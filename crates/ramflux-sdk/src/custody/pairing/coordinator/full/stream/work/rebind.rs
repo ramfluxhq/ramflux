@@ -31,11 +31,22 @@ impl FullStreamWork {
             "full data original writer observed native binding"
         );
         if self.role == PairingRole::Initiator && observed != bound {
-            let draft = self.io.prepare_rebind(current.clone()).await?;
+            let draft = self
+                .io
+                .prepare_rebind(current.clone())
+                .await
+                .inspect_err(|error| Self::note_failure("prepare native rebind", error))?;
             let participant = self.participant.clone();
-            let packet =
-                self.runtime.clone().run_blocking(move || draft.sign(&participant)).await?;
-            self.io.retain_rebind(current, packet.clone()).await?;
+            let packet = self
+                .runtime
+                .clone()
+                .run_blocking(move || draft.sign(&participant))
+                .await
+                .inspect_err(|error| Self::note_failure("sign native rebind", error))?;
+            self.io
+                .retain_rebind(current, packet.clone())
+                .await
+                .inspect_err(|error| Self::note_failure("retain native rebind", error))?;
             self.pending_rebind = Some(packet);
         }
         self.flush_rebind().await?;

@@ -264,7 +264,8 @@ impl Fixture {
             &mut self.target,
             &self.b.client,
         )
-        .await?;
+        .await
+        .map_err(|error| format!("test: prepare target candidate: {error}"))?;
         for _ in 0..1024 {
             self.a
                 .service_data()
@@ -272,7 +273,7 @@ impl Fixture {
             self.b
                 .service_data()
                 .map_err(|error| format!("test: publication target service: {error}"))?;
-            for actor in [&mut self.b.actor, &mut self.a.actor] {
+            for (role, actor) in [("target", &mut self.b.actor), ("source", &mut self.a.actor)] {
                 self.node.clock.advance_ms(1001);
                 drive(
                     Box::pin(actor.poll_full_management_control()),
@@ -281,9 +282,12 @@ impl Fixture {
                     &mut self.target,
                     &self.b.client,
                 )
-                .await?;
+                .await
+                .map_err(|error| format!("test: {role} management control: {error}"))?;
             }
-            self.affirm_source_if_displayed().await?;
+            self.affirm_source_if_displayed()
+                .await
+                .map_err(|error| format!("test: source affirmation: {error}"))?;
             drive(
                 Box::pin(self.a.actor.advance_full_source_publication()),
                 &mut self.source,
@@ -291,7 +295,8 @@ impl Fixture {
                 &mut self.target,
                 &self.b.client,
             )
-            .await?;
+            .await
+            .map_err(|error| format!("test: source native publication: {error}"))?;
             self.b
                 .actor
                 .service_linked_installation(&mut self.b.client, &mut self.target)

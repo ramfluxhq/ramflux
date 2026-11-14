@@ -456,7 +456,7 @@ mod tests {
     ) -> Result<Linked, Box<dyn std::error::Error>> {
         fixture.rig.secondary.set_install_races_for_test(races)?;
         let original = fixture.target.account_db()?.path.clone();
-        let native = crate::custody::load_account(
+        let native = crate::custody::load_data_account(
             &fixture.rig.participant_b.root,
             &fixture.rig.participant_b.account_id,
             crate::custody::network_now()?,
@@ -684,7 +684,8 @@ mod tests {
             client.unlock_account(&participant.account_id, password)?;
         }
         let now = crate::custody::network_now()?;
-        let native = crate::custody::load_account(&participant.root, &participant.account_id, now)?;
+        let native =
+            crate::custody::load_data_account(&participant.root, &participant.account_id, now)?;
         let id = native.local_device_id()?;
         let device = native
             .record()

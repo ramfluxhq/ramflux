@@ -19,7 +19,7 @@ impl PairingActor {
         let owned = request.clone();
         let snapshot =
             self.installation_loan(move |db| local::snapshot(&local, &owned, db)).await?;
-        let Some((install, scope, unlock, has_head)) = snapshot else { return Ok(None) };
+        let Some((install, unlock, has_head)) = snapshot else { return Ok(None) };
         let cleanup = has_head.then(|| (participant.clone(), install.clone()));
         let local = participant;
         let anchor = install.account_anchor.clone();
@@ -34,27 +34,37 @@ impl PairingActor {
             })
             .await?;
         let owned = request.clone();
-        let tail_status = tail_disposition(&scope);
-        let result = self
+        let (scope, result) = self
             .installation_loan(move |db| {
                 let now = crate::custody::network_now()?;
+                // The ordinary tail reader intentionally refuses a retained install Head.
+                // Finish only the locally agreed G3 cleanup after our fresh native read,
+                // then use that unchanged strict reader; this restores no data epoch.
+                if let Some((owner, installed)) = cleanup {
+                    local::finish_interrupted_cleanup(&owner, &installed, db)?;
+                }
+                let scope = db.full_installed_recipient_tail_scope(
+                    &owned.operation_id,
+                    owned.generation,
+                    now,
+                )?;
                 db.observe_full_installed_tail_native_head(
                     &owned.operation_id,
                     owned.generation,
                     &current,
                     now,
                 )?;
-                if let Some((owner, installed)) = cleanup {
-                    local::finish_interrupted_cleanup(&owner, &installed, db)?;
-                }
-                if scope.merged || scope.abandoned {
-                    return Ok(None);
-                }
-                Ok(installed_authority_result(&scope.grant, &current, now, scope.lease_expires_at))
+                let result = if scope.merged || scope.abandoned {
+                    None
+                } else {
+                    installed_authority_result(&scope.grant, &current, now, scope.lease_expires_at)
+                };
+                Ok((scope, result))
             })
             .await?;
         // These are public progress totals only. Neither the historic installed marker
         // nor a live relay lease reconstructs a data session or confirms a candidate.
+        let tail_status = tail_disposition(&scope);
         let status = installed_progress(
             request,
             scope.lease_expires_at,

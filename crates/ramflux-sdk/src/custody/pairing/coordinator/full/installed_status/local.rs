@@ -4,15 +4,16 @@
 //! Completed local G3 owner agreement and the last interrupted cleanup boundaries.
 use super::{SdkError, StatusRequest, full_generation, install_store};
 use crate::custody::pairing::LocalPairingParticipant;
-use ramflux_storage::{AccountDb, FullInstalledTailScope, FullLocalUnlockGuard};
+use ramflux_storage::{AccountDb, FullLocalUnlockGuard};
 
-type Snapshot = (install_store::Install, FullInstalledTailScope, FullLocalUnlockGuard, bool);
+type Snapshot = (install_store::Install, FullLocalUnlockGuard, bool);
 pub(super) fn snapshot(
     local: &LocalPairingParticipant,
     owned: &StatusRequest,
     db: &AccountDb,
 ) -> Result<Option<Snapshot>, SdkError> {
-    let has_head = db.pairing_head()?.is_some();
+    let head = db.pairing_head()?;
+    let has_head = head.is_some();
     let Some(install) = install_store::read_installed(&local.root, &local.account_id)? else {
         return Ok(None);
     };
@@ -34,12 +35,27 @@ pub(super) fn snapshot(
         return Ok(None);
     }
     local.full_selected_db(db, Some(&install.account_anchor))?;
+    if let Some(head) = head {
+        let live = db
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|row| row.operation_id == owned.operation_id)
+            .ok_or(SdkError::PairingCode("WrongContext"))?;
+        if live.role != "responder"
+            || live.generation != owned.generation
+            || head.operation_id != owned.operation_id
+            || head.generation != owned.generation
+            || head.state != "acknowledged"
+            || head.kind != "transfer"
+            || Some(head.candidate_hash.as_str()) != install.record_hash.as_deref()
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+    }
     let now = crate::custody::network_now()?;
     let native = crate::custody::load_data_account(&local.root, &local.account_id, now)?;
     full_generation::require_completed_full_generation(&local.root, &native, &install, &adoption)?;
-    let scope =
-        db.full_installed_recipient_tail_scope(&owned.operation_id, owned.generation, now)?;
-    Ok(Some((install, scope, db.full_local_unlock_guard()?, has_head)))
+    Ok(Some((install, db.full_local_unlock_guard()?, has_head)))
 }
 pub(super) fn finish_interrupted_cleanup(
     local: &LocalPairingParticipant,
