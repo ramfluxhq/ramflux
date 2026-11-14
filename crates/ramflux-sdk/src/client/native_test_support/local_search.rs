@@ -148,7 +148,7 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 "rebuild must index the accepted replacement"
             );
             spoiler_scope(&source, &mut target, &runtime, &conversation).await?;
-            attachment_scope(&source, &mut target, &runtime, &conversation).await?;
+            Box::pin(attachment_scope(&source, &mut target, &runtime, &conversation)).await?;
             expiry_boundary(&mut target, &runtime, &original.id).await?;
             target
                 .client
@@ -176,49 +176,7 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
             let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             let runtime =
                 LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
-            let peer = LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
-            let held = runtime.admit(7, "shared-executor").await?;
-            let mut queued = Box::pin(peer.admit(7, "shared-queue"));
-            std::future::poll_fn(|cx| {
-                use std::future::Future as _;
-                assert!(queued.as_mut().poll(cx).is_pending(), "another handle for the same open account must share its one executor");
-                std::task::Poll::Ready(())
-            }).await;
-            runtime.cancel(7, runtime.unlock_epoch(), "shared-queue")?;
-            assert!(matches!(queued.await, Err(crate::SdkError::Search(SearchError::Cancelled))), "shared-account queue must retain out-of-queue cancellation");
-            drop(held);
-            drop(peer);
-            let ticket = runtime.start_rebuild(7, "paused-job")?;
-            drop(ticket);
-            assert_eq!(
-                runtime.index_status(&fixture.client)?.rebuild.ok_or("paused job")?.state,
-                crate::search::SearchRebuildState::Paused,
-                "dropping a lease before its first poll must release job ownership"
-            );
-            let old_ticket = runtime.start_rebuild(7, "reused-job")?;
-            runtime.cancel_rebuild(7, runtime.unlock_epoch(), "reused-job")?;
-            let new_ticket = runtime.start_rebuild(7, "reused-job")?;
-            drop(old_ticket);
-            assert!(
-                matches!(
-                    runtime.start_rebuild(7, "third-job"),
-                    Err(crate::SdkError::Search(SearchError::Capacity))
-                ),
-                "old lease destruction must not release a newly reused job ID"
-            );
-            drop(new_ticket);
-            let ticket = runtime.start_rebuild(7, "shared-id")?;
-            let shared =
-                runtime.query(&fixture.client, 7, &SearchQuery::new("shared-id", "canary")).await?;
-            runtime.cancel_rebuild(7, runtime.unlock_epoch(), "shared-id")?;
-            shared.check_current()?;
-            drop(shared);
-            drop(ticket);
-            let cancelled = runtime.query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary")).await?;
-            let token = runtime.queue_completion(7, cancelled)?;
-            runtime.cancel(7, runtime.unlock_epoch(), "cancelled-reply")?;
-            assert!(matches!(runtime.take_completion(7, token["search_completion"].as_str().ok_or("cancel token")?), Err(crate::SdkError::Search(SearchError::CursorStale))), "cancellation must release a queued completion and its executor admission immediately");
-            runtime.query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary")).await?.take()?;
+            shared_cancellation_and_lease_ownership(&runtime, &fixture).await?;
             let query = SearchQuery::new("empty-query", "canary");
             let completion = runtime.query(&fixture.client, 7, &query).await?;
             assert!(
@@ -275,6 +233,73 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
         }),
     )
     .await??;
+    Ok(())
+}
+
+async fn shared_cancellation_and_lease_ownership(
+    runtime: &Arc<LocalSearch>,
+    fixture: &Fixture,
+) -> TestResult {
+    let peer = LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
+    let held = runtime.admit(7, "shared-executor").await?;
+    let mut queued = Box::pin(peer.admit(7, "shared-queue"));
+    std::future::poll_fn(|cx| {
+        use std::future::Future as _;
+        assert!(
+            queued.as_mut().poll(cx).is_pending(),
+            "another handle for the same open account must share its one executor"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    runtime.cancel(7, runtime.unlock_epoch(), "shared-queue")?;
+    assert!(
+        matches!(queued.await, Err(crate::SdkError::Search(SearchError::Cancelled))),
+        "shared-account queue must retain out-of-queue cancellation"
+    );
+    drop(held);
+    drop(peer);
+    let ticket = runtime.start_rebuild(7, "paused-job")?;
+    drop(ticket);
+    assert_eq!(
+        runtime.index_status(&fixture.client)?.rebuild.ok_or("paused job")?.state,
+        crate::search::SearchRebuildState::Paused,
+        "dropping a lease before its first poll must release job ownership"
+    );
+    let old_ticket = runtime.start_rebuild(7, "reused-job")?;
+    runtime.cancel_rebuild(7, runtime.unlock_epoch(), "reused-job")?;
+    let new_ticket = runtime.start_rebuild(7, "reused-job")?;
+    drop(old_ticket);
+    assert!(
+        matches!(
+            runtime.start_rebuild(7, "third-job"),
+            Err(crate::SdkError::Search(SearchError::Capacity))
+        ),
+        "old lease destruction must not release a newly reused job ID"
+    );
+    drop(new_ticket);
+    let ticket = runtime.start_rebuild(7, "shared-id")?;
+    let shared =
+        runtime.query(&fixture.client, 7, &SearchQuery::new("shared-id", "canary")).await?;
+    runtime.cancel_rebuild(7, runtime.unlock_epoch(), "shared-id")?;
+    shared.check_current()?;
+    drop(shared);
+    drop(ticket);
+    let cancelled =
+        runtime.query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary")).await?;
+    let token = runtime.queue_completion(7, cancelled)?;
+    runtime.cancel(7, runtime.unlock_epoch(), "cancelled-reply")?;
+    assert!(
+        matches!(
+            runtime.take_completion(7, token["search_completion"].as_str().ok_or("cancel token")?),
+            Err(crate::SdkError::Search(SearchError::CursorStale))
+        ),
+        "cancellation must release a queued completion and its executor admission immediately"
+    );
+    runtime
+        .query(&fixture.client, 7, &SearchQuery::new("cancelled-reply", "canary"))
+        .await?
+        .take()?;
     Ok(())
 }
 
