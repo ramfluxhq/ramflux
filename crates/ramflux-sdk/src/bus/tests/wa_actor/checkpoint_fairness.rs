@@ -25,14 +25,14 @@ async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
                 let writer =
                     crate::bus::couriers::writer::Writer::new(checkpoints, handle.generation());
                 let polled = Arc::new(AtomicBool::new(false));
-                let observed = Arc::clone(&polled);
-                let mut checkpoint = Box::pin(writer.apply(move |_account| {
+                let session_turn = Arc::clone(&polled);
+                let mut checkpoint = Box::pin(tokio::task::unconstrained(writer.apply(move |_account| {
                     assert!(
-                        observed.load(Ordering::Acquire),
+                        session_turn.load(Ordering::Acquire),
                         "a ready session task must run before another synchronous writer checkpoint"
                     );
                     Ok(())
-                }));
+                })));
                 // Enqueue through the real writer without yielding to the executor yet.
                 std::future::poll_fn(|cx| {
                     assert!(
@@ -43,12 +43,12 @@ async fn writer_checkpoint_yields_to_ready_session_tasks() -> Case {
                 })
                 .await;
                 let work = queued.try_recv()?;
-                let observer = tokio::spawn(async move {
+                let ready_task = tokio::spawn(async move {
                     polled.store(true, Ordering::Release);
                 });
                 runtime.apply_connection_work(work).await?;
                 checkpoint.await?;
-                observer.await?;
+                ready_task.await?;
                 runtime.stop_connection().await;
                 Ok(())
             })

@@ -141,7 +141,7 @@ impl Fixture {
         frame_timeout: Option<Duration>,
     ) -> Case<Self> {
         let root = runtime_tests::root(label);
-        Self::build_at(root, second_peer, frame_timeout).await
+        Box::pin(Self::build_at(root, second_peer, frame_timeout)).await
     }
 
     #[allow(clippy::too_many_lines)]
