@@ -40,50 +40,62 @@ fn generation(frame: &LocalBusFrame) -> TestResult<u64> {
 #[tokio::test]
 async fn pairing_private_socket_reader_delivers_only_to_attended_call() -> TestResult {
     crate::bus::credentials::contract_tests::deadline(async {
-        let root = tempfile::tempdir()?;
-        let expected = reservation(root.path(), "a")?;
-        let (outbound, mut prompts) = mpsc::channel(4);
-        let input = connection(root.path().into(), 17, outbound);
-        let channel = input.channel();
-        let _call = bind_call(
-            root.path(),
-            "a",
-            "parent-a".into(),
-            PrivateCredentialCallKind::Unlock,
-            channel.clone(),
-        )?;
-        let provider = provider_for_account(root.path(), "a".into())?;
-        let worker = tokio::task::spawn_blocking(move || provider.provide(&expected));
-        let prompt = prompts.recv().await.ok_or("missing private prompt")?;
-        assert_eq!(
-            prompt.request_id, "parent-a",
-            "test: connection-owned callback or early private-frame refusal changed"
-        );
-        assert_eq!(
-            prompt.method, "device.credential.request",
-            "test: connection-owned callback or early private-frame refusal changed"
-        );
-        assert!(
-            !serde_json::to_vec(&prompt)?.windows(21).any(|b| b == b"socket-private-canary"),
-            "test: connection-owned callback or early private-frame refusal changed"
-        );
-        let bytes = raw(generation(&prompt)?)?;
-        assert!(
-            read_frame(&mut bytes.as_slice(), &channel, 17).await?.is_none(),
-            "test: connection-owned callback or early private-frame refusal changed"
-        );
-        let CredentialOutcome::Provided { passphrase, .. } = worker.await?? else {
-            return Err("attended private reply refused".into());
-        };
-        assert!(passphrase.as_bytes() == b"socket-private-canary", "private socket bytes changed");
-        assert!(
-            read_frame(&mut bytes.as_slice(), &channel, 17).await.is_err(),
-            "second binary reply reached generic routing"
-        );
+        for tagged in [false, true] {
+            deliver_to_attended_call(tagged).await?;
+        }
         Ok(())
     })
     .await
 }
+async fn deliver_to_attended_call(tagged: bool) -> TestResult {
+    let root = tempfile::tempdir()?;
+    let expected = reservation(root.path(), "a")?;
+    let (outbound, mut prompts) = crate::bus::outbound::LocalBusOutbound::channel(4, tagged);
+    let input = connection(root.path().into(), 17, outbound);
+    let channel = input.channel();
+    let _call = bind_call(
+        root.path(),
+        "a",
+        "parent-a".into(),
+        PrivateCredentialCallKind::Unlock,
+        channel.clone(),
+    )?;
+    let provider = provider_for_account(root.path(), "a".into())?;
+    let worker = tokio::task::spawn_blocking(move || provider.provide(&expected));
+    let message = prompts.recv().await.ok_or("missing private prompt")?;
+    assert!(
+        message.generation.is_none(),
+        "test: credential request acquired a subscription generation"
+    );
+    let prompt = message.frame;
+    assert_eq!(
+        prompt.request_id, "parent-a",
+        "test: connection-owned callback or early private-frame refusal changed"
+    );
+    assert_eq!(
+        prompt.method, "device.credential.request",
+        "test: connection-owned callback or early private-frame refusal changed"
+    );
+    assert!(
+        !serde_json::to_vec(&prompt)?.windows(21).any(|b| b == b"socket-private-canary"),
+        "test: connection-owned callback or early private-frame refusal changed"
+    );
+    let bytes = raw(generation(&prompt)?)?;
+    assert!(
+        read_frame(&mut bytes.as_slice(), &channel, 17).await?.is_none(),
+        "test: connection-owned callback or early private-frame refusal changed"
+    );
+    let CredentialOutcome::Provided { passphrase, .. } = worker.await?? else {
+        return Err("attended private reply refused".into());
+    };
+    assert!(passphrase.as_bytes() == b"socket-private-canary", "private socket bytes changed");
+    assert!(
+        read_frame(&mut bytes.as_slice(), &channel, 17).await.is_err(),
+        "second binary reply reached generic routing"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn pairing_private_socket_refuses_json_before_private_payload() -> TestResult {
     crate::bus::credentials::contract_tests::deadline(async {
