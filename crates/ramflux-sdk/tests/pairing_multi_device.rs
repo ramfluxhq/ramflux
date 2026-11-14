@@ -137,27 +137,7 @@ async fn full_acceptance() -> ResultOf<()> {
     Box::pin(fixture.publish())
         .await
         .map_err(|error| format!("test: external native publication: {error}"))?;
-    for _ in 0..1024 {
-        fixture.step().await?;
-        let a = fixture.status(true).await?;
-        let b = fixture.status(false).await?;
-        if a.is_some_and(|value| {
-            value.tail_status
-                == ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged
-        }) && b.is_some_and(|value| {
-            value.tail_status
-                == ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged
-        }) {
-            break;
-        }
-    }
-    for primary in [true, false] {
-        assert_eq!(
-            fixture.status(primary).await?.ok_or("test: final full status")?.tail_status,
-            ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged,
-            "test: endpoint lacks actual final tail acknowledgement"
-        );
-    }
+    Box::pin(merge_full_tail(&mut fixture)).await?;
     assert_eq!(
         ramflux_storage::AccountIndex::open(fixture.b.root.path())?
             .load_wrapped_db_key(&fixture.b.id)?,
@@ -246,6 +226,31 @@ fn assert_retained_devices(
         let mut normalized = after.clone();
         normalized.branch_certificate.clone_from(&before.branch_certificate);
         assert_eq!(normalized, *before, "test: full transfer changed branch status or identity");
+    }
+    Ok(())
+}
+
+async fn merge_full_tail(fixture: &mut full::Fixture) -> ResultOf<()> {
+    for _ in 0..1024 {
+        fixture.step().await?;
+        let a = fixture.status(true).await?;
+        let b = fixture.status(false).await?;
+        if a.is_some_and(|value| {
+            value.tail_status
+                == ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged
+        }) && b.is_some_and(|value| {
+            value.tail_status
+                == ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged
+        }) {
+            break;
+        }
+    }
+    for primary in [true, false] {
+        assert_eq!(
+            fixture.status(primary).await?.ok_or("test: final full status")?.tail_status,
+            ramflux_protocol::custody::pairing::local_dto::FullTailStatus::Merged,
+            "test: endpoint lacks actual final tail acknowledgement"
+        );
     }
     Ok(())
 }

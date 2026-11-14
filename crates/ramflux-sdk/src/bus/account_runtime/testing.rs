@@ -18,6 +18,8 @@ use crate::{
 pub struct AccountSessionHarness {
     runtime: AccountRuntime,
     event_router: tokio::task::JoinHandle<()>,
+    _preempt: watch::Sender<u64>,
+    _shutdown: watch::Sender<bool>,
 }
 
 /// Explicit authenticated coordinates supplied by a real-component fixture.
@@ -145,8 +147,8 @@ impl AccountSessionHarness {
         };
         let (_, receiver) = mpsc::channel(2);
         let (_, lifecycle) = mpsc::channel(2);
-        let (_, preempt) = watch::channel(0);
-        let (_, shutdown) = watch::channel(false);
+        let (preempt_owner, preempt) = watch::channel(0);
+        let (shutdown_owner, shutdown) = watch::channel(false);
         let (events, mut batches) = mpsc::channel::<super::super::events::EventBatch>(2);
         let event_router = tokio::spawn(async move {
             let mut subscribers = BTreeMap::new();
@@ -182,7 +184,8 @@ impl AccountSessionHarness {
             courier_events: None,
         };
         runtime.start_connection()?;
-        let mut harness = Self { runtime, event_router };
+        let mut harness =
+            Self { runtime, event_router, _preempt: preempt_owner, _shutdown: shutdown_owner };
         let handle = harness.handle()?;
         harness.drive(handle.require_live(Duration::from_secs(10))).await.map_err(|error| {
             SdkError::GatewaySessionRejected(format!("fixture live admission: {error:?}"))
@@ -624,3 +627,7 @@ impl Drop for AccountSessionHarness {
         self.event_router.abort();
     }
 }
+
+#[path = "testing_pairing.rs"]
+mod pairing;
+pub use pairing::NativePairingSessionFixture;

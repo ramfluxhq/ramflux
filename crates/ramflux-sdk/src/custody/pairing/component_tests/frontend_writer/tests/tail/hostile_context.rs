@@ -77,10 +77,11 @@ fn forge(
 ) -> Result<SourceManifest, SdkError> {
     match fault {
         Fault::Parent => {
-            value.manifest.parent_manifest_hash = Some(ramflux_protocol::encode_base64url([91; 32]))
+            value.manifest.parent_manifest_hash =
+                Some(ramflux_protocol::encode_base64url([91; 32]));
         }
         Fault::Transfer => {
-            value.manifest.transfer_id = ramflux_protocol::encode_base64url([92; 32])
+            value.manifest.transfer_id = ramflux_protocol::encode_base64url([92; 32]);
         }
         Fault::DeltaAfterJ6 => {
             value.manifest.kind = ManifestKind::Delta;
