@@ -81,7 +81,7 @@ pub(crate) fn register(
     let control: ramflux_node_core::PushRouteControl =
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
-    control.verify(ingress.wake_auth.key.as_ref().ok_or_else(rejected)?, now)?;
+    control.verify(&ingress.wake_auth.key, now)?;
     let registration = &control.body.registration;
     let configured = credentials()?;
     let Some(credential) =
@@ -107,12 +107,13 @@ pub(crate) fn register(
             webpush_auth: registration.webpush_auth.clone(),
             registered_at,
             expires_at,
+            route_generation: 0,
         },
         control.body.client_seq,
     );
     match stored {
         Ok(true) => Ok(Answer::Registered { expires_at }),
-        // A newer deregistration was already confirmed for this device.
+        // A newer deregistration, or a persisted registration sequence, already won.
         Ok(false) => Ok(Answer::Refused { code: PushRouteRefusal::Superseded }),
         Err(NodeCoreError::Unauthorized(_)) => {
             Ok(Answer::Refused { code: PushRouteRefusal::Rejected })
@@ -128,7 +129,7 @@ pub(crate) fn deregister(
     let control: ramflux_node_core::PushRouteDeleteControl =
         serde_json::from_value(value).map_err(|_| rejected())?;
     let now = ramflux_node_core::now_unix_seconds();
-    control.verify(ingress.wake_auth.key.as_ref().ok_or_else(rejected)?, now)?;
+    control.verify(&ingress.wake_auth.key, now)?;
     let removed = ingress.store.delete_authenticated_push_routes_at(
         &control.body.authority,
         control.body.provider.as_ref(),

@@ -57,9 +57,9 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         [0, 1, 0, 0],
     ),
     (
-        "client/call/mod.rs",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/call/mod.rs")),
-        [3, 0, 0, 0],
+        "client/call/control.rs",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/call/control.rs")),
+        [4, 0, 0, 0],
     ),
     (
         "client/contact_requests/delivery.rs",

@@ -4,101 +4,47 @@
 use super::*;
 #[cfg(feature = "itest-http")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+#[cfg(feature = "itest-http")]
+use std::sync::{Arc, Mutex, mpsc};
 #[cfg(feature = "itest-http")]
 use std::{path::Path, process::Command};
 
-const TEST_EC_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgwyBphzPT6zP0T3HT\nmUd3y/OXm9uWxWxy8nbR0YWA22ShRANCAAQAIpCYq6Tsdeuzzy1sjb/0VLEcd1+r\nQs8681WYx7uSG+akC/YXdlGjSeyiRGjZYJ1KHqoa2d4mAQwi9XAZuDT5\n-----END PRIVATE KEY-----\n";
-
+#[cfg(feature = "itest-http")]
 #[test]
-fn s13_dispatch_sends_wake_to_tls_h2_provider() -> Result<(), Box<dyn std::error::Error>> {
-    let stub = LocalH2ProviderStub::start()?;
-    let store_path =
-        ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
-            format!("ramflux-notify-s13-dispatch-{}.redb", ramflux_node_core::now_unix_seconds()),
-        );
-    let _ = std::fs::remove_file(&store_path);
-    let store = ramflux_node_core::NotifyRedbStore::open(&store_path)?;
-    let subscription = test_webpush_subscription();
-    store.update_provider_credential(&ramflux_node_core::ProviderCredential::WebPush(
-        ramflux_node_core::WebPushProviderCredential {
-            credential_id: "credential_webpush".to_owned(),
-            vapid_public_key_ref: "literal:test-vapid-public-key".to_owned(),
-            vapid_private_key_ref: format!("literal:{TEST_EC_PRIVATE_KEY}"),
-            subject: "mailto:ops@ramflux.example".to_owned(),
-            provider_ca_pem_ref: Some(stub.ca_pem_secret_ref()),
-        },
-    ))?;
-    store.register_push_route(ramflux_node_core::DevicePushRoute {
-        device_delivery_id: "device_dispatch".to_owned(),
-        provider: ramflux_node_core::PushProviderKind::WebPush,
-        credential_id: Some("credential_webpush".to_owned()),
-        token: "raw_token_not_logged".to_owned(),
-        endpoint: stub.endpoint("/webpush"),
-        webpush_p256dh: Some(subscription.0),
-        webpush_auth: Some(subscription.1),
-        registered_at: 1_760_000_000,
-        expires_at: 4_102_444_800,
-    })?;
-
-    let (entry, pushes) = store.queue_wake_for_push(
-        "device_dispatch",
-        &test_wake(),
-        ramflux_node_core::now_unix_seconds(),
-        false,
-    )?;
-    assert_eq!(entry.queue_id, "wake_dispatch");
-    assert_eq!(pushes.len(), 1);
-    assert!(send_provider_push(&pushes[0])?);
-    let received = stub.recv()?;
-    assert_eq!(received.path, "/webpush");
-    let topic = received.headers.get("topic").ok_or("WebPush topic missing")?;
-    assert_eq!(topic.len(), 32);
-    assert!(topic.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte)));
-    assert_ne!(Some(topic), test_wake().collapse_key.as_ref());
-    assert!(pushes[0].collapse_key_hash.starts_with(topic));
-    assert_eq!(
-        received.headers.get("ramflux-delivery-class").map(String::as_str),
-        Some("user_content_notification")
+fn s13_body_rejects_duplicate_members_and_noncharacters() {
+    let signed = r#"{"body":{"action":"enqueue","audience":"ramflux-notify","class":"message","created_at":1,"expires_at":2,"signature_alg":"ed25519","signing_key_id":"k","source_event_id":"env","target_delivery_id":"device","target_owner_epoch":1,"version":2,"wake_id":"AAAAAAAAAAAAAAAAAAAAAA"},"signature":"sig"}"#;
+    let clean = format!(r#"{{"device_delivery_id":"device","signed_wake":{signed}}}"#);
+    assert!(parse_s13_wake_request_body(clean.as_bytes()).is_ok());
+    let duplicate = format!(
+        r#"{{"device_delivery_id":"device","device_delivery_id":"other","signed_wake":{signed}}}"#
     );
-    assert_eq!(received.headers.get("ttl").map(String::as_str), Some("86400"));
-    assert_eq!(received.headers.get("urgency").map(String::as_str), Some("normal"));
-    assert!(received.headers.contains_key("ramflux-push-alias-hash"));
-    assert!(received.headers.contains_key("ramflux-collapse-key-hash"));
-    assert_eq!(received.headers.get("content-encoding").map(String::as_str), Some("aes128gcm"));
-    assert_ne!(received.body.len(), 0);
-    for forbidden in
-        [b"wake_dispatch".as_slice(), b"target:".as_slice(), b"encrypted_hint".as_slice()]
-    {
-        assert!(
-            !received.body.windows(forbidden.len()).any(|window| window == forbidden),
-            "webpush encrypted body leaked plaintext marker"
-        );
-    }
-    Ok(())
+    assert!(serde_json::from_slice::<serde_json::Value>(duplicate.as_bytes()).is_ok());
+    let collapsed = serde_json::from_slice::<serde_json::Value>(duplicate.as_bytes())
+        .unwrap_or(serde_json::Value::Null);
+    assert!(serde_json::from_value::<S13WakeRequest>(collapsed).is_ok());
+    assert!(parse_s13_wake_request_body(duplicate.as_bytes()).is_err());
+    let noncharacter = format!(r#"{{"device_delivery_id":"bad\uFFFF","signed_wake":{signed}}}"#);
+    assert!(serde_json::from_slice::<S13WakeRequest>(noncharacter.as_bytes()).is_ok());
+    assert!(parse_s13_wake_request_body(noncharacter.as_bytes()).is_err());
 }
 
 #[test]
-fn provider_common_headers_follow_s13_contract() {
+fn provider_common_headers_follow_s13_contract() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = test_prepared_push(ramflux_node_core::PushProviderKind::Fcm);
-    let headers = generic_provider_headers(&prepared)
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(headers.get("ttl").map(String::as_str), Some("86400"));
-    assert_eq!(headers.get("urgency").map(String::as_str), Some("normal"));
-    assert_eq!(
-        headers.get("ramflux-delivery-class").map(String::as_str),
-        Some("user_content_notification")
-    );
-    assert!(headers.contains_key("ramflux-push-alias-hash"));
-    assert!(headers.contains_key("ramflux-collapse-key-hash"));
+    let parts = contract_parts(&prepared)?;
     assert!(
-        headers
-            .get("ramflux-collapse-key")
-            .map(String::as_str)
-            .unwrap_or_default()
-            .contains("target:")
+        parts.headers.iter().all(|(name, _)| !name.to_ascii_lowercase().starts_with("ramflux-"))
     );
+    assert_eq!(parts.headers.len(), 0);
+    let body: serde_json::Value = serde_json::from_slice(&parts.body)?;
+    let message = body.get("message").ok_or("fcm message")?;
+    assert!(message.get("notification").is_none());
+    assert!(message.get("data").and_then(|data| data.get("encrypted_hint")).is_none());
+    assert_eq!(
+        message.get("data").and_then(|data| data.get("class")).and_then(|value| value.as_str()),
+        Some("message")
+    );
+    Ok(())
 }
 
 #[test]
@@ -175,8 +121,9 @@ fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>>
     let store_gate = Arc::new(Mutex::new(()));
     let signing_key =
         ramflux_node_core::NodeServiceSigningKey::from_seed(bench_node_service_signing_seed());
-    let wake_auth = NotifyWakeAuth { require: true, key: Some(signing_key.clone()) };
+    let wake_auth = NotifyWakeAuth { key: signing_key.clone() };
     let ingress = Arc::new(NotifyIngressState {
+        authority: Arc::new(send_authority::Surface::without_origins_for_test()),
         store: Arc::clone(&store),
         runtime: Arc::new(NotifyRuntime::Current),
         store_gate,
@@ -189,11 +136,8 @@ fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>>
         gateway.ca_pem.clone(),
         Arc::clone(&ingress),
     )?;
-    let mut wake = test_signed_wake(7);
-    wake.wake_id = "wake_mesh_s13".to_owned();
-    wake.push_alias = "device_mesh_s13".to_owned();
-    wake.collapse_key = Some("target:device_mesh_s13:content".to_owned());
-    signing_key.sign_notification_wake(&mut wake)?;
+    let signed = signed_message_wake(&signing_key, "device_mesh_s13", "env-mesh-s13", 7)?;
+    let wake_id = signed.body.wake_id.clone();
     let response: serde_json::Value = ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
         &endpoint,
         "/s13/notify/wake",
@@ -202,16 +146,16 @@ fn notify_mesh_quic_accepts_s13_wake() -> Result<(), Box<dyn std::error::Error>>
         std::slice::from_ref(&notify.ca_pem),
         &serde_json::json!({
             "device_delivery_id": "device_mesh_s13",
-            "wake": wake,
+            "signed_wake": signed,
             "queued_at": 1_760_000_123_u64,
             "dnd_active": false
         }),
     )?;
-    assert_eq!(response["entry"]["queue_id"], "wake_mesh_s13");
+    assert_eq!(response["entry"]["queue_id"], wake_id);
     assert_eq!(response["entry"]["device_delivery_id"], "device_mesh_s13");
     assert!(response["attempts"].as_array().is_some_and(Vec::is_empty));
     let state = store.load_state()?.ok_or("missing notify state")?;
-    let entry = state.entry("wake_mesh_s13").ok_or("missing mesh wake entry")?;
+    let entry = state.entry(&wake_id).ok_or("missing mesh wake entry")?;
     assert_eq!(entry.device_delivery_id, "device_mesh_s13");
     assert_eq!(entry.queued_at, 1_760_000_123);
     drop(ingress);
@@ -225,7 +169,7 @@ fn spawn_notify_mesh_test_listener(
     trusted_gateway_ca: String,
     ingress: Arc<NotifyIngressState>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+    let (endpoint_tx, endpoint_rx) = mpsc::sync_channel::<Result<String, String>>(1);
     let _server_thread = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -294,9 +238,10 @@ fn notify_ingest_throughput_bench() -> Result<(), Box<dyn std::error::Error>> {
         return Err("notify ingest bench requires RAMFLUX_NOTIFY_WAL=1".into());
     }
     let store_gate = Arc::new(Mutex::new(()));
-    let wake_auth = NotifyWakeAuth { require: true, key: Some(key) };
+    let wake_auth = NotifyWakeAuth { key };
     let wake_verify_batcher = NotifyWakeVerifyBatcher::from_env(&wake_auth, &store)?;
     let ingress = Arc::new(NotifyIngressState {
+        authority: Arc::new(send_authority::Surface::without_origins_for_test()),
         store,
         runtime: Arc::new(NotifyRuntime::Current),
         store_gate,
@@ -367,11 +312,11 @@ fn signed_s13_wake_request_bodies(
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
     let mut bodies = Vec::with_capacity(total);
     for index in 0..total {
-        let mut wake = test_signed_wake(index);
-        key.sign_notification_wake(&mut wake)?;
+        let device = format!("device_ingest_{}", index % 1024);
+        let signed = signed_message_wake(key, &device, &format!("env-ingest-{index}"), index)?;
         let body = serde_json::json!({
-            "device_delivery_id": format!("device_ingest_{}", index % 1024),
-            "wake": wake,
+            "device_delivery_id": device,
+            "signed_wake": signed,
             "queued_at": 1_760_000_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
             "dnd_active": false
         });
@@ -380,25 +325,35 @@ fn signed_s13_wake_request_bodies(
     Ok(bodies)
 }
 
-fn test_signed_wake(index: usize) -> ramflux_protocol::NotificationWake {
-    ramflux_protocol::NotificationWake {
-        schema: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        ext: ramflux_protocol::Ext::default(),
-        signed: ramflux_protocol::SignedFields {
-            signing_key_id: ramflux_node_core::NODE_SERVICE_SIGNING_KEY_ID.to_owned(),
-            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-            signature: String::new(),
-        },
-        wake_id: format!("wake_ingest_{index}"),
-        push_alias: format!("device_ingest_{}", index % 1024),
-        delivery_class: ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
-        priority: ramflux_protocol::PushPriority::Normal,
-        ttl: 86_400,
-        collapse_key: Some(format!("target:device_ingest_{}:content", index % 1024)),
-        encrypted_hint: Some("encrypted_hint".to_owned()),
+fn signed_message_wake(
+    key: &ramflux_node_core::NodeServiceSigningKey,
+    device: &str,
+    source_event: &str,
+    index: usize,
+) -> Result<ramflux_protocol::SignedWakeV2, ramflux_node_core::NodeCoreError> {
+    let now = ramflux_node_core::now_unix_seconds();
+    let mut wake_id_bytes = [0_u8; 16];
+    let index_bytes = index.to_le_bytes();
+    let copied = index_bytes.len().min(wake_id_bytes.len());
+    if let (Some(dest), Some(src)) = (wake_id_bytes.get_mut(..copied), index_bytes.get(..copied)) {
+        dest.copy_from_slice(src);
     }
+    let body = ramflux_protocol::WakeV2 {
+        version: 2,
+        signing_key_id: ramflux_node_core::NODE_SERVICE_SIGNING_KEY_ID.to_owned(),
+        signature_alg: ramflux_protocol::WakeSignatureAlg::Ed25519,
+        audience: ramflux_protocol::NOTIFY_WAKE_AUDIENCE.to_owned(),
+        action: ramflux_protocol::WakeAction::Enqueue,
+        wake_id: ramflux_protocol::encode_base64url(wake_id_bytes),
+        target_delivery_id: device.to_owned(),
+        target_owner_epoch: 1,
+        source_event_id: source_event.to_owned(),
+        class: ramflux_protocol::WakeClass::Message,
+        created_at: now,
+        expires_at: now.saturating_add(3_600),
+        call_intent_digest: None,
+    };
+    key.sign_wake_v2(&body)
 }
 
 fn bench_node_service_signing_seed() -> [u8; 32] {
@@ -540,28 +495,15 @@ fn bench_usize_env(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn test_wake() -> ramflux_protocol::NotificationWake {
-    ramflux_protocol::NotificationWake {
-        schema: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        ext: ramflux_protocol::Ext::default(),
-        signed: ramflux_protocol::SignedFields {
-            signing_key_id: "test-notify".to_owned(),
-            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-            signature: "test-signature".to_owned(),
-        },
-        wake_id: "wake_dispatch".to_owned(),
-        push_alias: "device_dispatch".to_owned(),
-        delivery_class: ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
-        priority: ramflux_protocol::PushPriority::Normal,
-        ttl: 86_400,
-        collapse_key: Some("target:device_dispatch:content".to_owned()),
-        encrypted_hint: Some("encrypted_hint".to_owned()),
-    }
+fn canonical_wake_id() -> String {
+    ramflux_protocol::encode_base64url([0x11; 16])
 }
 
-fn test_webpush_subscription() -> (String, String) {
+fn canonical_collapse() -> String {
+    ramflux_protocol::encode_base64url([0x22; 24])
+}
+
+pub(super) fn test_webpush_subscription() -> (String, String) {
     use p256::elliptic_curve::Generate;
     use p256::elliptic_curve::sec1::ToSec1Point;
 
@@ -587,139 +529,61 @@ fn test_prepared_push(
             webpush_auth: None,
             registered_at: 1_760_000_000,
             expires_at: 4_102_444_800,
+            route_generation: 0,
         },
-        credential: ramflux_node_core::ProviderCredential::WebPush(
-            ramflux_node_core::WebPushProviderCredential {
-                credential_id: "credential_dispatch".to_owned(),
-                vapid_public_key_ref: "literal:test-public".to_owned(),
-                vapid_private_key_ref: "literal:test-private".to_owned(),
-                subject: "mailto:ops@ramflux.example".to_owned(),
-                provider_ca_pem_ref: None,
-            },
-        ),
+        credential: match &provider {
+            ramflux_node_core::PushProviderKind::Fcm => ramflux_node_core::ProviderCredential::Fcm(
+                ramflux_node_core::FcmProviderCredential {
+                    credential_id: "credential_dispatch".to_owned(),
+                    project_id: "project".to_owned(),
+                    service_account_json_ref: "literal:{}".to_owned(),
+                    oauth_scope: "https://www.googleapis.com/auth/firebase.messaging".to_owned(),
+                    oauth_token_url: None,
+                    provider_ca_pem_ref: None,
+                },
+            ),
+            ramflux_node_core::PushProviderKind::Apns
+            | ramflux_node_core::PushProviderKind::ApnsVoip => {
+                let voip = matches!(provider, ramflux_node_core::PushProviderKind::ApnsVoip);
+                ramflux_node_core::ProviderCredential::Apns(
+                    ramflux_node_core::ApnsProviderCredential {
+                        credential_id: "credential_dispatch".to_owned(),
+                        team_id: "TEAM".to_owned(),
+                        key_id: "KEY".to_owned(),
+                        p8_key_ref: "literal:unused".to_owned(),
+                        topic: if voip { "app.example.voip" } else { "app.example" }.to_owned(),
+                        sandbox: true,
+                        provider_ca_pem_ref: None,
+                    },
+                )
+            }
+            ramflux_node_core::PushProviderKind::WebPush => {
+                ramflux_node_core::ProviderCredential::WebPush(
+                    ramflux_node_core::WebPushProviderCredential {
+                        credential_id: "credential_dispatch".to_owned(),
+                        vapid_public_key_ref: "literal:test-public".to_owned(),
+                        vapid_private_key_ref: "literal:test-private".to_owned(),
+                        subject: "mailto:ops@ramflux.example".to_owned(),
+                        provider_ca_pem_ref: None,
+                    },
+                )
+            }
+        },
         payload: ramflux_node_core::ProviderPushPayload {
-            wake_id: "wake_dispatch".to_owned(),
+            wake_id: canonical_wake_id(),
             provider,
             delivery_class: ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
             priority: ramflux_protocol::PushPriority::Normal,
             ttl: 86_400,
-            collapse_key: Some("target:device_dispatch:content".to_owned()),
-            encrypted_hint: Some("encrypted_hint".to_owned()),
+            collapse_key: Some(canonical_collapse()),
+            encrypted_hint: None,
         },
         push_alias_hash: "push_alias_hash".to_owned(),
-        collapse_key_hash: "collapse_key_hash".to_owned(),
+        collapse_key_hash: canonical_collapse(),
         action: ramflux_node_core::NotifyDeliveryAction::Accept,
-    }
-}
-
-struct LocalH2ProviderStub {
-    addr: std::net::SocketAddr,
-    ca_pem: String,
-    receiver: mpsc::Receiver<ReceivedProviderRequest>,
-    _thread: std::thread::JoinHandle<()>,
-}
-
-impl LocalH2ProviderStub {
-    fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        ensure_ring_crypto_provider_installed();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
-        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
-        let ca_pem = certified.cert.pem();
-        let cert_der = rustls_pki_types::CertificateDer::from(certified.cert.der().to_vec());
-        let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(
-            rustls_pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
-        );
-        let (sender, receiver) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            run_local_h2_provider(listener, cert_der, key_der, sender);
-        });
-        Ok(Self { addr, ca_pem, receiver, _thread: thread })
-    }
-
-    fn endpoint(&self, path: &str) -> String {
-        format!("https://localhost:{}{path}", self.addr.port())
-    }
-
-    fn ca_pem_secret_ref(&self) -> String {
-        format!("literal:{}", self.ca_pem)
-    }
-
-    fn recv(&self) -> Result<ReceivedProviderRequest, Box<dyn std::error::Error>> {
-        self.receiver.recv_timeout(Duration::from_secs(5)).map_err(Into::into)
-    }
-}
-
-#[derive(Debug)]
-struct ReceivedProviderRequest {
-    path: String,
-    headers: std::collections::BTreeMap<String, String>,
-    body: Vec<u8>,
-}
-
-fn run_local_h2_provider(
-    listener: std::net::TcpListener,
-    cert_der: rustls_pki_types::CertificateDer<'static>,
-    key_der: rustls_pki_types::PrivateKeyDer<'static>,
-    sender: mpsc::Sender<ReceivedProviderRequest>,
-) {
-    ensure_ring_crypto_provider_installed();
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-        return;
-    };
-    runtime.block_on(async move {
-        let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-            return;
-        };
-        let Ok(mut server_config) = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-        else {
-            return;
-        };
-        server_config.alpn_protocols = vec![b"h2".to_vec()];
-        let Ok((stream, _peer)) = listener.accept().await else {
-            return;
-        };
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
-        let Ok(tls) = acceptor.accept(stream).await else {
-            return;
-        };
-        let Ok(mut connection) = h2::server::handshake(tls).await else {
-            return;
-        };
-        if let Some(Ok((request, respond))) = connection.accept().await {
-            handle_local_h2_provider_request(request, respond, sender).await;
-        }
-        let _ = tokio::time::timeout(Duration::from_millis(100), connection.accept()).await;
-    });
-}
-
-async fn handle_local_h2_provider_request(
-    request: http::Request<h2::RecvStream>,
-    mut respond: h2::server::SendResponse<bytes::Bytes>,
-    sender: mpsc::Sender<ReceivedProviderRequest>,
-) {
-    let path = request.uri().path().to_owned();
-    let headers = request
-        .headers()
-        .iter()
-        .filter_map(|(key, value)| {
-            Some((key.as_str().to_ascii_lowercase(), value.to_str().ok()?.to_owned()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut body_stream = request.into_body();
-    let mut body = Vec::new();
-    while let Some(Ok(chunk)) = body_stream.data().await {
-        body.extend_from_slice(&chunk);
-    }
-    let _ = sender.send(ReceivedProviderRequest { path, headers, body });
-    let response =
-        http::Response::builder().status(202).header("content-type", "application/json").body(());
-    if let Ok(response) = response
-        && let Ok(mut send) = respond.send_response(response, false)
-    {
-        let _ = send.send_data(bytes::Bytes::from_static(b"{}"), true);
+        expires_at: 4_102_444_800,
+        admitted_unix: 1_760_000_000,
+        boot_id: 0,
+        owner_epoch: 0,
     }
 }

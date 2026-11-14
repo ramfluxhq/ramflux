@@ -136,6 +136,7 @@ mod tests {
             "shared",
         )?;
         let runtime = crate::GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,

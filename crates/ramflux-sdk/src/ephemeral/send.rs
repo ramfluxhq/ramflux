@@ -66,8 +66,13 @@ pub fn encode_ephemeral_submit(
 ) -> Result<Vec<u8>, EphemeralSendError> {
     serde_json::to_vec(&GatewayClientFrame::Submit {
         submit: GatewaySubmitFrame {
+            call_context: None,
             signed_request: signed_request.clone(),
             envelope: envelope.clone(),
+            call_intent: None,
+            wake_id: None,
+            call_ref: None,
+            call_terminal: None,
         },
     })
     .map_err(|_| EphemeralSendError::Encode)

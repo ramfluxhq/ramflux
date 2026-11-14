@@ -352,6 +352,37 @@ pub(super) fn rate_limit_abuse(bucket_id: &str) -> RateLimitAbuseMetadata {
     }
 }
 
+pub(super) fn signed_raw_wake_body(
+    device: &str,
+    source_event: &str,
+    wake_byte: u8,
+    queued_at: u64,
+) -> Result<Vec<u8>, NodeCoreError> {
+    let body = ramflux_protocol::WakeV2 {
+        version: 2,
+        signing_key_id: NODE_SERVICE_SIGNING_KEY_ID.to_owned(),
+        signature_alg: ramflux_protocol::WakeSignatureAlg::Ed25519,
+        audience: ramflux_protocol::NOTIFY_WAKE_AUDIENCE.to_owned(),
+        action: ramflux_protocol::WakeAction::Enqueue,
+        wake_id: ramflux_protocol::encode_base64url([wake_byte; 16]),
+        target_delivery_id: device.to_owned(),
+        target_owner_epoch: 1,
+        source_event_id: source_event.to_owned(),
+        class: ramflux_protocol::WakeClass::Message,
+        created_at: queued_at,
+        expires_at: queued_at.saturating_add(3_600),
+        call_intent_digest: None,
+    };
+    let signed = NodeServiceSigningKey::from_seed([4_u8; 32]).sign_wake_v2(&body)?;
+    serde_json::to_vec(&serde_json::json!({
+        "device_delivery_id": device,
+        "signed_wake": signed,
+        "queued_at": queued_at,
+        "dnd_active": false
+    }))
+    .map_err(|source| NodeCoreError::ItestJson(source.to_string()))
+}
+
 pub(super) fn notification_wake(wake_id: &str, ttl: u32) -> ramflux_protocol::NotificationWake {
     ramflux_protocol::NotificationWake {
         schema: "ramflux.notification_wake.v1".to_owned(),
@@ -364,6 +395,7 @@ pub(super) fn notification_wake(wake_id: &str, ttl: u32) -> ramflux_protocol::No
         delivery_class: ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification,
         priority: ramflux_protocol::PushPriority::Normal,
         ttl,
+        absolute_expires_at: u64::from(ttl).saturating_add(1_900_000_000),
         collapse_key: Some("collapse_self_device".to_owned()),
         encrypted_hint: Some("encrypted_hint".to_owned()),
     }
@@ -412,6 +444,7 @@ pub(super) fn notify_webpush_route(
         webpush_auth: None,
         registered_at: 1_760_000_000,
         expires_at: 1_760_010_000,
+        route_generation: 0,
     }
 }
 

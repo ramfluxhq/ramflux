@@ -172,6 +172,19 @@ pub struct DeviceManifestResponse {
     pub devices: Vec<DeviceManifestEntry>,
 }
 
+/// Path prefix for `GET /mvp1/delivery-owner-epoch/{delivery_id}`.
+pub const DELIVERY_OWNER_EPOCH_PREFIX: &str = "/mvp1/delivery-owner-epoch/";
+
+/// Authenticated owner of the single usable device on a delivery id.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeliveryOwnerEpoch {
+    /// Device epoch from the identity registry. Callers must not invent this value.
+    pub device_epoch: u64,
+    /// Root-qualified storage key of that device.
+    #[serde(default)]
+    pub owner_device: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeviceAuthKeyResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]

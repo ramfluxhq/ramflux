@@ -6,9 +6,11 @@
 //! Delivery rechecks one owner per wake. The periodic revocation sweep is batched and bounded:
 //! each call checks at most [`PUSH_ROUTE_SWEEP_LIMIT`] owners in batches of
 //! [`PUSH_ROUTE_AUTHORITY_BATCH`], resuming where the previous call stopped.
-use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, routes};
+use super::{DevicePushRoute, NOTIFY_ROUTE_TABLE, NotifyRedbStore, PushProviderKind, routes};
 use crate::{DeviceAuthKeyResponse, NodeCoreError};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 pub(super) const OWNERS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("notify_route_authority_v1");
 /// Per-device `(client sequence, set at)` of the last deregistration. It only has to outlive a
@@ -18,6 +20,8 @@ pub(super) const OWNERS: TableDefinition<&str, &[u8]> =
 const FENCES: TableDefinition<&str, (u64, u64)> = TableDefinition::new("notify_route_fence_v2");
 /// Lifetime of a deregistration fence.
 pub const PUSH_ROUTE_FENCE_SECONDS: u64 = 600;
+/// Persistent per-provider sequence high-water and the next route generation.
+const HIGH_WATER: TableDefinition<&str, &[u8]> = TableDefinition::new("notify_route_high_water_v1");
 /// Owners per authority lookup request.
 pub const PUSH_ROUTE_AUTHORITY_BATCH: usize = 256;
 /// Owners checked per revocation sweep call.
@@ -26,6 +30,12 @@ pub(super) type RouteAuthorizer =
     dyn Fn(&[DeviceAuthKeyResponse]) -> Result<Vec<bool>, NodeCoreError> + Send + Sync;
 fn error(value: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(value.to_string())
+}
+pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
+    tx.open_table(OWNERS).map_err(error)?;
+    tx.open_table(FENCES).map_err(error)?;
+    tx.open_table(HIGH_WATER).map_err(error)?;
+    Ok(())
 }
 fn context(target: &str) -> Vec<u8> {
     format!("ramflux.notify.route_owner.v1\0{target}").into_bytes()
@@ -111,6 +121,11 @@ impl NotifyRedbStore {
             &context(&route.device_delivery_id),
             &serde_json::to_vec(authority).map_err(error)?,
         )?;
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        self.resume_route_mutation(&route.device_delivery_id)?;
         let txn = self.db.begin_write().map_err(error)?;
         let fence = txn
             .open_table(FENCES)
@@ -125,6 +140,26 @@ impl NotifyRedbStore {
             txn.abort().map_err(error)?;
             return Ok(false);
         }
+        let mut stored = route.clone();
+        {
+            let mut marks_table = txn.open_table(HIGH_WATER).map_err(error)?;
+            let mut marks = load_marks(&marks_table, route.device_delivery_id.as_str())?;
+            let provider = provider_mark(&route.provider);
+            if registration_is_stale(&marks, provider, client_seq) {
+                drop(marks_table);
+                txn.abort().map_err(error)?;
+                return Ok(false);
+            }
+            stored.route_generation = take_generation(&mut marks)?;
+            if let Some(seq) = client_seq {
+                marks.providers.insert(provider.to_owned(), seq);
+            }
+            let marks_bytes = serde_json::to_vec(&marks)
+                .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+            marks_table
+                .insert(route.device_delivery_id.as_str(), marks_bytes.as_slice())
+                .map_err(error)?;
+        }
         let same_owner = self.same_registered_owner(&txn, authority)?;
         {
             let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
@@ -138,7 +173,7 @@ impl NotifyRedbStore {
                 .transpose()?
                 .unwrap_or_default();
             values.retain(|prior| prior.provider != route.provider && prior.expires_at > now);
-            values.push(route.clone());
+            values.push(stored);
             table
                 .insert(
                     route.device_delivery_id.as_str(),
@@ -150,7 +185,7 @@ impl NotifyRedbStore {
                 .insert(route.device_delivery_id.as_str(), binding.as_slice())
                 .map_err(error)?;
         }
-        txn.commit().map_err(error)?;
+        self.commit_route_transaction(txn, &route.device_delivery_id)?;
         Ok(true)
     }
     /// Deletes the device's routes for `provider` (or all providers) on explicit deregistration.
@@ -185,18 +220,26 @@ impl NotifyRedbStore {
         {
             return Err(NodeCoreError::PushRouteOwnerMismatch);
         }
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        self.resume_route_mutation(target)?;
         let txn = self.db.begin_write().map_err(error)?;
         if let Some(seq) = client_seq {
             let now = crate::now_unix_seconds();
-            let mut fences = txn.open_table(FENCES).map_err(error)?;
-            let current = fences.get(target).map_err(error)?.map(|value| value.value());
-            let live = current
-                .filter(|(_, set_at)| now.saturating_sub(*set_at) < PUSH_ROUTE_FENCE_SECONDS)
-                .map_or(0, |(seq, _)| seq);
-            fences.insert(target, (seq.max(live), now)).map_err(error)?;
+            {
+                let mut fences = txn.open_table(FENCES).map_err(error)?;
+                let current = fences.get(target).map_err(error)?.map(|value| value.value());
+                let live = current
+                    .filter(|(_, set_at)| now.saturating_sub(*set_at) < PUSH_ROUTE_FENCE_SECONDS)
+                    .map_or(0, |(seq, _)| seq);
+                fences.insert(target, (seq.max(live), now)).map_err(error)?;
+            }
+            raise_marks(&txn, target, provider, seq)?;
         }
         if binding.is_none() {
-            txn.commit().map_err(error)?;
+            self.commit_route_transaction(txn, target)?;
             return Ok(0);
         }
         let removed;
@@ -219,9 +262,63 @@ impl NotifyRedbStore {
                     .map_err(error)?;
             }
         }
-        txn.commit().map_err(error)?;
+        self.commit_route_transaction(txn, target)?;
         Ok(removed)
     }
+
+    /// Delete one route only when the stored row still matches the send snapshot.
+    ///
+    /// A generation of zero never matches, so an unadmitted row cannot be removed
+    /// by a provider response. A rotated token has a newer generation and stays.
+    ///
+    /// # Errors
+    /// Returns an error when the route row cannot be read or written.
+    pub fn delete_snapshotted_route(
+        &self,
+        snapshot: &DevicePushRoute,
+    ) -> Result<bool, NodeCoreError> {
+        if snapshot.route_generation == 0 {
+            return Ok(false);
+        }
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        self.resume_route_mutation(&snapshot.device_delivery_id)?;
+        let txn = self.db.begin_write().map_err(error)?;
+        let target = snapshot.device_delivery_id.as_str();
+        let clear_owner = {
+            let mut table = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
+            let bytes = table.get(target).map_err(error)?.map(|value| value.value().to_vec());
+            let mut values = bytes
+                .map(|bytes| routes::open(&self.route_key, target, &bytes))
+                .transpose()?
+                .unwrap_or_default();
+            let before = values.len();
+            values.retain(|route| !route_snapshot_matches(route, snapshot));
+            if values.len() == before {
+                None
+            } else if values.is_empty() {
+                table.remove(target).map_err(error)?;
+                Some(true)
+            } else {
+                table
+                    .insert(target, routes::seal(&self.route_key, target, &values)?.as_slice())
+                    .map_err(error)?;
+                Some(false)
+            }
+        };
+        let Some(clear_owner) = clear_owner else {
+            txn.abort().map_err(error)?;
+            return Ok(false);
+        };
+        if clear_owner {
+            txn.open_table(OWNERS).map_err(error)?.remove(target).map_err(error)?;
+        }
+        self.commit_route_transaction(txn, target)?;
+        Ok(true)
+    }
+
     fn same_registered_owner(
         &self,
         txn: &redb::WriteTransaction,
@@ -245,23 +342,66 @@ impl NotifyRedbStore {
             && previous.branch_public_key == current.branch_public_key)
     }
     pub(super) fn prune_route_owners(&self) -> Result<(), NodeCoreError> {
-        let txn = self.db.begin_write().map_err(error)?;
-        {
-            let routes = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
-            let mut owners = txn.open_table(OWNERS).map_err(error)?;
-            let keys = owners
-                .iter()
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        let keys = self.route_cleanup_page(true)?;
+        for target in &keys {
+            self.resume_route_mutation(target)?;
+            let tx = self.db.begin_read().map_err(error)?;
+            let absent = tx
+                .open_table(NOTIFY_ROUTE_TABLE)
                 .map_err(error)?
-                .map(|row| row.map(|(key, _)| key.value().to_owned()).map_err(error))
-                .collect::<Result<Vec<_>, _>>()?;
-            for key in keys {
-                if routes.get(key.as_str()).map_err(error)?.is_none() {
-                    owners.remove(key.as_str()).map_err(error)?;
-                }
+                .get(target.as_str())
+                .map_err(error)?
+                .is_none();
+            drop(tx);
+            if !absent {
+                continue;
             }
+            let tx = self.db.begin_write().map_err(error)?;
+            tx.open_table(OWNERS).map_err(error)?.remove(target.as_str()).map_err(error)?;
+            self.commit_route_transaction(tx, target)?;
         }
-        txn.commit().map_err(error)
+        self.finish_route_cleanup_page(true, &keys)?;
+        Ok(())
     }
+
+    fn route_cleanup_page(&self, owners: bool) -> Result<Vec<String>, NodeCoreError> {
+        const LIMIT: usize = 128;
+        let mut cursors = self.route_cleanup_cursors.lock().map_err(error)?;
+        let [ownerless, orphan] = &mut *cursors;
+        let cursor = if owners { orphan } else { ownerless };
+        let tx = self.db.begin_read().map_err(error)?;
+        let table =
+            tx.open_table(if owners { OWNERS } else { NOTIFY_ROUTE_TABLE }).map_err(error)?;
+        let range = match cursor.as_deref() {
+            Some(start) => {
+                table.range::<&str>((std::ops::Bound::Excluded(start), std::ops::Bound::Unbounded))
+            }
+            None => table.range::<&str>(..),
+        }
+        .map_err(error)?;
+        let keys = range
+            .take(LIMIT)
+            .map(|entry| entry.map(|(key, _)| key.value().to_owned()).map_err(error))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(keys)
+    }
+
+    fn finish_route_cleanup_page(
+        &self,
+        owners: bool,
+        keys: &[String],
+    ) -> Result<(), NodeCoreError> {
+        let mut cursors = self.route_cleanup_cursors.lock().map_err(error)?;
+        let [ownerless, orphan] = &mut *cursors;
+        let cursor = if owners { orphan } else { ownerless };
+        *cursor = if keys.len() == 128 { keys.last().cloned() } else { None };
+        Ok(())
+    }
+
     fn owner_binding(&self, target: &str) -> Result<Option<Vec<u8>>, NodeCoreError> {
         let txn = self.db.begin_read().map_err(error)?;
         let table = match txn.open_table(OWNERS) {
@@ -283,6 +423,11 @@ impl NotifyRedbStore {
     /// Deletes a revoked owner's routes, but only if the encrypted binding is unchanged, so a
     /// delayed lookup cannot delete a route that was re-registered meanwhile.
     fn revoke_if_unchanged(&self, target: &str, bytes: &[u8]) -> Result<bool, NodeCoreError> {
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        self.resume_route_mutation(target)?;
         let txn = self.db.begin_write().map_err(error)?;
         let removed;
         {
@@ -293,8 +438,19 @@ impl NotifyRedbStore {
                 txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?.remove(target).map_err(error)?;
             }
         }
-        txn.commit().map_err(error)?;
+        self.commit_route_transaction(txn, target)?;
         Ok(removed)
+    }
+
+    pub(super) fn current_owner_epoch(&self, target: &str) -> Result<u64, NodeCoreError> {
+        if self.route_authorizer.is_none() {
+            return Ok(0);
+        }
+        let Some(bytes) = self.owner_binding(target)? else {
+            return Ok(0);
+        };
+        let authority = self.open_binding(target, &bytes)?;
+        if authority.revoked { Ok(0) } else { Ok(authority.device_epoch) }
     }
 
     pub(super) fn authorize_push_route(&self, target: &str) -> Result<bool, NodeCoreError> {
@@ -360,59 +516,67 @@ impl NotifyRedbStore {
         Ok(removed)
     }
 
-    /// Validate route ownership once; old unbound rows require an explicit store reset.
+    /// Validate recovered route ownership; unbound rows require an explicit store reset.
     fn reject_ownerless_routes(&self) -> Result<(), NodeCoreError> {
         if self.allow_itest_unbound_routes
             || self.route_owners_checked.load(std::sync::atomic::Ordering::Acquire)
         {
             return Ok(());
         }
-        let txn = self.db.begin_read().map_err(error)?;
-        let owners = match txn.open_table(OWNERS) {
-            Ok(table) => Some(table),
-            Err(redb::TableError::TableDoesNotExist(_)) => None,
-            Err(source) => return Err(error(source)),
-        };
-        let routes = txn.open_table(NOTIFY_ROUTE_TABLE).map_err(error)?;
-        for row in routes.iter().map_err(error)? {
-            let (key, _) = row.map_err(error)?;
-            let bound = match &owners {
-                Some(owners) => owners.get(key.value()).map_err(error)?.is_some(),
-                None => false,
-            };
-            if !bound {
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        let keys = self.route_cleanup_page(false)?;
+        for target in &keys {
+            self.resume_route_mutation(target)?;
+            if self.owner_binding(target)?.is_none() {
                 return Err(NodeCoreError::UnsupportedPersistedFormat("notify unowned route"));
             }
         }
-        self.route_owners_checked.store(true, std::sync::atomic::Ordering::Release);
+        self.finish_route_cleanup_page(false, &keys)?;
+        if keys.len() < 128 {
+            self.route_owners_checked.store(true, std::sync::atomic::Ordering::Release);
+        }
         Ok(())
     }
 
     /// Deletes current deregistration fences older than [`PUSH_ROUTE_FENCE_SECONDS`].
     pub(super) fn prune_route_fences(&self, now: u64) -> Result<usize, NodeCoreError> {
-        let txn = self.db.begin_write().map_err(error)?;
-        let removed;
-        {
-            let mut fences = txn.open_table(FENCES).map_err(error)?;
-            let expired = fences
-                .iter()
-                .map_err(error)?
-                .filter_map(|row| {
-                    row.map(|(key, value)| {
-                        let (_, set_at) = value.value();
-                        (now.saturating_sub(set_at) >= PUSH_ROUTE_FENCE_SECONDS)
-                            .then(|| key.value().to_owned())
-                    })
-                    .map_err(error)
-                    .transpose()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            removed = expired.len();
-            for key in expired {
-                fences.remove(key.as_str()).map_err(error)?;
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        let txn = self.db.begin_read().map_err(error)?;
+        let table = txn.open_table(FENCES).map_err(error)?;
+        let mut expired = Vec::new();
+        for row in table.iter().map_err(error)? {
+            let (key, value) = row.map_err(error)?;
+            if now.saturating_sub(value.value().1) >= PUSH_ROUTE_FENCE_SECONDS {
+                expired.push(key.value().to_owned());
             }
         }
-        txn.commit().map_err(error)?;
+        drop(table);
+        drop(txn);
+        let mut removed = 0;
+        for target in &expired {
+            self.resume_route_mutation(target)?;
+            let txn = self.db.begin_write().map_err(error)?;
+            let old = txn
+                .open_table(FENCES)
+                .map_err(error)?
+                .get(target.as_str())
+                .map_err(error)?
+                .map(|v| v.value());
+            if old.is_some_and(|(_, set_at)| now.saturating_sub(set_at) >= PUSH_ROUTE_FENCE_SECONDS)
+            {
+                txn.open_table(FENCES).map_err(error)?.remove(target.as_str()).map_err(error)?;
+                self.commit_route_transaction(txn, target)?;
+                removed += 1;
+            } else {
+                txn.abort().map_err(error)?;
+            }
+        }
         Ok(removed)
     }
 
@@ -441,3 +605,93 @@ impl NotifyRedbStore {
         Ok(fence)
     }
 }
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct RouteMarks {
+    #[serde(default)]
+    barrier: u64,
+    #[serde(default)]
+    next_generation: u64,
+    #[serde(default)]
+    providers: BTreeMap<String, u64>,
+}
+
+fn provider_mark(provider: &PushProviderKind) -> &'static str {
+    match provider {
+        PushProviderKind::Apns => "apns",
+        PushProviderKind::ApnsVoip => "apns_voip",
+        PushProviderKind::Fcm => "fcm",
+        PushProviderKind::WebPush => "webpush",
+    }
+}
+
+fn registration_is_stale(marks: &RouteMarks, provider: &str, client_seq: Option<u64>) -> bool {
+    let floor = marks.barrier.max(marks.providers.get(provider).copied().unwrap_or(0));
+    match client_seq {
+        Some(seq) => seq <= floor,
+        None => floor > 0,
+    }
+}
+
+fn take_generation(marks: &mut RouteMarks) -> Result<u64, NodeCoreError> {
+    let generation = marks.next_generation.max(1);
+    marks.next_generation = generation.checked_add(1).ok_or_else(|| {
+        NodeCoreError::InvalidConfiguration("route generation overflow".to_owned())
+    })?;
+    Ok(generation)
+}
+
+fn load_marks<T>(table: &T, key: &str) -> Result<RouteMarks, NodeCoreError>
+where
+    T: ReadableTable<&'static str, &'static [u8]>,
+{
+    let Some(bytes) = table.get(key).map_err(error)?.map(|value| value.value().to_vec()) else {
+        return Ok(RouteMarks::default());
+    };
+    serde_json::from_slice(&bytes)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))
+}
+
+fn raise_marks(
+    txn: &redb::WriteTransaction,
+    target: &str,
+    provider: Option<&PushProviderKind>,
+    seq: u64,
+) -> Result<(), NodeCoreError> {
+    let mut table = txn.open_table(HIGH_WATER).map_err(error)?;
+    let mut marks = load_marks(&table, target)?;
+    match provider {
+        None => marks.barrier = marks.barrier.max(seq),
+        Some(provider) => {
+            let key = provider_mark(provider);
+            let current = marks.providers.get(key).copied().unwrap_or(0);
+            marks.providers.insert(key.to_owned(), current.max(seq));
+        }
+    }
+    let bytes = serde_json::to_vec(&marks)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+    table.insert(target, bytes.as_slice()).map_err(error)?;
+    Ok(())
+}
+
+fn route_snapshot_matches(route: &DevicePushRoute, snapshot: &DevicePushRoute) -> bool {
+    route.provider == snapshot.provider
+        && route.route_generation == snapshot.route_generation
+        && route.token == snapshot.token
+        && route.credential_id == snapshot.credential_id
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::RouteMarks;
+
+    #[test]
+    fn route_generation_overflow_refuses() {
+        let mut marks = RouteMarks { next_generation: u64::MAX, ..RouteMarks::default() };
+        assert!(super::take_generation(&mut marks).is_err());
+        assert_eq!(marks.next_generation, u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod tests;

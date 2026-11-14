@@ -21,6 +21,9 @@ pub(crate) fn fixture(
     let id = ramflux_protocol::encode_base64url([7; 16]);
     let mut call =
         LiveCall::outgoing(id.clone(), "thread".into(), local, vec![peer], now_unix_timestamp())?;
+    // These receipt/key-reuse fixtures begin with an already-authorized active call.
+    assert!(call.media_held, "new calls must start held before this fixture's authorization");
+    call.allow_media();
     call.row.state = "active".into();
     call.row.answered_at = Some(now_unix_timestamp());
     call.receive_key = Some(zeroize::Zeroizing::new([3; 32]));
@@ -51,6 +54,33 @@ pub(crate) fn fixture(
 fn request(method: &str, id: &str) -> LocalBusFrame {
     LocalBusFrame::request("call-test", Some("alice".into()), "test", method, json!({"call_id":id}))
 }
+#[tokio::test]
+async fn an_active_call_reholds_media_keys_after_its_gateway_generation_changes()
+-> Result<(), SdkError> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (root, mut state, id) = fixture("call-media-held")?;
+        let account = local_bus_account_mut(&mut state, "alice")?;
+        let call = account.client.voice_calls.get_mut(&id).ok_or_else(|| invalid("test call"))?;
+        call.bind_gateway_generation(Some("new-authenticated-generation"))?;
+        let error = dispatch(&request("call.media.session", &id), &mut state)
+            .await
+            .err()
+            .ok_or_else(|| invalid("test: held call exposed media"))?;
+        assert!(
+            error.to_string().contains("call resolution missing"),
+            "media was refused for the wrong reason: {error}"
+        );
+        let account = local_bus_account(&state, "alice")?;
+        let call = account.client.voice_calls.get(&id).ok_or_else(|| invalid("test call"))?;
+        assert!(!call.media_taken, "refused media request consumed its one-use key lease");
+        drop(state);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| invalid("test: held media request timed out"))?
+}
+
 #[tokio::test]
 async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
 -> Result<(), SdkError> {

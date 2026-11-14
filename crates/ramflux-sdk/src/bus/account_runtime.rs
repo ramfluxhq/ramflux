@@ -479,4 +479,7 @@ mod expiry_tests;
 pub mod testing;
 
 #[cfg(feature = "test-support")]
+pub mod testing_calls;
+
+#[cfg(feature = "test-support")]
 mod testing_authority;

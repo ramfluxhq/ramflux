@@ -83,6 +83,67 @@ async fn drive_controls(
 #[path = "call_driver_tests.rs"]
 mod tests;
 #[cfg(test)]
+struct SignedFlush {
+    control: ramflux_protocol::CallControl,
+    bound: Option<call::intent::BoundCallIntent>,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    extras: crate::gateway::engine::CallSubmitExtras,
+}
+
+#[cfg(test)]
+fn sign_flushed_control(
+    account: &LocalBusAccountState,
+    mut control: ramflux_protocol::CallControl,
+    target: &crate::bus::dispatch::task_transport::Target,
+) -> Result<SignedFlush, SdkError> {
+    let bound = if target.federation.is_none() {
+        let epoch = call::intent::manifest_device_epoch(
+            account,
+            target.identity.root_commitment(),
+            &target.device,
+        )?;
+        if let Some(epoch) = epoch {
+            call::intent::bind_call_intent(
+                account,
+                &control,
+                &call::intent::IntentTarget {
+                    device_id: target.device.clone(),
+                    qualified_device: target.identity.storage_key().to_owned(),
+                    epoch,
+                    delivery_id: target.delivery.clone(),
+                },
+                u64::try_from(now_unix_timestamp()).unwrap_or(0),
+            )?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(bound) = bound.as_ref() {
+        control.call_ref = Some(bound.signed.body.call_ref.clone());
+        if matches!(control.body, ramflux_protocol::CallAction::Invite { .. }) {
+            control.call_start = Some(bound.signed.clone());
+        }
+    }
+    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    control.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &call::signing_bytes(&control)?,
+        local,
+    );
+    let bytes = call::bytes(&control)?;
+    let extras = crate::gateway::engine::CallSubmitExtras {
+        action: Some(crate::gateway::call_resolution::CallOperationAction::from_control(&control)),
+        start_digest: None,
+        call_intent: bound.as_ref().map(|bound| bound.signed.clone()),
+        wake_id: None,
+        call_ref: control.call_ref.clone(),
+        call_terminal: call::resolution_terminal(&control),
+    };
+    Ok(SignedFlush { control, bound, bytes, extras })
+}
+
+#[cfg(test)]
 async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, SdkError> {
     account.client.require_native_operation(
         &account.client.owned_device_identity()?,
@@ -108,7 +169,9 @@ async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, Sd
     let mut engine = account.session_client().await?;
     let result = async {
         let mut deliveries = Vec::new();
-        for mut control in pending {
+        let mut acknowledged = None;
+        let mut resolutions = Vec::new();
+        for control in pending {
             let target_device = if control.sender == control.caller {
                 &control.callee.device_id
             } else {
@@ -116,34 +179,55 @@ async fn flush(account: &mut LocalBusAccountState, id: &str) -> Result<usize, Sd
             };
             let target = targets
                 .iter()
-                .find(|t| &t.device == target_device)
+                .find(|candidate| &candidate.device == target_device)
                 .ok_or_else(|| invalid("call target no longer active"))?;
-            let local =
-                account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            control.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-                &call::signing_bytes(&control)?,
-                local,
-            );
-            let bytes = call::bytes(&control)?;
-            deliveries.push(
-                crate::bus::dispatch::task_transport::seal(
-                    account,
-                    &mut engine,
-                    target,
-                    &conversation,
-                    &bytes,
-                    crate::client::routed::Route::control(),
-                )
-                .await?,
-            );
+            let prepared = sign_flushed_control(account, control, target)?;
+            let resolves = prepared.extras.call_intent.is_some()
+                || prepared.extras.call_ref.is_some()
+                || prepared.extras.call_terminal.is_some();
+            let sealed = crate::bus::dispatch::task_transport::seal_assigned(
+                account,
+                &mut engine,
+                target,
+                crate::bus::dispatch::task_transport::AssignedSeal {
+                    conversation: &conversation,
+                    body: &prepared.bytes,
+                    kind: crate::client::routed::Route::control(),
+                    envelope_id: prepared.bound.as_ref().map(|bound| bound.envelope_id.as_str()),
+                    created_at: prepared
+                        .bound
+                        .as_ref()
+                        .and_then(|bound| i64::try_from(bound.signed.body.created_at).ok()),
+                },
+            )
+            .await?;
+            if resolves {
+                let submitted =
+                    engine.submit_correlated_call(sealed.envelope, prepared.extras).await?;
+                resolutions.push(submitted);
+                if acknowledged.is_none() {
+                    acknowledged = prepared.control.call_ref;
+                }
+            } else {
+                deliveries.push(sealed);
+            }
         }
-        Ok::<_, SdkError>(deliveries)
+        Ok::<_, SdkError>((deliveries, acknowledged, resolutions))
     }
     .await;
     account.apply_session_metadata(engine);
-    let deliveries = result?;
+    let (deliveries, acknowledged, resolutions) = result?;
     let n = crate::bus::task_delivery::submit_all(account, deliveries).await?;
-    account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("call vanished"))?.pending.clear();
+    let call = account.client.voice_calls.get_mut(id).ok_or_else(|| invalid("call vanished"))?;
+    call.pending.clear();
+    if let Some(call_ref) = acknowledged {
+        if call.call_ref.is_none() {
+            call.call_ref = Some(call_ref.clone());
+        }
+        if resolutions.iter().any(|r| r.context.call_ref == call_ref && r.permits_media()) {
+            call.allow_media();
+        }
+    }
     Ok(n)
 }
 

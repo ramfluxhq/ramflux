@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 mod attachment_renewal;
+mod call_intent;
+
+#[cfg(test)]
+mod call_composition_tests;
 mod clients;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
@@ -20,6 +24,7 @@ mod issued_probe;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod mesh_delivery;
+mod notify_wake;
 mod object_issue;
 mod pre_auth;
 #[cfg(test)]
@@ -34,6 +39,7 @@ mod registration;
 #[cfg(test)]
 mod registration_forward_tests;
 mod retention;
+mod send_authority;
 mod serve;
 mod session;
 mod session_hub;
@@ -42,13 +48,16 @@ mod session_response;
 mod state;
 mod submit_source;
 mod voice;
+#[cfg(test)]
+mod wake_acceptance;
 
 use std::sync::{Arc, Mutex};
 
 pub(crate) use clients::{
-    gateway_state, notify_http_client, notify_offline_wake, router_cursor_async,
-    router_get_json_async, router_inbox_async, router_mesh_client, router_post_json,
-    router_post_json_async, router_post_json_until, router_session_async,
+    gateway_state, lookup_target_owner_epoch, notify_http_client, notify_offline_wake,
+    post_signed_wake, router_cursor_async, router_get_json_async, router_inbox_async,
+    router_mesh_client, router_post_json, router_post_json_async, router_post_json_until,
+    router_session_async,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use clients::{is_timeout_error, pre_auth_gate, router_get_json};

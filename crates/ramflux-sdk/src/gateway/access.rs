@@ -318,6 +318,7 @@ impl CountingGateway {
         Self {
             config,
             session: GatewaySessionState {
+                call_session_generation: None,
                 session_id: "counting".into(),
                 gateway_id: "counting".into(),
                 resume_token: "counting".into(),

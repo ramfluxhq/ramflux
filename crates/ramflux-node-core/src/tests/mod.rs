@@ -31,6 +31,9 @@ mod root_mailbox;
 
 mod session_authority_refresh;
 
+mod notify_legacy_wake;
+mod notify_route_generation;
+mod notify_wake_acceptance;
 mod server_retention;
 mod server_retention_r2;
 mod server_retention_r2_api;

@@ -14,6 +14,7 @@ pub(crate) fn gateway_session_state(
     fallback_inbox_seq: u64,
 ) -> GatewaySessionState {
     GatewaySessionState {
+        call_session_generation: session.call_session_generation.clone(),
         session_id: session.session_id.clone(),
         gateway_id: session.gateway_id.clone(),
         resume_token: session.resume_token.clone(),

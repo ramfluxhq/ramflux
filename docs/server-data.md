@@ -165,7 +165,7 @@ The wire contract: send a `push_route_register` gateway session frame with `requ
 `signed_request` and `body`. Sign `POST /notify/v1/push-route` with the current
 device branch key, canonical body hash, a fresh request id/nonce and expiry,
 `device_proof_hash: "already_authed"`, and `ext.session_id` equal to the live
-session id. Body fields are `provider` (`apns`, `fcm`, `webpush`), `token`, and
+session id. Body fields are `provider` (`apns`, `apns_voip`, `fcm`, `webpush`), `token`, and
 optional `endpoint`, `webpush_p256dh`, `webpush_auth`. Unknown fields are refused:
 the caller cannot supply an owner, target delivery id, credentials or expiry.
 Success returns `push_route_registered` with server-assigned `expires_at` and the
@@ -193,13 +193,74 @@ An empty `RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE` means "not configured". WebP
 be provisioned by the operator before accepting subscriptions. Provider secret
 references are stored in redb; provider secrets remain in the referenced files or operator-controlled environment.
 
-Apple/Google receive their device token, a generic alert, wake id, delivery class,
-encrypted hint, and a collapse value keyed with the notify route secret
-(HMAC-SHA-256). Knowing a delivery id does not let anyone predict it. The raw canonical collapse
-key is not forwarded. Provider diagnostics omit raw tokens and application
-content. Push providers still learn destination and timing metadata. The
-feature-gated `itest-http` registration/credential APIs are synthetic fixtures;
-they are not the production registration boundary.
+Providers receive the device token and a closed payload. The iOS alert title is
+`Ramflux` and the body is `You have a new Ramflux update.` The payload carries no
+wake id, envelope id, sender, delivery class, or encrypted hint, and it sets no
+sound, badge, `mutable-content`, or `content-available`. Background delivery is
+unsupported: there is no background push builder. FCM is data-only. Web Push
+encrypts a short body and is not used for calls.
+
+A message collapse value is HMAC-SHA-256 of the target delivery id under the
+notify route secret, domain `ramflux.notification.device_collapse.v1`. Calls omit
+collapse on every provider. One device has one message collapse slot, so message
+subclasses, token rotations, and provider routes share it. An operator who holds
+the route secret can recompute that value. Knowing only a delivery id does not.
+
+Only `call_wake` is high priority, and only after a current signed call intent.
+An iOS device may register both an alert route (`apns`) and a `PushKit` route
+(`apns_voip`). A call uses the `PushKit` route when
+`RAMFLUX_NOTIFY_APNS_VOIP_ENABLED` is exactly `1` and that route's credential is
+current; otherwise it uses the alert route. One call never sends both. `PushKit`
+pushes set APNs expiration to `0`. The server sends nothing, and retries nothing,
+once the signed deadline has passed. That is not a promise the provider delivers
+before the deadline. Messages never select a `PushKit` route.
+
+Notify admits only a signed `WakeV2` (`ramflux.notification.wake.v2`). Startup
+drops pending queue rows and raw WAL records from the older wake contract and
+does not give them a new deadline. The durable message inbox is a different
+database and is not modified. A cancellation does not recall a provider request
+that has already left the process. The route generation and token copied into a
+prepared push stay with that attempt. A later rotation does not rewrite it, and
+an invalid-token response deletes a stored route only when the stored row still
+matches that snapshot.
+
+Route controls for the same provider replace each other. Delete-all is a barrier
+and supersedes every queued control. Each accepted registration gets a new
+`route_generation` that is never reused. A registration whose sequence is not
+newer than the stored high-water mark is refused.
+
+A caller can sign a call intent that does not match a live call. A provider or
+operator can still deliver a wake after the server has stopped sending, or
+deliver one the server refused. Cross-node call envelopes are forwarded as
+ordinary messages and do not mint a same-node wake. The feature-gated
+`itest-http` registration and credential APIs are synthetic fixtures; they are
+not the production registration boundary.
+
+Notification sending requires an authenticated coordinator connection. On each router
+and gateway, set `mesh.endpoints.notify-authority` to notify's QUIC listener
+(default port `18085`), independently of its HTTP mesh endpoint. On notify, list
+every router and exact gateway instance URI under `[send_authority.origins]`,
+with their QUIC addresses (router default `17444`; gateway mesh listener). These
+identities must match the certificates and belong to the same node. The sample
+configs show the default topology. Without this configuration, ordinary messaging
+remains available; correlated calls and provider sends fail closed.
+
+Notify's `send_authority.root_budget` defaults to `4096` simultaneous recipient
+roots. It must fund every configured origin plus notify itself. Canonically sorted
+identities receive fixed, non-borrowable shares; attachments to an existing root do
+not charge a second root. Reservations activate before durable authority work,
+unused reservations expire after 30 seconds, and active reservations release only
+after both components retire their charged rows and denial horizons. Restart and
+uncertain acknowledgements retain occupancy until reconciliation proves it safe.
+This is a simultaneous capacity limit, not a lifetime recipient limit.
+
+Wake ledgers and WAL segments carry format marker `1`. An unversioned predecessor,
+unknown format, or zero retention horizon refuses startup with
+`notify_wake_state_reset_required`; it is never silently treated as current.
+Normal message wakes may recover their original absolute expiry after restart.
+Pre-restart ringing calls cannot regain sending authority. Provider cancellation
+serializes with header and complete body enqueue, but cannot recall a request
+already handed to the provider transport.
 
 ## Restoring router inbox state
 

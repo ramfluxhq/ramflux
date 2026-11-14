@@ -3,8 +3,13 @@
 
 #![cfg_attr(not(feature = "itest-http"), allow(dead_code))]
 
+mod provider_issuance;
+mod provider_outcome;
+use provider_issuance::SendBoundary;
+mod provider_payload;
 mod push_registration;
 mod retention;
+mod send_authority;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as FmtWrite;
@@ -30,8 +35,6 @@ const NOTIFY_MESH_INGRESS_ENV: &str = "RAMFLUX_NOTIFY_MESH_INGRESS";
 const NOTIFY_MESH_LISTEN_ADDR_ENV: &str = "RAMFLUX_NOTIFY_MESH_LISTEN_ADDR";
 const NOTIFY_MESH_INGRESS_RUNTIME_ENV: &str = "RAMFLUX_NOTIFY_MESH_INGRESS_RUNTIME";
 const DEFAULT_NOTIFY_MESH_LISTEN_ADDR: &str = "0.0.0.0:18085";
-const PROVIDER_PUSH_RETRY_DELAYS: [Duration; 3] =
-    [Duration::from_millis(100), Duration::from_millis(200), Duration::from_millis(400)];
 
 fn main() {
     if let Err(error) = run_service("ramflux-notify") {
@@ -67,16 +70,19 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         )?;
         let mut store =
             ramflux_node_core::NotifyRedbStore::open_with_route_key(redb_path, route_key)?;
+        let authority = Arc::new(send_authority::Surface::new(&config, &store)?);
+        authority.configure_reader(&mut store);
         push_registration::configure(&mut store, &config)?;
         let store = Arc::new(store);
         log_notify_wal_recovery(&store);
+        store.drop_legacy_pending_wakes()?;
         retention::start(Arc::clone(&store))?;
         let state = match store.load_state()? {
             Some(state) => state,
             None => ramflux_node_core::NotifyQueueState::new(),
         };
         if !store.uses_notify_wal() {
-            store.save_state(&state)?;
+            store.save_queue_state(&state)?;
         }
         tracing::info!(service, node_id = config.node_id, "notify queue initialized");
         if std::env::args().any(|arg| arg == "--once") {
@@ -91,6 +97,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         let wake_auth = NotifyWakeAuth::from_config(&config)?;
         let wake_verify_batcher = NotifyWakeVerifyBatcher::from_env(&wake_auth, &store)?;
         let ingress = Arc::new(NotifyIngressState {
+            authority,
             store,
             runtime,
             store_gate,
@@ -129,6 +136,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
 }
 
 struct NotifyIngressState {
+    authority: Arc<send_authority::Surface>,
     store: Arc<ramflux_node_core::NotifyRedbStore>,
     runtime: Arc<NotifyRuntime>,
     store_gate: Arc<Mutex<()>>,
@@ -139,55 +147,23 @@ struct NotifyIngressState {
 
 #[derive(Clone)]
 struct NotifyWakeAuth {
-    require: bool,
-    key: Option<ramflux_node_core::NodeServiceSigningKey>,
+    key: ramflux_node_core::NodeServiceSigningKey,
 }
 
 impl NotifyWakeAuth {
     fn from_config(
         config: &ramflux_node_core::NodeServiceConfig,
     ) -> Result<Self, ramflux_node_core::NodeCoreError> {
-        let require = notify_require_wake_auth();
-        let key = if require {
-            Some(ramflux_node_core::require_node_service_signing_key(config)?)
-        } else {
-            ramflux_node_core::node_service_signing_key_from_config(config)?
-        };
-        Ok(Self { require, key })
+        let key = ramflux_node_core::require_node_service_signing_key(config)?;
+        Ok(Self { key })
     }
 
-    fn verify(
+    fn verify_signed(
         &self,
-        wake: &ramflux_protocol::NotificationWake,
+        signed: &ramflux_protocol::SignedWakeV2,
     ) -> Result<(), ramflux_node_core::NodeCoreError> {
-        if !self.require {
-            return Ok(());
-        }
-        let key = self.key.as_ref().ok_or_else(|| {
-            ramflux_node_core::NodeCoreError::Unauthorized(
-                "notify wake auth is required but no node service key is configured".to_owned(),
-            )
-        })?;
-        key.verify_notification_wake(wake)
+        self.key.verify_wake_v2(signed)
     }
-
-    fn verify_batch_indices(
-        &self,
-        wakes: &[&ramflux_protocol::NotificationWake],
-    ) -> Result<(), Vec<usize>> {
-        if !self.require {
-            return Ok(());
-        }
-        let Some(key) = self.key.as_ref() else {
-            return Err((0..wakes.len()).collect());
-        };
-        key.verify_notification_wakes_batch(wakes)
-    }
-}
-
-fn notify_require_wake_auth() -> bool {
-    ramflux_node_core::environment::var("RAMFLUX_NOTIFY_REQUIRE_WAKE_AUTH")
-        .map_or(true, |value| value != "0" && !value.eq_ignore_ascii_case("false"))
 }
 
 #[derive(Clone)]
@@ -200,7 +176,7 @@ impl NotifyWakeVerifyBatcher {
         wake_auth: &NotifyWakeAuth,
         store: &Arc<ramflux_node_core::NotifyRedbStore>,
     ) -> Result<Option<Self>, ramflux_node_core::NodeCoreError> {
-        if !notify_batch_verify_enabled() || !wake_auth.require {
+        if !notify_batch_verify_enabled() {
             return Ok(None);
         }
         let batch_max = notify_runtime_usize_env(NOTIFY_VERIFY_BATCH_MAX_ENV, || 1024).max(1);
@@ -242,7 +218,8 @@ impl NotifyWakeVerifyBatcher {
     async fn verify_and_enqueue(
         &self,
         shard_id: usize,
-        wake: ramflux_protocol::NotificationWake,
+        signed: ramflux_protocol::SignedWakeV2,
+        device_delivery_id: String,
         raw_body: Vec<u8>,
         queued_at: u64,
     ) -> Result<(), ramflux_node_core::NodeCoreError> {
@@ -252,13 +229,14 @@ impl NotifyWakeVerifyBatcher {
                 "notify wake verifier shard {shard_id} not available"
             ))
         })?;
-        sender.send(WakeVerifyRequest { wake, raw_body, queued_at, reply }).await.map_err(
-            |source| {
+        sender
+            .send(WakeVerifyRequest { signed, device_delivery_id, raw_body, queued_at, reply })
+            .await
+            .map_err(|source| {
                 ramflux_node_core::NodeCoreError::ItestHttp(format!(
                     "notify wake verifier stopped: {source}"
                 ))
-            },
-        )?;
+            })?;
         response.await.map_err(|source| {
             ramflux_node_core::NodeCoreError::ItestHttp(format!(
                 "notify wake verifier response dropped: {source}"
@@ -268,7 +246,8 @@ impl NotifyWakeVerifyBatcher {
 }
 
 struct WakeVerifyRequest {
-    wake: ramflux_protocol::NotificationWake,
+    signed: ramflux_protocol::SignedWakeV2,
+    device_delivery_id: String,
     raw_body: Vec<u8>,
     queued_at: u64,
     reply: tokio::sync::oneshot::Sender<Result<(), ramflux_node_core::NodeCoreError>>,
@@ -317,25 +296,29 @@ fn verify_and_enqueue_wake_batch(
     shard_id: usize,
     batch: Vec<WakeVerifyRequest>,
 ) {
-    let wakes = batch.iter().map(|request| &request.wake).collect::<Vec<_>>();
-    let failures = wake_auth.verify_batch_indices(&wakes).err().unwrap_or_default();
-    let mut failed = vec![false; batch.len()];
-    for index in failures {
-        if let Some(slot) = failed.get_mut(index) {
-            *slot = true;
-        }
-    }
     let mut valid = Vec::new();
     let mut replies = Vec::new();
-    for (index, request) in batch.into_iter().enumerate() {
-        if failed[index] {
+    for request in batch {
+        let bound = request.signed.body.target_delivery_id == request.device_delivery_id;
+        if wake_auth.verify_signed(&request.signed).is_err() || !bound {
             let _ = request.reply.send(Err(ramflux_node_core::NodeCoreError::Unauthorized(
                 "notify wake signature rejected".to_owned(),
             )));
-        } else {
-            valid.push((request.raw_body, request.queued_at));
-            replies.push(request.reply);
+            continue;
         }
+        if request.signed.body.action != ramflux_protocol::WakeAction::Enqueue {
+            let _ = request.reply.send(Ok(()));
+            continue;
+        }
+        if ramflux_node_core::project_wake_v2(&request.signed, request.queued_at).is_err() {
+            let _ =
+                request.reply.send(Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                    "wake contract rejected".to_owned(),
+                )));
+            continue;
+        }
+        valid.push((request.raw_body, request.queued_at));
+        replies.push(request.reply);
     }
     if valid.is_empty() {
         return;
@@ -508,25 +491,29 @@ async fn notify_mesh_quic_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
     ingress: Arc<NotifyIngressState>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let peer_identity = connection.peer_spiffe_uri().map(str::to_owned);
     loop {
-        let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
-            &connection,
-        )
-        .await
-        {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::debug!(%error, "notify mesh QUIC stream loop ended");
-                return Ok(());
-            }
-        };
+        let accepted =
+            match ramflux_transport::MeshQuicServer::accept_control_request_on_connection(
+                &connection,
+            )
+            .await
+            {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    tracing::debug!(%error, "notify mesh QUIC stream loop ended");
+                    return Ok(());
+                }
+            };
         let request_ingress = Arc::clone(&ingress);
+        let peer_identity = peer_identity.clone();
         tokio::spawn(async move {
             let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
                 return;
             };
             if let Err(error) =
-                handle_notify_mesh_quic_accepted_request(accepted, request_ingress).await
+                handle_notify_mesh_quic_accepted_request(accepted, request_ingress, peer_identity)
+                    .await
             {
                 tracing::warn!(%error, "notify mesh QUIC request failed");
             }
@@ -537,7 +524,45 @@ async fn notify_mesh_quic_connection_loop(
 async fn handle_notify_mesh_quic_accepted_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     ingress: Arc<NotifyIngressState>,
+    peer_identity: Option<String>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if accepted.request.method == "POST" && send_authority::is_path(&accepted.request.path) {
+        let result =
+            if let (Some(identity), Some(bytes)) = (peer_identity, accepted.raw_body.clone()) {
+                match ingress.authority.admit(&identity) {
+                    Ok(admission) => {
+                        let path = accepted.request.path.clone();
+                        tokio::task::spawn_blocking(move || {
+                            ingress.authority.handle(
+                                &ingress.store,
+                                &identity,
+                                &path,
+                                &bytes,
+                                admission,
+                            )
+                        })
+                        .await
+                        .map_err(|e| ramflux_node_core::NodeCoreError::ItestHttp(e.to_string()))
+                        .and_then(|r| r)
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                Err(ramflux_node_core::NodeCoreError::Unauthorized(
+                    "authority RPC requires original bytes and mTLS identity".into(),
+                ))
+            };
+        return match result {
+            Ok(value) => accepted
+                .write_json_response(200, &value)
+                .await
+                .map_err(|e| notify_mesh_transport_error(&e)),
+            Err(error) => accepted
+                .write_text_response(notify_mesh_error_status(&error), &error.to_string())
+                .await
+                .map_err(|e| notify_mesh_transport_error(&e)),
+        };
+    }
     let route_control = if accepted.request.method == "POST" {
         match accepted.request.path.as_str() {
             ramflux_node_core::PUSH_ROUTE_PATH => Some(true),
@@ -600,21 +625,17 @@ fn handle_notify_mesh_quic_request(
             })
         }
         ("POST", "/s13/notify/wake") => {
-            let body: S13WakeRequest =
+            let mut body: S13WakeRequest =
                 serde_json::from_value(request.body.clone()).map_err(|source| {
                     ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
                 })?;
-            ingress.wake_auth.verify(&body.wake)?;
+            body.admit(&ingress.wake_auth, &ingress.store)?;
             let response = if ingress.async_accept {
                 handle_s13_wake_async_accept(&ingress.store, &body)?
             } else {
                 handle_s13_wake_value(&ingress.store, &ingress.store_gate, &ingress.runtime, &body)?
             };
-            tracing::info!(
-                queue_id = %response.entry.queue_id,
-                device_delivery_id = body.device_delivery_id,
-                "notify mesh QUIC wake accepted"
-            );
+            tracing::info!("notify mesh QUIC wake accepted");
             Ok(ramflux_transport::GatewayQuicResponse {
                 status: 200,
                 body: serde_json::to_value(response).map_err(|source| {
@@ -792,10 +813,11 @@ fn handle_itest_request(
             )?;
         }
         ("POST", "/s13/notify/wake") => {
-            let body: S13WakeRequest = serde_json::from_slice(&request.body).map_err(|source| {
-                ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-            })?;
-            ingress.wake_auth.verify(&body.wake)?;
+            let mut body: S13WakeRequest =
+                ramflux_protocol::parse_i_json(&request.body).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            body.admit(&ingress.wake_auth, &ingress.store)?;
             let response = if ingress.async_accept {
                 handle_s13_wake_async_accept(&ingress.store, &body)?
             } else {
@@ -1014,12 +1036,13 @@ async fn handle_itest_request_value_async(
                 .await?;
                 return async_json_response("200 OK", &response, keep_alive);
             }
-            let body: S13WakeRequest = serde_json::from_slice(&request.body).map_err(|source| {
-                ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-            })?;
+            let mut body: S13WakeRequest =
+                ramflux_protocol::parse_i_json(&request.body).map_err(|source| {
+                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
+                })?;
+            body.admit(&ingress.wake_auth, &ingress.store)?;
             let response = if ingress.async_accept {
-                handle_s13_wake_async_accept_value_async(&ingress.store, &ingress.wake_auth, &body)
-                    .await?
+                handle_s13_wake_async_accept_value_async(&ingress.store, &body).await?
             } else {
                 let blocking_ingress = Arc::clone(&ingress);
                 tokio::task::spawn_blocking(move || {
@@ -1097,14 +1120,9 @@ async fn handle_mvp10_notify_wake_value_async(
     keep_alive: bool,
 ) -> Result<AsyncItestHttpResponse, ramflux_node_core::NodeCoreError> {
     let entry = tokio::task::spawn_blocking(move || {
-        let body: serde_json::Value = serde_json::from_slice(&body)
+        let body: serde_json::Value = ramflux_protocol::parse_i_json(&body)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-        let wake_value = body.get("wake").cloned().ok_or_else(|| {
-            ramflux_node_core::NodeCoreError::ItestJson("missing wake".to_owned())
-        })?;
-        let wake: ramflux_protocol::NotificationWake = serde_json::from_value(wake_value)
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-        ingress.wake_auth.verify(&wake)?;
+        let wake = project_mvp10_signed_wake(&ingress.wake_auth, &body)?;
         let push_alias_hash = body
             .get("push_alias_hash")
             .and_then(serde_json::Value::as_str)
@@ -1170,14 +1188,15 @@ async fn handle_s13_provider_credential_value_async(
 #[cfg(feature = "itest-http")]
 async fn handle_s13_wake_async_accept_value_async(
     store: &ramflux_node_core::NotifyRedbStore,
-    wake_auth: &NotifyWakeAuth,
     request: &S13WakeRequest,
 ) -> Result<S13WakeResponse, ramflux_node_core::NodeCoreError> {
-    wake_auth.verify(&request.wake)?;
+    let Some(wake) = request.queued_provider_wake()? else {
+        return Ok(no_push_response(request));
+    };
     let entry = store
         .queue_wake_for_async_accept_async(
             &request.device_delivery_id,
-            &request.wake,
+            wake,
             request.queued_at.unwrap_or_else(ramflux_node_core::now_unix_seconds),
             request.dnd_active.unwrap_or(false),
         )
@@ -1191,8 +1210,11 @@ async fn handle_s13_wake_raw_async_accept_value_async(
     wake_auth: &NotifyWakeAuth,
     raw_body: Vec<u8>,
 ) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError> {
-    let request = parse_s13_wake_request_body(&raw_body)?;
-    wake_auth.verify(&request.wake)?;
+    let mut request = parse_s13_wake_request_body(&raw_body)?;
+    request.admit(wake_auth, store)?;
+    if request.queued_provider_wake()?.is_none() {
+        return Ok(serde_json::json!({ "queue_id": "" }));
+    }
     let queued_at = ramflux_node_core::now_unix_seconds();
     let shard_id = store.notify_ingest_shard_for_key(&request.device_delivery_id);
     let raw =
@@ -1208,12 +1230,23 @@ async fn ingest_raw_s13_wake_for_async_ingress(
     raw_body: Vec<u8>,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let queued_at = ramflux_node_core::now_unix_seconds();
-    let request = parse_s13_wake_request_body(&raw_body)?;
+    let mut request = parse_s13_wake_request_body(&raw_body)?;
+    request.admit(&ingress.wake_auth, &ingress.store)?;
+    if request.queued_provider_wake()?.is_none() {
+        return Ok(());
+    }
     let shard_id = ingress.store.notify_ingest_shard_for_key(&request.device_delivery_id);
     if let Some(batcher) = &ingress.wake_verify_batcher {
-        return batcher.verify_and_enqueue(shard_id, request.wake, raw_body, queued_at).await;
+        return batcher
+            .verify_and_enqueue(
+                shard_id,
+                request.signed_wake,
+                request.device_delivery_id,
+                raw_body,
+                queued_at,
+            )
+            .await;
     }
-    ingress.wake_auth.verify(&request.wake)?;
     ingress
         .store
         .queue_raw_wake_for_async_accept_shard_async(shard_id, raw_body, queued_at)
@@ -1240,7 +1273,7 @@ async fn handle_mvp10_notify_deliver_value_async(
         let entry = state.entry(queue_id).cloned().ok_or_else(|| {
             ramflux_node_core::NodeCoreError::EnvelopeNotFound(queue_id.to_owned())
         })?;
-        ingress.store.save_state(&state)?;
+        ingress.store.save_queue_state(&state)?;
         Ok::<_, ramflux_node_core::NodeCoreError>(entry)
     })
     .await
@@ -1360,15 +1393,9 @@ fn handle_mvp10_notify_wake(
     body: &[u8],
     keep_alive: bool,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let body: serde_json::Value = serde_json::from_slice(body)
+    let body: serde_json::Value = ramflux_protocol::parse_i_json(body)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-    let wake_value = body
-        .get("wake")
-        .cloned()
-        .ok_or_else(|| ramflux_node_core::NodeCoreError::ItestJson("missing wake".to_owned()))?;
-    let wake: ramflux_protocol::NotificationWake = serde_json::from_value(wake_value)
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-    ingress.wake_auth.verify(&wake)?;
+    let wake = project_mvp10_signed_wake(&ingress.wake_auth, &body)?;
     let push_alias_hash = body
         .get("push_alias_hash")
         .and_then(serde_json::Value::as_str)
@@ -1421,7 +1448,7 @@ fn handle_mvp10_notify_deliver(
         let entry = state.entry(queue_id).cloned().ok_or_else(|| {
             ramflux_node_core::NodeCoreError::EnvelopeNotFound(queue_id.to_owned())
         })?;
-        ingress.store.save_state(&state)?;
+        ingress.store.save_queue_state(&state)?;
         entry
     };
     ramflux_node_core::write_itest_json_response_with_connection(
@@ -1737,6 +1764,7 @@ impl Drop for ConcurrentProviderPushWorkerPool {
 
 impl ConcurrentProviderPushWorkerPool {
     fn new(worker_count: usize) -> Result<Self, ramflux_node_core::NodeCoreError> {
+        let worker_count = worker_count.clamp(1, 128);
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -1780,28 +1808,34 @@ impl ConcurrentProviderPushWorkerPool {
 
     fn dispatch(
         &self,
+        store: Arc<ramflux_node_core::NotifyRedbStore>,
         prepared: ramflux_node_core::PreparedProviderPush,
     ) -> Result<
-        std::sync::mpsc::Receiver<Result<bool, ramflux_node_core::NodeCoreError>>,
+        std::sync::mpsc::Receiver<
+            Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError>,
+        >,
         ramflux_node_core::NodeCoreError,
     > {
         let worker = self.next_worker.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % self.senders.len();
         let (reply, response) = std::sync::mpsc::sync_channel(1);
-        self.senders[worker].try_send(ConcurrentProviderPushJob { prepared, reply }).map_err(
-            |error| {
+        self.senders[worker]
+            .try_send(ConcurrentProviderPushJob { store, prepared, reply })
+            .map_err(|error| {
                 ramflux_node_core::NodeCoreError::ItestHttp(format!(
                     "notify provider worker queue unavailable: {error}"
                 ))
-            },
-        )?;
+            })?;
         Ok(response)
     }
 }
 
 struct ConcurrentProviderPushJob {
+    store: Arc<ramflux_node_core::NotifyRedbStore>,
     prepared: ramflux_node_core::PreparedProviderPush,
-    reply: std::sync::mpsc::SyncSender<Result<bool, ramflux_node_core::NodeCoreError>>,
+    reply: std::sync::mpsc::SyncSender<
+        Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError>,
+    >,
 }
 
 fn concurrent_provider_push_worker_loop(
@@ -1810,54 +1844,43 @@ fn concurrent_provider_push_worker_loop(
     h2_pool: &ProviderH2ConnectionPool,
 ) {
     while let Ok(job) = receiver.recv() {
-        let result = send_provider_push_with_runtime(runtime, h2_pool, &job.prepared);
+        let result = send_provider_push_with_runtime(runtime, h2_pool, &job.store, &job.prepared);
         let _result = job.reply.send(result);
     }
 }
 
 fn dispatch_s13_wake_concurrent_worker(
-    store: &ramflux_node_core::NotifyRedbStore,
+    store: &Arc<ramflux_node_core::NotifyRedbStore>,
     _store_gate: &Arc<Mutex<()>>,
     provider_workers: &ConcurrentProviderPushWorkerPool,
     request: &S13WakeRequest,
 ) -> Result<S13WakeResponse, ramflux_node_core::NodeCoreError> {
+    let Some(wake) = request.queued_provider_wake()? else {
+        return Ok(no_push_response(request));
+    };
     let (entry, pushes) = store.queue_wake_for_push(
         &request.device_delivery_id,
-        &request.wake,
+        wake,
         request.queued_at.unwrap_or_else(ramflux_node_core::now_unix_seconds),
         request.dnd_active.unwrap_or(false),
     )?;
     tracing::debug!(
-        queue_id = %entry.queue_id,
-        device_delivery_id = request.device_delivery_id,
         prepared_push_count = pushes.len(),
         "notify concurrent fanout prepared provider pushes"
     );
     let mut pending = Vec::with_capacity(pushes.len());
     for prepared in pushes {
-        let response = provider_workers.dispatch(prepared.clone())?;
+        let response = provider_workers.dispatch(Arc::clone(store), prepared.clone())?;
         pending.push((prepared, response));
     }
     let mut attempts = Vec::with_capacity(pending.len());
     for (prepared, response) in pending {
-        let accepted = match response.recv().map_err(|error| {
+        let received = response.recv().map_err(|error| {
             ramflux_node_core::NodeCoreError::ItestHttp(format!(
                 "notify provider worker response closed: {error}"
             ))
-        })? {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::warn!(
-                    device_delivery_id = prepared.route.device_delivery_id,
-                    provider = ?prepared.route.provider,
-                    push_alias_hash = prepared.push_alias_hash,
-                    collapse_key_hash = prepared.collapse_key_hash,
-                    %error,
-                    "push provider send failed"
-                );
-                false
-            }
-        };
+        })?;
+        let accepted = note_provider_send(store, &prepared, received);
         let attempt = ramflux_node_core::redacted_provider_attempt(
             &entry,
             &prepared,
@@ -2156,9 +2179,12 @@ fn handle_s13_wake_async_accept(
     store: &ramflux_node_core::NotifyRedbStore,
     request: &S13WakeRequest,
 ) -> Result<S13WakeResponse, ramflux_node_core::NodeCoreError> {
+    let Some(wake) = request.queued_provider_wake()? else {
+        return Ok(no_push_response(request));
+    };
     let entry = store.queue_wake_for_async_accept(
         &request.device_delivery_id,
-        &request.wake,
+        wake,
         request.queued_at.unwrap_or_else(ramflux_node_core::now_unix_seconds),
         request.dnd_active.unwrap_or(false),
     )?;
@@ -2170,34 +2196,22 @@ fn dispatch_s13_wake_current(
     _store_gate: &Arc<Mutex<()>>,
     request: &S13WakeRequest,
 ) -> Result<S13WakeResponse, ramflux_node_core::NodeCoreError> {
+    let Some(wake) = request.queued_provider_wake()? else {
+        return Ok(no_push_response(request));
+    };
     let (entry, pushes) = store.queue_wake_for_push(
         &request.device_delivery_id,
-        &request.wake,
+        wake,
         request.queued_at.unwrap_or_else(ramflux_node_core::now_unix_seconds),
         request.dnd_active.unwrap_or(false),
     )?;
     tracing::debug!(
-        queue_id = %entry.queue_id,
-        device_delivery_id = request.device_delivery_id,
         prepared_push_count = pushes.len(),
         "notify wake dispatch prepared provider pushes"
     );
     let mut attempts = Vec::with_capacity(pushes.len());
     for prepared in pushes {
-        let accepted = match send_provider_push(&prepared) {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::warn!(
-                    device_delivery_id = prepared.route.device_delivery_id,
-                    provider = ?prepared.route.provider,
-                    push_alias_hash = prepared.push_alias_hash,
-                    collapse_key_hash = prepared.collapse_key_hash,
-                    %error,
-                    "push provider send failed"
-                );
-                false
-            }
-        };
+        let accepted = note_provider_send(store, &prepared, send_provider_push(store, &prepared));
         let attempt = ramflux_node_core::redacted_provider_attempt(
             &entry,
             &prepared,
@@ -2415,53 +2429,30 @@ fn notify_async_release_entry(in_flight: &Arc<Mutex<BTreeSet<String>>>, queue_id
 }
 
 fn notify_async_deliver_entry(
-    store: &ramflux_node_core::NotifyRedbStore,
+    store: &Arc<ramflux_node_core::NotifyRedbStore>,
     provider_workers: &ConcurrentProviderPushWorkerPool,
     entry: &ramflux_node_core::NotifyQueueEntry,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let pushes = store.prepare_provider_pushes_for_entry(entry)?;
     if pushes.is_empty() {
-        tracing::debug!(
-            queue_id = entry.queue_id.as_str(),
-            device_delivery_id = entry.device_delivery_id.as_str(),
-            wake_id = entry.wake.wake_id.as_str(),
-            "notify async delivery found no provider pushes for pending entry"
-        );
+        tracing::debug!("notify async delivery found no provider pushes for pending entry");
         return Ok(());
     }
-    tracing::trace!(
-        queue_id = entry.queue_id.as_str(),
-        device_delivery_id = entry.device_delivery_id.as_str(),
-        wake_id = entry.wake.wake_id.as_str(),
-        push_count = pushes.len(),
-        "notify async delivery prepared provider pushes"
-    );
+    tracing::trace!(push_count = pushes.len(), "notify async delivery prepared provider pushes");
     let mut pending = Vec::with_capacity(pushes.len());
     for prepared in pushes {
-        let response = provider_workers.dispatch(prepared.clone())?;
+        let response = provider_workers.dispatch(Arc::clone(store), prepared.clone())?;
         pending.push((prepared, response));
     }
     let total_count = pending.len();
     let mut accepted_count = 0_usize;
     for (prepared, response) in pending {
-        let accepted = match response.recv().map_err(|error| {
+        let received = response.recv().map_err(|error| {
             ramflux_node_core::NodeCoreError::ItestHttp(format!(
                 "notify async provider worker response closed: {error}"
             ))
-        })? {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                tracing::warn!(
-                    device_delivery_id = prepared.route.device_delivery_id,
-                    provider = ?prepared.route.provider,
-                    push_alias_hash = prepared.push_alias_hash,
-                    collapse_key_hash = prepared.collapse_key_hash,
-                    %error,
-                    "async push provider send failed"
-                );
-                false
-            }
-        };
+        })?;
+        let accepted = note_provider_send(store, &prepared, received);
         if accepted {
             accepted_count = accepted_count.saturating_add(1);
         }
@@ -2474,7 +2465,6 @@ fn notify_async_deliver_entry(
         store.record_provider_attempt(attempt)?;
     }
     tracing::trace!(
-        queue_id = entry.queue_id.as_str(),
         accepted_count,
         total_count,
         "notify async delivery recorded provider attempts"
@@ -2483,139 +2473,233 @@ fn notify_async_deliver_entry(
 }
 
 fn send_provider_push(
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
+) -> Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    runtime.block_on(async { send_provider_push_h2_with_retry(prepared).await })
+    runtime.block_on(async { send_provider_push_h2_with_retry(store, prepared).await })
 }
 
 fn send_provider_push_with_runtime(
     runtime: &tokio::runtime::Runtime,
     h2_pool: &ProviderH2ConnectionPool,
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    runtime.block_on(async { send_provider_push_h2_pooled_with_retry(prepared, h2_pool).await })
+) -> Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError> {
+    runtime
+        .block_on(async { send_provider_push_h2_pooled_with_retry(store, prepared, h2_pool).await })
 }
 
 async fn send_provider_push_h2_with_retry(
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    send_provider_push_with_retry(prepared, || send_provider_push_h2(prepared)).await
+) -> Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError> {
+    send_provider_push_with_retry(store, prepared, || send_provider_push_h2(store, prepared)).await
 }
 
 async fn send_provider_push_h2_pooled_with_retry(
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
     h2_pool: &ProviderH2ConnectionPool,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    send_provider_push_with_retry(prepared, || send_provider_push_h2_pooled(prepared, h2_pool))
-        .await
+) -> Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError> {
+    send_provider_push_with_retry(store, prepared, || {
+        send_provider_push_h2_pooled(store, prepared, h2_pool)
+    })
+    .await
+}
+
+fn note_provider_send(
+    store: &ramflux_node_core::NotifyRedbStore,
+    prepared: &ramflux_node_core::PreparedProviderPush,
+    status: Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError>,
+) -> bool {
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(%error, provider = ?prepared.route.provider, "push provider send failed");
+            return false;
+        }
+    };
+    if status == provider_outcome::ProviderSendStatus::InvalidToken
+        && let Err(error) = store.delete_snapshotted_route(&prepared.route)
+    {
+        tracing::warn!(%error, "snapshotted route delete failed");
+    }
+    status.accepted()
 }
 
 async fn send_provider_push_with_retry<'a, F, Fut>(
+    store: &'a ramflux_node_core::NotifyRedbStore,
     prepared: &'a ramflux_node_core::PreparedProviderPush,
     mut send: F,
-) -> Result<bool, ramflux_node_core::NodeCoreError>
+) -> Result<provider_outcome::ProviderSendStatus, ramflux_node_core::NodeCoreError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<bool, ramflux_node_core::NodeCoreError>> + 'a,
+    Fut: std::future::Future<Output = Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError>>
+        + 'a,
 {
-    let mut last_error = None;
-    for (attempt, delay) in PROVIDER_PUSH_RETRY_DELAYS.iter().enumerate() {
-        match send().await {
-            Ok(true) => return Ok(true),
-            Ok(false) => {
-                last_error = None;
-            }
-            Err(error) => {
-                last_error = Some(error);
-            }
+    if !store.begin_wake_send(&prepared.payload.wake_id)? {
+        return Ok(provider_outcome::ProviderSendStatus::Failed);
+    }
+    let mut attempts_used = 0_u32;
+    let mut invalidated = false;
+    loop {
+        let now = ramflux_node_core::now_unix_seconds();
+        attempts_used = attempts_used.saturating_add(1);
+        let attempt_limit = provider_outcome::attempt_timeout(now, prepared.expires_at);
+        if attempt_limit.is_zero() {
+            return Ok(provider_outcome::ProviderSendStatus::Failed);
         }
-        if attempt + 1 < PROVIDER_PUSH_RETRY_DELAYS.len() {
-            tracing::debug!(
-                device_delivery_id = prepared.route.device_delivery_id,
+        let attempt_result = match tokio::time::timeout(attempt_limit, send()).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ramflux_node_core::NodeCoreError::ItestHttp(
+                "provider attempt timed out".to_owned(),
+            )),
+        };
+        if let Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(message)) =
+            &attempt_result
+            && message == "wake send dropped"
+        {
+            return Ok(provider_outcome::ProviderSendStatus::Failed);
+        }
+        let (outcome, retry_after, quota) = match attempt_result {
+            Ok(response) => classify_observed_response(prepared, &response),
+            Err(_error) => {
+                tracing::debug!(
+                    provider = ?prepared.route.provider,
+                    "push provider send attempt failed"
+                );
+                (provider_outcome::ProviderOutcome::Transient, None, false)
+            }
+        };
+        if provider_outcome::invalidates_token(outcome) {
+            invalidated = true;
+            tracing::warn!(
                 provider = ?prepared.route.provider,
-                push_alias_hash = prepared.push_alias_hash,
-                collapse_key_hash = prepared.collapse_key_hash,
-                attempt = attempt + 1,
-                retry_after_ms = delay.as_millis(),
-                "push provider send attempt failed; retrying"
+                "push provider rejected the snapshotted token"
             );
-            tokio::time::sleep(*delay).await;
+        }
+        match provider_outcome::next_attempt(
+            provider_outcome::AttemptClock { attempts_used, now, expires_at: prepared.expires_at },
+            outcome,
+            retry_after,
+            quota,
+            provider_jitter_bps(),
+        ) {
+            provider_outcome::AttemptStep::Stop(provider_outcome::ProviderOutcome::Accepted) => {
+                return Ok(provider_outcome::ProviderSendStatus::Accepted);
+            }
+            provider_outcome::AttemptStep::Stop(_) if invalidated => {
+                return Ok(provider_outcome::ProviderSendStatus::InvalidToken);
+            }
+            provider_outcome::AttemptStep::Stop(_) => {
+                return Ok(provider_outcome::ProviderSendStatus::Failed);
+            }
+            provider_outcome::AttemptStep::Wait { delay, .. } => {
+                tracing::debug!(
+                    provider = ?prepared.route.provider,
+                    "push provider send will retry inside the original deadline"
+                );
+                tokio::time::sleep(delay).await;
+            }
         }
     }
-    if let Some(error) = last_error {
-        Err(error)
-    } else {
-        tracing::warn!(
-            device_delivery_id = prepared.route.device_delivery_id,
-            provider = ?prepared.route.provider,
-            push_alias_hash = prepared.push_alias_hash,
-            collapse_key_hash = prepared.collapse_key_hash,
-            attempts = PROVIDER_PUSH_RETRY_DELAYS.len(),
-            "push provider rejected all retry attempts"
-        );
-        Ok(false)
+}
+
+fn classify_observed_response(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+    response: &ProviderHttpResponse,
+) -> (provider_outcome::ProviderOutcome, Option<u64>, bool) {
+    provider_outcome::classify_provider_response(
+        provider_family(prepared),
+        response.status,
+        &response.body,
+        response.body_truncated,
+        response.retry_after.as_deref(),
+    )
+}
+
+fn provider_family(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+) -> provider_outcome::ProviderFamily {
+    match prepared.route.provider {
+        ramflux_node_core::PushProviderKind::Apns
+        | ramflux_node_core::PushProviderKind::ApnsVoip => provider_outcome::ProviderFamily::Apns,
+        ramflux_node_core::PushProviderKind::Fcm => provider_outcome::ProviderFamily::Fcm,
+        ramflux_node_core::PushProviderKind::WebPush => provider_outcome::ProviderFamily::WebPush,
     }
+}
+
+fn provider_jitter_bps() -> u16 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.subsec_nanos());
+    u16::try_from(nanos % 2_001).unwrap_or(0)
 }
 
 async fn send_provider_push_h2(
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    let request = build_provider_request(prepared).await?;
-    let response = h2_post_json(&request).await?;
-    if is_hard_token_failure(response.status) {
-        tracing::warn!(
-            device_delivery_id = prepared.route.device_delivery_id,
-            provider = ?prepared.route.provider,
-            push_alias_hash = prepared.push_alias_hash,
-            status = response.status,
-            "push provider marked token stale"
-        );
-    }
-    Ok((200..300).contains(&response.status))
+) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
+    let _preparation = store.send_authority().reserve_preparation()?;
+    let deadline = tokio::time::Instant::from_std(store.provider_push_deadline(prepared)?);
+    tokio::time::timeout_at(deadline, async {
+        let request = build_provider_request(prepared).await?;
+        check_call_request_budget(prepared, &request)?;
+        h2_post_boundary(&request, provider_issuance::WakeBoundary { store, prepared }).await
+    })
+    .await
+    .map_err(|_| wake_send_dropped())?
 }
 
 async fn send_provider_push_h2_pooled(
+    store: &ramflux_node_core::NotifyRedbStore,
     prepared: &ramflux_node_core::PreparedProviderPush,
     h2_pool: &ProviderH2ConnectionPool,
-) -> Result<bool, ramflux_node_core::NodeCoreError> {
-    let request = build_provider_request(prepared).await?;
-    let response = h2_pool.post_json(&request).await?;
-    if is_hard_token_failure(response.status) {
-        tracing::warn!(
-            device_delivery_id = prepared.route.device_delivery_id,
-            provider = ?prepared.route.provider,
-            push_alias_hash = prepared.push_alias_hash,
-            status = response.status,
-            "push provider marked token stale"
-        );
-    }
-    Ok((200..300).contains(&response.status))
+) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
+    let _preparation = store.send_authority().reserve_preparation()?;
+    let deadline = tokio::time::Instant::from_std(store.provider_push_deadline(prepared)?);
+    tokio::time::timeout_at(deadline, async {
+        let request = build_provider_request(prepared).await?;
+        check_call_request_budget(prepared, &request)?;
+        h2_pool
+            .post_json_boundary(&request, provider_issuance::WakeBoundary { store, prepared })
+            .await
+    })
+    .await
+    .map_err(|_| wake_send_dropped())?
 }
 
-fn push_urgency(priority: &ramflux_protocol::PushPriority) -> &'static str {
-    match priority {
-        ramflux_protocol::PushPriority::Low => "low",
-        ramflux_protocol::PushPriority::Normal => "normal",
-        ramflux_protocol::PushPriority::High => "high",
+fn check_call_request_budget(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+    request: &ProviderHttpRequest,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if matches!(
+        prepared.payload.delivery_class,
+        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
+    ) {
+        let bytes = request
+            .headers
+            .iter()
+            .try_fold(request.body.len(), |size, (key, value)| {
+                size.checked_add(key.len()).and_then(|size| size.checked_add(value.len()))
+            })
+            .ok_or(ramflux_node_core::send_authority::SendAuthorityError::Capacity)?;
+        if bytes > 4096 {
+            return Err(ramflux_node_core::send_authority::SendAuthorityError::Capacity.into());
+        }
     }
-}
-
-fn apns_priority(priority: &ramflux_protocol::PushPriority) -> &'static str {
-    match priority {
-        ramflux_protocol::PushPriority::High => "10",
-        ramflux_protocol::PushPriority::Low | ramflux_protocol::PushPriority::Normal => "5",
-    }
+    Ok(())
 }
 
 fn parse_https_url(url: &str) -> Result<ParsedHttpsUrl, ramflux_node_core::NodeCoreError> {
     let Some(rest) = url.strip_prefix("https://") else {
-        return Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
-            "unsupported push provider url {url}"
-        )));
+        return Err(ramflux_node_core::NodeCoreError::ItestHttp(
+            "unsupported push provider url".to_owned(),
+        ));
     };
     let (host_port, path) = rest
         .split_once('/')
@@ -2626,9 +2710,9 @@ fn parse_https_url(url: &str) -> Result<ParsedHttpsUrl, ramflux_node_core::NodeC
 
 fn split_host_port(host_port: &str) -> Result<(String, u16), ramflux_node_core::NodeCoreError> {
     let Some((host, port)) = host_port.rsplit_once(':') else {
-        return Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
-            "provider endpoint missing port: {host_port}"
-        )));
+        return Err(ramflux_node_core::NodeCoreError::ItestHttp(
+            "provider endpoint missing port".to_owned(),
+        ));
     };
     let port = port
         .parse::<u16>()
@@ -2655,6 +2739,8 @@ struct ProviderHttpRequest {
 struct ProviderHttpResponse {
     status: u16,
     body: Vec<u8>,
+    retry_after: Option<String>,
+    body_truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2673,37 +2759,35 @@ impl ProviderH2ConnectionPool {
     fn from_env() -> Self {
         let max_connections =
             notify_runtime_usize_env("RAMFLUX_NOTIFY_PROVIDER_H2_POOL_MAX_CONNECTIONS", || 128)
-                .max(1);
+                .clamp(1, 128);
         Self { clients: Mutex::new(HashMap::new()), max_connections }
     }
 
-    async fn post_json(
+    async fn post_json_boundary<F: SendBoundary>(
         &self,
         request: &ProviderHttpRequest,
+        mut boundary: F,
     ) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
         let key = ProviderH2ConnectionKey::from_request(request);
-        match self.post_json_once(request, &key).await {
+        match self.post_json_once(request, &key, &mut boundary).await {
             Ok(response) => Ok(response),
-            Err(first_error) => {
+            Err(error) if is_wake_send_dropped(&error) => Err(error),
+            Err(error) => {
                 self.evict(&key)?;
-                tracing::debug!(
-                    host = key.host,
-                    port = key.port,
-                    error = %first_error,
-                    "provider h2 pooled request failed; reconnecting once"
-                );
-                self.post_json_once(request, &key).await
+                tracing::debug!(%error,"provider h2 pooled request failed; reconnecting once");
+                self.post_json_once(request, &key, &mut boundary).await
             }
         }
     }
 
-    async fn post_json_once(
+    async fn post_json_once<F: SendBoundary>(
         &self,
         request: &ProviderHttpRequest,
         key: &ProviderH2ConnectionKey,
+        boundary: &mut F,
     ) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
         let mut client = self.client_for(request, key).await?;
-        post_json_with_h2_client(request, &mut client).await
+        post_json_with_h2_client(request, &mut client, boundary).await
     }
 
     async fn client_for(
@@ -2797,34 +2881,16 @@ fn build_apns_request(
         endpoint.path = format!("/3/device/{}", prepared.route.token);
     }
     let jwt = apns_jwt(credential)?;
-    let mut headers = generic_provider_headers(prepared);
+    let parts = contract_parts(prepared)?;
+    let mut headers = parts.headers;
     headers.extend([
         ("authorization".to_owned(), format!("bearer {jwt}")),
-        ("apns-topic".to_owned(), credential.topic.clone()),
-        ("apns-push-type".to_owned(), apns_push_type(&prepared.payload).to_owned()),
-        ("apns-expiration".to_owned(), expiration_epoch(prepared).to_string()),
-        ("apns-priority".to_owned(), apns_priority(&prepared.payload.priority).to_owned()),
+        ("content-type".to_owned(), "application/json".to_owned()),
     ]);
-    if let Some(collapse_key) = prepared.payload.collapse_key.as_ref() {
-        headers.push(("apns-collapse-id".to_owned(), collapse_key.clone()));
-    }
-    let body = serde_json::to_vec(&serde_json::json!({
-        "aps": {
-            "alert": {
-                "title": "Ramflux",
-                "body": "You have a new Ramflux update."
-            },
-            "mutable-content": 1
-        },
-        "wake_id": prepared.payload.wake_id,
-        "delivery_class": prepared.payload.delivery_class,
-        "encrypted_hint": prepared.payload.encrypted_hint
-    }))
-    .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
     Ok(ProviderHttpRequest {
         endpoint,
         headers,
-        body,
+        body: parts.body,
         ca_pem: read_optional_secret_ref(credential.provider_ca_pem_ref.as_deref())?,
     })
 }
@@ -2836,29 +2902,13 @@ async fn build_fcm_request(
     let endpoint = parse_https_url(&prepared.route.endpoint)?;
     let ca_pem = read_optional_secret_ref(credential.provider_ca_pem_ref.as_deref())?;
     let oauth_token = fcm_oauth_access_token(credential, ca_pem.clone()).await?;
-    let mut headers = generic_provider_headers(prepared);
-    headers.push(("authorization".to_owned(), format!("Bearer {oauth_token}")));
-    let body = serde_json::to_vec(&serde_json::json!({
-        "message": {
-            "token": prepared.route.token,
-            "notification": {
-                "title": "Ramflux",
-                "body": "You have a new Ramflux update."
-            },
-            "data": {
-                "wake_id": prepared.payload.wake_id,
-                "delivery_class": prepared.payload.delivery_class,
-                "encrypted_hint": prepared.payload.encrypted_hint
-            },
-            "android": {
-                "priority": fcm_priority(&prepared.payload.priority),
-                "ttl": format!("{}s", prepared.payload.ttl),
-                "collapse_key": prepared.payload.collapse_key
-            }
-        }
-    }))
-    .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
-    Ok(ProviderHttpRequest { endpoint, headers, body, ca_pem })
+    let parts = contract_parts(prepared)?;
+    let mut headers = parts.headers;
+    headers.extend([
+        ("authorization".to_owned(), format!("Bearer {oauth_token}")),
+        ("content-type".to_owned(), "application/json".to_owned()),
+    ]);
+    Ok(ProviderHttpRequest { endpoint, headers, body: parts.body, ca_pem })
 }
 
 fn build_webpush_request(
@@ -2868,22 +2918,14 @@ fn build_webpush_request(
     let endpoint = parse_https_url(&prepared.route.endpoint)?;
     let vapid_token = webpush_vapid_jwt(credential, &endpoint)?;
     let vapid_public_key = read_secret_ref(&credential.vapid_public_key_ref)?;
-    let mut headers = generic_provider_headers(prepared);
+    let parts = contract_parts(prepared)?;
+    let mut headers = parts.headers;
     set_provider_header(&mut headers, "content-type", "application/octet-stream".to_owned());
     headers.extend([
         ("authorization".to_owned(), format!("vapid t={vapid_token}, k={vapid_public_key}")),
         ("content-encoding".to_owned(), "aes128gcm".to_owned()),
     ]);
-    if prepared.payload.collapse_key.is_some() {
-        // RFC 8030 topics allow at most 32 URL-safe characters; keep 192 bits of the hash.
-        headers.push(("topic".to_owned(), prepared.collapse_key_hash.chars().take(32).collect()));
-    }
-    let plaintext = serde_json::to_vec(&serde_json::json!({
-        "wake_id": prepared.payload.wake_id,
-        "delivery_class": prepared.payload.delivery_class,
-        "encrypted_hint": prepared.payload.encrypted_hint
-    }))
-    .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    let plaintext = parts.body;
     let body = encrypt_webpush_aes128gcm(
         prepared.route.webpush_p256dh.as_deref().ok_or_else(|| {
             ramflux_node_core::NodeCoreError::ItestHttp(
@@ -2897,12 +2939,71 @@ fn build_webpush_request(
         })?,
         &plaintext,
     )?;
+    provider_payload::ensure_encrypted_web_body_fits(body.len()).map_err(provider_build_error)?;
     Ok(ProviderHttpRequest {
         endpoint,
         headers,
         body,
         ca_pem: read_optional_secret_ref(credential.provider_ca_pem_ref.as_deref())?,
     })
+}
+
+fn contract_parts(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+) -> Result<provider_payload::ProviderRequestParts, ramflux_node_core::NodeCoreError> {
+    let class = provider_payload::provider_class_for_internal(&prepared.payload.delivery_class);
+    let mode = wire_mode(prepared, class)?;
+    let topic = match &prepared.credential {
+        ramflux_node_core::ProviderCredential::Apns(credential) => credential.topic.as_str(),
+        ramflux_node_core::ProviderCredential::Fcm(_)
+        | ramflux_node_core::ProviderCredential::WebPush(_) => "",
+    };
+    provider_payload::build_provider_parts(&provider_payload::ProviderBuildInput {
+        class,
+        wake_id: &prepared.payload.wake_id,
+        collapse_key: prepared.payload.collapse_key.as_deref(),
+        token: &prepared.route.token,
+        topic,
+        expires_at: prepared.expires_at,
+        now: ramflux_node_core::now_unix_seconds(),
+        mode,
+    })
+    .map_err(provider_build_error)
+}
+
+fn wire_mode(
+    prepared: &ramflux_node_core::PreparedProviderPush,
+    class: ramflux_protocol::WakeClass,
+) -> Result<provider_payload::ProviderWireMode, ramflux_node_core::NodeCoreError> {
+    match &prepared.credential {
+        ramflux_node_core::ProviderCredential::Apns(credential) => {
+            let voip_topic = ramflux_node_core::apns_topic_is_voip(&credential.topic);
+            let voip_route =
+                prepared.route.provider == ramflux_node_core::PushProviderKind::ApnsVoip;
+            if voip_route || voip_topic {
+                if !voip_route || !voip_topic || class != ramflux_protocol::WakeClass::CallWake {
+                    return Err(provider_build_error(
+                        provider_payload::ProviderBuildError::VoipRequiresCall,
+                    ));
+                }
+                Ok(provider_payload::ProviderWireMode::ApnsVoip)
+            } else {
+                Ok(provider_payload::select_apns_mode(class, false, false))
+            }
+        }
+        ramflux_node_core::ProviderCredential::Fcm(_) => {
+            Ok(provider_payload::ProviderWireMode::Fcm)
+        }
+        ramflux_node_core::ProviderCredential::WebPush(_) => {
+            Ok(provider_payload::ProviderWireMode::WebPush)
+        }
+    }
+}
+
+fn provider_build_error(
+    error: provider_payload::ProviderBuildError,
+) -> ramflux_node_core::NodeCoreError {
+    ramflux_node_core::NodeCoreError::ItestHttp(format!("provider payload refused: {error:?}"))
 }
 
 fn set_provider_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
@@ -3039,26 +3140,6 @@ fn encrypt_webpush_aes128gcm_with(
     Ok(body)
 }
 
-fn generic_provider_headers(
-    prepared: &ramflux_node_core::PreparedProviderPush,
-) -> Vec<(String, String)> {
-    let mut headers = vec![
-        ("content-type".to_owned(), "application/json".to_owned()),
-        (
-            "ramflux-delivery-class".to_owned(),
-            delivery_class_name(&prepared.payload.delivery_class).to_owned(),
-        ),
-        ("ttl".to_owned(), prepared.payload.ttl.to_string()),
-        ("urgency".to_owned(), push_urgency(&prepared.payload.priority).to_owned()),
-        ("ramflux-push-alias-hash".to_owned(), prepared.push_alias_hash.clone()),
-        ("ramflux-collapse-key-hash".to_owned(), prepared.collapse_key_hash.clone()),
-    ];
-    if let Some(collapse_key) = prepared.payload.collapse_key.as_ref() {
-        headers.push(("ramflux-collapse-key".to_owned(), collapse_key.clone()));
-    }
-    headers
-}
-
 async fn fcm_oauth_access_token(
     credential: &ramflux_node_core::FcmProviderCredential,
     ca_pem: Option<String>,
@@ -3098,11 +3179,40 @@ async fn fcm_oauth_access_token(
     )
 }
 
+fn wake_send_dropped() -> ramflux_node_core::NodeCoreError {
+    ramflux_node_core::NodeCoreError::InvalidConfiguration("wake send dropped".to_owned())
+}
+
+fn is_wake_send_dropped(error: &ramflux_node_core::NodeCoreError) -> bool {
+    matches!(
+        error,
+        ramflux_node_core::NodeCoreError::InvalidConfiguration(message)
+            if message == "wake send dropped"
+    )
+}
+
 async fn h2_post_json(
     request: &ProviderHttpRequest,
 ) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
+    h2_post_checked(request, || Ok(true)).await
+}
+
+async fn h2_post_checked<F>(
+    request: &ProviderHttpRequest,
+    allow: F,
+) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError>
+where
+    F: FnMut() -> Result<bool, ramflux_node_core::NodeCoreError>,
+{
+    h2_post_boundary(request, provider_issuance::Checked(allow)).await
+}
+
+async fn h2_post_boundary<F: SendBoundary>(
+    request: &ProviderHttpRequest,
+    mut boundary: F,
+) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
     let mut client = connect_provider_h2(request).await?;
-    post_json_with_h2_client(request, &mut client).await
+    post_json_with_h2_client(request, &mut client, &mut boundary).await
 }
 
 async fn connect_provider_h2(
@@ -3143,10 +3253,14 @@ async fn connect_provider_h2(
     Ok(client)
 }
 
-async fn post_json_with_h2_client(
+async fn post_json_with_h2_client<F: SendBoundary>(
     request: &ProviderHttpRequest,
     client: &mut h2::client::SendRequest<bytes::Bytes>,
+    boundary: &mut F,
 ) -> Result<ProviderHttpResponse, ramflux_node_core::NodeCoreError> {
+    std::future::poll_fn(|cx| client.poll_ready(cx)).await.map_err(|error| {
+        ramflux_node_core::NodeCoreError::ItestHttp(format!("provider h2 readiness: {error}"))
+    })?;
     let authority = format!("{}:{}", request.endpoint.host, request.endpoint.port);
     let uri = format!("https://{}{}", authority, request.endpoint.path);
     let mut builder = http::Request::builder()
@@ -3159,17 +3273,28 @@ async fn post_json_with_h2_client(
     let http_request = builder
         .body(())
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    let (response_future, mut send_stream) =
-        client.send_request(http_request, false).map_err(|source| {
+    let owned_body = bytes::Bytes::copy_from_slice(&request.body);
+    let response_future = boundary.issue(|| {
+        let (response, mut stream) = client.send_request(http_request, false).map_err(|error| {
             ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "provider h2 send request: {source}"
+                "provider h2 send request: {error}"
             ))
         })?;
-    send_stream.send_data(bytes::Bytes::copy_from_slice(&request.body), true).map_err(
-        |source| {
-            ramflux_node_core::NodeCoreError::ItestHttp(format!("provider h2 send body: {source}"))
-        },
-    )?;
+        #[cfg(test)]
+        if let Err(error) = permit_tests::issued_headers() {
+            stream.send_reset(h2::Reason::CANCEL);
+            return Err(error);
+        }
+        if let Err(error) = stream.send_data(owned_body, true) {
+            stream.send_reset(h2::Reason::CANCEL);
+            return Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
+                "provider h2 body handoff uncertain: {error}"
+            )));
+        }
+        #[cfg(test)]
+        permit_tests::issued_body()?;
+        Ok(response)
+    })?;
     let response = tokio::time::timeout(Duration::from_secs(30), response_future)
         .await
         .map_err(|_| {
@@ -3179,8 +3304,14 @@ async fn post_json_with_h2_client(
             ramflux_node_core::NodeCoreError::ItestHttp(format!("provider h2 response: {source}"))
         })?;
     let status = response.status().as_u16();
+    let retry_after = response.headers().get("retry-after").and_then(|value| {
+        let text = value.to_str().ok()?.trim();
+        let bounded = text.get(..64).unwrap_or(text);
+        Some(bounded.to_owned())
+    });
     let mut body = response.into_body();
     let mut bytes = Vec::new();
+    let mut body_truncated = false;
     while let Some(chunk) =
         tokio::time::timeout(Duration::from_secs(30), body.data()).await.map_err(|_| {
             ramflux_node_core::NodeCoreError::ItestHttp("provider body timed out".to_owned())
@@ -3189,9 +3320,20 @@ async fn post_json_with_h2_client(
         let chunk = chunk.map_err(|source| {
             ramflux_node_core::NodeCoreError::ItestHttp(format!("provider h2 body: {source}"))
         })?;
-        bytes.extend_from_slice(&chunk);
+        if body_truncated {
+            continue;
+        }
+        let room = provider_outcome::MAX_PROVIDER_ERROR_BODY.saturating_sub(bytes.len());
+        if chunk.len() > room {
+            if let Some(prefix) = chunk.get(..room) {
+                bytes.extend_from_slice(prefix);
+            }
+            body_truncated = true;
+        } else {
+            bytes.extend_from_slice(&chunk);
+        }
     }
-    Ok(ProviderHttpResponse { status, body: bytes })
+    Ok(ProviderHttpResponse { status, body: bytes, retry_after, body_truncated })
 }
 
 fn provider_tls_config(
@@ -3316,55 +3458,7 @@ fn read_secret_ref(secret_ref: &str) -> Result<String, ramflux_node_core::NodeCo
         return std::fs::read_to_string(path)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()));
     }
-    Err(ramflux_node_core::NodeCoreError::ItestHttp(format!(
-        "unsupported secret ref scheme: {secret_ref}"
-    )))
-}
-
-fn apns_push_type(payload: &ramflux_node_core::ProviderPushPayload) -> &'static str {
-    match payload.delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => "voip",
-        _ => "alert",
-    }
-}
-
-fn fcm_priority(priority: &ramflux_protocol::PushPriority) -> &'static str {
-    match priority {
-        ramflux_protocol::PushPriority::High => "HIGH",
-        ramflux_protocol::PushPriority::Low | ramflux_protocol::PushPriority::Normal => "NORMAL",
-    }
-}
-
-fn expiration_epoch(prepared: &ramflux_node_core::PreparedProviderPush) -> u64 {
-    ramflux_node_core::now_unix_seconds().saturating_add(u64::from(prepared.payload.ttl))
-}
-
-fn delivery_class_name(
-    delivery_class: &ramflux_protocol::NotificationDeliveryClass,
-) -> &'static str {
-    match delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => {
-            "self_device_control_notification"
-        }
-        ramflux_protocol::NotificationDeliveryClass::UserContentNotification => {
-            "user_content_notification"
-        }
-        ramflux_protocol::NotificationDeliveryClass::AiTaskNotification => "ai_task_notification",
-        ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification => {
-            "a2ui_surface_notification"
-        }
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => {
-            "call_wake_notification"
-        }
-        ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => {
-            "conference_wake_notification"
-        }
-    }
-}
-
-fn is_hard_token_failure(status: u16) -> bool {
-    matches!(status, 400 | 404 | 410)
+    Err(ramflux_node_core::NodeCoreError::ItestHttp("unsupported secret ref scheme".to_owned()))
 }
 
 fn percent_encode(value: &str) -> String {
@@ -3382,21 +3476,156 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
+#[derive(Clone, Default)]
+enum AdmittedWake {
+    #[default]
+    Unverified,
+    Push(Box<ramflux_protocol::NotificationWake>),
+    NoPush,
+}
+
 #[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct S13WakeRequest {
     device_delivery_id: String,
-    wake: ramflux_protocol::NotificationWake,
+    signed_wake: ramflux_protocol::SignedWakeV2,
     #[serde(default)]
     queued_at: Option<u64>,
     #[serde(default)]
     dnd_active: Option<bool>,
+    #[serde(skip, default)]
+    admission: AdmittedWake,
+}
+
+impl S13WakeRequest {
+    fn admit(
+        &mut self,
+        auth: &NotifyWakeAuth,
+        store: &ramflux_node_core::NotifyRedbStore,
+    ) -> Result<(), ramflux_node_core::NodeCoreError> {
+        if !matches!(self.admission, AdmittedWake::Unverified) {
+            return Ok(());
+        }
+        auth.verify_signed(&self.signed_wake)?;
+        if self.signed_wake.body.target_delivery_id != self.device_delivery_id {
+            return Err(ramflux_node_core::NodeCoreError::Unauthorized(
+                "notify wake signature rejected".to_owned(),
+            ));
+        }
+        let now = ramflux_node_core::now_unix_seconds();
+        if self.signed_wake.body.action != ramflux_protocol::WakeAction::Enqueue {
+            self.signed_wake.body.validate_shape().map_err(|_source| {
+                ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                    "wake contract rejected".to_owned(),
+                )
+            })?;
+            self.signed_wake.body.validate_times(now).map_err(|_source| {
+                ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                    "wake contract rejected".to_owned(),
+                )
+            })?;
+            self.admission = AdmittedWake::NoPush;
+            store.cancel_signed_wake(&self.signed_wake)?;
+            return Ok(());
+        }
+        let mut wake =
+            ramflux_node_core::project_wake_v2(&self.signed_wake, now).map_err(|_source| {
+                ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                    "wake contract rejected".to_owned(),
+                )
+            })?;
+        let Some(deadline) =
+            store.claim_signed_wake(&self.signed_wake, wake.absolute_expires_at)?
+        else {
+            self.admission = AdmittedWake::NoPush;
+            return Ok(());
+        };
+        if deadline <= now {
+            self.admission = AdmittedWake::NoPush;
+            return Ok(());
+        }
+        wake.absolute_expires_at = deadline;
+        wake.ttl = u32::try_from(deadline.saturating_sub(now)).unwrap_or(u32::MAX);
+        self.admission = AdmittedWake::Push(Box::new(wake));
+        Ok(())
+    }
+
+    fn queued_provider_wake(
+        &self,
+    ) -> Result<Option<&ramflux_protocol::NotificationWake>, ramflux_node_core::NodeCoreError> {
+        match &self.admission {
+            AdmittedWake::Push(wake) => Ok(Some(wake.as_ref())),
+            AdmittedWake::NoPush => Ok(None),
+            AdmittedWake::Unverified => Err(ramflux_node_core::NodeCoreError::Unauthorized(
+                "notify wake signature rejected".to_owned(),
+            )),
+        }
+    }
+}
+
+fn project_mvp10_signed_wake(
+    auth: &NotifyWakeAuth,
+    body: &serde_json::Value,
+) -> Result<ramflux_protocol::NotificationWake, ramflux_node_core::NodeCoreError> {
+    if body.get("wake").is_some() {
+        return Err(ramflux_node_core::NodeCoreError::ItestJson("legacy wake rejected".to_owned()));
+    }
+    let signed_value = body.get("signed_wake").cloned().ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::ItestJson("missing signed wake".to_owned())
+    })?;
+    let signed: ramflux_protocol::SignedWakeV2 = serde_json::from_value(signed_value)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    auth.verify_signed(&signed)?;
+    ramflux_node_core::project_wake_v2(&signed, ramflux_node_core::now_unix_seconds()).map_err(
+        |_source| {
+            ramflux_node_core::NodeCoreError::InvalidConfiguration(
+                "wake contract rejected".to_owned(),
+            )
+        },
+    )
+}
+
+fn no_push_response(request: &S13WakeRequest) -> S13WakeResponse {
+    let now = ramflux_node_core::now_unix_seconds();
+    S13WakeResponse {
+        entry: ramflux_node_core::NotifyQueueEntry {
+            queue_id: request.signed_wake.body.wake_id.clone(),
+            device_delivery_id: request.device_delivery_id.clone(),
+            wake: ramflux_protocol::NotificationWake {
+                schema: ramflux_protocol::domain::NOTIFICATION_WAKE_V2.to_owned(),
+                version: 2,
+                domain: ramflux_protocol::domain::NOTIFICATION_WAKE_V2.to_owned(),
+                ext: ramflux_protocol::Ext::default(),
+                signed: ramflux_protocol::SignedFields {
+                    signing_key_id: request.signed_wake.body.signing_key_id.clone(),
+                    signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                    signature: request.signed_wake.signature.clone(),
+                },
+                wake_id: request.signed_wake.body.wake_id.clone(),
+                push_alias: request.device_delivery_id.clone(),
+                delivery_class: ramflux_protocol::NotificationDeliveryClass::CallWakeNotification,
+                priority: ramflux_protocol::PushPriority::High,
+                ttl: 0,
+                absolute_expires_at: 0,
+                collapse_key: None,
+                encrypted_hint: None,
+            },
+            push_alias_hash: String::new(),
+            queued_at: now,
+            expires_at: now,
+            attempt_count: 0,
+            status: ramflux_node_core::NotifyQueueStatus::DroppedExpired,
+            dnd_active: request.dnd_active.unwrap_or(false),
+        },
+        attempts: Vec::new(),
+    }
 }
 
 #[cfg(feature = "itest-http")]
 fn parse_s13_wake_request_body(
     body: &[u8],
 ) -> Result<S13WakeRequest, ramflux_node_core::NodeCoreError> {
-    serde_json::from_slice(body)
+    ramflux_protocol::parse_i_json(body)
         .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))
 }
 
@@ -3417,7 +3646,14 @@ struct FcmServiceAccount {
 }
 
 #[cfg(test)]
+mod acceptance;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod webpush_tests;
+
+#[cfg(test)]
+mod native_provider_tests;
+#[cfg(test)]
+mod permit_tests;

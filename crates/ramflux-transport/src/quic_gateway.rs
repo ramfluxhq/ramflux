@@ -868,6 +868,13 @@ pub(crate) async fn write_quic_raw_frame(
 pub(crate) async fn read_quic_raw_frame(
     recv: &mut quinn::RecvStream,
 ) -> Result<Vec<u8>, TransportError> {
+    read_quic_raw_frame_limited(recv, MAX_QUIC_FRAME_BYTES).await
+}
+
+pub(crate) async fn read_quic_raw_frame_limited(
+    recv: &mut quinn::RecvStream,
+    limit: usize,
+) -> Result<Vec<u8>, TransportError> {
     tracing::trace!("quinn QUIC reading JSON frame length");
     let mut len_bytes = [0_u8; 4];
     recv.read_exact(&mut len_bytes).await.map_err(|error| match error {
@@ -878,7 +885,7 @@ pub(crate) async fn read_quic_raw_frame(
         )),
     })?;
     let len = u32::from_be_bytes(len_bytes) as usize;
-    if len > MAX_QUIC_FRAME_BYTES {
+    if len > limit.min(MAX_QUIC_FRAME_BYTES) {
         return Err(TransportError::FrameTooLarge { len });
     }
     tracing::trace!(len, "quinn QUIC reading JSON frame body");
@@ -1041,7 +1048,7 @@ mod relay_client_quic_config_tests {
 }
 
 #[cfg(test)]
-mod authority_json_tests {
+mod tests {
     use super::*;
     struct Raw(Vec<u8>);
     impl GatewaySessionFrameSource for Raw {
@@ -1052,8 +1059,14 @@ mod authority_json_tests {
     #[tokio::test]
     async fn duplicate_publication_fields_are_rejected_before_value_normalization() {
         let mut source=Raw(br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"device_set_epoch":1,"device_set_epoch":2}}}"#.to_vec());
-        assert!(read_gateway_session_json::<serde_json::Value>(&mut source).await.is_err());
+        assert!(
+            read_gateway_session_json::<serde_json::Value>(&mut source).await.is_err(),
+            "duplicate signed publication field survived ingress"
+        );
         let mut source=Raw(br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"device_set_epoch":1}}}"#.to_vec());
-        assert!(read_gateway_session_json::<serde_json::Value>(&mut source).await.is_ok());
+        assert!(
+            read_gateway_session_json::<serde_json::Value>(&mut source).await.is_ok(),
+            "strict positive publication control was rejected"
+        );
     }
 }

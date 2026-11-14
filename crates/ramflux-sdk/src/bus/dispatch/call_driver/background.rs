@@ -42,6 +42,22 @@ struct Control {
     message: GatewayDirectMessage,
     bytes: zeroize::Zeroizing<Vec<u8>>,
     request: SendMaterialRequest,
+    extras: crate::gateway::engine::CallSubmitExtras,
+    deadline: tokio::time::Instant,
+}
+struct SignedControl {
+    id: String,
+    extras: crate::gateway::engine::CallSubmitExtras,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
+    intent_created_at: Option<i64>,
+}
+struct ControlOutcome {
+    success: bool,
+    sent: bool,
+    acknowledged: Option<String>,
+    resolutions: Vec<crate::gateway::call_resolution::CallSubmitOutcome>,
+    #[cfg(feature = "test-support")]
+    error: Option<String>,
 }
 
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
@@ -58,6 +74,7 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         let prepared = writer.apply(move |account| prepare(account, &owned_id)).await?;
         let Some(prepared) = prepared else { continue };
         let lease_due = !prepared.plan.original.media_lost()
+            && !prepared.plan.original.media_held
             && prepared.plan.original.next_lease_refresh <= now_unix_timestamp()
             && matches!(prepared.plan.original.row.state.as_str(), "connecting" | "active");
         let manifest = if lease_due {
@@ -152,6 +169,7 @@ fn prepare_lease(
     let mut next = plan.original.clone();
     let now = now_unix_timestamp();
     if next.media_lost()
+        || next.media_held
         || next.next_lease_refresh > now
         || !matches!(next.row.state.as_str(), "connecting" | "active")
     {
@@ -272,7 +290,7 @@ async fn send_controls(
     }
     let result = async {
         if plan.original.pending.is_empty() {
-            return Ok(false);
+            return Ok((false, None, Vec::new()));
         }
         let input = prepared.input?;
         let manifest =
@@ -281,7 +299,9 @@ async fn send_controls(
         let captured = plan.clone();
         let controls =
             writer.apply(move |account| prepare_controls(account, &captured, manifest)).await?;
-        let Some(controls) = controls else { return Ok(false) };
+        let Some(controls) = controls else { return Ok((false, None, Vec::new())) };
+        let mut acknowledged = None;
+        let mut resolutions = Vec::new();
         for mut control in controls {
             let request = std::mem::replace(
                 &mut control.request,
@@ -296,41 +316,135 @@ async fn send_controls(
             )
             .await?;
             let route = control.target.federation.clone();
+            let call_ref = control.extras.call_ref.clone();
+            let extras = std::mem::replace(
+                &mut control.extras,
+                crate::gateway::engine::CallSubmitExtras::from_intent(None),
+            );
+            let deadline = control.deadline;
             let envelope =
                 writer.apply(move |account| seal_control(account, control, material)).await?;
-            let Some(envelope) = envelope else { return Ok(false) };
-            federation::submit_until(context, envelope, route, context.call_deadline(), true)
+            let Some(envelope) = envelope else { return Ok((false, None, Vec::new())) };
+            if route.is_none() {
+                let resolved = federation::submit_local_call(
+                    context,
+                    envelope,
+                    context.call_deadline().min(deadline),
+                    extras,
+                )
                 .await?;
+                resolutions.push(resolved);
+            } else {
+                // The destination federation forward admits the envelope only.
+                federation::submit_until(context, envelope, route, context.call_deadline(), true)
+                    .await?;
+            }
+            if acknowledged.is_none() {
+                acknowledged = call_ref;
+            }
         }
-        Ok(true)
+        Ok((true, acknowledged, resolutions))
     }
     .await;
-    let success = result.is_ok();
-    writer
-        .apply(move |account| {
-            if !current(account, &plan)? {
-                return Ok(());
-            }
-            let now = now_unix_timestamp();
-            let mut next = plan.original;
-            if success {
-                next.pending.clear();
-                next.retry_attempts = 0;
-                next.retry_at = 0;
+    let outcome = ControlOutcome {
+        #[cfg(feature = "test-support")]
+        error: result.as_ref().err().map(ToString::to_string),
+        success: result.is_ok(),
+        sent: result.as_ref().is_ok_and(|(sent, _, _)| *sent),
+        acknowledged: result.as_ref().ok().and_then(|(_, call_ref, _)| call_ref.clone()),
+        resolutions: result
+            .as_ref()
+            .map(|(_, _, resolutions)| resolutions.clone())
+            .unwrap_or_default(),
+    };
+    writer.apply(move |account| note_control_result(account, plan, outcome)).await?;
+    result.map(|(sent, _, _)| sent)
+}
+fn note_control_result(
+    account: &mut LocalBusAccountState,
+    plan: Plan,
+    outcome: ControlOutcome,
+) -> Result<(), SdkError> {
+    if !current(account, &plan)? {
+        return Ok(());
+    }
+    let now = now_unix_timestamp();
+    let expected_actions = plan
+        .original
+        .pending
+        .iter()
+        .map(crate::gateway::call_resolution::CallOperationAction::from_control)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut next = plan.original;
+    #[cfg(feature = "test-support")]
+    {
+        next.last_control_error = outcome.error;
+    }
+    if outcome.success {
+        next.pending.clear();
+        next.retry_attempts = 0;
+        next.retry_at = 0;
+        if outcome.sent && outcome.acknowledged.is_some() {
+            let peers = if next.local == next.caller {
+                next.invited.clone()
             } else {
-                next.retry_attempts = next.retry_attempts.saturating_add(1);
-                next.retry_at =
-                    now.saturating_add(1_i64 << next.retry_attempts.saturating_sub(1).min(4));
-                if next.row.state == "ended"
-                    && now.saturating_sub(next.row.ended_at.unwrap_or(now)) >= 60
+                vec![next.caller.clone()]
+            };
+            let mut bindings = Vec::new();
+            for peer in peers {
+                if let Some(start) =
+                    call::intent::start_for_control(account, &next, &peer.device_id)?
                 {
-                    next.pending.clear();
+                    let origin_identity = account.client.call_device_identity(&next.caller)?;
+                    let destination = if next.local == next.caller { &peer } else { &next.local };
+                    let target_identity = account.client.call_device_identity(destination)?;
+                    if start.body.sender_device == origin_identity.storage_key()
+                        && start.body.target_device == target_identity.storage_key()
+                    {
+                        bindings.push((peer, ramflux_protocol::call_intent_digest(&start)?, start));
+                    }
                 }
             }
-            install(account, next)
-        })
-        .await?;
-    result
+            for resolved in outcome.resolutions {
+                let Some((peer, _, start)) = bindings.iter().find(|(_, digest, start)| {
+                    resolved.context.start_digest == *digest
+                        && resolved.context.call_ref == start.body.call_ref
+                }) else {
+                    continue;
+                };
+                if account.connection.as_ref().is_some_and(|handle| {
+                    let snapshot = handle.snapshot();
+                    handle.metadata().is_some_and(|metadata| {
+                        snapshot.state == crate::bus::connection_manager::NetworkingState::Live
+                            && metadata.generation == snapshot.generation
+                            && metadata.session.session_id == resolved.context.session_id
+                            && metadata.session.call_session_generation.as_ref()
+                                == Some(&resolved.context.session_generation)
+                    })
+                }) && expected_actions.contains(&resolved.action)
+                    && !next.expired(now)
+                    && next.row.state != "ended"
+                {
+                    let allowed = resolved.permits_media();
+                    next.apply_media_for(
+                        peer.clone(),
+                        start,
+                        allowed,
+                        allowed
+                            && resolved.decision.state
+                                == ramflux_protocol::CallResolutionState::Answered,
+                    )?;
+                }
+            }
+        }
+    } else {
+        next.retry_attempts = next.retry_attempts.saturating_add(1);
+        next.retry_at = now.saturating_add(1_i64 << next.retry_attempts.saturating_sub(1).min(4));
+        if next.row.state == "ended" && now.saturating_sub(next.row.ended_at.unwrap_or(now)) >= 60 {
+            next.pending.clear();
+        }
+    }
+    install(account, next)
 }
 fn prepare_controls(
     account: &LocalBusAccountState,
@@ -344,10 +458,16 @@ fn prepare_controls(
         &account.client.owned_device_identity()?,
         NativeOperation::Call,
     )?;
+    let device_epochs = manifest
+        .devices
+        .iter()
+        .map(|device| (device.device_id.clone(), device.device_epoch))
+        .collect::<Vec<_>>();
     let targets = {
         account.client.persist_fetched_identity_directory(&manifest)?;
         task_transport::direct_targets_from_manifest(account, &plan.thread, manifest)
     }?;
+    let now = u64::try_from(now_unix_timestamp()).unwrap_or(0);
     let mut controls = Vec::new();
     for mut control in plan.original.pending.clone() {
         let recipient = if control.sender == control.caller {
@@ -360,30 +480,100 @@ fn prepare_controls(
             .find(|target| target.device == *recipient)
             .ok_or_else(|| invalid("call target no longer active"))?
             .clone();
-        control.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
-            &call::signing_bytes(&control)?,
-            account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        );
-        let bytes = call::bytes(&control)?;
-        let id = crate::new_surface_message_id()?;
+        let prepared = if target.federation.is_none()
+            && let Some((_, epoch)) = device_epochs.iter().find(|(id, _)| id == &target.device)
+        {
+            call::intent::bind_call_intent(
+                account,
+                &control,
+                &call::intent::IntentTarget {
+                    device_id: target.device.clone(),
+                    qualified_device: target.identity.storage_key().to_owned(),
+                    epoch: *epoch,
+                    delivery_id: target.delivery.clone(),
+                },
+                now,
+            )?
+        } else {
+            None
+        };
+        if let Some(prepared) = prepared.as_ref() {
+            control.call_ref = Some(prepared.signed.body.call_ref.clone());
+            if matches!(control.body, ramflux_protocol::CallAction::Invite { .. }) {
+                control.call_start = Some(prepared.signed.clone());
+            }
+        }
+        let stored_start =
+            call::intent::start_for_control(account, &plan.original, &target.device)?;
+        let bound_start = control.call_start.as_ref().or(stored_start.as_ref());
+        let start_digest = bound_start.map(ramflux_protocol::call_intent_digest).transpose()?;
+        let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        if !plan.original.gateway_answered
+            && let Some(start) = bound_start
+        {
+            deadline = deadline.min(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(start.body.expires_at.saturating_sub(now)),
+            );
+        }
+
+        // Fan-out controls bind their actual recipient, including a losing sibling.
+        control.call_ref = bound_start.map(|start| start.body.call_ref.clone());
+        let signed = sign_control(account, &mut control, prepared, start_digest)?;
         let message = GatewayDirectMessage {
             conversation_id: plan.original.row.conversation_id.clone(),
-            message_id: id.clone(),
-            envelope_id: id,
+            message_id: signed.id.clone(),
+            envelope_id: signed.id,
             source_principal_id: plan.config.principal_id.clone(),
             sender_id: plan.config.device_id.clone(),
             recipient_device_id: Some(target.device.clone()),
             recipient_principal_commitment: Some(target.identity.root_commitment().into()),
             target_delivery_id: target.delivery.clone(),
             encrypted_body: Vec::new(),
-            created_at: now_unix_timestamp(),
+            created_at: signed.intent_created_at.unwrap_or_else(now_unix_timestamp),
             ttl: crate::offline_retention::CALL_SIGNAL_TTL_SECS,
         };
         let request = account.client.routed_send_material_request(&plan.config, &message)?;
-        controls.push(Control { plan: plan.clone(), target, message, bytes, request });
+        controls.push(Control {
+            plan: plan.clone(),
+            target,
+            message,
+            bytes: signed.bytes,
+            request,
+            extras: signed.extras,
+            deadline,
+        });
     }
     Ok(Some(controls))
 }
+fn sign_control(
+    account: &LocalBusAccountState,
+    control: &mut ramflux_protocol::CallControl,
+    prepared: Option<call::intent::BoundCallIntent>,
+    start_digest: Option<String>,
+) -> Result<SignedControl, SdkError> {
+    control.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &call::signing_bytes(control)?,
+        account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+    );
+    let bytes = call::bytes(control)?;
+    let intent_created_at =
+        prepared.as_ref().and_then(|bound| i64::try_from(bound.signed.body.created_at).ok());
+    let (id, call_intent) = match prepared {
+        Some(prepared) => (prepared.envelope_id, Some(prepared.signed)),
+        None => (crate::new_surface_message_id()?, None),
+    };
+    let extras = crate::gateway::engine::CallSubmitExtras {
+        action: Some(crate::gateway::call_resolution::CallOperationAction::from_control(control)),
+        start_digest,
+        call_intent,
+        wake_id: None,
+        call_ref: control.call_ref.clone(),
+        call_terminal: call::resolution_terminal(control),
+    };
+    Ok(SignedControl { id, extras, bytes, intent_created_at })
+}
+
 fn seal_control(
     account: &LocalBusAccountState,
     mut control: Control,

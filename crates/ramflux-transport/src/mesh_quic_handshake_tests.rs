@@ -374,7 +374,15 @@ async fn untrusted_or_missing_mesh_identity_never_dispatches() -> TestResult {
 
 #[cfg(target_os = "linux")]
 fn rss_bytes() -> TestResult<u64> {
-    let status = std::fs::read_to_string("/proc/self/status")?;
+    use std::io::Read as _;
+    const MAX_STATUS_BYTES: u64 = 64 * 1024;
+    let mut status = String::new();
+    std::fs::File::open("/proc/self/status")?
+        .take(MAX_STATUS_BYTES + 1)
+        .read_to_string(&mut status)?;
+    if u64::try_from(status.len())? > MAX_STATUS_BYTES {
+        return Err("test: process status exceeded its fixed read bound".into());
+    }
     let line = status.lines().find(|line| line.starts_with("VmRSS:")).ok_or("missing RSS")?;
     Ok(line.split_whitespace().nth(1).ok_or("missing RSS value")?.parse::<u64>()? * 1024)
 }
@@ -385,6 +393,24 @@ fn rss_bytes() -> TestResult<u64> {
 #[tokio::test]
 async fn stalled_application_keeps_endpoint_progress_and_memory_stable() -> TestResult {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    const CHILD_MARKER: &str = "RAMFLUX_TRANSPORT_RSS_OBSERVATION_CHILD";
+    const TEST_NAME: &str =
+        "mesh_quic_handshake_tests::stalled_application_keeps_endpoint_progress_and_memory_stable";
+    const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        // RSS covers the entire process. Other concurrently running TLS tests must not
+        // contribute allocations to this transport observation.
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .env("RUST_TEST_THREADS", "1")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let status = tokio::time::timeout(CHILD_DEADLINE, child.wait()).await??;
+        assert!(status.success(), "isolated transport RSS observation failed: {status}");
+        return Ok(());
+    }
     let certs = Certificates::new()?;
     let harness = Harness::new(&certs, MeshQuicAdmissionLimits::default())?;
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;

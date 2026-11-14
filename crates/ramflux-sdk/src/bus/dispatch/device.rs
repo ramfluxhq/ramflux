@@ -3,7 +3,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
-use crate::gateway::GatewayPushRouteRegistration;
+use crate::gateway::{GatewayPushProvider, GatewayPushRouteRegistration};
 use crate::prelude::*;
 
 pub(crate) async fn dispatch_device_bus_request(
@@ -69,23 +69,74 @@ const PUSH_ROUTE_CLEAR_PENDING: &str = "{\"deregister_pending\":true}";
 
 /// Persisted push route state restored into the gateway config at startup.
 pub(crate) struct StoredPushRoute {
-    pub(crate) registration: Option<GatewayPushRouteRegistration>,
+    pub(crate) routes: BTreeMap<GatewayPushProvider, GatewayPushRouteRegistration>,
+    pub(crate) clears: BTreeSet<GatewayPushProvider>,
     pub(crate) clear_pending: bool,
 }
 
-/// Restores the persisted push route so every reconnect re-registers it, or so an
-/// unconfirmed deregistration is retried.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct StoredPushBook {
+    routes: BTreeMap<GatewayPushProvider, GatewayPushRouteRegistration>,
+    #[serde(default)]
+    clears: BTreeSet<GatewayPushProvider>,
+    #[serde(default)]
+    clear_all: bool,
+}
+
+/// Restores the persisted push routes so every reconnect re-registers them, or so an
+/// unconfirmed deregistration is retried. A single old registration object and the
+/// delete-all sentinel still parse.
 pub(crate) fn stored_push_route(client: &RamfluxClient) -> Result<StoredPushRoute, SdkError> {
-    Ok(match client.projection_checkpoint(PUSH_ROUTE_CHECKPOINT)? {
-        Some(value) if value == PUSH_ROUTE_CLEAR_PENDING => {
-            StoredPushRoute { registration: None, clear_pending: true }
-        }
-        Some(value) if !value.is_empty() => StoredPushRoute {
-            registration: Some(serde_json::from_str(&value)?),
-            clear_pending: false,
-        },
-        _ => StoredPushRoute { registration: None, clear_pending: false },
-    })
+    let Some(value) = client.projection_checkpoint(PUSH_ROUTE_CHECKPOINT)? else {
+        return Ok(empty_stored_push());
+    };
+    if value.is_empty() {
+        return Ok(empty_stored_push());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&value)?;
+    if parsed.get("routes").is_some() {
+        let book: StoredPushBook = serde_json::from_value(parsed)?;
+        return Ok(StoredPushRoute {
+            routes: book.routes,
+            clears: book.clears,
+            clear_pending: book.clear_all,
+        });
+    }
+    if parsed.get("provider").is_some() {
+        let registration: GatewayPushRouteRegistration = serde_json::from_value(parsed)?;
+        let mut routes = BTreeMap::new();
+        routes.insert(registration.provider, registration);
+        return Ok(StoredPushRoute { routes, clears: BTreeSet::new(), clear_pending: false });
+    }
+    if parsed.get("deregister_pending").is_some() {
+        return Ok(StoredPushRoute {
+            routes: BTreeMap::new(),
+            clears: BTreeSet::new(),
+            clear_pending: true,
+        });
+    }
+    Ok(empty_stored_push())
+}
+
+fn empty_stored_push() -> StoredPushRoute {
+    StoredPushRoute { routes: BTreeMap::new(), clears: BTreeSet::new(), clear_pending: false }
+}
+
+fn encode_stored_push(stored: &StoredPushRoute) -> Result<String, SdkError> {
+    if stored.clear_pending && stored.routes.is_empty() && stored.clears.is_empty() {
+        return Ok(PUSH_ROUTE_CLEAR_PENDING.to_owned());
+    }
+    if stored.clears.is_empty() && !stored.clear_pending && stored.routes.len() == 1 {
+        let Some(registration) = stored.routes.values().next() else {
+            return Ok(String::new());
+        };
+        return Ok(serde_json::to_string(registration)?);
+    }
+    Ok(serde_json::to_string(&StoredPushBook {
+        routes: stored.routes.clone(),
+        clears: stored.clears.clone(),
+        clear_all: stored.clear_pending,
+    })?)
 }
 
 /// Sets the push route after a token change and registers it now, or clears it and deletes
@@ -98,14 +149,22 @@ async fn dispatch_push_route_set(
     let body: LocalBusPushRouteSetRequest = serde_json::from_value(request.body.clone())?;
     let account_id = request_account_id(request)?.to_owned();
     let account = local_bus_account_mut(state, &account_id)?;
+    let mut stored = stored_push_route(&account.client)?;
     let cleared = body.registration.is_none();
-    let stored = match &body.registration {
-        Some(registration) => serde_json::to_string(registration)?,
-        None => PUSH_ROUTE_CLEAR_PENDING.to_owned(),
-    };
-    account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, &stored)?;
-    account.gateway_config.push_route.clone_from(&body.registration);
-    account.gateway_config.push_route_clear_pending = cleared;
+    if let Some(registration) = &body.registration {
+        stored.clears.remove(&registration.provider);
+        stored.clear_pending = false;
+        stored.routes.insert(registration.provider, registration.clone());
+    } else {
+        stored.routes.clear();
+        stored.clears.clear();
+        stored.clear_pending = true;
+    }
+    let encoded = encode_stored_push(&stored)?;
+    account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, &encoded)?;
+    account.gateway_config.push_routes.clone_from(&stored.routes);
+    account.gateway_config.push_route_clears.clone_from(&stored.clears);
+    account.gateway_config.push_route_clear_pending = stored.clear_pending;
     let mut engine = account.session_client().await?;
     let outcome = engine.set_push_route(body.registration).await;
     account.apply_session_metadata(engine);

@@ -186,7 +186,10 @@ async fn park_hub_write(
 
 async fn row_durable_wake_positive_control(context: &crate::GatewayQuicContext) -> TestResult {
     let before = context.notify.wake_count();
-    crate::session::dispatch_offline_wake(context, TARGET, &envelope(TARGET, "env-wake")).await?;
+    let mut envelope = envelope(TARGET, "env-wake");
+    envelope.created_at = i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(0);
+    envelope.ttl = 60;
+    crate::session::dispatch_offline_wake(context, "source-c4", 1, 1, TARGET, &envelope).await?;
     assert_eq!(context.notify.wake_count(), before + 1);
     Ok(())
 }

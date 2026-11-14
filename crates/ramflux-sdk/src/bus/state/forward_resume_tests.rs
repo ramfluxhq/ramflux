@@ -49,6 +49,7 @@ async fn reconnect_gateway(
             &mut stream,
             &GatewayServerFrame::SessionEstablished {
                 session: crate::GatewaySessionEstablishedFrame {
+                    call_session_generation: None,
                     session_id: "resumed-session".into(),
                     gateway_id: "test-gateway".into(),
                     accepted_cursor: None,

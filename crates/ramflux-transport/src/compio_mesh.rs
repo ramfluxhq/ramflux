@@ -25,6 +25,22 @@ fn raw_attachment_body(frame: &[u8]) -> Result<Vec<u8>, ramflux_protocol::Protoc
     Ok(raw.body.get().as_bytes().to_vec())
 }
 
+fn request_raw_body(
+    frame: &[u8],
+    path: &str,
+    control: bool,
+) -> Result<Option<Vec<u8>>, TransportError> {
+    let authority = control || crate::mesh_quic::authority_path(path);
+    if !authority && !path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
+        return Ok(None);
+    }
+    let body = raw_attachment_body(frame)?;
+    if authority && body.len() > 8192 {
+        return Err(TransportError::FrameTooLarge { len: body.len() });
+    }
+    Ok(Some(body))
+}
+
 pub struct CompioMeshQuicServer {
     endpoint: compio_quic::Endpoint,
 }
@@ -38,6 +54,7 @@ pub struct CompioMeshQuicAcceptedRequest {
     pub request: GatewayQuicRequest,
     /// The body exactly as received for `RAW_BODY_PATH_PREFIX` routes (see the tokio ingress).
     pub raw_body: Option<Vec<u8>>,
+    control: Option<crate::mesh_quic::control_ingress::ControlRequest>,
     peer_spiffe_uri: Option<String>,
     send: compio_quic::SendStream,
     recv: compio_quic::RecvStream,
@@ -159,7 +176,16 @@ impl CompioMeshQuicServer {
             .await
             .map_err(|error| TransportError::Quic(error.to_string()))?;
         tracing::trace!("compio mesh accepted bidirectional stream; reading request frame");
-        let frame = compio_read_raw_frame(&mut recv).await?;
+        let control = if connection
+            .peer_spiffe_uri
+            .as_deref()
+            .is_some_and(|uri| uri.ends_with("/ramflux-notify"))
+        {
+            Some(crate::mesh_quic::control_ingress::admit()?)
+        } else {
+            None
+        };
+        let frame = read_admitted_frame(&mut recv, control.as_ref()).await?;
         let request: GatewayQuicRequest = match ramflux_protocol::parse_i_json(&frame) {
             Ok(request) => request,
             Err(error) => {
@@ -181,27 +207,11 @@ impl CompioMeshQuicServer {
             path = %request.path,
             "compio mesh request frame decoded"
         );
-        let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
-            match raw_attachment_body(&frame) {
-                Ok(body) => Some(body),
-                Err(error) => {
-                    let error = TransportError::Protocol(error);
-                    reject_i_json(
-                        send,
-                        recv,
-                        reject_deadline.unwrap_or_else(|| {
-                            std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
-                        }),
-                    );
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
+        let raw_body = request_raw_body(&frame, &request.path, control.is_some())?;
         Ok(CompioMeshQuicAcceptedRequest {
             request,
             raw_body,
+            control,
             peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
             send,
             recv,
@@ -231,7 +241,19 @@ impl CompioMeshQuicServer {
             .await
             .map_err(|error| TransportError::Quic(error.to_string()))?;
         tracing::trace!("compio mesh accepted bidirectional stream; reading wire request frame");
-        let frame = compio_read_raw_frame(&mut recv).await?;
+        let control = if connection
+            .peer_spiffe_uri
+            .as_deref()
+            .is_some_and(|uri| uri.ends_with("/ramflux-notify"))
+        {
+            Some(crate::mesh_quic::control_ingress::admit()?)
+        } else {
+            None
+        };
+        let frame = read_admitted_frame(&mut recv, control.as_ref()).await?;
+        if control.is_some() && frame.starts_with(COMP_IO_MESH_POSTCARD_MAGIC) {
+            return Err(TransportError::Quic("notification control requires JSON".into()));
+        }
         if let Some(body) = frame.strip_prefix(COMP_IO_MESH_POSTCARD_MAGIC) {
             let request = postcard_from_bytes::<CompioMeshQuicPostcardRequest>(body)?;
             tracing::trace!(
@@ -271,33 +293,11 @@ impl CompioMeshQuicServer {
             path = %request.path,
             "compio mesh JSON request frame decoded"
         );
-        let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
-            let raw = match ramflux_protocol::validate_i_json_bytes(&frame).and_then(|()| {
-                serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)
-                    .map_err(ramflux_protocol::ProtocolError::IJson)
-            }) {
-                Ok(raw) => raw,
-                Err(error) => {
-                    let error = TransportError::Protocol(error);
-                    if ramflux_protocol::is_i_json_rejection(&error) {
-                        reject_i_json(
-                            send,
-                            recv,
-                            reject_deadline.unwrap_or_else(|| {
-                                std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
-                            }),
-                        );
-                    }
-                    return Err(error);
-                }
-            };
-            Some(raw.body.get().as_bytes().to_vec())
-        } else {
-            None
-        };
+        let raw_body = request_raw_body(&frame, &request.path, control.is_some())?;
         Ok(CompioMeshQuicAcceptedWireRequest::Json(CompioMeshQuicAcceptedRequest {
             request,
             raw_body,
+            control,
             peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
             send,
             recv,
@@ -396,6 +396,17 @@ impl CompioMeshQuicAcceptedRequest {
         &mut self,
         response: &T,
     ) -> Result<(), TransportError> {
+        if let Some(control) = &self.control {
+            let remaining = control.deadline.saturating_duration_since(std::time::Instant::now());
+            return compio::time::timeout(remaining, async {
+                compio_write_json_message(&mut self.send, response).await?;
+                compio_finish_send_stream(&mut self.send)
+            })
+            .await
+            .map_err(|_| {
+                TransportError::Quic("notification control response deadline exceeded".into())
+            })?;
+        }
         compio_write_json_message(&mut self.send, response).await?;
         compio_finish_send_stream(&mut self.send)?;
         compio_drain_recv_to_fin(&mut self.recv).await
@@ -575,11 +586,33 @@ async fn compio_write_raw_frame(
 async fn compio_read_raw_frame(
     recv: &mut compio_quic::RecvStream,
 ) -> Result<Vec<u8>, TransportError> {
+    compio_read_raw_frame_limited(recv, COMP_IO_MESH_FRAME_MAX_BYTES).await
+}
+
+async fn read_admitted_frame(
+    recv: &mut compio_quic::RecvStream,
+    control: Option<&crate::mesh_quic::control_ingress::ControlRequest>,
+) -> Result<Vec<u8>, TransportError> {
+    match control {
+        Some(control) => compio::time::timeout(
+            control.deadline.saturating_duration_since(std::time::Instant::now()),
+            compio_read_raw_frame_limited(recv, 8192 + 512),
+        )
+        .await
+        .map_err(|_| TransportError::Quic("notification control read deadline exceeded".into()))?,
+        None => compio_read_raw_frame(recv).await,
+    }
+}
+
+async fn compio_read_raw_frame_limited(
+    recv: &mut compio_quic::RecvStream,
+    limit: usize,
+) -> Result<Vec<u8>, TransportError> {
     tracing::trace!("compio mesh reading raw frame length");
     let mut len_bytes = [0_u8; 4];
     compio_read_exact(recv, &mut len_bytes).await?;
     let len = u32::from_be_bytes(len_bytes) as usize;
-    if len > COMP_IO_MESH_FRAME_MAX_BYTES {
+    if len > limit.min(COMP_IO_MESH_FRAME_MAX_BYTES) {
         return Err(TransportError::FrameTooLarge { len });
     }
     tracing::trace!(len, "compio mesh reading raw frame body");

@@ -22,13 +22,16 @@ async fn session_host_applies_interleaved_push_routes_before_notifying_the_subsc
             .call(
                 |engine| {
                     Box::pin(async move {
-                        engine.config.push_route = Some(GatewayPushRouteRegistration {
-                            provider: GatewayPushProvider::Apns,
-                            token: "fixture".into(),
-                            endpoint: None,
-                            webpush_p256dh: None,
-                            webpush_auth: None,
-                        });
+                        engine.config.push_routes.insert(
+                            GatewayPushProvider::Apns,
+                            GatewayPushRouteRegistration {
+                                provider: GatewayPushProvider::Apns,
+                                token: "fixture".into(),
+                                endpoint: None,
+                                webpush_p256dh: None,
+                                webpush_auth: None,
+                            },
+                        );
                         Ok(())
                     })
                 },

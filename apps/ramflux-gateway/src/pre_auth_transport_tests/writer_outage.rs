@@ -72,7 +72,15 @@ fn overflow_operations() -> anyhow::Result<Vec<GatewayClientFrame>> {
     let operations = vec![
         signed_operation(80, "outage-device-8")?,
         GatewayClientFrame::Submit {
-            submit: ramflux_node_core::GatewaySubmitFrame { signed_request, envelope },
+            submit: ramflux_node_core::GatewaySubmitFrame {
+                call_intent: None,
+                wake_id: None,
+                call_ref: None,
+                call_terminal: None,
+                call_context: None,
+                signed_request,
+                envelope,
+            },
         },
     ];
     #[cfg(feature = "itest-local-mint")]

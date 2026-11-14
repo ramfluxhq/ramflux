@@ -316,6 +316,52 @@ impl IdentityRegistry {
         };
         self.device_record_is_usable(device)
     }
+    /// One usable device for this delivery id. Missing or ambiguous registrations fail closed.
+    #[must_use]
+    pub fn authenticated_owner_epoch(&self, target_delivery_id: &str) -> Option<u64> {
+        self.authenticated_owner(target_delivery_id).map(|owner| owner.device_epoch)
+    }
+
+    /// One usable device for this delivery id, including its storage key.
+    #[must_use]
+    pub fn authenticated_owner(
+        &self,
+        target_delivery_id: &str,
+    ) -> Option<crate::DeliveryOwnerEpoch> {
+        if target_delivery_id.is_empty() {
+            return None;
+        }
+        if let Ok(Some((root, device))) =
+            ramflux_protocol::parse_qualified_device_id(target_delivery_id)
+            && self.custody_anchor_known(&root)
+        {
+            let identity = self.custody_device_identity(&root, &device)?;
+            let current =
+                self.custody_device_auth_key(&identity, crate::now_unix_seconds()).ok()??;
+            return (!current.revoked && current.target_delivery_id == target_delivery_id).then(
+                || crate::DeliveryOwnerEpoch {
+                    device_epoch: current.device_epoch,
+                    owner_device: identity.storage_key().to_owned(),
+                },
+            );
+        }
+        let mut owners = self.devices.values().filter_map(|device| {
+            if device.target_delivery_id != target_delivery_id
+                || !self.device_record_is_usable(device)
+            {
+                return None;
+            }
+            let identity =
+                self.device_identity_for_root(&device.principal_commitment, &device.device_id)?;
+            Some(crate::DeliveryOwnerEpoch {
+                device_epoch: device.device_epoch,
+                owner_device: identity.storage_key().to_owned(),
+            })
+        });
+        let owner = owners.next()?;
+        owners.next().is_none().then_some(owner)
+    }
+
     pub(crate) fn device_record_is_usable(&self, device: &IdentityDeviceRecord) -> bool {
         if self.record_is_revoked(device) {
             return false;

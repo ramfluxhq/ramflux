@@ -34,6 +34,8 @@ pub(super) async fn post(
     if let Some(mesh) = &router.async_mesh {
         let result = ramflux_transport::mesh_quic_post_raw_with_peer_ca_pems_async(
             ramflux_transport::MeshQuicRawPost {
+                expected_peer_spiffe: None,
+                max_response_frame_bytes: 5 * 1024 * 1024,
                 endpoint: &mesh.endpoint,
                 path: "/mvp0/issued-seqs",
                 tls: &mesh.tls,

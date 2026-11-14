@@ -140,6 +140,18 @@ pub use sender_transcript::{
 
 mod call;
 pub use call::*;
+mod call_resolution;
+pub use call_resolution::*;
+
+mod wake_v2;
+pub use wake_v2::{
+    CALL_MAX_LIFETIME_SECONDS, CLOCK_UNCERTAINTY_SECONDS, CallIntentAction, CallIntentKind,
+    CallIntentV1, GATEWAY_CALL_INTENT_AUDIENCE, MAX_NOTIFICATION_ID_BYTES,
+    MESSAGE_MAX_LIFETIME_SECONDS, NOTIFY_WAKE_AUDIENCE, SignedCallIntentV1, SignedWakeV2,
+    WakeAction, WakeClass, WakeSignatureAlg, WakeV2, call_intent_digest, call_intent_signing_bytes,
+    effective_expiry, parse_signed_call_intent_v1, parse_signed_wake_v2, remaining_whole_seconds,
+    wake_request_digest, wake_signing_bytes,
+};
 
 mod identity_name;
 mod identity_profile;
@@ -151,3 +163,6 @@ pub use identity_profile::{SignedIdentityProfile, identity_profile_signing_bytes
 
 pub mod identity_profile_v2;
 pub mod username_directory;
+
+mod call_submission;
+pub use call_submission::{CallSubmitCarrier, CallSubmitCarrierRef};

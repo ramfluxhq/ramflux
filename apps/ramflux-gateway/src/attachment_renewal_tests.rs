@@ -241,6 +241,7 @@ fn resident_runtime(
     public: &str,
 ) -> GatewaySessionRuntime {
     GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,
@@ -675,6 +676,7 @@ mod entrypoint {
         let branch = ramflux_crypto::create_device_branch("resident", "device", 1, [32; 32]);
         let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
         Ok(GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,

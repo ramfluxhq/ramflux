@@ -20,6 +20,7 @@ allowed_service_ids = [
 [mesh.endpoints]
 gateway = "ramflux-gateway:7443"
 router = "ramflux-router:7443"
+router-async = "ramflux-router:17444"
 notify = "ramflux-notify:7443"
 federation = "ramflux-federation:7443"
 relay = "ramflux-relay:7443"
@@ -32,3 +33,10 @@ public_listen_addr = "0.0.0.0:443"
 [signaling]
 turn_udp_addr = "0.0.0.0:3478"
 turn_tcp_addr = "0.0.0.0:3478"
+
+[send_authority]
+root_budget = 4096
+
+[send_authority.origins]
+"spiffe://localhost/ramflux-router" = "ramflux-router:17444"
+"spiffe://localhost/ramflux-gateway/ramflux-gateway" = "ramflux-gateway:7443"

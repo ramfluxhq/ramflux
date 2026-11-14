@@ -37,19 +37,19 @@ pub(super) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<GatewayServerFr
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_succeeds_when_the_inbox_is_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack("empty-inbox", false, false, "online", true).await
+    Box::pin(submit_after_recipient_ack("empty-inbox", false, false, "online", true)).await
 }
 
 #[tokio::test]
 async fn recipient_ack_before_submit_confirmation_never_confirms_a_later_envelope()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack("later-envelope", true, false, "online", true).await
+    Box::pin(submit_after_recipient_ack("later-envelope", true, false, "online", true)).await
 }
 
 #[tokio::test]
 async fn replacing_a_registration_during_submit_finishes_its_reply_and_keeps_the_new_sink()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack("replacement", false, true, "online", true).await
+    Box::pin(submit_after_recipient_ack("replacement", false, true, "online", true)).await
 }
 
 async fn submit_after_recipient_ack(
@@ -436,20 +436,26 @@ impl GatewaySessionFrameSink for DelayedReply {
 #[tokio::test]
 async fn migrated_home_forward_returns_a_typed_ack_and_keeps_heartbeat_on_the_same_stream()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack("migrated-typed", false, false, "forwarded_home_node_migrated", true)
-        .await
+    Box::pin(submit_after_recipient_ack(
+        "migrated-typed",
+        false,
+        false,
+        "forwarded_home_node_migrated",
+        true,
+    ))
+    .await
 }
 
 #[tokio::test]
 async fn migrated_home_forward_keeps_the_legacy_nack_for_an_older_client()
 -> Result<(), Box<dyn std::error::Error>> {
-    submit_after_recipient_ack(
+    Box::pin(submit_after_recipient_ack(
         "migrated-legacy",
         false,
         false,
         "forwarded_home_node_migrated",
         false,
-    )
+    ))
     .await
 }
 async fn submit_then_heartbeat(
@@ -508,7 +514,7 @@ async fn sender_retry_refusals_keep_the_existing_nack_shape()
         ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict", "payload_too_large"]
     {
         for capable in [false, true] {
-            submit_after_recipient_ack(reason, false, false, reason, capable).await?;
+            Box::pin(submit_after_recipient_ack(reason, false, false, reason, capable)).await?;
         }
     }
     Ok(())

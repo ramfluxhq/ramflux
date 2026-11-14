@@ -170,6 +170,21 @@ fn handle_itest_directory_request(
             let response = handle_mvp1_device_auth_key_fetch(path, router.state())?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
+        ("GET", path) if path.starts_with(ramflux_node_core::DELIVERY_OWNER_EPOCH_PREFIX) => {
+            let response = delivery_owner_epoch_response(path, router.state())?;
+            match response {
+                Some(response) => ramflux_node_core::write_itest_json_response(
+                    stream,
+                    response.status,
+                    &serde_json::from_slice::<serde_json::Value>(&response.body)?,
+                )?,
+                None => ramflux_node_core::write_itest_text_response(
+                    stream,
+                    "404 Not Found",
+                    "not found",
+                )?,
+            }
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -637,6 +652,13 @@ pub(crate) async fn handle_mesh_quic_request_raw(
     router: &crate::router_runtime::RouterHandle,
     peer: &ramflux_node_core::MeshPeerIdentity,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+    if request.method == "POST"
+        && request.path == ramflux_node_core::send_authority::NOTIFY_OWNER_READ_PATH
+    {
+        let bytes =
+            raw_body.ok_or_else(|| anyhow::anyhow!("authority request requires original body"))?;
+        return crate::send_authority::read(bytes, router, peer).await;
+    }
     let peer_service_id = peer.service_id.as_str();
     let body = match raw_body {
         Some(raw) => raw.to_vec(),
@@ -867,6 +889,11 @@ fn handle_mesh_device_lookup(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> Option<anyhow::Result<MeshResponse>> {
+    if method == "GET"
+        && let Some(response) = delivery_owner_epoch_response(path, router.state()).transpose()
+    {
+        return Some(response);
+    }
     let state = router.state();
     let value = match (method, path) {
         ("GET", path)
@@ -1290,6 +1317,26 @@ fn handle_itest_device_lookup(
         )?,
     }
     Ok(true)
+}
+
+fn delivery_owner_epoch_response(
+    path: &str,
+    state: &ramflux_node_core::RouterCore,
+) -> anyhow::Result<Option<MeshResponse>> {
+    let Some(id) = path.strip_prefix(ramflux_node_core::DELIVERY_OWNER_EPOCH_PREFIX) else {
+        return Ok(None);
+    };
+    if id.is_empty() || id.contains('/') || id.contains('?') {
+        return Ok(Some(missing_delivery_epoch()));
+    }
+    Ok(Some(match state.mvp1_owner_for_delivery(id) {
+        Some(owner) => MeshResponse::json("200 OK", serde_json::to_vec(&owner)?),
+        None => missing_delivery_epoch(),
+    }))
+}
+
+fn missing_delivery_epoch() -> MeshResponse {
+    MeshResponse::json("404 Not Found", br#"{"error":"delivery owner unavailable"}"#.to_vec())
 }
 
 fn device_lookup_mesh_response(

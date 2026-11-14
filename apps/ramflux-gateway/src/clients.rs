@@ -455,46 +455,45 @@ pub(crate) async fn router_session_async(
     )
 }
 
+pub(crate) async fn lookup_target_owner_epoch(
+    router: &RouterMeshClient,
+    target_delivery_id: &str,
+) -> Option<ramflux_node_core::DeliveryOwnerEpoch> {
+    if target_delivery_id.is_empty()
+        || target_delivery_id.contains('/')
+        || target_delivery_id.contains('?')
+        || target_delivery_id.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let path = format!("{}{target_delivery_id}", ramflux_node_core::DELIVERY_OWNER_EPOCH_PREFIX);
+    router_get_json_async::<ramflux_node_core::DeliveryOwnerEpoch>(router, &path).await.ok()
+}
+
 pub(crate) fn notify_offline_wake(
     notify: &NotifyHttpClient,
+    store: &ramflux_node_core::GatewayRedbStore,
+    input: &crate::notify_wake::OfflineWakeInput<'_>,
+) -> anyhow::Result<()> {
+    let Some(signed_wake) = crate::notify_wake::signed_offline_wake(store, &notify.signer, input)?
+    else {
+        return Ok(());
+    };
+    post_signed_wake(notify, input.target_delivery_id, signed_wake, input.now)
+}
+
+pub(crate) fn post_signed_wake(
+    notify: &NotifyHttpClient,
     target_delivery_id: &str,
-    envelope: &ramflux_protocol::Envelope,
+    signed_wake: ramflux_protocol::SignedWakeV2,
+    now: u64,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     notify.wake_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let encrypted_hint = ramflux_crypto::blake3_256_base64url(
-        ramflux_protocol::domain::NOTIFICATION_WAKE,
-        envelope.encrypted_payload.as_bytes(),
-    );
-    let mut wake = ramflux_protocol::NotificationWake {
-        schema: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::NOTIFICATION_WAKE.to_owned(),
-        ext: ramflux_protocol::Ext::default(),
-        signed: ramflux_protocol::SignedFields {
-            signing_key_id: notify.signer.signing_key_id().to_owned(),
-            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-            signature: String::new(),
-        },
-        wake_id: format!("wake_{}", envelope.envelope_id),
-        push_alias: target_delivery_id.to_owned(),
-        delivery_class: notification_class_for_envelope(envelope),
-        priority: ramflux_protocol::PushPriority::Normal,
-        ttl: 86_400,
-        collapse_key: Some(format!(
-            "target:{}:content",
-            ramflux_crypto::blake3_256_base64url(
-                ramflux_protocol::domain::PUSH_ALIAS,
-                target_delivery_id.as_bytes(),
-            )
-        )),
-        encrypted_hint: Some(encrypted_hint),
-    };
-    notify.signer.sign_notification_wake(&mut wake)?;
     let request = S13WakeRequest {
         device_delivery_id: target_delivery_id.to_owned(),
-        wake,
-        queued_at: ramflux_node_core::now_unix_seconds(),
+        signed_wake,
+        queued_at: now,
     };
     let response = if let Some(mesh) = &notify.mesh {
         match ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
@@ -536,7 +535,7 @@ fn observe_s13_wake_response(response: &S13WakeResponse) {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct S13WakeRequest {
     device_delivery_id: String,
-    wake: ramflux_protocol::NotificationWake,
+    signed_wake: ramflux_protocol::SignedWakeV2,
     queued_at: u64,
 }
 
@@ -544,21 +543,6 @@ struct S13WakeRequest {
 struct S13WakeResponse {
     entry: ramflux_node_core::NotifyQueueEntry,
     attempts: Vec<ramflux_node_core::ProviderPushAttempt>,
-}
-
-pub(crate) fn notification_class_for_envelope(
-    envelope: &ramflux_protocol::Envelope,
-) -> ramflux_protocol::NotificationDeliveryClass {
-    match envelope.delivery_class {
-        ramflux_protocol::DeliveryClass::SelfDeviceControl => {
-            ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification
-        }
-        ramflux_protocol::DeliveryClass::NotificationWake
-        | ramflux_protocol::DeliveryClass::CallWake => {
-            ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        }
-        _ => ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
-    }
 }
 
 #[cfg(test)]
@@ -641,18 +625,30 @@ pub(crate) mod tests {
             wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let envelope = test_envelope("env_notify_mesh");
+        let (store, _temp) = wake_store("mesh")?;
+        let now = ramflux_node_core::now_unix_seconds();
 
-        notify_offline_wake(&client, "target_notify_mesh", &envelope)?;
+        notify_offline_wake(
+            &client,
+            &store,
+            &crate::notify_wake::OfflineWakeInput {
+                source_identity: "source-mesh",
+                source_epoch: 1,
+                target_owner_epoch: 4,
+                target_delivery_id: "target_notify_mesh",
+                envelope: &envelope,
+                now,
+            },
+        )?;
 
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.device_delivery_id, "target_notify_mesh");
-        assert_eq!(request.wake.wake_id, "wake_env_notify_mesh");
-        assert_eq!(request.wake.push_alias, "target_notify_mesh");
-        assert_eq!(
-            request.wake.delivery_class,
-            ramflux_protocol::NotificationDeliveryClass::UserContentNotification
-        );
-        signer.verify_notification_wake(&request.wake)?;
+        assert_ne!(request.signed_wake.body.wake_id, "wake_env_notify_mesh");
+        assert!(!request.signed_wake.body.wake_id.contains("env_notify_mesh"));
+        assert_eq!(request.signed_wake.body.target_delivery_id, "target_notify_mesh");
+        assert_eq!(request.signed_wake.body.target_owner_epoch, 4);
+        assert_eq!(request.signed_wake.body.class, ramflux_protocol::WakeClass::Message);
+        signer.verify_wake_v2(&request.signed_wake)?;
         Ok(())
     }
 
@@ -676,13 +672,27 @@ pub(crate) mod tests {
             wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let envelope = test_envelope("env_notify_mesh_fallback");
+        let (store, _temp) = wake_store("fallback")?;
+        let now = ramflux_node_core::now_unix_seconds();
 
-        notify_offline_wake(&client, "target_notify_mesh_fallback", &envelope)?;
+        notify_offline_wake(
+            &client,
+            &store,
+            &crate::notify_wake::OfflineWakeInput {
+                source_identity: "source-fallback",
+                source_epoch: 1,
+                target_owner_epoch: 4,
+                target_delivery_id: "target_notify_mesh_fallback",
+                envelope: &envelope,
+                now,
+            },
+        )?;
 
         let request = received.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(request.device_delivery_id, "target_notify_mesh_fallback");
-        assert_eq!(request.wake.wake_id, "wake_env_notify_mesh_fallback");
-        signer.verify_notification_wake(&request.wake)?;
+        assert_ne!(request.signed_wake.body.wake_id, "wake_env_notify_mesh_fallback");
+        assert!(!request.signed_wake.body.wake_id.contains("env_notify_mesh_fallback"));
+        signer.verify_wake_v2(&request.signed_wake)?;
         Ok(())
     }
 
@@ -1257,16 +1267,47 @@ pub(crate) mod tests {
         Ok((endpoint, request_rx))
     }
 
+    fn wake_store(
+        name: &str,
+    ) -> Result<(ramflux_node_core::GatewayRedbStore, tempfile::TempDir), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::Builder::new().prefix(name).tempdir()?;
+        let store = ramflux_node_core::GatewayRedbStore::open(temp.path().join("gateway.redb"))?;
+        Ok((store, temp))
+    }
+
     fn notify_queue_entry_from_request(
         request: &S13WakeRequest,
     ) -> ramflux_node_core::NotifyQueueEntry {
+        let wake = ramflux_node_core::project_wake_v2(&request.signed_wake, request.queued_at)
+            .unwrap_or_else(|_| ramflux_protocol::NotificationWake {
+                schema: ramflux_protocol::domain::NOTIFICATION_WAKE_V2.to_owned(),
+                version: 2,
+                domain: ramflux_protocol::domain::NOTIFICATION_WAKE_V2.to_owned(),
+                ext: ramflux_protocol::Ext::default(),
+                signed: ramflux_protocol::SignedFields {
+                    signing_key_id: request.signed_wake.body.signing_key_id.clone(),
+                    signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                    signature: request.signed_wake.signature.clone(),
+                },
+                wake_id: request.signed_wake.body.wake_id.clone(),
+                push_alias: request.device_delivery_id.clone(),
+                delivery_class:
+                    ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
+                priority: ramflux_protocol::PushPriority::Normal,
+                ttl: 60,
+                absolute_expires_at: request.signed_wake.body.expires_at,
+                collapse_key: None,
+                encrypted_hint: None,
+            });
+        let expires_at = wake.absolute_expires_at;
         ramflux_node_core::NotifyQueueEntry {
-            queue_id: request.wake.wake_id.clone(),
+            queue_id: wake.wake_id.clone(),
             device_delivery_id: request.device_delivery_id.clone(),
-            wake: request.wake.clone(),
+            wake,
             push_alias_hash: "test_push_alias_hash".to_owned(),
             queued_at: request.queued_at,
-            expires_at: request.queued_at.saturating_add(u64::from(request.wake.ttl)),
+            expires_at,
             attempt_count: 0,
             status: ramflux_node_core::NotifyQueueStatus::Pending,
             dnd_active: false,
@@ -1438,7 +1479,7 @@ pub(crate) mod tests {
             delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
-            created_at: 1_760_000_000,
+            created_at: i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(0),
             encrypted_payload: "encrypted_payload".to_owned(),
             payload_hash: "payload_hash".to_owned(),
             delivery_mode: None,
@@ -1456,6 +1497,7 @@ pub(crate) mod tests {
         endpoints.insert("router".to_owned(), "ramflux-router:7443".to_owned());
         endpoints.insert("notify".to_owned(), "ramflux-notify:7443".to_owned());
         ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: "test-node".to_owned(),
             service_id: "ramflux-gateway".to_owned(),
             redb_path: "test.redb".to_owned(),

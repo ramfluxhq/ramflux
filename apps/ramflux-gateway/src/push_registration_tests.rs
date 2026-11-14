@@ -18,16 +18,27 @@ fn signed(id: &str) -> ramflux_protocol::SignedRequest {
     .unwrap_or_else(|_| panic!("fixture signed request"))
 }
 
-fn register(id: &str) -> RouteIntent {
+fn register_as(id: &str, provider: ramflux_node_core::PushProviderKind) -> RouteIntent {
     RouteIntent::Register(ramflux_node_core::PushRouteRegistrationFrame {
         signed_request: signed(id),
         body: ramflux_node_core::PushRouteRegistration {
-            provider: ramflux_node_core::PushProviderKind::WebPush,
+            provider,
             token: "t".into(),
             endpoint: None,
             webpush_p256dh: None,
             webpush_auth: None,
         },
+    })
+}
+
+fn register(id: &str) -> RouteIntent {
+    register_as(id, ramflux_node_core::PushProviderKind::WebPush)
+}
+
+fn deregister_one(id: &str, provider: ramflux_node_core::PushProviderKind) -> RouteIntent {
+    RouteIntent::Deregister(ramflux_node_core::PushRouteDeregistrationFrame {
+        signed_request: signed(id),
+        body: ramflux_node_core::PushRouteDeregistration { provider: Some(provider) },
     })
 }
 
@@ -132,4 +143,62 @@ async fn queued_control_is_superseded_by_the_latest_intent() {
             if request_id == "queued"
     )));
     assert_eq!(harness.max_in_flight.load(Ordering::SeqCst), 1);
+}
+
+fn superseded(replies: &[GatewayServerFrame], request_id: &str) -> bool {
+    replies.iter().any(|frame| {
+        matches!(
+            frame,
+            GatewayServerFrame::PushRouteRefused {
+                request_id: id,
+                code: PushRouteRefusal::Superseded,
+                ..
+            } if id == request_id
+        )
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn dual_apns_routes_survive_rotation_reconnect_and_delete() {
+    let apns = ramflux_node_core::PushProviderKind::Apns;
+    let voip = ramflux_node_core::PushProviderKind::ApnsVoip;
+    let rotated = harness(std::time::Duration::from_millis(200));
+    rotated.queue.submit(register_as("alert", apns.clone())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    rotated.queue.submit(register_as("voip", voip.clone())).await;
+    rotated.queue.submit(register_as("alert-rotate", apns.clone())).await;
+    settle(&rotated, 3).await;
+    let executed =
+        rotated.executed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(executed, ["alert", "voip", "alert-rotate"]);
+    let replies = rotated.replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert!(!superseded(&replies, "voip"));
+    assert!(!superseded(&replies, "alert-rotate"));
+    assert_eq!(rotated.max_in_flight.load(Ordering::SeqCst), 1);
+
+    let barrier = harness(std::time::Duration::from_millis(200));
+    barrier.queue.submit(register_as("alert", apns.clone())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    barrier.queue.submit(register_as("voip", voip.clone())).await;
+    barrier.queue.submit(register_as("alert-rotate", apns.clone())).await;
+    barrier.queue.submit(deregister("delete-all")).await;
+    settle(&barrier, 4).await;
+    let executed =
+        barrier.executed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(executed, ["alert", "delete-all"]);
+    let replies = barrier.replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert!(superseded(&replies, "voip"));
+    assert!(superseded(&replies, "alert-rotate"));
+
+    let cleared = harness(std::time::Duration::from_millis(200));
+    cleared.queue.submit(register_as("alert", apns.clone())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    cleared.queue.submit(register_as("voip", voip)).await;
+    cleared.queue.submit(deregister_one("delete-alert", apns)).await;
+    settle(&cleared, 3).await;
+    let executed =
+        cleared.executed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert_eq!(executed, ["alert", "voip", "delete-alert"]);
+    let replies = cleared.replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert!(!superseded(&replies, "voip"));
 }

@@ -531,9 +531,10 @@ fn retention_redb_store_restores_incidents_and_rate_limits()
 fn notify_redb_store_restores_wake_queue() -> Result<(), Box<dyn std::error::Error>> {
     let path = temp_store_path("notify_redb_store_restores_wake_queue")?;
     let store = NotifyRedbStore::open(&path)?;
-    let entry =
-        store.queue_wake(notification_wake("wake_1", 60), "push_alias_hash", 1_760_000_000)?;
-    assert_eq!(entry.expires_at, 1_760_000_060);
+    let mut wake = notification_wake("wake_1", 60);
+    wake.absolute_expires_at = 1_760_000_030;
+    let entry = store.queue_wake(wake, "push_alias_hash", 1_760_000_000)?;
+    assert_eq!(entry.expires_at, 1_760_000_030);
     drop(store);
 
     let reopened = NotifyRedbStore::open(&path)?;
@@ -545,9 +546,39 @@ fn notify_redb_store_restores_wake_queue() -> Result<(), Box<dyn std::error::Err
         state.entry("wake_1").map(|entry| entry.push_alias_hash.as_str()),
         Some("push_alias_hash")
     );
-    assert_eq!(state.drop_expired(1_760_000_061), 1);
+    assert_eq!(state.drop_expired(1_760_000_029), 0);
+    assert_eq!(state.drop_expired(1_760_000_030), 1);
     assert_eq!(
         state.entry("wake_1").map(|entry| entry.status.clone()),
+        Some(NotifyQueueStatus::DroppedExpired)
+    );
+    Ok(())
+}
+
+#[test]
+fn cancel_pending_wake_drops_the_incremental_queue_row() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temp_store_path("cancel_pending_wake_drops_the_incremental_queue_row")?;
+    let store = NotifyRedbStore::open_without_wal(&path)?;
+    store.queue_wake(
+        notification_wake("wake_cancel_incremental", 60),
+        "push_alias_hash",
+        1_760_000_000,
+    )?;
+    store.cancel_pending_wake("wake_cancel_incremental")?;
+    let state = store
+        .load_state()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("notify_queue".to_owned()))?;
+    assert_eq!(
+        state.entry("wake_cancel_incremental").map(|entry| entry.status.clone()),
+        Some(NotifyQueueStatus::DroppedExpired)
+    );
+    drop(store);
+    let reopened = NotifyRedbStore::open_without_wal(&path)?;
+    let state = reopened
+        .load_state()?
+        .ok_or_else(|| NodeCoreError::SessionNotFound("notify_queue".to_owned()))?;
+    assert_eq!(
+        state.entry("wake_cancel_incremental").map(|entry| entry.status.clone()),
         Some(NotifyQueueStatus::DroppedExpired)
     );
     Ok(())
@@ -758,16 +789,13 @@ fn notify_wal_store_restores_raw_async_wakes() -> Result<(), Box<dyn std::error:
     let path = temp_store_path("notify_wal_store_restores_raw_async_wakes")?;
     let wal_root = path.with_extension("wal");
     let store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
-    let raw = serde_json::to_vec(&serde_json::json!({
-        "device_delivery_id": "device_notify_wal_raw",
-        "wake": notification_wake("wake_notify_wal_raw", 60),
-        "queued_at": 1_760_000_000_u64,
-        "dnd_active": false
-    }))?;
+    let queued_at = now_unix_seconds();
+    let raw = signed_raw_wake_body("device_notify_wal_raw", "env-notify-wal-raw", 11, queued_at)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let raw =
         runtime.block_on(store.queue_raw_wake_for_async_accept_async(raw, now_unix_seconds()))?;
-    assert!(raw.queue_id.starts_with("raw_wake_"));
+    let wake_id = ramflux_protocol::encode_base64url([11_u8; 16]);
+    assert_eq!(raw.queue_id, wake_id);
     drop(store);
 
     let reopened = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
@@ -775,7 +803,7 @@ fn notify_wal_store_restores_raw_async_wakes() -> Result<(), Box<dyn std::error:
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].queue_id, raw.queue_id);
     assert_eq!(pending[0].device_delivery_id, "device_notify_wal_raw");
-    assert_eq!(pending[0].wake.wake_id, "wake_notify_wal_raw");
+    assert_eq!(pending[0].wake.wake_id, wake_id);
     Ok(())
 }
 
@@ -797,45 +825,50 @@ fn notify_wal_store_async_accept_uses_server_time_for_expiry()
     )?;
     assert!(entry.queued_at >= before);
     assert_ne!(entry.queued_at, old_client_queued_at);
-    assert_eq!(entry.expires_at, entry.queued_at.saturating_add(60));
+    assert_eq!(entry.expires_at, entry.wake.absolute_expires_at);
+    assert_ne!(entry.expires_at, entry.queued_at.saturating_add(60));
     assert!(entry.expires_at > now_unix_seconds());
     Ok(())
 }
 
 #[test]
 fn notify_wal_store_prepares_recovered_raw_wake_for_provider_push()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::test_support::notification_authority::NativeScenario;
     let directory = tempfile::TempDir::new()?;
-    let path = directory.path().join("notify.redb");
-    let wal_root = path.with_extension("wal");
-    let mut store = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
-    store.update_provider_credential(&notify_webpush_credential("credential_raw_recovered"))?;
-    register_current_notify_route(
-        &mut store,
-        "device_notify_wal_raw_recovered",
-        "credential_raw_recovered",
-    )?;
-    let raw = serde_json::to_vec(&serde_json::json!({
-        "device_delivery_id": "device_notify_wal_raw_recovered",
-        "wake": notification_wake("wake_notify_wal_raw_recovered", 60),
-        "queued_at": 1_760_000_000_u64,
-        "dnd_active": false
+    let scenario = NativeScenario::new_with_wal(directory.path())?;
+    let (caller, target, mut signed) = scenario.call_wake()?;
+    let now = now_unix_seconds();
+    signed.body.class = ramflux_protocol::WakeClass::Message;
+    signed.body.call_intent_digest = None;
+    signed.body.expires_at = now + 600;
+    signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &ramflux_protocol::wake_signing_bytes(&signed.body)?,
+        &caller.branch,
+    );
+    let body = serde_json::to_vec(&serde_json::json!({
+        "device_delivery_id": target.target,
+        "signed_wake": signed,
     }))?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let raw =
-        runtime.block_on(store.queue_raw_wake_for_async_accept_async(raw, now_unix_seconds()))?;
-    drop(store);
-
-    let mut reopened = NotifyRedbStore::open_with_wal(&path, &wal_root)?;
-    reopened.set_push_route_authorizer(|_| Ok(true));
-    let pending = reopened.pending_entries_without_attempts(10)?;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].queue_id, raw.queue_id);
-    assert_eq!(pending[0].device_delivery_id, "device_notify_wal_raw_recovered");
-    let pushes = reopened.prepare_provider_pushes_for_entry(&pending[0])?;
-    assert_eq!(pushes.len(), 1);
-    assert_eq!(pushes[0].route.device_delivery_id, "device_notify_wal_raw_recovered");
-    assert_eq!(pushes[0].payload.wake_id, "wake_notify_wal_raw_recovered");
+    let raw = scenario
+        .notify
+        .queue_raw_wakes_for_async_accept_batch(vec![(body, now)])?
+        .pop()
+        .ok_or("test: raw WAL record missing")?;
+    let expiry = raw.effective_expires_at;
+    drop(scenario);
+    let reopened = NativeScenario::new_with_wal(directory.path())?;
+    let pending = reopened.notify.pending_entries_without_attempts(10)?;
+    assert_eq!(pending.len(), 1, "current signed raw wake was not recovered");
+    let entry = pending.first().ok_or("test: recovered wake missing")?;
+    assert_eq!(entry.queue_id, raw.queue_id, "WAL identity changed across restart");
+    assert_eq!(entry.device_delivery_id, target.target, "recovery changed the native recipient");
+    assert_eq!(entry.expires_at, expiry, "recovery extended the admission deadline");
+    let pushes = reopened.notify.prepare_provider_pushes_for_entry(entry)?;
+    assert_eq!(pushes.len(), 1, "native authority did not prepare the recovered message");
+    let push = pushes.first().ok_or("test: prepared provider missing")?;
+    assert_eq!(push.route.device_delivery_id, target.target, "wrong native provider target");
+    assert_eq!(push.payload.wake_id, signed.body.wake_id, "signed wake identity changed");
     Ok(())
 }
 
@@ -849,17 +882,16 @@ fn notify_wal_store_recovers_existing_shards_when_configured_count_shrinks()
     let store = NotifyRedbStore::open_with_wal_shard_count(&path, &wal_root, 4)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     for shard_id in 0..4 {
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "device_delivery_id": format!("device_notify_wal_shard_{shard_id}"),
-            "wake": notification_wake(&format!("wake_notify_wal_shard_{shard_id}"), 60),
-            "queued_at": 1_760_000_000_u64 + u64::try_from(shard_id)?,
-            "dnd_active": false
-        }))?;
-        runtime.block_on(store.queue_raw_wake_for_async_accept_shard_async(
-            shard_id,
-            raw,
-            1_760_000_000 + u64::try_from(shard_id)?,
-        ))?;
+        let queued_at = now_unix_seconds();
+        let raw = signed_raw_wake_body(
+            &format!("device_notify_wal_shard_{shard_id}"),
+            &format!("env-notify-wal-shard-{shard_id}"),
+            u8::try_from(shard_id).unwrap_or(0),
+            queued_at,
+        )?;
+        runtime.block_on(
+            store.queue_raw_wake_for_async_accept_shard_async(shard_id, raw, queued_at),
+        )?;
     }
     drop(store);
 
@@ -867,16 +899,14 @@ fn notify_wal_store_recovers_existing_shards_when_configured_count_shrinks()
     assert_eq!(reopened.notify_ingest_shard_count(), 4);
     let pending = reopened.pending_entries_without_attempts(10)?;
     assert_eq!(pending.len(), 4);
+    let expected = [
+        ramflux_protocol::encode_base64url([0_u8; 16]),
+        ramflux_protocol::encode_base64url([1_u8; 16]),
+        ramflux_protocol::encode_base64url([2_u8; 16]),
+        ramflux_protocol::encode_base64url([3_u8; 16]),
+    ];
     let wake_ids = pending.iter().map(|entry| entry.wake.wake_id.as_str()).collect::<BTreeSet<_>>();
-    assert_eq!(
-        wake_ids,
-        BTreeSet::from([
-            "wake_notify_wal_shard_0",
-            "wake_notify_wal_shard_1",
-            "wake_notify_wal_shard_2",
-            "wake_notify_wal_shard_3"
-        ])
-    );
+    assert_eq!(wake_ids, expected.iter().map(String::as_str).collect());
     Ok(())
 }
 

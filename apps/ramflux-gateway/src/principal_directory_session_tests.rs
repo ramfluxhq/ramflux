@@ -128,6 +128,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         }),
     };
     let runtime = crate::GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,

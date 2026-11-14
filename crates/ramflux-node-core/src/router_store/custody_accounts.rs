@@ -17,6 +17,7 @@ const MAX_ACCOUNTS: u64 = 65_536;
 pub(crate) struct CustodyAccountWrite<'a> {
     pub anchor: &'a str,
     pub state: &'a CustodyAccountState,
+    pub expected: Option<&'a CustodyAccountState>,
     pub is_new: bool,
     pub source: IpAddr,
     pub now: u64,
@@ -225,19 +226,19 @@ impl RouterRedbStore {
 
     pub(crate) fn record_custody_account(
         &self,
-        anchor: &str,
-        state: &CustodyAccountState,
-        is_new: bool,
-        source: IpAddr,
-        now: u64,
+        input: CustodyAccountWrite<'_>,
     ) -> Result<(), NodeCoreError> {
+        let CustodyAccountWrite { anchor, state, expected, is_new, source, now } = input;
         self.prune_custody_history(now)?;
+        let prepared = self.prepare_notify_owner(state, now)?;
         let tx = self.begin_write().map_err(error)?;
         self.record_custody_account_in_tx(
             &tx,
-            CustodyAccountWrite { anchor, state, is_new, source, now },
+            CustodyAccountWrite { anchor, state, expected, is_new, source, now },
         )?;
+        let committed = RouterRedbStore::commit_notify_owner(&tx, &prepared)?;
         tx.commit().map_err(error)?;
+        self.publish_notify_owner(&prepared, &committed)?;
         self.observe_custody_publication_commit();
         Ok(())
     }
@@ -249,7 +250,7 @@ impl RouterRedbStore {
         tx: &redb::WriteTransaction,
         input: CustodyAccountWrite<'_>,
     ) -> Result<(), NodeCoreError> {
-        let CustodyAccountWrite { anchor, state, is_new, source, now } = input;
+        let CustodyAccountWrite { anchor, state, expected, is_new, source, now } = input;
         let bytes = serde_json::to_vec(state).map_err(error)?;
         if bytes.len() > 16 * 1024 * 1024 {
             crate::custody_budget_log::refuse(
@@ -263,6 +264,20 @@ impl RouterRedbStore {
         }
         {
             let mut accounts = tx.open_table(ACCOUNTS).map_err(error)?;
+            let previous = accounts
+                .get(anchor)
+                .map_err(error)?
+                .map(|value| {
+                    ramflux_protocol::parse_i_json::<CustodyAccountState>(value.value())
+                        .map_err(error)
+                })
+                .transpose()?;
+            if previous.as_ref() == Some(state) {
+                return Ok(());
+            }
+            if previous.as_ref() != expected {
+                return Err(crate::send_authority::SendAuthorityError::Conflict.into());
+            }
             if is_new {
                 let mut budgets = tx.open_table(BUDGETS).map_err(error)?;
                 for (key, daily_limit, minute_limit, global) in self.custody_budget_keys(source) {

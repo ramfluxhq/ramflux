@@ -144,6 +144,7 @@ pub(super) async fn ordinary(
         stream,
         &GatewayServerFrame::SessionEstablished {
             session: GatewaySessionEstablishedFrame {
+                call_session_generation: None,
                 session_id: session.into(),
                 gateway_id: "ordinary-test".into(),
                 accepted_cursor: None,

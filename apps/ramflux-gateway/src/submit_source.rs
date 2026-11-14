@@ -84,6 +84,7 @@ pub(crate) mod tests {
             1,
         )?;
         let runtime = GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,

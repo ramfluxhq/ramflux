@@ -705,6 +705,8 @@ async fn json_quic_post_raw(
         .await
         .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?;
     mesh_quic_post_raw_with_peer_ca_pems_async(MeshQuicRawPost {
+        expected_peer_spiffe: None,
+        max_response_frame_bytes: 5 * 1024 * 1024,
         endpoint,
         path,
         tls,

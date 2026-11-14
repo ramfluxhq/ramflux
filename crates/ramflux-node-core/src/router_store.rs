@@ -66,7 +66,10 @@ const ROUTER_WAL_DIR_ENV: &str = "RAMFLUX_ROUTER_WAL_DIR";
 const CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV: &str = "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_DAY";
 const CUSTODY_NEW_PRINCIPALS_PER_MINUTE_ENV: &str = "RAMFLUX_CUSTODY_NEW_PRINCIPALS_PER_MINUTE";
 
+mod notify_owner;
+
 pub struct RouterRedbStore {
+    notify_authority: std::sync::OnceLock<Arc<crate::send_authority::AuthorityClient>>,
     db: Arc<redb::Database>,
     path: PathBuf,
     publication: std::sync::Mutex<Option<Arc<publication::PublicationCore>>>,
@@ -594,6 +597,7 @@ impl RouterRedbStore {
             RouterWalStore::validate_formats(root)?;
         }
         Self::initialize_open_schema(&db)?;
+        crate::send_authority::AuthorityOrigin::initialize(&db)?;
         let mut legacy_registry: IdentityRegistry =
             load_snapshot(&db, ROUTER_SNAPSHOT_TABLE, ROUTER_IDENTITY_REGISTRY_KEY)?
                 .unwrap_or_default();
@@ -625,6 +629,7 @@ impl RouterRedbStore {
         migration_barrier::initialize_wal_view(&db, submission_wal.as_ref())?;
         Ok(Self {
             db: Arc::clone(&db),
+            notify_authority: std::sync::OnceLock::new(),
             path: path.to_path_buf(),
             publication: std::sync::Mutex::new(None),
             commit_writer,

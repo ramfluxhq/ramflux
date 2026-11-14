@@ -63,6 +63,7 @@ pub enum NotifyWalPayload {
     RawWake(NotifyWalRawWake),
     ProviderAttempt(ProviderPushAttempt),
     Delivered { queue_id: String },
+    Closed { queue_id: String, retain_until: u64 },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -70,6 +71,34 @@ pub struct NotifyWalRawWake {
     pub queue_id: String,
     pub raw_body: Vec<u8>,
     pub queued_at: u64,
+    /// Effective absolute expiry fixed at admission. Zero means the row cannot be sent.
+    #[serde(default)]
+    pub effective_expires_at: u64,
+}
+
+fn raw_wake_deadline(raw: &NotifyWalRawWake) -> u64 {
+    raw.effective_expires_at
+}
+
+fn closed_retain_until(state: &NotifyWalState, queue_id: &str) -> u64 {
+    if let Some(until) = state.closed_ids.get(queue_id) {
+        return *until;
+    }
+    let skew = ramflux_protocol::CLOCK_UNCERTAINTY_SECONDS;
+    if let Some(NotifyWalPayload::QueueEntry(entry)) =
+        state.entries_by_id.get(queue_id).map(|record| &record.payload)
+    {
+        return entry.expires_at.saturating_add(skew);
+    }
+    if let Some(NotifyWalPayload::RawWake(raw)) =
+        state.raw_wakes_by_id.get(queue_id).map(|record| &record.payload)
+        && raw.effective_expires_at != 0
+    {
+        return raw.effective_expires_at.saturating_add(skew);
+    }
+    crate::now_unix_seconds()
+        .saturating_add(ramflux_protocol::MESSAGE_MAX_LIFETIME_SECONDS)
+        .saturating_add(skew)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -78,6 +107,7 @@ enum StoredNotifyWalPayload {
     RawWake(NotifyWalRawWake),
     ProviderAttempt(ProviderPushAttempt),
     Delivered { queue_id: String },
+    Closed { queue_id: String, retain_until: u64 },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -105,6 +135,8 @@ struct StoredNotifyWalWake {
     delivery_class: ramflux_protocol::NotificationDeliveryClass,
     priority: ramflux_protocol::PushPriority,
     ttl: u32,
+    #[serde(default)]
+    absolute_expires_at: u64,
     collapse_key: Option<String>,
     encrypted_hint: Option<String>,
 }
@@ -117,6 +149,7 @@ impl NotifyWalPayload {
             Self::RawWake(raw) => format!("raw:{}", raw.queue_id),
             Self::ProviderAttempt(attempt) => format!("attempt:{}", attempt.queue_id),
             Self::Delivered { queue_id } => format!("delivered:{queue_id}"),
+            Self::Closed { queue_id, .. } => format!("closed:{queue_id}"),
         }
     }
 }
@@ -133,8 +166,9 @@ impl TryFrom<&NotifyWalPayload> for StoredNotifyWalPayload {
             NotifyWalPayload::ProviderAttempt(attempt) => {
                 Ok(Self::ProviderAttempt(attempt.clone()))
             }
-            NotifyWalPayload::Delivered { queue_id } => {
-                Ok(Self::Delivered { queue_id: queue_id.clone() })
+            NotifyWalPayload::Delivered { .. } => Err(NodeCoreError::NotifyWakeStateResetRequired),
+            NotifyWalPayload::Closed { queue_id, retain_until } => {
+                Ok(Self::Closed { queue_id: queue_id.clone(), retain_until: *retain_until })
             }
         }
     }
@@ -148,7 +182,15 @@ impl TryFrom<StoredNotifyWalPayload> for NotifyWalPayload {
             StoredNotifyWalPayload::QueueEntry(entry) => Ok(Self::QueueEntry(entry.try_into()?)),
             StoredNotifyWalPayload::RawWake(raw) => Ok(Self::RawWake(raw)),
             StoredNotifyWalPayload::ProviderAttempt(attempt) => Ok(Self::ProviderAttempt(attempt)),
-            StoredNotifyWalPayload::Delivered { queue_id } => Ok(Self::Delivered { queue_id }),
+            StoredNotifyWalPayload::Delivered { .. } => {
+                Err(NodeCoreError::NotifyWakeStateResetRequired)
+            }
+            StoredNotifyWalPayload::Closed { queue_id, retain_until } => {
+                if retain_until == 0 {
+                    return Err(NodeCoreError::NotifyWakeStateResetRequired);
+                }
+                Ok(Self::Closed { queue_id, retain_until })
+            }
         }
     }
 }
@@ -212,6 +254,7 @@ impl TryFrom<&ramflux_protocol::NotificationWake> for StoredNotifyWalWake {
             delivery_class: wake.delivery_class.clone(),
             priority: wake.priority.clone(),
             ttl: wake.ttl,
+            absolute_expires_at: wake.absolute_expires_at,
             collapse_key: wake.collapse_key.clone(),
             encrypted_hint: wake.encrypted_hint.clone(),
         })
@@ -238,6 +281,7 @@ impl TryFrom<StoredNotifyWalWake> for ramflux_protocol::NotificationWake {
             delivery_class: wake.delivery_class,
             priority: wake.priority,
             ttl: wake.ttl,
+            absolute_expires_at: wake.absolute_expires_at,
             collapse_key: wake.collapse_key,
             encrypted_hint: wake.encrypted_hint,
         })
@@ -254,12 +298,39 @@ struct NotifyWalState {
     entries_by_id: BTreeMap<String, NotifyWalRecoveredRecord>,
     raw_wakes_by_id: BTreeMap<String, NotifyWalRecoveredRecord>,
     provider_attempts_by_queue: BTreeMap<String, Vec<ProviderPushAttempt>>,
+    /// Cancelled or delivered wake ids, retained until the mapped unix second.
+    closed_ids: BTreeMap<String, u64>,
+    closed_due: std::collections::BTreeSet<(u64, String)>,
 }
 
 impl NotifyWalState {
+    fn close_id(&mut self, queue_id: String, until: u64) {
+        let retained = *self.closed_ids.entry(queue_id.clone()).or_insert(until);
+        self.closed_due.insert((retained, queue_id));
+    }
+
+    fn prune_closed(&mut self, now: u64) -> usize {
+        let mut removed = 0;
+        for _ in 0..128 {
+            let Some((until, id)) = self.closed_due.first().cloned() else { break };
+            if until > now {
+                break;
+            }
+            self.closed_due.remove(&(until, id.clone()));
+            if self.closed_ids.get(&id) == Some(&until) {
+                self.closed_ids.remove(&id);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     fn apply(&mut self, payload: NotifyWalPayload, location: NotifyWalRecordLocation) {
         match payload {
             NotifyWalPayload::QueueEntry(entry) => {
+                if self.closed_ids.contains_key(&entry.queue_id) {
+                    return;
+                }
                 self.raw_wakes_by_id.remove(&entry.queue_id);
                 self.entries_by_id.insert(
                     entry.queue_id.clone(),
@@ -270,6 +341,9 @@ impl NotifyWalState {
                 );
             }
             NotifyWalPayload::RawWake(raw) => {
+                if self.closed_ids.contains_key(&raw.queue_id) {
+                    return;
+                }
                 if !self.entries_by_id.contains_key(&raw.queue_id) {
                     self.raw_wakes_by_id.insert(
                         raw.queue_id.clone(),
@@ -288,8 +362,15 @@ impl NotifyWalState {
                 }
             }
             NotifyWalPayload::Delivered { queue_id } => {
+                let retain_until = closed_retain_until(self, &queue_id);
                 self.entries_by_id.remove(&queue_id);
                 self.raw_wakes_by_id.remove(&queue_id);
+                self.close_id(queue_id, retain_until);
+            }
+            NotifyWalPayload::Closed { queue_id, retain_until } => {
+                self.entries_by_id.remove(&queue_id);
+                self.raw_wakes_by_id.remove(&queue_id);
+                self.close_id(queue_id, retain_until);
             }
         }
     }
@@ -341,19 +422,24 @@ impl NotifyWalState {
             }
             NotifyWalPayload::RawWake(_)
             | NotifyWalPayload::ProviderAttempt(_)
-            | NotifyWalPayload::Delivered { .. } => None,
+            | NotifyWalPayload::Delivered { .. }
+            | NotifyWalPayload::Closed { .. } => None,
         }));
         payloads.extend(self.raw_wakes_by_id.values().filter_map(|record| match &record.payload {
             NotifyWalPayload::RawWake(raw) => Some(NotifyWalPayload::RawWake(raw.clone())),
             NotifyWalPayload::QueueEntry(_)
             | NotifyWalPayload::ProviderAttempt(_)
-            | NotifyWalPayload::Delivered { .. } => None,
+            | NotifyWalPayload::Delivered { .. }
+            | NotifyWalPayload::Closed { .. } => None,
         }));
         payloads.extend(
             self.provider_attempts_by_queue.values().flat_map(|attempts| {
                 attempts.iter().cloned().map(NotifyWalPayload::ProviderAttempt)
             }),
         );
+        payloads.extend(self.closed_ids.iter().map(|(queue_id, retain_until)| {
+            NotifyWalPayload::Closed { queue_id: queue_id.clone(), retain_until: *retain_until }
+        }));
         payloads
     }
 }
@@ -365,6 +451,7 @@ impl NotifyWalStore {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
+        ensure_wake_wal_format(&root)?;
         let segment_bytes =
             notify_wal_u64_env(NOTIFY_WAL_SEGMENT_BYTES_ENV, NOTIFY_WAL_SEGMENT_BYTES_DEFAULT)
                 .max(1024 * 1024);
@@ -461,6 +548,18 @@ impl NotifyWalStore {
             .map_or_else(|_| BTreeMap::new(), |state| state.provider_attempts_by_queue.clone())
     }
 
+    pub(crate) fn queue_entry(
+        &self,
+        queue_id: &str,
+    ) -> Result<Option<NotifyQueueEntry>, NodeCoreError> {
+        let state =
+            self.state.lock().map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+        Ok(state.entries_by_id.get(queue_id).and_then(|recovered| match &recovered.payload {
+            NotifyWalPayload::QueueEntry(entry) => Some(entry.clone()),
+            _ => None,
+        }))
+    }
+
     #[must_use]
     pub fn active_entries(&self) -> Vec<NotifyQueueEntry> {
         self.state.lock().map_or_else(
@@ -473,7 +572,8 @@ impl NotifyWalStore {
                         NotifyWalPayload::QueueEntry(entry) => Some(entry.clone()),
                         NotifyWalPayload::RawWake(_)
                         | NotifyWalPayload::ProviderAttempt(_)
-                        | NotifyWalPayload::Delivered { .. } => None,
+                        | NotifyWalPayload::Delivered { .. }
+                        | NotifyWalPayload::Closed { .. } => None,
                     })
                     .collect()
             },
@@ -526,6 +626,54 @@ impl NotifyWalStore {
         self.append_async(NotifyWalPayload::RawWake(raw)).await
     }
 
+    /// One signed wake occupies one queue id. A closed id is not appended again.
+    ///
+    /// # Errors
+    /// Returns an error when the WAL lock is poisoned or the append fails.
+    pub async fn enqueue_raw_once_async(
+        &self,
+        raw: NotifyWalRawWake,
+    ) -> Result<bool, NodeCoreError> {
+        if self.wake_is_closed(&raw.queue_id) {
+            return Ok(false);
+        }
+        self.record_raw_wake_async(raw).await?;
+        Ok(true)
+    }
+
+    /// True when this wake id was cancelled or already delivered.
+    #[must_use]
+    pub fn wake_is_closed(&self, queue_id: &str) -> bool {
+        self.state.lock().is_ok_and(|mut state| {
+            let now = crate::now_unix_seconds();
+            state.prune_closed(now);
+            state.closed_ids.contains_key(queue_id)
+        })
+    }
+
+    /// Drop closed ids whose retain horizon is at or before `now`.
+    ///
+    /// # Errors
+    /// Returns an error when the WAL index lock is poisoned.
+    pub fn prune_closed_ids(&self, now: u64) -> Result<usize, NodeCoreError> {
+        let mut state = self.state.lock().map_err(|source| {
+            NodeCoreError::ItestJson(format!("notify WAL index lock poisoned: {source}"))
+        })?;
+        Ok(state.prune_closed(now))
+    }
+
+    /// Tombstone a wake that may not be queued yet. A later raw or decoded row cannot reopen it.
+    ///
+    /// # Errors
+    /// Returns an error when the tombstone cannot be appended.
+    pub fn tombstone_wake(&self, wake_id: &str) -> Result<(), NodeCoreError> {
+        if self.wake_is_closed(wake_id) {
+            return Ok(());
+        }
+        self.mark_delivered(wake_id)?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when the provider attempt cannot be durably appended.
     pub fn record_provider_attempt(
@@ -541,7 +689,33 @@ impl NotifyWalStore {
         &self,
         queue_id: impl Into<String>,
     ) -> Result<NotifyWalRecordLocation, NodeCoreError> {
-        self.append(NotifyWalPayload::Delivered { queue_id: queue_id.into() })
+        let queue_id = queue_id.into();
+        let retain_until = {
+            let state = self.state.lock().map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+            closed_retain_until(&state, &queue_id)
+        };
+        self.append(NotifyWalPayload::Closed { queue_id, retain_until })
+    }
+
+    /// Drops queue rows and raw bodies that are not a current `WakeV2`.
+    ///
+    /// Each dropped id gets a `Delivered` tombstone, so a later recovery cannot
+    /// project the old payload or extend its deadline. Current raw `WakeV2`
+    /// requests stay queued.
+    ///
+    /// # Errors
+    /// Returns an error when the WAL lock is poisoned or a tombstone cannot be appended.
+    pub fn drop_legacy_wakes(&self) -> Result<usize, NodeCoreError> {
+        let ids = {
+            let state = self.state.lock().map_err(|source| {
+                NodeCoreError::ItestJson(format!("notify WAL index lock poisoned: {source}"))
+            })?;
+            legacy_wake_ids(&state)
+        };
+        for queue_id in &ids {
+            self.mark_delivered(queue_id.clone())?;
+        }
+        Ok(ids.len())
     }
 
     /// # Errors
@@ -1057,17 +1231,11 @@ fn notify_wal_compact(
             _ => false,
         });
         retained.raw_wakes_by_id.retain(|_, record| match &record.payload {
-            NotifyWalPayload::RawWake(raw) => {
-                let ttl = serde_json::from_slice::<serde_json::Value>(&raw.raw_body)
-                    .ok()
-                    .and_then(|value| value["wake"]["ttl"].as_u64())
-                    .unwrap_or(0)
-                    .min(86400);
-                raw.queued_at.saturating_add(ttl) > now
-            }
+            NotifyWalPayload::RawWake(raw) => raw_wake_deadline(raw) > now,
             _ => false,
         });
         crate::notify::retention::prune_attempts(&mut retained.provider_attempts_by_queue, now);
+        retained.prune_closed(now);
     }
     let payloads = retained.compacted_payloads();
     drop(retained);
@@ -1198,6 +1366,35 @@ fn read_notify_wal_record(
     Ok(Some((payload, len)))
 }
 
+fn ensure_wake_wal_format(root: &Path) -> Result<(), NodeCoreError> {
+    let marker = root.join("notify_wake_state_format");
+    match fs::File::open(&marker) {
+        Ok(mut file) => {
+            let mut bytes = [0_u8; 3];
+            let n = file.read(&mut bytes).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+            if n != 2 || bytes.get(..2) != Some(b"1\n".as_slice()) {
+                return Err(NodeCoreError::NotifyWakeStateResetRequired);
+            }
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(NodeCoreError::ItestJson(e.to_string())),
+    }
+    if !notify_wal_segment_ids(root)?.is_empty() {
+        return Err(NodeCoreError::NotifyWakeStateResetRequired);
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+    file.write_all(b"1\n").map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+    file.sync_all().map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
+    fs::File::open(root)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| NodeCoreError::ItestJson(e.to_string()))
+}
+
 fn notify_wal_segment_ids(root: &Path) -> Result<Vec<u64>, NodeCoreError> {
     let mut ids = Vec::new();
     for entry in fs::read_dir(root)
@@ -1242,6 +1439,56 @@ fn sync_notify_wal_directory(root: &Path) -> Result<(), NodeCoreError> {
     let directory =
         File::open(root).map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
     directory.sync_all().map_err(|source| NodeCoreError::ItestJson(source.to_string()))
+}
+
+/// `true` when the row was projected from `WakeV2` and still carries that contract.
+#[must_use]
+pub(crate) fn notification_wake_is_current_v2(wake: &ramflux_protocol::NotificationWake) -> bool {
+    wake.version == 2
+        && wake.schema == ramflux_protocol::domain::NOTIFICATION_WAKE_V2
+        && wake.domain == ramflux_protocol::domain::NOTIFICATION_WAKE_V2
+}
+
+fn legacy_wake_ids(state: &NotifyWalState) -> Vec<String> {
+    let queued = state.entries_by_id.iter().filter_map(|(queue_id, record)| {
+        let NotifyWalPayload::QueueEntry(entry) = &record.payload else {
+            return None;
+        };
+        (!notification_wake_is_current_v2(&entry.wake)).then(|| queue_id.clone())
+    });
+    let raw = state.raw_wakes_by_id.iter().filter_map(|(queue_id, record)| {
+        let NotifyWalPayload::RawWake(raw) = &record.payload else {
+            return None;
+        };
+        (!raw_body_is_current_wake(&raw.raw_body)).then(|| queue_id.clone())
+    });
+    queued.chain(raw).collect()
+}
+
+fn raw_body_is_current_wake(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    if json_contains_legacy_domain(&value) {
+        return false;
+    }
+    let Some(signed_body) = value.get("signed_wake").and_then(|wake| wake.get("body")) else {
+        return false;
+    };
+    signed_body.get("version").and_then(serde_json::Value::as_u64) == Some(2)
+        && signed_body.get("audience").and_then(serde_json::Value::as_str)
+            == Some(ramflux_protocol::NOTIFY_WAKE_AUDIENCE)
+}
+
+fn json_contains_legacy_domain(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text == ramflux_protocol::domain::NOTIFICATION_WAKE,
+        serde_json::Value::Array(items) => items.iter().any(json_contains_legacy_domain),
+        serde_json::Value::Object(map) => map.values().any(json_contains_legacy_domain),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
 }
 
 fn notify_wal_usize_env(name: &str, default: usize) -> usize {
@@ -1427,6 +1674,27 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn closed_ids_expire_after_the_wake_horizon_and_survive_compaction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_notify_wal_dir("closed_ids_expire_after_the_wake_horizon")?;
+        let store = NotifyWalStore::open(&root)?;
+        let mut entry = notify_wal_queue_entry("wal_bound");
+        entry.expires_at = 4_102_444_800;
+        store.append(NotifyWalPayload::QueueEntry(entry))?;
+        store.mark_delivered("wal_bound")?;
+        assert!(store.wake_is_closed("wal_bound"));
+        store.prune_expired(1_760_000_000)?;
+        drop(store);
+        let reopened = NotifyWalStore::open(&root)?;
+        assert!(reopened.wake_is_closed("wal_bound"));
+        let horizon = 4_102_444_800_u64.saturating_add(ramflux_protocol::CLOCK_UNCERTAINTY_SECONDS);
+        assert_eq!(reopened.prune_closed_ids(horizon)?, 1);
+        assert!(!reopened.wake_is_closed("wal_bound"));
+        remove_notify_wal_dir(root);
+        Ok(())
+    }
+
     fn notify_wal_queue_entry(queue_id: &str) -> NotifyQueueEntry {
         NotifyQueueEntry {
             queue_id: queue_id.to_owned(),
@@ -1457,6 +1725,7 @@ mod tests {
             delivery_class: NotificationDeliveryClass::SelfDeviceControlNotification,
             priority: PushPriority::Normal,
             ttl: 300,
+            absolute_expires_at: 1_900_000_300,
             collapse_key: Some("collapse_self_device".to_owned()),
             encrypted_hint: Some("encrypted_hint".to_owned()),
         }

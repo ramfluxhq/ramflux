@@ -73,6 +73,7 @@ pub(crate) struct GatewayQuicContext {
 
 #[derive(Clone)]
 pub(crate) struct GatewaySessionRuntime {
+    pub(crate) call_session_generation: Option<String>,
     pub(crate) session_push: Option<String>,
     pub(crate) ephemeral: bool,
     pub(crate) push_limit: usize,
@@ -392,6 +393,7 @@ mod tests {
 
     fn config(root: &Path, node_id: &str) -> ramflux_node_core::NodeServiceConfig {
         ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: node_id.to_owned(),
             service_id: "ramflux-gateway".to_owned(),
             redb_path: root.join("gateway.redb").display().to_string(),

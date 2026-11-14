@@ -7,6 +7,7 @@ pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     let root = ramflux_crypto::create_identity_root("agent", [3; 32]);
     let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
     Ok(crate::GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,
@@ -64,5 +65,13 @@ pub(crate) fn signed_submit(
         &ramflux_protocol::signed_bytes(&signed_request)?,
         [4; 32],
     );
-    Ok(ramflux_node_core::GatewaySubmitFrame { signed_request, envelope })
+    Ok(ramflux_node_core::GatewaySubmitFrame {
+        call_context: None,
+        signed_request,
+        envelope,
+        call_intent: None,
+        wake_id: None,
+        call_ref: None,
+        call_terminal: None,
+    })
 }

@@ -33,6 +33,7 @@ pub(crate) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<Value>>>) {
 }
 pub(crate) fn runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     Ok(crate::GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: Some(ID.into()),
         ephemeral: false,
         push_limit: 256,

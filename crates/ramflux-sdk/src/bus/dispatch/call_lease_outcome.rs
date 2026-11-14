@@ -74,11 +74,16 @@ impl VoiceAdmissionProbe {
             vec![scope.callee.clone()],
             now,
         )?;
-        let mut recipient = LiveCall::incoming(&origin.pending[0], scope.callee, now)?;
+        let invite = origin.pending.first().ok_or_else(|| invalid("probe invite absent"))?;
+        let mut recipient = LiveCall::incoming(invite, scope.callee, now)?;
+        // This lease probe starts after signaling authorization. Fresh calls remain held
+        // in production; the real gateway reply below tests only lease admission effects.
+        recipient.allow_media();
         recipient.answer(now)?;
         let answer = recipient.pending.last().ok_or_else(|| invalid("probe answer absent"))?;
         origin.apply(answer, now)?;
         let mut call = if callee { recipient } else { origin };
+        call.allow_media();
         if active {
             call.activate(
                 ramflux_protocol::VoiceAllocation {
@@ -112,7 +117,7 @@ impl VoiceAdmissionProbe {
     /// Returns serialization errors.
     pub fn snapshot(&self) -> Result<serde_json::Value, SdkError> {
         Ok(
-            serde_json::json!({"row":self.0.row,"allocation":self.0.allocation,"pending":self.0.pending,"receive_key_present":self.0.receive_key.is_some(),"next_refresh":self.0.next_lease_refresh}),
+            serde_json::json!({"row":self.0.row,"allocation":self.0.allocation,"pending":self.0.pending,"receive_key_present":self.0.receive_key.is_some(),"next_refresh":self.0.next_lease_refresh,"media_held":self.0.media_held}),
         )
     }
     /// Runs the regular bounded call/media expiry rules.

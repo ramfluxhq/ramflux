@@ -21,11 +21,27 @@ use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod bootstrap;
 pub(crate) mod retention;
 mod route_authority;
+mod send_gate;
+#[cfg(test)]
+mod tests;
+mod wake_admission;
 pub use route_authority::PUSH_ROUTE_FENCE_SECONDS;
 mod format;
+pub(crate) use send_gate::retire_call_wakes;
+mod route_selection;
+pub use route_selection::{apns_topic_is_voip, voip_push_enabled};
 mod routes;
+mod wake_policy;
+pub use wake_policy::project_wake_v2;
+
+const NOTIFY_WAKE_DUE: TableDefinition<(u64, &str), u8> =
+    TableDefinition::new("notify_wake_due_v1");
+const NOTIFY_WAKE_FORMAT: TableDefinition<&str, u64> =
+    TableDefinition::new("notify_wake_state_format");
+const NOTIFY_WAKE_CLEANUP_LIMIT: usize = 128;
 
 pub const NOTIFY_RATE_ALIAS_PER_MINUTE: usize = 60;
 pub const NOTIFY_RATE_ALIAS_PER_HOUR: usize = 600;
@@ -35,6 +51,8 @@ const NOTIFY_COMMIT_BATCH_MAX_ENV: &str = "RAMFLUX_NOTIFY_COMMIT_BATCH_MAX";
 const NOTIFY_COMMIT_WINDOW_US_ENV: &str = "RAMFLUX_NOTIFY_COMMIT_WINDOW_US";
 const NOTIFY_COMMIT_QUEUE_CAPACITY_ENV: &str = "RAMFLUX_NOTIFY_COMMIT_QUEUE_CAPACITY";
 const NOTIFY_WAL_ENABLED_ENV: &str = "RAMFLUX_NOTIFY_WAL";
+const NOTIFY_WAKE_LEDGER: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("notify_wake_ledger_v1");
 const NOTIFY_WAL_DIR_ENV: &str = "RAMFLUX_NOTIFY_WAL_DIR";
 const NOTIFY_INGEST_SHARDS_ENV: &str = "RAMFLUX_NOTIFY_INGEST_SHARDS";
 const NOTIFY_COMMIT_BATCH_MAX_DEFAULT: usize = 256;
@@ -53,6 +71,7 @@ pub enum NotifyQueueStatus {
 #[serde(rename_all = "snake_case")]
 pub enum PushProviderKind {
     Apns,
+    ApnsVoip,
     Fcm,
     #[serde(rename = "webpush")]
     WebPush,
@@ -116,6 +135,9 @@ pub struct DevicePushRoute {
     pub webpush_auth: Option<String>,
     pub registered_at: u64,
     pub expires_at: u64,
+    /// Server-allocated id. It is never reused. Zero was not admitted here.
+    #[serde(default)]
+    pub route_generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -165,6 +187,18 @@ pub struct PreparedProviderPush {
     pub push_alias_hash: String,
     pub collapse_key_hash: String,
     pub action: NotifyDeliveryAction,
+    /// Absolute provider deadline in Unix seconds. Retries must not move it.
+    #[serde(default)]
+    pub expires_at: u64,
+    /// Server clock when this push was prepared. A call sees rollback when `now` moves backward.
+    #[serde(default)]
+    pub admitted_unix: u64,
+    /// Process boot that prepared this push. A call from another boot is not sent.
+    #[serde(default)]
+    pub boot_id: u64,
+    /// Owner epoch observed at prepare. Zero means the route had no authorizer.
+    #[serde(default)]
+    pub owner_epoch: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -183,9 +217,12 @@ pub struct NotifyQueueEntry {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawS13WakeRequest {
     device_delivery_id: String,
-    wake: ramflux_protocol::NotificationWake,
+    signed_wake: ramflux_protocol::SignedWakeV2,
+    #[serde(default, rename = "queued_at")]
+    _queued_at: Option<u64>,
     #[serde(default)]
     dnd_active: Option<bool>,
 }
@@ -228,6 +265,8 @@ struct StoredNotificationWake {
     delivery_class: ramflux_protocol::NotificationDeliveryClass,
     priority: ramflux_protocol::PushPriority,
     ttl: u32,
+    #[serde(default)]
+    absolute_expires_at: u64,
     collapse_key: Option<String>,
     encrypted_hint: Option<String>,
 }
@@ -244,6 +283,7 @@ struct StoredNotificationWakeRef<'a> {
     delivery_class: &'a ramflux_protocol::NotificationDeliveryClass,
     priority: &'a ramflux_protocol::PushPriority,
     ttl: u32,
+    absolute_expires_at: u64,
     collapse_key: Option<&'a String>,
     encrypted_hint: Option<&'a String>,
 }
@@ -307,6 +347,7 @@ impl<'a> TryFrom<&'a ramflux_protocol::NotificationWake> for StoredNotificationW
             delivery_class: &wake.delivery_class,
             priority: &wake.priority,
             ttl: wake.ttl,
+            absolute_expires_at: wake.absolute_expires_at,
             collapse_key: wake.collapse_key.as_ref(),
             encrypted_hint: wake.encrypted_hint.as_ref(),
         })
@@ -333,6 +374,7 @@ impl TryFrom<StoredNotificationWake> for ramflux_protocol::NotificationWake {
             delivery_class: wake.delivery_class,
             priority: wake.priority,
             ttl: wake.ttl,
+            absolute_expires_at: wake.absolute_expires_at,
             collapse_key: wake.collapse_key,
             encrypted_hint: wake.encrypted_hint,
         })
@@ -379,7 +421,11 @@ impl NotifyQueueState {
         queued_at: u64,
         dnd_active: bool,
     ) -> NotifyQueueEntry {
-        let expires_at = queued_at.saturating_add(u64::from(wake.ttl));
+        if let Some(existing) = self.entries_by_id.get(&wake.wake_id) {
+            return existing.clone();
+        }
+        // The signed effective expiry is the only deadline. Queue time cannot move it.
+        let expires_at = wake.absolute_expires_at;
         let entry = NotifyQueueEntry {
             queue_id: wake.wake_id.clone(),
             device_delivery_id: device_delivery_id.into(),
@@ -470,11 +516,16 @@ impl NotifyQueueState {
 }
 
 pub struct NotifyRedbStore {
+    send_authority: std::sync::Arc<crate::send_authority::SendAuthorityStore>,
+    local_writer: Mutex<()>,
+    send_authority_reader: Option<Box<send_gate::RemoteAuthorityReader>>,
     route_key: crate::NodeSecret,
     route_authorizer: Option<Box<route_authority::RouteAuthorizer>>,
     allow_itest_unbound_routes: bool,
     revocation_cursor: Mutex<Option<String>>,
     route_owners_checked: std::sync::atomic::AtomicBool,
+    route_cleanup_cursors: Mutex<[Option<String>; 2]>,
+    route_expiry_cursor: Mutex<Option<String>>,
     db: std::sync::Arc<redb::Database>,
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
@@ -723,7 +774,7 @@ impl NotifyRedbStore {
         Self::open_with_wal_root(path, Some(wal_root.as_ref()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open_with_wal_shard_count(
         path: impl AsRef<Path>,
         wal_root: impl AsRef<Path>,
@@ -737,7 +788,7 @@ impl NotifyRedbStore {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         Self::open_with_wal_root(path, None)
     }
@@ -769,6 +820,7 @@ impl NotifyRedbStore {
         let route_key = route_key_override.map_or_else(routes::configured_key, Ok)?;
         format::validate_store(&db)?;
         routes::validate(&db, &route_key)?;
+        initialize_wake_state_format(&db)?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -787,7 +839,21 @@ impl NotifyRedbStore {
             let _table = write_txn
                 .open_table(NOTIFY_CREDENTIAL_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let _table = write_txn
+                .open_table(NOTIFY_WAKE_LEDGER)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            write_txn
+                .open_table(send_gate::ROOT_WAKES)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            write_txn
+                .open_table(send_gate::CALL_WAKES)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
+        write_txn
+            .open_table(send_gate::DIAGNOSTICS)
+            .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        wake_admission::initialize(&write_txn)?;
+        route_authority::initialize(&write_txn)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let wal_shards = match (wal_root, shard_count_override) {
             (Some(root), Some(shard_count)) => {
@@ -797,18 +863,58 @@ impl NotifyRedbStore {
             (None, _) => None,
         };
         let db = std::sync::Arc::new(db);
+        let boot = ramflux_protocol::encode_base64url(
+            ramflux_crypto::random_32()
+                .map_err(|e| crate::send_authority::SendAuthorityError::Storage(e.to_string()))?,
+        );
+        let send_authority = std::sync::Arc::new(crate::send_authority::SendAuthorityStore::new(
+            std::sync::Arc::clone(&db),
+            boot,
+        )?);
+        send_authority.set_voip_enabled(route_selection::voip_push_enabled())?;
         let commit_writer = NotifyCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self {
+            send_authority,
+            local_writer: Mutex::new(()),
+            send_authority_reader: None,
             route_key,
             route_authorizer: None,
             allow_itest_unbound_routes: false,
             revocation_cursor: Mutex::new(None),
             route_owners_checked: std::sync::atomic::AtomicBool::new(false),
+            route_cleanup_cursors: Mutex::new([None, None]),
+            route_expiry_cursor: Mutex::new(None),
             db,
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
             wal_shards,
         })
+    }
+
+    #[must_use]
+    pub fn send_authority(&self) -> &crate::send_authority::SendAuthorityStore {
+        &self.send_authority
+    }
+
+    #[must_use]
+    pub fn send_authority_handle(
+        &self,
+    ) -> std::sync::Arc<crate::send_authority::SendAuthorityStore> {
+        std::sync::Arc::clone(&self.send_authority)
+    }
+
+    /// Install a store-local `VoIP` policy. `None` reads the operator environment again.
+    ///
+    /// # Errors
+    /// Returns an error when the policy lock is poisoned.
+    pub fn set_voip_policy(&self, enabled: Option<bool>) -> Result<(), NodeCoreError> {
+        self.send_authority
+            .set_voip_enabled(enabled.unwrap_or_else(route_selection::voip_push_enabled))?;
+        Ok(())
+    }
+
+    fn voip_enabled(&self) -> bool {
+        self.send_authority.voip_enabled()
     }
 
     #[must_use]
@@ -860,6 +966,14 @@ impl NotifyRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn save_state(&self, state: &NotifyQueueState) -> Result<(), NodeCoreError> {
+        self.replace_authority_snapshot(state)?;
+        self.save_queue_state(state)
+    }
+
+    /// Persist queue/diagnostic state without overwriting independently published routes.
+    /// # Errors
+    /// Returns queue storage errors.
+    pub fn save_queue_state(&self, state: &NotifyQueueState) -> Result<(), NodeCoreError> {
         let snapshot = notify_bounded_snapshot(state);
         let snapshot = serialize_notify_value(&snapshot)?;
         let queue_entries = state
@@ -880,21 +994,6 @@ impl NotifyRedbStore {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let route_entries = state
-            .routes_by_device
-            .iter()
-            .map(|(device_id, routes)| {
-                routes::seal(&self.route_key, device_id, routes)
-                    .map(|bytes| (device_id.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let credential_entries = state
-            .credentials_by_id
-            .iter()
-            .map(|(credential_id, credential)| {
-                serialize_notify_value(credential).map(|bytes| (credential_id.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -910,8 +1009,6 @@ impl NotifyRedbStore {
                 NOTIFY_PROVIDER_ATTEMPT_TABLE,
                 &attempt_entries,
             )?;
-            replace_notify_table_values(&write_txn, NOTIFY_ROUTE_TABLE, &route_entries)?;
-            replace_notify_table_values(&write_txn, NOTIFY_CREDENTIAL_TABLE, &credential_entries)?;
         }
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         Ok(())
@@ -1073,13 +1170,119 @@ impl NotifyRedbStore {
     }
 
     /// # Errors
-    /// Returns an error when the provider credential cannot be persisted.
+    /// Returns a closed mutation or storage error without publishing stale credentials.
     pub fn update_provider_credential(
         &self,
         credential: &ProviderCredential,
     ) -> Result<(), NodeCoreError> {
         self.load_bounded_state()?;
         self.record_notify_credential(credential)
+    }
+
+    /// Stop a wake, including one that has not been queued yet.
+    ///
+    /// An attempt that already left this process is not recalled. The tombstone
+    /// reaches the ledger, the decoded queue, and every raw WAL shard.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger, queue, or WAL cannot be written.
+    pub fn cancel_pending_wake(&self, wake_id: &str) -> Result<(), NodeCoreError> {
+        let target = self.send_authority.wake_target(wake_id)?;
+        let root = target.as_deref().map(wake_admission::target_root).transpose()?;
+        self.send_authority.close_wake(wake_id)?;
+        self.tombstone_wake_id(wake_id, root.as_deref())?;
+        if let Some(shards) = &self.wal_shards {
+            if let Some(target) = target {
+                shards
+                    .get(self.notify_ingest_shard_for_key(&target))
+                    .ok_or(crate::send_authority::SendAuthorityError::Invalid)?
+                    .store
+                    .tombstone_wake(wake_id)?;
+            } else {
+                for shard in shards {
+                    shard.store.tombstone_wake(wake_id)?;
+                }
+            }
+        }
+        self.cancel_decoded_queue(wake_id)
+    }
+
+    fn cancel_decoded_queue(&self, wake_id: &str) -> Result<(), NodeCoreError> {
+        // Queue rows live in the incremental table. The bounded snapshot does not.
+        let (state, _incremental) = self.load_state_with_incremental_flag()?;
+        let Some(mut state) = state else {
+            return Ok(());
+        };
+        let Some(entry) = state.entries_by_id.get_mut(wake_id) else {
+            return Ok(());
+        };
+        if entry.status != NotifyQueueStatus::Pending {
+            return Ok(());
+        }
+        entry.status = NotifyQueueStatus::DroppedExpired;
+        let entry = entry.clone();
+        self.commit_writer
+            .commit(NotifyCommitOp::QueueEntry { entry: Box::new(entry), bounded_state: None })?;
+        Ok(())
+    }
+
+    /// Retain an authenticated cancel-before-enqueue inside its recipient's bounded share.
+    /// # Errors
+    /// Capacity and persistence failures keep the wake closed without acknowledging a tombstone.
+    pub fn cancel_signed_wake(
+        &self,
+        signed: &ramflux_protocol::SignedWakeV2,
+    ) -> Result<(), NodeCoreError> {
+        self.send_authority.close_wake(&signed.body.wake_id)?;
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        let root = self.wake_root(&signed.body.target_delivery_id)?;
+        self.tombstone_wake_id(&signed.body.wake_id, Some(&root))?;
+        if let Some(shards) = &self.wal_shards {
+            shards
+                .get(self.notify_ingest_shard_for_key(&signed.body.target_delivery_id))
+                .ok_or(crate::send_authority::SendAuthorityError::Invalid)?
+                .store
+                .tombstone_wake(&signed.body.wake_id)?;
+        }
+        self.cancel_decoded_queue(&signed.body.wake_id)
+    }
+
+    /// Drops every pending notification that is not a current `WakeV2`.
+    ///
+    /// Pre-upgrade snapshots, incremental rows, decoded queue rows, and raw WAL
+    /// bodies are removed. A surviving row keeps the expiry it was admitted with.
+    /// This store is not the durable message inbox; that database is not opened.
+    ///
+    /// # Errors
+    /// Returns an error when the queue or WAL cannot be read or written.
+    pub fn drop_legacy_pending_wakes(&self) -> Result<usize, NodeCoreError> {
+        let mut dropped = 0_usize;
+        if let Some(shards) = &self.wal_shards {
+            for shard in shards {
+                dropped = dropped.saturating_add(shard.store.drop_legacy_wakes()?);
+            }
+        }
+        let Some(mut state) = self.load_state()? else {
+            return Ok(dropped);
+        };
+        let legacy_ids: Vec<String> = state
+            .entries_by_id
+            .iter()
+            .filter(|(_, entry)| !crate::notify_wal::notification_wake_is_current_v2(&entry.wake))
+            .map(|(queue_id, _)| queue_id.clone())
+            .collect();
+        if legacy_ids.is_empty() {
+            return Ok(dropped);
+        }
+        for queue_id in &legacy_ids {
+            state.entries_by_id.remove(queue_id);
+            state.provider_attempts_by_queue.remove(queue_id);
+        }
+        self.save_queue_state(&state)?;
+        Ok(dropped.saturating_add(legacy_ids.len()))
     }
 
     /// # Errors
@@ -1097,6 +1300,9 @@ impl NotifyRedbStore {
             "ramflux.notification.push_alias_hash.v1",
             normalized_wake.push_alias.as_bytes(),
         );
+        if let Some(existing) = self.existing_queue_entry(&normalized_wake.wake_id)? {
+            return Ok((existing, Vec::new()));
+        }
         let entry = state.queue_wake_for_device(
             device_delivery_id,
             normalized_wake.clone(),
@@ -1104,10 +1310,13 @@ impl NotifyRedbStore {
             queued_at,
             dnd_active,
         );
+        if entry.status != NotifyQueueStatus::Pending {
+            return Ok((entry, Vec::new()));
+        }
         let routes = self
             .load_notify_routes(device_delivery_id)?
             .into_iter()
-            .filter(|route| route.expires_at > queued_at)
+            .filter(|route| route.expires_at > now_unix_seconds())
             .collect::<Vec<_>>();
         // All routes share the target's owner binding: one authority check per wake.
         let routes: Vec<DevicePushRoute> =
@@ -1117,11 +1326,19 @@ impl NotifyRedbStore {
                 Vec::new()
             };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
+        let routes = route_selection::select_wake_routes(
+            routes,
+            &normalized_wake.delivery_class,
+            self.voip_enabled(),
+            |route| {
+                self.provider_credential_for_route(&mut credential_cache, route).is_ok_and(
+                    |credential| credential.provider_kind() == PushProviderKind::ApnsVoip,
+                )
+            },
+        );
         let mut pushes = Vec::new();
         let mut deferred_changed = false;
         for route in routes {
-            let collapse_key = canonical_collapse_key(&normalized_wake, device_delivery_id);
-            let collapse_key_hash = self.collapse_key_hash(&collapse_key);
             let action = delivery_action_for_wake(&normalized_wake, dnd_active);
             if matches!(
                 action,
@@ -1145,32 +1362,39 @@ impl NotifyRedbStore {
                 route.provider.clone(),
                 queued_at,
             )?;
-            let route_provider = route.provider.clone();
-            pushes.push({
-                let payload = ProviderPushPayload {
-                    wake_id: normalized_wake.wake_id.clone(),
-                    provider: route_provider,
-                    delivery_class: normalized_wake.delivery_class.clone(),
-                    priority: normalized_wake.priority.clone(),
-                    ttl: normalized_wake.ttl,
-                    collapse_key: Some(collapse_key_hash.clone()),
-                    encrypted_hint: normalized_wake.encrypted_hint.clone(),
-                };
-                PreparedProviderPush {
-                    route,
-                    credential,
-                    payload,
-                    push_alias_hash: push_alias_hash.clone(),
-                    collapse_key_hash,
-                    action,
-                }
-            });
+            pushes.push(self.finish_prepared_push(route, credential, &entry, action)?);
         }
+        self.charge_prepared_work(&entry.queue_id, &pushes)?;
         self.commit_writer.commit(NotifyCommitOp::QueueEntry {
             entry: Box::new(entry.clone()),
             bounded_state: deferred_changed.then_some(Box::new(state)),
         })?;
         Ok((entry, pushes))
+    }
+
+    fn existing_queue_entry(
+        &self,
+        queue_id: &str,
+    ) -> Result<Option<NotifyQueueEntry>, NodeCoreError> {
+        let tx = self.db.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let table = tx
+            .open_table(NOTIFY_QUEUE_ENTRY_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        if let Some(value) =
+            table.get(queue_id).map_err(|error| NodeCoreError::Redb(error.to_string()))?
+        {
+            return deserialize_notify_queue_entry(value.value()).map(Some);
+        }
+        drop(table);
+        drop(tx);
+        if let Some(shards) = &self.wal_shards {
+            for shard in shards {
+                if let Some(entry) = shard.store.queue_entry(queue_id)? {
+                    return Ok(Some(entry));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// # Errors
@@ -1182,6 +1406,9 @@ impl NotifyRedbStore {
         _queued_at: u64,
         dnd_active: bool,
     ) -> Result<NotifyQueueEntry, NodeCoreError> {
+        if let Some(existing) = self.existing_queue_entry(&wake.wake_id)? {
+            return Ok(existing);
+        }
         let queued_at = now_unix_seconds();
         let normalized_wake = normalized_notification_wake(wake, device_delivery_id);
         let push_alias_hash = notification_hash(
@@ -1220,6 +1447,9 @@ impl NotifyRedbStore {
         _queued_at: u64,
         dnd_active: bool,
     ) -> Result<NotifyQueueEntry, NodeCoreError> {
+        if let Some(existing) = self.existing_queue_entry(&wake.wake_id)? {
+            return Ok(existing);
+        }
         let queued_at = now_unix_seconds();
         let normalized_wake = normalized_notification_wake(wake, device_delivery_id);
         let push_alias_hash = notification_hash(
@@ -1270,11 +1500,344 @@ impl NotifyRedbStore {
         queued_at: u64,
     ) -> Result<NotifyWalRawWake, NodeCoreError> {
         let shard = self.wal_shard(shard_id)?;
-        let sequence = shard.raw_wake_sequence.fetch_add(1, Ordering::Relaxed);
-        let queue_id = notify_raw_wake_queue_id(shard_id, queued_at, sequence);
-        let raw = NotifyWalRawWake { queue_id, raw_body, queued_at };
-        shard.store.record_raw_wake_async(raw.clone()).await?;
+        let raw = self.prepare_raw_wake(shard_id, &shard.store, raw_body, queued_at)?;
+        if shard.store.enqueue_raw_once_async(raw.clone()).await? {
+            return Ok(raw);
+        }
         Ok(raw)
+    }
+
+    /// Check-and-insert one signed wake. `Ok(None)` is terminal. `Ok(Some(deadline))`
+    /// is the first persisted effective expiry and is not recomputed on replay.
+    ///
+    /// # Errors
+    /// Returns an error when the digest cannot be computed or the ledger cannot be written.
+    /// A conflicting reuse of the same wake id is `InvalidConfiguration`.
+    pub fn claim_signed_wake(
+        &self,
+        signed: &ramflux_protocol::SignedWakeV2,
+        effective_expires_at: u64,
+    ) -> Result<Option<u64>, NodeCoreError> {
+        let clock = self.send_authority.capture_wake_clock()?;
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
+        let digest = ramflux_protocol::wake_request_digest(signed).map_err(|_source| {
+            NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned())
+        })?;
+        let key = signed.body.wake_id.clone();
+        let root = wake_admission::target_root(&signed.body.target_delivery_id)?;
+        let existing = self.load_wake_ledger_row(&key)?;
+        if existing.as_ref().is_some_and(|row| row.terminal) {
+            return Ok(None);
+        }
+        let pending = wake_admission::read(&self.db, &root, &key)?;
+        if let Some(row) = &existing
+            && !row.terminal
+            && (row.digest != digest
+                || row.audience != signed.body.audience
+                || row.target_owner_epoch != signed.body.target_owner_epoch)
+        {
+            return Err(NodeCoreError::InvalidConfiguration("wake dedup conflict".into()));
+        }
+        let first = existing.is_none();
+        if first {
+            self.local_call_mapping(signed)?;
+            if signed.body.call_intent_digest.is_none() {
+                self.wake_root(&signed.body.target_delivery_id)?;
+            }
+        }
+        let rehydrate_message = signed.body.call_intent_digest.is_none()
+            && existing.as_ref().is_some_and(|row| !row.terminal)
+            && self.send_authority.wake_deadline(&key, &digest).is_err();
+        let effective_expires_at = if first || rehydrate_message {
+            self.send_authority.admit_wake_at(
+                crate::send_authority::WakeAdmission {
+                    wake_id: &key,
+                    digest: &digest,
+                    target: &signed.body.target_delivery_id,
+                    owner_epoch: signed.body.target_owner_epoch,
+                    start: signed.body.call_intent_digest.as_deref(),
+                    expiry: existing.as_ref().map_or_else(
+                        || pending.as_ref().map_or(effective_expires_at, |row| row.expiry),
+                        |row| row.effective_expires_at,
+                    ),
+                },
+                clock,
+            )?
+        } else {
+            effective_expires_at
+        };
+        if first
+            && let Err(error) = self.reserve_pending_wake(
+                &root,
+                &key,
+                &digest,
+                signed.body.call_intent_digest.as_deref(),
+                effective_expires_at,
+            )
+        {
+            self.send_authority.discard_unfunded_wake(&key)?;
+            return Err(error);
+        }
+        let mapping = if first { self.verified_call_mapping(signed)? } else { None };
+        self.persist_wake_claim(signed, &digest, mapping.as_ref(), effective_expires_at)
+    }
+
+    fn persist_wake_claim(
+        &self,
+        signed: &ramflux_protocol::SignedWakeV2,
+        digest: &str,
+        mapping: Option<&send_gate::WakeMapping>,
+        effective_expires_at: u64,
+    ) -> Result<Option<u64>, NodeCoreError> {
+        let key = signed.body.wake_id.clone();
+        let root = wake_admission::target_root(&signed.body.target_delivery_id)?;
+        let now = now_unix_seconds();
+        let wire_bytes = ramflux_protocol::canonical_json_bytes(signed)
+            .map_err(|e| NodeCoreError::SnapshotSerialization(e.to_string()))?
+            .len();
+        if wire_bytes > 8192 {
+            return Err(crate::send_authority::SendAuthorityError::Capacity.into());
+        }
+        let recipient_root = match mapping {
+            Some(map) => Some(map.root.clone()),
+            None => Some(root.clone()),
+        };
+        let txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        wake_admission::remove(&txn, &root, &key)?;
+        let deadline = {
+            let mut table = txn
+                .open_table(NOTIFY_WAKE_LEDGER)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let existing = ledger_row(&table, &key)?;
+            let (row, deadline) = match existing {
+                Some(row) if row.terminal => (row, None),
+                Some(row)
+                    if row.digest == *digest
+                        && row.audience == signed.body.audience
+                        && row.target_owner_epoch == signed.body.target_owner_epoch =>
+                {
+                    let deadline = row.effective_expires_at;
+                    (row, Some(deadline))
+                }
+                Some(_row) => {
+                    return Err(NodeCoreError::InvalidConfiguration(
+                        "wake dedup conflict".to_owned(),
+                    ));
+                }
+                None => {
+                    let row = WakeLedgerRow {
+                        work_bytes: u64::try_from(
+                            2 * wire_bytes + signed.body.target_delivery_id.len() + 8192,
+                        )
+                        .map_err(|_| crate::send_authority::SendAuthorityError::Capacity)?,
+                        recipient_root,
+                        call_generation: mapping.as_ref().map(|map| map.generation),
+                        authority_boot: self.send_authority.boot().into(),
+                        start_digest: signed.body.call_intent_digest.clone(),
+                        audience: signed.body.audience.clone(),
+                        target_owner_epoch: signed.body.target_owner_epoch,
+                        digest: digest.to_owned(),
+                        effective_expires_at,
+                        terminal: false,
+                        sent: false,
+                        retain_until: ledger_retain_until(effective_expires_at, now),
+                        boot_id: notify_boot_id(),
+                        admitted_unix: now,
+                    };
+                    (row, Some(effective_expires_at))
+                }
+            };
+            if row.start_digest.is_some() && row.authority_boot != self.send_authority.boot() {
+                return Err(crate::send_authority::SendAuthorityError::Closed.into());
+            }
+            Self::charge_wake_row(&txn, &key, &row)?;
+            Self::charge_wake_work(&txn, &key, &row, &[])?;
+            write_ledger_row(&txn, &mut table, &key, &row)?;
+            deadline
+        };
+        self.send_authority.persist_clock(&txn)?;
+        txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        if deadline.is_some() {
+            self.send_authority.commit_wake_claim(&key, digest, false)?;
+        }
+        Ok(deadline)
+    }
+
+    fn tombstone_wake_id(&self, wake_id: &str, root: Option<&str>) -> Result<(), NodeCoreError> {
+        let now = now_unix_seconds();
+        let pending =
+            root.map(|root| wake_admission::read(&self.db, root, wake_id)).transpose()?.flatten();
+        let txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        if let Some(root) = root {
+            wake_admission::remove(&txn, root, wake_id)?;
+        }
+        {
+            let mut table = txn
+                .open_table(NOTIFY_WAKE_LEDGER)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let mut row = ledger_row(&table, wake_id)?.unwrap_or(WakeLedgerRow {
+                work_bytes: 0,
+                recipient_root: root.map(str::to_owned),
+                call_generation: None,
+                authority_boot: self.send_authority.boot().into(),
+                start_digest: pending.as_ref().and_then(|row| row.start.clone()),
+                audience: String::new(),
+                target_owner_epoch: 0,
+                digest: String::new(),
+                effective_expires_at: 0,
+                terminal: true,
+                sent: false,
+                retain_until: ledger_retain_until(0, now),
+                boot_id: 0,
+                admitted_unix: 0,
+            });
+            row.terminal = true;
+            Self::charge_wake_row(&txn, wake_id, &row)?;
+            write_ledger_row(&txn, &mut table, wake_id, &row)?;
+        }
+        txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(())
+    }
+
+    /// The signed wake is terminal, already handed to a provider, or past its deadline.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger cannot be read.
+    pub fn wake_send_blocked(&self, wake_id: &str, now: u64) -> Result<bool, NodeCoreError> {
+        self.ledger_blocks(wake_id, now, true)
+    }
+
+    fn ledger_blocks(
+        &self,
+        wake_id: &str,
+        now: u64,
+        sent_blocks: bool,
+    ) -> Result<bool, NodeCoreError> {
+        let txn = self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let table = match txn.open_table(NOTIFY_WAKE_LEDGER) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(source) => return Err(NodeCoreError::Redb(source.to_string())),
+        };
+        let Some(row) = ledger_row(&table, wake_id)? else {
+            return Ok(false);
+        };
+        Ok(row.terminal
+            || (sent_blocks && row.sent)
+            || (row.effective_expires_at != 0 && now >= row.effective_expires_at))
+    }
+
+    /// Mark one reserved wake as sent. A second caller gets `false` and must not send.
+    ///
+    /// A wake that was never reserved (tests and unsigned fixtures) is allowed through.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger cannot be updated.
+    pub fn begin_wake_send(&self, wake_id: &str) -> Result<bool, NodeCoreError> {
+        let txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let allowed = {
+            let mut table = txn
+                .open_table(NOTIFY_WAKE_LEDGER)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            let Some(mut row) = ledger_row(&table, wake_id)? else {
+                return Ok(true);
+            };
+            if row.terminal || row.sent {
+                false
+            } else {
+                row.sent = true;
+                write_ledger_row(&txn, &mut table, wake_id, &row)?;
+                true
+            }
+        };
+        if allowed {
+            txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        }
+        if allowed {
+            self.send_authority.claim_attempt(wake_id)?;
+        }
+        Ok(allowed)
+    }
+
+    /// Delete ledger rows whose retain horizon has passed.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger cannot be read or written.
+    pub fn prune_wake_ledger(&self, now: u64) -> Result<usize, NodeCoreError> {
+        let now = self.send_authority.retention_clock(now)?;
+        self.prune_wake_copies(now)?;
+        let txn =
+            self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let removed = wake_admission::prune(&txn, now)? + {
+            let mut table = txn
+                .open_table(NOTIFY_WAKE_LEDGER)
+                .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+            prune_open_ledger(&txn, &mut table, now)?
+        };
+        txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        Ok(removed)
+    }
+
+    fn load_wake_ledger_row(&self, wake_id: &str) -> Result<Option<WakeLedgerRow>, NodeCoreError> {
+        let txn = self.db.begin_read().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        let table = match txn.open_table(NOTIFY_WAKE_LEDGER) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(source) => return Err(NodeCoreError::Redb(source.to_string())),
+        };
+        ledger_row(&table, wake_id)
+    }
+
+    fn prepare_raw_wake(
+        &self,
+        shard_id: usize,
+        wal: &NotifyWalStore,
+        raw_body: Vec<u8>,
+        admission_now: u64,
+    ) -> Result<NotifyWalRawWake, NodeCoreError> {
+        if let Some(signed) = signed_wake_from_raw(&raw_body) {
+            let queue_id = signed.body.wake_id.clone();
+            if signed.body.action == ramflux_protocol::WakeAction::Cancel {
+                self.cancel_signed_wake(&signed)?;
+                wal.tombstone_wake(&queue_id)?;
+                return Ok(NotifyWalRawWake {
+                    queue_id,
+                    raw_body,
+                    queued_at: admission_now,
+                    effective_expires_at: 0,
+                });
+            }
+            if wal.wake_is_closed(&queue_id) {
+                return Ok(closed_raw(queue_id, raw_body, admission_now));
+            }
+            let projected = project_wake_v2(&signed, admission_now).map_err(|_source| {
+                NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned())
+            })?;
+            let Some(deadline) = self.claim_signed_wake(&signed, projected.absolute_expires_at)?
+            else {
+                wal.tombstone_wake(&queue_id)?;
+                return Ok(closed_raw(queue_id, raw_body, admission_now));
+            };
+            return Ok(NotifyWalRawWake {
+                queue_id,
+                raw_body,
+                queued_at: admission_now,
+                effective_expires_at: deadline,
+            });
+        }
+        let sequence = self.wal_shard(shard_id)?.raw_wake_sequence.fetch_add(1, Ordering::Relaxed);
+        Ok(NotifyWalRawWake {
+            queue_id: notify_raw_wake_queue_id(shard_id, admission_now, sequence),
+            raw_body,
+            queued_at: admission_now,
+            effective_expires_at: 0,
+        })
     }
 
     fn wal_shard(&self, shard_id: usize) -> Result<&NotifyWalShard, NodeCoreError> {
@@ -1321,12 +1884,17 @@ impl NotifyRedbStore {
     ) -> Result<Vec<NotifyWalRawWake>, NodeCoreError> {
         let shard = self.wal_shard(shard_id)?;
         let mut raws = Vec::with_capacity(raw_bodies.len());
+        let mut fresh = Vec::new();
         for (raw_body, queued_at) in raw_bodies {
-            let sequence = shard.raw_wake_sequence.fetch_add(1, Ordering::Relaxed);
-            let queue_id = notify_raw_wake_queue_id(shard_id, queued_at, sequence);
-            raws.push(NotifyWalRawWake { queue_id, raw_body, queued_at });
+            let raw = self.prepare_raw_wake(shard_id, &shard.store, raw_body, queued_at)?;
+            if !shard.store.wake_is_closed(&raw.queue_id) {
+                fresh.push(raw.clone());
+            }
+            raws.push(raw);
         }
-        shard.store.record_raw_wakes_batch(raws.clone())?;
+        if !fresh.is_empty() {
+            shard.store.record_raw_wakes_batch(fresh)?;
+        }
         Ok(raws)
     }
 
@@ -1394,11 +1962,22 @@ impl NotifyRedbStore {
     }
 
     fn parse_raw_wake_entry(raw: &NotifyWalRawWake) -> Result<NotifyQueueEntry, NodeCoreError> {
-        let request: RawS13WakeRequest = serde_json::from_slice(&raw.raw_body)
+        if raw.effective_expires_at == 0 {
+            return Err(NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned()));
+        }
+        let request: RawS13WakeRequest = ramflux_protocol::parse_i_json(&raw.raw_body)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         let queued_at = raw.queued_at;
-        let normalized_wake =
-            normalized_notification_wake(&request.wake, &request.device_delivery_id);
+        if request.signed_wake.body.target_delivery_id != request.device_delivery_id {
+            return Err(NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned()));
+        }
+        let clock = raw.effective_expires_at.saturating_sub(1);
+        let mut projected = project_wake_v2(&request.signed_wake, clock).map_err(|_source| {
+            NodeCoreError::InvalidConfiguration("wake contract rejected".to_owned())
+        })?;
+        // Replay keeps the deadline persisted at admission. Queue time is not an input.
+        projected.absolute_expires_at = raw.effective_expires_at;
+        let normalized_wake = normalized_notification_wake(&projected, &request.device_delivery_id);
         let push_alias_hash = notification_hash(
             "ramflux.notification.push_alias_hash.v1",
             normalized_wake.push_alias.as_bytes(),
@@ -1440,11 +2019,137 @@ impl NotifyRedbStore {
         Ok(())
     }
 
-    /// Providers see a node-keyed pseudonym: knowing a delivery id is not enough to link a
-    /// provider-visible collapse value to that mailbox.
-    fn collapse_key_hash(&self, collapse_key: &str) -> String {
-        self.route_key
-            .pseudonym("ramflux.notification.collapse_key_hash.v2", collapse_key.as_bytes())
+    /// Build one provider push. Messages carry the device collapse key. Calls omit it.
+    /// The signed wake is not mutated.
+    ///
+    /// # Errors
+    /// Returns an error when the collapse MAC cannot be initialized.
+    fn finish_prepared_push(
+        &self,
+        route: DevicePushRoute,
+        credential: ProviderCredential,
+        entry: &NotifyQueueEntry,
+        action: NotifyDeliveryAction,
+    ) -> Result<PreparedProviderPush, NodeCoreError> {
+        let collapse = if matches!(
+            entry.wake.delivery_class,
+            ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
+        ) {
+            None
+        } else {
+            Some(self.route_key.device_collapse_key(&route.device_delivery_id)?)
+        };
+        let collapse_key_hash = collapse.clone().unwrap_or_default();
+        let route_provider = route.provider.clone();
+        let admitted = self.admission_stamp(&entry.wake.wake_id, &route.device_delivery_id)?;
+        Ok(PreparedProviderPush {
+            route,
+            credential,
+            payload: ProviderPushPayload {
+                wake_id: entry.wake.wake_id.clone(),
+                provider: route_provider,
+                delivery_class: entry.wake.delivery_class.clone(),
+                priority: entry.wake.priority.clone(),
+                ttl: entry.wake.ttl,
+                collapse_key: collapse,
+                encrypted_hint: None,
+            },
+            push_alias_hash: entry.push_alias_hash.clone(),
+            collapse_key_hash,
+            action,
+            expires_at: entry.expires_at,
+            admitted_unix: admitted.admitted_unix,
+            boot_id: admitted.boot_id,
+            owner_epoch: admitted.owner_epoch,
+        })
+    }
+
+    /// Copy the signed claim when one exists. A missing row is stamped now.
+    /// A stored boot of zero is left zero so a call fails closed.
+    fn admission_stamp(
+        &self,
+        wake_id: &str,
+        device_delivery_id: &str,
+    ) -> Result<AdmissionStamp, NodeCoreError> {
+        if let Some(row) = self.load_wake_ledger_row(wake_id)? {
+            return Ok(AdmissionStamp {
+                owner_epoch: row.target_owner_epoch,
+                boot_id: row.boot_id,
+                admitted_unix: row.admitted_unix,
+            });
+        }
+        Ok(AdmissionStamp {
+            owner_epoch: self.current_owner_epoch(device_delivery_id)?,
+            boot_id: notify_boot_id(),
+            admitted_unix: now_unix_seconds(),
+        })
+    }
+
+    /// Live check immediately before a provider request, including every retry.
+    ///
+    /// Calls fail closed on clock rollback and on a different process boot.
+    /// An expired, terminal, or rotated route is not sent.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger or the route store cannot be read.
+    pub fn provider_send_still_allowed(
+        &self,
+        prepared: &PreparedProviderPush,
+        now: u64,
+    ) -> Result<bool, NodeCoreError> {
+        if prepared.expires_at == 0 || now >= prepared.expires_at {
+            return Ok(false);
+        }
+        let call = matches!(
+            prepared.payload.delivery_class,
+            ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
+        );
+        if call
+            && (prepared.boot_id != notify_boot_id()
+                || (prepared.admitted_unix != 0 && now < prepared.admitted_unix))
+        {
+            return Ok(false);
+        }
+        // `sent` stays false here: this check runs on the send that already claimed the row.
+        if self.ledger_blocks(&prepared.payload.wake_id, now, false)? {
+            return Ok(false);
+        }
+        if !self.authorize_push_route(&prepared.route.device_delivery_id)? {
+            return Ok(false);
+        }
+        let live_epoch = self.current_owner_epoch(&prepared.route.device_delivery_id)?;
+        if live_epoch != 0 && prepared.owner_epoch != 0 && live_epoch != prepared.owner_epoch {
+            return Ok(false);
+        }
+        self.load_bounded_state()?;
+        let routes = self.load_notify_routes(&prepared.route.device_delivery_id)?;
+        let Some(live) = routes.into_iter().find(|route| {
+            route.provider == prepared.route.provider
+                && route.token == prepared.route.token
+                && route.route_generation == prepared.route.route_generation
+                && route.expires_at > now
+        }) else {
+            return Ok(false);
+        };
+        self.credential_still_current(prepared, &live)
+    }
+
+    fn credential_still_current(
+        &self,
+        prepared: &PreparedProviderPush,
+        live: &DevicePushRoute,
+    ) -> Result<bool, NodeCoreError> {
+        if live.credential_id.is_none()
+            || live.credential_id.as_deref() != prepared.route.credential_id.as_deref()
+        {
+            return Ok(false);
+        }
+        let mut cache = BTreeMap::new();
+        match self.provider_credential_for_route(&mut cache, live) {
+            Ok(credential) => Ok(credential == prepared.credential),
+            Err(NodeCoreError::ItestJson(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// # Errors
@@ -1463,7 +2168,7 @@ impl NotifyRedbStore {
         let routes = self
             .load_notify_routes(&entry.device_delivery_id)?
             .into_iter()
-            .filter(|route| route.expires_at > entry.queued_at)
+            .filter(|route| route.expires_at > now_unix_seconds())
             .collect::<Vec<_>>();
         let routes: Vec<DevicePushRoute> =
             if routes.is_empty() || self.authorize_push_route(&entry.device_delivery_id)? {
@@ -1472,10 +2177,18 @@ impl NotifyRedbStore {
                 Vec::new()
             };
         let mut credential_cache: BTreeMap<String, ProviderCredential> = BTreeMap::new();
+        let routes = route_selection::select_wake_routes(
+            routes,
+            &entry.wake.delivery_class,
+            self.voip_enabled(),
+            |route| {
+                self.provider_credential_for_route(&mut credential_cache, route).is_ok_and(
+                    |credential| credential.provider_kind() == PushProviderKind::ApnsVoip,
+                )
+            },
+        );
         let mut pushes = Vec::new();
         for route in routes {
-            let collapse_key = canonical_collapse_key(&entry.wake, &entry.device_delivery_id);
-            let collapse_key_hash = self.collapse_key_hash(&collapse_key);
             let action = delivery_action_for_wake(&entry.wake, entry.dnd_active);
             if matches!(
                 action,
@@ -1493,27 +2206,9 @@ impl NotifyRedbStore {
                 route.provider.clone(),
                 entry.queued_at,
             )?;
-            let route_provider = route.provider.clone();
-            pushes.push({
-                let payload = ProviderPushPayload {
-                    wake_id: entry.wake.wake_id.clone(),
-                    provider: route_provider,
-                    delivery_class: entry.wake.delivery_class.clone(),
-                    priority: entry.wake.priority.clone(),
-                    ttl: entry.wake.ttl,
-                    collapse_key: Some(collapse_key_hash.clone()),
-                    encrypted_hint: entry.wake.encrypted_hint.clone(),
-                };
-                PreparedProviderPush {
-                    route,
-                    credential,
-                    payload,
-                    push_alias_hash: entry.push_alias_hash.clone(),
-                    collapse_key_hash,
-                    action,
-                }
-            });
+            pushes.push(self.finish_prepared_push(route, credential, entry, action)?);
         }
+        self.charge_prepared_work(&entry.queue_id, &pushes)?;
         Ok(pushes)
     }
 
@@ -1583,6 +2278,48 @@ impl NotifyRedbStore {
         &self,
         attempt: ProviderPushAttempt,
     ) -> Result<(), NodeCoreError> {
+        if self
+            .load_wake_ledger_row(&attempt.queue_id)?
+            .is_some_and(|row| row.start_digest.is_some())
+        {
+            if let Some(shards) = &self.wal_shards {
+                let index = self
+                    .wal_shard_index_for_queue_id(&attempt.queue_id)
+                    .ok_or(crate::send_authority::SendAuthorityError::Invalid)?;
+                shards
+                    .get(index)
+                    .ok_or(crate::send_authority::SendAuthorityError::Invalid)?
+                    .store
+                    .mark_delivered(attempt.queue_id)?;
+            } else {
+                let tx = self.db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+                let mut table = tx
+                    .open_table(NOTIFY_QUEUE_ENTRY_TABLE)
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+                let bytes = table
+                    .get(attempt.queue_id.as_str())
+                    .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+                    .map(|v| v.value().to_vec());
+                if let Some(bytes) = bytes {
+                    let mut entry = deserialize_notify_queue_entry(&bytes)?;
+                    entry.status = if attempt.accepted {
+                        NotifyQueueStatus::Delivered
+                    } else {
+                        NotifyQueueStatus::ProviderRejected
+                    };
+                    table
+                        .insert(
+                            attempt.queue_id.as_str(),
+                            serialize_notify_queue_entry_binary(&entry)?.as_slice(),
+                        )
+                        .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+                }
+                drop(table);
+                tx.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            }
+            return Ok(());
+        }
+        self.charge_provider_diagnostic(&attempt)?;
         if let Some(shards) = &self.wal_shards {
             let shard_id = self
                 .wal_shard_index_for_queue_id(&attempt.queue_id)
@@ -1656,12 +2393,19 @@ impl NotifyRedbStore {
     }
 
     fn record_notify_routes(&self, routes: &[DevicePushRoute]) -> Result<(), NodeCoreError> {
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
         let Some(device_delivery_id) =
             routes.first().map(|route| route.device_delivery_id.as_str())
         else {
             return Ok(());
         };
         let routes_bytes = routes::seal(&self.route_key, device_delivery_id, routes)?;
+        self.resume_local_mutation(&crate::send_authority::AuthorityScope::TargetRoutes {
+            target_delivery_id: device_delivery_id.into(),
+        })?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -1672,15 +2416,21 @@ impl NotifyRedbStore {
                 .insert(device_delivery_id, routes_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+        self.commit_route_transaction(write_txn, device_delivery_id)
     }
 
     fn record_notify_credential(
         &self,
         credential: &ProviderCredential,
     ) -> Result<(), NodeCoreError> {
+        let _writer = self
+            .local_writer
+            .try_lock()
+            .map_err(|_| crate::send_authority::SendAuthorityError::Busy)?;
         let credential_bytes = serialize_notify_value(credential)?;
+        self.resume_local_mutation(&crate::send_authority::AuthorityScope::Credential {
+            credential_id: credential.credential_id().into(),
+        })?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -1691,8 +2441,7 @@ impl NotifyRedbStore {
                 .insert(credential.credential_id(), credential_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
-        Ok(())
+        self.commit_credential_transaction(write_txn, credential.credential_id())
     }
 
     fn load_notify_routes(
@@ -1764,7 +2513,13 @@ impl ProviderCredential {
     #[must_use]
     pub fn provider_kind(&self) -> PushProviderKind {
         match self {
-            Self::Apns(_) => PushProviderKind::Apns,
+            Self::Apns(credential) => {
+                if apns_topic_is_voip(&credential.topic) {
+                    PushProviderKind::ApnsVoip
+                } else {
+                    PushProviderKind::Apns
+                }
+            }
             Self::Fcm(_) => PushProviderKind::Fcm,
             Self::WebPush(_) => PushProviderKind::WebPush,
         }
@@ -1786,11 +2541,11 @@ pub fn notification_default_ttl(
 ) -> u32 {
     match delivery_class {
         ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => 300,
-        ramflux_protocol::NotificationDeliveryClass::UserContentNotification => 86_400,
+        ramflux_protocol::NotificationDeliveryClass::UserContentNotification
+        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => 86_400,
         ramflux_protocol::NotificationDeliveryClass::AiTaskNotification => 1_800,
         ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification => 600,
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => 60,
+        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => 30,
     }
 }
 
@@ -1800,8 +2555,7 @@ pub fn notification_default_priority(
     requested: &ramflux_protocol::PushPriority,
 ) -> ramflux_protocol::PushPriority {
     match delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => {
+        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => {
             ramflux_protocol::PushPriority::High
         }
         ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification => {
@@ -1815,7 +2569,8 @@ pub fn notification_default_priority(
             ramflux_protocol::PushPriority::Low
         }
         ramflux_protocol::NotificationDeliveryClass::UserContentNotification
-        | ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification => {
+        | ramflux_protocol::NotificationDeliveryClass::A2uiSurfaceNotification
+        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => {
             ramflux_protocol::PushPriority::Normal
         }
     }
@@ -1824,7 +2579,7 @@ pub fn notification_default_priority(
 #[must_use]
 pub fn normalized_notification_wake(
     wake: &ramflux_protocol::NotificationWake,
-    target_device_id: &str,
+    _target_device_id: &str,
 ) -> ramflux_protocol::NotificationWake {
     let mut normalized = wake.clone();
     let default_ttl = notification_default_ttl(&normalized.delivery_class);
@@ -1832,7 +2587,6 @@ pub fn normalized_notification_wake(
         if normalized.ttl == 0 { default_ttl } else { normalized.ttl.min(default_ttl) };
     normalized.priority =
         notification_default_priority(&normalized.delivery_class, &normalized.priority);
-    normalized.collapse_key = Some(canonical_collapse_key(&normalized, target_device_id));
     normalized
 }
 
@@ -1871,13 +2625,7 @@ pub fn delivery_action_for_wake(
         return NotifyDeliveryAction::Accept;
     }
     match wake.delivery_class {
-        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification
-        | ramflux_protocol::NotificationDeliveryClass::ConferenceWakeNotification => {
-            NotifyDeliveryAction::Accept
-        }
-        ramflux_protocol::NotificationDeliveryClass::SelfDeviceControlNotification
-            if wake.priority == ramflux_protocol::PushPriority::High =>
-        {
+        ramflux_protocol::NotificationDeliveryClass::CallWakeNotification => {
             NotifyDeliveryAction::Accept
         }
         ramflux_protocol::NotificationDeliveryClass::AiTaskNotification => {
@@ -2186,4 +2934,175 @@ fn notify_usize_env(name: &str, default: usize) -> usize {
 
 fn notify_u64_env(name: &str, default: u64) -> u64 {
     crate::environment::parsed::<u64>(name).filter(|value| *value > 0).unwrap_or(default)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WakeLedgerRow {
+    work_bytes: u64,
+    #[serde(deserialize_with = "crate::send_authority::required_nullable")]
+    recipient_root: Option<String>,
+    #[serde(deserialize_with = "crate::send_authority::required_nullable")]
+    call_generation: Option<u64>,
+    authority_boot: String,
+    #[serde(deserialize_with = "crate::send_authority::required_nullable")]
+    start_digest: Option<String>,
+    audience: String,
+    target_owner_epoch: u64,
+    digest: String,
+    effective_expires_at: u64,
+    terminal: bool,
+    #[serde(default)]
+    sent: bool,
+    /// Immutable nonzero expiry of this ledger row.
+    retain_until: u64,
+    boot_id: u64,
+    admitted_unix: u64,
+}
+
+struct AdmissionStamp {
+    owner_epoch: u64,
+    boot_id: u64,
+    admitted_unix: u64,
+}
+
+fn ledger_retain_until(effective_expires_at: u64, now: u64) -> u64 {
+    let skew = ramflux_protocol::CLOCK_UNCERTAINTY_SECONDS;
+    if effective_expires_at == 0 {
+        now.saturating_add(ramflux_protocol::MESSAGE_MAX_LIFETIME_SECONDS).saturating_add(skew)
+    } else {
+        effective_expires_at.saturating_add(skew)
+    }
+}
+
+fn initialize_wake_state_format(db: &redb::Database) -> Result<(), NodeCoreError> {
+    let tx = db.begin_read().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    let marker = match tx.open_table(NOTIFY_WAKE_FORMAT) {
+        Ok(table) => table
+            .get("notify_wake_state_format")
+            .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+            .map(|v| v.value()),
+        Err(redb::TableError::TableDoesNotExist(_)) => None,
+        Err(e) => return Err(NodeCoreError::Redb(e.to_string())),
+    };
+    if marker == Some(1) {
+        tx.open_table(NOTIFY_WAKE_DUE).map_err(|_| NodeCoreError::NotifyWakeStateResetRequired)?;
+        if let Ok(table) = tx.open_table(NOTIFY_WAKE_LEDGER) {
+            for entry in table.iter().map_err(|e| NodeCoreError::Redb(e.to_string()))? {
+                let (key, _) = entry.map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+                ledger_row(&table, key.value())?;
+            }
+        }
+        return Ok(());
+    }
+    if marker.is_some() || tx.open_table(NOTIFY_WAKE_LEDGER).is_ok() {
+        return Err(NodeCoreError::NotifyWakeStateResetRequired);
+    }
+    drop(tx);
+    let tx = db.begin_write().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    {
+        tx.open_table(NOTIFY_WAKE_FORMAT)
+            .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+            .insert("notify_wake_state_format", 1)
+            .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+        tx.open_table(NOTIFY_WAKE_DUE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    }
+    tx.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))
+}
+
+fn prune_open_ledger(
+    txn: &redb::WriteTransaction,
+    table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    now: u64,
+) -> Result<usize, NodeCoreError> {
+    let mut due =
+        txn.open_table(NOTIFY_WAKE_DUE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    let candidates = due
+        .iter()
+        .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+        .take(NOTIFY_WAKE_CLEANUP_LIMIT)
+        .map(|row| {
+            row.map(|(key, _)| (key.value().0, key.value().1.to_owned()))
+                .map_err(|e| NodeCoreError::Redb(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut removed = 0;
+    for (until, key) in candidates {
+        if until > now {
+            break;
+        }
+        if let Some(row) = ledger_row(table, &key)?
+            && row.retain_until == until
+        {
+            send_gate::retire_wake_rows(txn, &key, &row)?;
+            table.remove(key.as_str()).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+            removed += 1;
+        }
+        due.remove((until, key.as_str())).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    }
+    Ok(removed)
+}
+
+fn ledger_row(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    key: &str,
+) -> Result<Option<WakeLedgerRow>, NodeCoreError> {
+    let Some(value) = table.get(key).map_err(|source| NodeCoreError::Redb(source.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if value.value().len() > 8192 {
+        return Err(NodeCoreError::NotifyWakeStateResetRequired);
+    }
+    let row: WakeLedgerRow = serde_json::from_slice(value.value())
+        .map_err(|_| NodeCoreError::NotifyWakeStateResetRequired)?;
+    if row.retain_until == 0 {
+        return Err(NodeCoreError::NotifyWakeStateResetRequired);
+    }
+    Ok(Some(row))
+}
+
+fn write_ledger_row(
+    txn: &redb::WriteTransaction,
+    table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    key: &str,
+    row: &WakeLedgerRow,
+) -> Result<(), NodeCoreError> {
+    if row.retain_until == 0 {
+        return Err(NodeCoreError::NotifyWakeStateResetRequired);
+    }
+    txn.open_table(NOTIFY_WAKE_DUE)
+        .map_err(|e| NodeCoreError::Redb(e.to_string()))?
+        .insert((row.retain_until, key), 0)
+        .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
+    let bytes = serde_json::to_vec(row)
+        .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
+    table
+        .insert(key, bytes.as_slice())
+        .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+    Ok(())
+}
+
+fn closed_raw(queue_id: String, raw_body: Vec<u8>, admission_now: u64) -> NotifyWalRawWake {
+    NotifyWalRawWake { queue_id, raw_body, queued_at: admission_now, effective_expires_at: 0 }
+}
+
+fn signed_wake_from_raw(body: &[u8]) -> Option<ramflux_protocol::SignedWakeV2> {
+    let value = ramflux_protocol::parse_i_json::<serde_json::Value>(body).ok()?;
+    let wake = value.get("signed_wake")?;
+    let bytes = serde_json::to_vec(wake).ok()?;
+    ramflux_protocol::parse_signed_wake_v2(&bytes).ok()
+}
+
+/// Process start. Calls admitted under another boot are not sent.
+#[must_use]
+pub fn notify_boot_id() -> u64 {
+    static BOOT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(1, |duration| u64::try_from(duration.as_nanos()).unwrap_or(1));
+        let mixed = nanos ^ u64::from(std::process::id());
+        if mixed == 0 { 1 } else { mixed }
+    })
 }

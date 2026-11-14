@@ -37,6 +37,7 @@ impl GatewaySessionFrameSink for Sink {
 }
 fn runtime() -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
+        call_session_generation: None,
         session_push: None,
         ephemeral: false,
         push_limit: 256,

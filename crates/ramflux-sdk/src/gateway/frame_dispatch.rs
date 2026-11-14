@@ -34,6 +34,7 @@ pub(crate) enum FrameKind {
     Close,
     /// A capable `resync` event (negotiated sessions only).
     Resync,
+    CallResolved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +76,7 @@ impl FrameKind {
             GatewayServerFrame::Ephemeral { .. } => Self::Ephemeral,
             GatewayServerFrame::EphemeralResult { .. } => Self::EphemeralResult,
             GatewayServerFrame::Close { .. } => Self::Close,
+            GatewayServerFrame::CallResolved { .. } => Self::CallResolved,
         }
     }
 
@@ -91,7 +93,11 @@ impl FrameKind {
             Self::PushRouteRegistered | Self::PushRouteRefused | Self::PushRouteDeregistered => {
                 FrameClass::PushRoute
             }
-            Self::Deliver | Self::InBandWake | Self::Resync | Self::Ephemeral => FrameClass::Event,
+            Self::Deliver
+            | Self::InBandWake
+            | Self::Resync
+            | Self::Ephemeral
+            | Self::CallResolved => FrameClass::Event,
             Self::Drain | Self::Close => FrameClass::Terminal,
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease

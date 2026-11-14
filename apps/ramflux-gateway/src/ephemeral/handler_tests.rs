@@ -42,7 +42,15 @@ pub(crate) fn submit(
         [4; 32],
     );
     let signed_request = signed_request_for(runtime, &envelope, now)?;
-    Ok(ramflux_node_core::GatewaySubmitFrame { signed_request, envelope })
+    Ok(ramflux_node_core::GatewaySubmitFrame {
+        call_context: None,
+        signed_request,
+        envelope,
+        call_intent: None,
+        wake_id: None,
+        call_ref: None,
+        call_terminal: None,
+    })
 }
 
 fn signed_request_for(

@@ -126,6 +126,7 @@ fn default_config() -> GatewaySessionConfig {
 
 fn session() -> n::GatewaySessionEstablishedFrame {
     n::GatewaySessionEstablishedFrame {
+        call_session_generation: None,
         session_id: "neg-session".into(),
         gateway_id: "neg-gateway".into(),
         accepted_cursor: None,

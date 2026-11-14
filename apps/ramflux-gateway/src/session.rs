@@ -9,8 +9,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
-    gateway_state, notify_offline_wake, router_cursor_async, router_get_json_async,
-    router_inbox_async, router_post_json_async, router_session_async,
+    gateway_state, notify_offline_wake, post_signed_wake, router_cursor_async,
+    router_get_json_async, router_inbox_async, router_post_json_async, router_session_async,
     serve::GatewayListenerContext,
 };
 
@@ -694,7 +694,19 @@ pub(crate) async fn establish_gateway_session(
     })
     .await?;
     let accepted_cursor = router_cursor_async(&context.router, &open.target_delivery_id).await?;
+    let call_session_generation = if context.store.call_resolution_configured()
+        && auth_frame
+            .device_proof
+            .capability_scope
+            .iter()
+            .any(|capability| capability == ramflux_protocol::CALL_RESOLUTION_CAPABILITY)
+    {
+        Some(ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?))
+    } else {
+        None
+    };
     let established = ramflux_node_core::GatewaySessionEstablishedFrame {
+        call_session_generation: call_session_generation.clone(),
         session_id: session_id.clone(),
         gateway_id: context.gateway_id.clone(),
         accepted_cursor,
@@ -712,6 +724,7 @@ pub(crate) async fn establish_gateway_session(
     let ephemeral_rate =
         context.hub.ephemeral_rates.bucket(&session_id, crate::ephemeral::now_ms());
     Ok(GatewaySessionRuntime {
+        call_session_generation,
         session_push: negotiated.incarnation_id,
         ephemeral: negotiated.ephemeral,
         push_limit: usize::try_from(open.max_inflight_downstream).unwrap_or(256).clamp(16, 256),
@@ -1424,13 +1437,14 @@ async fn validate_durable_submit(
     let owned_submit = submit.clone();
     crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
         let envelope = crate::submit_source::bind_source(&owned_runtime, &owned_submit.envelope)?;
+        let body = crate::call_intent::authenticated_submit_body(&owned_runtime, &owned_submit)?;
         validate_gateway_session_signed_request(
             context,
             &owned_runtime,
             &owned_submit.signed_request,
             "POST",
             "/gateway/session/submit",
-            &owned_submit.envelope,
+            &body,
         )?;
         Ok(envelope)
     })
@@ -1460,6 +1474,14 @@ pub(crate) async fn handle_gateway_submit(
             return Ok(());
         }
     };
+    if !enforce_call_resolution(send, context, runtime, submit).await? {
+        return Ok(());
+    }
+    let verified_intent =
+        match check_submit_intent(send, context, runtime, submit, &envelope).await? {
+            CheckedSubmitIntent::Answered => return Ok(()),
+            CheckedSubmitIntent::Continue(verified) => verified,
+        };
     let accepted_at_unix_ms = now_unix_millis();
     if let Err(error) = attach_franking_node_tag(
         &mut envelope,
@@ -1479,6 +1501,20 @@ pub(crate) async fn handle_gateway_submit(
     let mesh: serde_json::Value =
         router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
     let response: ramflux_node_core::EnvelopeSubmitResponse = serde_json::from_value(mesh.clone())?;
+    if let Err(error) = persist_accepted_intent(
+        context,
+        runtime,
+        submit,
+        &envelope.envelope_id,
+        verified_intent.as_ref(),
+        response.outcome.as_str(),
+    )
+    .await
+    {
+        tracing::warn!(%error, "call intent admission failed");
+        nack_call_intent(send).await?;
+        return Ok(());
+    }
     let metadata = crate::session_push::metadata(
         &mesh,
         runtime.session_push.is_some()
@@ -1490,36 +1526,48 @@ pub(crate) async fn handle_gateway_submit(
         context.hub.retire_incarnation(&runtime.target_delivery_id, id, send).await;
         return Err(crate::session_push::Retired.into());
     }
-    if crate::session_push::submit_refused(&response.outcome) {
-        write_gateway_handle(
-            send,
-            &ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() },
-        )
-        .await?;
+    finish_accepted_submit(
+        send,
+        context,
+        runtime,
+        AcceptedSubmit { submit, response: &response, envelope, metadata: metadata.as_ref() },
+    )
+    .await
+}
+
+struct AcceptedSubmit<'a> {
+    submit: &'a ramflux_node_core::GatewaySubmitFrame,
+    response: &'a ramflux_node_core::EnvelopeSubmitResponse,
+    envelope: ramflux_protocol::Envelope,
+    metadata: Option<&'a (String, i64)>,
+}
+
+async fn finish_accepted_submit(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    accepted: AcceptedSubmit<'_>,
+) -> anyhow::Result<()> {
+    if nack_refused_submit(send, &accepted.response.outcome).await? {
         return Ok(());
     }
-    if response.outcome == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
-        anyhow::ensure!(
-            response.target_delivery_id == envelope.target_delivery_id,
-            "forward acknowledgement target does not match submitted envelope"
-        );
-        let frame = if runtime.supports_forward_ack {
-            ramflux_node_core::GatewayServerFrame::ForwardAck {
-                ack: ramflux_node_core::GatewayForwardAck {
-                    envelope_id: envelope.envelope_id.clone(),
-                    target_delivery_id: response.target_delivery_id.clone(),
-                    inbox_seq: response.inbox_seq,
-                },
-            }
-        } else {
-            ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() }
-        };
-        write_gateway_handle(send, &frame).await?;
+    if reply_if_home_migrated(send, runtime, accepted.response, &accepted.envelope).await? {
+        return Ok(());
+    }
+    if !commit_owner_resolution(
+        send,
+        context,
+        runtime,
+        accepted.submit,
+        accepted.response.outcome.as_str(),
+    )
+    .await?
+    {
         return Ok(());
     }
     // The router response confirms the durable submit. A recipient can ACK and remove its
     // pending entry before this task resumes, so the inbox is not a submit receipt store.
-    let entry = committed_submit_entry(&response, envelope.clone())?;
+    let entry = committed_submit_entry(accepted.response, accepted.envelope)?;
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry };
     capture_itest_gateway_json(
         "deliver",
@@ -1528,7 +1576,267 @@ pub(crate) async fn handle_gateway_submit(
             "frame": &frame,
         }),
     );
-    reply_and_deliver_submitted(send, context, runtime, &response, &frame, metadata.as_ref()).await
+    reply_and_deliver_submitted(
+        send,
+        context,
+        runtime,
+        accepted.response,
+        &frame,
+        accepted.metadata,
+    )
+    .await
+}
+
+enum CheckedSubmitIntent {
+    Answered,
+    Continue(Option<crate::call_intent::VerifiedIntent>),
+}
+
+/// `true` when the submit may continue. A refusal is already written to `send`.
+///
+/// Caller-signed intents keep the existing admission path. A callee submit that names a
+/// wake id, call reference, or terminal action must resolve as the authenticated device.
+pub(crate) async fn enforce_call_resolution(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> anyhow::Result<bool> {
+    if submit.call_intent.is_some()
+        || (submit.wake_id.is_none() && submit.call_ref.is_none() && submit.call_terminal.is_none())
+    {
+        return Ok(true);
+    }
+    let now = ramflux_node_core::now_unix_seconds();
+    let owner_device = runtime.source_identity.storage_key();
+    let lookup = ramflux_node_core::WakeOwnerLookup {
+        owner_device,
+        owner_epoch: runtime.device_epoch,
+        wake_id: submit.wake_id.as_deref(),
+        call_ref: submit.call_ref.as_deref(),
+        now,
+    };
+    let Some(call_context) = submit.call_context.as_ref() else {
+        nack_call_resolution(send).await?;
+        return Ok(false);
+    };
+    if context
+        .store
+        .resolve_call_context(call_context, owner_device, runtime.device_epoch, now)
+        .is_err()
+    {
+        nack_call_resolution(send).await?;
+        return Ok(false);
+    }
+    if context.store.validate_call_owner_context(&lookup, call_context).is_err() {
+        nack_call_resolution(send).await?;
+        return Ok(false);
+    }
+    match context.store.owner_terminal_permitted(&lookup, submit.call_terminal.as_deref()) {
+        Ok(Some(())) => Ok(true),
+        Ok(None) => {
+            nack_call_resolution(send).await?;
+            Ok(false)
+        }
+        Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(reason))
+            if reason == "call resolution refused" =>
+        {
+            nack_call_resolution(send).await?;
+            Ok(false)
+        }
+        Err(error) => Err(anyhow::anyhow!(error)),
+    }
+}
+
+pub(crate) async fn commit_owner_resolution(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    outcome: &str,
+) -> anyhow::Result<bool> {
+    if submit.call_context.is_none() {
+        return Ok(true);
+    }
+    if !matches!(outcome, "online" | "offline_queued") {
+        return Ok(true);
+    }
+    let (owned_runtime, owned_submit) = (runtime.clone(), submit.clone());
+    let completion =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            crate::call_intent::complete_resolution(context, &owned_runtime, &owned_submit)
+                .map_err(anyhow::Error::from)
+        })
+        .await;
+    let completion = match completion {
+        Ok(completion) => completion,
+        Err(error) => {
+            tracing::warn!(%error,"call resolution remains held");
+            nack_call_resolution(send).await?;
+            return Ok(false);
+        }
+    };
+    let decision = completion.decision;
+    write_gateway_handle(
+        send,
+        &ramflux_node_core::GatewayServerFrame::CallResolved {
+            context: decision.context,
+            state: decision.state,
+            media_allowed: decision.media_allowed,
+            wake_resolved: decision.wake_resolved,
+        },
+    )
+    .await?;
+    if let Some((start, digest, wake_id)) = completion.cancellation {
+        dispatch_cancel_wake(context, &start, &digest, &wake_id, start.body.target_epoch).await;
+    }
+    Ok(true)
+}
+
+async fn nack_call_resolution(send: &GatewaySendHandle) -> anyhow::Result<()> {
+    write_gateway_handle(
+        send,
+        &ramflux_node_core::GatewayServerFrame::Nack {
+            reason: "call resolution refused".to_owned(),
+        },
+    )
+    .await
+}
+
+async fn check_submit_intent(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<CheckedSubmitIntent> {
+    let Some(intent) = submit.call_intent.as_deref() else {
+        return Ok(CheckedSubmitIntent::Continue(None));
+    };
+    let Some(owner) =
+        crate::lookup_target_owner_epoch(&context.router, &envelope.target_delivery_id).await
+    else {
+        nack_call_intent(send).await?;
+        return Ok(CheckedSubmitIntent::Answered);
+    };
+    match crate::call_intent::verify_submission(
+        runtime,
+        envelope,
+        intent,
+        owner.device_epoch,
+        &owner.owner_device,
+        ramflux_node_core::now_unix_seconds(),
+    ) {
+        Ok(verified) => Ok(CheckedSubmitIntent::Continue(Some(verified))),
+        Err(_error) => {
+            nack_call_intent(send).await?;
+            Ok(CheckedSubmitIntent::Answered)
+        }
+    }
+}
+
+async fn nack_refused_submit(send: &GatewaySendHandle, outcome: &str) -> anyhow::Result<bool> {
+    if !crate::session_push::submit_refused(outcome) {
+        return Ok(false);
+    }
+    write_gateway_handle(
+        send,
+        &ramflux_node_core::GatewayServerFrame::Nack { reason: outcome.to_owned() },
+    )
+    .await?;
+    Ok(true)
+}
+
+async fn nack_call_intent(send: &GatewaySendHandle) -> anyhow::Result<()> {
+    write_gateway_handle(
+        send,
+        &ramflux_node_core::GatewayServerFrame::Nack { reason: "call intent rejected".to_owned() },
+    )
+    .await
+}
+
+async fn persist_accepted_intent(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    envelope_id: &str,
+    verified: Option<&crate::call_intent::VerifiedIntent>,
+    outcome: &str,
+) -> anyhow::Result<()> {
+    if !matches!(outcome, "online" | "offline_queued") {
+        return Ok(());
+    }
+    let (Some(intent), Some(verified)) = (submit.call_intent.as_deref(), verified) else {
+        return Ok(());
+    };
+    let (owned_intent, owned_digest, owned_envelope, source, epoch, ciphertext) = (
+        intent.clone(),
+        verified.start_digest.clone(),
+        envelope_id.to_owned(),
+        runtime.source_identity.clone(),
+        runtime.device_epoch,
+        submit.envelope.encrypted_payload.as_bytes().to_vec(),
+    );
+    let request_expires_at = u64::try_from(submit.signed_request.expires_at)
+        .map_err(|_| anyhow::anyhow!("call request expiry rejected"))?;
+    let admitted =
+        crate::durable_work::run(context, Some(&runtime.source_identity), move |context| {
+            Ok(context.store.admit_verified_call_intent_with_expiry(
+                &ramflux_node_core::CallIntentAdmission {
+                    signed: &owned_intent,
+                    start_digest: &owned_digest,
+                    envelope_id: &owned_envelope,
+                    source_identity: source.storage_key(),
+                    source_epoch: epoch,
+                    encrypted_invite: &ciphertext,
+                },
+                request_expires_at,
+            )?)
+        })
+        .await;
+    match admitted {
+        Ok(ramflux_node_core::CallIntentEffect::Cancelled { wake_id: Some(wake_id) }) => {
+            dispatch_cancel_wake(
+                context,
+                intent,
+                &verified.start_digest,
+                &wake_id,
+                intent.body.target_epoch,
+            )
+            .await;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(error)),
+    }
+}
+
+async fn reply_if_home_migrated(
+    send: &GatewaySendHandle,
+    runtime: &GatewaySessionRuntime,
+    response: &ramflux_node_core::EnvelopeSubmitResponse,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<bool> {
+    if response.outcome != ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        response.target_delivery_id == envelope.target_delivery_id,
+        "forward acknowledgement target does not match submitted envelope"
+    );
+    let frame = if runtime.supports_forward_ack {
+        ramflux_node_core::GatewayServerFrame::ForwardAck {
+            ack: ramflux_node_core::GatewayForwardAck {
+                envelope_id: envelope.envelope_id.clone(),
+                target_delivery_id: response.target_delivery_id.clone(),
+                inbox_seq: response.inbox_seq,
+            },
+        }
+    } else {
+        ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() }
+    };
+    write_gateway_handle(send, &frame).await?;
+    Ok(true)
 }
 
 async fn reply_and_deliver_submitted(
@@ -1569,7 +1877,13 @@ async fn deliver_submitted_to_peer(
     metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<()> {
     if response.outcome == "offline_queued" {
-        dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
+        dispatch_authenticated_offline_wake(
+            context,
+            runtime,
+            &response.target_delivery_id,
+            envelope,
+        )
+        .await?;
     } else if response.outcome == "online"
         && (response.target_delivery_id != runtime.target_delivery_id
             || runtime.session_push.is_some())
@@ -1591,7 +1905,13 @@ async fn deliver_submitted_to_peer(
             )
             .await?
         {
-            dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
+            dispatch_authenticated_offline_wake(
+                context,
+                runtime,
+                &response.target_delivery_id,
+                envelope,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -1762,12 +2082,23 @@ async fn deliver_own_device_fanout_entry(
                 )
                 .await?
             {
-                dispatch_offline_wake(context, &delivery.target_delivery_id, &entry.envelope)
-                    .await?;
+                dispatch_authenticated_offline_wake(
+                    context,
+                    runtime,
+                    &delivery.target_delivery_id,
+                    &entry.envelope,
+                )
+                .await?;
             }
         }
         "offline_queued" => {
-            dispatch_offline_wake(context, &delivery.target_delivery_id, &entry.envelope).await?;
+            dispatch_authenticated_offline_wake(
+                context,
+                runtime,
+                &delivery.target_delivery_id,
+                &entry.envelope,
+            )
+            .await?;
         }
         _ => {}
     }
@@ -1874,16 +2205,88 @@ fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+async fn dispatch_cancel_wake(
+    context: &GatewayQuicContext,
+    intent: &ramflux_protocol::SignedCallIntentV1,
+    start_digest: &str,
+    wake_id: &str,
+    target_owner_epoch: u64,
+) {
+    let notify = context.notify.clone();
+    let intent = intent.clone();
+    let start_digest = start_digest.to_owned();
+    let wake_id = wake_id.to_owned();
+    let now = ramflux_node_core::now_unix_seconds();
+    let posted = tokio::task::spawn_blocking(move || {
+        let Some(signed_wake) = crate::notify_wake::signed_cancel_wake(
+            &notify.signer,
+            &intent,
+            &start_digest,
+            &wake_id,
+            target_owner_epoch,
+            now,
+        ) else {
+            return Ok(());
+        };
+        post_signed_wake(&notify, &intent.body.target_delivery_id, signed_wake, now)
+    })
+    .await;
+    match posted {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "call cancel wake dispatch failed"),
+        Err(error) => tracing::warn!(%error, "call cancel wake task failed"),
+    }
+}
+
+async fn dispatch_authenticated_offline_wake(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    target_delivery_id: &str,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<()> {
+    let Some(owner) = crate::lookup_target_owner_epoch(&context.router, target_delivery_id).await
+    else {
+        tracing::warn!("offline wake skipped because the target owner epoch is unavailable");
+        return Ok(());
+    };
+    dispatch_offline_wake(
+        context,
+        runtime.source_identity.storage_key(),
+        runtime.device_epoch,
+        owner.device_epoch,
+        target_delivery_id,
+        envelope,
+    )
+    .await
+}
+
 pub(crate) async fn dispatch_offline_wake(
     context: &GatewayQuicContext,
+    source_identity: &str,
+    source_epoch: u64,
+    target_owner_epoch: u64,
     target_delivery_id: &str,
     envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<()> {
     let notify = context.notify.clone();
+    let store = Arc::clone(&context.store);
+    let source_identity = source_identity.to_owned();
     let target_delivery_id_owned = target_delivery_id.to_owned();
     let envelope = envelope.clone();
+    let now = ramflux_node_core::now_unix_seconds();
     match tokio::task::spawn_blocking(move || {
-        notify_offline_wake(&notify, &target_delivery_id_owned, &envelope)
+        notify_offline_wake(
+            &notify,
+            &store,
+            &crate::notify_wake::OfflineWakeInput {
+                source_identity: &source_identity,
+                source_epoch,
+                target_owner_epoch,
+                target_delivery_id: &target_delivery_id_owned,
+                envelope: &envelope,
+                now,
+            },
+        )
     })
     .await
     {
@@ -2287,6 +2690,7 @@ pub(crate) mod tests {
     #[test]
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,
@@ -2582,6 +2986,7 @@ pub(crate) mod tests {
         branch: &ramflux_crypto::DeviceBranch,
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
+            call_session_generation: None,
             session_push: None,
             ephemeral: false,
             push_limit: 256,
@@ -2702,6 +3107,7 @@ pub(crate) mod tests {
         crate::pre_auth::tests::mount_key(&mut state, &store_path.with_extension("cookie"))?;
         store.save_state(&state)?;
         let config = ramflux_node_core::NodeServiceConfig {
+            send_authority: None,
             node_id: "node-gateway-test".to_owned(),
             service_id: "ramflux-gateway".to_owned(),
             redb_path: "gateway.redb".to_owned(),
