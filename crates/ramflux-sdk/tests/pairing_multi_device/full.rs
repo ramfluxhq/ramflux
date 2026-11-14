@@ -160,6 +160,10 @@ impl Fixture {
             )
             .await?;
         }
+        // sync_relay may just have published epoch_ready. Start that foreground
+        // transition before waiting on the other peer's already-running DATA job.
+        self.a.service_data()?;
+        self.b.service_data()?;
         // A peer still on the SAS relay must be pumped before either DATA worker is awaited.
         if self.a.actor.full_data_worker_owns_relay()
             && self.b.actor.full_data_worker_owns_relay()

@@ -22,8 +22,14 @@ impl FullStreamWork {
             .await
     }
     pub(super) async fn fresh(&mut self) -> Result<(), SdkError> {
+        tracing::debug!(role = self.role.as_str(), "full data native observation started");
         let current = self.own_native_head().await?;
+        tracing::debug!(role = self.role.as_str(), "full data native observation returned");
         let (observed, bound) = self.io.observe_prepublication_binding(current.clone()).await?;
+        tracing::debug!(
+            role = self.role.as_str(),
+            "full data original writer observed native binding"
+        );
         if self.role == PairingRole::Initiator && observed != bound {
             let draft = self.io.prepare_rebind(current.clone()).await?;
             let participant = self.participant.clone();

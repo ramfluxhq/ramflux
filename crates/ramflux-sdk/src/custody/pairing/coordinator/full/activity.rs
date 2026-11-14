@@ -33,6 +33,8 @@ impl PairingActor {
     /// A driver services its ordinary writer, pumps both peers, then waits on their
     /// signals only while this predicate is true AND both peers report
     /// `full_data_worker_owns_relay`. Short SAS relay messages still need pumping.
+    /// Service local data again after `sync_relay`: it can publish a newly ready
+    /// epoch which requires foreground service before a worker can emit a wakeup.
     #[must_use]
     pub fn has_pending_full_local_work(&self) -> bool {
         let pending = self

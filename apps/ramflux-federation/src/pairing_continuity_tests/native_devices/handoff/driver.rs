@@ -38,6 +38,10 @@ impl Fixture {
             )
             .await?;
         }
+        // Consume newly published epoch_ready before waiting on a peer that is
+        // already polling DATA and cannot wake a foreground-only transition.
+        self.a.service_data(&mut self.wire.primary)?;
+        self.b.service_data(&mut self.wire.recipient)?;
         if self.wire.primary.full_data_worker_owns_relay()
             && self.wire.recipient.full_data_worker_owns_relay()
             && (self.wire.primary.has_pending_full_local_work()
