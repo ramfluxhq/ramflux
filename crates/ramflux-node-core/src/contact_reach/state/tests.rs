@@ -192,3 +192,48 @@ fn cr_group_route_requires_its_own_grant_even_with_friendship() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn cr_reach_conflict_holds_positive_use_without_erasing_queued_payloads() -> TestResult {
+    let (friendship, _, id) = subjects()?;
+    let mut state = closed_state()?;
+    state.admission(command(friendship, Decision::Allow, 0), Some(&id), NOW)?;
+    let route = Route {
+        version: 1,
+        source: DeviceRef { account_anchor: digest(2), device_id: "peer".into(), device_epoch: 1 },
+        recipient_root: digest(1),
+        conversation_id: id,
+        traffic: Traffic::Dm,
+        group: None,
+        envelope_hash: digest(21),
+        authority_head_hash: digest(22),
+        issued_at: NOW,
+        expires_at: NOW + 3600,
+    };
+    assert_eq!(
+        state.classify(&route, "peer.example", NOW)?.0,
+        ReachClass::Accepted,
+        "the control must start with an otherwise usable friendship"
+    );
+    state.conflicts.insert(
+        "admission".into(),
+        StateRecord::Conflict {
+            scope: ramflux_protocol::contact_reach::ConflictScope::Admission,
+            revision: 1,
+            first_hash: digest(40),
+            other_hash: digest(41),
+        },
+    );
+    assert!(
+        matches!(
+            state.classify(&route, "peer.example", NOW),
+            Err(ReachError::Refused(Reason::ReachRevisionConflict))
+        ),
+        "an unresolved signed-state fork must hold positive publication"
+    );
+    assert!(
+        state.check_denials(&digest(2), "peer.example", NOW).is_ok(),
+        "a conflict alone must not authorize deletion of a queued sealed payload"
+    );
+    Ok(())
+}

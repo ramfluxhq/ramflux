@@ -164,7 +164,17 @@ pub fn verify_ephemeral(
     frame.validate(now_ms)?;
     let b = &frame.route.body;
     let envelope = &frame.frame.envelope;
-    if b.source.account_anchor != authority.envelope().body.account_anchor
+    let target = ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)?
+        .ok_or_else(|| reject("native ephemeral target required"))?;
+    if !matches!(
+        ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope),
+        Ok(ramflux_protocol::message::outer::NamedDeliveryMode::Ephemeral)
+    ) || ramflux_protocol::message::outer::refuse_live_bridge(envelope).is_err()
+        || envelope.delivery_class != ramflux_protocol::DeliveryClass::Message
+        || target.0 != b.recipient_root
+        || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+            != Some(b.source.account_anchor.as_str())
+        || b.source.account_anchor != authority.envelope().body.account_anchor
         || b.authority_head_hash != custody::object_hash(authority.envelope())?
         || b.source.device_id != envelope.source_device_id
         || authority.envelope().body.principal_id != envelope.source_principal_id
@@ -173,11 +183,11 @@ pub fn verify_ephemeral(
     }
     let certificate = authority.authorize(&b.source, "message", now_ms / 1000)?;
     verify(wire::ROUTE_DOMAIN, &frame.route, &certificate.branch_signing_public_key)?;
-    crate::verify_canonical_signature(
-        &ramflux_protocol::signed_bytes(envelope)?,
-        &envelope.signed.signature,
+    ramflux_protocol::verify_envelope_sender_signature(
+        envelope,
         &certificate.branch_signing_public_key,
-    )
+    )?;
+    Ok(())
 }
 
 /// Verify a submitted recipient decision. Notice and peer evidence are verified by the caller.

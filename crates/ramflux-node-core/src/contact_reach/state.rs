@@ -342,6 +342,10 @@ impl AccountReach {
     pub fn classify(&self, route: &Route, peer: &str, now: u64) -> Result<(ReachClass, Placement)> {
         route.validate()?;
         self.check_denials(&route.source.account_anchor, peer, now)?;
+        if !self.conflicts.is_empty() {
+            // A mirror fork holds positive publication without authorizing payload erasure.
+            return Err(refuse(Reason::ReachRevisionConflict));
+        }
         let policy = self.policy.as_ref().ok_or_else(|| refuse(Reason::ReachPolicyRequired))?;
         if matches!(route.traffic, Traffic::SelfSync | Traffic::OwnCopy) {
             if route.source.account_anchor != route.recipient_root {

@@ -39,6 +39,21 @@ impl CustodyService {
         }
         Ok(self)
     }
+    /// Attach this node's configured mutual-TLS source Submit transport.
+    /// # Errors
+    /// Refuses reach activation without its verified home service.
+    pub fn with_reach_source_submitter(
+        mut self,
+        submitter: Arc<dyn crate::contact_reach::ReachSourceSubmitter>,
+    ) -> Result<Self, CustodyRefusal> {
+        if wire::enabled() && self.reach.is_none() {
+            return Err(CustodyRefusal::BindingRefused);
+        }
+        if let Some(service) = self.reach.take() {
+            self.reach = Some(service.with_source_submitter(submitter));
+        }
+        Ok(self)
+    }
     /// Dispatch a public read after the mesh listener checks the exact local node/service identity.
     /// # Errors
     /// Refuses malformed carrier input; valid requests retain typed correlated results.

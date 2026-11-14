@@ -29,9 +29,13 @@ impl Job {
     ) -> Result<Self, Response> {
         static WORKERS: Semaphore = Semaphore::const_new(4);
         let slot = WORKERS.try_acquire().map_err(|_| super::failure(503, "foreign_capacity"))?;
-        // The shared frame decoder already checked I-JSON. Retain the narrower Query budget.
-        ramflux_protocol::contact_reach::original_document(&request.body, 8192)
+        // The shared frame decoder already checked I-JSON; the worker strictly dispatches
+        // Query at 8192 bytes and Submit at the existing aggregate frame ceiling.
+        let bytes = ramflux_protocol::canonical_json_bytes(&request.body)
             .map_err(|_| super::failure(400, "foreign_invalid_frame"))?;
+        if bytes.len() > ramflux_protocol::contact_reach::MAX_FRAME_BYTES {
+            return Err(super::failure(413, "foreign_payload_too_large"));
+        }
         Ok(Self {
             _slot: slot,
             request: request.clone(),

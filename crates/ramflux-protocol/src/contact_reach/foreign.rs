@@ -398,3 +398,10 @@ mod validation;
 
 mod query;
 pub use query::*;
+
+mod submit;
+pub use submit::{SourceSubmitKind, SourceSubmitRequest};
+mod submit_response;
+pub use submit_response::{
+    MAX_SUBMIT_RESPONSE_BYTES, SourceSubmitResponse, SourceSubmitResponseKind,
+};

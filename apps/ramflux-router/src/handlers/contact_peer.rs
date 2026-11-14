@@ -36,8 +36,21 @@ pub(super) fn route(
 ) -> anyhow::Result<Option<MeshResponse>> {
     if method == "POST" && path == ramflux_protocol::contact_reach::SNAPSHOT_PATH {
         let mut request: ramflux_protocol::contact_reach::PeerQueryRequest =
-            ramflux_protocol::contact_reach::decode(body, 8192)?;
-        request.validate()?;
+            match ramflux_protocol::contact_reach::decode(body, 8192) {
+                Ok(value) => value,
+                Err(_) => return Ok(Some(MeshResponse::json(
+                    "400 Bad Request",
+                    br#"{"frame_type":"contact_foreign_error","reason":"foreign_invalid_frame"}"#
+                        .to_vec(),
+                ))),
+            };
+        if request.validate().is_err() {
+            return Ok(Some(MeshResponse::json(
+                "400 Bad Request",
+                br#"{"frame_type":"contact_foreign_error","reason":"foreign_invalid_frame"}"#
+                    .to_vec(),
+            )));
+        }
         let elapsed = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
         request.remaining_ms = request.remaining_ms.saturating_sub(elapsed);
         if request.remaining_ms == 0 {

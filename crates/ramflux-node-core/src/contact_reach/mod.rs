@@ -12,6 +12,8 @@ pub use ephemeral::{ReachEphemeralAdmission, ReachEphemeralContext};
 mod resolver;
 pub use resolver::ReachPeerResolver;
 mod service;
+mod submit;
+pub use submit::ReachSourceSubmitter;
 mod source;
 pub use source::{ReachSnapshotContext, ReachSourceDocuments};
 mod snapshots;

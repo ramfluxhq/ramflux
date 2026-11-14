@@ -20,6 +20,7 @@ pub struct ReachSession<'a> {
 pub struct ReachService {
     pub(super) node: MigrationNode,
     snapshots: Snapshots,
+    pub(super) source_submitter: Option<std::sync::Arc<dyn super::submit::ReachSourceSubmitter>>,
     pub(super) peer_resolver: Option<std::sync::Arc<dyn super::resolver::ReachPeerResolver>>,
     pub(super) source_documents: Option<std::sync::Arc<dyn super::source::ReachSourceDocuments>>,
 }
@@ -28,7 +29,13 @@ impl ReachService {
     /// # Errors
     /// Returns private staging-key randomness failures.
     pub fn new(node: MigrationNode) -> Result<Self> {
-        Ok(Self { node, snapshots: Snapshots::new()?, source_documents: None, peer_resolver: None })
+        Ok(Self {
+            node,
+            snapshots: Snapshots::new()?,
+            source_documents: None,
+            peer_resolver: None,
+            source_submitter: None,
+        })
     }
 
     /// Execute one account-scoped operation and preserve exact session correlation on errors.
@@ -100,8 +107,10 @@ impl ReachService {
         let owner = ReachOwner { recipient_root: root, actor };
         match &request.operation {
             Operation::Query { .. } => self.resolve_owner_query(store, owner, request, now),
-            Operation::GroupRoster { operation_id, roster } => {
-                store.reach_group_roster(owner, operation_id, roster, now)
+            Operation::Submit { .. } => self.submit_owner(store, owner, request, now),
+            Operation::GroupRoster { .. } => {
+                // TODO(r4h): the signed roster is pinned; its owner request/result is not.
+                Err(refuse(Reason::ForeignCapabilityMissing))
             }
             Operation::ProfilePublish { operation_id, expected_epoch, update } => {
                 store.reach_publish_profile(owner, operation_id, *expected_epoch, update, now)

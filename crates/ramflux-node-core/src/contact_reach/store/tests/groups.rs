@@ -305,3 +305,93 @@ fn cr_group_home_retained_unblock_outlives_dedup_and_last_update() -> TestResult
     );
     Ok(())
 }
+
+#[test]
+fn cr_source_submit_requires_original_return_grant_before_first_dm() -> TestResult {
+    use crate::contact_reach::submit::require_return_grant;
+    let dir = tempfile::TempDir::new()?;
+    let (store, f) = initialize(&dir.path().join("source-return-grant.redb"))?;
+    store.reach_owner_commit(owner(&f), &policy(&f, 70, 0, ReachMode::ContactsOnly)?, NOW)?;
+    store.reach_owner_commit(owner(&f), &policy(&f, 71, 1, ReachMode::Open)?, NOW)?;
+    let tx = store.begin_write()?;
+    let mut state = load(&tx, &f.root)?;
+    drop(tx);
+    let peer = digest(41);
+    let conversation = ramflux_protocol::message::dm_scope::derive(&f.root, &peer)?;
+    let mut outgoing = Route {
+        version: 1,
+        source: f.actor.clone(),
+        recipient_root: peer.clone(),
+        conversation_id: conversation.clone(),
+        traffic: Traffic::Dm,
+        group: None,
+        envelope_hash: digest(72),
+        authority_head_hash: custody::object_hash(f.authority.envelope())?,
+        issued_at: NOW,
+        expires_at: NOW + 3600,
+    };
+    assert!(
+        require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW).is_err(),
+        "open source policy cannot replace the explicit return grant required before first send"
+    );
+    let Operation::Admission { update, .. } =
+        decision(&f, 73, Subject::Friendship { root: peer.clone() }, 0, Decision::Allow, NOW)?
+    else {
+        return Err("friendship operation".into());
+    };
+    let mut body = update.body;
+    body.subject =
+        Subject::Conversation { root: peer.clone(), conversation_id: conversation.clone() };
+    body.grant_until = Some(NOW + ramflux_protocol::contact_reach::CONVERSATION_LIFETIME);
+    let grant = f.key.sign_reach_admission(body, &f.authority, NOW)?;
+    // This exercises source use-time authorization from an original primary signature.
+    // The composite writer's Notice/evidence/outbox atomicity has separate controls.
+    state.admission(grant, Some(&conversation), NOW)?;
+    require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW)?;
+    for traffic in [Traffic::ReceiptDelivered, Traffic::ReceiptRead] {
+        outgoing.traffic = traffic;
+        assert!(
+            require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW).is_err(),
+            "default conversation grants cannot authorize optional outbound receipt signals"
+        );
+    }
+    outgoing.traffic = Traffic::Dm;
+    let expires = NOW + ramflux_protocol::contact_reach::CONVERSATION_LIFETIME;
+    let renewed = renewed_primary(&f, expires)?;
+    require_return_grant(&state, &outgoing, &renewed, "peer.example", expires - 1)?;
+    assert!(
+        require_return_grant(&state, &outgoing, &renewed, "peer.example", expires).is_err(),
+        "the exact grant deadline must stop sending while the same primary remains authorized"
+    );
+    let subject = Subject::Conversation { root: peer, conversation_id: conversation };
+    let StateRecord::Grant { update, .. } =
+        state.grants.get_mut(&subject.key()?).ok_or("return grant")?
+    else {
+        return Err("grant row".into());
+    };
+    update.signature = ramflux_protocol::encode_base64url([99; 64]);
+    assert!(
+        require_return_grant(&state, &outgoing, &f.authority, "peer.example", NOW).is_err(),
+        "a saved grant row without the original phone signature cannot authorize source egress"
+    );
+    Ok(())
+}
+
+fn renewed_primary(f: &Fixture, expires: u64) -> TestResult<VerifiedRecord> {
+    let mut body = f.authority.envelope().body.clone();
+    body.device_set_epoch = body.device_set_epoch.checked_add(1).ok_or("epoch overflow")?;
+    body.previous_record_hash = Some(custody::object_hash(f.authority.envelope())?);
+    body.issued_at = expires - 3600;
+    let primary = body
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == f.actor.device_id)
+        .ok_or("primary device")?;
+    let mut branch = primary.branch_certificate.as_ref().ok_or("primary certificate")?.body.clone();
+    branch.cert_id = digest(75);
+    branch.not_before = expires - 3600;
+    branch.expires_at = expires + 3600;
+    primary.branch_certificate = Some(f.key.certify_branch(branch)?);
+    let record = f.key.sign_record(body)?;
+    Ok(ramflux_crypto::custody::verify_record(&record, expires, None, None)?)
+}

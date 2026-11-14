@@ -568,6 +568,8 @@ fn serve_contact_request(
         let status = match response.frame.status {
             200 => "200 OK",
             403 => "403 Forbidden",
+            413 => "413 Payload Too Large",
+            504 => "504 Gateway Timeout",
             503 => "503 Service Unavailable",
             _ => "400 Bad Request",
         };

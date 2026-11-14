@@ -95,3 +95,6 @@ impl RamfluxClient {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ephemeral_tests;

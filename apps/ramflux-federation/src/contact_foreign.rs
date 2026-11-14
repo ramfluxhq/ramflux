@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 mod budget;
 pub(crate) mod quic;
+mod request;
+mod submit;
 pub(crate) struct Response {
     pub frame: GatewayQuicResponse,
     _reservation: Option<budget::Permit>,
@@ -72,32 +74,12 @@ pub(crate) fn route(
     if !recognizes(path) {
         return Ok(None);
     }
-    if method != "POST" || bytes.len() > 8192 {
-        return Ok(Some(failure(400, "foreign_invalid_frame")));
-    }
-    let request: PeerQueryRequest = match wire::decode(bytes, 8192) {
-        Ok(value) => value,
-        Err(_) => return Ok(Some(failure(400, "foreign_invalid_frame"))),
+    let request = match request::decode(method, path, bytes, context.own_node, context.peer_uri) {
+        Ok(request::Request::Query(request)) => request,
+        Ok(request::Request::Submit(request)) => return submit::route(&request).map(Some),
+        Err(response) => return Ok(Some(response)),
     };
-    if request.validate().is_err() {
-        return Ok(Some(failure(400, "foreign_invalid_frame")));
-    }
-    let peer = context.peer_uri.and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok());
     let own = path == wire::FOREIGN_PATH;
-    let authorized = peer.as_ref().is_some_and(|peer| {
-        if own {
-            peer.node_id == context.own_node
-                && matches!(peer.service_id.as_str(), "ramflux-router" | "ramflux-gateway")
-                && request.query.source_node == context.own_node
-        } else {
-            peer.service_id == "ramflux-federation"
-                && request.query.source_node == peer.node_id
-                && request.query.target_node == context.own_node
-        }
-    });
-    if !authorized {
-        return Ok(Some(failure(403, "foreign_policy_denied")));
-    }
     let peer_key =
         if own { request.query.target_node.as_str() } else { request.query.source_node.as_str() };
     let reservation =
