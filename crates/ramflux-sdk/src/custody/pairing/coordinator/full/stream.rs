@@ -33,6 +33,7 @@ pub(super) struct FullStreamState {
 }
 pub(in crate::custody::pairing::coordinator) struct FullStreamJob(
     Option<JoinHandle<Result<FullStreamFinished, SdkError>>>,
+    Arc<std::sync::atomic::AtomicBool>,
 );
 impl Drop for FullStreamJob {
     fn drop(&mut self) {
@@ -42,6 +43,9 @@ impl Drop for FullStreamJob {
     }
 }
 impl FullStreamJob {
+    pub(super) fn finished(&self) -> bool {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
     pub(in crate::custody::pairing::coordinator) async fn abort_and_drain(mut self) {
         if let Some(job) = self.0.take() {
             job.abort();
@@ -57,7 +61,7 @@ impl FullStreamState {
         if self.complete.is_some() {
             return Ok(None);
         }
-        if self.job.as_ref().and_then(|job| job.0.as_ref()).is_some_and(JoinHandle::is_finished) {
+        if self.job.as_ref().is_some_and(FullStreamJob::finished) {
             let mut job = self.job.take().ok_or_else(wrong)?;
             let outcome = job.0.take().ok_or_else(wrong)?.await;
             self.service.take();
@@ -240,7 +244,10 @@ impl PairingActor {
             new_target,
             linked_target,
         };
+        let completion = runtime.completion();
+        let finished = completion.flag();
         let job = tokio::spawn(async move {
+            let _completion = completion;
             match role {
                 PairingRole::Initiator => Box::pin(work.source(manifest.ok_or_else(wrong)?)).await,
                 PairingRole::Responder => Box::pin(work.destination()).await,
@@ -250,7 +257,7 @@ impl PairingActor {
         state.stream = Some(FullStreamState {
             progress,
             service: Some(service),
-            job: Some(FullStreamJob(Some(job))),
+            job: Some(FullStreamJob(Some(job), finished)),
             complete: None,
             receiver: None,
             failure: None,

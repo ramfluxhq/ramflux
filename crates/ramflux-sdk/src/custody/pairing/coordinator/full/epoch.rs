@@ -22,6 +22,7 @@ struct FullEpochFinished {
 }
 pub(in crate::custody::pairing::coordinator) struct FullEpochJob(
     Option<JoinHandle<FullEpochFinished>>,
+    Arc<std::sync::atomic::AtomicBool>,
 );
 impl Drop for FullEpochJob {
     fn drop(&mut self) {
@@ -32,7 +33,7 @@ impl Drop for FullEpochJob {
 }
 impl FullEpochJob {
     pub(super) fn finished(&self) -> bool {
-        self.0.as_ref().is_some_and(JoinHandle::is_finished)
+        self.1.load(std::sync::atomic::Ordering::Acquire)
     }
     pub(super) async fn packet(self) -> Result<FullPacketEpoch, SdkError> {
         self.finish().await?.packet
@@ -72,7 +73,10 @@ fn start(
     let FullEpochWork { signer, cancelled, trust, mut keys } = work;
     stop.require_live()?;
     let owner = stop.clone();
+    let completion = stop.completion();
+    let finished = completion.flag();
     let task = tokio::spawn(async move {
+        let _completion = completion;
         let packet = timeout(Duration::from_secs(10), async {
             stop.require_live()?;
             let signing_stop = stop.clone();
@@ -156,7 +160,7 @@ fn start(
             let _ = owner.register_tail_epoch(task.abort_handle());
         }
     }
-    Ok(FullEpochJob(Some(task)))
+    Ok(FullEpochJob(Some(task), finished))
 }
 pub(super) fn start_tail(
     relay: Arc<dyn FullPairingTransport>,

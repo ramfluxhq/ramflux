@@ -9,12 +9,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod activity;
 mod local_jobs;
 
 #[derive(Default)]
 pub(crate) struct FullRuntimeCancel {
     stopped: AtomicBool,
     stopped_signal: tokio::sync::Notify,
+    activity: std::sync::Arc<tokio::sync::Notify>,
     local_workers: Mutex<usize>,
     local_jobs: Mutex<Vec<local_jobs::LocalJob>>,
     idle: Condvar,
@@ -149,6 +151,7 @@ impl FullRuntimeCancel {
     pub(crate) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.stopped_signal.notify_waiters();
+        self.notify_activity();
         if let Some(job) = self.job.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
         {
             job.abort();

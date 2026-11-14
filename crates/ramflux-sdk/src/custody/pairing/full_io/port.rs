@@ -353,6 +353,7 @@ impl FullLocalIoPort {
             .send(Envelope { request: self.scope.request(action), reply })
             .await
             .map_err(|_| SdkError::PairingCode("Retired"))?;
+        self.scope.runtime.notify_activity();
         let FullLocalIoReply(value) =
             response.await.map_err(|_| SdkError::PairingCode("Retired"))??;
         self.scope.live()?;

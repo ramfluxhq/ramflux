@@ -17,6 +17,7 @@ use ramflux_protocol::custody::pairing::{
     local_dto::FullTransferBegin,
 };
 use ramflux_storage::{FullSourcePreparationCancel, PreparedFullSource};
+mod activity;
 mod affirm;
 mod bootstrap;
 pub(super) mod cancel;
