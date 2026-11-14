@@ -27,6 +27,9 @@ use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "wa_actor/checkpoint_fairness.rs"]
+mod checkpoint_fairness;
+
 fn snap(runtime: &super::super::AccountRuntime) -> Result<ReceiveLedgerSnap, SdkError> {
     let account = account_of(runtime)?;
     Ok(account.client.account_db()?.receive_ledger_snap_for_test(&account.target_delivery_id)?)

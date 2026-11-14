@@ -3,6 +3,8 @@
 
 //! Account receive scheduling uses only ticks, connection establishment, and explicit resync.
 
+#[path = "receive_progress.rs"]
+mod progress;
 #[path = "receive_ledger.rs"]
 mod receive_ledger;
 
@@ -331,7 +333,12 @@ async fn run_one_anchored(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push((trigger, false));
     let epoch = handle.resync_epoch();
-    let pass = timeout(limits.sync, pass_anchored(handle, work, generation, trigger, limits.call));
+    let (progress, observed) = progress::Progress::start();
+    let pass = progress::until_stalled(
+        limits.sync,
+        observed,
+        pass_anchored(handle, work, generation, trigger, limits.call, Some(&progress)),
+    );
     let result = tokio::select! {
         biased;
         _ = stop.changed() => {
@@ -400,7 +407,7 @@ async fn pass(
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
     let (active, _, backpressure) =
-        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout, None)).await?;
     let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
     Ok(active || more)
 }
@@ -412,9 +419,10 @@ async fn pass_anchored(
     generation: u64,
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
+    progress: Option<&progress::Progress>,
 ) -> Result<(bool, bool), SdkError> {
     let (active, paused, backpressure) =
-        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout, progress)).await?;
     let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
     if !paused {
         flush_acks(
@@ -435,6 +443,7 @@ async fn catch_up(
     generation: u64,
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
+    progress: Option<&progress::Progress>,
 ) -> Result<(bool, bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::PrepareReceive { generation, trigger, reply })
@@ -456,6 +465,7 @@ async fn catch_up(
             backpressure,
             retries: plan.retries,
             limit: plan.limit.min(RECEIVE_PAGE_LIMIT),
+            progress,
         }))
         .await?;
         return Ok((done.active, done.paused, done.backpressure));
@@ -525,7 +535,7 @@ pub(crate) async fn test_catch_up(
     call_timeout: std::time::Duration,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let (active, _, backpressure) =
-        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout, None)).await?;
     Ok((active, backpressure))
 }
 
@@ -550,7 +560,7 @@ pub(crate) async fn test_pass_anchored(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<(bool, bool), SdkError> {
-    Box::pin(pass_anchored(handle, work, generation, trigger, call_timeout)).await
+    Box::pin(pass_anchored(handle, work, generation, trigger, call_timeout, None)).await
 }
 
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one

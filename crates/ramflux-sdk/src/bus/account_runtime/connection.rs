@@ -110,6 +110,14 @@ impl AccountRuntime {
         &mut self,
         work: AccountWork,
     ) -> Result<(), SdkError> {
+        // Ready courier checkpoints can starve the Send queue containing session I/O
+        // and heartbeat tasks. Give that queue a turn before the next checkpoint.
+        // Receive-turn arms retain their generation check without a new suspension:
+        // starting a pending connection here could otherwise change the generation
+        // before an already queued settle is validated.
+        if matches!(&work, AccountWork::Courier(_)) {
+            tokio::spawn(async {}).await.map_err(|_| SdkError::NetworkingPending)?;
+        }
         let publish_networking = self.apply_connection_work_inner(work).await?;
         if let Some(pool) = self.readers.lock().map_err(|_| super::stopped())?.as_ref() {
             pool.set_account_view(&self.state, &self.id)?;
