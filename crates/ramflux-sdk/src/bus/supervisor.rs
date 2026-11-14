@@ -264,11 +264,18 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
-        if let Some(body) = crate::search::capability::guard(&request.method)? {
-            return Ok(reply(body));
-        }
         if crate::search::capability::is_method(&request.method) {
-            return Box::pin(self.search_request(request, connection)).await;
+            match crate::search::capability::guard(&request.method) {
+                Ok(Some(body)) => {
+                    super::secrets::wipe(&mut request.body);
+                    return Ok(reply(body));
+                }
+                Err(error) => {
+                    super::secrets::wipe(&mut request.body);
+                    return Err(error);
+                }
+                Ok(None) => return Box::pin(self.search_request(request, connection)).await,
+            }
         }
         if !super::lifecycle::handles(&request.method) {
             return Box::pin(self.route(request, connection)).await;

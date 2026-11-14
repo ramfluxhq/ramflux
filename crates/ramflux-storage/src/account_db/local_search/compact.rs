@@ -73,7 +73,32 @@ fn locator_tables(db: &Connection) -> rusqlite::Result<Vec<LocatorTable>> {
         let table = match kind.as_str() {
             "archived_actor" => "backup_archived_actor_state",
             "archived_event" => "backup_archived_local_event",
-            _ => kind.split(':').next().ok_or(rusqlite::Error::InvalidQuery)?,
+            // Only these footprint producers use implicit rowids (see footprint/schema.rs).
+            // In particular raw_inner_evidence uses a message ID despite matching a table name.
+            "runtime_message_content"
+            | "rejected_inbox_projection"
+            | "conversation_unread_marker"
+            | "group_message_tombstone_projection"
+            | "message_projection"
+            | "receipt_projection"
+            | "group_pending_undecrypted"
+            | "root_group_sender_key_counter_seen"
+            | "group_sender_key_counter_seen"
+            | "contact_message_request"
+            | "conversation_read_state"
+            | "conversation_delivery_state" => kind.as_str(),
+            "raw_envelope_log:envelope_id"
+            | "outbox_queue:envelope_id"
+            | "ack_state:envelope_id"
+            | "nack_state:envelope_id"
+            | "cursor_checkpoint:last_envelope_id"
+            | "device_inbox_cursor:last_envelope_id"
+            | "event_causal_dependency:event_id"
+            | "event_causal_dependency:depends_on_event_id"
+            | "projection_checkpoint:last_event_id" => {
+                kind.split(':').next().ok_or(rusqlite::Error::InvalidQuery)?
+            }
+            _ => continue,
         };
         if !exists(db, table)? {
             continue;

@@ -109,17 +109,20 @@ async fn local_search_live_versions_and_scope() -> TestResult {
                 crate::client::generated_identity::now_ms(),
                 false,
             )?;
+            let target_ref = g::MessageRef {
+                id: original.id.clone(),
+                conversation_id: conversation.clone(),
+                author_anchor: source_anchor,
+            };
+            let digest =
+                crate::client::message_mutations::previous_content_digest(&target_ref, &body)?;
             let edit = RamfluxClient::encode_generated_inner(
                 identity,
                 &g::Content {
                     value: Some(g::content::Value::Edit(g::Edit {
-                        target: Some(g::MessageRef {
-                            id: original.id.clone(),
-                            conversation_id: conversation.clone(),
-                            author_anchor: source_anchor,
-                        }),
+                        target: Some(target_ref),
                         revision: 1,
-                        previous_content_digest: vec![0; 32],
+                        previous_content_digest: digest.to_vec(),
                         replacement: Some(replacement),
                     })),
                 },

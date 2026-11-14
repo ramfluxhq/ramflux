@@ -403,9 +403,15 @@ fn archive_compaction_preserves_erasure_locators() -> TestResult {
     f.insert("survivor", "survivorcanary")?;
     f.db.delete_direct_message("thread", "gap", "me", "delete-gap")?;
     f.db.connection.execute_batch("CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT INTO backup_archived_actor_state(rowid,source,state_kind,state_json) VALUES(9,'local','opaque-victim',x'7b2270726976617465223a226f70617175652d63616e617279227d'); INSERT INTO message_footprint VALUES('victim','archived_actor','9');")?;
+    f.db.connection.execute_batch("INSERT INTO raw_inner_evidence VALUES('victim',x'00',x'01'); INSERT INTO message_footprint VALUES('victim','raw_inner_evidence','victim');")?;
     let destination = f.directory.path().join("compacted.db");
     let snapshot = f.db.write_backup_snapshot(&destination)?;
     let backup = BackupDatabase::open(&destination, &snapshot.key)?;
+    let natural: bool = backup.db.query_row("SELECT EXISTS(SELECT 1 FROM message_footprint WHERE message_id='victim' AND kind='raw_inner_evidence' AND locator='victim')", [], |r| r.get(0))?;
+    assert!(
+        natural,
+        "a natural message-ID locator must never be rewritten as an implicit rowid merely because its kind matches a table name"
+    );
     let present: i64 = backup.db.query_row(
         "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='opaque-victim'",
         [],

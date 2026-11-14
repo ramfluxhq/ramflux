@@ -162,20 +162,20 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                 }
                 let request = incoming.take()?;
                 if let Err(error) = super::requests::deadline(&request) {
-                    outbound.send(local_bus_error(&request,&error)).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(request, &error)).await.map_err(|_| closed())?;
                     continue;
                 }
                 if request.kind != LocalBusFrameKind::Request {
-                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(request, &SdkError::LocalBus("expected request frame".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if !inflight.insert(request.request_id.clone()) {
-                    outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
+                    outbound.send(rejected_request(request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
                 if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
-                        outbound.send(local_bus_error(&request,&error)).await.map_err(|_|closed())?;
+                        outbound.send(rejected_request(request, &error)).await.map_err(|_|closed())?;
                     }
                     inflight.remove(&request.request_id);
                     continue;
@@ -253,6 +253,12 @@ async fn configure_subscription(
         .await
         .map_err(|_| closed())?;
     Ok(())
+}
+
+fn rejected_request(mut request: LocalBusFrame, error: &SdkError) -> LocalBusFrame {
+    let response = local_bus_error(&request, error);
+    super::secrets::wipe(&mut request.body);
+    response
 }
 
 fn closed() -> SdkError {

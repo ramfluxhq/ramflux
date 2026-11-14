@@ -130,7 +130,14 @@ pub fn compile_query(
             .map_err(|_| SearchError::IndexUnavailable)?;
     }
     let mut hash = blake3::Hasher::new();
+    hash.update(b"ramflux.local-search.query.v1");
+    hash.update(
+        &u64::try_from(expression.len()).map_err(|_| SearchError::InvalidQuery)?.to_le_bytes(),
+    );
     hash.update(expression.as_bytes());
+    hash.update(
+        &u64::try_from(cjk_runs.len()).map_err(|_| SearchError::InvalidQuery)?.to_le_bytes(),
+    );
     for run in &cjk_runs {
         hash.update(
             &u64::try_from(run.expose().len())
@@ -139,10 +146,17 @@ pub fn compile_query(
         );
         hash.update(run.expose().as_bytes());
     }
+    hash.update(
+        &u64::try_from(request.kinds.len()).map_err(|_| SearchError::InvalidQuery)?.to_le_bytes(),
+    );
     for kind in &request.kinds {
         hash.update(&kind.ordinal().to_le_bytes());
     }
+    hash.update(&[u8::from(request.conversation_id.is_some())]);
     if let Some(scope) = &request.conversation_id {
+        hash.update(
+            &u64::try_from(scope.len()).map_err(|_| SearchError::InvalidQuery)?.to_le_bytes(),
+        );
         hash.update(scope.as_bytes());
     }
     hash.update(&[u8::from(request.include_snippets)]);
@@ -246,6 +260,18 @@ mod tests {
                 "compiler must never generate a prefix operator"
             );
         }
+        let mut left = SearchQuery::new("left", "cat");
+        left.kinds = vec![super::super::SearchKind::Message];
+        left.conversation_id = Some(format!("{}thread", "\0".repeat(8)));
+        let mut right = SearchQuery::new("right", "cat");
+        right.kinds =
+            vec![super::super::SearchKind::Message, super::super::SearchKind::Conversation];
+        right.conversation_id = Some("thread".into());
+        assert_ne!(
+            compile_query(&left, &SearchControl::new())?.fingerprint,
+            compile_query(&right, &SearchControl::new())?.fingerprint,
+            "cursor fingerprints must frame kind counts and scope bytes without concatenation ambiguity"
+        );
         let request = SearchQuery::new("request", "a".repeat(MAX_QUERY_BYTES + 1));
         assert!(
             matches!(

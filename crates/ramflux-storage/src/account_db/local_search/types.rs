@@ -74,7 +74,7 @@ impl Drop for SearchText {
 }
 
 /// Refusals never carry the query, token stream or snippet.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum SearchError {
     #[error("SearchInvalidQuery")]
     InvalidQuery,
@@ -96,6 +96,11 @@ pub enum SearchError {
     IndexUnavailable,
     #[error("search storage operation failed")]
     Storage(#[from] crate::StorageError),
+}
+impl std::fmt::Debug for SearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 impl From<rusqlite::Error> for SearchError {
     fn from(error: rusqlite::Error) -> Self {
