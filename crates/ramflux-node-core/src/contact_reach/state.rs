@@ -20,8 +20,10 @@ use std::collections::BTreeMap;
 #[serde(deny_unknown_fields)]
 pub struct AccountReach {
     pub revision: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub policy: Option<Signed<ReachPolicy>>,
     pub admission_revision: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub last_update: Option<Signed<Admission>>,
     pub grants: BTreeMap<String, StateRecord>,
     pub blocks: BTreeMap<String, StateRecord>,

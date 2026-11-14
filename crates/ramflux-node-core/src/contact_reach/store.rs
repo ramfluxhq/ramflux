@@ -40,7 +40,9 @@ struct CandidateQuery {
     query: Query,
     expires: u64,
     consumed: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
     authenticated_node_key: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     snapshot_hash: Option<String>,
 }
 

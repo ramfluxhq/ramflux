@@ -85,6 +85,40 @@ fn owner(f: &Fixture) -> ReachOwner<'_> {
 }
 
 #[test]
+fn cr_candidate_query_requires_complete_current_context() -> TestResult {
+    let row = CandidateQuery {
+        query: Query {
+            version: 1,
+            source_node: "source.example".into(),
+            target_node: "target.example".into(),
+            account_anchor: digest(1),
+            card_hash: None,
+            nonce: digest(2),
+            base: None,
+            device_ref: None,
+        },
+        expires: NOW + 60,
+        consumed: false,
+        authenticated_node_key: None,
+        snapshot_hash: None,
+    };
+    let current = serde_json::to_value(row)?;
+    for field in ["authenticated_node_key", "snapshot_hash"] {
+        let mut missing = current.clone();
+        missing.as_object_mut().ok_or("candidate object")?.remove(field);
+        assert!(
+            serde_json::from_value::<CandidateQuery>(missing).is_err(),
+            "missing {field} cannot be treated as an unbound current candidate"
+        );
+    }
+    assert!(
+        serde_json::from_value::<CandidateQuery>(current).is_ok(),
+        "current candidates use explicit null until the verified peer reply is bound"
+    );
+    Ok(())
+}
+
+#[test]
 fn cr_home_policy_cas_exact_retry_and_closed_default_survive_reopen() -> TestResult {
     let directory = tempfile::TempDir::new()?;
     let path = directory.path().join("home.redb");

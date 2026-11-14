@@ -9,6 +9,24 @@ pub(super) const NOW: u64 = 1_760_000_000;
 pub(super) fn digest(n: u8) -> String {
     ramflux_protocol::encode_base64url([n; 32])
 }
+
+#[test]
+fn cr_home_state_requires_explicit_current_nullable_fields() -> TestResult {
+    let current = serde_json::to_value(AccountReach::default())?;
+    for field in ["policy", "last_update"] {
+        let mut missing = current.clone();
+        missing.as_object_mut().ok_or("home state object")?.remove(field);
+        assert!(
+            serde_json::from_value::<AccountReach>(missing).is_err(),
+            "missing {field} must refuse instead of selecting an older home-state shape"
+        );
+    }
+    assert!(
+        serde_json::from_value::<AccountReach>(current).is_ok(),
+        "a fresh current home state explicitly represents its uninitialized revisions"
+    );
+    Ok(())
+}
 pub(super) fn command(subject: Subject, decision: Decision, revision: u64) -> Signed<Admission> {
     let allow = decision == Decision::Allow;
     let conversation = matches!(subject, Subject::Conversation { .. });
