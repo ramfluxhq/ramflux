@@ -437,6 +437,17 @@ impl FullGenerationCommitted {
             installed.state = "installed".into();
             install_store::write_installed(local.root, &installed)?;
         }
+        if cut >= 7 {
+            install_store::remove_pending(
+                local.root,
+                &self.install.account_id,
+                &self.install.operation_id,
+            )?;
+        }
+        if cut >= 8 {
+            require_selected_full_generation(local.root, &self.install, &adoption)?;
+            self.directory.finish_g3()?;
+        }
         Ok(())
     }
 }

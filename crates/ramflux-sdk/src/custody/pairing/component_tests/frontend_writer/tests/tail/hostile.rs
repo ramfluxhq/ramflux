@@ -48,9 +48,11 @@ async fn run() -> TestResult {
         crate::custody::pairing::ordinary_session_admitted(&client, &rig.participant_b.account_id)?,
         "test: data-channel corruption revoked installed ordinary B authority"
     );
+    eprintln!("test: hostile tail rejected; cold reopening source");
     source =
         reopen(&mut rig.primary, &rig.participant_a, &mut rig.source.client, b"fresh-source-data")
             .await?;
+    eprintln!("test: hostile tail source reopened; cold reopening target");
     target = reopen(
         &mut rig.secondary,
         &rig.participant_b,
@@ -61,8 +63,10 @@ async fn run() -> TestResult {
     // Cold owners have discarded the old bearer tokens. The native relay keeps
     // that epoch until its specified ten-second idle expiry.
     tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    eprintln!("test: hostile tail cold owners opened; restoring fresh epochs");
     drive(Box::pin(rig.primary.transfer_status(&request)), &mut source, &rig.source.client).await?;
     drive(Box::pin(rig.secondary.transfer_status(&request)), &mut target, &client).await?;
+    eprintln!("test: hostile tail epochs started; merging cold data");
     Box::pin(merge(&mut rig, &mut source, &client, &mut target, &request)).await?;
     assert!(
         matches!(

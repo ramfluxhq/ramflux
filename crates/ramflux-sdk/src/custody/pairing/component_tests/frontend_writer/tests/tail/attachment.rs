@@ -42,7 +42,9 @@ async fn after_base() -> TestResult {
             rig.secondary
                 .service_full_transfer(slot.as_ref().ok_or("test: target writer absent")?)?;
         }
-        rig.clock.advance_ms(1001);
+        if !rig.primary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         let result =
             drive(Box::pin(rig.primary.sync_relay()), &mut source, &rig.source.client).await;
         if matches!(
@@ -54,7 +56,9 @@ async fn after_base() -> TestResult {
             break;
         }
         result.map_err(|error| format!("test: source post-base media refusal: {error}"))?;
-        rig.clock.advance_ms(1001);
+        if !rig.secondary.full_data_worker_owns_relay() {
+            rig.clock.advance_ms(1001);
+        }
         drive(Box::pin(rig.secondary.sync_relay()), &mut source, &rig.source.client)
             .await
             .map_err(|error| format!("test: target post-base media: {error}"))?;

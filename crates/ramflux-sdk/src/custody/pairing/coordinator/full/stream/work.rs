@@ -112,15 +112,23 @@ impl FullStreamWork {
                 self.packet.allow_verified_duplex(&proof)?;
                 return Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None });
             }
-            manifest = self.next_source_manifest().await?;
+            manifest = self
+                .next_source_manifest()
+                .await
+                .inspect_err(|error| Self::note_failure("next source cut", error))?;
             self.send_manifest(&manifest).await?;
         }
         loop {
-            self.transfer_source_input(&manifest).await?;
+            self.transfer_source_input(&manifest)
+                .await
+                .inspect_err(|error| Self::note_failure("send forward input", error))?;
             if manifest.manifest.is_last_prepublication_delta() {
                 break;
             }
-            manifest = self.next_source_manifest().await?;
+            manifest = self
+                .next_source_manifest()
+                .await
+                .inspect_err(|error| Self::note_failure("next source cut", error))?;
             self.send_manifest(&manifest).await?;
         }
         self.fresh().await.inspect_err(|error| Self::note_failure("native freshness", error))?;

@@ -105,6 +105,15 @@ mod tests {
         hold.finish().await?;
         Ok(())
     }
+    #[tokio::test(start_paused = true)]
+    async fn pairing_full_g3_pending_removal_and_reclamation_crash_cuts() -> TestResult {
+        let hold = ClockHold::new();
+        for cut in [7, 8] {
+            crate::bus::credentials::contract_tests::deadline(Box::pin(run_actor(cut))).await?;
+        }
+        hold.finish().await?;
+        Ok(())
+    }
     async fn run_actor(cut: u8) -> TestResult {
         use ramflux_protocol::custody::pairing::local_dto::StatusRequest;
         let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
@@ -232,6 +241,11 @@ mod tests {
         use ramflux_protocol::custody::pairing::local_dto::{FullStatusStage, Outcome};
         let restart_relay = relay.clone();
         let mut actor = cold_installed_actor(rig, &install, &authority, relay)?;
+        let pending = crate::custody::pairing::install_store::list_pending(
+            &rig.participant_b.root,
+            &install.account_id,
+        )?;
+        let required_observations = if pending.is_empty() { 1 } else { 2 };
         let before = rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed);
         let mut wrong = request.clone();
         wrong.generation += 1;
@@ -249,8 +263,9 @@ mod tests {
             "test: exact recovered G3 was not reported installed"
         );
         assert!(
-            rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed) >= before + 2,
-            "test: recovery did not reobserve native head around physical verification"
+            rig.node.query_calls.load(std::sync::atomic::Ordering::Relaxed)
+                >= before + required_observations,
+            "test: cold recovery omitted its own required native observation"
         );
         assert!(actor.displayed_proposal().is_err(), "test: recovery restored human approval");
         rig.participant_b.return_client(&mut frontend)?;

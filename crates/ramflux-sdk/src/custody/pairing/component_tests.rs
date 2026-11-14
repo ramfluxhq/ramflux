@@ -1789,7 +1789,23 @@ async fn settle_stream_work(rig: &Rig) {
     rig.primary.settle_full_local_jobs_for_test().await;
     rig.secondary.settle_full_local_jobs_for_test().await;
     tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    // A queued local request or completed worker is a causal turn, not a relay
+    // polling delay. Charging it 500ms can exhaust a paused test's A3 deadline.
+    use std::future::Future as _;
+    let first = rig.primary.local_work_signal();
+    let second = rig.secondary.local_work_signal();
+    let a = first.notified();
+    let b = second.notified();
+    tokio::pin!(a, b);
+    let local_activity = std::future::poll_fn(|cx| {
+        let source = a.as_mut().poll(cx).is_ready();
+        let recipient = b.as_mut().poll(cx).is_ready();
+        std::task::Poll::Ready(source || recipient)
+    })
+    .await;
+    if !local_activity {
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 mod attended_join;

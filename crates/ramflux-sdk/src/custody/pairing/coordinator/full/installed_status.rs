@@ -8,6 +8,7 @@ use ramflux_protocol::custody::pairing::{
     full_transfer::{FullError, U64},
     local_dto::{FullStatus, FullStatusStage, FullTailStatus, LocalResult, StatusRequest},
 };
+mod local;
 impl PairingActor {
     pub(super) async fn restore_installed_status(
         &mut self,
@@ -16,49 +17,10 @@ impl PairingActor {
         let participant = self.participant.clone().ok_or(SdkError::PairingCode("WrongContext"))?;
         let local = participant.clone();
         let owned = request.clone();
-        let snapshot = self
-            .installation_loan(move |db| {
-                if db.pairing_head()?.is_some() {
-                    return Ok(None);
-                }
-                let Some(install) = install_store::read_installed(&local.root, &local.account_id)?
-                else {
-                    return Ok(None);
-                };
-                let Some(adoption) = db
-                    .pairing_adoption()?
-                    .filter(|adoption| adoption.full_generation_nonce.is_some())
-                else {
-                    return Ok(None);
-                };
-                let selected = ramflux_storage::AccountIndex::open(&local.root)?
-                    .account_generation_selection(&local.account_id)?;
-                let bytes = zeroize::Zeroizing::new(
-                    selected.manifest_json.ok_or(SdkError::PairingCode("PublicationPending"))?,
-                );
-                let marker = full_generation::FullGenerationManifest::decode(&bytes)?;
-                if marker.operation_id != owned.operation_id {
-                    return Ok(None);
-                }
-                local.full_selected_db(db, Some(&install.account_anchor))?;
-                let now = crate::custody::network_now()?;
-                let native =
-                    crate::custody::load_data_account(&local.root, &local.account_id, now)?;
-                full_generation::require_completed_full_generation(
-                    &local.root,
-                    &native,
-                    &install,
-                    &adoption,
-                )?;
-                let scope = db.full_installed_recipient_tail_scope(
-                    &owned.operation_id,
-                    owned.generation,
-                    now,
-                )?;
-                Ok(Some((install, scope, db.full_local_unlock_guard()?)))
-            })
-            .await?;
-        let Some((install, scope, unlock)) = snapshot else { return Ok(None) };
+        let snapshot =
+            self.installation_loan(move |db| local::snapshot(&local, &owned, db)).await?;
+        let Some((install, scope, unlock, has_head)) = snapshot else { return Ok(None) };
+        let cleanup = has_head.then(|| (participant.clone(), install.clone()));
         let local = participant;
         let anchor = install.account_anchor.clone();
         let current = self
@@ -82,6 +44,9 @@ impl PairingActor {
                     &current,
                     now,
                 )?;
+                if let Some((owner, installed)) = cleanup {
+                    local::finish_interrupted_cleanup(&owner, &installed, db)?;
+                }
                 if scope.merged || scope.abandoned {
                     return Ok(None);
                 }

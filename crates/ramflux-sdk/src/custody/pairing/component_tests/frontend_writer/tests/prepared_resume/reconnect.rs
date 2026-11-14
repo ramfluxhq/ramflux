@@ -71,9 +71,11 @@ async fn run() -> TestResult {
     drive(Box::pin(rig.secondary.resume_full_data(&request)), &mut b, &target)
         .await
         .map_err(|error| format!("test: prepared reconnect target data: {error}"))?;
+    eprintln!("test: prepared cold owners starting duplex");
     Box::pin(pump(&mut rig, &mut a, &mut b, &target))
         .await
         .map_err(|error| format!("test: prepared reconnect duplex: {error}"))?;
+    eprintln!("test: prepared cold duplex complete; starting attended renewal");
     Box::pin(review_and_renew(&mut rig, &mut a, &mut b, &target, &request, &original))
         .await
         .map_err(|error| format!("test: prepared reconnect review: {error}"))?;
