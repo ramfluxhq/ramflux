@@ -36,8 +36,10 @@ impl Fixture {
             )
             .await?;
         }
-        if self.wire.primary.has_pending_full_local_work()
-            || self.wire.recipient.has_pending_full_local_work()
+        if self.wire.primary.full_data_worker_owns_relay()
+            && self.wire.recipient.full_data_worker_owns_relay()
+            && (self.wire.primary.has_pending_full_local_work()
+                || self.wire.recipient.has_pending_full_local_work())
         {
             let a = self.wire.primary.local_work_signal();
             let b = self.wire.recipient.local_work_signal();

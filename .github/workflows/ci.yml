@@ -467,6 +467,9 @@ jobs:
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
           python3 -B scripts/ci/run-nextest.py --label e2e_harness -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
+          # Pairing remains default-off; this row opts in only in owned child services.
+          cargo build -p ramflux-rf --bin rf
+          RAMFLUX_PAIRING_BIN_DIR="$PWD/target/debug" python3 -B scripts/ci/run-nextest.py --label pairing_history -- cargo nextest run --profile ci --no-tests=fail -p ramflux-federation --bin ramflux-federation --run-ignored ignored-only --test-threads=1 -E 'test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay)'
           # Includes b1_same_node_bidirectional_dm_uses_deliver_without_resume and
           # two_nodes_have_separate_identities_cas_and_stores (Demo B).
           python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1

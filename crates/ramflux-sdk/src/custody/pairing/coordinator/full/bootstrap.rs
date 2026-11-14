@@ -274,14 +274,21 @@ impl PairingActor {
                 counter,
                 ciphertext: decode_base64url(&ciphertext).map_err(|_| wrong())?,
             };
-            let (role, mut owner, awaiting) = self.with_ceremony_mut(|c| {
-                let state =
-                    c.full.as_mut().and_then(|full| full.bootstrap.as_mut()).ok_or_else(wrong)?;
-                Ok((c.role, state.owner.take().ok_or_else(wrong)?, state.awaiting_lease))
-            })?;
+            let (role, mut owner, awaiting) = self
+                .with_ceremony_mut(|c| {
+                    let state = c
+                        .full
+                        .as_mut()
+                        .and_then(|full| full.bootstrap.as_mut())
+                        .ok_or_else(wrong)?;
+                    Ok((c.role, state.owner.take().ok_or_else(wrong)?, state.awaiting_lease))
+                })
+                .inspect_err(|error| note_bootstrap_failure("channel owner", error))?;
             let now = crate::custody::network_now()?;
             if role == PairingRole::Responder && awaiting {
-                let (_, trust) = owner.accept_destination_lease(&frame, now)?;
+                let (_, trust) = owner
+                    .accept_destination_lease(&frame, now)
+                    .inspect_err(|error| note_bootstrap_failure("destination lease", error))?;
                 self.retain_bootstrap_trust(trust, participant.clone())
                     .await
                     .inspect_err(|error| note_bootstrap_failure("durable trust", error))?;

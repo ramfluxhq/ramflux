@@ -22,12 +22,17 @@ async fn after_base() -> TestResult {
     let mut rig = Box::pin(Rig::open_profile(true)).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
     let mut source = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
-    Box::pin(bootstrap(&mut rig, &mut source)).await?;
-    let base = Box::pin(hold_base_application(&mut rig, &mut source)).await?;
+    Box::pin(bootstrap(&mut rig, &mut source))
+        .await
+        .map_err(|error| format!("test: local-media original bootstrap: {error}"))?;
+    let base = Box::pin(hold_base_application(&mut rig, &mut source))
+        .await
+        .map_err(|error| format!("test: local-media base barrier: {error}"))?;
     rig.source.client.put_encrypted_object(MEDIA, PLAINTEXT)?;
     {
         let slot = rig.participant_b.db.lock().map_err(|_| "test: held base target owner")?;
-        base.apply(slot.as_ref().ok_or("test: held base writer absent")?)?;
+        base.apply(slot.as_ref().ok_or("test: held base writer absent")?)
+            .map_err(|error| format!("test: actual held base application: {error}"))?;
     }
     let mut refused = false;
     for _ in 0..128 {

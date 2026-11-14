@@ -535,3 +535,6 @@ fn pairing_full_terminal_unprepared_stage_requires_drain_and_reclaims_only_priva
     );
     Ok(())
 }
+
+#[path = "full_reference/prelink.rs"]
+mod prelink;

@@ -223,10 +223,17 @@ async fn merge(
             merged = true;
             break;
         }
-        // This fixture pauses Tokio time and holds automatic advancement. Advance the
-        // existing A3 relay poll turn after yielding owned work; readiness alone cannot
-        // fire while both fresh epoch workers are waiting for that protocol deadline.
-        settle_stream_work(rig).await;
+        // Advance a protocol turn only for a fresh cold epoch. Normal tail work is
+        // directly pumped above; it must not consume virtual time while copying data.
+        if rig.primary.full_tail_epoch_in_flight_for_test()
+            || rig.secondary.full_tail_epoch_in_flight_for_test()
+        {
+            settle_stream_work(rig).await;
+        } else {
+            tokio::task::yield_now().await;
+            rig.primary.settle_full_local_jobs_for_test().await;
+            rig.secondary.settle_full_local_jobs_for_test().await;
+        }
     }
     assert!(
         merged,

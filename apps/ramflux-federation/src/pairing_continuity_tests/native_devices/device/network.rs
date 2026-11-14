@@ -114,7 +114,7 @@ impl Device {
         );
         self.client.initialize_born_v3_branch(&reference.device_id, self.vault.clone()).await?;
         let config = session_config(&self.local, profile, stack, &reference)?;
-        let client = std::mem::replace(&mut self.client, RamfluxClient::new());
+        let client = std::mem::take(&mut self.client);
         Box::pin(ramflux_sdk::AccountSessionHarness::connect_pairing(
             ramflux_sdk::NativePairingNetworkFixture { client, config, node: profile.clone() },
         ))

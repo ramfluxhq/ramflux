@@ -27,7 +27,9 @@ async fn run() -> TestResult {
         .next()
         .ok_or("test: full operation missing")?
         .operation_id;
-    Box::pin(deliver_candidate_and_ready(&mut rig, &operation)).await?;
+    Box::pin(deliver_candidate_and_ready(&mut rig, &operation))
+        .await
+        .map_err(|error| format!("test: prepared reconnect initial ready: {error}"))?;
     let original = rig.primary.affirmed_full_source_preservation()?.clone();
     let source_relay = relay(&mut rig.primary)?;
     let target_relay = relay(&mut rig.secondary)?;
@@ -42,7 +44,8 @@ async fn run() -> TestResult {
     rig.clock.set_wall(rig.now);
     crate::time::FixedClock::advance_to(i64::try_from(rig.now)?);
     rig.source.client = reopen(&rig.participant_a, b"fresh-source-data")?;
-    let target = reopen_staged(&rig.participant_b, &operation)?;
+    let target = reopen_staged(&rig.participant_b, &operation)
+        .map_err(|error| format!("test: prepared reconnect target reopen: {error}"))?;
     rig.primary = actor(&rig.participant_a, &rig.source.client, source_relay, &operation, rig.now)?;
     rig.secondary = actor(&rig.participant_b, &target, target_relay, &operation, rig.now)?;
     let request = StatusRequest {
@@ -59,10 +62,18 @@ async fn run() -> TestResult {
             .is_none(),
         "test: positively unpublished prepared B was mistaken for installation"
     );
-    drive(Box::pin(rig.primary.resume_full_data(&request)), &mut a, &rig.source.client).await?;
-    drive(Box::pin(rig.secondary.resume_full_data(&request)), &mut b, &target).await?;
-    Box::pin(pump(&mut rig, &mut a, &mut b, &target)).await?;
-    Box::pin(review_and_renew(&mut rig, &mut a, &mut b, &target, &request, &original)).await?;
+    drive(Box::pin(rig.primary.resume_full_data(&request)), &mut a, &rig.source.client)
+        .await
+        .map_err(|error| format!("test: prepared reconnect source data: {error}"))?;
+    drive(Box::pin(rig.secondary.resume_full_data(&request)), &mut b, &target)
+        .await
+        .map_err(|error| format!("test: prepared reconnect target data: {error}"))?;
+    Box::pin(pump(&mut rig, &mut a, &mut b, &target))
+        .await
+        .map_err(|error| format!("test: prepared reconnect duplex: {error}"))?;
+    Box::pin(review_and_renew(&mut rig, &mut a, &mut b, &target, &request, &original))
+        .await
+        .map_err(|error| format!("test: prepared reconnect review: {error}"))?;
     rig.primary.lock().await?;
     rig.secondary.lock().await?;
     Ok(())

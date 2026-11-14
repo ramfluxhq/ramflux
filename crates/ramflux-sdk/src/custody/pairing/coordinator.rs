@@ -905,7 +905,21 @@ impl PairingActor {
     }
 
     async fn ingest(&mut self, frames: Vec<QueuedFrame>) -> Result<(), SdkError> {
-        let outcome = match self.ingest_inner(frames).await {
+        let outcome = match self.ingest_inner(frames).await.inspect_err(|error| {
+            if let Some(ceremony) = &self.ceremony {
+                #[cfg(test)]
+                eprintln!(
+                    "test: pairing ingest phase={} full={}: {error}",
+                    ceremony.phase,
+                    ceremony.full.is_some()
+                );
+                tracing::debug!(
+                    phase = ceremony.phase,
+                    error_code = Self::background_error_code(error),
+                    "pairing frame ingestion refused"
+                );
+            }
+        }) {
             Ok(()) => self.advance_workflow().await,
             Err(error) => match protocol_fail_code(&error) {
                 Some(code) if self.ceremony.as_ref().is_some_and(|c| !terminal(&c.phase)) => {

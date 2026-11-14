@@ -158,8 +158,11 @@ impl Fixture {
             )
             .await?;
         }
-        // No sleep or private job handle: wait only while an owned worker is pending.
-        if self.a.actor.has_pending_full_local_work() || self.b.actor.has_pending_full_local_work()
+        // A peer still on the SAS relay must be pumped before either DATA worker is awaited.
+        if self.a.actor.full_data_worker_owns_relay()
+            && self.b.actor.full_data_worker_owns_relay()
+            && (self.a.actor.has_pending_full_local_work()
+                || self.b.actor.has_pending_full_local_work())
         {
             let a = self.a.actor.local_work_signal();
             let b = self.b.actor.local_work_signal();

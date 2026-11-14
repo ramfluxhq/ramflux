@@ -11,9 +11,28 @@ impl PairingActor {
     pub fn local_work_signal(&self) -> Arc<tokio::sync::Notify> {
         self.full_runtime.activity_signal()
     }
+    /// Whether the DATA worker has replaced this actor's short SAS relay pump.
+    /// Standalone two-endpoint drivers keep pumping both actors until both return true
+    /// before waiting solely on their worker signals. This is a scheduling hint only.
+    #[must_use]
+    pub fn full_data_worker_owns_relay(&self) -> bool {
+        self.ceremony
+            .as_ref()
+            .and_then(|ceremony| ceremony.full.as_ref())
+            .and_then(|full| full.bootstrap.as_ref())
+            .is_some_and(|state| {
+                state.epoch_job.is_some() || state.epoch_ready.is_some() || state.stream.is_some()
+            })
+            || !self.tail_jobs.is_empty()
+    }
+    #[cfg(test)]
+    pub(crate) fn full_tail_epoch_in_flight_for_test(&self) -> bool {
+        self.tail_jobs.values().any(|job| job.epoch.as_ref().is_some_and(|epoch| !epoch.finished()))
+    }
     /// Whether a full-data async worker still needs local service or completion.
     /// A driver services its ordinary writer, pumps both peers, then waits on their
-    /// signals only while this predicate is true. Relay messages still need pumping.
+    /// signals only while this predicate is true AND both peers report
+    /// `full_data_worker_owns_relay`. Short SAS relay messages still need pumping.
     #[must_use]
     pub fn has_pending_full_local_work(&self) -> bool {
         let pending = self
