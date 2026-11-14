@@ -1785,13 +1785,13 @@ async fn finish_owned_stream(rig: &mut Rig) -> TestResult {
     Err("stream did not complete signed DV after application".into())
 }
 async fn settle_stream_work(rig: &Rig) {
+    use std::future::Future as _;
     tokio::task::yield_now().await;
     rig.primary.settle_full_local_jobs_for_test().await;
     rig.secondary.settle_full_local_jobs_for_test().await;
     tokio::task::yield_now().await;
     // A queued local request or completed worker is a causal turn, not a relay
     // polling delay. Charging it 500ms can exhaust a paused test's A3 deadline.
-    use std::future::Future as _;
     let first = rig.primary.local_work_signal();
     let second = rig.secondary.local_work_signal();
     let a = first.notified();
