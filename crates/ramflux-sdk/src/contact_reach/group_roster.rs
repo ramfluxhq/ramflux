@@ -270,7 +270,7 @@ impl RamfluxClient {
                 &authority.envelope().body.master_certificate,
             )?,
             version: 1,
-            recipient_root: mirror.root,
+            recipient_root: mirror.root.clone(),
             group_id: group.into(),
             conversation_id: state.view().conversation_id.clone(),
             grant_hash: queue.grant_hash.clone(),

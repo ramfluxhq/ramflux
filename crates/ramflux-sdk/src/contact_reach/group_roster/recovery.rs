@@ -102,7 +102,7 @@ impl RamfluxClient {
                 grant_hash: queue.grant_hash.clone(),
                 group_epoch: intent.epoch,
                 context,
-                authority_hash: mirror.authority_head_hash,
+                authority_hash: mirror.authority_head_hash.clone(),
             });
             if *reason == Reason::GroupEpochStale {
                 queue.active = queue.next.take();

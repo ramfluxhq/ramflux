@@ -22,6 +22,7 @@ pub(super) fn verify(
     db: &AccountDb,
     root: &str,
     home: Option<&ramflux_crypto::home_migration::VerifiedHome>,
+    latest_original_time: u64,
 ) -> Result<Option<Vec<StateRecord>>, SdkError> {
     let (count, bytes) = db.actor_state_usage(KEY)?;
     if count == 0 {
@@ -48,6 +49,9 @@ pub(super) fn verify(
         })
     {
         return Err(refused(Reason::ForeignSnapshotInvalid));
+    }
+    for record in &staged.records {
+        record.validate_original_time(latest_original_time)?;
     }
     verify_originals(db, root, &staged.records, home)?;
     Ok(Some(staged.records))
@@ -98,6 +102,6 @@ impl crate::RamfluxClient {
     pub(super) fn saved_reach_state(&self) -> Result<Option<SavedReachState>, SdkError> {
         let db = self.account_db()?;
         require_ready(db)?;
-        Ok(db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?)
+        Ok(db.reach_saved_state()?.map(SavedReachState))
     }
 }

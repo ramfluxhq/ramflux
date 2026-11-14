@@ -10,7 +10,7 @@ use ramflux_protocol::{
 use std::collections::BTreeMap;
 const NOW: u64 = 1000;
 fn state() -> SavedReachState {
-    SavedReachState {
+    SavedReachState(ramflux_storage::ReachSavedState {
         provenance_hash: "provenance".into(),
         positive_pending: false,
         root: "owner".into(),
@@ -24,7 +24,7 @@ fn state() -> SavedReachState {
         records: vec![],
         restrictions: BTreeMap::new(),
         conflict: false,
-    }
+    })
 }
 
 #[test]

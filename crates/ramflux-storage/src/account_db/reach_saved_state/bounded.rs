@@ -7,7 +7,7 @@ use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use std::{collections::BTreeMap, fmt};
 const LIMIT: usize = 8192;
 
-pub(super) fn records<'de, D: serde::Deserializer<'de>>(
+pub(in crate::account_db) fn records<'de, D: serde::Deserializer<'de>>(
     decoder: D,
 ) -> Result<Vec<StateRecord>, D::Error> {
     struct Records;
@@ -32,7 +32,7 @@ pub(super) fn records<'de, D: serde::Deserializer<'de>>(
     }
     decoder.deserialize_seq(Records)
 }
-pub(super) fn restrictions<'de, D: serde::Deserializer<'de>>(
+pub(in crate::account_db) fn restrictions<'de, D: serde::Deserializer<'de>>(
     decoder: D,
 ) -> Result<BTreeMap<String, StateRecord>, D::Error> {
     struct Restrictions;

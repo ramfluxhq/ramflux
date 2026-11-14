@@ -209,7 +209,7 @@ async fn cr_group_signed_read_clears_only_original_retained_unblock() -> TestRes
         "the retirement's signed grant remains proof and is never installed as permission"
     );
     let older = proofs.records(Some(&proofs.block), &proofs.block, &[])?;
-    let restored = super::super::restrictions::merge_restored(state.restrictions, &older)?;
+    let restored = super::super::restrictions::merge_restored(state.restrictions.clone(), &older)?;
     assert!(restored.values().any(|record| matches!(record,
         StateRecord::Retirement { group_floor: Some(floor), .. }
         if floor.floor_epoch == cleared.floor_epoch && floor.block_control.as_deref() == Some(&proofs.unblock)

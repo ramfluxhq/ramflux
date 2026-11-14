@@ -210,6 +210,60 @@ async fn future_clearance() -> TestResult {
     assert_eq!(after.state_hash, before.state_hash, "refusal must preserve the committed mirror");
     assert_eq!(after.restrictions, before.restrictions, "refusal must preserve the signed block");
     assert_denied(&fixture.check(Traffic::Dm));
+    refuse_restored_future_clearance(&fixture, &block, &unblock)?;
+    Ok(())
+}
+
+fn refuse_restored_future_clearance(
+    fixture: &PolicyFixture,
+    block: &custody::Envelope<wire::Admission>,
+    unblock: &custody::Envelope<wire::Admission>,
+) -> TestResult {
+    let db = fixture.owner.client.account_db()?;
+    let before = db.reach_saved_state()?.ok_or("committed block")?;
+    let future = StateRecord::Retirement {
+        subject: unblock.body.subject.clone(),
+        revision: 4,
+        update: unblock.clone(),
+        group_floor: None,
+    };
+    let hashes = db.reach_provenance_proof_hashes()?;
+    let proof = db
+        .reach_provenance_proof(&before.root, hashes.first().ok_or("native proof selector")?)?
+        .ok_or("native proof")?;
+    let mut signers = wire::record_signers(&future)?;
+    for signer in &mut signers {
+        signer.proof_hash.clone_from(&proof.proof_hash);
+    }
+    db.retain_reach_provenance(&before.root, &signers, [Ok(proof)])?;
+    db.persist_actor_state(
+        crate::contact_reach::restore::KEY,
+        &ramflux_storage::ReachRestoreRestrictions {
+            root: before.root.clone(),
+            records: vec![future],
+        },
+    )?;
+    let error = fixture
+        .install(
+            block,
+            vec![StateRecord::Block { subject: block.body.subject.clone(), update: block.clone() }],
+        )
+        .err()
+        .ok_or("future restored clearance must refuse")?;
+    assert!(
+        matches!(error.downcast_ref::<SdkError>(), Some(SdkError::Protocol(_)))
+            && error.to_string().contains("original signing time"),
+        "a valid proof/reference closure must stop at the restored original-time boundary: {error}"
+    );
+    assert_eq!(
+        db.reach_saved_state()?.ok_or("preserved block")?,
+        before,
+        "refused future restore must leave the entire committed mirror unchanged"
+    );
+    assert!(
+        db.actor_state_exists(crate::contact_reach::restore::KEY)?,
+        "the unauthenticated-in-time restore remains pending instead of clearing the block"
+    );
     Ok(())
 }
 
@@ -410,7 +464,8 @@ async fn retained_clearance() -> TestResult {
         .is_none(),
         "the legitimately cleared and superseded block must stop occupying signer metadata"
     );
-    let merged = crate::contact_reach::restrictions::merge_restrictions(saved.restrictions, &old)?;
+    let merged =
+        crate::contact_reach::restrictions::merge_restrictions(saved.restrictions.clone(), &old)?;
     assert!(!merged.values().any(
         |record| matches!(record, StateRecord::Block { subject: peer, .. } if peer == &subject)
     ));
@@ -538,8 +593,12 @@ async fn forged_restored_clearance() -> TestResult {
         crate::contact_reach::restore::KEY,
         &serde_json::json!({"root":fixture.route.recipient_root,"records":[record]}),
     )?;
-    let verification =
-        crate::contact_reach::restore::verify(db, &fixture.route.recipient_root, None);
+    let verification = crate::contact_reach::restore::verify(
+        db,
+        &fixture.route.recipient_root,
+        None,
+        fixture.now.checked_add(60).ok_or("restore clock window")?,
+    );
     assert!(
         matches!(verification, Err(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed))),
         "matching object/proof hashes cannot replace original cryptographic verification"

@@ -10,6 +10,31 @@ const NOW: u64 = 1_700_000_100;
 fn d(n: u8) -> String {
     ramflux_protocol::encode_base64url([n; 32])
 }
+fn native_root() -> TestResult<String> {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ramflux-crypto/tests/fixtures/custody_v3.json"
+    ))?;
+    let record: custody::Envelope<custody::DeviceSet> =
+        serde_json::from_value(fixture.get("record").ok_or("native root")?.clone())?;
+    Ok(record.body.account_anchor)
+}
+fn saved(root: String) -> Saved {
+    Saved {
+        root,
+        revision: 1,
+        admission_revision: 0,
+        home_head_hash: d(50),
+        home_node_key: d(51),
+        authority_head_hash: d(52),
+        custodian_head_hash: None,
+        state_hash: d(53),
+        provenance_hash: d(54),
+        records: vec![],
+        restrictions: BTreeMap::new(),
+        conflict: false,
+        positive_pending: true,
+    }
+}
 
 fn seed(db: &AccountDb, peer: u8, expected: u64) -> TestResult<String> {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -67,9 +92,13 @@ fn seed(db: &AccountDb, peer: u8, expected: u64) -> TestResult<String> {
         signer.proof_hash.clone_from(&proof.proof_hash);
     }
     db.retain_reach_provenance(&root, &signers, [Ok(proof)])?;
-    db.persist_client_record("reach", "state", &serde_json::json!({
-        "root":root,"revision":100-expected,"records":[],"restrictions":{"block":denial,"floor":floor}
-    }))?;
+    let mut saved = saved(root.clone());
+    saved.revision = 100 - expected;
+    saved.admission_revision = expected + 1;
+    saved.authority_head_hash.clone_from(&update.body.authority_head_hash);
+    saved.restrictions.insert("block".into(), denial);
+    saved.restrictions.insert("floor".into(), floor);
+    db.persist_reach_saved_state(&saved)?;
     Ok(root)
 }
 
@@ -84,8 +113,8 @@ fn merge_mode(native: bool) -> TestResult {
     let temp = tempfile::TempDir::new()?;
     let source_index = AccountIndex::open(temp.path().join("source"))?;
     let local_index = AccountIndex::open(temp.path().join("local"))?;
-    source_index.create_account("acct", "principal")?;
-    local_index.create_account("acct", "principal")?;
+    source_index.create_account("acct", &native_root()?)?;
+    local_index.create_account("acct", &native_root()?)?;
     let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
     let local = AccountDb::open(&local_index, "acct", &AccountDbKey::generate()?)?;
     let root = seed(&local, 20, 2)?;
@@ -118,11 +147,7 @@ fn merge_mode(native: bool) -> TestResult {
     );
     let references: u64 = merged.db.query_row("SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'reach/provenance/reference/%'", [], |row| row.get(0))?;
     assert_eq!(references, 2, "both original reference sets survive the encrypted merge");
-    source.persist_client_record(
-        "reach",
-        "state",
-        &serde_json::json!({"root":d(99),"records":[],"restrictions":{}}),
-    )?;
+    source.persist_reach_saved_state(&saved(d(99)))?;
     let bad_path = temp.path().join("bad.db");
     let bad = source.write_backup_snapshot(&bad_path)?;
     let result = if native {
@@ -151,7 +176,8 @@ fn cr_restore_restriction_counts_refuse_during_decode() -> TestResult {
     let bytes = ramflux_protocol::canonical_json_bytes(&Restrictions { root: d(81), records })?;
     assert!(wire::decode::<Restrictions>(&bytes, MAX_STATE_BYTES).is_err());
     let map: BTreeMap<_, _> = (0..8193).map(|index| (index.to_string(), floor.clone())).collect();
-    let saved = serde_json::json!({"root":d(81),"records":[],"restrictions":map});
+    let mut saved = saved(d(81));
+    saved.restrictions = map;
     assert!(
         ramflux_protocol::parse_i_json::<Saved>(&ramflux_protocol::canonical_json_bytes(&saved)?)
             .is_err()
@@ -164,15 +190,11 @@ fn cr_empty_restriction_restore_still_requires_fresh_reconciliation() -> TestRes
     for native in [false, true] {
         let temp = tempfile::TempDir::new()?;
         let index = AccountIndex::open(temp.path().join("account"))?;
-        index.create_account("acct", "principal")?;
+        index.create_account("acct", &d(82))?;
         let source = AccountDb::open(&index, "acct", &AccountDbKey::generate()?)?;
-        source.persist_client_record(
-            "reach",
-            "state",
-            &serde_json::json!({
-                "root":d(82),"revision":1,"records":[],"restrictions":{},"positive_pending":false
-            }),
-        )?;
+        let mut current = saved(d(82));
+        current.positive_pending = false;
+        source.persist_reach_saved_state(&current)?;
         let incoming = temp.path().join("incoming.db");
         let snapshot = source.write_backup_snapshot(&incoming)?;
         let destination = temp.path().join("destination.db");

@@ -61,7 +61,9 @@ mod reach_clock;
 mod reach_proof_records;
 mod reach_provenance;
 mod reach_restrictions;
+mod reach_saved_state;
 pub use reach_restrictions::ReachRestoreRestrictions;
+pub use reach_saved_state::ReachSavedState;
 #[cfg(any(test, feature = "test-instrumentation"))]
 mod test_busy;
 pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};

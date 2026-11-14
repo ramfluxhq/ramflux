@@ -144,22 +144,18 @@ impl VerifiedReachState {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SavedReachState {
-    root: String,
-    revision: u64,
-    admission_revision: u64,
-    home_head_hash: String,
-    home_node_key: String,
-    authority_head_hash: String,
-    #[serde(deserialize_with = "required_option")]
-    custodian_head_hash: Option<String>,
-    state_hash: String,
-    provenance_hash: String,
-    records: Vec<StateRecord>,
-    restrictions: BTreeMap<String, StateRecord>,
-    conflict: bool,
-    positive_pending: bool,
+#[serde(transparent)]
+pub(crate) struct SavedReachState(ramflux_storage::ReachSavedState);
+impl std::ops::Deref for SavedReachState {
+    type Target = ramflux_storage::ReachSavedState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for SavedReachState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 impl crate::RamfluxClient {
     pub(super) fn require_reach_authority_head(
@@ -193,15 +189,18 @@ impl crate::RamfluxClient {
                 verified.custodian_head_hash.as_deref(),
                 now,
             )?;
-            let previous: Option<SavedReachState> =
-                db.client_record("reach", "state")?.map(serde_json::from_value).transpose()?;
+            let previous: Option<SavedReachState> = db.reach_saved_state()?.map(SavedReachState);
             provenance::retain_snapshot(
                 db,
                 &verified.manifest.account_anchor,
                 &verified.provenance,
             )?;
-            let restored =
-                restore::verify(db, &verified.manifest.account_anchor, verified.home.as_ref())?;
+            let restored = restore::verify(
+                db,
+                &verified.manifest.account_anchor,
+                verified.home.as_ref(),
+                verified.manifest.expires_at,
+            )?;
             if let Some(saved) = &previous {
                 if saved.root != verified.manifest.account_anchor
                     || saved.conflict
@@ -217,17 +216,13 @@ impl crate::RamfluxClient {
                             let mut refreshed = saved.clone();
                             refreshed.refresh_current(&verified);
                             collection::collect(db, &refreshed)?;
-                            db.persist_client_record(
-                                "reach",
-                                "state",
-                                &serde_json::to_value(refreshed)?,
-                            )?;
+                            db.persist_reach_saved_state(&refreshed)?;
                             return Ok(());
                         }
                     } else {
                         let mut fenced = saved.clone();
                         fenced.conflict = true;
-                        db.persist_client_record("reach", "state", &serde_json::to_value(fenced)?)?;
+                        db.persist_reach_saved_state(&fenced)?;
                         // Return after commit below; a callback error would roll the restrictive fence back.
                         return Ok(());
                     }
@@ -243,12 +238,12 @@ impl crate::RamfluxClient {
                 Err(SdkError::ReachRefused(Reason::HomeFork)) => {
                     let mut fenced = previous.ok_or_else(|| refused(Reason::HomeFork))?;
                     fenced.conflict = true;
-                    db.persist_client_record("reach", "state", &serde_json::to_value(fenced)?)?;
+                    db.persist_reach_saved_state(&fenced)?;
                     return Ok(());
                 }
                 Err(error) => return Err(error),
             };
-            let saved = SavedReachState {
+            let saved = SavedReachState(ramflux_storage::ReachSavedState {
                 root: verified.manifest.account_anchor,
                 revision: verified.manifest.revision,
                 admission_revision: verified.manifest.admission_revision,
@@ -262,18 +257,17 @@ impl crate::RamfluxClient {
                 restrictions,
                 conflict: false,
                 positive_pending: !verified.positives_ready,
-            };
+            });
             if restored.is_some() {
                 db.remove_actor_state(restore::KEY)?;
             }
             collection::collect(db, &saved)?;
-            db.persist_client_record("reach", "state", &serde_json::to_value(saved)?)?;
+            db.persist_reach_saved_state(&saved)?;
             Ok::<_, SdkError>(())
         })?;
-        let saved: SavedReachState = serde_json::from_value(
-            db.client_record("reach", "state")?
-                .ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?,
-        )?;
+        let saved = SavedReachState(
+            db.reach_saved_state()?.ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?,
+        );
         if saved.conflict {
             return Err(refused(Reason::HomeFork));
         }

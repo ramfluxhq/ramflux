@@ -118,7 +118,7 @@ async fn roster_retry_and_repair() -> TestResult {
     peer.client.install_reach_state(verified_records(
         &peer,
         &mirror.home_head_hash,
-        mirror.records,
+        mirror.records.clone(),
         now,
     )?)?;
     let original_hash = custody::framed_hash(OPERATION_HASH_DOMAIN, &roster(&first)?.header)?;
@@ -143,7 +143,7 @@ async fn roster_retry_and_repair() -> TestResult {
     peer.client.install_reach_state(verified_records(
         &peer,
         &mirror.home_head_hash,
-        mirror.records,
+        mirror.records.clone(),
         now,
     )?)?;
     assert!(
@@ -409,7 +409,8 @@ async fn cr_reach_read_rechecks_current_authority_and_refreshes_same_content_bin
         peer.client.group_reach_mirror().is_err(),
         "a stale saved authority cannot supply positive group bookkeeping after the custody head changes"
     );
-    let current = verified_records(&peer, &home, before.records, crate::custody::network_now()?)?;
+    let current =
+        verified_records(&peer, &home, before.records.clone(), crate::custody::network_now()?)?;
     peer.client.install_reach_state(current)?;
     let updated = peer.client.group_reach_mirror()?.ok_or("current mirror")?;
     assert_ne!(

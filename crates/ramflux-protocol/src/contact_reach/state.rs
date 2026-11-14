@@ -116,12 +116,22 @@ impl StateRecord {
         }
     }
 
+    /// Bound every original witness by the authenticated read's allowed signing-time window.
+    /// This does not reapply the expired submission deadline of a retained object.
+    /// # Errors
+    /// Refuses unsafe time bounds and future policy/admission/group-floor witnesses.
+    pub fn validate_original_time(&self, latest: u64) -> Result<(), ProtocolError> {
+        safe(latest)?;
+        if self.latest_original_time().is_some_and(|time| time > latest) {
+            return Err(invalid("reach original signing time exceeds snapshot clock window"));
+        }
+        Ok(())
+    }
+
     fn validate_shape(&self, manifest: &StateManifest) -> Result<(), ProtocolError> {
         // A snapshot's exact 60-second lease also bounds the allowed command clock skew.
         // Retained commands keep their signatures after their submission deadline expires.
-        if self.latest_original_time().is_some_and(|time| time > manifest.expires_at) {
-            return Err(invalid("reach original signing time exceeds snapshot clock window"));
-        }
+        self.validate_original_time(manifest.expires_at)?;
         if matches!(
             self,
             Self::Block { subject: Subject::Group { .. }, .. }

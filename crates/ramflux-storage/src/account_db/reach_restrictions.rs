@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Restore stages independent restrictions for SDK authentication, never positive permissions.
+use super::reach_saved_state::{ReachSavedState as Saved, bounded};
 use crate::StorageError;
 use ramflux_protocol::contact_reach::{MAX_STATE_BYTES, StateRecord};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 const KEY: &str = "reach/restore-restrictions";
 const STATE_KEY: &str = "directory/reach/state";
 // The private saved mirror contains the bounded canonical image and independent restrictions.
-const MAX_SAVED_BYTES: usize = 2 * MAX_STATE_BYTES + 4096;
+const MAX_SAVED_BYTES: usize = super::reach_saved_state::MAX_BYTES;
 /// Negative-only private restore stage. It never carries a positive grant or an active lease.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,15 +22,6 @@ pub struct ReachRestoreRestrictions {
     pub records: Vec<StateRecord>,
 }
 use ReachRestoreRestrictions as Restrictions;
-// These are selected fields of SDK-private persistence, not a permissive wire decoder.
-#[derive(Deserialize)]
-struct Saved {
-    root: String,
-    #[serde(deserialize_with = "bounded::records")]
-    records: Vec<StateRecord>,
-    #[serde(deserialize_with = "bounded::restrictions")]
-    restrictions: BTreeMap<String, StateRecord>,
-}
 fn invalid() -> StorageError {
     StorageError::Integrity("invalid retained reach restrictions")
 }
@@ -135,6 +127,5 @@ fn append(
     Ok(())
 }
 
-mod bounded;
 #[cfg(test)]
 mod tests;
