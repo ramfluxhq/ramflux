@@ -52,8 +52,8 @@ pub enum RamfluxErrorCode {
     ObjectOwnershipUnverified = 21,
     CustodyForkFenced = 22,
     SchemaResetRequired = 23,
-    PairingRefused = 24,
-    PairingStale = 25,
+    PairingRefused = 28,
+    PairingStale = 29,
 }
 
 /// Retryable account writer contention (18). Existing `StorageFailed` (8) remains
@@ -64,9 +64,9 @@ pub const RAMFLUX_ERR_ACCOUNT_BUSY: i32 = 18;
 pub const RAMFLUX_ERR_OBJECT_ERASED: i32 = 19;
 
 /// Pairing wrote a closed local refusal result to the caller's output buffer.
-pub const RAMFLUX_ERR_PAIRING_REFUSED: i32 = 24;
+pub const RAMFLUX_ERR_PAIRING_REFUSED: i32 = 28;
 /// Pairing rejected a stale operation generation without applying its request.
-pub const RAMFLUX_ERR_PAIRING_STALE: i32 = 25;
+pub const RAMFLUX_ERR_PAIRING_STALE: i32 = 29;
 
 impl RamfluxErrorCode {
     const fn name(self) -> &'static str {

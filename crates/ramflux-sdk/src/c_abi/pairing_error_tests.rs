@@ -41,12 +41,28 @@ fn pairing_abi_error_codes_are_additive() {
         );
         assert_ne!(code as i32, RAMFLUX_ERR_PAIRING_STALE, "pairing code aliases existing {name}");
     }
+    for (status, number) in [
+        (super::v2::RamfluxV2Status::Pending, 24),
+        (super::v2::RamfluxV2Status::Cancelled, 25),
+        (super::v2::RamfluxV2Status::Closed, 26),
+        (super::v2::RamfluxV2Status::ResyncRequired, 27),
+    ] {
+        assert_eq!(status as i32, number, "test: changed existing v2 transport status");
+        assert_ne!(
+            status as i32, RAMFLUX_ERR_PAIRING_REFUSED,
+            "test: pairing refusal aliases a v2 transport status"
+        );
+        assert_ne!(
+            status as i32, RAMFLUX_ERR_PAIRING_STALE,
+            "test: pairing stale callback aliases a v2 transport status"
+        );
+    }
     for (code, number, name) in
-        [(Code::PairingRefused, 24, "PairingRefused"), (Code::PairingStale, 25, "PairingStale")]
+        [(Code::PairingRefused, 28, "PairingRefused"), (Code::PairingStale, 29, "PairingStale")]
     {
         assert_eq!(code as i32, number);
         assert_eq!(code.name(), name);
     }
-    assert_eq!(RAMFLUX_ERR_PAIRING_REFUSED, 24);
-    assert_eq!(RAMFLUX_ERR_PAIRING_STALE, 25);
+    assert_eq!(RAMFLUX_ERR_PAIRING_REFUSED, 28);
+    assert_eq!(RAMFLUX_ERR_PAIRING_STALE, 29);
 }

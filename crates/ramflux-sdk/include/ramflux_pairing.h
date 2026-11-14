@@ -3,21 +3,17 @@
  */
 #ifndef RAMFLUX_PAIRING_H
 #define RAMFLUX_PAIRING_H
-#include <stddef.h>
-#include <stdint.h>
+#include "ramflux_sdk.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct RamfluxClient RamfluxClient;
-typedef struct RamfluxBuffer {
-    uint8_t *ptr;
-    size_t len;
-} RamfluxBuffer;
+typedef struct RamfluxBuffer RamfluxBuffer;
 
-/* Additive codes; all existing codes 0 through 23 keep their meanings. */
-#define RAMFLUX_ERR_PAIRING_REFUSED 24
-#define RAMFLUX_ERR_PAIRING_STALE 25
+/* Additive codes; all existing codes and transport statuses 0 through 27 keep their meanings. */
+#define RAMFLUX_ERR_PAIRING_REFUSED 28
+#define RAMFLUX_ERR_PAIRING_STALE 29
 
 /* Return 0 for provided input, 1 for refusal. Both output capacities are 1024.
  * Respect the capacities and write the actual lengths. Setup requires identical
