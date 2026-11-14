@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add dormant account-local encrypted search to the Rust SDK and local bus, with
+  exact-word/CJK matching, bounded paging, cancellation and synchronous privacy
+  purges. Capability and engine qualification remain disabled; activation and
+  C ABI exposure require separate integration.
+
 - Remove relay HTTP/shared-HMAC object transfers and the obsolete relay-to-retention
   TTL registration route and relay retention fallback settings. Retired relay-key
   options and upload journals carrying them are refused; restart those uploads with

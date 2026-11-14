@@ -180,10 +180,7 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
         }),
     )?;
     f.db.write_transaction::<_, crate::StorageError>(|| {
-        f.db.connection.execute(
-            "DELETE FROM runtime_message_content WHERE message_id=?1",
-            params!["victim"],
-        )?;
+        f.db.retire_message_payload_copies("victim", &[])?;
         Ok(())
     })?;
     let retained: bool = f.db.connection.query_row(
@@ -212,8 +209,7 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
     assert_eq!(remaining, 0, "retirement must remove all derived locators");
     f.insert("rollback", "rollbackcanary")?;
     let result = f.db.write_transaction::<_, crate::StorageError>(|| {
-        f.db.connection
-            .execute("DELETE FROM runtime_message_content WHERE message_id='rollback'", [])?;
+        f.db.retire_message_payload_copies("rollback", &[])?;
         Err::<(), _>(crate::StorageError::AuthorizationRejected)
     });
     assert!(result.is_err(), "fixture must roll back the canonical mutation");
@@ -246,6 +242,28 @@ fn local_search_erase_removes_all_derivatives() -> TestResult {
         "unsupported admission must fence tokenization even before a dependency row exists"
     );
 
+    assert_retirement_after_reopen(f)
+}
+
+fn assert_retirement_after_reopen(fixture: Fixture) -> TestResult {
+    let Fixture { directory, db, activation, watch: _ } = fixture;
+    drop(db);
+    let index = AccountIndex::open(directory.path())?;
+    let db = AccountDb::open(&index, "account", &AccountDbKey::from_bytes([42; 32]))?;
+    db.enable_runtime()?;
+    let watch = db.search_prepare(&activation)?;
+    let reopened = Fixture { directory, db, activation, watch };
+    assert!(reopened.hits("oldcanary")?.is_empty(), "retired terms must stay absent after reopen");
+    assert_eq!(
+        reopened.hits("unrelatedcanary")?.len(),
+        1,
+        "unrelated postings must survive reopen"
+    );
+    assert_eq!(
+        reopened.hits("rollbackcanary")?.len(),
+        1,
+        "rolled-back retirement must stay rolled back"
+    );
     Ok(())
 }
 
