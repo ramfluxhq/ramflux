@@ -238,9 +238,14 @@ impl RamfluxClient {
         for record in state.records.iter().chain(state.restrictions.values()) {
             match record {
                 StateRecord::Block { subject: Subject::Friendship { root }, .. }
-                | StateRecord::Floor {
-                    subject: Subject::Friendship { root }, denied: true, ..
-                } if root == &route.source.account_anchor => {
+                    if root == &route.source.account_anchor =>
+                {
+                    return Err(refused(Reason::ForeignReadRefused));
+                }
+                StateRecord::Floor { subject: Subject::Friendship { root }, .. }
+                    if root == &route.source.account_anchor
+                        && state.floor_denies_now(record, now) =>
+                {
                     return Err(refused(Reason::ForeignReadRefused));
                 }
                 StateRecord::Decline { root, until, .. }
@@ -271,8 +276,13 @@ impl RamfluxClient {
                 StateRecord::Grant {
                     subject:
                         Subject::Group { group_id, conversation_id, genesis_hash, group_epoch, .. },
+                    update,
                     ..
-                } if group_id == &group.group_id
+                } if state.grant_above_peer_floors(
+                    update,
+                    &route.source.account_anchor,
+                    &route.conversation_id,
+                ) && group_id == &group.group_id
                     && conversation_id == &route.conversation_id
                     && genesis_hash == genesis =>
                 {

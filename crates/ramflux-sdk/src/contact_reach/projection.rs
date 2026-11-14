@@ -48,8 +48,10 @@ impl SavedReachState {
         };
         for record in self.records.iter().chain(self.restrictions.values()) {
             let denied = match record {
-                StateRecord::Block { subject, .. }
-                | StateRecord::Floor { subject, denied: true, .. } => matches(subject),
+                StateRecord::Block { subject, .. } => matches(subject),
+                StateRecord::Floor { subject, .. } => {
+                    matches(subject) && self.floor_denies_now(record, now)
+                }
                 StateRecord::Decline { root, until, .. } => root == peer_root && *until > now,
                 StateRecord::Conflict { .. } => true,
                 _ => false,
@@ -84,10 +86,12 @@ impl SavedReachState {
         let mut friendship = None;
         let mut conversation = None;
         for record in &self.records {
-            let StateRecord::Grant { subject, permissions, grant_until, .. } = record else {
+            let StateRecord::Grant { subject, permissions, grant_until, update } = record else {
                 continue;
             };
-            if !matches(subject) {
+            if !matches(subject)
+                || !self.grant_above_peer_floors(update, peer_root, conversation_id)
+            {
                 continue;
             }
             match subject {

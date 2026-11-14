@@ -4,6 +4,7 @@
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
 mod current_authority;
 mod delivery;
+mod denials;
 mod group_binding;
 mod group_join;
 mod group_kick;
@@ -17,7 +18,9 @@ mod producer;
 mod projection;
 mod provenance;
 mod receive_policy;
+mod restrictions;
 mod signal_settings;
+use restrictions::merge_restrictions;
 mod verification;
 use crate::SdkError;
 pub use producer::ReachSendIntent;
@@ -25,8 +28,8 @@ pub use projection::{ConversationPermission, ConversationReach};
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::{
     contact_reach::{
-        Decision, MAX_STATE_BYTES, Reason, STATE_DOMAIN, StateManifest, StatePage, StateRecord,
-        check_submission_time, verify_pages,
+        Reason, STATE_DOMAIN, StateManifest, StatePage, StateRecord, check_submission_time,
+        verify_pages,
     },
     custody::{self, Envelope as Signed},
 };
@@ -267,120 +270,6 @@ impl crate::RamfluxClient {
         self.stage_reach_group_repairs()?;
         Ok(())
     }
-}
-
-fn denial_revision(record: &StateRecord) -> Result<Option<(String, u64)>, SdkError> {
-    Ok(match record {
-        StateRecord::Block { subject, update } => Some((
-            subject.key()?,
-            update
-                .body
-                .expected_revision
-                .checked_add(1)
-                .ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?,
-        )),
-        StateRecord::Floor { subject, revision, denied: true, .. } => {
-            Some((subject.key()?, *revision))
-        }
-        _ => None,
-    })
-}
-fn merge_restrictions(
-    mut retained: BTreeMap<String, StateRecord>,
-    records: &[StateRecord],
-) -> Result<BTreeMap<String, StateRecord>, SdkError> {
-    let mut denial_floors: BTreeMap<String, u64> = BTreeMap::new();
-    for record in retained.values().chain(records.iter()) {
-        if let Some((key, revision)) = denial_revision(record)? {
-            denial_floors
-                .entry(key)
-                .and_modify(|old| *old = (*old).max(revision))
-                .or_insert(revision);
-        }
-    }
-    for record in records {
-        if !matches!(
-            record,
-            StateRecord::Block { .. }
-                | StateRecord::Decline { .. }
-                | StateRecord::Floor { .. }
-                | StateRecord::Conflict { .. }
-                | StateRecord::Retirement { group_floor: Some(_), .. }
-        ) {
-            continue;
-        }
-        let key = serde_json::to_string(&record.order_key()?)?;
-        if matches!(record, StateRecord::Retirement { group_floor: Some(_), .. }) {
-            let merged = group_restrictions::merge(retained.get(&key), record)?;
-            retained.insert(key, merged);
-            continue;
-        }
-        let merged = match (retained.get(&key), record) {
-            (
-                Some(StateRecord::Floor { subject, revision, denied, erase_generation, erased }),
-                StateRecord::Floor {
-                    revision: next_revision,
-                    denied: next_denied,
-                    erase_generation: next_generation,
-                    erased: next_erased,
-                    ..
-                },
-            ) => StateRecord::Floor {
-                subject: subject.clone(),
-                revision: (*revision).max(*next_revision),
-                denied: *denied || *next_denied,
-                erase_generation: (*erase_generation).max(*next_generation),
-                erased: *erased || *next_erased,
-            },
-            (
-                Some(StateRecord::Block { update: old, .. }),
-                StateRecord::Block { update: next, .. },
-            ) if old.body.expected_revision > next.body.expected_revision => {
-                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
-            }
-            (
-                Some(StateRecord::Decline { until: old, .. }),
-                StateRecord::Decline { until: next, .. },
-            ) if old > next => {
-                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
-            }
-            (Some(StateRecord::Conflict { .. }), StateRecord::Conflict { .. }) => {
-                retained.get(&key).ok_or_else(|| refused(Reason::ForeignSnapshotInvalid))?.clone()
-            }
-            _ => record.clone(),
-        };
-        retained.insert(key, merged);
-    }
-    for record in records {
-        let StateRecord::Retirement { subject, revision, update, .. } = record else {
-            continue;
-        };
-        if update.body.decision != Decision::Unblock
-            || *revision <= denial_floors.get(&subject.key()?).copied().unwrap_or(0)
-        {
-            continue;
-        }
-        retained.remove(&serde_json::to_string(&("block", subject.key()?))?);
-        let floor_key = serde_json::to_string(&("floor", subject.key()?))?;
-        if let Some(StateRecord::Floor { revision: floor_revision, denied, .. }) =
-            retained.get_mut(&floor_key)
-            && *floor_revision <= *revision
-        {
-            *denied = false;
-        }
-    }
-    if retained.len() > 8192
-        || ramflux_protocol::canonical_json_bytes(&retained)?.len() > MAX_STATE_BYTES
-    {
-        return Err(refused(Reason::ForeignCapacity));
-    }
-    group_restrictions::verify_bindings(
-        records
-            .iter()
-            .filter(|record| !matches!(record, StateRecord::Retirement { .. }))
-            .chain(retained.values()),
-    )?;
-    Ok(retained)
 }
 
 fn positive_pending_default() -> bool {

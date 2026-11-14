@@ -225,6 +225,140 @@ async fn retained_root_denial() -> TestResult {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cr_decline_expiry_preserves_revision_floor_without_reviving_old_grants() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), decline_expiry()).await?
+}
+
+async fn decline_expiry() -> TestResult {
+    let fixture = PolicyFixture::new().await?;
+    let subject = Subject::Friendship { root: fixture.route.source.account_anchor.clone() };
+    let old = fixture.update(
+        subject.clone(),
+        wire::Decision::Allow,
+        Some(wire::Permissions::ACCEPTED),
+        1,
+    )?;
+    let decline = fixture.update(subject.clone(), wire::Decision::Decline, None, 2)?;
+    let until = fixture.now.checked_add(wire::DECLINE_COOLDOWN).ok_or("cooldown overflow")?;
+    fixture.install(
+        &decline,
+        vec![
+            StateRecord::Grant {
+                subject: subject.clone(),
+                permissions: wire::Permissions::ACCEPTED,
+                grant_until: 0,
+                update: old,
+            },
+            StateRecord::Decline {
+                root: fixture.route.source.account_anchor.clone(),
+                until,
+                update: decline.clone(),
+            },
+            StateRecord::Floor {
+                subject,
+                revision: 3,
+                denied: true,
+                erase_generation: 3,
+                erased: true,
+            },
+        ],
+    )?;
+    assert_denied(&fixture.owner.client.require_reach_receive_policy(&fixture.route, until - 1));
+    fixture.owner.client.require_reach_receive_policy(&fixture.route, until)?;
+    fixture.owner.client.set_reach_signal_settings(wire::Permissions::ACCEPTED)?;
+    let projected = fixture.owner.client.conversation_reach(
+        &fixture.route.source.account_anchor,
+        "peer.example",
+        &fixture.route.conversation_id,
+        until,
+    )?;
+    assert_eq!(projected.relationship, wire::Relationship::Unaccepted);
+    assert_eq!(projected.permissions, wire::Permissions::UNACCEPTED);
+    let mut receipt = fixture.route.clone();
+    receipt.traffic = Traffic::ReceiptRead;
+    assert_denied(&fixture.owner.client.require_reach_receive_policy(&receipt, until));
+    let saved = fixture.owner.client.group_reach_mirror()?.ok_or("retained mirror")?;
+    assert!(
+        saved.restrictions.values().any(|record| matches!(
+            record,
+            StateRecord::Floor { revision: 3, erase_generation: 3, erased: true, .. }
+        )),
+        "expiry cannot remove revision or erasure floors"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cr_signed_root_clearance_survives_mirror_omission_and_older_denial_merge() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), retained_clearance()).await?
+}
+
+async fn retained_clearance() -> TestResult {
+    let fixture = PolicyFixture::new().await?;
+    let subject = Subject::Friendship { root: fixture.route.source.account_anchor.clone() };
+    let block = fixture.update(subject.clone(), wire::Decision::Block, None, 2)?;
+    let old = vec![
+        StateRecord::Block { subject: subject.clone(), update: block.clone() },
+        StateRecord::Floor {
+            subject: subject.clone(),
+            revision: 3,
+            denied: true,
+            erase_generation: 3,
+            erased: true,
+        },
+    ];
+    fixture.install(&block, old.clone())?;
+    let unblock = fixture.update(subject.clone(), wire::Decision::Unblock, None, 3)?;
+    fixture.install(
+        &unblock,
+        vec![
+            StateRecord::Retirement {
+                subject: subject.clone(),
+                revision: 4,
+                update: unblock.clone(),
+                group_floor: None,
+            },
+            StateRecord::Floor {
+                subject: subject.clone(),
+                revision: 4,
+                denied: false,
+                erase_generation: 4,
+                erased: true,
+            },
+        ],
+    )?;
+    let other = fixture.update(
+        Subject::Friendship { root: digest(46) },
+        wire::Decision::Unblock,
+        None,
+        4,
+    )?;
+    fixture.install(&other, vec![])?;
+    let saved = fixture.owner.client.group_reach_mirror()?.ok_or("current mirror")?;
+    assert!(
+        saved.restrictions.values().any(
+            |record| matches!(record, StateRecord::Retirement { update, .. } if update == &unblock)
+        ),
+        "canonical omission must retain the original signed clearance and its native proof"
+    );
+    let merged = crate::contact_reach::restrictions::merge_restrictions(saved.restrictions, &old)?;
+    assert!(!merged.values().any(
+        |record| matches!(record, StateRecord::Block { subject: peer, .. } if peer == &subject)
+    ));
+    assert!(merged.values().any(|record| matches!(
+        record,
+        StateRecord::Floor { denied: false, revision: 4, erase_generation: 4, erased: true, .. }
+    )));
+    let later = fixture.update(subject.clone(), wire::Decision::Block, None, 5)?;
+    let merged = crate::contact_reach::restrictions::merge_restrictions(
+        merged,
+        &[StateRecord::Block { subject, update: later }],
+    )?;
+    assert!(merged.values().any(|record| matches!(record, StateRecord::Block { update, .. } if update.body.expected_revision == 5)), "an old signed clearance cannot clear a newer denial");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cr_recipient_node_denial_needs_authenticated_source_home() -> TestResult {
     tokio::time::timeout(std::time::Duration::from_secs(60), node_denial()).await?
 }

@@ -30,8 +30,10 @@ impl SavedReachState {
         let mut node_evidence_needed = false;
         for record in self.records.iter().chain(self.restrictions.values()) {
             let subject = match record {
-                StateRecord::Block { subject, .. }
-                | StateRecord::Floor { subject, denied: true, .. } => Some(subject),
+                StateRecord::Block { subject, .. } => Some(subject),
+                StateRecord::Floor { subject, .. } if self.floor_denies_now(record, now) => {
+                    Some(subject)
+                }
                 StateRecord::Decline { root, until, .. } if root == peer && *until > now => {
                     return Err(denied());
                 }
