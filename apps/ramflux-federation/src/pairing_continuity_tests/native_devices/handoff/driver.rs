@@ -118,6 +118,7 @@ impl Fixture {
             &self.b.client,
         )
         .await?;
+        let mut attended = false;
         for _ in 0..256 {
             self.a.service_data(&mut self.wire.primary)?;
             self.b.service_data(&mut self.wire.recipient)?;
@@ -135,7 +136,7 @@ impl Fixture {
             // Candidate reception can queue the original attended approval locally.
             self.a.service_data(&mut self.wire.primary)?;
             self.b.service_data(&mut self.wire.recipient)?;
-            self.affirm_source_if_displayed().await?;
+            self.affirm_source_if_displayed(&mut attended).await?;
             drive(
                 Box::pin(self.wire.primary.advance_full_source_publication()),
                 &mut self.source,
@@ -155,8 +156,9 @@ impl Fixture {
         }
         Err("test: TLS full handoff did not complete exact native/G3 installation".into())
     }
-    async fn affirm_source_if_displayed(&mut self) -> TestResult {
-        if self.wire.primary.affirmed_full_source_preservation().is_ok() {
+    async fn affirm_source_if_displayed(&mut self, attended: &mut bool) -> TestResult {
+        if *attended || self.wire.primary.affirmed_full_source_preservation().is_ok() {
+            *attended = true;
             return Ok(());
         }
         let Ok(candidate) = self.wire.primary.displayed_proposal() else { return Ok(()) };
@@ -177,6 +179,7 @@ impl Fixture {
             &self.b.client,
         )
         .await?;
+        *attended = true;
         self.a.service_data(&mut self.wire.primary)?;
         Ok(())
     }

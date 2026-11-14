@@ -30,7 +30,7 @@ impl FullStreamWork {
         tracing::debug!(role = self.role.as_str(), "full data native observation returned");
         let (observed, bound) =
             self.io.observe_prepublication_binding(current.clone()).await.inspect_err(|error| {
-                Self::note_failure("writer native rebind observation", error)
+                Self::note_failure("writer native rebind observation", error);
             })?;
         tracing::debug!(
             role = self.role.as_str(),

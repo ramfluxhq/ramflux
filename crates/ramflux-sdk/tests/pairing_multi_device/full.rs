@@ -223,8 +223,9 @@ impl Fixture {
         }
         Err("test: external full driver did not finish durable duplex".into())
     }
-    async fn affirm_source_if_displayed(&mut self) -> ResultOf<()> {
-        if self.a.actor.affirmed_full_source_preservation().is_ok() {
+    async fn affirm_source_if_displayed(&mut self, attended: &mut bool) -> ResultOf<()> {
+        if *attended || self.a.actor.affirmed_full_source_preservation().is_ok() {
+            *attended = true;
             return Ok(());
         }
         let Ok(candidate) = self.a.actor.displayed_proposal() else { return Ok(()) };
@@ -245,6 +246,7 @@ impl Fixture {
             &self.b.client,
         )
         .await?;
+        *attended = true;
         self.a.service_data()?;
         Ok(())
     }
@@ -266,6 +268,7 @@ impl Fixture {
         )
         .await
         .map_err(|error| format!("test: prepare target candidate: {error}"))?;
+        let mut attended = false;
         for _ in 0..1024 {
             self.a
                 .service_data()
@@ -289,7 +292,7 @@ impl Fixture {
             // Finish that local request before deciding whether fresh attendance is needed.
             self.a.service_data()?;
             self.b.service_data()?;
-            self.affirm_source_if_displayed()
+            self.affirm_source_if_displayed(&mut attended)
                 .await
                 .map_err(|error| format!("test: source affirmation: {error}"))?;
             drive(

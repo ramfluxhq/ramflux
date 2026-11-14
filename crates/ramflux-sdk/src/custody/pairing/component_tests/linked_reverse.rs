@@ -607,6 +607,7 @@ mod tests {
         )
         .await
         .map_err(|error| format!("test: linked B attended prepare: {error}"))?;
+        let mut attended = false;
         for _ in 0..72 {
             poll_management(fixture, false).await?;
             poll_management(fixture, true).await?;
@@ -615,7 +616,7 @@ mod tests {
                 rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
                 rig.secondary.service_full_transfer(target.account_db()?)?;
             }
-            affirm_displayed_candidate(fixture, &prepare.operation_id)
+            affirm_displayed_candidate(fixture, &prepare.operation_id, &mut attended)
                 .await
                 .map_err(|error| format!("test: linked source affirmation: {error}"))?;
             let Linked { rig, target, source_service, target_service, .. } = fixture;
@@ -636,9 +637,14 @@ mod tests {
         }
         Err("test: linked candidate did not reach actual native publication".into())
     }
-    async fn affirm_displayed_candidate(fixture: &mut Linked, operation: &str) -> TestResult {
+    async fn affirm_displayed_candidate(
+        fixture: &mut Linked,
+        operation: &str,
+        attended: &mut bool,
+    ) -> TestResult {
         let Linked { rig, target, source_service, target_service, .. } = fixture;
-        if rig.primary.affirmed_full_source_preservation().is_ok() {
+        if *attended || rig.primary.affirmed_full_source_preservation().is_ok() {
+            *attended = true;
             return Ok(());
         }
         let Ok(candidate) = rig.primary.displayed_proposal() else { return Ok(()) };
@@ -659,6 +665,7 @@ mod tests {
             target,
         )
         .await?;
+        *attended = true;
         rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
         Ok(())
     }
