@@ -95,6 +95,29 @@ impl AccountDb {
 }
 
 impl AccountDb {
+    /// Read one private actor row after checking its encoded byte length in SQL.
+    /// # Errors
+    /// Refuses over-limit values before allocating or decoding them; propagates storage errors.
+    pub fn load_bounded_actor_state<T: serde::de::DeserializeOwned>(
+        &self,
+        kind: &str,
+        max_bytes: usize,
+    ) -> Result<Option<T>, StorageError> {
+        let value: Option<(usize, Option<Vec<u8>>)> = self.connection.query_row(
+            "SELECT length(CAST(state_json AS BLOB)),CASE WHEN length(CAST(state_json AS BLOB))<=?2 THEN state_json ELSE NULL END FROM runtime_actor_state WHERE state_kind=?1",
+            params![kind, max_bytes],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((length, bytes)) = value else {
+            return Ok(None);
+        };
+        if length > max_bytes {
+            return Err(StorageError::SegmentResourceCapacity { limit: max_bytes });
+        }
+        let bytes = bytes.ok_or(StorageError::Integrity("missing bounded actor bytes"))?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
     /// Removes private actor state in the caller's transaction.
     /// # Errors
     /// Returns SQLite errors.

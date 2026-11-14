@@ -26,6 +26,18 @@ struct KickIntent {
     operation: Option<Operation>,
     complete: bool,
 }
+pub(super) fn pin_originals(
+    db: &ramflux_storage::AccountDb,
+    pins: &mut super::collection::Pins,
+) -> Result<(), SdkError> {
+    super::collection::visit(db, PREFIX, |intent: KickIntent| {
+        pins.retained_admission(db, &intent.grant_hash)?;
+        if let Some(operation) = intent.operation.as_ref() {
+            pins.operation(operation)?;
+        }
+        Ok(())
+    })
+}
 
 #[cfg(test)]
 mod tests;

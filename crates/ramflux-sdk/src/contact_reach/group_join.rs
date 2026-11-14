@@ -31,6 +31,17 @@ struct JoinIntent {
     roster: Option<Operation>,
     complete: bool,
 }
+pub(super) fn pin_originals(
+    db: &ramflux_storage::AccountDb,
+    pins: &mut super::collection::Pins,
+) -> Result<(), SdkError> {
+    super::collection::visit(db, PREFIX, |intent: JoinIntent| {
+        for operation in intent.grant.iter().chain(intent.roster.iter()) {
+            pins.operation(operation)?;
+        }
+        Ok(())
+    })
+}
 fn invalid() -> SdkError {
     refused(Reason::ReachRouteInvalid)
 }

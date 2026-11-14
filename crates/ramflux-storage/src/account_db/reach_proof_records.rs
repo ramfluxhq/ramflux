@@ -61,6 +61,61 @@ pub(super) fn canonical_record(key: &str, bytes: &[u8]) -> Result<Vec<u8>, Stora
 }
 
 impl AccountDb {
+    /// Collect only originals outside the caller's complete live-reference set.
+    /// Call inside the transaction that installs the replacement records and signed intents.
+    /// Process-owned encrypted snapshot stages retain their own complete proof copies.
+    /// # Errors
+    /// Refuses missing or changed live selectors and rolls back every deletion on failure.
+    pub fn collect_reach_provenance(
+        &self,
+        root: &str,
+        live: &[SignerReference],
+    ) -> Result<(), StorageError> {
+        digest(root)?;
+        if live.len() > wire::MAX_SIGNER_REFERENCES {
+            return Err(StorageError::SegmentResourceCapacity {
+                limit: wire::MAX_SIGNER_REFERENCES,
+            });
+        }
+        self.write_transaction(|| {
+            let expected_root = root.to_owned();
+            self.connection
+                .call(move |connection| Ok(validate(connection, Some(&expected_root))))??;
+            let mut keep = std::collections::BTreeSet::new();
+            let mut proofs = std::collections::BTreeSet::new();
+            for reference in live {
+                reference.validate()?;
+                let key = reference_key(reference.object_kind, &reference.object_hash)?;
+                let stored: SignerReference =
+                    self.read_reach_original(&key, 2048)?.ok_or_else(invalid)?;
+                if stored != *reference {
+                    return Err(invalid());
+                }
+                keep.insert(key);
+                if proofs.insert(proof_key(&reference.proof_hash)?)
+                    && self.reach_provenance_proof(root, &reference.proof_hash)?.is_none()
+                {
+                    return Err(invalid());
+                }
+            }
+            self.visit_reach_keys(REFERENCES, wire::MAX_SIGNER_REFERENCES, |key| {
+                if !keep.contains(key) {
+                    self.remove_actor_state(key)?;
+                }
+                Ok(())
+            })?;
+            self.visit_reach_keys(PROOFS, wire::MAX_PROVENANCE_OBJECTS, |key| {
+                if !proofs.contains(key) {
+                    self.remove_actor_state(key)?;
+                }
+                Ok(())
+            })?;
+            let root = root.to_owned();
+            self.connection.call(move |connection| Ok(validate(connection, Some(&root))))??;
+            Ok(())
+        })
+    }
+
     /// Retain exact originals atomically with the caller's signed intent or adopted mirror.
     /// Each proof is decoded/encoded separately; no all-proof catalogue is allocated.
     /// # Errors

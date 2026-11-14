@@ -393,6 +393,23 @@ async fn retained_clearance() -> TestResult {
         ),
         "canonical omission must retain the original signed clearance and its native proof"
     );
+    let db = fixture.owner.client.account_db()?;
+    assert!(
+        db.reach_provenance_reference(
+            wire::ObjectKind::Admission,
+            &custody::framed_hash(wire::OPERATION_HASH_DOMAIN, &unblock)?,
+        )?
+        .is_some(),
+        "collection must retain the independently saved clearance's exact signer reference"
+    );
+    assert!(
+        db.reach_provenance_reference(
+            wire::ObjectKind::Admission,
+            &custody::framed_hash(wire::OPERATION_HASH_DOMAIN, &block)?,
+        )?
+        .is_none(),
+        "the legitimately cleared and superseded block must stop occupying signer metadata"
+    );
     let merged = crate::contact_reach::restrictions::merge_restrictions(saved.restrictions, &old)?;
     assert!(!merged.values().any(
         |record| matches!(record, StateRecord::Block { subject: peer, .. } if peer == &subject)

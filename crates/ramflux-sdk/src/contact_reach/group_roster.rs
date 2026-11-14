@@ -43,6 +43,23 @@ struct Queue {
     #[serde(default)]
     refusal: Option<recovery::RosterRefusal>,
 }
+pub(super) fn pin_originals(
+    db: &ramflux_storage::AccountDb,
+    pins: &mut super::collection::Pins,
+) -> Result<(), SdkError> {
+    super::collection::visit(db, PREFIX, |queue: Queue| {
+        pins.retained_admission(db, &queue.grant_hash)?;
+        if let Some(roster) = queue.checkpoint.as_ref() {
+            pins.roster(roster)?;
+        }
+        for intent in queue.active.iter().chain(queue.next.iter()) {
+            if let Some(operation) = intent.operation.as_ref() {
+                pins.operation(operation)?;
+            }
+        }
+        Ok(())
+    })
+}
 fn key(group: &str) -> String {
     format!("{PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }

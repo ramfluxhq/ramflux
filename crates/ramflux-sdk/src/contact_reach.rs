@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verified recipient state. A home signature cannot manufacture friendship or positive grants.
+mod collection;
 mod current_authority;
 mod delivery;
 mod denials;
@@ -219,6 +220,7 @@ impl crate::RamfluxClient {
                         if restored.is_none() {
                             let mut refreshed = saved.clone();
                             refreshed.refresh_current(&verified);
+                            collection::collect(db, &refreshed)?;
                             db.persist_client_record(
                                 "reach",
                                 "state",
@@ -265,10 +267,11 @@ impl crate::RamfluxClient {
                 conflict: false,
                 positive_pending: !verified.positives_ready,
             };
-            db.persist_client_record("reach", "state", &serde_json::to_value(saved)?)?;
             if restored.is_some() {
                 db.remove_actor_state(restore::KEY)?;
             }
+            collection::collect(db, &saved)?;
+            db.persist_client_record("reach", "state", &serde_json::to_value(saved)?)?;
             Ok::<_, SdkError>(())
         })?;
         let saved: SavedReachState = serde_json::from_value(

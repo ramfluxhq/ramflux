@@ -31,6 +31,10 @@ fn roster(operation: &Operation) -> TestResult<&GroupRoster> {
 
 #[tokio::test]
 async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(60), roster_retry_and_repair()).await?
+}
+
+async fn roster_retry_and_repair() -> TestResult {
     let (owner, peer, joined) = group_fixture().await?;
     let third = advance(&owner, GroupStateChange::SetName { name: "third".into() })?;
     peer.client.accept_shared_group_state(&third, &peer.config.target_delivery_id)?;
@@ -43,6 +47,24 @@ async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() ->
         first,
         "a newer adopted head cannot replace the signed operation while its outcome is uncertain"
     );
+    let mirror = peer.client.group_reach_mirror()?.ok_or("mirror before collection")?;
+    peer.client.install_reach_state(verified_records(
+        &peer,
+        &mirror.home_head_hash,
+        mirror.records,
+        now,
+    )?)?;
+    let original_hash = custody::framed_hash(OPERATION_HASH_DOMAIN, &roster(&first)?.header)?;
+    assert!(
+        peer.client
+            .account_db()?
+            .reach_provenance_reference(
+                ramflux_protocol::contact_reach::ObjectKind::GroupRoster,
+                &original_hash,
+            )?
+            .is_some(),
+        "equal-content snapshot collection must retain the uncertain signed roster's original"
+    );
     let result = OperationResult::GroupRoster {
         group_epoch: roster(&first)?.header.body.group_epoch,
         outcome: Applied::Applied,
@@ -50,6 +72,23 @@ async fn cr_group_roster_preserves_inflight_retry_and_repairs_without_allow() ->
     peer.client.apply_reach_group_roster_result("roster-group", &first, &result)?;
     let second =
         peer.client.prepare_reach_group_roster(peer.vault.as_ref(), "roster-group", now)?;
+    let mirror = peer.client.group_reach_mirror()?.ok_or("mirror with checkpoint")?;
+    peer.client.install_reach_state(verified_records(
+        &peer,
+        &mirror.home_head_hash,
+        mirror.records,
+        now,
+    )?)?;
+    assert!(
+        peer.client
+            .account_db()?
+            .reach_provenance_reference(
+                ramflux_protocol::contact_reach::ObjectKind::GroupRoster,
+                &original_hash,
+            )?
+            .is_some(),
+        "the last applied checkpoint remains pinned alongside the successor intent"
+    );
     assert_eq!(
         roster(&second)?.header.body.group_epoch,
         fourth.view().epoch,
