@@ -263,7 +263,9 @@ impl PairingActor {
                 && c.full.as_ref().is_some_and(|full| full.bootstrap.is_none()))
         })?;
         if initialize {
-            self.initialize_full_bootstrap(participant.clone()).await?;
+            self.initialize_full_bootstrap(participant.clone())
+                .await
+                .inspect_err(|error| note_bootstrap_failure("local initialization", error))?;
         }
         while let Some((counter, ciphertext)) =
             self.ceremony.as_mut().and_then(|c| c.channels.pop_front())
@@ -280,23 +282,32 @@ impl PairingActor {
             let now = crate::custody::network_now()?;
             if role == PairingRole::Responder && awaiting {
                 let (_, trust) = owner.accept_destination_lease(&frame, now)?;
-                self.retain_bootstrap_trust(trust, participant.clone()).await?;
+                self.retain_bootstrap_trust(trust, participant.clone())
+                    .await
+                    .inspect_err(|error| note_bootstrap_failure("durable trust", error))?;
                 continue;
             }
             let signer = participant.clone();
             let writer = self.local_writer.clone();
             let (mut owner, reply) = local(self.full_runtime.clone(), move || {
-                let reply = owner.receive(&frame, now, |request| match &writer {
-                    Some(writer) => writer.sign_grant(&signer, request),
-                    None => signer.sign_full_grant(request),
-                })?;
+                let reply = owner
+                    .receive(&frame, now, |request| match &writer {
+                        Some(writer) => writer.sign_grant(&signer, request),
+                        None => signer.sign_full_grant(request),
+                    })
+                    .inspect_err(|error| note_bootstrap_failure("peer control", error))?;
                 Ok((owner, reply))
             })
             .await?;
             if role == PairingRole::Initiator {
                 let native = self.native.clone().ok_or_else(wrong)?;
-                let (frame, _, trust) = owner.issue_source_lease(native.as_ref(), now).await?;
-                self.retain_bootstrap_trust(trust, participant.clone()).await?;
+                let (frame, _, trust) = owner
+                    .issue_source_lease(native.as_ref(), now)
+                    .await
+                    .inspect_err(|error| note_bootstrap_failure("native lease", error))?;
+                self.retain_bootstrap_trust(trust, participant.clone())
+                    .await
+                    .inspect_err(|error| note_bootstrap_failure("durable trust", error))?;
                 self.queue_full_bootstrap(frame)?;
             } else {
                 self.with_ceremony_mut(|c| {

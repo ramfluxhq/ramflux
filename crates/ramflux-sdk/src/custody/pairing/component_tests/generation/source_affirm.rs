@@ -52,15 +52,17 @@ mod tests {
         }
     }
     async fn setup()
-    -> Result<(Rig, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>> {
+    -> Result<(Box<Rig>, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>>
+    {
         Box::pin(setup_with_original_approval(false)).await
     }
     async fn setup_with_original_approval(
         original: bool,
-    ) -> Result<(Rig, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>>
+    ) -> Result<(Box<Rig>, String, RecipientPrepared, Arc<MeteredVault>), Box<dyn std::error::Error>>
     {
-        let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
-        rig.primary.sync_relay().await?;
+        let (rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+        let mut rig = Box::new(rig);
+        Box::pin(rig.primary.sync_relay()).await?;
         rig.participant_a.return_client(&mut rig.source.client)?;
         Box::pin(finish_owned_stream(&mut rig)).await?;
         let recipient = Box::pin(prepare_recipient_candidate(&mut rig, &operation)).await?;
@@ -116,11 +118,14 @@ mod tests {
         vault: &MeteredVault,
     ) -> TestResult {
         assert!(
-            rig.primary.observe_full_source_candidate(recipient.publication.clone()).await.is_err(),
+            Box::pin(rig.primary.observe_full_source_candidate(recipient.publication.clone()))
+                .await
+                .is_err(),
             "test: DATA-only source restored its old SAS signing approval"
         );
         let review =
-            rig.primary.inspect_full_source_candidate(recipient.publication.clone()).await?;
+            Box::pin(rig.primary.inspect_full_source_candidate(recipient.publication.clone()))
+                .await?;
         assert!(
             matches!(review.outcome,Outcome::Update {value} if value.emoji_indices.is_none()
                 && value.proposal_hash.as_deref()==Some(request.new_record_hash.as_str())
@@ -142,7 +147,7 @@ mod tests {
         let mut changed = request.clone();
         changed.new_record_hash = encode_base64url([91; 32]);
         assert!(
-            rig.primary.affirm_full_transfer(&changed).await.is_err(),
+            Box::pin(rig.primary.affirm_full_transfer(&changed)).await.is_err(),
             "test: affirmation ignored changed candidate hash"
         );
         assert_eq!(
@@ -158,7 +163,7 @@ mod tests {
         vault: &MeteredVault,
     ) -> TestResult {
         let before = rig.node.query_calls.load(Ordering::Relaxed);
-        rig.primary.affirm_full_transfer(request).await?;
+        Box::pin(rig.primary.affirm_full_transfer(request)).await?;
         assert_eq!(
             rig.node.query_calls.load(Ordering::Relaxed),
             before + 1,
@@ -189,7 +194,7 @@ mod tests {
         );
         let signed = canonical_json_bytes(rig.primary.affirmed_full_source_preservation()?)?;
         assert!(
-            rig.primary.affirm_full_transfer(request).await.is_err(),
+            Box::pin(rig.primary.affirm_full_transfer(request)).await.is_err(),
             "test: replayed source approval was consumed twice"
         );
         assert!(
@@ -213,7 +218,7 @@ mod tests {
         request: &TransferAffirm,
         recipient: &RecipientPrepared,
     ) -> TestResult {
-        rig.primary.affirm_full_transfer(request).await?;
+        Box::pin(rig.primary.affirm_full_transfer(request)).await?;
         assert!(
             rig.primary.service_full_transfer(rig.source.client.account_db()?)?,
             "test: source signing service did not run"
@@ -330,7 +335,7 @@ mod tests {
                 "test: original approval skipped writer service"
             );
             assert!(
-                rig.primary.affirm_full_transfer(&expected).await.is_err(),
+                Box::pin(rig.primary.affirm_full_transfer(&expected)).await.is_err(),
                 "test: original SAS approval accepted a second candidate grant"
             );
             let before = rig.node.query_calls.load(Ordering::Relaxed);
@@ -403,14 +408,14 @@ mod tests {
             Box::pin(review_without_approval(&mut rig, &recipient, &request, &vault)).await?;
             Box::pin(consume_once(&mut rig, &request, &vault)).await?;
             rig.participant_a.take_client(&mut rig.source.client)?;
-            let submission = rig.primary.prepare_affirmed_source_submission().await?;
+            let submission = Box::pin(rig.primary.prepare_affirmed_source_submission()).await?;
             assert_eq!(
                 vault.primary_reads.load(Ordering::Relaxed),
                 1,
                 "test: submission minted another preservation signature"
             );
             assert!(
-                rig.primary.prepare_affirmed_source_submission().await.is_err(),
+                Box::pin(rig.primary.prepare_affirmed_source_submission()).await.is_err(),
                 "test: attended submission token was reused"
             );
             rig.participant_a.return_client(&mut rig.source.client)?;

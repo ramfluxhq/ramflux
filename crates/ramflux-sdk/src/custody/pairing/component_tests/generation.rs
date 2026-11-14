@@ -453,6 +453,23 @@ fn refuses_before_j6_or_with_wrong_primary(
     let pinned = {
         let slot = rig.participant_b.db.lock().map_err(|_| "B negative owner")?;
         let db = slot.as_ref().ok_or("B negative writer")?;
+        if !wrong_primary
+            && let Some(head) = db.pairing_head()?
+            && head.state == "acknowledged"
+        {
+            // A rejected union retains its positive native receipt. Recomputing that
+            // union must not pretend this same candidate is still before local J6.
+            assert_eq!(
+                head.candidate_hash,
+                ramflux_protocol::custody::object_hash(&published.authority.publication.record)?,
+                "test: retained J6 belongs to another candidate"
+            );
+            assert_eq!(
+                head.operation_id, published.install.operation_id,
+                "test: retained J6 belongs to another installation"
+            );
+            return Ok(());
+        }
         let stage = db.open_full_transfer_stage(
             &published.install.operation_id,
             ramflux_crypto::custody::pairing::PairingRole::Responder,

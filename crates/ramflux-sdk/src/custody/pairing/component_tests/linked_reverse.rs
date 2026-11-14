@@ -12,8 +12,8 @@ mod tests {
     use crate::custody::pairing::{PairingIdentity, PairingLocalWriterService};
     use ramflux_protocol::custody::{DeviceRef, object_hash};
     struct Linked {
-        rig: Rig,
-        target: crate::RamfluxClient,
+        rig: Box<Rig>,
+        target: Box<crate::RamfluxClient>,
         source_service: PairingLocalWriterService,
         target_service: PairingLocalWriterService,
         third: Option<third::Third>,
@@ -23,7 +23,7 @@ mod tests {
         Box::pin(open_devices(false)).await
     }
     async fn open_devices(three: bool) -> Result<Linked, Box<dyn std::error::Error>> {
-        let mut rig = Box::pin(Rig::open_profile(true)).await?;
+        let mut rig = Box::new(Box::pin(Rig::open_profile(true)).await?);
         Box::pin(enroll(&mut rig)).await?;
         let third = if three { Some(Box::pin(third::enroll(&mut rig)).await?) } else { None };
         let mut target = crate::RamfluxClient::new();
@@ -93,7 +93,7 @@ mod tests {
         rig.secondary = secondary;
         let source_service = rig.primary.bind_frontend_writer(rig.source.client.account_db()?)?;
         let target_service = rig.secondary.bind_frontend_writer(target.account_db()?)?;
-        Ok(Linked { rig, target, source_service, target_service, third })
+        Ok(Linked { rig, target: Box::new(target), source_service, target_service, third })
     }
     async fn drive<T>(
         work: impl std::future::Future<Output = Result<T, SdkError>>,
