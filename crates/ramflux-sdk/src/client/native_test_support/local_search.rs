@@ -76,11 +76,12 @@ async fn hits(
     Ok(completion.take()?)
 }
 
-async fn search_step(
+fn search_step(
     phase: &'static str,
     future: impl std::future::Future<Output = TestResult>,
-) -> TestResult {
-    future.await.map_err(|error| format!("{phase}: {error}").into())
+) -> impl std::future::Future<Output = TestResult> {
+    let future = Box::pin(future);
+    async move { future.await.map_err(|error| format!("{phase}: {error}").into()) }
 }
 
 #[tokio::test(flavor = "current_thread")]
