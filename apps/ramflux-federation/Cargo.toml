@@ -32,6 +32,7 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+quinn = { workspace = true }
 ramflux-relay = { path = "../ramflux-relay" }
 ramflux-storage = { workspace = true }
 tempfile = "3"
@@ -39,7 +40,7 @@ tokio = { workspace = true, features = ["process"] }
 socket2 = { workspace = true }
 redb = { workspace = true }
 ramflux-node-core = { workspace = true, features = ["test-support"] }
-ramflux-sdk = { workspace = true }
+ramflux-sdk = { workspace = true, features = ["test-support"] }
 ramflux-transport = { workspace = true, features = ["test-support"] }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

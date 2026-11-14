@@ -117,3 +117,7 @@ async fn enroll_native(wire: &mut Continuity) -> TestResult {
 
 #[path = "native_devices/handoff.rs"]
 mod handoff;
+
+#[cfg(unix)]
+#[path = "native_devices/history.rs"]
+mod history;

@@ -22,14 +22,18 @@ async fn pairing_tls_fedwire_full_handoff_retires_only_old_primary() -> TestResu
     deadline(Box::pin(run())).await
 }
 async fn run() -> TestResult {
-    let mut fixture = Box::pin(Fixture::open()).await?;
+    let mut fixture = Box::pin(Fixture::open())
+        .await
+        .map_err(|error| format!("test: TLS full fixture: {error}"))?;
     let original = [fixture.branch(true)?, fixture.branch(false)?];
     let wrapping = ramflux_storage::AccountIndex::open(fixture.b.root.path())?
         .load_wrapped_db_key(&fixture.b.id)?;
-    Box::pin(fixture.begin()).await?;
-    Box::pin(fixture.data()).await?;
-    Box::pin(fixture.publish()).await?;
-    Box::pin(fixture.merge()).await?;
+    Box::pin(fixture.begin()).await.map_err(|error| format!("test: TLS full begin: {error}"))?;
+    Box::pin(fixture.data()).await.map_err(|error| format!("test: TLS full data: {error}"))?;
+    Box::pin(fixture.publish())
+        .await
+        .map_err(|error| format!("test: TLS full publish: {error}"))?;
+    Box::pin(fixture.merge()).await.map_err(|error| format!("test: TLS full merge: {error}"))?;
     for (primary, expected) in [true, false].into_iter().zip(original) {
         assert_eq!(
             fixture.branch(primary)?,
@@ -78,8 +82,12 @@ impl Fixture {
         Box::pin(enroll_native(&mut wire)).await?;
         *b.credential.0.lock().map_err(|_| "test: B attended phrase provider")? =
             Some(a.phrase.as_ref().ok_or("test: original human recovery phrase")?.clone());
-        let (primary, source) = a.full_frontend(node.clone(), &wire.config, true)?;
-        let (recipient, target) = b.full_frontend(node, &wire.config, false)?;
+        let (primary, source) = a
+            .full_frontend(node.clone(), &wire.config, true)
+            .map_err(|error| format!("test: TLS source frontend: {error}"))?;
+        let (recipient, target) = b
+            .full_frontend(node, &wire.config, false)
+            .map_err(|error| format!("test: TLS B frontend: {error}"))?;
         wire.primary = primary;
         wire.recipient = recipient;
         Ok(Self { wire, a, b, source, target, operation: String::new() })

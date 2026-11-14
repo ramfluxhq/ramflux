@@ -3460,6 +3460,7 @@ name = "ramflux-federation"
 version = "0.1.0"
 dependencies = [
  "compio",
+ "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",

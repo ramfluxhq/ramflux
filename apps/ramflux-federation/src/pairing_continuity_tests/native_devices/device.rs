@@ -247,3 +247,7 @@ fn create_primary(local: &Local) -> TestResult<(custody::BornAccount, Zeroizing<
         ceremony.confirm_with_passphrase(&answers, local.vault.as_ref(), wall()?, PASSWORD)?;
     Ok((account, phrase))
 }
+
+#[cfg(unix)]
+#[path = "device/network.rs"]
+mod network;

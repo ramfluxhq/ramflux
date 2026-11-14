@@ -73,7 +73,7 @@ async fn cold_vetoes() -> TestResult {
     let path = fixture.target.account_db()?.path.clone();
     fixture.rig.primary.lock().await?;
     fixture.rig.secondary.lock().await?;
-    fixture.target = Box::new(crate::RamfluxClient::new());
+    *fixture.target = crate::RamfluxClient::new();
     fixture.target.open_account_index(&fixture.rig.participant_b.root)?;
     fixture
         .target

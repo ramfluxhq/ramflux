@@ -37,6 +37,10 @@ use zeroize::Zeroizing;
 #[path = "pairing_continuity_tests/native_devices.rs"]
 mod native_devices;
 
+#[cfg(unix)]
+#[path = "../../rf/tests/e2e/mod.rs"]
+mod process_stack;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 struct Continuity {

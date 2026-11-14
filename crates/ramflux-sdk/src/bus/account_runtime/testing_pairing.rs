@@ -95,6 +95,19 @@ impl AccountSessionHarness {
         Box::pin(self.runtime.service_pairing_own_sync()).await
     }
 
+    /// Inspect only message presence in this fixture's independently owned account.
+    /// # Errors
+    /// Returns the actual writer's storage or account error.
+    pub fn has_pairing_history(&self, message: &str) -> Result<bool, SdkError> {
+        let account = self
+            .runtime
+            .state
+            .accounts
+            .get(&self.runtime.id)
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        Ok(account.client.account_db()?.message_content(message)?.is_some())
+    }
+
     /// Service actual writer requests until an imported known message becomes readable.
     /// The surrounding real-component test supplies its existing bounded deadline.
     /// # Errors

@@ -77,6 +77,7 @@ pub struct Stack {
     pub root: PathBuf,
     pub discovery_url: String,
     pub gateway_public: String,
+    pub gateway_quic: String,
     pub router_mesh: String,
     pub node_id: String,
     pub admin_url: String,
@@ -167,7 +168,18 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
         || text.contains("addrinuse")
 }
 
+/// Boot ordinary product services with explicit test-owned operator settings.
+/// # Errors
+/// Returns configuration, child-process or readiness failures.
+pub fn boot_pairing_stack(extra: &[(&str, &str)]) -> Result<Stack> {
+    boot_stack_once_with_env(NODE_ID, true, extra)
+}
+
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
+    boot_stack_once_with_env(node_id, wal, &[])
+}
+
+fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) -> Result<Stack> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
     let mut guard = RootGuard { path: root.clone(), keep: false };
@@ -236,7 +248,8 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR")
             .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
             .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
-            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
+            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
+            .envs(extra.iter().copied());
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -259,6 +272,7 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
         root,
         discovery_url,
         gateway_public: gateway_tcp,
+        gateway_quic,
         router_mesh,
         node_id,
         admin_url,
@@ -1671,7 +1685,12 @@ fn shell_join(args: &[&str]) -> String {
 }
 
 fn rf_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rf"))
+    if let Some(root) = std::env::var_os("RAMFLUX_PAIRING_BIN_DIR") {
+        return PathBuf::from(root).join("rf");
+    }
+    option_env!("CARGO_BIN_EXE_rf")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/debug/rf"))
 }
 
 fn sibling_bin(name: &str) -> Result<PathBuf> {
@@ -1784,7 +1803,7 @@ fn create_ca(root: &Path) -> Result<()> {
     ])
 }
 
-fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
+pub fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
     let certs = root.join("certs");
     let key = certs.join(format!("{service}.key"));
     let csr = certs.join(format!("{service}.csr"));
