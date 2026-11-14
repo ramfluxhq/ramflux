@@ -98,10 +98,9 @@ fn read_request(peer: &str) -> LocalBusFrame {
 }
 
 async fn read_view(pool: &AccountReaders, peer: &str) -> Result<serde_json::Value, SdkError> {
-    match tokio::time::timeout(Duration::from_secs(5), pool.request(read_request(peer))).await {
-        Ok(result) => result,
-        Err(_) => Err(SdkError::LocalBus("contact verification read deadline exceeded".into())),
-    }
+    crate::client::native_test_support::watchdog::within(pool.request(read_request(peer)))
+        .await
+        .map_err(|_| SdkError::LocalBus("contact verification read deadline exceeded".into()))?
 }
 
 fn rename_peer(
