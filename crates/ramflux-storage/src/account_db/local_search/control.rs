@@ -38,13 +38,6 @@ impl SearchControl {
         control.clock = Some(clock);
         control
     }
-    fn clock_now(&self) -> Instant {
-        #[cfg(test)]
-        if let Some(clock) = self.clock.as_ref() {
-            return clock();
-        }
-        Instant::now()
-    }
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
@@ -54,7 +47,11 @@ impl SearchControl {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(SearchError::Cancelled);
         }
-        if self.clock_now() >= self.deadline || self.steps.load(Ordering::Acquire) >= MAX_VM_STEPS {
+        #[cfg(test)]
+        let now = self.clock.as_ref().map_or_else(Instant::now, |clock| clock());
+        #[cfg(not(test))]
+        let now = Instant::now();
+        if now >= self.deadline || self.steps.load(Ordering::Acquire) >= MAX_VM_STEPS {
             return Err(SearchError::Deadline);
         }
         Ok(())
