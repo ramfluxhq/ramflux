@@ -15,7 +15,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
     let account = runtime_tests::account(root, "alice", None, Arc::new(AtomicBool::new(false)))?;
     let create = crate::SurfaceSendRequest::event(&create_frame(
         "thread",
-        &text_snapshot("surface", "Persisted", &("saved")),
+        &text_snapshot("surface", "Persisted", "saved"),
     )?)?;
     let carrier = Carrier {
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),

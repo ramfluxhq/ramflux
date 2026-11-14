@@ -180,7 +180,14 @@ impl Group {
             );
             Ok(LocalBusAccountState::new(client, engine, commitment))
         };
-        let source = wrap(source_client)?;
+        let mut source = wrap(source_client)?;
+        // Setup authored two ordinary events, which legitimately queue sibling copies.
+        // Finish that work before observing the private resync request/reply exchange.
+        assert_eq!(
+            crate::bus::own_device_copy::flush(&mut source).await?,
+            2,
+            "the initial create and delta must finish their own-device submission"
+        );
         let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
         Ok(Self { source, peers, config, directory, create, _root: root })
     }
@@ -262,7 +269,10 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
     }
     let frames = replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(frames.len(), 2);
-    assert!(own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty());
+    assert!(
+        own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+        "private resync replies must never be copied to the author's other devices"
+    );
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
