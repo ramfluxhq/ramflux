@@ -6,7 +6,6 @@ use super::*;
 use crate::bus::state::LocalBusAccountState;
 use crate::client::native_test_support::{Fixture as Native, bus as native_bus};
 use crate::prekey::SdkDeviceManifestResponse;
-use std::path::Path;
 pub(super) fn temp_root(label: &str) -> Result<ramflux_test_support::TestPath, SdkError> {
     Ok(ramflux_test_support::TestPath::new().expect("test: allocate fixture directory").child(
         format!(
@@ -14,22 +13,6 @@ pub(super) fn temp_root(label: &str) -> Result<ramflux_test_support::TestPath, S
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
         ),
     ))
-}
-pub(super) fn person(
-    root: &Path,
-    principal: &str,
-    device: &str,
-    root_seed: u8,
-    device_seed: u8,
-) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.create_identity_root(principal, [root_seed; 32]);
-    client.create_device_branch(principal, device, 1, [device_seed; 32]);
-    client.open_account_index(root)?;
-    let actor = client.owned_group_actor(&format!("target-{device}"))?;
-    client.create_account("acct", &actor.identity.root_commitment)?;
-    client.unlock_account("acct", b"shared-group-test")?;
-    Ok(client)
 }
 /// Runs one native fixture future to completion on a fresh current-thread runtime.
 fn native_block_on<T>(
@@ -43,7 +26,7 @@ fn native_block_on<T>(
 }
 
 /// One native account whose only device is `device`, held as a public-bus fixture.
-fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+pub(super) fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
     native_block_on(async move {
         let fixture = Native::with_device(id, device).await?;
         Ok(fixture.into_bus())
@@ -51,7 +34,7 @@ fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkErro
 }
 
 /// A laptop sibling of `phone`. It carries the account primary, as the phone holds it.
-fn native_sibling(
+pub(super) fn native_sibling(
     phone: &mut LocalBusAccountState,
     id: &str,
     device: &str,
@@ -60,7 +43,9 @@ fn native_sibling(
 }
 
 /// Manifest that the account's own native fixture published.
-fn manifest_of(account: &LocalBusAccountState) -> Result<SdkDeviceManifestResponse, SdkError> {
+pub(super) fn manifest_of(
+    account: &LocalBusAccountState,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
     account
         .client
         .native_bus_fixture
@@ -70,8 +55,20 @@ fn manifest_of(account: &LocalBusAccountState) -> Result<SdkDeviceManifestRespon
 }
 
 /// Device storage key that the raw group entry points expect as their target.
-fn native_target(client: &RamfluxClient) -> Result<String, SdkError> {
+pub(super) fn native_target(client: &RamfluxClient) -> Result<String, SdkError> {
     Ok(client.owned_device_identity()?.storage_key().into())
+}
+
+/// Publishes each listed account's native manifest into every listed account's directory.
+pub(super) fn install_native_directories(
+    accounts: &[&LocalBusAccountState],
+) -> Result<(), SdkError> {
+    for holder in accounts {
+        for source in accounts {
+            holder.client.persist_fetched_identity_directory(&manifest_of(source)?)?;
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]

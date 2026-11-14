@@ -67,30 +67,27 @@ pub(in crate::bus) fn stage(account: &LocalBusAccountState) -> Result<usize, Sdk
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::identity_authority::test_support;
-    use std::sync::{Arc, atomic::AtomicBool};
+    use crate::client::native_test_support::{Fixture as Native, TestResult, bus as native_bus};
+    use std::future::Future;
+    fn native_block_on<T>(future: impl Future<Output = TestResult<T>>) -> Result<T, SdkError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(future)
+            .map_err(|error| SdkError::LocalBus(error.to_string()))
+    }
     #[test]
     fn shared_group_recovery_runs_only_for_authenticated_device_set_changes() -> Result<(), SdkError>
     {
-        let root = crate::bus::runtime_tests::root("group-recovery");
-        let account = crate::bus::runtime_tests::account(
-            &root,
-            "alice",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let mut manifest = test_support::public_manifest(&account.client)?;
-        account.client.persist_identity_directory(&manifest)?;
-        account.client.shared_group_create("group", "thread", Some("Name".into()), "target")?;
+        let mut account =
+            native_block_on(async { Ok(Native::with_device("alice", "phone").await?.into_bus()) })?;
+        account.client.fixture_group_create("group", "thread", Some("Name".into()), "phone")?;
         assert_eq!(stage(&account)?, 1);
         assert_eq!(stage(&account)?, 0, "same state cannot create an echo broadcast");
-        // An authenticated own-set epoch change invalidates the completed scan.
-        test_support::sign_manifest(
-            account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &mut manifest,
-            2,
-        )?;
-        account.client.persist_identity_directory(&manifest)?;
+        // An authenticated own-set epoch change (a native sibling joining) invalidates the scan.
+        let laptop =
+            native_block_on(Box::pin(native_bus::sibling(&mut account, "alice-laptop", "laptop")))?;
+        drop(laptop);
         assert_eq!(stage(&account)?, 1);
         assert_eq!(stage(&account)?, 0);
         let db = account.client.account_db()?;

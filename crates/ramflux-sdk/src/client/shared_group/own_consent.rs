@@ -314,26 +314,27 @@ mod tests {
     #[test]
     fn r8_local_decision_advances_past_a_future_account_decision_and_matches_reply()
     -> Result<(), SdkError> {
-        use crate::client::identity_authority::test_support::public_manifest;
-        let path = super::super::tests::temp_root("local-consent-clock")?;
-        let phone = super::super::tests::person(&path.join("phone"), "owner", "phone", 11, 12)?;
-        let stranger =
-            super::super::tests::person(&path.join("stranger"), "stranger", "stranger", 21, 22)?;
-        phone.persist_identity_directory(&public_manifest(&phone)?)?;
+        use crate::client::shared_group::tests::{install_native_directories, native_person};
+        let phone = native_person("owner", "phone")?;
+        let stranger = native_person("stranger", "stranger")?;
+        install_native_directories(&[&phone, &stranger])?;
         for accepted in [true, false] {
             let group = if accepted { "accept" } else { "decline" };
-            stranger.shared_group_create(group, group, None, "target-stranger")?;
-            let state = stranger.shared_group_change(
+            stranger.client.fixture_group_create(group, group, None, "stranger")?;
+            let state = stranger.client.fixture_group_change(
                 group,
-                "target-stranger",
+                "stranger",
                 ramflux_protocol::GroupStateChange::Add {
-                    member: phone.owned_group_actor("target-phone")?.identity,
+                    member: phone.client.fixture_group_actor("phone")?.identity,
                     role: ramflux_protocol::SharedGroupRole::Member,
                 },
             )?;
-            phone.hold_group_invitation(&state, &stranger.shared_group_packet(&state, false)?)?;
+            phone.client.hold_group_invitation(
+                &state,
+                &stranger.client.shared_group_packet(&state, false)?,
+            )?;
             let future = now_unix_timestamp() + 120;
-            phone.account_db()?.persist_actor_state(
+            phone.client.account_db()?.persist_actor_state(
                 &key(group),
                 &Decision {
                     genesis_hash: state.genesis_hash()?,
@@ -342,44 +343,35 @@ mod tests {
                     expires_at: future + 7 * 86400,
                 },
             )?;
-            let reply = phone.decide_group_invitation(group, accepted, "target-phone")?;
+            let reply = phone.client.decide_group_invitation(group, accepted, "phone")?;
             assert_eq!(reply["accepted"], accepted);
             let saved: Decision = phone
+                .client
                 .account_db()?
                 .load_actor_state(&key(group))?
                 .ok_or(StorageError::AuthorizationRejected)?;
             assert_eq!(saved.issued_at, future + 1);
             assert_eq!(saved.accepted, accepted);
-            assert_eq!(phone.local_is_group_member(group)?, accepted);
+            assert_eq!(phone.client.local_is_group_member(group)?, accepted);
         }
         drop((phone, stranger));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
     #[test]
     fn r7_signed_account_decisions_follow_time_and_decline_wins_ties() -> Result<(), SdkError> {
-        use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
-        let path = super::super::tests::temp_root("ordered-consent")?;
-        let phone = super::super::tests::person(&path.join("phone"), "owner", "phone", 11, 12)?;
-        let laptop = super::super::tests::person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
-        let stranger =
-            super::super::tests::person(&path.join("stranger"), "stranger", "stranger", 21, 22)?;
-        let mut own = public_manifest(&phone)?;
-        own.devices.extend(public_manifest(&laptop)?.devices);
-        sign_manifest(
-            phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &mut own,
-            2,
-        )?;
-        for client in [&phone, &laptop] {
-            client.persist_identity_directory(&own)?;
-        }
-        stranger.shared_group_create("group", "thread", None, "target-stranger")?;
-        let state = stranger.shared_group_change(
+        use crate::client::shared_group::tests::{
+            install_native_directories, native_person, native_sibling,
+        };
+        let mut phone = native_person("owner", "phone")?;
+        let laptop = native_sibling(&mut phone, "owner-laptop", "laptop")?;
+        let stranger = native_person("stranger", "stranger")?;
+        install_native_directories(&[&phone, &laptop])?;
+        stranger.client.fixture_group_create("group", "thread", None, "stranger")?;
+        let state = stranger.client.fixture_group_change(
             "group",
-            "target-stranger",
+            "stranger",
             ramflux_protocol::GroupStateChange::Add {
-                member: phone.owned_group_actor("target-phone")?.identity,
+                member: phone.client.fixture_group_actor("phone")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
@@ -403,16 +395,16 @@ mod tests {
             Ok(bytes)
         };
         // Two independently signed devices disagree; delivery order must not choose the winner.
-        let decline = make(&phone, false, now - 20)?;
-        let accept = make(&laptop, true, now - 10)?;
-        for client in [&phone, &laptop] {
-            client.receive_own_group_consent(&phone.owned_device_identity()?, &decline)?;
-            client.receive_own_group_consent(&laptop.owned_device_identity()?, &accept)?;
-            client.receive_own_group_consent(&phone.owned_device_identity()?, &decline)?;
+        let decline = make(&phone.client, false, now - 20)?;
+        let accept = make(&laptop.client, true, now - 10)?;
+        for client in [&phone.client, &laptop.client] {
+            client.receive_own_group_consent(&phone.client.owned_device_identity()?, &decline)?;
+            client.receive_own_group_consent(&laptop.client.owned_device_identity()?, &accept)?;
+            client.receive_own_group_consent(&phone.client.owned_device_identity()?, &decline)?;
             assert!(client.local_is_group_member("group")?);
-            let tie = make(&phone, false, now - 10)?;
-            client.receive_own_group_consent(&phone.owned_device_identity()?, &tie)?;
-            client.receive_own_group_consent(&laptop.owned_device_identity()?, &accept)?;
+            let tie = make(&phone.client, false, now - 10)?;
+            client.receive_own_group_consent(&phone.client.owned_device_identity()?, &tie)?;
+            client.receive_own_group_consent(&laptop.client.owned_device_identity()?, &accept)?;
             assert!(!client.local_is_group_member("group")?);
             let saved: Decision = client
                 .account_db()?
@@ -421,7 +413,6 @@ mod tests {
             assert_eq!(saved.expires_at, now - 10 + 7 * 86400);
         }
         drop((phone, laptop, stranger));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 

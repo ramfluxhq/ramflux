@@ -873,30 +873,35 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::shared_group::tests::{
+        install_native_directories, native_person, native_sibling, native_target,
+    };
     use ramflux_protocol::{GroupStateChange, SharedGroupRole};
     #[test]
     fn r7_sibling_reservation_waits_for_signed_outcome_not_the_issue_deadline()
     -> Result<(), SdkError> {
-        let path = super::super::tests::temp_root("transfer-outcome")?;
-        let phone = super::super::tests::person(&path.join("phone"), "owner", "phone", 11, 12)?;
-        let laptop = super::super::tests::person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
-        let next = super::super::tests::person(&path.join("next"), "next", "next", 21, 22)?;
-        install_transfer_directories(&phone, &laptop, &next)?;
-        phone.shared_group_create("group", "thread", None, "target-phone")?;
-        let base = phone.shared_group_change(
+        let mut phone_account = native_person("owner", "phone")?;
+        let laptop_account = native_sibling(&mut phone_account, "owner-laptop", "laptop")?;
+        let next_account = native_person("next", "next")?;
+        install_native_directories(&[&phone_account, &laptop_account, &next_account])?;
+        let (phone, laptop, next) =
+            (&phone_account.client, &laptop_account.client, &next_account.client);
+        let laptop_target = native_target(laptop)?;
+        phone.fixture_group_create("group", "thread", None, "phone")?;
+        let base = phone.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::Add {
-                member: next.owned_group_actor("target-next")?.identity,
+                member: next.fixture_group_actor("next")?.identity,
                 role: SharedGroupRole::Member,
             },
         )?;
-        laptop.accept_shared_group_state(&base, "target-laptop")?;
+        laptop.fixture_accept_group_state(&base, "laptop")?;
         let now = now_unix_timestamp();
         let probe = TransferProbe {
             id: ramflux_protocol::encode_base64url([75; 32]),
-            actor: phone.owned_group_actor("target-phone")?,
-            creator: next.owned_group_actor("target-next")?,
+            actor: phone.fixture_group_actor("phone")?,
+            creator: next.fixture_group_actor("next")?,
             base: base.snapshot().clone(),
             required: vec![TransferDevice {
                 root: laptop.owned_device_identity()?.root_commitment().into(),
@@ -918,17 +923,17 @@ mod tests {
             Some("transfer_outcome_pending")
         );
         // An unrelated creator edit is not proof that this handover finished.
-        let edited = phone.shared_group_change(
+        let edited = phone.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::SetName { name: "concurrent".into() },
         )?;
-        laptop.accept_shared_group_state(&edited, "target-laptop")?;
+        laptop.fixture_accept_group_state(&edited, "laptop")?;
         assert!(laptop.check_group_transfer_lease("group", None).is_err());
         // A different creator sibling cannot impersonate the proposing device's cancellation.
         let forged = TransferHead {
             proposal: probe.id.clone(),
-            actor: laptop.owned_group_actor("target-laptop")?,
+            actor: laptop.fixture_group_actor("laptop")?,
             requested_hash: base.snapshot().state_hash.clone(),
             head: base.snapshot().clone(),
             acceptance: None,
@@ -940,9 +945,8 @@ mod tests {
             issued_at: now,
             expires_at: now + 7 * 86400,
         };
-        let forged =
-            TransferControl::sign(&laptop, TransferBody::Head { reply: Box::new(forged) })?;
-        assert!(laptop.apply_group_transfer_control(&forged, "target-laptop").is_err());
+        let forged = TransferControl::sign(laptop, TransferBody::Head { reply: Box::new(forged) })?;
+        assert!(laptop.apply_group_transfer_control(&forged, &laptop_target).is_err());
         phone.cancel_group_transfer(&probe)?;
         let rows = phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
         let cancel = rows
@@ -957,7 +961,7 @@ mod tests {
         }
         phone.refresh_group_transfer_cancellation(&mut renewed)?;
         renewed.control.verify(now_unix_timestamp())?;
-        laptop.apply_group_transfer_control(&cancel.control, "target-laptop")?;
+        laptop.apply_group_transfer_control(&cancel.control, &laptop_target)?;
         assert!(
             !phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?.is_empty(),
             "cancellation is retained until observation is acknowledged"
@@ -967,37 +971,16 @@ mod tests {
             .iter()
             .find(|r| matches!(&r.control.body,TransferBody::Head{reply} if reply.cancel_ack))
             .ok_or(StorageError::AuthorizationRejected)?;
-        phone.apply_group_transfer_control(&ack.control, "target-phone")?;
+        phone.apply_group_transfer_control(&ack.control, &native_target(phone)?)?;
         assert!(phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?.is_empty());
         laptop.check_group_transfer_lease("group", None)?;
-        laptop.shared_group_change(
+        laptop.fixture_group_change(
             "group",
-            "target-laptop",
+            "laptop",
             GroupStateChange::SetName { name: "unlocked".into() },
         )?;
-        assert_commit_releases_reservation(&phone, &laptop, &next, probe)?;
-        drop((phone, laptop, next));
-        std::fs::remove_dir_all(path)?;
-        Ok(())
-    }
-    pub(super) fn install_transfer_directories(
-        phone: &RamfluxClient,
-        laptop: &RamfluxClient,
-        next: &RamfluxClient,
-    ) -> Result<(), SdkError> {
-        use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
-        let mut owner = public_manifest(phone)?;
-        owner.devices.extend(public_manifest(laptop)?.devices);
-        sign_manifest(
-            phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &mut owner,
-            2,
-        )?;
-        let target = public_manifest(next)?;
-        for client in [phone, laptop, next] {
-            client.persist_identity_directory(&owner)?;
-            client.persist_identity_directory(&target)?;
-        }
+        assert_commit_releases_reservation(phone, laptop, next, probe)?;
+        drop((phone_account, laptop_account, next_account));
         Ok(())
     }
     fn assert_commit_releases_reservation(
@@ -1006,11 +989,12 @@ mod tests {
         next: &RamfluxClient,
         probe: TransferProbe,
     ) -> Result<(), SdkError> {
+        let laptop_target = native_target(laptop)?;
         let unlocked = laptop
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::AuthorizationRejected)?;
-        phone.accept_shared_group_state(&unlocked, "target-phone")?;
+        phone.fixture_accept_group_state(&unlocked, "phone")?;
         let mut committed_probe = probe;
         committed_probe.id = ramflux_protocol::encode_base64url([76; 32]);
         committed_probe.base = unlocked.snapshot().clone();
@@ -1023,8 +1007,8 @@ mod tests {
             .iter()
             .find(|row| row.control.proposal() == committed_probe.id)
             .ok_or(StorageError::AuthorizationRejected)?;
-        laptop.apply_group_transfer_control(&cancel.control, "target-laptop")?;
-        laptop.answer_group_transfer(&committed_probe, "target-laptop")?;
+        laptop.apply_group_transfer_control(&cancel.control, &laptop_target)?;
+        laptop.answer_group_transfer(&committed_probe, &laptop_target)?;
         laptop.check_group_transfer_lease("group", None)?;
         committed_probe.id = ramflux_protocol::encode_base64url([77; 32]);
         laptop.reserve_group_transfer(&committed_probe, &unlocked)?;
@@ -1035,40 +1019,42 @@ mod tests {
             &committed_probe.id,
             now_unix_timestamp(),
         )?;
-        let transferred = phone.shared_group_change(
+        let transferred = phone.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::TransferOwnership {
                 creator: committed_probe.creator,
                 acceptance: Box::new(acceptance),
             },
         )?;
-        laptop.accept_shared_group_state(&transferred, "target-laptop")?;
+        laptop.fixture_accept_group_state(&transferred, "laptop")?;
         laptop.check_group_transfer_lease("group", None)?;
         Ok(())
     }
     #[test]
     fn r7_transfer_controls_tolerate_five_minutes_of_skew_and_bind_acceptance_to_issuer_time()
     -> Result<(), SdkError> {
-        let path = super::super::tests::temp_root("transfer-clock")?;
-        let owner = super::super::tests::person(&path.join("owner"), "owner", "owner", 11, 12)?;
-        let next = super::super::tests::person(&path.join("next"), "next", "next", 21, 22)?;
-        owner.shared_group_create("group", "thread", None, "target-owner")?;
-        let base = owner.shared_group_change(
+        let owner_account = native_person("owner", "owner")?;
+        let next_account = native_person("next", "next")?;
+        install_native_directories(&[&owner_account, &next_account])?;
+        let (owner, next) = (&owner_account.client, &next_account.client);
+        let next_target = native_target(next)?;
+        owner.fixture_group_create("group", "thread", None, "owner")?;
+        let base = owner.fixture_group_change(
             "group",
-            "target-owner",
+            "owner",
             GroupStateChange::Add {
-                member: next.owned_group_actor("target-next")?.identity,
+                member: next.fixture_group_actor("next")?.identity,
                 role: SharedGroupRole::Member,
             },
         )?;
-        next.accept_shared_group_state(&base, "target-next")?;
+        next.fixture_accept_group_state(&base, "next")?;
         let now = now_unix_timestamp();
         for offset in [-300, 300] {
             let probe = TransferProbe {
                 id: ramflux_protocol::encode_base64url([if offset < 0 { 75 } else { 76 }; 32]),
-                actor: owner.owned_group_actor("target-owner")?,
-                creator: next.owned_group_actor("target-next")?,
+                actor: owner.fixture_group_actor("owner")?,
+                creator: next.fixture_group_actor("next")?,
                 base: base.snapshot().clone(),
                 required: vec![TransferDevice {
                     root: next.owned_device_identity()?.root_commitment().into(),
@@ -1078,11 +1064,11 @@ mod tests {
                 expires_at: now + offset + 60,
             };
             let wire = TransferControl::sign(
-                &owner,
+                owner,
                 TransferBody::Probe { probe: Box::new(probe.clone()) },
             )?;
             wire.verify(now)?;
-            next.answer_group_transfer(&probe, "target-next")?;
+            next.answer_group_transfer(&probe, &next_target)?;
             let rows = next.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
             let acceptance = rows
                 .iter()
@@ -1100,7 +1086,7 @@ mod tests {
                 reply.issued_at += 1;
                 reply.expires_at += 1;
             }
-            repeated = TransferControl::sign(&next, repeated.body)?;
+            repeated = TransferControl::sign(next, repeated.body)?;
             next.stage_group_transfer_control(repeated)?;
             assert_eq!(
                 next.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?.len(),
@@ -1110,8 +1096,7 @@ mod tests {
             assert_eq!(acceptance.issued_at, probe.issued_at);
             assert!(wire.verify(now - 301 - offset.abs()).is_err());
         }
-        drop((owner, next));
-        std::fs::remove_dir_all(path)?;
+        drop((owner_account, next_account));
         Ok(())
     }
 }

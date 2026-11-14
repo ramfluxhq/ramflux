@@ -89,25 +89,27 @@ impl RamfluxClient {
 mod tests {
     use super::super::transfer_wire::{TransferBody, TransferControl, TransferHead};
     use super::*;
+    use crate::client::shared_group::tests::{install_native_directories, native_person};
     #[test]
     fn r7_other_genesis_cancellation_cannot_preclaim_an_outcome() -> Result<(), SdkError> {
-        let path = super::super::tests::temp_root("outcome-genesis")?;
-        let owner = super::super::tests::person(&path.join("owner"), "owner", "owner", 11, 12)?;
-        let member = super::super::tests::person(&path.join("member"), "member", "member", 21, 22)?;
-        owner.shared_group_create("group", "thread", None, "target-owner")?;
-        let actor = member.owned_group_actor("target-member")?;
-        owner.shared_group_change(
+        let owner = native_person("owner", "owner")?;
+        let member = native_person("member", "member")?;
+        install_native_directories(&[&owner, &member])?;
+        owner.client.fixture_group_create("group", "thread", None, "owner")?;
+        let actor = member.client.fixture_group_actor("member")?;
+        owner.client.fixture_group_change(
             "group",
-            "target-owner",
+            "owner",
             ramflux_protocol::GroupStateChange::Add {
                 member: actor.identity.clone(),
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
         // A current member can sign a genuinely valid different group using the same display id.
-        let foreign = ramflux_crypto::create_group_state(
-            member.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            member.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        let primary = member.client.fixture_primary()?.ok_or(SdkError::CustodySetupInvalid)?;
+        let foreign = ramflux_crypto::create_native_group_state(
+            &primary,
+            member.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
             &actor,
             ramflux_crypto::GroupStateCreateInput {
                 group_id: "group",
@@ -126,7 +128,7 @@ mod tests {
             acceptance: None,
             requires_sync: true,
             target: TransferDevice {
-                root: owner.owned_device_identity()?.root_commitment().into(),
+                root: owner.client.owned_device_identity()?.root_commitment().into(),
                 device: "owner".into(),
             },
             additional_targets: Vec::new(),
@@ -136,15 +138,14 @@ mod tests {
             expires_at: now_unix_timestamp() + 60,
         };
         let control =
-            TransferControl::sign(&member, TransferBody::Head { reply: Box::new(reply) })?;
+            TransferControl::sign(&member.client, TransferBody::Head { reply: Box::new(reply) })?;
         control.verify(now_unix_timestamp())?;
         assert!(matches!(
-            owner.apply_group_transfer_control(&control, "target-owner"),
+            owner.client.apply_group_transfer_control(&control, "owner"),
             Err(SdkError::Storage(StorageError::GroupPermissionDenied))
         ));
-        assert_eq!(owner.account_db()?.actor_state_usage(PREFIX)?.0, 0);
+        assert_eq!(owner.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
         drop((owner, member));
-        std::fs::remove_dir_all(path)?;
         Ok(())
     }
 }
