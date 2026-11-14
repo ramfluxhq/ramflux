@@ -3,7 +3,7 @@
 
 //! Filesystem ownership for test fixtures. Depend on this crate only as a dev-dependency.
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Write as _};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,10 +22,12 @@ impl TestPath {
     /// Allocate an existing private directory; all derived paths stay owned by the fixture.
     ///
     /// # Errors
-    /// Returns the filesystem error if the temporary directory cannot be created.
+    /// Returns an error if allocation or CI ownership recording fails.
+    #[track_caller]
     pub fn new() -> io::Result<Self> {
         let directory = Arc::new(tempfile::Builder::new().prefix("rf-test-").tempdir()?);
         let path = directory.path().canonicalize()?;
+        record_owner(&path, std::panic::Location::caller())?;
         Ok(Self { path, directory })
     }
 
@@ -49,6 +51,27 @@ impl TestPath {
     pub fn with_file_name(&self, name: impl AsRef<OsStr>) -> Self {
         Self { path: self.path.with_file_name(name), directory: Arc::clone(&self.directory) }
     }
+}
+
+// The job owns this bounded journal, outside individual fixtures. CI initializes it
+// before sudo tests so later unprivileged allocations can still append diagnostics.
+fn record_owner(path: &Path, location: &std::panic::Location<'_>) -> io::Result<()> {
+    const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
+    let Some(base) = std::env::var_os("RF_TEST_TMPDIR") else { return Ok(()) };
+    let base = PathBuf::from(base).canonicalize()?;
+    if path.parent() != Some(base.as_path()) {
+        return Ok(());
+    }
+    let Some(name) = path.file_name() else { return Ok(()) };
+    let thread = std::thread::current();
+    let label: String = thread.name().unwrap_or("unnamed").chars().take(512).collect();
+    let record = format!("{}\t{:?} at {location}\n", name.to_string_lossy(), label);
+    let mut journal =
+        std::fs::OpenOptions::new().create(true).append(true).open(base.join(".test-owners"))?;
+    if journal.metadata()?.len() >= MAX_JOURNAL_BYTES {
+        return Err(io::Error::other("test ownership journal exceeded its bounded budget"));
+    }
+    journal.write_all(record.as_bytes())
 }
 
 impl Deref for TestPath {

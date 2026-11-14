@@ -21,6 +21,7 @@ def initialize():
     base = os.environ.get("RF_CI_TMPBASE") or os.environ["RUNNER_TEMP"]
     root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=base))
     root = root.resolve()
+    (root / ".test-owners").touch(mode=0o600)
     with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
         output.write(f"RF_CI_TMPBASE={Path(base).resolve()}\n")
         for key in ("TMPDIR", "TMP", "TEMP", "RF_TEST_TMPDIR"):
@@ -36,6 +37,29 @@ def restore_environment():
             output.write("RF_TEST_TMPDIR=\n")
 
 
+def owner_context(root, names):
+    """Read bounded diagnostic records; ownership never changes the leak verdict."""
+    found = {}
+    try:
+        with (root / ".test-owners").open("rb") as journal:
+            remaining = 16 * 1024 * 1024
+            for _ in range(100_000):
+                if remaining <= 0:
+                    break
+                line = journal.readline(min(16 * 1024, remaining))
+                if not line:
+                    break
+                remaining -= len(line)
+                name, separator, owner = line.partition(b"\t")
+                if separator and name.decode("utf-8", errors="replace") in names:
+                    found[name.decode("utf-8", errors="replace")] = owner.decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        print(f"::warning::test ownership diagnostics unavailable: {error}")
+    return found
+
+
 def check():
     root = Path(os.environ["RF_TEST_TMPDIR"])
     restore_environment()
@@ -49,8 +73,11 @@ def check():
     except OSError as error:
         leaked = []
         errors.append((root, error))
+    owners = owner_context(root, set(leaked)) if leaked else {}
     for name in leaked:
         print(f"::error::test temporary entry leaked: {name}")
+        if name in owners:
+            print(f"test allocation owner: {owners[name]}")
     print(f"TEST_TMP_LEAKS={len(leaked)}")
 
     def failed(_operation, path, exception):
@@ -91,6 +118,19 @@ class Tests(unittest.TestCase):
                         self.assertEqual(check(), int(leaked))
                     self.assertIn(f"TEST_TMP_LEAKS={int(leaked)}", output.getvalue())
                 self.assertFalse(root.exists(), "CI scratch must be removed after recording the verdict")
+
+    def test_leak_owner_diagnostics_preserve_failure_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = Path(tempfile.mkdtemp(prefix="rf-tests-", dir=parent))
+            (root / "rf-leaked").mkdir()
+            (root / ".test-owners").write_text('rf-leaked\t"tests::leaking_case" at fixture.rs:12:3\n')
+            with patch.dict(os.environ, {"RUNNER_TEMP": str(parent), "RF_CI_TMPBASE": "", "RF_TEST_TMPDIR": str(root), "GITHUB_ENV": ""}):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(check(), 1)
+            self.assertIn("tests::leaking_case", output.getvalue())
+            self.assertIn("TEST_TMP_LEAKS=1", output.getvalue())
+            self.assertFalse(root.exists(), "diagnostics must not bypass scratch cleanup")
 
     def test_initialize_assigns_all_platform_temp_variables(self):
         with tempfile.TemporaryDirectory() as directory:
