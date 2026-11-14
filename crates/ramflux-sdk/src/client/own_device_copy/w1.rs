@@ -127,7 +127,7 @@ impl OwnCopyW1<'_> {
     }
 }
 
-fn join_own_copy<T>(
+pub(crate) fn join_own_copy<T>(
     db: &AccountDb,
     expected: ReceiveExpectation<'_>,
     generation: u64,
@@ -244,6 +244,32 @@ pub(crate) fn with_omit_locator<T>(f: impl FnOnce() -> T) -> T {
 }
 
 impl RamfluxClient {
+    /// Bind generated own-copy settlement to its committed receipt's erasure owners.
+    pub(crate) fn bind_received_own_copy_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        entry: &crate::GatewayInboxEntry,
+        expected: ReceiveExpectation<'_>,
+    ) -> Result<(), SdkError> {
+        let Some(ack) = self.own_copy_ack_binding(entry)? else { return Ok(()) };
+        tx.require_open_input(entry.inbox_seq)?;
+        if entry.target_delivery_id != expected.target {
+            return Err(StorageError::AuthorizationRejected.into());
+        }
+        let key = locator_key(&entry.envelope.envelope_id);
+        let locator = SequenceLocator {
+            target: expected.target.into(),
+            incarnation: expected.incarnation.into(),
+            sequence: entry.inbox_seq,
+            acknowledged: false,
+            ack: Some(ack.clone()),
+        };
+        tx.account().persist_actor_state(&key, &locator)?;
+        tx.account().bind_actor_container_reference(&ack.receipt_key, &key)?;
+        before_commit_fault()?;
+        Ok(())
+    }
+
     /// Decrypts an own-copy packet and commits through the dormant W1 adapter.
     #[cfg(test)]
     pub(crate) fn apply_own_copy_w1(

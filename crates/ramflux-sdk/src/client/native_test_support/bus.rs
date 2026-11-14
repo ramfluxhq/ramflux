@@ -96,6 +96,28 @@ pub(crate) async fn receive_copy(
     Ok(received.routing.is_some())
 }
 
+/// Run the actual generated prepare/decrypt path with the caller's W1 persistence cut.
+pub(crate) async fn receive_copy_joining(
+    client: &mut RamfluxClient,
+    config: &GatewaySessionConfig,
+    entry: &crate::GatewayInboxEntry,
+    persist: impl FnOnce(
+        &RamfluxClient,
+        crate::client::routed::JoinedW1<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), crate::SdkError>,
+) -> Result<(), crate::SdkError> {
+    let mut engine = crate::GatewaySessionEngine::with_test_transport(
+        config.clone(),
+        Box::new(super::sibling::NoNetwork),
+    );
+    let pool = ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()
+            .map_err(|error| crate::SdkError::LocalBus(error.to_string()))?,
+    );
+    Box::pin(client.apply_routed_entry_joining(&mut engine, &pool, entry, None, persist)).await?;
+    Ok(())
+}
+
 pub(crate) fn seed_pair(a: &RamfluxClient, b: &RamfluxClient) -> Result<(), crate::SdkError> {
     let own = a.owned_device_identity()?;
     let peer = b.owned_device_identity()?;
@@ -265,13 +287,10 @@ pub(crate) fn reopen_account(
     account: &mut LocalBusAccountState,
     id: &str,
 ) -> Result<(), crate::SdkError> {
-    let native = account.client.born_v3_account.is_some();
+    account.client.born_v3_account.as_ref().ok_or(crate::SdkError::IdentityRootMissing)?;
     account.client.active_account_db = None;
-    account.client.unlock_account(
-        id,
-        if native { b"native fixture data passphrase" } else { b"actor-test-secret" },
-    )?;
-    if native {
+    account.client.unlock_account(id, b"native fixture data passphrase")?;
+    {
         let custody = account
             .gateway_config
             .custody

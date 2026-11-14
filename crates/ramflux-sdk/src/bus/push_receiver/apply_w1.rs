@@ -762,20 +762,14 @@ fn settled_routed_kind(
     retry_key: Option<&str>,
 ) -> Result<Option<Kind>, SdkError> {
     account.client.validate_routed_receipt_or_ciphertext(entry)?;
-    let auth_key = match account.client.retained_committed_receipt_key(entry) {
-        Ok(Some(key)) => key,
-        Err(SdkError::InboundRejected(reason))
-            if reason.starts_with("envelope id reused with a different authenticated payload") =>
-        {
-            return Err(SdkError::InboundRejected(reason));
-        }
-        Ok(None) | Err(_) => {
+    let auth_key = match account.client.retained_committed_receipt_key(entry)? {
+        Some(key) => key,
+        None => {
             if let Some(key) = retry_key {
                 key.to_owned()
             } else {
                 match projection_key(&account.client, entry) {
                     Ok(key) => key,
-                    Err(error) if identity_absence(&error) => return Ok(None),
                     // Incomplete cache / stale head: nothing is settled yet. Fall through to
                     // decode (routed W1) or sender-key hold. DirectoryAuthorityUnavailable
                     // still propagates so the settled-key probe stays a typed miss.
@@ -1029,14 +1023,8 @@ pub(super) fn project_if_committed(
     sequence: u64,
     expected: ReceiveExpectation<'_>,
 ) -> Result<(), SdkError> {
-    // Own-copy and legacy-DM success: a missing authenticated identity means
-    // nothing is owed. Every other derivation error (including storage) still
-    // propagates. `project_application` keeps failing on the same derivation error.
-    let auth_key = match projection_auth_key(client, entry) {
-        Ok(key) => key,
-        Err(error) if identity_absence(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    };
+    client.bind_received_own_copy_in(tx, entry, expected)?;
+    let auth_key = projection_auth_key(client, entry)?;
     if tx.account().load_actor_state::<crate::client::routed::Committed>(&auth_key)?.is_none() {
         return Ok(());
     }

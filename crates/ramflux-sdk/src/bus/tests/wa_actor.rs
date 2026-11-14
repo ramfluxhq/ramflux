@@ -1374,7 +1374,12 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         gateway.router = Some((Arc::clone(&router), Arc::clone(&store)));
     }
 
-    let mut runtime = start_runtime_default_on(&mut fixture).await?;
+    let mut runtime = start_runtime_default_on(&mut fixture).await.map_err(|error| {
+        format!(
+            "initial connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(
         account_of(&runtime)?.client.account_db()?.receive_activation()?,
         ramflux_storage::ReceiveActivation::Activated
@@ -1392,7 +1397,12 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         .prepare_publication_target(&store, &fixture.source.target_delivery_id)
         .map_err(|error| SdkError::LocalBus(error.to_string()))?;
     let (first_ids, mut ack_ids) = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     drive_flush(&mut runtime, true).await.map_err(|error| {
         format!(
             "restart ACK: {error}; gateway errors={:?}",
@@ -1446,8 +1456,18 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     runtime.start_connection()?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await?;
-    wait_connected_receive(&mut runtime, &handle).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
+    wait_connected_receive(&mut runtime, &handle).await.map_err(|error| {
+        format!(
+            "restart connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     drive_flush(&mut runtime, true).await.map_err(|error| {
         format!(
             "restart ACK: {error}; gateway errors={:?}",

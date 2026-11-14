@@ -3,10 +3,9 @@
 
 //! Creator-device fork repair preserves durable removals before replaying pending intent.
 use super::{
-    GroupStateChange, RamfluxClient, SdkError, VerifiedGroupState, advance_group_state, json,
-    now_unix_timestamp,
+    GroupStateChange, RamfluxClient, SdkError, VerifiedGroupState, json, now_unix_timestamp,
 };
-use ramflux_crypto::GroupStateRelation;
+use ramflux_crypto::{GroupStateRelation, advance_group_state};
 use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize)]
 struct PendingCreatorChange {

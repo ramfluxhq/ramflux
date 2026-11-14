@@ -3,6 +3,7 @@
 
 //! Creator-device convergence and durable foreign-request revalidation.
 use super::*;
+use ramflux_crypto::advance_group_state;
 use ramflux_protocol::{GroupChangeStatus, SharedGroupRole};
 #[test]
 fn creator_device_conflicts_replay_losing_removal_or_name() -> Result<(), SdkError> {

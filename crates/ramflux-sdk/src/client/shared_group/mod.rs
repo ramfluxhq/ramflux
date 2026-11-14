@@ -5,8 +5,8 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{
-    VerifiedGroupState, advance_group_state, advance_native_group_state, certify_group_state_actor,
-    certify_native_group_state_actor, create_group_state, create_native_group_state,
+    VerifiedGroupState, advance_native_group_state, certify_native_group_state_actor,
+    create_native_group_state,
 };
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
 use serde_json::{Value, json};
@@ -52,13 +52,8 @@ impl RamfluxClient {
                 .effective_role(local.root_commitment(), local.device_id())
                 .is_some());
         }
-        // A pending invitation has no joined projection yet. Absence is a
-        // negative membership answer; real storage failures still propagate.
-        if self.account_db()?.group_snapshot_epoch(group)?.is_none() {
-            return Ok(false);
-        }
-        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        Ok(self.group_state(group)?.members.contains(&branch.device_id))
+        self.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(false)
     }
 
     pub(super) fn shared_group_local_target(&self, group: &str) -> Result<String, SdkError> {
@@ -71,21 +66,16 @@ impl RamfluxClient {
     }
 
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
-        if let Some(account) = &self.born_v3_account {
-            let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
-            return Ok(certify_native_group_state_actor(
-                account.verified(),
-                branch,
-                target,
-                crate::custody::network_now()?,
-            )?);
-        }
-        Ok(certify_group_state_actor(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        let account = self.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(certify_native_group_state_actor(
+            account.verified(),
+            branch,
             target,
+            crate::custody::network_now()?,
         )?)
     }
+
     pub(crate) fn shared_group_create(
         &self,
         group: &str,
@@ -116,21 +106,12 @@ impl RamfluxClient {
             name,
             now: now_unix_timestamp(),
         };
-        let verified = if self.born_v3_account.is_some() {
-            create_native_group_state(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                branch,
-                &actor,
-                input,
-            )?
-        } else {
-            create_group_state(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                branch,
-                &actor,
-                input,
-            )?
-        };
+        let verified = create_native_group_state(
+            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+            branch,
+            &actor,
+            input,
+        )?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&verified, &actor)?;
             self.observe_native_task_roster(&verified)?;
@@ -166,23 +147,13 @@ impl RamfluxClient {
         self.check_group_transfer_lease(group, nonce)?;
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let state = if self.born_v3_account.is_some() {
-            advance_native_group_state(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                branch,
-                &actor,
-                &previous,
-                change.clone(),
-            )?
-        } else {
-            advance_group_state(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                branch,
-                &actor,
-                &previous,
-                change.clone(),
-            )?
-        };
+        let state = advance_native_group_state(
+            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+            branch,
+            &actor,
+            &previous,
+            change.clone(),
+        )?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&state, &actor)?;
             self.observe_native_task_roster(&state)?;

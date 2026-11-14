@@ -98,124 +98,127 @@ async fn a_no_role_tombstone_does_not_squat_on_a_different_signers_legitimate_ta
 async fn stale_snapshot_membership_cannot_wedge_task_ingress_local_mutations_or_verified_removals()
 -> TestResult {
     for path in ["start", "cancel", "add", "remove", "kick", "ban"] {
-        let f = Box::pin(native_group::fixture(false, "other")).await?;
-        f.human.fixture_group_change(
-            "group",
-            "human-device",
-            ramflux_protocol::GroupStateChange::SetRole {
-                root_commitment: f.agent.own_account_anchor()?,
-                device_id: "agent-device".into(),
-                role: ramflux_protocol::SharedGroupRole::Admin,
-            },
-        )?;
-        let epoch = f.human.group_state("group")?.group_epoch;
-        f.human.account_db()?.upsert_group_member_snapshot("group", "ghost", "member", epoch)?;
-        f.human.account_db()?.persist_client_record(
-            "conversation",
-            "group-thread",
-            &json!({"kind":"group","group_id":"group"}),
-        )?;
-        match path {
-            "start" | "cancel" => {
+        let f = Box::pin(skewed_group_fixture())
+            .await
+            .map_err(|error| format!("{path} setup: {error}"))?;
+        Box::pin(exercise_skewed_group(&f, path))
+            .await
+            .map_err(|error| format!("{path} execution: {error}"))?;
+    }
+    Ok(())
+}
+async fn skewed_group_fixture() -> Result<native_group::GroupFixture, Box<dyn std::error::Error>> {
+    let f = Box::pin(native_group::fixture(false, "other")).await?;
+    f.human.fixture_group_change(
+        "group",
+        "human-device",
+        ramflux_protocol::GroupStateChange::SetRole {
+            root_commitment: f.agent.own_account_anchor()?,
+            device_id: "agent-device".into(),
+            role: ramflux_protocol::SharedGroupRole::Admin,
+        },
+    )?;
+    let epoch =
+        f.human.account_db()?.shared_group_state("group")?.ok_or("native group")?.view().epoch;
+    native_group::skew_projection(&f.human, epoch)?;
+    f.human.account_db()?.persist_client_record(
+        "conversation",
+        "group-thread",
+        &json!({"kind":"group","group_id":"group"}),
+    )?;
+    Ok(f)
+}
+async fn exercise_skewed_group(f: &native_group::GroupFixture, path: &str) -> TestResult {
+    match path {
+        "start" | "cancel" => {
+            let c = sign(
+                &f.agent,
+                "group-thread",
+                "start",
+                peer_start("group-task", "group-thread", "agent", "human"),
+            )?;
+            assert!(project(&f.human, &c)?.accepted, "start failed after snapshot skew");
+            if path == "cancel" {
                 let c = sign(
                     &f.agent,
                     "group-thread",
-                    "start",
-                    peer_start("group-task", "group-thread", "agent", "human"),
+                    "cancel",
+                    TaskEventBody::Cancel(TaskCancel {
+                        task_id: "group-task".into(),
+                        base_revision: 1,
+                    }),
                 )?;
-                assert!(project(&f.human, &c)?.accepted, "start failed after snapshot skew");
-                if path == "cancel" {
-                    let c = sign(
-                        &f.agent,
-                        "group-thread",
-                        "cancel",
-                        TaskEventBody::Cancel(TaskCancel {
-                            task_id: "group-task".into(),
-                            base_revision: 1,
-                        }),
-                    )?;
-                    assert!(project(&f.human, &c)?.accepted);
-                }
+                assert!(project(&f.human, &c)?.accepted);
             }
-            "add" => {
-                let newcomer =
-                    Box::pin(crate::client::native_test_support::Fixture::with_principal(
-                        "task-newcomer",
-                        "new-member",
-                        "newcomer",
-                    ))
-                    .await?
-                    .into_bus();
-                f.human.persist_fetched_identity_directory(
-                    &newcomer
-                        .client
-                        .native_bus_fixture
-                        .as_ref()
-                        .ok_or("newcomer material")?
-                        .manifest,
-                )?;
-                let state = f.human.fixture_group_change(
-                    "group",
-                    "human-device",
-                    ramflux_protocol::GroupStateChange::Add {
-                        member: newcomer.client.fixture_group_actor("new-member")?.identity,
-                        role: ramflux_protocol::SharedGroupRole::Member,
-                    },
-                )?;
-                assert!(
-                    state
-                        .view()
-                        .members
-                        .iter()
-                        .any(|member| member.identity.device_id == "new-member")
-                );
-            }
-            "remove" | "kick" => {
-                let state = f.human.fixture_group_change(
-                    "group",
-                    "human-device",
-                    ramflux_protocol::GroupStateChange::Remove {
-                        root_commitment: f.agent.own_account_anchor()?,
-                        device_id: "agent-device".into(),
-                    },
-                )?;
-                assert!(
-                    !state
-                        .view()
-                        .members
-                        .iter()
-                        .any(|member| member.identity.device_id == "agent-device")
-                );
-            }
-            "ban" => {
-                let before =
-                    f.human.account_db()?.shared_group_state("group")?.ok_or("native state")?;
-                assert!(
-                    matches!(
-                        f.human.create_signed_group_member_ban(
-                            "group",
-                            "human-device",
-                            "agent-device",
-                            "banned"
-                        ),
-                        Err(SdkError::GeneratedRefused {
-                            code: crate::GeneratedRefusalCode::Content,
-                            ..
-                        })
-                    ),
-                    "the retired ban carrier cannot mutate a native group"
-                );
-                assert_eq!(
-                    f.human
-                        .account_db()?
-                        .shared_group_state("group")?
-                        .ok_or("native state")?
-                        .snapshot(),
-                    before.snapshot()
-                );
-            }
-            _ => return Err("unknown regression path".into()),
         }
+        "add" => {
+            let newcomer = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+                "task-newcomer",
+                "new-member",
+                "newcomer",
+            ))
+            .await?
+            .into_bus();
+            f.human.persist_fetched_identity_directory(
+                &newcomer.client.native_bus_fixture.as_ref().ok_or("newcomer material")?.manifest,
+            )?;
+            let state = f.human.fixture_group_change(
+                "group",
+                "human-device",
+                ramflux_protocol::GroupStateChange::Add {
+                    member: newcomer.client.fixture_group_actor("new-member")?.identity,
+                    role: ramflux_protocol::SharedGroupRole::Member,
+                },
+            )?;
+            assert!(
+                state.view().members.iter().any(|member| member.identity.device_id == "new-member")
+            );
+        }
+        "remove" | "kick" => {
+            let state = f.human.fixture_group_change(
+                "group",
+                "human-device",
+                ramflux_protocol::GroupStateChange::Remove {
+                    root_commitment: f.agent.own_account_anchor()?,
+                    device_id: "agent-device".into(),
+                },
+            )?;
+            assert!(
+                !state
+                    .view()
+                    .members
+                    .iter()
+                    .any(|member| member.identity.device_id == "agent-device")
+            );
+        }
+        "ban" => {
+            let before =
+                f.human.account_db()?.shared_group_state("group")?.ok_or("native state")?;
+            assert!(
+                matches!(
+                    f.human.create_signed_group_member_ban(
+                        "group",
+                        "human-device",
+                        "agent-device",
+                        "banned"
+                    ),
+                    Err(SdkError::GeneratedRefused {
+                        code: crate::GeneratedRefusalCode::Content,
+                        ..
+                    })
+                ),
+                "the retired ban carrier cannot mutate a native group"
+            );
+            assert_eq!(
+                f.human
+                    .account_db()?
+                    .shared_group_state("group")?
+                    .ok_or("native state")?
+                    .snapshot(),
+                before.snapshot()
+            );
+        }
+        _ => return Err("unknown regression path".into()),
     }
     Ok(())
 }
