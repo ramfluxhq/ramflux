@@ -32,10 +32,10 @@ impl Admission {
         client: u64,
         id: &str,
     ) -> SearchResult<Self> {
+        static GLOBAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
         if id.is_empty() || id.len() > 128 {
             return Err(SearchError::InvalidQuery);
         }
-        static GLOBAL: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
         let request = RequestControl {
             control: SearchControl::new(),
             wake: Arc::new(tokio::sync::Notify::new()),

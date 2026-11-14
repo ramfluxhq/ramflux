@@ -148,8 +148,9 @@ impl LocalSearch {
         let epoch = self.epoch(client, &control)?;
         let mut status = client.account_db()?.search_index_status(&self.activation, &control)?;
         status.view_epoch = Some(epoch);
-        status.rebuild =
-            self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        status.rebuild.clone_from(
+            &self.rebuild_progress.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         Ok(status)
     }
 }
