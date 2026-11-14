@@ -1,5 +1,4 @@
 # path | enclosing fn | ordinal | class | admission provenance or exclusion reason
-
 apps/ramflux-agent-host/src/bus.rs | request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/checkpoint.rs | load | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/ramflux-agent-host/src/config.rs | load | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -360,6 +359,14 @@ crates/ramflux-protocol/src/a2ui/wire.rs | from_wire_bytes | 1 | C | admission=c
 crates/ramflux-protocol/src/call_resolution.rs | validate_call_resolution_frame | 1 | A | strict=parse_i_json; admission=closed correlated call decision ingress
 crates/ramflux-protocol/src/call_resolution.rs | validate_call_resolution_frame | 2 | A | strict=parse_i_json; admission=closed correlated call decision ingress
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 7 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 8 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 9 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 10 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 11 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 12 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -370,20 +377,12 @@ crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 16 | E | e
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 17 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 18 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 19 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 20 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 21 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 22 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 23 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 24 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 25 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 7 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 8 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 9 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/client_discovery.rs | client_discovery_signing_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/custody/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/custody/mod.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

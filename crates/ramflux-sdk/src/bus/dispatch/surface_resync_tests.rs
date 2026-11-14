@@ -90,20 +90,20 @@ impl Group {
                 epoch,
                 128,
                 "none",
-                client.owned_device_identity()?.storage_key(),
+                &local.device_id,
                 "member",
                 1,
             )?;
-            client.account_db()?.upsert_group_member_snapshot(
+            client.account_db()?.upsert_root_bound_group_member_snapshot(
                 "group",
-                source_identity.storage_key(),
+                &source_identity,
                 "owner",
                 1,
             )?;
             for identity in &identities {
-                client.account_db()?.upsert_group_member_snapshot(
+                client.account_db()?.upsert_root_bound_group_member_snapshot(
                     "group",
-                    identity.storage_key(),
+                    identity,
                     "member",
                     1,
                 )?;
