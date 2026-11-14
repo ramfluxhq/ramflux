@@ -914,14 +914,19 @@ mod tests {
         let mut current = None;
         for _ in 0..256 {
             step(&mut fixture).await?;
-            current = retained_current(&fixture)?;
+            current = retained_current(&fixture)
+                .map_err(|error| format!("test: inspect retained CURRENT: {error}"))?;
             if current.is_some() {
                 break;
             }
         }
         let hash = current.ok_or("test: no unverified retained CURRENT after base DV")?;
-        Box::pin(cold_resume(&mut fixture)).await?;
-        Box::pin(finish_resumed_data(&mut fixture)).await?;
+        Box::pin(cold_resume(&mut fixture))
+            .await
+            .map_err(|error| format!("test: cold CURRENT reopen: {error}"))?;
+        Box::pin(finish_resumed_data(&mut fixture))
+            .await
+            .map_err(|error| format!("test: cold CURRENT stream: {error}"))?;
         assert_eq!(
             fixture.rig.secondary.first_forward_position_for_test(),
             Some(crate::custody::pairing::full_epoch::FirstForwardPosition::Manifest {
