@@ -3,54 +3,129 @@
 
 //! Creator-device convergence and durable foreign-request revalidation.
 use super::*;
-use ramflux_crypto::advance_group_state;
+use crate::bus::state::LocalBusAccountState;
+use crate::client::native_test_support::{Fixture as Native, bus as native_bus};
+use crate::prekey::SdkDeviceManifestResponse;
+use ramflux_crypto::advance_native_group_state;
 use ramflux_protocol::{GroupChangeStatus, SharedGroupRole};
+
+/// Runs one native fixture future to completion on a fresh current-thread runtime.
+fn block_on<T>(
+    future: impl std::future::Future<Output = Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, SdkError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
+/// One native account whose only device is `device`, held as a public-bus fixture.
+fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+    block_on(async move {
+        let fixture = Native::with_device(id, device).await?;
+        Ok(fixture.into_bus())
+    })
+}
+
+/// A laptop sibling of `phone`. It carries the account primary, as the phone holds it.
+fn native_sibling(
+    phone: &mut LocalBusAccountState,
+    id: &str,
+    device: &str,
+) -> Result<LocalBusAccountState, SdkError> {
+    block_on(Box::pin(native_bus::sibling(phone, id, device)))
+}
+
+/// Device storage key that the raw group entry points expect as their target.
+fn skey(client: &RamfluxClient) -> Result<String, SdkError> {
+    Ok(client.owned_device_identity()?.storage_key().into())
+}
+
+/// Manifest that the account's own native fixture published.
+fn manifest_of(account: &LocalBusAccountState) -> Result<SdkDeviceManifestResponse, SdkError> {
+    account
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .map(|material| material.manifest.clone())
+        .ok_or(SdkError::CustodySetupInvalid)
+}
+
+/// Primary-signed revocation of `device` on `account`. Returns the manifest that receivers adopt.
+fn primary_revoked_manifest(
+    account: &LocalBusAccountState,
+    device: &str,
+) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let material =
+        account.client.native_bus_fixture.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let mut manifest = material.manifest.clone();
+    let vault = material.vault.clone();
+    let mut native = manifest.custody.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    let now = crate::custody::network_now()?.max(native.publication.record.body.issued_at);
+    let current = account
+        .client
+        .current_custody_authority(&manifest.principal_commitment, now)?
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    let primary = vault.primary_for_public_key(
+        &native.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    native.publication.record = primary.revoke_device(&current, device, now)?;
+    native.devices.retain(|entry| entry.device_ref.device_id != device);
+    manifest.devices.retain(|entry| entry.device_id != device);
+    manifest.custody = Some(native);
+    Ok(manifest)
+}
+
 #[test]
 fn creator_device_conflicts_replay_losing_removal_or_name() -> Result<(), SdkError> {
-    let root = temp_root("creator-forks")?;
-    let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-    let sibling = person(&root.join("sibling"), "owner", "laptop", 11, 32)?;
-    let victim = person(&root.join("victim"), "victim", "phone", 21, 22)?;
-    owner.shared_group_create("group", "thread", Some("base".into()), "target-phone")?;
-    let base = owner.shared_group_change(
+    let mut owner = native_person("owner", "phone")?;
+    let sibling = native_sibling(&mut owner, "owner-laptop", "laptop")?;
+    let victim = native_person("victim", "phone")?;
+    owner.client.fixture_group_create("group", "thread", Some("base".into()), "phone")?;
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: victim.owned_group_actor("target-phone")?.identity,
+            member: victim.client.fixture_group_actor("phone")?.identity,
             role: SharedGroupRole::Member,
         },
     )?;
-    sibling.accept_shared_group_state(&base, "target-laptop")?;
-    owner.shared_group_change(
+    sibling.client.fixture_accept_group_state(&base, "laptop")?;
+    owner.client.fixture_group_change(
         "group",
-        "target-phone",
+        "phone",
         GroupStateChange::Remove {
-            root_commitment: victim.owned_device_identity()?.root_commitment().into(),
+            root_commitment: victim.client.owned_device_identity()?.root_commitment().into(),
             device_id: "phone".into(),
         },
     )?;
-    sibling.shared_group_change(
+    sibling.client.fixture_group_change(
         "group",
-        "target-laptop",
+        "laptop",
         GroupStateChange::SetName { name: "concurrent name".into() },
     )?;
     for _ in 0..3 {
         let a = owner
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        sibling.accept_shared_group_state(&a, "target-laptop")?;
+        sibling.client.fixture_accept_group_state(&a, "laptop")?;
         let b = sibling
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        owner.accept_shared_group_state(&b, "target-phone")?;
+        owner.client.fixture_accept_group_state(&b, "phone")?;
     }
     let a = owner
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
     let b = sibling
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
@@ -58,122 +133,133 @@ fn creator_device_conflicts_replay_losing_removal_or_name() -> Result<(), SdkErr
     assert_eq!(a.view().name.as_deref(), Some("concurrent name"));
     assert!(
         a.view()
-            .effective_role(victim.owned_device_identity()?.root_commitment(), "phone")
+            .effective_role(victim.client.owned_device_identity()?.root_commitment(), "phone")
             .is_none()
     );
-    drop((owner, sibling, victim));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn offline_admin_removal_waits_for_owner_and_duplicate_has_one_result() -> Result<(), SdkError> {
-    let root = temp_root("admin-offline")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
-    let victim = person(&root.join("victim"), "victim", "victim", 31, 32)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    owner.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let admin = native_person("admin", "admin")?;
+    let victim = native_person("victim", "victim")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-admin")?.identity,
+            member: admin.client.fixture_group_actor("admin")?.identity,
             role: SharedGroupRole::Admin,
         },
     )?;
-    let base = owner.shared_group_change(
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: victim.owned_group_actor("target-victim")?.identity,
+            member: victim.client.fixture_group_actor("victim")?.identity,
             role: SharedGroupRole::Member,
         },
     )?;
-    admin.accept_shared_group_state(&base, "target-admin")?;
-    let request = admin.stage_group_change_request(
+    admin.client.fixture_accept_group_state(&base, "admin")?;
+    let request = admin.client.stage_group_change_request(
         "group",
-        "target-admin",
+        &skey(&admin.client)?,
         GroupStateChange::Remove {
-            root_commitment: victim.owned_device_identity()?.root_commitment().into(),
+            root_commitment: victim.client.owned_device_identity()?.root_commitment().into(),
             device_id: "victim".into(),
         },
         Some("offline-remove"),
     )?;
     assert_eq!(
-        admin.group_change_statuses(Some("group"))?["requests"][0]["status"],
+        admin.client.group_change_statuses(Some("group"))?["requests"][0]["status"],
         "waiting_for_owner"
     );
     assert_eq!(
-        admin.group_state("group")?.group_epoch,
+        admin.client.group_state("group")?.group_epoch,
         base.view().epoch,
         "request has no state authority"
     );
-    owner.shared_group_change(
+    owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::SetName { name: "new base".into() },
     )?;
-    owner.persist_identity_directory(
-        &crate::client::identity_authority::test_support::public_manifest(&admin)?,
+    owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+    owner.client.insert_group_request(&request, true)?;
+    let primary = owner.client.fixture_primary()?;
+    let result = owner.client.process_group_request_with_primary(
+        &request,
+        &skey(&owner.client)?,
+        primary.as_ref(),
     )?;
-    owner.insert_group_request(&request, true)?;
-    let result = owner.process_group_request(&request, "target-owner")?;
     assert_eq!(result.status, GroupChangeStatus::Applied);
-    assert_eq!(owner.process_group_request(&request, "target-owner")?, result);
-    assert!(!owner.group_state("group")?.members.contains("victim"));
-    admin.apply_group_request_result(&result)?;
-    assert_eq!(admin.group_change_statuses(Some("group"))?["requests"][0]["status"], "applied");
-    drop((owner, admin, victim));
-    std::fs::remove_dir_all(root)?;
+    assert_eq!(
+        owner.client.process_group_request_with_primary(
+            &request,
+            &skey(&owner.client)?,
+            primary.as_ref(),
+        )?,
+        result
+    );
+    assert!(!owner.client.group_state("group")?.members.contains("victim"));
+    admin.client.apply_group_request_result(&result)?;
+    assert_eq!(
+        admin.client.group_change_statuses(Some("group"))?["requests"][0]["status"],
+        "applied"
+    );
     Ok(())
 }
 #[test]
 fn demoted_admin_pending_removal_gets_signed_refusal() -> Result<(), SdkError> {
-    let root = temp_root("demoted-request")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
-    let victim = person(&root.join("victim"), "victim", "victim", 31, 32)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    let member = admin.owned_group_actor("target-admin")?.identity;
-    owner.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let admin = native_person("admin", "admin")?;
+    let victim = native_person("victim", "victim")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    let member = admin.client.fixture_group_actor("admin")?.identity;
+    owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add { member: member.clone(), role: SharedGroupRole::Admin },
     )?;
-    let base = owner.shared_group_change(
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: victim.owned_group_actor("target-victim")?.identity,
+            member: victim.client.fixture_group_actor("victim")?.identity,
             role: SharedGroupRole::Member,
         },
     )?;
-    admin.accept_shared_group_state(&base, "target-admin")?;
-    let request = admin.stage_group_change_request(
+    admin.client.fixture_accept_group_state(&base, "admin")?;
+    let request = admin.client.stage_group_change_request(
         "group",
-        "target-admin",
+        &skey(&admin.client)?,
         GroupStateChange::Remove {
-            root_commitment: victim.owned_device_identity()?.root_commitment().into(),
+            root_commitment: victim.client.owned_device_identity()?.root_commitment().into(),
             device_id: "victim".into(),
         },
         Some("stale-remove"),
     )?;
-    let current = owner.shared_group_change(
+    let current = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::SetRole {
             root_commitment: member.root_commitment,
             device_id: "admin".into(),
             role: SharedGroupRole::Member,
         },
     )?;
-    owner.persist_identity_directory(
-        &crate::client::identity_authority::test_support::public_manifest(&admin)?,
+    owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+    owner.client.insert_group_request(&request, true)?;
+    let primary = owner.client.fixture_primary()?;
+    let result = owner.client.process_group_request_with_primary(
+        &request,
+        &skey(&owner.client)?,
+        primary.as_ref(),
     )?;
-    owner.insert_group_request(&request, true)?;
-    let result = owner.process_group_request(&request, "target-owner")?;
     assert_eq!(result.status, GroupChangeStatus::PermissionDenied);
     assert_eq!(
         owner
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?
@@ -181,96 +267,108 @@ fn demoted_admin_pending_removal_gets_signed_refusal() -> Result<(), SdkError> {
             .state_hash,
         current.snapshot().state_hash
     );
-    admin.apply_group_request_result(&result)?;
-    assert_eq!(admin.group_change_statuses(None)?["requests"][0]["status"], "permission_denied");
+    admin.client.apply_group_request_result(&result)?;
+    assert_eq!(
+        admin.client.group_change_statuses(None)?["requests"][0]["status"],
+        "permission_denied"
+    );
     assert!(
         admin
-            .shared_group_change(
+            .client
+            .fixture_group_change(
                 "group",
-                "target-admin",
+                "admin",
                 GroupStateChange::SetName { name: "forged".into() }
             )
             .is_err()
     );
-    drop((owner, admin, victim));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 #[test]
 fn a_lagging_member_commits_latest_full_state_without_history_resolution() -> Result<(), SdkError> {
-    let root = temp_root("long-lag")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let peer = person(&root.join("peer"), "peer", "peer", 21, 22)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    let initial = owner.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let peer = native_person("peer", "peer")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    let initial = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: peer.owned_group_actor("target-peer")?.identity,
+            member: peer.client.fixture_group_actor("peer")?.identity,
             role: SharedGroupRole::Member,
         },
     )?;
-    peer.accept_shared_group_state(&initial, "target-peer")?;
+    peer.client.fixture_accept_group_state(&initial, "peer")?;
     let mut state = initial;
     for epoch in 0..70 {
-        state = owner.shared_group_change(
+        state = owner.client.fixture_group_change(
             "group",
-            "target-owner",
+            "owner",
             GroupStateChange::SetName { name: format!("Name {epoch}") },
         )?;
     }
-    assert!(peer.accept_shared_group_state(&state, "target-peer")?);
+    assert!(peer.client.fixture_accept_group_state(&state, "peer")?);
     assert_eq!(
-        peer.account_db()?
+        peer.client
+            .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?
             .view(),
         state.view()
     );
-    drop((owner, peer));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn pending_requests_are_bounded_per_root_and_capacity_has_a_signed_result() -> Result<(), SdkError>
 {
-    let root = temp_root("request-cap")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    let base = owner.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let admin = native_person("admin", "admin")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-admin")?.identity,
+            member: admin.client.fixture_group_actor("admin")?.identity,
             role: SharedGroupRole::Admin,
         },
     )?;
-    admin.accept_shared_group_state(&base, "target-admin")?;
+    admin.client.fixture_accept_group_state(&base, "admin")?;
     let change = GroupStateChange::SetName { name: "Pending".into() };
+    let admin_target = skey(&admin.client)?;
     for index in 0..8 {
         let id = format!("request-{index}");
-        let request =
-            admin.stage_group_change_request("group", "target-admin", change.clone(), Some(&id))?;
+        let request = admin.client.stage_group_change_request(
+            "group",
+            &admin_target,
+            change.clone(),
+            Some(&id),
+        )?;
         assert_eq!(
-            admin.stage_group_change_request("group", "target-admin", change.clone(), Some(&id))?,
+            admin.client.stage_group_change_request(
+                "group",
+                &admin_target,
+                change.clone(),
+                Some(&id)
+            )?,
             request
         );
-        owner.persist_identity_directory(
-            &crate::client::identity_authority::test_support::public_manifest(&admin)?,
-        )?;
-        owner.insert_group_request(&request, true)?;
+        owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+        owner.client.insert_group_request(&request, true)?;
     }
     assert!(matches!(
-        admin.stage_group_change_request("group", "target-admin", change.clone(), Some("ninth")),
+        admin.client.stage_group_change_request(
+            "group",
+            &admin_target,
+            change.clone(),
+            Some("ninth")
+        ),
         Err(SdkError::Protocol(ramflux_protocol::ProtocolError::GroupStateLimit(
             ramflux_protocol::GroupStateLimit::Requests
         )))
     ));
     let ninth = ramflux_crypto::sign_group_change_request(
-        admin.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &admin.owned_group_actor("target-admin")?,
+        admin.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &admin.client.owned_group_actor(&admin_target)?,
         &base,
         ramflux_crypto::GroupChangeRequestInput {
             request_id: "ninth".into(),
@@ -278,86 +376,80 @@ fn pending_requests_are_bounded_per_root_and_capacity_has_a_signed_result() -> R
             now: now_unix_timestamp(),
         },
     )?;
-    owner.insert_group_request(&ninth, true)?;
-    let refusal = owner.process_group_request(&ninth, "target-owner")?;
+    owner.client.insert_group_request(&ninth, true)?;
+    let primary = owner.client.fixture_primary()?;
+    let refusal = owner.client.process_group_request_with_primary(
+        &ninth,
+        &skey(&owner.client)?,
+        primary.as_ref(),
+    )?;
     assert_eq!(refusal.status, GroupChangeStatus::Capacity);
     ramflux_crypto::verify_group_change_result(&refusal, &ninth, &base, now_unix_timestamp())?;
-    assert_eq!(owner.group_state("group")?.group_epoch, base.view().epoch);
-    drop((owner, admin));
-    std::fs::remove_dir_all(root)?;
+    assert_eq!(owner.client.group_state("group")?.group_epoch, base.view().epoch);
     Ok(())
 }
 
 #[test]
 fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_request()
 -> Result<(), SdkError> {
-    let root = temp_root("request-revoked-repair")?;
-    let owner = person(&root.join("owner"), "owner", "owner", 11, 12)?;
-    let sibling = person(&root.join("sibling"), "owner", "laptop", 11, 32)?;
-    let admin = person(&root.join("admin"), "admin", "admin", 21, 22)?;
-    owner.shared_group_create("group", "thread", None, "target-owner")?;
-    let base = owner.shared_group_change(
+    let mut owner = native_person("owner", "phone")?;
+    let sibling = native_sibling(&mut owner, "owner-laptop", "laptop")?;
+    let admin = native_person("admin", "admin")?;
+    owner.client.fixture_group_create("group", "thread", None, "phone")?;
+    let base = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "phone",
         GroupStateChange::Add {
-            member: admin.owned_group_actor("target-admin")?.identity,
+            member: admin.client.fixture_group_actor("admin")?.identity,
             role: SharedGroupRole::Admin,
         },
     )?;
-    admin.accept_shared_group_state(&base, "target-admin")?;
-    sibling.accept_shared_group_state(&base, "target-laptop")?;
-    let first = admin.stage_group_change_request(
+    admin.client.fixture_accept_group_state(&base, "admin")?;
+    sibling.client.fixture_accept_group_state(&base, "laptop")?;
+    let admin_target = skey(&admin.client)?;
+    let first = admin.client.stage_group_change_request(
         "group",
-        "target-admin",
+        &admin_target,
         GroupStateChange::SetName { name: "Foreign first".into() },
         Some("repair-first"),
     )?;
-    let second = admin.stage_group_change_request(
+    let second = admin.client.stage_group_change_request(
         "group",
-        "target-admin",
+        &admin_target,
         GroupStateChange::SetName { name: "Foreign second".into() },
         Some("repair-second"),
     )?;
-    let mut manifest = crate::client::identity_authority::test_support::public_manifest(&admin)?;
-    for (client, target, request) in
-        [(&owner, "target-owner", &first), (&sibling, "target-laptop", &second)]
-    {
-        client.persist_identity_directory(&manifest)?;
+    let manifest = manifest_of(&admin)?;
+    for (client, request) in [(&owner.client, &first), (&sibling.client, &second)] {
+        client.persist_fetched_identity_directory(&manifest)?;
         client.insert_group_request(request, true)?;
+        let primary = client.fixture_primary()?;
         assert_eq!(
-            client.process_group_request(request, target)?.status,
+            client
+                .process_group_request_with_primary(request, &skey(client)?, primary.as_ref())?
+                .status,
             GroupChangeStatus::Applied
         );
     }
     let left = owner
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
     let right = sibling
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
     let (loser, winning, request, target) =
         if right.relation_to(&left)? == ramflux_crypto::GroupStateRelation::IncomingPreferred {
-            (&owner, right, &first, "target-owner")
+            (&owner.client, right, &first, "phone")
         } else {
-            (&sibling, left, &second, "target-laptop")
+            (&sibling.client, left, &second, "laptop")
         };
-    let record = manifest.signed_device_set.as_ref().ok_or(StorageError::GroupPermissionDenied)?;
-    let mut devices = record.devices.clone();
-    devices[0].status = ramflux_protocol::DeviceSetStatus::Revoked;
-    devices[0].revoked_at = Some(now_unix_timestamp());
-    manifest.signed_device_set = Some(ramflux_crypto::sign_device_set(
-        admin.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: record.principal_kind,
-            device_set_epoch: 2,
-            devices,
-        },
-    )?);
-    manifest.devices.clear();
-    loser.persist_identity_directory(&manifest)?;
-    loser.accept_shared_group_state(&winning, target)?;
+    let revoked = primary_revoked_manifest(&admin, "admin")?;
+    loser.persist_fetched_identity_directory(&revoked)?;
+    loser.fixture_accept_group_state(&winning, target)?;
     assert_eq!(
         loser
             .account_db()?
@@ -372,33 +464,30 @@ fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_reques
         .and_then(|record| record.result)
         .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(refused.status, GroupChangeStatus::PermissionDenied);
-    drop((owner, sibling, admin));
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 
 #[test]
 fn r7_owner_forks_repair_durable_removals_without_pending_intent() -> Result<(), SdkError> {
     for expired in [false, true] {
-        let root = temp_root("durable-repair")?;
-        let phone = person(&root.join("phone"), "owner", "phone", 11, 12)?;
-        let laptop = person(&root.join("laptop"), "owner", "laptop", 11, 32)?;
-        let peer = person(&root.join("peer"), "peer", "peer", 21, 22)?;
-        phone.shared_group_create("group", "thread", None, "target-phone")?;
-        let base = phone.shared_group_change(
+        let mut phone = native_person("owner", "phone")?;
+        let laptop = native_sibling(&mut phone, "owner-laptop", "laptop")?;
+        let peer = native_person("peer", "peer")?;
+        phone.client.fixture_group_create("group", "thread", None, "phone")?;
+        let base = phone.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::Add {
-                member: peer.owned_group_actor("target-peer")?.identity,
+                member: peer.client.fixture_group_actor("peer")?.identity,
                 role: SharedGroupRole::Member,
             },
         )?;
-        laptop.accept_shared_group_state(&base, "target-laptop")?;
-        phone.shared_group_change(
+        laptop.client.fixture_accept_group_state(&base, "laptop")?;
+        phone.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::Remove {
-                root_commitment: peer.owned_device_identity()?.root_commitment().into(),
+                root_commitment: peer.client.owned_device_identity()?.root_commitment().into(),
                 device_id: "peer".into(),
             },
         )?;
@@ -406,35 +495,39 @@ fn r7_owner_forks_repair_durable_removals_without_pending_intent() -> Result<(),
             format!("group-state/creator-pending/{}", ramflux_protocol::encode_base64url("group"));
         if expired {
             let mut entries: Vec<serde_json::Value> = phone
+                .client
                 .account_db()?
                 .load_actor_state(&pending)?
                 .ok_or(StorageError::GroupPermissionDenied)?;
             for entry in &mut entries {
                 entry["expires_at"] = json!(0);
             }
-            phone.account_db()?.persist_actor_state(&pending, &entries)?;
+            phone.client.account_db()?.persist_actor_state(&pending, &entries)?;
         } else {
-            phone.account_db()?.remove_actor_state(&pending)?;
+            phone.client.account_db()?.remove_actor_state(&pending)?;
         }
         for name in ["laptop first", "laptop latest"] {
-            laptop.shared_group_change(
+            laptop.client.fixture_group_change(
                 "group",
-                "target-laptop",
+                "laptop",
                 GroupStateChange::SetName { name: name.into() },
             )?;
         }
         let incoming = laptop
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        assert!(phone.accept_shared_group_state(&incoming, "target-phone")?);
+        assert!(phone.client.fixture_accept_group_state(&incoming, "phone")?);
         let repaired = phone
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        assert!(laptop.accept_shared_group_state(&repaired, "target-laptop")?);
+        assert!(laptop.client.fixture_accept_group_state(&repaired, "laptop")?);
         assert_eq!(
             laptop
+                .client
                 .account_db()?
                 .shared_group_state("group")?
                 .ok_or(StorageError::GroupPermissionDenied)?
@@ -446,53 +539,54 @@ fn r7_owner_forks_repair_durable_removals_without_pending_intent() -> Result<(),
         assert!(
             repaired
                 .view()
-                .effective_role(peer.owned_device_identity()?.root_commitment(), "peer")
+                .effective_role(peer.client.owned_device_identity()?.root_commitment(), "peer")
                 .is_none()
         );
-        drop((phone, laptop, peer));
-        std::fs::remove_dir_all(root)?;
     }
     Ok(())
 }
 
 #[test]
 fn r7_pruned_wire_exclusions_still_repair_from_indexed_receiver_floors() -> Result<(), SdkError> {
-    let path = temp_root("pruned-wire-repair")?;
-    let phone = person(&path.join("phone"), "owner", "phone", 11, 12)?;
-    let laptop = person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
-    let peer = person(&path.join("peer"), "peer", "peer", 21, 22)?;
-    let initial = phone.shared_group_create("group", "thread", None, "target-phone")?;
-    let joined = phone.shared_group_change(
+    let mut phone = native_person("owner", "phone")?;
+    let laptop = native_sibling(&mut phone, "owner-laptop", "laptop")?;
+    let peer = native_person("peer", "peer")?;
+    let initial = phone.client.fixture_group_create("group", "thread", None, "phone")?;
+    let joined = phone.client.fixture_group_change(
         "group",
-        "target-phone",
+        "phone",
         GroupStateChange::Add {
-            member: peer.owned_group_actor("target-peer")?.identity,
+            member: peer.client.fixture_group_actor("peer")?.identity,
             role: SharedGroupRole::Member,
         },
     )?;
-    laptop.accept_shared_group_state(&joined, "target-laptop")?;
-    phone.shared_group_change(
+    laptop.client.fixture_accept_group_state(&joined, "laptop")?;
+    phone.client.fixture_group_change(
         "group",
-        "target-phone",
+        "phone",
         GroupStateChange::Remove {
-            root_commitment: peer.owned_device_identity()?.root_commitment().into(),
+            root_commitment: peer.client.owned_device_identity()?.root_commitment().into(),
             device_id: "peer".into(),
         },
     )?;
     // Model a later full snapshot after departed-root exclusions are pruned.
+    let primary = phone.client.fixture_primary()?.ok_or(SdkError::CustodySetupInvalid)?;
+    let branch = phone.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    let actor = phone.client.owned_group_actor(&skey(&phone.client)?)?;
     let mut pruned = initial;
     for name in ["one", "two", "three"] {
-        pruned = advance_group_state(
-            phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            phone.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &phone.owned_group_actor("target-phone")?,
+        pruned = advance_native_group_state(
+            &primary,
+            branch,
+            &actor,
             &pruned,
             GroupStateChange::SetName { name: name.into() },
         )?;
     }
-    phone.accept_shared_group_state(&pruned, "target-phone")?;
+    phone.client.fixture_accept_group_state(&pruned, "phone")?;
     assert_eq!(
         phone
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::AuthorizationRejected)?
@@ -500,30 +594,33 @@ fn r7_pruned_wire_exclusions_still_repair_from_indexed_receiver_floors() -> Resu
             .excluded,
         []
     );
-    phone.account_db()?.remove_actor_state(&format!(
+    phone.client.account_db()?.remove_actor_state(&format!(
         "group-state/creator-pending/{}",
         ramflux_protocol::encode_base64url("group")
     ))?;
     for name in ["laptop one", "laptop two", "laptop three"] {
-        laptop.shared_group_change(
+        laptop.client.fixture_group_change(
             "group",
-            "target-laptop",
+            "laptop",
             GroupStateChange::SetName { name: name.into() },
         )?;
     }
     let incoming = laptop
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::AuthorizationRejected)?;
     assert_eq!(incoming.relation_to(&pruned)?, ramflux_crypto::GroupStateRelation::Extension);
-    phone.accept_shared_group_state(&incoming, "target-phone")?;
+    phone.client.fixture_accept_group_state(&incoming, "phone")?;
     let repaired = phone
+        .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::AuthorizationRejected)?;
-    laptop.accept_shared_group_state(&repaired, "target-laptop")?;
+    laptop.client.fixture_accept_group_state(&repaired, "laptop")?;
     assert_eq!(
         laptop
+            .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::AuthorizationRejected)?
@@ -534,10 +631,8 @@ fn r7_pruned_wire_exclusions_still_repair_from_indexed_receiver_floors() -> Resu
     assert!(
         repaired
             .view()
-            .effective_role(peer.owned_device_identity()?.root_commitment(), "peer")
+            .effective_role(peer.client.owned_device_identity()?.root_commitment(), "peer")
             .is_none()
     );
-    drop((phone, laptop, peer));
-    std::fs::remove_dir_all(path)?;
     Ok(())
 }
