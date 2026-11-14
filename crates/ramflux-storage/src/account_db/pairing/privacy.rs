@@ -118,7 +118,18 @@ fn table_exists(db: &Connection, table: &str) -> rusqlite::Result<bool> {
 }
 
 fn local_pairing_account(db: &Connection) -> Result<Option<String>, StorageError> {
-    for table in TABLES {
+    // Operation-scoped tail/application ledgers are stripped too, but have no
+    // account_id column and cannot establish the local floor's account binding.
+    const ACCOUNT_TABLES: [&str; 7] = [
+        "pairing_floor",
+        "pairing_live",
+        "pairing_head",
+        "pairing_terminal",
+        "pairing_adoption",
+        "pairing_full_tail",
+        "pairing_source_cleanup",
+    ];
+    for table in ACCOUNT_TABLES {
         if !table_exists(db, table)? {
             continue;
         }

@@ -112,6 +112,16 @@ pub(super) async fn unlock_secret(
         if let Some(reason) = crate::custody::failed_setup(&root, &account)? {
             return Err(crate::custody::failed_setup_error(&account, reason));
         }
+        // Authority-only creation has no data key to unlock. Refuse before any
+        // private challenge, preserving the ordinary pending-account response.
+        let index = ramflux_storage::AccountIndex::open(&root)?;
+        match index.load_wrapped_db_key(&account) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(ramflux_storage::StorageError::AccountNotFound(_)) => {
+                return Err(SdkError::CustodySetupInvalid);
+            }
+            Err(error) => return Err(error.into()),
+        }
         let generation = load_reservation(&root, &account)?.map_or(1, |r| r.frontend_generation);
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce).map_err(|_| SdkError::CustodyRandomUnavailable)?;
