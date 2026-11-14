@@ -24,3 +24,37 @@ pub(crate) fn refuse(reason: Reason) -> ReachError {
     ReachError::Refused(reason)
 }
 pub type Result<T> = std::result::Result<T, ReachError>;
+
+/// Preserve uncertainty and closed metadata at every authenticated owner/issuer boundary.
+pub(crate) fn owner_error(error: &ReachError) -> ramflux_protocol::contact_reach::OperationResult {
+    use ramflux_protocol::contact_reach::OperationResult;
+    match error {
+        ReachError::Revision(revision) => OperationResult::Error {
+            reason: Reason::ReachRevisionConflict,
+            retry_after_ms: None,
+            current_revision: Some(*revision),
+        },
+        ReachError::Refused(reason) => OperationResult::Error {
+            reason: *reason,
+            retry_after_ms: if matches!(
+                reason,
+                Reason::ForeignRateLimited | Reason::ForeignSpamLimited
+            ) {
+                Some(1000)
+            } else {
+                None
+            },
+            current_revision: None,
+        },
+        ReachError::Storage(_) => OperationResult::Error {
+            reason: Reason::ForeignStorageUnavailable,
+            retry_after_ms: None,
+            current_revision: None,
+        },
+        _ => OperationResult::Error {
+            reason: Reason::CustodyRefused,
+            retry_after_ms: None,
+            current_revision: None,
+        },
+    }
+}

@@ -3,6 +3,8 @@
 
 //! Receiving-home reach state and bounded admission, shared by local and foreign routes.
 mod cost;
+mod cost_owner;
+pub use cost_owner::ReachCostTransport;
 mod forward;
 mod public_prekeys;
 pub use forward::{ReachCapability, ReachDeliveryClass, ReachForward};
@@ -29,6 +31,7 @@ pub use store::ReachOwner;
 pub(crate) use store::require_empty_reach_activation;
 
 mod error;
+pub(crate) use error::owner_error;
 pub use error::{ReachError, Result};
 pub(super) use error::{refuse, storage};
 pub use ramflux_protocol::contact_reach::enabled;

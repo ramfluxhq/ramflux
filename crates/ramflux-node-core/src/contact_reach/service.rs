@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Authenticated owner dispatch. Session/account facts are supplied by the custody service.
-use super::{ReachError, ReachOwner, Result, refuse, snapshots::Snapshots};
+use super::{ReachOwner, Result, refuse, snapshots::Snapshots};
 use crate::{MigrationNode, RouterRedbStore};
 use ramflux_protocol::{
     contact_reach::{Operation, OperationResult, Reason, Request, Response},
@@ -20,6 +20,7 @@ pub struct ReachSession<'a> {
 pub struct ReachService {
     pub(super) node: MigrationNode,
     snapshots: Snapshots,
+    pub(super) cost_transport: Option<std::sync::Arc<dyn super::ReachCostTransport>>,
     pub(super) source_submitter: Option<std::sync::Arc<dyn super::submit::ReachSourceSubmitter>>,
     pub(super) peer_resolver: Option<std::sync::Arc<dyn super::resolver::ReachPeerResolver>>,
     pub(super) source_documents: Option<std::sync::Arc<dyn super::source::ReachSourceDocuments>>,
@@ -33,6 +34,7 @@ impl ReachService {
             node,
             snapshots: Snapshots::new()?,
             source_documents: None,
+            cost_transport: None,
             peer_resolver: None,
             source_submitter: None,
         })
@@ -47,35 +49,9 @@ impl ReachService {
         request: &Request,
         now: u64,
     ) -> Response {
-        let result = self.owner_inner(store, session, request, now).unwrap_or_else(|e| match e {
-            ReachError::Revision(revision) => OperationResult::Error {
-                reason: Reason::ReachRevisionConflict,
-                retry_after_ms: None,
-                current_revision: Some(revision),
-            },
-            ReachError::Refused(reason) => OperationResult::Error {
-                reason,
-                retry_after_ms: if matches!(
-                    reason,
-                    Reason::ForeignRateLimited | Reason::ForeignSpamLimited
-                ) {
-                    Some(1000)
-                } else {
-                    None
-                },
-                current_revision: None,
-            },
-            ReachError::Storage(_) => OperationResult::Error {
-                reason: Reason::ForeignStorageUnavailable,
-                retry_after_ms: None,
-                current_revision: None,
-            },
-            _ => OperationResult::Error {
-                reason: Reason::CustodyRefused,
-                retry_after_ms: None,
-                current_revision: None,
-            },
-        });
+        let result = self
+            .owner_inner(store, session, request, now)
+            .unwrap_or_else(|error| super::owner_error(&error));
         Response {
             request_id: request.request_id.clone(),
             session_id: request.session_id.clone(),
@@ -136,22 +112,7 @@ impl ReachService {
                     now,
                 },
             ),
-            Operation::Cost { request, target_node_id }
-                if target_node_id == self.node.node_id() =>
-            {
-                if request.source_root != actor.account_anchor {
-                    return Err(refuse(Reason::ForeignReadRefused));
-                }
-                Ok(OperationResult::Challenge {
-                    challenge: store.reach_issue_cost(
-                        &self.node,
-                        &super::CostIssuerPeer::local(self.node.node_id()),
-                        request,
-                        now,
-                    )?,
-                })
-            }
-            Operation::Cost { .. } => Err(refuse(Reason::ForeignCapabilityMissing)),
+            Operation::Cost { .. } => self.cost_owner(store, owner, request, now),
         }
     }
 }

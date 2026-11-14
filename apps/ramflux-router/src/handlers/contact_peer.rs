@@ -4,11 +4,13 @@
 //! Own-account/public-snapshot proxy hops are trusted only within this node's service identity.
 use super::MeshResponse;
 use ramflux_node_core::MeshPeerIdentity;
-use ramflux_protocol::contact_reach::{FOREIGN_PATH, RECIPIENT_PATH, SNAPSHOT_PATH};
+use ramflux_protocol::contact_reach::{
+    FOREIGN_PATH, ISSUER_COST_PATH, RECIPIENT_PATH, SNAPSHOT_PATH,
+};
 fn allowed(method: &str, path: &str, own_node: &str, peer: &MeshPeerIdentity) -> Option<bool> {
     let role = match path {
         RECIPIENT_PATH => peer.service_id == "ramflux-gateway",
-        SNAPSHOT_PATH => peer.service_id == "ramflux-federation",
+        SNAPSHOT_PATH | ISSUER_COST_PATH => peer.service_id == "ramflux-federation",
         FOREIGN_PATH => matches!(peer.service_id.as_str(), "ramflux-gateway" | "ramflux-router"),
         _ => return None,
     };
@@ -34,6 +36,43 @@ pub(super) fn route(
     router: &crate::router_runtime::RouterHandle,
     received: std::time::Instant,
 ) -> anyhow::Result<Option<MeshResponse>> {
+    if method == "POST" && path == ISSUER_COST_PATH {
+        use ramflux_protocol::contact_reach::{self as wire, OperationResult, Reason};
+        let mut request: wire::CostRequest =
+            match wire::decode(body, wire::MAX_COST_REQUEST_BYTES) {
+                Ok(request) => request,
+                Err(_) => return Ok(Some(MeshResponse::json(
+                    "400 Bad Request",
+                    br#"{"frame_type":"contact_foreign_error","reason":"foreign_invalid_frame"}"#
+                        .to_vec(),
+                ))),
+            };
+        if request.validate().is_err() {
+            return Ok(Some(MeshResponse::json(
+                "400 Bad Request",
+                br#"{"frame_type":"contact_foreign_error","reason":"foreign_invalid_frame"}"#
+                    .to_vec(),
+            )));
+        }
+        let elapsed = u64::try_from(received.elapsed().as_millis()).unwrap_or(u64::MAX);
+        request.remaining_ms = request.remaining_ms.saturating_sub(elapsed);
+        let response = if request.remaining_ms == 0 {
+            wire::CostResponse {
+                request_id: request.request_id,
+                result: OperationResult::Error {
+                    reason: Reason::ForeignUnavailable,
+                    retry_after_ms: None,
+                    current_revision: None,
+                },
+            }
+        } else {
+            router.contact_cost(&request)?
+        };
+        return Ok(Some(MeshResponse::json(
+            "200 OK",
+            ramflux_protocol::canonical_json_bytes(&response)?,
+        )));
+    }
     if method == "POST" && path == ramflux_protocol::contact_reach::SNAPSHOT_PATH {
         let mut request: ramflux_protocol::contact_reach::PeerQueryRequest =
             match ramflux_protocol::contact_reach::decode(body, 8192) {
@@ -86,6 +125,7 @@ mod tests {
         for (path, role) in [
             (RECIPIENT_PATH, "ramflux-gateway"),
             (SNAPSHOT_PATH, "ramflux-federation"),
+            (ISSUER_COST_PATH, "ramflux-federation"),
             (FOREIGN_PATH, "ramflux-router"),
         ] {
             let own =

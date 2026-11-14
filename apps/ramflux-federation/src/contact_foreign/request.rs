@@ -14,6 +14,8 @@ struct Kind<'a> {
 pub(super) enum Request {
     Query(Box<PeerQueryRequest>),
     Submit(Box<SourceSubmitRequest>),
+    Cost(Box<wire::SourceCostRequest>),
+    PeerCost(Box<wire::CostRequest>),
 }
 
 pub(super) fn decode(
@@ -29,11 +31,20 @@ pub(super) fn decode(
     if bytes.len() > wire::MAX_FRAME_BYTES {
         return Err(failure(413, "foreign_payload_too_large"));
     }
+    let peer = peer_uri.and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok());
+    if path == wire::PEER_COST_PATH {
+        let request: wire::CostRequest = wire::decode(bytes, wire::MAX_COST_REQUEST_BYTES)
+            .map_err(|_| failure(400, "foreign_invalid_frame"))?;
+        request.validate().map_err(|_| failure(400, "foreign_invalid_frame"))?;
+        if peer.as_ref().is_none_or(|peer| peer.service_id != "ramflux-federation") {
+            return Err(failure(403, "foreign_policy_denied"));
+        }
+        return Ok(Request::PeerCost(Box::new(request)));
+    }
     // This borrowed selector skips other values without materializing their strings/arrays.
     // The selected owning codec below then checks original I-JSON, depth and every field.
     let selector: Kind<'_> =
         serde_json::from_slice(bytes).map_err(|_| failure(400, "foreign_invalid_frame"))?;
-    let peer = peer_uri.and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok());
     let own = path == wire::FOREIGN_PATH;
     match selector.kind.as_ref() {
         "query" => {
@@ -55,6 +66,22 @@ pub(super) fn decode(
                 return Err(failure(403, "foreign_policy_denied"));
             }
             Ok(Request::Query(Box::new(request)))
+        }
+        "cost" => {
+            if !own {
+                return Err(failure(400, "foreign_invalid_frame"));
+            }
+            let request: wire::SourceCostRequest =
+                wire::decode(bytes, wire::MAX_COST_REQUEST_BYTES)
+                    .map_err(|_| failure(400, "foreign_invalid_frame"))?;
+            request.validate().map_err(|_| failure(400, "foreign_invalid_frame"))?;
+            if !peer.as_ref().is_some_and(|peer| {
+                peer.node_id == own_node
+                    && matches!(peer.service_id.as_str(), "ramflux-router" | "ramflux-gateway")
+            }) {
+                return Err(failure(403, "foreign_policy_denied"));
+            }
+            Ok(Request::Cost(Box::new(request)))
         }
         "submit" => {
             if !own {

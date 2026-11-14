@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bound queued plus running QUIC contact work before copying request or service handles.
-use super::{Context, Response};
+use super::{Context, PeerContext, Response};
 use crate::RouterMeshClient;
 use ramflux_node_core::{FederationRedbStore, NodeCoreError};
 use ramflux_transport::GatewayQuicRequest;
@@ -16,6 +16,7 @@ pub(crate) struct Job {
     router: Arc<RouterMeshClient>,
     store: Arc<FederationRedbStore>,
     peer_uri: Option<String>,
+    peer_ip: Option<std::net::IpAddr>,
     received: Instant,
 }
 impl Job {
@@ -24,7 +25,7 @@ impl Job {
         own_node: &str,
         router: &Arc<RouterMeshClient>,
         store: &Arc<FederationRedbStore>,
-        peer_uri: Option<&str>,
+        peer: PeerContext<'_>,
         received: Instant,
     ) -> Result<Self, Response> {
         static WORKERS: Semaphore = Semaphore::const_new(4);
@@ -42,7 +43,8 @@ impl Job {
             own_node: own_node.into(),
             router: Arc::clone(router),
             store: Arc::clone(store),
-            peer_uri: peer_uri.map(str::to_owned),
+            peer_uri: peer.uri.map(str::to_owned),
+            peer_ip: peer.ip,
             received,
         })
     }
@@ -57,7 +59,7 @@ impl Job {
                 own_node: &self.own_node,
                 router: &self.router,
                 store: &self.store,
-                peer_uri: self.peer_uri.as_deref(),
+                peer: PeerContext { uri: self.peer_uri.as_deref(), ip: self.peer_ip },
                 received: self.received,
             },
         )

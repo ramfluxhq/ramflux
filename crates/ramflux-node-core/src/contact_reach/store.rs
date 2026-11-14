@@ -163,13 +163,18 @@ pub(super) fn home(
     tx: &redb::WriteTransaction,
     root: &str,
 ) -> Result<ramflux_protocol::home_migration::RecordEvidence> {
-    tx.open_table(HEADS)
+    let home: ramflux_protocol::home_migration::RecordEvidence = tx
+        .open_table(HEADS)
         .map_err(storage)?
         .get(root)
         .map_err(storage)?
         .map(|v| row(v.value()))
         .transpose()?
-        .ok_or_else(|| refuse(Reason::HomeEvidenceRequired))
+        .ok_or_else(|| refuse(Reason::HomeEvidenceRequired))?;
+    if home.record.account_anchor() != root {
+        return Err(refuse(Reason::HomeRollback));
+    }
+    Ok(home)
 }
 
 fn key(root: &str, id: &str) -> Result<String> {

@@ -24,6 +24,7 @@ const INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS: u64 = 20;
 
 mod attachment_authority;
 mod contact_clock;
+mod contact_cost;
 pub use attachment_authority::{AuthorityHistory, MAX_AUTHORITY_NODES};
 #[cfg(test)]
 pub(crate) type DurableIngressSnapshot = (u64, [u8; 32], u64, u64, u64, u64);

@@ -602,6 +602,24 @@ impl RouterHandle {
         })
     }
 
+    pub(crate) fn contact_cost(
+        &self,
+        request: &ramflux_protocol::contact_reach::CostRequest,
+    ) -> anyhow::Result<ramflux_protocol::contact_reach::CostResponse> {
+        let Self::Tokio(runtime) = self;
+        if let Some(service) = runtime.custody.get() {
+            return Ok(service.contact_cost(
+                self.store(),
+                request,
+                ramflux_node_core::now_unix_seconds(),
+            )?);
+        }
+        Ok(ramflux_protocol::contact_reach::CostResponse {
+            request_id: request.request_id.clone(),
+            result: ramflux_protocol::contact_reach::unavailable(),
+        })
+    }
+
     pub(crate) fn contact_owner(
         &self,
         request: &ramflux_protocol::contact_reach::RecipientRequest,

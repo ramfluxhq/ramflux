@@ -20,7 +20,8 @@ pub(crate) fn configure(
     Ok(service
         .with_reach_source_documents(documents.clone())?
         .with_reach_peer_resolver(documents.clone())?
-        .with_reach_source_submitter(documents)?)
+        .with_reach_source_submitter(documents.clone())?
+        .with_reach_cost_transport(documents)?)
 }
 pub(crate) struct SourceDocuments {
     node: String,
@@ -132,6 +133,35 @@ impl ramflux_node_core::contact_reach::ReachSourceSubmitter for SourceDocuments 
         })
         .map_err(storage)?;
         let response = wire::decode(&bytes, wire::MAX_SUBMIT_RESPONSE_BYTES)?;
+        request.validate_response(&response)?;
+        Ok(response)
+    }
+}
+
+impl ramflux_node_core::contact_reach::ReachCostTransport for SourceDocuments {
+    fn cost(
+        &self,
+        request: &wire::SourceCostRequest,
+        deadline: Instant,
+    ) -> Result<wire::SourceCostResponse, ReachError> {
+        request.validate()?;
+        let mut next = request.clone();
+        next.remaining_ms = deadline
+            .checked_duration_since(Instant::now())
+            .and_then(|left| u64::try_from(left.as_millis()).ok())
+            .filter(|ms| (1..=10_000).contains(ms))
+            .ok_or(ReachError::Refused(wire::Reason::ForeignUnavailable))?;
+        let body = ramflux_protocol::canonical_json_bytes(&next)?;
+        let bytes = ramflux_transport::bounded_http_post(ramflux_transport::BoundedHttpPost {
+            endpoint: &self.endpoint,
+            path: wire::FOREIGN_PATH,
+            body: &body,
+            tls: Some(&self.tls),
+            deadline,
+            max_bytes: wire::MAX_COST_RESPONSE_BYTES,
+        })
+        .map_err(storage)?;
+        let response = wire::decode(&bytes, wire::MAX_COST_RESPONSE_BYTES)?;
         request.validate_response(&response)?;
         Ok(response)
     }

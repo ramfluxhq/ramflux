@@ -17,17 +17,25 @@ impl FederationRedbStore {
         }
         let mut tx = self.db.begin_write().map_err(|e| error(&e))?;
         tx.set_durability(redb::Durability::Immediate).map_err(|e| error(&e))?;
-        let mut table = tx.open_table(CLOCK).map_err(|e| error(&e))?;
-        let old = table.get("floor").map_err(|e| error(&e))?.map_or(0, |v| v.value());
-        if old > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
-            return Err(NodeCoreError::Unauthorized("unsafe retained contact clock".into()));
-        }
-        let now = old.max(now);
-        table.insert("floor", now).map_err(|e| error(&e))?;
-        drop(table);
+        let now = fenced(&tx, now)?;
         tx.commit().map_err(|e| error(&e))?;
         Ok(now)
     }
+}
+pub(super) fn fenced(tx: &redb::WriteTransaction, now: u64) -> Result<u64, NodeCoreError> {
+    let error = |e: &dyn std::fmt::Display| NodeCoreError::Redb(e.to_string());
+    if now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+        return Err(NodeCoreError::Unauthorized("unsafe contact clock".into()));
+    }
+    let mut table = tx.open_table(CLOCK).map_err(|e| error(&e))?;
+    let old = table.get("floor").map_err(|e| error(&e))?.map_or(0, |v| v.value());
+    if old > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+        return Err(NodeCoreError::Unauthorized("unsafe retained contact clock".into()));
+    }
+    let now = old.max(now);
+    table.insert("floor", now).map_err(|e| error(&e))?;
+    drop(table);
+    Ok(now)
 }
 #[cfg(test)]
 mod tests {

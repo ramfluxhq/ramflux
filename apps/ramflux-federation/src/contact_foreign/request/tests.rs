@@ -113,3 +113,65 @@ fn cr_submit_request_dispatch_keeps_closed_fields_and_separate_query_bound() -> 
     );
     Ok(())
 }
+
+#[test]
+fn cr_cost_internal_hop_dispatch_has_closed_roles_and_paths() -> TestResult {
+    let public = wire::CostRequest {
+        request_id: ID.into(),
+        remaining_ms: 1000,
+        request: wire::ChallengeRequest {
+            purpose: wire::CostPurpose::Stranger,
+            source_root: ID.into(),
+            recipient_root: Some(ID.into()),
+            operation_hash: ID.into(),
+        },
+    };
+    let source = wire::SourceCostRequest {
+        kind: wire::SourceCostKind::Cost,
+        request_id: ID.into(),
+        remaining_ms: 1000,
+        target_node_id: "target.example".into(),
+        request: public.request.clone(),
+    };
+    let public_bytes = ramflux_protocol::canonical_json_bytes(&public)?;
+    let own_bytes = ramflux_protocol::canonical_json_bytes(&source)?;
+    for service in ["ramflux-router", "ramflux-gateway"] {
+        let uri = format!("spiffe://{OWN}/{service}");
+        assert!(
+            matches!(
+                decode("POST", wire::FOREIGN_PATH, &own_bytes, OWN, Some(&uri)),
+                Ok(Request::Cost(_))
+            ),
+            "the exact own-node router/gateway role may dispatch a source cost call"
+        );
+        assert_eq!(
+            status(&public_bytes, wire::PEER_COST_PATH, Some(&uri))?,
+            403,
+            "an owner service role cannot enter the public cost issuer path"
+        );
+    }
+    let peer = "spiffe://peer.example/ramflux-federation";
+    assert!(
+        matches!(
+            decode("POST", wire::PEER_COST_PATH, &public_bytes, OWN, Some(peer)),
+            Ok(Request::PeerCost(_))
+        ),
+        "the public body has a separate authenticated federation-only issuer path"
+    );
+    assert_eq!(
+        status(&own_bytes, wire::PEER_QUERY_PATH, Some(peer))?,
+        400,
+        "cost cannot be smuggled into the foreign query path"
+    );
+    assert_eq!(
+        status(&public_bytes, wire::FOREIGN_PATH, Some(peer))?,
+        400,
+        "the public cost body cannot be reinterpreted as a source Submit or Query"
+    );
+    assert_eq!(
+        status(&own_bytes, wire::PEER_COST_PATH, Some(peer))?,
+        400,
+        "the public path never accepts the own-service wrapper"
+    );
+    Ok(())
+}

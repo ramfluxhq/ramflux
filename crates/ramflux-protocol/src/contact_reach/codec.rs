@@ -31,7 +31,10 @@ pub(crate) fn text(value: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-pub(crate) fn node(value: &str) -> Result<(), ProtocolError> {
+/// Validate a public reach node selector without interpreting it as a URL or IP address.
+/// # Errors
+/// Refuses noncanonical DNS labels and selectors longer than 253 bytes.
+pub fn validate_node_selector(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.len() > 253
         || value.parse::<std::net::IpAddr>().is_ok()
@@ -161,3 +164,5 @@ pub fn original_document<T: Serialize>(value: &T, limit: usize) -> Result<(), Pr
     }
     Ok(())
 }
+
+pub(crate) use validate_node_selector as node;

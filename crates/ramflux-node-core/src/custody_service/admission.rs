@@ -483,16 +483,16 @@ impl CustodyService {
         if matches!(action, CustodySessionAction::HomeMigration { .. }) {
             return Err(CustodyRefusal::BindingRefused);
         }
-        let _home =
-            if matches!(action, CustodySessionAction::Ack { .. } | CustodySessionAction::Close) {
-                None
-            } else {
-                Some(home_operation(scope, &session.device_ref, &request.nonce, now)?)
-            };
+        let _home = requires_outer_home_lease(action)
+            .then(|| home_operation(scope, &session.device_ref, &request.nonce, now))
+            .transpose()?;
         self.leases().request(session_id, &request.nonce)?;
-        // Authenticated submit persistence and retry waits use mailbox ownership;
-        // they must not retain the service-wide admission lock.
-        if matches!(action, CustodySessionAction::Submit { .. }) {
+        // Reach owners recheck current authority under their own writer. Their configured
+        // service calls must retain neither a root lease nor the service-wide admission lock.
+        if matches!(
+            action,
+            CustodySessionAction::Submit { .. } | CustodySessionAction::ContactForeign { .. }
+        ) {
             drop(admission);
         }
         self.perform_action(scope, &session, &authority, &source, attempt.action)
@@ -744,6 +744,15 @@ fn session_publication(
             .map_err(invalid)?
             .ok_or(CustodyRefusal::AuthorityUnavailable)
     }
+}
+
+fn requires_outer_home_lease(action: &CustodySessionAction) -> bool {
+    !matches!(
+        action,
+        CustodySessionAction::Ack { .. }
+            | CustodySessionAction::Close
+            | CustodySessionAction::ContactForeign { .. }
+    )
 }
 
 fn home_operation(

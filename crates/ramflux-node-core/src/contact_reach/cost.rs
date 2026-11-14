@@ -16,6 +16,8 @@ use ramflux_protocol::{
     custody::{self, Envelope as Signed},
 };
 use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
+#[cfg(test)]
+pub(super) mod fault;
 use serde::{Deserialize, Serialize};
 
 const CHALLENGES: TableDefinition<&str, &[u8]> =
@@ -26,6 +28,7 @@ const ISSUE_RATES: TableDefinition<&str, &[u8]> =
 pub struct CostIssuerPeer {
     node: String,
     prefix: String,
+    proxy_budgeted: bool,
 }
 impl CostIssuerPeer {
     /// Bind challenge budgets to an authenticated federation identity and socket address.
@@ -33,7 +36,11 @@ impl CostIssuerPeer {
     /// Refuses non-federation service identities and inconsistent parsed identity facts.
     pub fn from_tls(peer: &crate::MeshPeerIdentity, remote: std::net::IpAddr) -> Result<Self> {
         let parsed = crate::parse_mesh_spiffe_uri(&peer.spiffe_uri)?;
-        if parsed.node_id != peer.node_id || parsed.service_id != "ramflux-federation" {
+        ramflux_protocol::contact_reach::validate_node_selector(&parsed.node_id)?;
+        if parsed.node_id != peer.node_id
+            || parsed.service_id != "ramflux-federation"
+            || parsed.service_id != peer.service_id
+        {
             return Err(refuse(Reason::ForeignReadRefused));
         }
         let prefix = match remote {
@@ -44,10 +51,22 @@ impl CostIssuerPeer {
                 format!("{}/56", std::net::Ipv6Addr::from(u128::from(ip) & (u128::MAX << 72)))
             }
         };
-        Ok(Self { node: peer.node_id.clone(), prefix })
+        Ok(Self { node: peer.node_id.clone(), prefix, proxy_budgeted: false })
+    }
+    // Only the own-federation issuer hop may use this after charging its authenticated peer.
+    pub(crate) fn budgeted_proxy(node: &str) -> Self {
+        Self { node: node.into(), prefix: String::new(), proxy_budgeted: true }
+    }
+    #[must_use]
+    pub(crate) fn node(&self) -> &str {
+        &self.node
+    }
+    #[must_use]
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
     }
     pub(super) fn local(node: &str) -> Self {
-        Self { node: node.into(), prefix: format!("local:{node}") }
+        Self { node: node.into(), prefix: format!("local:{node}"), proxy_budgeted: false }
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -82,6 +101,9 @@ fn charge_issue(tx: &redb::WriteTransaction, peer: &CostIssuerPeer, now: u64) ->
         ("node", peer.node.as_str(), 60),
         ("prefix", peer.prefix.as_str(), 120),
     ] {
+        if peer.proxy_budgeted && scope != "global" {
+            continue;
+        }
         let key = serde_json::to_string(&(scope, window, value)).map_err(storage)?;
         let prior = table
             .get(key.as_str())
@@ -150,6 +172,16 @@ impl RouterRedbStore {
         let nonce = ramflux_crypto::random_32()?;
         let tx = self.begin_write()?;
         let now = super::store::clock(&tx, now)?;
+        let recipient =
+            request.recipient_root.as_deref().ok_or_else(|| refuse(Reason::CostInvalid))?;
+        let home = super::store::home(&tx, recipient).map_err(|error| match error {
+            super::ReachError::Refused(_) => refuse(Reason::CostInvalid),
+            error => error,
+        })?;
+        if home.record.home() != (node.node_id(), node.public_key()) {
+            return Err(refuse(Reason::CostInvalid));
+        }
+        let _recipient_authority = super::store::authority(&tx, recipient, now)?;
         charge_issue(&tx, peer, now)?;
         let expires =
             now.checked_add(COMMAND_LIFETIME).ok_or_else(|| refuse(Reason::ForeignUnavailable))?;
@@ -195,7 +227,11 @@ impl RouterRedbStore {
             )
             .map_err(storage)?;
         drop(table);
+        #[cfg(test)]
+        fault::checkpoint(fault::Point::BeforeCommit)?;
         tx.commit()?;
+        #[cfg(test)]
+        fault::checkpoint(fault::Point::AfterCommit)?;
         Ok(signed)
     }
 }

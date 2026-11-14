@@ -15,6 +15,7 @@ use ramflux_transport::{
 use std::time::{Duration, Instant};
 
 mod budget;
+mod cost;
 pub(crate) mod quic;
 mod request;
 mod submit;
@@ -23,15 +24,20 @@ pub(crate) struct Response {
     _reservation: Option<budget::Permit>,
 }
 #[derive(Clone, Copy)]
+pub(crate) struct PeerContext<'a> {
+    pub uri: Option<&'a str>,
+    pub ip: Option<std::net::IpAddr>,
+}
+#[derive(Clone, Copy)]
 pub(crate) struct Context<'a> {
     pub own_node: &'a str,
     pub router: &'a RouterMeshClient,
     pub store: &'a FederationRedbStore,
-    pub peer_uri: Option<&'a str>,
+    pub peer: PeerContext<'a>,
     pub received: Instant,
 }
 pub(crate) fn recognizes(path: &str) -> bool {
-    matches!(path, wire::FOREIGN_PATH | wire::PEER_QUERY_PATH)
+    matches!(path, wire::FOREIGN_PATH | wire::PEER_QUERY_PATH | wire::PEER_COST_PATH)
 }
 fn failure(status: u16, reason: &str) -> Response {
     Response {
@@ -84,9 +90,11 @@ pub(crate) fn route(
     if !recognizes(path) {
         return Ok(None);
     }
-    let request = match request::decode(method, path, bytes, context.own_node, context.peer_uri) {
+    let request = match request::decode(method, path, bytes, context.own_node, context.peer.uri) {
         Ok(request::Request::Query(request)) => request,
         Ok(request::Request::Submit(request)) => return submit::route(&request).map(Some),
+        Ok(request::Request::Cost(request)) => return cost::source(&request, context).map(Some),
+        Ok(request::Request::PeerCost(request)) => return cost::peer(&request, context).map(Some),
         Err(response) => return Ok(Some(response)),
     };
     let own = path == wire::FOREIGN_PATH;

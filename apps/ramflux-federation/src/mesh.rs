@@ -328,7 +328,9 @@ pub(crate) fn serve_mesh_mtls(
 /// The body cap for a request, decided from its path before any body byte is read. The
 /// attachment renewal route is bounded at 16 KiB; everything else keeps the migration frame cap.
 pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
-    if path == ramflux_protocol::contact_reach::PEER_QUERY_PATH {
+    if path == ramflux_protocol::contact_reach::PEER_COST_PATH {
+        ramflux_protocol::contact_reach::MAX_COST_REQUEST_BYTES
+    } else if path == ramflux_protocol::contact_reach::PEER_QUERY_PATH {
         8192
     } else if path == crate::attachment_renewal::PEER_PATH {
         crate::attachment_renewal::MAX_BODY
@@ -561,7 +563,10 @@ fn serve_contact_request(
             own_node: &context.discovery.node_id,
             router: &context.router,
             store: &context.store,
-            peer_uri: peer_spiffe_uri,
+            peer: crate::contact_foreign::PeerContext {
+                uri: peer_spiffe_uri,
+                ip: stream.sock.peer_addr().ok().map(|address| address.ip()),
+            },
             received,
         },
     )? {
@@ -625,6 +630,7 @@ async fn handle_mesh_quic_connection(
                 request_peer_service_id.as_deref(),
                 request_peer_uri.as_deref(),
                 &context,
+                remote_address.ip(),
             )
             .await
             {
@@ -639,6 +645,7 @@ async fn handle_mesh_quic_request(
     peer_service_id: Option<&str>,
     peer_uri: Option<&str>,
     context: &MeshServerContext,
+    remote_ip: std::net::IpAddr,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let Some(_request) = ramflux_node_core::begin_service_request() else {
         return Ok(());
@@ -652,7 +659,7 @@ async fn handle_mesh_quic_request(
             &context.discovery.node_id,
             &context.router,
             &context.store,
-            peer_uri,
+            crate::contact_foreign::PeerContext { uri: peer_uri, ip: Some(remote_ip) },
             std::time::Instant::now(),
         ) {
             Ok(job) => {
@@ -731,6 +738,7 @@ async fn handle_mesh_compio_quic_connection(
             peer_service_id.as_deref(),
             peer_uri.as_deref(),
             context,
+            remote_address.ip(),
         )
         .await?;
     }
@@ -742,6 +750,7 @@ async fn handle_mesh_compio_quic_request(
     peer_service_id: Option<&str>,
     peer_uri: Option<&str>,
     context: &MeshServerContext,
+    remote_ip: std::net::IpAddr,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     if crate::contact_foreign::recognizes(&accepted.request.path)
         || accepted.request.body.get("frame_type").and_then(serde_json::Value::as_str)
@@ -752,7 +761,7 @@ async fn handle_mesh_compio_quic_request(
             &context.discovery.node_id,
             &context.router,
             &context.store,
-            peer_uri,
+            crate::contact_foreign::PeerContext { uri: peer_uri, ip: Some(remote_ip) },
             std::time::Instant::now(),
         ) {
             Ok(job) => compio::runtime::Runtime::with_current(|runtime| {

@@ -54,6 +54,40 @@ impl CustodyService {
         }
         Ok(self)
     }
+    /// Configure the own-node cost transport; account/session authentication remains in the home.
+    /// # Errors
+    /// Refuses activation without a verified receiving-home signer.
+    pub fn with_reach_cost_transport(
+        mut self,
+        transport: Arc<dyn crate::contact_reach::ReachCostTransport>,
+    ) -> Result<Self, CustodyRefusal> {
+        if wire::enabled() && self.reach.is_none() {
+            return Err(CustodyRefusal::BindingRefused);
+        }
+        if let Some(service) = self.reach.take() {
+            self.reach = Some(service.with_cost_transport(transport));
+        }
+        Ok(self)
+    }
+
+    /// Issue after the listener verifies the own-federation role and its peer budget admission.
+    /// # Errors
+    /// Refuses malformed input; executor failures retain the pinned uncertain/definite error arms.
+    pub fn contact_cost(
+        &self,
+        store: &RouterRedbStore,
+        request: &wire::CostRequest,
+        now: u64,
+    ) -> Result<wire::CostResponse, NodeCoreError> {
+        request.validate().map_err(|error| NodeCoreError::Unauthorized(error.to_string()))?;
+        let result = self.reach.as_ref().map_or_else(wire::unavailable, |service| {
+            service
+                .issue_cost_from_proxy(store, request, now)
+                .unwrap_or_else(|error| crate::contact_reach::owner_error(&error))
+        });
+        Ok(wire::CostResponse { request_id: request.request_id.clone(), result })
+    }
+
     /// Dispatch a public read after the mesh listener checks the exact local node/service identity.
     /// # Errors
     /// Refuses malformed carrier input; valid requests retain typed correlated results.
