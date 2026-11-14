@@ -13,7 +13,10 @@ impl FullReceiverBaseCopy {
         stage: &FullTransferStage<'_>,
     ) -> Result<(), StorageError> {
         stage.require_io()?;
-        super::rebase::require_before_selection(stage)?;
+        super::rebase::require_before_selection(stage).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("test: retained union failed selection discriminator");
+        })?;
         self.attested
             .lock()
             .map_err(|_| wrong())?
@@ -52,19 +55,28 @@ impl FullReceiverBaseCopy {
                 .collect();
             for table in tables {
                 stage.require_io()?;
-                sql_delta::table(&private.db, table)?;
+                sql_delta::table(&private.db, table).inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("test: retained union local table refresh failed: {table}");
+                })?;
             }
             sql_delta::sequences(&private.db)?;
-            let encoding = self.contributions.rebase_target(
-                &self.scratch.path.join("contributions.db"),
-                &self.key,
-                &mut private,
-                stage,
-                super::super::receiver_contributions::TargetRows {
-                    current: &current,
-                    schema: &schema,
-                },
-            )?;
+            let encoding = self
+                .contributions
+                .rebase_target(
+                    &self.scratch.path.join("contributions.db"),
+                    &self.key,
+                    &mut private,
+                    stage,
+                    super::super::receiver_contributions::TargetRows {
+                        current: &current,
+                        schema: &schema,
+                    },
+                )
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("test: retained union qualified B refresh failed");
+                })?;
             observation.require_current(stage.db)?;
             stage.require_io()?;
             private.db.execute_batch("COMMIT")?;
@@ -83,7 +95,10 @@ impl FullReceiverBaseCopy {
         self.observation = observation;
         self.union = Some(encoding);
         *self.attested.lock().map_err(|_| wrong())? = Some(sealed);
-        self.verify_input(stage)
+        self.verify_input(stage).inspect_err(|_| {
+            #[cfg(test)]
+            eprintln!("test: retained union physical verification failed");
+        })
     }
 }
 

@@ -21,12 +21,26 @@ const FORBIDDEN: [&[u8]; 10] = [
 #[derive(Default)]
 pub(in crate::custody::pairing::component_tests) struct NodeEvidence {
     violated: AtomicBool,
+    corrupt_next: AtomicBool,
+    corruption_relayed: AtomicUsize,
     sends: AtomicUsize,
     bytes: AtomicUsize,
     logs: AtomicUsize,
     roots: Mutex<Option<zeroize::Zeroizing<[[u8; 32]; 2]>>>,
 }
 impl NodeEvidence {
+    pub(in crate::custody::pairing::component_tests) fn corrupt_next_packet(&self) {
+        self.corrupt_next.store(true, Ordering::Release);
+    }
+    pub(super) fn take_corruption(&self) -> bool {
+        self.corrupt_next.swap(false, Ordering::AcqRel)
+    }
+    pub(super) fn relayed_corruption(&self) {
+        self.corruption_relayed.fetch_add(1, Ordering::Release);
+    }
+    pub(in crate::custody::pairing::component_tests) fn admitted_corruption(&self) -> usize {
+        self.corruption_relayed.load(Ordering::Acquire)
+    }
     pub(super) fn observe(&self, bytes: &[u8]) {
         if FORBIDDEN.iter().any(|needle| bytes.windows(needle.len()).any(|part| part == *needle)) {
             self.violated.store(true, Ordering::Release);

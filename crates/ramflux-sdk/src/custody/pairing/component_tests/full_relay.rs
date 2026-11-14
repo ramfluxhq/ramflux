@@ -131,18 +131,31 @@ impl FullPairingTransport for FullNativeFixture {
     claim!(prove_full, ProveFull, FullProofReply, Proof, FullProofReply::from_wire_bytes);
     fn send_full<'a>(&'a self, _: &'a str, request: &'a SendFull) -> FullPortFuture<'a, SentFull> {
         Box::pin(async move {
-            let encrypted = Zeroizing::new(
+            let corrupt = self.wire_evidence.take_corruption();
+            let mut request = request.clone();
+            let mut encrypted = Zeroizing::new(
                 ramflux_protocol::decode_base64url(&request.packet.ciphertext)
                     .map_err(|_| SdkError::PairingCode("InvalidInput"))?,
             );
+            if corrupt {
+                let byte = encrypted.first_mut().ok_or_else(wrong)?;
+                *byte ^= 1;
+                request.packet.ciphertext =
+                    ramflux_protocol::encode_base64url(encrypted.as_slice());
+            }
             self.wire_evidence.observe(&encrypted);
             self.wire_evidence.sent(encrypted.len());
-            match self.full_request(request, FullArm::Send)? {
-                FullAdmittedReply::Sent(counter) => Ok(SentFull {
-                    kind: "sent_full".into(),
-                    profile: PROFILE.into(),
-                    counter: U64(counter),
-                }),
+            match self.full_request(&request, FullArm::Send)? {
+                FullAdmittedReply::Sent(counter) => {
+                    if corrupt {
+                        self.wire_evidence.relayed_corruption();
+                    }
+                    Ok(SentFull {
+                        kind: "sent_full".into(),
+                        profile: PROFILE.into(),
+                        counter: U64(counter),
+                    })
+                }
                 _ => Err(wrong()),
             }
         })

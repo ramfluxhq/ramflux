@@ -29,7 +29,12 @@ impl Access {
     ) -> Result<CustodyServerFrame, SdkError> {
         let now = wall().map_err(|error| SdkError::LocalBus(error.to_string()))?;
         let account = custody::load_account(device.root.path(), &device.id, now)?;
-        let (branch, _, reference) = device.vault.local_branch(account.record())?;
+        let record = match &action {
+            CustodyProofAction::Publish { publication }
+            | CustodyProofAction::HomeMigration { publication, .. } => &publication.record,
+            _ => account.record(),
+        };
+        let (branch, _, reference) = device.vault.local_branch(record)?;
         let challenge = self.service.mesh(
             &self.router,
             &self.redb,
@@ -46,8 +51,7 @@ impl Access {
         let CustodyServerFrame::Challenge { challenge } = challenge else {
             return Ok(challenge);
         };
-        let certificate = account
-            .record()
+        let certificate = record
             .body
             .devices
             .iter()
@@ -61,7 +65,7 @@ impl Access {
                 version: 3,
                 device_ref: reference,
                 certificate_hash: object_hash(certificate)?,
-                record_hash: object_hash(account.record())?,
+                record_hash: object_hash(record)?,
                 proof_id: encode_base64url(random_32()?),
                 challenge_nonce: challenge.challenge_nonce,
                 action_hash: challenge.action_hash,

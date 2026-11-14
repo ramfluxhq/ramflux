@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    mod cooperative;
     mod head_change;
     mod races;
     mod third;

@@ -115,7 +115,7 @@ fn seed(db: &ramflux_storage::AccountDb, parents: &[&str]) -> TestResult {
     }
     Ok(())
 }
-async fn merge(fixture: &mut Linked) -> TestResult {
+pub(super) async fn merge(fixture: &mut Linked) -> TestResult {
     let source = resume_request(&fixture.rig.source.client)?;
     let target = resume_request(&fixture.target)?;
     for _ in 0..96 {
