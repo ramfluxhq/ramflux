@@ -32,7 +32,7 @@ pub(super) fn read(db: &AccountDb, request: &LocalBusFrame) -> Result<serde_json
 pub(super) async fn start(
     readers: AccountReaders,
     request: LocalBusFrame,
-    outbound: mpsc::Sender<LocalBusFrame>,
+    outbound: super::outbound::LocalBusOutbound,
 ) -> Result<Option<tokio::task::JoinHandle<()>>, SdkError> {
     let body: Subscribe = serde_json::from_value(request.body.clone())?;
     if body.topics.len() > 64
@@ -71,7 +71,7 @@ async fn tail(
     readers: AccountReaders,
     mut query: LocalBusFrame,
     request: LocalBusFrame,
-    outbound: mpsc::Sender<LocalBusFrame>,
+    outbound: super::outbound::LocalBusOutbound,
     topics: BTreeSet<String>,
     mut cursor: u64,
 ) -> Result<(), SdkError> {
@@ -114,7 +114,11 @@ async fn tail(
     }
 }
 
-pub(super) fn lagged(outbound: &mpsc::Sender<LocalBusFrame>, request: &LocalBusFrame, seq: u64) {
+pub(super) fn lagged(
+    outbound: &super::outbound::LocalBusOutbound,
+    request: &LocalBusFrame,
+    seq: u64,
+) {
     let frame = local_bus_event(
         request,
         request.account_id.as_deref().unwrap_or_default(),

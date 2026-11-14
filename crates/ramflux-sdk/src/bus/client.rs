@@ -342,7 +342,7 @@ fn route_received(
                 "bus.subscribe",
                 serde_json::json!({}),
             );
-            super::subscription::lagged(events, &request, *last_seq);
+            super::subscription::lagged(&events.clone().into(), &request, *last_seq);
             reader_connected.store(false, Ordering::Release);
             fail_pending(
                 reader_pending,

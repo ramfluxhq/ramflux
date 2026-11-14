@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Isolated C pointer boundary. Handles and VMs remain on their creating thread.
 #![allow(unsafe_code)]
+#[cfg(panic = "abort")]
+compile_error!("Card C ABI requires panic=unwind; use --profile ffi-release");
+mod boundary;
 use crate::{AcceptancePolicy, HOST_ABI};
 use crate::{
     CardError, CardSession, CardSpec, Event, SignedPackage,
@@ -142,59 +145,61 @@ pub unsafe extern "C" fn ramflux_card_open(
     user: *mut c_void,
     out: *mut u64,
 ) -> i32 {
-    if out.is_null() {
-        return 1;
-    }
-    // SAFETY: caller provides a writable aligned output slot.
-    unsafe { out.write(0) };
-    if input.is_null() || callback.is_none() {
-        return 1;
-    }
-    if IN_CALLBACK.with(Cell::get) {
-        return BUSY;
-    }
-    // SAFETY: caller provides a valid aligned input structure for the call.
-    let input = unsafe { &*input };
-    let create = || -> Result<_, CardError> {
-        let presentation = crate::Presentation::parse(&bytes(
-            input.presentation,
-            crate::presentation::MAX_PRESENTATION,
-        )?)?;
-        let spec =
-            CardSpec::parse(&bytes(input.spec, MAX_INPUT)?)?.with_presentation(presentation)?;
-        let bytecode = bytes(input.bytecode, MAX_PACKAGE)?;
-        let signature: [u8; 64] =
-            bytes(input.signature, 64)?.try_into().map_err(|_| CardError::Signature)?;
-        let key: [u8; 32] =
-            bytes(input.trusted_key, 32)?.try_into().map_err(|_| CardError::Signature)?;
-        let descriptor = bytes(input.descriptor, MAX_DESCRIPTOR)?;
-        let policy_bytes = bytes(input.policy, MAX_DESCRIPTOR)?;
-        crate::spec::preflight(&policy_bytes, MAX_DESCRIPTOR)?;
-        let policy: AcceptancePolicy = serde_json::from_slice(&policy_bytes)?;
-        CardSession::open(
-            spec,
-            SignedPackage::verify(&bytecode, &descriptor, &signature, &key, &policy)?,
-        )
-    };
-    let capacity = SESSIONS.with(|sessions| sessions.borrow().len() < 32);
-    if !capacity {
-        return 2;
-    }
-    let (session, batch) = match create() {
-        Ok(result) => result,
-        Err(error) => return code(&error),
-    };
-    let id = session.id();
-    SESSIONS.with(|sessions| sessions.borrow_mut().insert(id, session));
-    // SAFETY: out is valid for the whole call by the entry contract.
-    unsafe { out.write(id) };
-    let status = emit(id, &batch, callback, user);
-    if status != OK {
-        SESSIONS.with(|sessions| sessions.borrow_mut().remove(&id));
-        // SAFETY: the output pointer remains writable until this synchronous call returns.
+    boundary::status(|| {
+        if out.is_null() {
+            return 1;
+        }
+        // SAFETY: caller provides a writable aligned output slot.
         unsafe { out.write(0) };
-    }
-    status
+        if input.is_null() || callback.is_none() {
+            return 1;
+        }
+        if IN_CALLBACK.with(Cell::get) {
+            return BUSY;
+        }
+        // SAFETY: caller provides a valid aligned input structure for the call.
+        let input = unsafe { &*input };
+        let create = || -> Result<_, CardError> {
+            let presentation = crate::Presentation::parse(&bytes(
+                input.presentation,
+                crate::presentation::MAX_PRESENTATION,
+            )?)?;
+            let spec =
+                CardSpec::parse(&bytes(input.spec, MAX_INPUT)?)?.with_presentation(presentation)?;
+            let bytecode = bytes(input.bytecode, MAX_PACKAGE)?;
+            let signature: [u8; 64] =
+                bytes(input.signature, 64)?.try_into().map_err(|_| CardError::Signature)?;
+            let key: [u8; 32] =
+                bytes(input.trusted_key, 32)?.try_into().map_err(|_| CardError::Signature)?;
+            let descriptor = bytes(input.descriptor, MAX_DESCRIPTOR)?;
+            let policy_bytes = bytes(input.policy, MAX_DESCRIPTOR)?;
+            crate::spec::preflight(&policy_bytes, MAX_DESCRIPTOR)?;
+            let policy: AcceptancePolicy = serde_json::from_slice(&policy_bytes)?;
+            CardSession::open(
+                spec,
+                SignedPackage::verify(&bytecode, &descriptor, &signature, &key, &policy)?,
+            )
+        };
+        let capacity = SESSIONS.with(|sessions| sessions.borrow().len() < 32);
+        if !capacity {
+            return 2;
+        }
+        let (session, batch) = match create() {
+            Ok(result) => result,
+            Err(error) => return code(&error),
+        };
+        let id = session.id();
+        SESSIONS.with(|sessions| sessions.borrow_mut().insert(id, session));
+        // SAFETY: out is valid for the whole call by the entry contract.
+        unsafe { out.write(id) };
+        let status = emit(id, &batch, callback, user);
+        if status != OK {
+            SESSIONS.with(|sessions| sessions.borrow_mut().remove(&id));
+            // SAFETY: the output pointer remains writable until this synchronous call returns.
+            unsafe { out.write(0) };
+        }
+        status
+    })
 }
 
 /// Replace a complete declarative snapshot on the creating thread.
@@ -207,14 +212,16 @@ pub unsafe extern "C" fn ramflux_card_update(
     callback: RamfluxCardCallback,
     user: *mut c_void,
 ) -> i32 {
-    if IN_CALLBACK.with(Cell::get) {
-        return BUSY;
-    }
-    let spec = match bytes(input, MAX_INPUT).and_then(|b| CardSpec::parse(&b)) {
-        Ok(spec) => spec,
-        Err(error) => return code(&error),
-    };
-    apply(id, callback, user, |session| session.update(spec))
+    boundary::status(|| {
+        if IN_CALLBACK.with(Cell::get) {
+            return BUSY;
+        }
+        let spec = match bytes(input, MAX_INPUT).and_then(|b| CardSpec::parse(&b)) {
+            Ok(spec) => spec,
+            Err(error) => return code(&error),
+        };
+        apply(id, callback, user, |session| session.update(spec))
+    })
 }
 /// Replace host-selected locale and tokens on the creating thread.
 /// # Safety
@@ -226,15 +233,17 @@ pub unsafe extern "C" fn ramflux_card_present(
     callback: RamfluxCardCallback,
     user: *mut c_void,
 ) -> i32 {
-    if IN_CALLBACK.with(Cell::get) {
-        return BUSY;
-    }
-    match bytes(input, crate::presentation::MAX_PRESENTATION)
-        .and_then(|b| crate::Presentation::parse(&b))
-    {
-        Ok(presentation) => apply(id, callback, user, |session| session.present(presentation)),
-        Err(error) => code(&error),
-    }
+    boundary::status(|| {
+        if IN_CALLBACK.with(Cell::get) {
+            return BUSY;
+        }
+        match bytes(input, crate::presentation::MAX_PRESENTATION)
+            .and_then(|b| crate::Presentation::parse(&b))
+        {
+            Ok(presentation) => apply(id, callback, user, |session| session.present(presentation)),
+            Err(error) => code(&error),
+        }
+    })
 }
 /// Deliver a versioned text edit or submit. Submit output is an intent, not a send.
 /// # Safety
@@ -246,20 +255,22 @@ pub unsafe extern "C" fn ramflux_card_event(
     callback: RamfluxCardCallback,
     user: *mut c_void,
 ) -> i32 {
-    if IN_CALLBACK.with(Cell::get) {
-        return BUSY;
-    }
-    let event = bytes(input, 8192).and_then(|b| {
-        preflight(&b, 8192)?;
-        Ok(serde_json::from_slice::<Event>(&b)?)
-    });
-    match event {
-        Ok(event) => apply(id, callback, user, |session| {
-            session.enqueue(event)?;
-            session.next_event()?.ok_or(CardError::Invalid("missing event"))
-        }),
-        Err(error) => code(&error),
-    }
+    boundary::status(|| {
+        if IN_CALLBACK.with(Cell::get) {
+            return BUSY;
+        }
+        let event = bytes(input, 8192).and_then(|b| {
+            preflight(&b, 8192)?;
+            Ok(serde_json::from_slice::<Event>(&b)?)
+        });
+        match event {
+            Ok(event) => apply(id, callback, user, |session| {
+                session.enqueue(event)?;
+                session.next_event()?.ok_or(CardError::Invalid("missing event"))
+            }),
+            Err(error) => code(&error),
+        }
+    })
 }
 /// Suspend and emit a removal batch, releasing VM capacity.
 /// # Safety
@@ -270,7 +281,7 @@ pub unsafe extern "C" fn ramflux_card_suspend(
     callback: RamfluxCardCallback,
     user: *mut c_void,
 ) -> i32 {
-    apply(id, callback, user, CardSession::suspend)
+    boundary::status(|| apply(id, callback, user, CardSession::suspend))
 }
 /// Resume and emit a full tree with a fresh version.
 /// # Safety
@@ -281,23 +292,25 @@ pub unsafe extern "C" fn ramflux_card_resume(
     callback: RamfluxCardCallback,
     user: *mut c_void,
 ) -> i32 {
-    apply(id, callback, user, CardSession::resume)
+    boundary::status(|| apply(id, callback, user, CardSession::resume))
 }
 /// Dispose on the creating thread. Foreign/stale handles return 7.
 #[unsafe(no_mangle)]
 pub extern "C" fn ramflux_card_dispose(id: u64) -> i32 {
-    if IN_CALLBACK.with(Cell::get) {
-        return BUSY;
-    }
-    SESSIONS.with(|sessions| match sessions.try_borrow_mut() {
-        Ok(mut sessions) => {
-            if sessions.remove(&id).is_some() {
-                OK
-            } else {
-                INVALID_HANDLE
-            }
+    boundary::status(|| {
+        if IN_CALLBACK.with(Cell::get) {
+            return BUSY;
         }
-        Err(_) => BUSY,
+        SESSIONS.with(|sessions| match sessions.try_borrow_mut() {
+            Ok(mut sessions) => {
+                if sessions.remove(&id).is_some() {
+                    OK
+                } else {
+                    INVALID_HANDLE
+                }
+            }
+            Err(_) => BUSY,
+        })
     })
 }
 

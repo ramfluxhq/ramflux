@@ -12,7 +12,7 @@ pub struct LocalBusConfig {
     /// Explicit runtime opt-in for unmigrated fixture accounts. Startup refuses this
     /// setting unless the integration-only creation implementation is compiled in.
     pub itest_legacy_accounts: bool,
-    #[cfg(any(test, feature = "itest-memory-vault"))]
+    #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     #[cfg(test)]
     pub(crate) custody_confirm_completed: Option<std::sync::Arc<tokio::sync::Notify>>,
@@ -1180,7 +1180,7 @@ impl LocalBusConfig {
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
             pairing: None,
-            #[cfg(any(test, feature = "itest-memory-vault"))]
+            #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
             custody_vault: None,
             itest_legacy_accounts: false,
             #[cfg(test)]

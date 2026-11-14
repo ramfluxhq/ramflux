@@ -106,8 +106,9 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
+    let generations = stream.subscription_generations();
     let (reader, writer) = stream.into_halves();
-    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
     let credential_input =
         super::credentials::connection(supervisor.config.data_root.clone(), id, outbound.clone());
     let reader_credentials = credential_input.channel();
@@ -174,7 +175,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     outbound.send(local_bus_error(&request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
-                if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
+                if subscription_method(&request.method) {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
                         outbound.send(local_bus_error(&request,&error)).await.map_err(|_|closed())?;
                     }
@@ -183,6 +184,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                 }
                 let mut context = connection.clone();
                 context.pending_events.clear();
+                context.outbound = context.outbound.for_account(request.account_id.as_deref());
                 requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
             }
             Some(result) = requests.join_next(), if !requests.is_empty() => {
@@ -251,11 +253,29 @@ async fn custody_response(
     super::custody_setup::respond(frame, &supervisor.config, ceremony, lease).await
 }
 
-async fn configure_subscription(
+fn subscription_method(method: &str) -> bool {
+    matches!(method, "bus.subscribe" | "subscription.open")
+        || (cfg!(feature = "c-abi") && method == "subscription.close")
+}
+
+pub(super) async fn configure_subscription(
     supervisor: &Supervisor,
     connection: &mut LocalBusConnectionState,
     request: &LocalBusFrame,
 ) -> Result<(), SdkError> {
+    #[cfg(feature = "c-abi")]
+    if request.method == "subscription.close" {
+        supervisor.disconnect(connection.connection_id);
+        connection.topics.clear();
+        connection.attended_account_id = None;
+        connection
+            .outbound
+            .send(local_bus_response(request, serde_json::json!({"subscribed":false})))
+            .await
+            .map_err(|_| closed())?;
+        return Ok(());
+    }
+    connection.outbound = connection.outbound.subscribe(request.account_id.clone())?;
     if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         connection.attended_account_id.clone_from(&request.account_id);
     }
@@ -308,7 +328,7 @@ impl Drop for WriterStopped {
 
 async fn write_responses<W: AsyncWrite + Unpin>(
     mut writer: W,
-    mut receiver: mpsc::Receiver<LocalBusFrame>,
+    mut receiver: super::outbound::Receiver,
     mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
     supervisor: Rc<Supervisor>,
     id: u64,
@@ -326,9 +346,9 @@ async fn write_responses<W: AsyncWrite + Unpin>(
         let Some(frame) = frame else {
             break;
         };
-        write_local_bus_frame(&mut writer, &frame).await?;
-        if frame.method == "daemon.stop" {
-            supervisor.finish_stop_response(id, &frame.request_id);
+        super::outbound::write(&mut writer, &frame).await?;
+        if frame.frame.method == "daemon.stop" {
+            supervisor.finish_stop_response(id, &frame.frame.request_id);
         }
     }
     Ok(())

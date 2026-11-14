@@ -8,6 +8,7 @@ use crate::custody::pairing::{
     private_credential::{PrivateCredentialScope, encode_reply, provider_for_account},
 };
 use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
+use tokio::sync::mpsc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn reservation(root: &Path, account: &str) -> Result<CredentialRequest, SdkError> {
     let stored = PersistedReservation {

@@ -8,7 +8,7 @@ use prost::Message as _;
 use ramflux_protocol::message as g;
 
 impl Fixture {
-    async fn restart_authored_source(&mut self) -> TestResult {
+    pub(crate) async fn restart_authored_source(&mut self) -> TestResult {
         let account = self.client.account_db()?.local_account_id.clone();
         drop(std::mem::replace(&mut self.client, RamfluxClient::new()));
         self.client.open_account_index(&self.root.0)?;

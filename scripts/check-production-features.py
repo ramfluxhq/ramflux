@@ -46,12 +46,16 @@ def check_release_commands(text, file):
     # Fold shell continuations so feature flags on a following line are checked too.
     for command in text.replace("\\\n", " ").splitlines():
         if re.search(r"\b(?:cargo|cross)(?:\s+[^\s;]+)*?\s+(?:build|install|run)\b", command):
+            if ("--release" in command or "--profile release" in command) and re.search(r"(?:-p|--package)\s+ramflux-sdk\b",command) and ("c-abi" in command or "card-runtime" in command) and "CARGO_PROFILE_RELEASE_PANIC=unwind" not in command:
+                raise ValueError(f"SDK native C ABI release requires --profile ffi-release or CARGO_PROFILE_RELEASE_PANIC=unwind: {file}")
             if "itest-http" in command or "--all-features" in command:
                 raise ValueError(f"test HTTP feature in release/deploy build command: {file}")
 
 
 def self_test_release_commands():
     for command in (
+        "cargo build --release -p ramflux-sdk --features c-abi",
+        "cargo build --release --package ramflux-sdk --features card-runtime",
         "cargo build --release --features itest-http",
         "cargo install --path apps/ramflux-gateway --features itest-http",
         "cargo run --release --features ramflux-gateway/itest-http",
@@ -65,6 +69,8 @@ def self_test_release_commands():
             continue
         raise ValueError("release command guard accepted a forbidden feature fixture")
     check_release_commands("cargo build --locked --release --workspace", "fixture")
+    check_release_commands("cargo build --profile ffi-release -p ramflux-sdk --features c-abi", "fixture")
+    check_release_commands("CARGO_PROFILE_RELEASE_PANIC=unwind cargo build --release -p ramflux-sdk --features card-runtime", "fixture")
 
 
 def main():

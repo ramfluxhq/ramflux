@@ -185,7 +185,7 @@ fn keyed_read(method: &str) -> crate::bus::actor::AccountCommand {
         topics: BTreeSet::new(),
         attended: false,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     }
 }

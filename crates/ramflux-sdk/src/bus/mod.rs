@@ -55,7 +55,7 @@ pub mod protocol;
 pub(crate) mod read_model;
 mod readers;
 mod requests;
-mod secrets;
+pub(crate) mod secrets;
 mod shared_group_sync;
 pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
@@ -80,6 +80,8 @@ mod task_delivery;
 
 #[cfg(test)]
 mod transport_security_tests;
+
+pub(crate) mod outbound;
 
 mod own_contact_backfill;
 mod pairing;
@@ -110,3 +112,5 @@ mod custody_daemon_tests;
 
 #[cfg(test)]
 mod generated_typing_tests;
+#[cfg(feature = "c-abi")]
+pub(crate) mod inprocess;

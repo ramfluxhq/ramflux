@@ -84,7 +84,7 @@ fn command(account: &str, method: &str, body: serde_json::Value) -> AccountComma
         topics: BTreeSet::new(),
         attended: true,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     }
 }

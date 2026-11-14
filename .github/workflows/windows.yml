@@ -134,6 +134,15 @@ jobs:
           cargo test --locked -p ramflux-sdk --lib --
           platform::pipe:: platform::fs:: custody::vault::windows::
 
+      - name: C ABI v2 supervisor and generation regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked -p ramflux-sdk --features c-abi --lib c_abi::v2:: --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B scripts/ci/run-libtest.py --junit target/windows-c-abi.xml -- cargo test --locked -p ramflux-sdk --features c-abi --lib c_abi::v2:: -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Second-user refusal tests
         shell: pwsh
         run: >

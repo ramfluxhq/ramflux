@@ -277,6 +277,14 @@ pub(crate) const SITES: &[WriterSite] = &[
         count: 1,
     },
     WriterSite {
+        file: "src/c_abi/v2/method_policy.rs",
+        symbol: "message.ack",
+        class: WriterClass::ProductionLegacy,
+        executor: "method policy name only; execution uses the existing managed_public_ack dispatcher",
+        hook: "none (discovery metadata contains no receive writer)",
+        count: 1,
+    },
+    WriterSite {
         file: "src/bus/push_receiver/executor.rs",
         symbol: "remove_unrouted",
         class: WriterClass::ExecutorOwned,

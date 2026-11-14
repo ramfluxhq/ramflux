@@ -14,10 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    sync::mpsc,
-};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub(crate) struct ConnectionInput(Arc<PrivateCredentialChannel>);
 impl Drop for ConnectionInput {
@@ -36,8 +33,9 @@ impl ConnectionInput {
 pub(crate) fn connection(
     root: PathBuf,
     id: u64,
-    outbound: mpsc::Sender<LocalBusFrame>,
+    outbound: impl Into<super::outbound::LocalBusOutbound>,
 ) -> ConnectionInput {
+    let outbound = outbound.into();
     ConnectionInput(Arc::new(PrivateCredentialChannel::new(
         id,
         Arc::new(move |generation, request| {

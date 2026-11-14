@@ -7,7 +7,7 @@ mod components;
 #[cfg(any(test, feature = "compiler"))]
 mod engine_compiler;
 mod error;
-#[cfg(feature = "c-abi")]
+#[cfg(all(feature = "c-abi", not(target_arch = "wasm32")))]
 mod ffi;
 #[cfg(test)]
 mod library_tests;

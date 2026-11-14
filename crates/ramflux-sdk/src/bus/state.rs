@@ -21,7 +21,7 @@ pub(crate) struct LocalBusDaemonState {
 pub(crate) struct LocalBusSubscriber {
     pub(crate) account_id: String,
     pub(crate) topics: BTreeSet<String>,
-    pub(crate) outbound: mpsc::Sender<LocalBusFrame>,
+    pub(crate) outbound: super::outbound::LocalBusOutbound,
 }
 
 /// T25-A3 (CTRL-102 / OBJ-IPC-01): an in-flight bounded UPLOAD spool for one large `object.put`,
@@ -690,18 +690,21 @@ pub(crate) struct LocalBusConnectionState {
         std::sync::Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
     >,
     pub(crate) connection_id: u64,
-    pub(crate) outbound: mpsc::Sender<LocalBusFrame>,
+    pub(crate) outbound: super::outbound::LocalBusOutbound,
     pub(crate) topics: BTreeSet<String>,
     pub(crate) attended_account_id: Option<String>,
     pub(crate) pending_events: Vec<LocalBusFrame>,
 }
 
 impl LocalBusConnectionState {
-    pub(crate) fn new(connection_id: u64, outbound: mpsc::Sender<LocalBusFrame>) -> Self {
+    pub(crate) fn new(
+        connection_id: u64,
+        outbound: impl Into<super::outbound::LocalBusOutbound>,
+    ) -> Self {
         Self {
             credential_channel: None,
             connection_id,
-            outbound,
+            outbound: outbound.into(),
             topics: BTreeSet::new(),
             attended_account_id: None,
             pending_events: Vec::new(),
@@ -754,9 +757,7 @@ impl LocalBusDaemonState {
                 }
                 match subscriber.outbound.try_send(event.clone()) {
                     Ok(()) => {}
-                    Err(
-                        mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_),
-                    ) => {
+                    Err(_) => {
                         stale_connections.insert(*connection_id);
                     }
                 }

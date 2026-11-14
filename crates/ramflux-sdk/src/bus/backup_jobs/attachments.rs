@@ -61,7 +61,7 @@ impl BackupJobs {
                     topics: std::collections::BTreeSet::default(),
                     attended: true,
                     nodes: None,
-                    outbound,
+                    outbound: outbound.into(),
                     reply: None,
                 })
                 .await;

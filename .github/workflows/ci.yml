@@ -193,6 +193,9 @@ jobs:
       - name: Clippy
         run: RAMFLUX_ITEST_BUILD=1 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Generated C ABI header matches reviewed bytes
+        run: python3 -B scripts/check-c-abi-header.py
+
   clippy-default:
     name: Clippy (default features)
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
@@ -225,6 +228,45 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  sdk-c-abi-v2:
+    name: SDK C ABI v2 (${{ matrix.features }})
+    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [c-abi, card-runtime]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: sdk-c-abi-${{ matrix.features }}
+      - name: Execute real supervisor, event and trust regressions
+        env:
+          RUST_TEST_THREADS: '1'
+        run: |
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-c_abi__v2__.xml -- timeout 600 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib c_abi::v2:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__outbound__tests.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::outbound::tests -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation_send_derives_routes_and_seals_for_every_verified_peer_device.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send_derives_routes_and_seals_for_every_verified_peer_device -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation-journal.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__dispatch__conversation_mutation__.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::dispatch::conversation_mutation:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-native_conversation_.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib native_conversation_ -- --test-threads=1
+      - name: Reject generated contract drift
+        run: |
+          python3 -B scripts/generate-c-abi-methods.py --check
+          python3 -B scripts/generate-c-abi-card-trust.py --check
+          python3 -B scripts/check-c-abi-header.py
 
   card-runtime:
     name: Card runtime (${{ matrix.target }})

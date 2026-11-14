@@ -149,7 +149,7 @@ async fn queue(commands: &mpsc::Sender<AccountCommand>, id: &str) -> TestResult<
             topics: BTreeSet::new(),
             attended: true,
             nodes: None,
-            outbound,
+            outbound: outbound.into(),
             reply: Some(reply),
         })
         .await?;

@@ -34,7 +34,7 @@ pub(super) fn broadcast(
                     lagged(subscriber, event);
                     return false;
                 }
-                match subscriber.outbound.try_send(event.clone()) {
+                match subscriber.outbound.try_send(event.clone()).map_err(|error| *error) {
                     Ok(()) => true,
                     Err(mpsc::error::TrySendError::Full(_)) if is_transient(event) => true,
                     Err(mpsc::error::TrySendError::Full(_)) if signals_lag() => {
@@ -150,7 +150,7 @@ mod transient_tests {
                     ramflux_protocol::message::TRANSIENT_TOPIC.into(),
                     "message.received".into(),
                 ]),
-                outbound: tx,
+                outbound: tx.into(),
             },
         )]);
         let mut frame = LocalBusFrame::request(
@@ -203,7 +203,7 @@ mod lag_tests {
             LocalBusSubscriber {
                 account_id: "a".into(),
                 topics: BTreeSet::from(["state.changed".into()]),
-                outbound: tx,
+                outbound: tx.into(),
             },
         )])
     }

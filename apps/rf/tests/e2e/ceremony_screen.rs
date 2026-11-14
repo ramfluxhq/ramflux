@@ -94,7 +94,28 @@ fn printed_literally(stream: &str, body: &str) -> bool {
 }
 
 fn token_present(screen: &str, word: &str) -> bool {
-    screen.split_whitespace().any(|token| token == word)
+    // A mnemonic can share words with the public challenge/passphrase prompts.
+    // Ignore only complete, exact prompt lines; extra text (including echoed answers)
+    // and the same token anywhere else must still fail the erasure check.
+    screen
+        .lines()
+        .filter(|line| !public_prompt(line.trim()))
+        .flat_map(str::split_whitespace)
+        .any(|token| token == word)
+}
+
+fn public_prompt(line: &str) -> bool {
+    if matches!(
+        line,
+        "New local data passphrase (hidden):" | "Repeat local data passphrase (hidden):"
+    ) {
+        return true;
+    }
+    line.strip_prefix("Recovery word ").and_then(|s| s.strip_suffix(" (hidden):")).is_some_and(
+        |position| {
+            position.parse::<u8>().is_ok_and(|n| (1..=24).contains(&n) && n.to_string() == position)
+        },
+    )
 }
 
 fn final_screen(stream: &str) -> String {
@@ -304,6 +325,45 @@ mod tests {
             "test: the challenge prompt was not on the restored screen: {screen}"
         );
         assert_words_hidden(&stream, &words()).expect("test: hide assertion");
+    }
+
+    fn common_word_stream() -> (String, Vec<String>) {
+        let mut phrase = words();
+        phrase[0] = "local".into();
+        phrase[1] = "word".into();
+        let stream = hidden_stream().replace("word00", "local").replace("word01", "word");
+        (
+            format!(
+                "{stream}\r\nNew local data passphrase (hidden):\r\nRepeat local data passphrase (hidden):"
+            ),
+            phrase,
+        )
+    }
+
+    #[test]
+    fn public_prompt_tokens_do_not_count_as_surviving_mnemonic_words() {
+        let (stream, phrase) = common_word_stream();
+        assert_words_hidden(&stream, &phrase)
+            .expect("test: exact public prompts do not expose the erased phrase");
+    }
+
+    #[test]
+    fn common_mnemonic_word_outside_a_prompt_is_still_rejected() {
+        let (stream, phrase) = common_word_stream();
+        let error = assert_words_hidden(&format!("{stream}\r\nlocal"), &phrase)
+            .expect_err("test: a single leaked common word remains forbidden");
+        assert!(
+            error.contains("recovery words still"),
+            "test: actual residual word must fail: {error}"
+        );
+    }
+
+    #[test]
+    fn echoed_challenge_answer_is_not_masked_as_a_public_prompt() {
+        let (stream, phrase) = common_word_stream();
+        let stream = stream.replace("Recovery word 3 (hidden):", "Recovery word 3 (hidden): local");
+        assert_words_hidden(&stream, &phrase)
+            .expect_err("test: only exact prompt lines may be excluded");
     }
 
     #[test]

@@ -16,6 +16,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub mod v2;
+
 const ABI_VERSION_MAJOR: u32 = 1;
 const ABI_VERSION_MINOR: u32 = 1;
 const PROTOCOL_VERSION: u32 = 1;

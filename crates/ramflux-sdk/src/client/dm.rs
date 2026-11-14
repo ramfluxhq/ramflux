@@ -7,11 +7,23 @@ use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 mod legacy_receive;
 pub(crate) use legacy_receive::{LegacyDmDecrypt, LegacyDmPrepared};
+#[cfg(test)]
+mod fanout_tests;
 mod post_send;
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
     pub auto_fetch_attachments: bool,
     pub relay_service_key_base64: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct SendMode {
+    franking: bool,
+    fanout: bool,
+}
+struct AttachmentSendMode {
+    send: SendMode,
+    consume_erased: bool,
 }
 
 impl RamfluxClient {
@@ -95,10 +107,52 @@ impl RamfluxClient {
             engine,
             message,
             plaintext,
-            true,
+            SendMode { franking: true, fanout: false },
             crate::client::routed::Route::direct(),
         )
         .await
+    }
+
+    pub(crate) async fn send_conversation_direct_message_via_gateway(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        mut message: GatewayDirectMessage,
+        plaintext: &[u8],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
+        self.send_plaintext_direct_message_via_gateway_inner(
+            engine,
+            message,
+            plaintext,
+            SendMode { franking: true, fanout: true },
+            crate::client::routed::Route::direct(),
+        )
+        .await
+    }
+
+    fn project_conversation_fanout(
+        &self,
+        message: &GatewayDirectMessage,
+        content: &[u8],
+        fanout: bool,
+    ) -> Result<(), SdkError> {
+        if fanout && let Some(previous) = self.direct_message_by_id(&message.message_id)? {
+            if previous.deleted
+                || previous.conversation_id != message.conversation_id
+                || previous.sender_id != message.sender_id
+                || self.account_db()?.message_content(&message.message_id)?.as_deref()
+                    != Some(content)
+            {
+                return Err(StorageError::MessageIdConflict(message.message_id.clone()).into());
+            }
+            return Ok(());
+        }
+        self.send_direct_message(
+            &message.conversation_id,
+            &message.message_id,
+            &message.sender_id,
+            &message.encrypted_body,
+        )
     }
 
     pub(crate) async fn send_plaintext_direct_message_without_franking(
@@ -109,7 +163,11 @@ impl RamfluxClient {
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.send_plaintext_direct_message_via_gateway_inner(
-            engine, message, plaintext, false, route,
+            engine,
+            message,
+            plaintext,
+            SendMode { franking: false, fanout: false },
+            route,
         )
         .await
     }
@@ -119,7 +177,7 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         mut message: GatewayDirectMessage,
         plaintext: &[u8],
-        include_franking_ext: bool,
+        mode: SendMode,
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.resolve_message_recipient(engine.config(), &mut message).await?;
@@ -132,8 +190,8 @@ impl RamfluxClient {
                 .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
         let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
-        let franking = include_franking_ext
-            .then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
+        let franking =
+            mode.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
         message.encrypted_body = serde_json::to_vec(&packet)?;
         let mut own_copy = None;
         // History replication controls must not become history messages themselves.
@@ -142,17 +200,12 @@ impl RamfluxClient {
                 self.journal_surface_frame(&message, &carrier, &message.encrypted_body)?;
             } else {
                 self.account_db()?.write_transaction(|| {
-                    self.send_direct_message(
-                        &message.conversation_id,
-                        &message.message_id,
-                        &message.sender_id,
-                        &message.encrypted_body,
-                    )?;
                     let content = zeroize::Zeroizing::new(if attachments {
                         crate::client::dm::decode_dm_attachment_body(plaintext)?.0
                     } else {
                         plaintext.to_vec()
                     });
+                    self.project_conversation_fanout(&message, &content, mode.fanout)?;
                     self.account_db()?.store_message_content(
                         &message.conversation_id,
                         &message.message_id,
@@ -211,8 +264,31 @@ impl RamfluxClient {
             message,
             plaintext,
             attachments,
-            true,
-            true,
+            AttachmentSendMode {
+                send: SendMode { franking: true, fanout: false },
+                consume_erased: true,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn send_conversation_attachments_via_gateway(
+        &mut self,
+        engine: &mut impl GatewaySessionAccess,
+        pool: &ramflux_transport::RelayQuicPool,
+        message: GatewayDirectMessage,
+        input: (&[u8], &[LocalBusMessageAttachmentInput]),
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
+            engine,
+            pool,
+            message,
+            input.0,
+            input.1,
+            AttachmentSendMode {
+                send: SendMode { franking: true, fanout: true },
+                consume_erased: true,
+            },
         )
         .await
     }
@@ -225,8 +301,7 @@ impl RamfluxClient {
         message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
-        include_franking_ext: bool,
-        consume_erased: bool,
+        mode: AttachmentSendMode,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let mut refs = Vec::with_capacity(attachments.len());
         let mut holds = Vec::with_capacity(attachments.len());
@@ -263,7 +338,7 @@ impl RamfluxClient {
                 engine,
                 message,
                 &envelope_plaintext,
-                include_franking_ext,
+                mode.send,
                 crate::client::routed::Route::attachments(),
             )
             .await;
@@ -276,7 +351,7 @@ impl RamfluxClient {
                 message: &message_id,
             },
             holds,
-            consume_erased,
+            mode.consume_erased,
         )
     }
 

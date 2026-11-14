@@ -234,7 +234,7 @@ async fn command(sender: &mpsc::Sender<AccountCommand>, method: &str, body: Valu
             topics: BTreeSet::new(),
             attended: true,
             nodes: None,
-            outbound,
+            outbound: outbound.into(),
             reply: Some(reply),
         })
         .await?;

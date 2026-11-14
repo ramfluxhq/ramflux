@@ -455,6 +455,17 @@ pub(crate) async fn read_local_bus_frame<R>(reader: &mut R) -> Result<LocalBusFr
 where
     R: AsyncRead + Unpin,
 {
+    let body = read_encoded_local_bus_frame(reader).await?;
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
+}
+
+/// Read one bounded, zeroizing server envelope, including compatibility custody replies.
+pub(crate) async fn read_encoded_local_bus_frame<R>(
+    reader: &mut R,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut len_bytes = [0_u8; 4];
     reader.read_exact(&mut len_bytes).await?;
     let len = u32::from_be_bytes(len_bytes) as usize;
@@ -471,17 +482,30 @@ where
         // This generic reader never allocates or forwards their secret payload to JSON.
         return Err(SdkError::PairingField("credential_channel"));
     }
-    read_json_after_discriminator(reader, len, discriminator[0]).await
+    read_encoded_after_discriminator(reader, len, discriminator[0]).await
 }
 pub(super) async fn read_json_after_discriminator<R: AsyncRead + Unpin>(
     reader: &mut R,
     len: usize,
     discriminator: u8,
 ) -> Result<LocalBusFrame, SdkError> {
-    let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
-    body[0] = discriminator;
-    reader.read_exact(&mut body[1..]).await?;
+    let body = read_encoded_after_discriminator(reader, len, discriminator).await?;
     Ok(ramflux_protocol::parse_i_json_secret(&body)?)
+}
+async fn read_encoded_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    if len == 0 || len > MAX_LOCAL_BUS_FRAME_BYTES {
+        return Err(SdkError::LocalBus("invalid local bus frame length".into()));
+    }
+    let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
+    let (first, remaining) =
+        body.split_first_mut().ok_or_else(|| SdkError::LocalBus("empty local bus frame".into()))?;
+    *first = discriminator;
+    reader.read_exact(remaining).await?;
+    Ok(body)
 }
 
 #[cfg(test)]
