@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![cfg(test)]
+
 //! Native TLS revocation fixture and real pair setup for denial regressions.
 use super::*;
 #[path = "device_revocation_native.rs"]
@@ -55,11 +57,12 @@ pub(super) async fn revoke(owner: &mut Fixture, target: &str) -> TestResult {
         serde_json::json!({"device_id":target}),
     );
     let response =
-        crate::bus::dispatch::device::dispatch_device_bus_request(&request, &mut state).await?;
-    assert_eq!(response.response_body["revoked"], true, "test: native revoke was not acknowledged");
+        crate::bus::dispatch::device::dispatch_device_bus_request(&request, &mut state).await;
     owner.client = std::mem::take(
         &mut state.accounts.get_mut(&account_id).ok_or("test: publisher account")?.client,
     );
+    let response = response?;
+    assert_eq!(response.response_body["revoked"], true, "test: native revoke was not acknowledged");
     Ok(())
 }
 
@@ -228,4 +231,13 @@ pub(super) fn engine(local: &Fixture) -> (GatewaySessionEngine, Arc<AtomicUsize>
         ),
         sent,
     )
+}
+
+pub(super) fn assert_local_denial<T>(result: Result<T, SdkError>) {
+    let error = result.err();
+    assert!(
+        matches!(&error, Some(SdkError::InboundRejected(reason))
+        if reason == "identity authority: device is locally fenced by a pending root revocation"),
+        "test: revoked local traffic failed for the wrong reason: {error:?}"
+    );
 }

@@ -75,18 +75,7 @@ pub(super) async fn dispatch(
     let published = with_db(account, |db| {
         custody::pairing::publish_head(db, &root, selected.vault.as_ref(), &write, &receipt)
     })?;
-    // Feed our acknowledged native denial through the same authority observer as a
-    // fetched head. Disk installation alone does not retire private pair state or
-    // invalidate a previously cached directory in this unlocked client.
-    account.client.observe_custody_manifest(
-        &ramflux_protocol::custody::CustodyManifest {
-            publication: Publication { record: published.record.clone(), compacted_ids: None },
-            custodian_publication: None,
-            devices: Vec::new(),
-        },
-        &published.record.body.account_anchor,
-        custody::network_now()?,
-    )?;
+    observe_published(account, &root, &published)?;
     account.client.born_v3_account = Some(Box::new(custody::load_account(
         account.client.account_index()?.root(),
         &account.client.account_db()?.local_account_id,
@@ -95,6 +84,33 @@ pub(super) async fn dispatch(
     Ok(super::local_bus_ok(
         serde_json::json!({"device_id":device,"revoked":true,"publication_state":"acknowledged","device_set_epoch":published.epoch,"record_hash":published.record_hash}),
     ))
+}
+
+fn observe_published(
+    account: &LocalBusAccountState,
+    root: &std::path::Path,
+    published: &custody::pairing::PublishedHead,
+) -> Result<(), SdkError> {
+    // Feed our acknowledged native denial through the same authority observer as a
+    // fetched head. Disk installation alone does not retire private pair state or
+    // invalidate a previously cached directory in this unlocked client.
+    let now = custody::network_now()?;
+    let custodian_publication = account
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or(SdkError::NetworkingPending)?
+        .custodian_publication(root, now)?;
+    account.client.observe_custody_manifest(
+        &ramflux_protocol::custody::CustodyManifest {
+            publication: Publication { record: published.record.clone(), compacted_ids: None },
+            custodian_publication,
+            devices: Vec::new(),
+        },
+        &published.record.body.account_anchor,
+        now,
+    )?;
+    Ok(())
 }
 
 // This adapter exists only after the real native proof has returned Published. It can
@@ -186,3 +202,7 @@ fn prepare(
         primary_vault_ref: Some(account.primary_vault_ref().into()),
     })
 }
+
+#[cfg(test)]
+#[path = "native_revoke_tests.rs"]
+mod tests;

@@ -180,6 +180,7 @@ impl RamfluxClient {
         mode: SendMode,
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        self.require_native_pair_device_not_revoked()?;
         self.resolve_message_recipient(engine.config(), &mut message).await?;
         let kind = crate::client::target_selection::kind_id_for_route(&route.kind);
         let _ = Self::candidate_target_plan(|| self.dm_selection_request(&message, kind))?;
