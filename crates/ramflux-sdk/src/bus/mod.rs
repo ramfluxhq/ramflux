@@ -112,5 +112,10 @@ mod custody_daemon_tests;
 
 #[cfg(test)]
 mod generated_typing_tests;
+
+#[cfg(test)]
+mod search_tests;
+
 #[cfg(feature = "c-abi")]
 pub(crate) mod inprocess;
+mod search_dispatch;

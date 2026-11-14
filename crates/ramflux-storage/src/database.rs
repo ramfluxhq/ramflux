@@ -50,6 +50,7 @@ impl WeakConnection {
 }
 
 struct Worker {
+    search_watch: std::sync::Arc<Mutex<Option<std::sync::Arc<crate::local_search::SearchWatch>>>>,
     id: u64,
     path: PathBuf,
     transaction_mode: Mutex<Option<TrackedTransaction>>,
@@ -215,6 +216,7 @@ impl Connection {
             inner: std::sync::Arc::new(Worker {
                 id: connection_id,
                 path,
+                search_watch: std::sync::Arc::new(Mutex::new(None)),
                 transaction_mode: Mutex::new(None),
                 checkpoints,
                 #[cfg(feature = "itest-work-budget")]
@@ -307,15 +309,31 @@ impl Connection {
         f: impl FnOnce(&mut rusqlite::Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (sender, receiver) = mpsc::sync_channel(1);
+        let search_watch = std::sync::Arc::clone(&self.inner.search_watch);
         self.inner
             .sender
             .as_ref()
             .ok_or(Error::InvalidQuery)?
             .send(Box::new(move |db| {
-                let _ = sender.send(f(db));
+                let result = f(db);
+                let watch =
+                    search_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                if let Some(watch) = watch {
+                    watch.refresh(db);
+                }
+                let _ = sender.send(result);
             }))
             .map_err(|_| Error::InvalidQuery)?;
         receiver.recv().map_err(|_| Error::InvalidQuery)?
+    }
+
+    pub(crate) fn observe_local_search(
+        &self,
+        watch: std::sync::Arc<crate::local_search::SearchWatch>,
+    ) -> std::sync::Arc<crate::local_search::SearchWatch> {
+        let mut current =
+            self.inner.search_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::sync::Arc::clone(current.get_or_insert(watch))
     }
 
     pub(crate) fn enable_background_checkpoints(&self) {
@@ -581,6 +599,11 @@ impl Connection {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        let watch =
+            self.search_watch.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        if let Some(watch) = watch {
+            watch.close();
+        }
         self.sender.take();
         if let Some(worker) = self.handle.take() {
             let _ = worker.join();

@@ -4,7 +4,7 @@
 //! Erases owned request values immediately after encoding, including seeds encoded as arrays.
 use serde_json::Value;
 use zeroize::Zeroize;
-pub(super) fn wipe(value: &mut Value) {
+pub(crate) fn wipe(value: &mut Value) {
     match value {
         Value::String(value) => wipe_string(value),
         Value::Array(values) => {

@@ -65,6 +65,7 @@ pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
 pub mod large_segments;
+pub mod local_search;
 pub(crate) mod mac_subkeys;
 pub mod mcp;
 mod message_edit_retirement;
@@ -106,6 +107,8 @@ pub struct AccountDb {
     device_signer: Option<ramflux_crypto::DeviceBranch>,
     clock: AccountClock,
     object_retirement: object_retention::RetirementObserver,
+    search_restore_admitted: bool,
+    search_incarnation: local_search::SearchAccountIncarnation,
     pub(crate) connection: Connection,
     erasure_authority: Option<Connection>,
     volatile_typing: RefCell<BTreeMap<(String, String), TypingStateRecord>>,
@@ -160,6 +163,9 @@ impl AccountDb {
             device_signer: None,
             clock: AccountClock::real(),
             object_retirement: object_retention::RetirementObserver::default(),
+            search_incarnation: local_search::SearchAccountIncarnation::default(),
+            search_restore_admitted: !local_search::LOCAL_SEARCH_V1
+                || index.search_owner_admitted(local_account_id)?,
             connection,
             erasure_authority: None,
             volatile_typing: RefCell::new(BTreeMap::new()),

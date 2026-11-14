@@ -1613,6 +1613,60 @@
       "show_once": false
     },
     {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.cursor.close",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.index.rebuild",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.index.rebuild.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.index.status",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "search",
+      "key_export": false,
+      "name": "search.query",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
       "bridge_allowed": true,
       "capability": "stream",
       "key_export": false,

@@ -91,6 +91,42 @@ impl Supervisor {
         Ok(supervisor)
     }
 
+    pub(super) fn search_actor(&self, id: &str) -> Result<AccountActor, SdkError> {
+        self.require_restore_ready(id, false)?;
+        if self.installing.borrow().contains(id) {
+            return Err(crate::search::SearchError::IndexUnavailable.into());
+        }
+        self.accounts
+            .borrow()
+            .get(id)
+            .filter(|actor| actor.is_open())
+            .cloned()
+            .ok_or_else(|| crate::search::SearchError::AccountLocked.into())
+    }
+    pub(super) fn search_actors(&self) -> Vec<AccountActor> {
+        self.accounts.borrow().values().cloned().collect()
+    }
+    pub(super) fn spawn_search_rebuild(
+        &self,
+        actor: AccountActor,
+        runtime: Arc<crate::search::LocalSearch>,
+        owner: u64,
+        ticket: crate::search::rebuild_job::RebuildTicket,
+    ) {
+        let job = ticket.work_id().to_owned();
+        let mut tasks = self.lifecycle_tasks.borrow_mut();
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn_local(async move {
+            let _ = runtime
+                .run_rebuild_with(ticket, move |admission, reset| {
+                    let actor = actor.clone();
+                    let job = job.clone();
+                    async move { actor.search_rebuild_batch(owner, job, admission, reset).await }
+                })
+                .await;
+        });
+        self.lifecycle_changed.notify_one();
+    }
     pub(super) fn account_is_open(&self, id: &str) -> bool {
         self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
     }
@@ -231,6 +267,19 @@ impl Supervisor {
         mut request: LocalBusFrame,
         connection: &LocalBusConnectionState,
     ) -> Result<ActorResponse, SdkError> {
+        if crate::search::capability::is_method(&request.method) {
+            match crate::search::capability::guard(&request.method) {
+                Ok(Some(body)) => {
+                    super::secrets::wipe(&mut request.body);
+                    return Ok(reply(body));
+                }
+                Err(error) => {
+                    super::secrets::wipe(&mut request.body);
+                    return Err(error);
+                }
+                Ok(None) => return Box::pin(self.search_request(request, connection)).await,
+            }
+        }
         let credential_call =
             super::credentials::call(&self.config.data_root, &request, connection)?;
         if request.method == "account.lock" {
@@ -245,7 +294,7 @@ impl Supervisor {
             return self.private_unlock(&request, call).await;
         }
         if !super::lifecycle::handles(&request.method) {
-            return self.route(request, connection).await;
+            return Box::pin(self.route(request, connection)).await;
         }
         let keyed = request.operation_id.is_some()
             || request.body.get("idempotency_key").and_then(serde_json::Value::as_str).is_some();
@@ -720,6 +769,13 @@ impl Supervisor {
     }
 
     async fn set_active(&self, id: &str) -> Result<(), SdkError> {
+        for actor in self.search_actors() {
+            if let Ok(pool) = actor.reader_pool()
+                && let Ok(runtime) = pool.search_runtime()
+            {
+                runtime.invalidate_views();
+            }
+        }
         let index = self.index.clone();
         let id = id.to_owned();
         super::lifecycle::spawn_blocking(move || index.set_active_account(&id))
@@ -948,6 +1004,7 @@ impl Supervisor {
     }
 
     pub(super) fn disconnect(&self, id: u64) {
+        self.search_disconnect(id);
         if let Some(task) = self.streams.borrow_mut().remove(&id) {
             task.abort();
         }

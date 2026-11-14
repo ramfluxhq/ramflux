@@ -208,6 +208,12 @@ policies! {
     "object.share" => ("object", true, true, false, false),
     "object.transfer.resume" => ("object", true, true, false, false),
     "object.transfer.status" => ("object", false, true, false, false),
+    "search.cancel" => ("search", true, true, false, false),
+    "search.cursor.close" => ("search", true, true, false, false),
+    "search.index.rebuild" => ("search", true, true, false, false),
+    "search.index.rebuild.cancel" => ("search", true, true, false, false),
+    "search.index.status" => ("search", true, true, false, false),
+    "search.query" => ("search", true, true, false, false),
     "stream.read" => ("stream", false, true, false, false),
     "subscription.close" => ("subscription", false, false, false, false),
     "subscription.open" => ("subscription", false, false, false, false),
@@ -230,7 +236,16 @@ policies! {
     "task.update" => ("task", true, true, false, false),
 }
 
-pub(super) const DENIED_METHODS: &[&str] = &["daemon.stop"];
+// Search stays unavailable to native hosts until its separate ABI integration is admitted.
+pub(super) const DENIED_METHODS: &[&str] = &[
+    "daemon.stop",
+    "search.cancel",
+    "search.cursor.close",
+    "search.index.rebuild",
+    "search.index.rebuild.cancel",
+    "search.index.status",
+    "search.query",
+];
 
 pub(super) fn requires_key_export(name: &str) -> bool {
     METHOD_POLICIES

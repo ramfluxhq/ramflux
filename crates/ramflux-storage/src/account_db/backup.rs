@@ -266,6 +266,9 @@ impl AccountDb {
             if let Err(error) = super::pairing::sanitize_backup(&target) {
                 return Ok(Err(error));
             }
+            if super::local_search::lifecycle::strip(&target)? {
+                super::local_search::lifecycle::compact(&target)?;
+            }
             super::backup_retirement::strip_own_copy_locators(&target)?;
             target.execute("DELETE FROM object_segment_resource", [])?;
             // Historical archives have no native physical progress to clear.

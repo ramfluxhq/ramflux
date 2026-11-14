@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 mod backup;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
 mod operations;
+mod search;
 
 #[derive(Clone)]
 pub struct AccountIndex {

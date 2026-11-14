@@ -11,6 +11,7 @@ pub use account_db::backup_database::{
 };
 pub use account_db::backup_edit_register::PARKED_EDIT_REVIEW;
 pub use account_db::backup_merge::{BackupItemRefusal, BackupMergeReport};
+pub use account_db::local_search;
 pub use account_db::restore_floor::{FloorPolicy, admit_floor};
 mod account_erase;
 mod account_generation;

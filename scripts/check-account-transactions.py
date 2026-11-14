@@ -36,6 +36,7 @@ ALLOW = {
     ('account_db/full_transfer/source_wire.rs', 'finish'): 'commit the self-owned encrypted wire spool only after complete byte/root computation',
     ('account_db/pairing/schema.rs', 'install'): 'exclusive account-open schema initialization before the managed connection worker starts',
     ('account_db/pairing/schema.rs', 'install_full_adoption_columns'): 'exclusive account-open schema migration before the managed connection worker starts',
+    ('account_db/local_search/compact.rs', 'compact'): 'private unpublished encrypted snapshot compaction; VACUUM is outside transactions, locator remapping commits only in the private candidate',
     ('database.rs', 'deferred_transaction'): 'managed deferred entrypoint',
     ('database.rs', 'immediate_transaction'): 'managed immediate entrypoint',
     ('database.rs', 'transaction'): 'sole managed transaction acquisition boundary',
