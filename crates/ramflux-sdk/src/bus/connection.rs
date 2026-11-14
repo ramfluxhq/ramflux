@@ -105,21 +105,12 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
-    let (mut reader, writer) = stream.into_halves();
+    let generations = stream.subscription_generations();
+    let (reader, writer) = stream.into_halves();
     let (incoming, mut frames) = mpsc::channel(64);
     let (disconnect, mut disconnected) = watch::channel(false);
-    let reader_task = tokio::task::spawn_local(async move {
-        loop {
-            let frame =
-                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
-            let failed = frame.is_err();
-            if incoming.try_send(frame).is_err() || failed {
-                break;
-            }
-        }
-        let _ = disconnect.send(true);
-    });
-    let (outbound, receiver) = mpsc::channel::<LocalBusFrame>(64);
+    let reader_task = read_requests(reader, incoming, disconnect);
+    let (outbound, receiver) = super::outbound::LocalBusOutbound::channel(64, generations);
     let (secrets, secret_receiver) = mpsc::channel::<zeroize::Zeroizing<Vec<u8>>>(1);
     let writer_task = tokio::task::spawn_local(write_responses(
         writer,
@@ -173,7 +164,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     outbound.send(rejected_request(&mut request, &SdkError::LocalBus("duplicate in-flight request_id".to_owned()))).await.map_err(|_| closed())?;
                     continue;
                 }
-                if matches!(request.method.as_str(),"bus.subscribe"|"subscription.open") {
+                if subscription_method(&request.method) {
                     if let Err(error)=configure_subscription(&supervisor,&mut connection,&request).await {
                         outbound.send(rejected_request(&mut request, &error)).await.map_err(|_|closed())?;
                     }
@@ -181,7 +172,7 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     continue;
                 }
                 let context = LocalBusConnectionState {
-                    connection_id: id, outbound: outbound.clone(), topics: connection.topics.clone(),
+                    connection_id: id, outbound: connection.outbound.for_account(request.account_id.as_deref()), topics: connection.topics.clone(),
                     attended_account_id: connection.attended_account_id.clone(), pending_events: Vec::new(),
                 };
                 requests.spawn_local(super::requests::respond(request, Rc::clone(&supervisor), context));
@@ -202,6 +193,24 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
     writer_task.abort();
     let _ = writer_task.await;
     result
+}
+
+fn read_requests<R: AsyncRead + Unpin + 'static>(
+    mut reader: R,
+    incoming: mpsc::Sender<Result<super::custody_setup::Incoming, SdkError>>,
+    disconnect: watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        loop {
+            let frame =
+                read_local_bus_frame(&mut reader).await.map(super::custody_setup::Incoming::new);
+            let failed = frame.is_err();
+            if incoming.try_send(frame).is_err() || failed {
+                break;
+            }
+        }
+        let _ = disconnect.send(true);
+    })
 }
 
 async fn custody_response(
@@ -228,11 +237,29 @@ async fn custody_response(
     super::custody_setup::respond(frame, &supervisor.config, ceremony, lease).await
 }
 
-async fn configure_subscription(
+fn subscription_method(method: &str) -> bool {
+    matches!(method, "bus.subscribe" | "subscription.open")
+        || (cfg!(feature = "c-abi") && method == "subscription.close")
+}
+
+pub(super) async fn configure_subscription(
     supervisor: &Supervisor,
     connection: &mut LocalBusConnectionState,
     request: &LocalBusFrame,
 ) -> Result<(), SdkError> {
+    #[cfg(feature = "c-abi")]
+    if request.method == "subscription.close" {
+        supervisor.disconnect(connection.connection_id);
+        connection.topics.clear();
+        connection.attended_account_id = None;
+        connection
+            .outbound
+            .send(local_bus_response(request, serde_json::json!({"subscribed":false})))
+            .await
+            .map_err(|_| closed())?;
+        return Ok(());
+    }
+    connection.outbound = connection.outbound.subscribe(request.account_id.clone())?;
     if request.body.get("attended_frontend").and_then(serde_json::Value::as_bool).unwrap_or(false) {
         connection.attended_account_id.clone_from(&request.account_id);
     }
@@ -288,7 +315,7 @@ impl Drop for WriterStopped {
 
 async fn write_responses<W: AsyncWrite + Unpin>(
     mut writer: W,
-    mut receiver: mpsc::Receiver<LocalBusFrame>,
+    mut receiver: super::outbound::Receiver,
     mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
     supervisor: Rc<Supervisor>,
     id: u64,
@@ -306,12 +333,12 @@ async fn write_responses<W: AsyncWrite + Unpin>(
         let Some(mut frame) = frame else {
             break;
         };
-        if frame.method == "search.query" && frame.ok == Some(true) {
+        if frame.frame.method == "search.query" && frame.frame.ok == Some(true) {
             let encoded = (|| -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
-                let completion = supervisor.resolve_search_completion(&frame, id)?;
-                frame.body = serde_json::to_value(completion.take()?)?;
-                let encoded = super::io::encode_local_bus_frame(&frame);
-                super::secrets::wipe(&mut frame.body);
+                let completion = supervisor.resolve_search_completion(&frame.frame, id)?;
+                frame.frame.body = serde_json::to_value(completion.take()?)?;
+                let encoded = super::io::encode_local_bus_frame(&frame.frame);
+                super::secrets::wipe(&mut frame.frame.body);
                 let encoded = zeroize::Zeroizing::new(encoded?);
                 completion.check_current()?;
                 Ok(encoded)
@@ -326,15 +353,15 @@ async fn write_responses<W: AsyncWrite + Unpin>(
                     .map_err(|_| closed())??;
                 }
                 Err(error) => {
-                    frame = super::io::local_bus_error(&frame, &error);
-                    write_local_bus_frame(&mut writer, &frame).await?;
+                    frame.frame = super::io::local_bus_error(&frame.frame, &error);
+                    write_local_bus_frame(&mut writer, &frame.frame).await?;
                 }
             }
             continue;
         }
-        if crate::search::capability::is_method(&frame.method) {
-            let encoded = super::io::encode_local_bus_frame(&frame);
-            super::secrets::wipe(&mut frame.body);
+        if crate::search::capability::is_method(&frame.frame.method) {
+            let encoded = super::io::encode_local_bus_frame(&frame.frame);
+            super::secrets::wipe(&mut frame.frame.body);
             let encoded = zeroize::Zeroizing::new(encoded?);
             tokio::time::timeout(
                 Duration::from_secs(10),
@@ -344,9 +371,9 @@ async fn write_responses<W: AsyncWrite + Unpin>(
             .map_err(|_| closed())??;
             continue;
         }
-        write_local_bus_frame(&mut writer, &frame).await?;
-        if frame.method == "daemon.stop" {
-            supervisor.finish_stop_response(id, &frame.request_id);
+        super::outbound::write(&mut writer, &frame).await?;
+        if frame.frame.method == "daemon.stop" {
+            supervisor.finish_stop_response(id, &frame.frame.request_id);
         }
     }
     Ok(())

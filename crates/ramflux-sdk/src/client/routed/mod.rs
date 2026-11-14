@@ -15,6 +15,8 @@ pub(crate) mod bootstrap_sequence;
 mod committed;
 mod contact_preview;
 mod context;
+mod conversation;
+pub(crate) use conversation::ConversationEvent;
 pub(crate) mod control;
 #[cfg(test)]
 mod native_contact_tests;

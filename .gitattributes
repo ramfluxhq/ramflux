@@ -1,1 +1,7 @@
 /crates/ramflux-protocol/src/message/generated/** linguist-generated=true
+/crates/ramflux-card/catalog.json text eol=lf
+/crates/ramflux-sdk/include/card/*.json text eol=lf
+/crates/ramflux-sdk/include/card/*.qjb binary
+/crates/ramflux-sdk/include/card/*.sig binary
+/crates/ramflux-sdk/include/card/*.pub binary
+/crates/ramflux-sdk/include/ramflux_sdk.h text eol=lf

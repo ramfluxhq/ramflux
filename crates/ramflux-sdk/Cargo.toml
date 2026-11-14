@@ -19,7 +19,9 @@ test-support = []
 itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
-c-abi = []
+c-abi = ["dep:ramflux-client-model"]
+# Bundle the independently versioned renderer into this same Rust library.
+card-runtime = ["c-abi", "dep:ramflux-card", "ramflux-card/c-abi"]
 # Read-only introspection for realnet integration tests (T21-A2a / CTRL-028). Never enabled by
 # production binaries; exposes recv-commit checkpoints/cursor as evidence, no control or mutation.
 itest-fingerprint = ["ramflux-transport/itest-fingerprint"]
@@ -46,6 +48,8 @@ object-ipc-crash-seam = []
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
+ramflux-client-model = { version = "0.1.0", path = "../ramflux-client-model", optional = true }
+ramflux-card = { version = "0.1.0", path = "../ramflux-card", optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -73,7 +77,7 @@ thiserror = "2.0"
 time = { version = "0.3.51", features = ["formatting"] }
 tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing = "0.1"
-zeroize = { version = "1.8", features = ["serde"] }
+zeroize = { version = "1.8", features = ["serde", "derive"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
@@ -100,6 +104,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
 ] }
 
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+# Mobile SDKs do not ship libcrypto. Package SQLCipher's crypto dependency with the core library.
+rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
+
 [dev-dependencies]
 ramflux-test-support.workspace = true
 serde_json = { version = "1.0", features = ["raw_value"] }
@@ -112,7 +120,8 @@ tokio = { version = "1.42", features = ["test-util"] }
 tempfile.workspace = true
 
 [build-dependencies]
-cbindgen = "0.29.3"
+cbindgen = "=0.29.4"
+serde_json = "1.0"
 
 [lints]
 workspace = true

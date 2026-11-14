@@ -1,4 +1,7 @@
 language = "C"
+line_endings = "LF"
+header = "/* SPDX-License-Identifier: BSD-3-Clause */"
+after_includes = "#ifdef RAMFLUX_WITH_CARD_RUNTIME\n#include \"ramflux_card.h\"\n#endif"
 include_guard = "RAMFLUX_SDK_H"
 pragma_once = true
 style = "tag"
@@ -12,6 +15,8 @@ parse_deps = false
 include = ["ramflux-sdk"]
 
 [export]
+include = ["RamfluxErrorCode", "RamfluxV2Status", "RamfluxV2CustodyOperation"]
+item_types = ["enums", "structs", "functions", "opaque"]
 exclude = ["CAbiClientInner", "CAbiEventQueue"]
 
 [enum]

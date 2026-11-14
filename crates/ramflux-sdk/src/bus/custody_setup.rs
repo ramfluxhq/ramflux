@@ -148,7 +148,7 @@ fn empty(request: &LocalBusFrame) -> Result<(), SdkError> {
 pub(super) fn primary_provider(
     config: &LocalBusConfig,
 ) -> std::sync::Arc<dyn crate::custody::PrimaryVault> {
-    #[cfg(any(test, feature = "itest-memory-vault"))]
+    #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
     if let Some(vault) = &config.custody_vault {
         return vault.clone();
     }
@@ -158,7 +158,7 @@ pub(super) fn primary_provider(
     }
     #[cfg(not(windows))]
     {
-        #[cfg(not(any(test, feature = "itest-memory-vault")))]
+        #[cfg(not(any(test, feature = "itest-memory-vault", feature = "c-abi")))]
         let _ = config;
         std::sync::Arc::new(NativePrimaryVault)
     }

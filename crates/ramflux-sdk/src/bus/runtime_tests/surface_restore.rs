@@ -58,7 +58,7 @@ fn command(method: &str, body: Value, outbound: mpsc::Sender<LocalBusFrame>) -> 
         topics: BTreeSet::new(),
         attended: false,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     }
 }

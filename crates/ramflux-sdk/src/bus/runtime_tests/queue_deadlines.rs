@@ -31,7 +31,7 @@ fn command(method: &str, body: serde_json::Value) -> AccountCommand {
         topics: BTreeSet::new(),
         attended: false,
         nodes: None,
-        outbound,
+        outbound: outbound.into(),
         reply: None,
     }
 }

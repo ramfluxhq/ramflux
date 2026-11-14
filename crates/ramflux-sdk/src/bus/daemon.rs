@@ -653,7 +653,7 @@ mod tests {
                 LocalBusSubscriber {
                     account_id: "acct".to_owned(),
                     topics: BTreeSet::from(["mcp.approval.request".to_owned()]),
-                    outbound,
+                    outbound: outbound.into(),
                 },
             )]),
         };
@@ -687,7 +687,7 @@ mod tests {
                 LocalBusSubscriber {
                     account_id: "acct".to_owned(),
                     topics: BTreeSet::from(["mcp.approval.request".to_owned()]),
-                    outbound,
+                    outbound: outbound.into(),
                 },
             )]),
         };

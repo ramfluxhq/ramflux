@@ -30,7 +30,7 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
-# rusqlite 0.41 bundled-sqlcipher uses sqlcipher-src (SQLCipher amalgamation +
+# rusqlite 0.42 bundled-sqlcipher uses sqlcipher-src (SQLCipher amalgamation +
 # SQLite blessing + libtomcrypt WTFPL). MIT/BSD-3-Clause of that crate already
 # match the allow list; the two extra licenses are crate-scoped.
 exceptions = [
@@ -44,7 +44,13 @@ highlight = "all"
 deny = [
     { name = "native-tls" },
     { name = "openssl" },
-    { name = "openssl-sys" },
+    # Mobile SQLCipher cannot depend on a host libcrypto installation. Its C
+    # backend statically vendors OpenSSL through libsqlite3-sys; this is database
+    # encryption, not a Rust TLS backend. Only that direct wrapper is excepted;
+    # native-tls and the Rust openssl crate remain banned above. Re-review this
+    # exception when changing the locked rusqlite/libsqlite3-sys crypto backend.
+    # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html#the-wrappers-field-optional
+    { name = "openssl-sys", wrappers = ["libsqlite3-sys"] },
 ]
 
 [sources]

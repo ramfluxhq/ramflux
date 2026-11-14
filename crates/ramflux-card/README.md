@@ -189,3 +189,10 @@ Peer JSON contains only catalog, components and model; peer `theme` or `host` pr
 Native edits retain their shown version. Submit is disabled while edits or invalid numeric drafts remain unresolved. Stale edits restore the latest committed value and report the conflict; host snapshots are never replayed. A typed runtime liveness check distinguishes pre-work refusal from a dead VM; dead VM replies settle all requests, clear security slots, make the view inert and release its worker.
 
 `npm test` includes automated DOM/settings tests and presentation lint; `web:check -- <release-prefix> <policy>` rejects web bundle drift after `web:build`. Release material is public and independently pinned; signing keys never enter the worker.
+
+Rust unwinds in every fallible C entry point are contained and return Engine (4).
+The constant ABI version query cannot unwind. A contained panic invalidates the
+creating thread's sessions and clears callback reentry state; hosts must discard
+the affected handles and recreate the renderer. Foreign callbacks must not unwind.
+C ABI builds refuse `panic=abort`; use the workspace `ffi-release` profile or set
+`CARGO_PROFILE_RELEASE_PANIC=unwind` with existing release packaging.

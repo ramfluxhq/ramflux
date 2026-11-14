@@ -64,7 +64,7 @@ async fn actor_local_fixture_uses_the_production_loop_and_independent_readers()
                         topics: BTreeSet::new(),
                         attended: false,
                         nodes: None,
-                        outbound: held_outbound,
+                        outbound: held_outbound.into(),
                         reply: None,
                     })
                     .await
@@ -86,7 +86,7 @@ async fn actor_local_fixture_uses_the_production_loop_and_independent_readers()
                     topics: BTreeSet::new(),
                     attended: false,
                     nodes: None,
-                    outbound,
+                    outbound: outbound.into(),
                     reply: None,
                 })
                 .await?;

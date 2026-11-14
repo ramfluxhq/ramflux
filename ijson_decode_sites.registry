@@ -438,6 +438,9 @@ crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | provisional_safety | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/conversation_mutation.rs | prepare | 1 | E | excluded=local typed conversation intent; authenticated target authority and egress sealing remain SDK-owned
+crates/ramflux-sdk/src/bus/dispatch/conversation_send.rs | send_account | 1 | E | excluded=local conversation intent has no signed Envelope/Ack/Nack; SDK authorizes and seals egress
+crates/ramflux-sdk/src/bus/dispatch/conversation_send.rs | send_direct | 1 | E | excluded=SDK constructs outbound submit parameters from a verified route; not signed-envelope ingress
 crates/ramflux-sdk/src/bus/dispatch/deferred_attachment.rs | dispatch_until | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_device_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/device.rs | dispatch_device_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -585,6 +588,8 @@ crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 1 | D | admitted-befor
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 2 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 3 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/c_abi/mod.rs | parse_json_input | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/c_abi/v2/card.rs | trust_package | 1 | E | excluded=compile-time SDK release index; public signed library and app-pinned host assets, not peer input
+crates/ramflux-sdk/src/c_abi/v2/runtime.rs | read_responses | 1 | E | excluded=authenticated in-process SDK responses preserved as JSON values; no signed envelope admission
 crates/ramflux-sdk/src/client/call/control.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/contact.rs | verify_device_manifest_json | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/contact_requests/messages.rs | contact_message_preview | 1 | D | admitted-before-persist; stored row is not an ingress decoder

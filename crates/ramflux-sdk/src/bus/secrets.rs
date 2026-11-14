@@ -6,20 +6,67 @@ use serde_json::Value;
 use zeroize::Zeroize;
 pub(crate) fn wipe(value: &mut Value) {
     match value {
-        Value::String(value) => value.zeroize(),
+        Value::String(value) => wipe_string(value),
         Value::Array(values) => {
             for value in values {
                 wipe(value);
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                wipe(value);
+            for (mut key, mut value) in std::mem::take(values) {
+                wipe_string(&mut key);
+                wipe(&mut value);
             }
         }
         Value::Number(_) => *value = Value::Number(0.into()),
         Value::Bool(value) => *value = false,
         Value::Null => {}
+    }
+}
+
+fn wipe_string(value: &mut String) {
+    #[cfg(all(test, feature = "c-abi"))]
+    let observed = canary::observed(value);
+    #[cfg(all(test, feature = "c-abi"))]
+    let len = value.len();
+    value.zeroize();
+    #[cfg(all(test, feature = "c-abi"))]
+    if observed {
+        canary::record(value, len);
+    }
+}
+#[cfg(all(test, feature = "c-abi"))]
+pub(crate) mod canary {
+    pub const TEXT: &str = "ABI_WIPE_CANARY_R5_38D79A";
+    thread_local! {static STATE:std::cell::Cell<(bool,usize,bool)>=const{std::cell::Cell::new((false,0,true))};}
+    pub fn enable() {
+        STATE.with(|s| s.set((true, 0, true)));
+    }
+    pub fn finish() -> (usize, bool) {
+        STATE.with(|s| {
+            let (_, n, ok) = s.replace((false, 0, true));
+            (n, ok)
+        })
+    }
+    pub(super) fn observed(value: &str) -> bool {
+        STATE.with(|s| s.get().0) && value.contains(TEXT)
+    }
+    #[allow(
+        unsafe_code,
+        reason = "Test-only observation of zeroized, still-owned allocation bytes"
+    )]
+    pub(super) fn record(value: &String, len: usize) {
+        let ok = if value.capacity() >= len {
+            // SAFETY: the live String retains its allocation; zeroize initialized every
+            // byte through the old length before clearing the logical length.
+            unsafe { std::slice::from_raw_parts(value.as_ptr(), len) }.iter().all(|b| *b == 0)
+        } else {
+            false
+        };
+        STATE.with(|s| {
+            let (active, n, prior) = s.get();
+            s.set((active, n + 1, prior && ok));
+        });
     }
 }
 
@@ -33,10 +80,7 @@ mod tests {
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&value)?);
         assert!(String::from_utf8_lossy(&bytes).contains("restore-secret"));
         wipe(&mut value);
-        assert_eq!(
-            value,
-            serde_json::json!({"passphrase":"","create":{"root_seed":[0,0,0]},"restore":{"account_secret":""}})
-        );
+        assert_eq!(value, serde_json::json!({}), "wiping retires keys as well as secret values");
         Ok(())
     }
 }
