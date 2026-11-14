@@ -67,17 +67,20 @@ pub(in crate::bus) async fn send_account(
     } else {
         message_id
     };
+    if thread.get("group_id").and_then(Value::as_str).is_some() && !intent.attachments.is_empty() {
+        return Err(invalid("group attachments are unsupported"));
+    }
     reserve_intent(&account.client, operation, &request.body)?;
     let deliveries = if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-        if !intent.attachments.is_empty() {
-            return Err(invalid("group attachments are unsupported"));
-        }
         send_group(account, &intent, &message_id, &sender, group).await?
     } else {
         send_direct(account, &intent, &message_id, &principal, &sender, &thread).await?
     };
     let submitted =
         deliveries.iter().all(|delivery| delivery.get("state") == Some(&json!("submitted")));
+    if submitted {
+        complete_intent(&account.client, operation)?;
+    }
     Ok(local_bus_ok(json!({"message_id":message_id,"conversation_id":intent.conversation_id,
         "delivery_state":if submitted {"submitted"} else {"failed"},"deliveries":deliveries})))
 }
@@ -185,15 +188,35 @@ fn delivery(target: &str, result: Result<LocalBusDispatchResult, SdkError>) -> V
 struct SendReceipt {
     fingerprint: String,
     expires_at: i64,
+    #[serde(default)]
+    completed: bool,
+    #[serde(default)]
+    completed_at: Option<i64>,
 }
-fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
-    let key = format!(
+fn receipt_key(operation: &str) -> String {
+    format!(
         "conversation-send/{}",
         ramflux_crypto::blake3_256_base64url(
             "ramflux.conversation.send.operation.v1",
             operation.as_bytes()
         )
-    );
+    )
+}
+fn complete_intent(client: &RamfluxClient, operation: &str) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        let key = receipt_key(operation);
+        let mut receipt = db
+            .load_actor_state::<SendReceipt>(&key)?
+            .ok_or_else(|| invalid("operation receipt absent"))?;
+        receipt.completed = true;
+        receipt.completed_at = Some(now_unix_timestamp());
+        db.persist_actor_state(&key, &receipt)?;
+        Ok(())
+    })
+}
+fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Result<(), SdkError> {
+    let key = receipt_key(operation);
     let canonical = zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(body)?);
     let fingerprint =
         ramflux_crypto::blake3_256_base64url("ramflux.conversation.send.intent.v1", &canonical);
@@ -213,7 +236,10 @@ fn reserve_intent(client: &RamfluxClient, operation: &str, body: &Value) -> Resu
         }
         super::conversation_journal::capacity(client, "conversation-send/")?;
         let expires_at = super::conversation_journal::expiry(client, now)?;
-        db.persist_actor_state(&key, &SendReceipt { fingerprint, expires_at })?;
+        db.persist_actor_state(
+            &key,
+            &SendReceipt { fingerprint, expires_at, completed: false, completed_at: None },
+        )?;
         Ok(())
     })
 }
@@ -275,7 +301,12 @@ mod retention_tests {
         let now = now_unix_timestamp();
         db.persist_actor_state(
             "conversation-send/expired",
-            &SendReceipt { fingerprint: "retired".into(), expires_at: now - 1 },
+            &SendReceipt {
+                fingerprint: "retired".into(),
+                expires_at: now - 1,
+                completed: false,
+                completed_at: None,
+            },
         )?;
         super::super::conversation_journal::prune(&account.client, now)?;
         assert!(
@@ -286,7 +317,12 @@ mod retention_tests {
             for n in 0..super::super::conversation_journal::LIMIT {
                 db.persist_actor_state(
                     &format!("conversation-send/{n:04}"),
-                    &SendReceipt { fingerprint: n.to_string(), expires_at: now + 3600 },
+                    &SendReceipt {
+                        fingerprint: n.to_string(),
+                        expires_at: now + 3600,
+                        completed: false,
+                        completed_at: None,
+                    },
                 )?;
             }
             Ok::<_, SdkError>(())
@@ -302,6 +338,32 @@ mod retention_tests {
             db.actor_state_usage("conversation-send/")?.0,
             u64::from(super::super::conversation_journal::LIMIT),
             "the retained namespace is bounded"
+        );
+        for (key, completed_at) in
+            [("conversation-send/0001", now - 2), ("conversation-send/0002", now - 1)]
+        {
+            db.persist_actor_state(
+                key,
+                &SendReceipt {
+                    fingerprint: key.into(),
+                    expires_at: now + 3600,
+                    completed: true,
+                    completed_at: Some(completed_at),
+                },
+            )?;
+        }
+        reserve_intent(&account.client, "new-operation", &json!({"text":"new"}))?;
+        assert!(!db.actor_state_exists("conversation-send/0001")?, "oldest terminal evicted first");
+        assert!(db.actor_state_exists("conversation-send/0002")?, "newer terminal retained");
+        assert!(db.actor_state_exists("conversation-send/0000")?, "pending receipt retained");
+        assert_eq!(db.actor_state_usage("conversation-send/")?.0, 1024);
+        complete_intent(&account.client, "new-operation")?;
+        let receipt = db
+            .load_actor_state::<SendReceipt>(&receipt_key("new-operation"))?
+            .ok_or("test: completed receipt")?;
+        assert!(
+            receipt.completed && receipt.completed_at.is_some(),
+            "successful send is evictable"
         );
         Ok(())
     }

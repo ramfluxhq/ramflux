@@ -197,6 +197,7 @@ pub(crate) fn prepare(
             wire,
         };
         let receipt = super::conversation_journal::Receipt {
+            completed_at: None,
             fingerprint,
             identity: prepared.identity.clone(),
             accepted: BTreeSet::new(),

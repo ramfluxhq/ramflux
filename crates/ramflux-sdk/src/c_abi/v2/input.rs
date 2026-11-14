@@ -362,4 +362,48 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn wiping_parser_differential_bounded_generated_inputs() {
+        const CASES: usize = 2048;
+        const MAX_BYTES: usize = 256;
+        const SEEDS: &[&[u8]] = &[
+            br#"{"text":"hello\n\u263a","items":[1,true,null]}"#,
+            br#"[0,-0,1.25,1e3,9007199254740991]"#,
+            br#"{"a":1,"a":2}"#,
+            br#""\ud83d\ude00""#,
+            br#"[1e-4000,1e400]"#,
+        ];
+        let mut state = 0x9e3779b97f4a7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut accepted = 0;
+        for case in 0..CASES {
+            let mut bytes = if case % 3 == 0 {
+                let len = (next() as usize) % MAX_BYTES;
+                (0..len).map(|_| next() as u8).collect::<Vec<_>>()
+            } else {
+                SEEDS[case % SEEDS.len()].to_vec()
+            };
+            if case % 3 == 1 && !bytes.is_empty() {
+                let index = (next() as usize) % bytes.len();
+                bytes[index] = next() as u8;
+            }
+            let actual = decode::<Wiping>(&bytes);
+            let expected = ramflux_protocol::parse_i_json::<Value>(&bytes);
+            assert_eq!(
+                actual.is_ok(),
+                expected.is_ok(),
+                "parser predicate diverged at case {case}: {bytes:?}"
+            );
+            if let (Ok(actual), Ok(expected)) = (actual, expected) {
+                accepted += 1;
+                assert_eq!(actual.0, expected, "parser value diverged at case {case}");
+            }
+        }
+        assert!(accepted > 100, "differential corpus must exercise successful decoding too");
+    }
 }

@@ -31,16 +31,18 @@ impl Fixture {
         Self::configured(false)
     }
     pub(super) fn configured(with_node: bool) -> Self {
-        Self::configured_exports(with_node, true)
+        Self::configured_exports(with_node, false)
     }
     pub(super) fn configured_exports(with_node: bool, allow: bool) -> Self {
         let root = tempfile::tempdir().expect("test: isolated data root");
         if with_node {
             seed_node(root.path());
         }
-        let config =
-            serde_json::to_vec(&json!({"data_root":root.path(),"allow_secret_exports":allow}))
-                .expect("test: config");
+        let mut config = json!({"data_root":root.path()});
+        if allow {
+            config["allow_secret_exports"] = json!(true);
+        }
+        let config = serde_json::to_vec(&config).expect("test: config");
         let mut handle = 0;
         assert_eq!(
             ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle),

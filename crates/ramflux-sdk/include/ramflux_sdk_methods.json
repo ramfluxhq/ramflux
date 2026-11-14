@@ -4,6 +4,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2i",
+      "key_export": false,
       "name": "a2i.acknowledge",
       "secret_input": true,
       "secret_output": true,
@@ -12,6 +13,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2i",
+      "key_export": false,
       "name": "a2i.append",
       "secret_input": true,
       "secret_output": true,
@@ -20,6 +22,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2i",
+      "key_export": false,
       "name": "a2i.list",
       "secret_input": false,
       "secret_output": true,
@@ -28,6 +31,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2i",
+      "key_export": false,
       "name": "a2i.list_pending",
       "secret_input": false,
       "secret_output": true,
@@ -36,6 +40,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2ui",
+      "key_export": false,
       "name": "a2ui.action",
       "secret_input": true,
       "secret_output": true,
@@ -44,6 +49,7 @@
     {
       "bridge_allowed": true,
       "capability": "a2ui",
+      "key_export": false,
       "name": "a2ui.render",
       "secret_input": true,
       "secret_output": true,
@@ -52,6 +58,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.backup.cancel",
       "secret_input": true,
       "secret_output": false,
@@ -60,6 +67,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.backup.create",
       "secret_input": true,
       "secret_output": false,
@@ -68,6 +76,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": true,
       "name": "account.backup.export",
       "secret_input": true,
       "secret_output": true,
@@ -76,6 +85,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.backup.import",
       "secret_input": true,
       "secret_output": true,
@@ -84,6 +94,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.backup.jobs",
       "secret_input": true,
       "secret_output": false,
@@ -92,6 +103,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.config.get",
       "secret_input": false,
       "secret_output": true,
@@ -100,6 +112,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.config.set",
       "secret_input": true,
       "secret_output": true,
@@ -108,6 +121,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.create",
       "secret_input": true,
       "secret_output": true,
@@ -116,6 +130,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.create.begin",
       "secret_input": true,
       "secret_output": true,
@@ -124,6 +139,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.create.cancel",
       "secret_input": false,
       "secret_output": false,
@@ -132,6 +148,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.create.confirm",
       "secret_input": true,
       "secret_output": true,
@@ -140,6 +157,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.create.hidden_challenge",
       "secret_input": false,
       "secret_output": true,
@@ -148,6 +166,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": true,
       "name": "account.create.show_once",
       "secret_input": false,
       "secret_output": true,
@@ -156,6 +175,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.custody.begin",
       "secret_input": true,
       "secret_output": true,
@@ -164,6 +184,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.custody.cancel",
       "secret_input": false,
       "secret_output": false,
@@ -172,6 +193,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.custody.confirm",
       "secret_input": true,
       "secret_output": true,
@@ -180,6 +202,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.custody.hidden_challenge",
       "secret_input": false,
       "secret_output": true,
@@ -188,6 +211,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": true,
       "name": "account.custody.show_once",
       "secret_input": false,
       "secret_output": true,
@@ -196,6 +220,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": true,
       "name": "account.export_agent_credentials",
       "secret_input": true,
       "secret_output": true,
@@ -204,6 +229,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.list",
       "secret_input": false,
       "secret_output": true,
@@ -212,6 +238,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.lock",
       "secret_input": true,
       "secret_output": true,
@@ -220,6 +247,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.passphrase.rotate",
       "secret_input": true,
       "secret_output": true,
@@ -228,6 +256,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.recover.begin",
       "secret_input": true,
       "secret_output": true,
@@ -236,6 +265,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.recover.cancel",
       "secret_input": false,
       "secret_output": false,
@@ -244,6 +274,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.recover.confirm",
       "secret_input": true,
       "secret_output": true,
@@ -252,6 +283,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.restore.install",
       "secret_input": true,
       "secret_output": false,
@@ -260,6 +292,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.restore.verify",
       "secret_input": true,
       "secret_output": false,
@@ -268,6 +301,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.status",
       "secret_input": false,
       "secret_output": true,
@@ -276,6 +310,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.switch",
       "secret_input": true,
       "secret_output": true,
@@ -284,6 +319,7 @@
     {
       "bridge_allowed": true,
       "capability": "account",
+      "key_export": false,
       "name": "account.unlock",
       "secret_input": true,
       "secret_output": true,
@@ -292,6 +328,7 @@
     {
       "bridge_allowed": true,
       "capability": "bot",
+      "key_export": false,
       "name": "bot.install",
       "secret_input": true,
       "secret_output": true,
@@ -300,6 +337,7 @@
     {
       "bridge_allowed": true,
       "capability": "bot",
+      "key_export": false,
       "name": "bot.list",
       "secret_input": false,
       "secret_output": true,
@@ -308,6 +346,7 @@
     {
       "bridge_allowed": true,
       "capability": "bot",
+      "key_export": false,
       "name": "bot.revoke",
       "secret_input": true,
       "secret_output": true,
@@ -316,6 +355,7 @@
     {
       "bridge_allowed": true,
       "capability": "bot",
+      "key_export": false,
       "name": "bot.trust.add",
       "secret_input": true,
       "secret_output": true,
@@ -324,6 +364,7 @@
     {
       "bridge_allowed": true,
       "capability": "bus",
+      "key_export": false,
       "name": "bus.subscribe",
       "secret_input": false,
       "secret_output": false,
@@ -332,6 +373,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.answer",
       "secret_input": true,
       "secret_output": true,
@@ -340,6 +382,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.hangup",
       "secret_input": true,
       "secret_output": true,
@@ -348,6 +391,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.invite",
       "secret_input": true,
       "secret_output": true,
@@ -356,6 +400,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.list",
       "secret_input": false,
       "secret_output": true,
@@ -364,6 +409,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.media.session",
       "secret_input": true,
       "secret_output": true,
@@ -372,6 +418,7 @@
     {
       "bridge_allowed": true,
       "capability": "call",
+      "key_export": false,
       "name": "call.reject",
       "secret_input": true,
       "secret_output": true,
@@ -380,6 +427,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.accept",
       "secret_input": true,
       "secret_output": true,
@@ -388,6 +436,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.add",
       "secret_input": true,
       "secret_output": true,
@@ -396,6 +445,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.block",
       "secret_input": true,
       "secret_output": true,
@@ -404,6 +454,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.card.export",
       "secret_input": true,
       "secret_output": true,
@@ -412,6 +463,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.card.import",
       "secret_input": true,
       "secret_output": true,
@@ -420,6 +472,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.decline",
       "secret_input": true,
       "secret_output": true,
@@ -428,6 +481,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.list",
       "secret_input": false,
       "secret_output": true,
@@ -436,6 +490,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.reject",
       "secret_input": true,
       "secret_output": true,
@@ -444,6 +499,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.rejected",
       "secret_input": false,
       "secret_output": true,
@@ -452,6 +508,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.remove",
       "secret_input": true,
       "secret_output": true,
@@ -460,6 +517,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.request",
       "secret_input": true,
       "secret_output": true,
@@ -468,6 +526,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.request.accept",
       "secret_input": true,
       "secret_output": true,
@@ -476,6 +535,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.request.block",
       "secret_input": true,
       "secret_output": true,
@@ -484,6 +544,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.request.decline",
       "secret_input": true,
       "secret_output": true,
@@ -492,6 +553,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -500,6 +562,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.policy.get",
       "secret_input": false,
       "secret_output": true,
@@ -508,6 +571,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.requests.policy.set",
       "secret_input": true,
       "secret_output": true,
@@ -516,6 +580,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.safety_number",
       "secret_input": true,
       "secret_output": true,
@@ -524,6 +589,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.unblock",
       "secret_input": true,
       "secret_output": true,
@@ -532,6 +598,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.verification.status",
       "secret_input": false,
       "secret_output": true,
@@ -540,6 +607,7 @@
     {
       "bridge_allowed": true,
       "capability": "contact",
+      "key_export": false,
       "name": "contact.verify",
       "secret_input": true,
       "secret_output": true,
@@ -548,6 +616,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.directory",
       "secret_input": false,
       "secret_output": true,
@@ -556,6 +625,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.disappearing.expire",
       "secret_input": true,
       "secret_output": true,
@@ -564,6 +634,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.disappearing.set",
       "secret_input": true,
       "secret_output": true,
@@ -572,6 +643,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.list",
       "secret_input": false,
       "secret_output": true,
@@ -580,6 +652,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.mute",
       "secret_input": true,
       "secret_output": true,
@@ -588,6 +661,7 @@
     {
       "bridge_allowed": true,
       "capability": "daemon",
+      "key_export": false,
       "name": "daemon.status",
       "secret_input": false,
       "secret_output": false,
@@ -596,6 +670,7 @@
     {
       "bridge_allowed": false,
       "capability": "daemon",
+      "key_export": false,
       "name": "daemon.stop",
       "secret_input": true,
       "secret_output": false,
@@ -604,6 +679,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.activate",
       "secret_input": true,
       "secret_output": true,
@@ -612,6 +688,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.authorize",
       "secret_input": true,
       "secret_output": true,
@@ -620,6 +697,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.list",
       "secret_input": false,
       "secret_output": true,
@@ -628,6 +706,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.migrate",
       "secret_input": true,
       "secret_output": true,
@@ -636,6 +715,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.approve",
       "secret_input": true,
       "secret_output": true,
@@ -644,6 +724,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.begin",
       "secret_input": true,
       "secret_output": true,
@@ -652,6 +733,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.cancel",
       "secret_input": true,
       "secret_output": true,
@@ -660,6 +742,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.confirm",
       "secret_input": true,
       "secret_output": true,
@@ -668,6 +751,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.join",
       "secret_input": true,
       "secret_output": true,
@@ -676,6 +760,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.pair.status",
       "secret_input": false,
       "secret_output": true,
@@ -684,6 +769,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.push_route.set",
       "secret_input": true,
       "secret_output": true,
@@ -692,6 +778,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.refresh",
       "secret_input": true,
       "secret_output": true,
@@ -700,6 +787,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.revoke",
       "secret_input": true,
       "secret_output": true,
@@ -708,6 +796,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": true,
       "name": "device.sync.export",
       "secret_input": true,
       "secret_output": true,
@@ -716,6 +805,7 @@
     {
       "bridge_allowed": true,
       "capability": "device",
+      "key_export": false,
       "name": "device.sync.import",
       "secret_input": true,
       "secret_output": true,
@@ -724,6 +814,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.approve",
       "secret_input": true,
       "secret_output": true,
@@ -732,6 +823,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.create_standing_approval",
       "secret_input": true,
       "secret_output": true,
@@ -740,6 +832,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.deny",
       "secret_input": true,
       "secret_output": true,
@@ -748,6 +841,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.list",
       "secret_input": false,
       "secret_output": true,
@@ -756,6 +850,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.list_standing_approvals",
       "secret_input": false,
       "secret_output": true,
@@ -764,6 +859,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.request",
       "secret_input": true,
       "secret_output": true,
@@ -772,6 +868,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.revoke",
       "secret_input": true,
       "secret_output": true,
@@ -780,6 +877,7 @@
     {
       "bridge_allowed": true,
       "capability": "grant",
+      "key_export": false,
       "name": "grant.revoke_standing_approval",
       "secret_input": true,
       "secret_output": true,
@@ -788,6 +886,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.create",
       "secret_input": true,
       "secret_output": true,
@@ -796,6 +895,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.history",
       "secret_input": false,
       "secret_output": true,
@@ -804,6 +904,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.invitation.accept",
       "secret_input": true,
       "secret_output": true,
@@ -812,6 +913,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.invitation.decline",
       "secret_input": true,
       "secret_output": true,
@@ -820,6 +922,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.invitations.list",
       "secret_input": false,
       "secret_output": true,
@@ -828,6 +931,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.invite.accept",
       "secret_input": true,
       "secret_output": true,
@@ -836,6 +940,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.invite.create",
       "secret_input": true,
       "secret_output": true,
@@ -844,6 +949,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.list",
       "secret_input": false,
       "secret_output": true,
@@ -852,6 +958,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.member.add",
       "secret_input": true,
       "secret_output": true,
@@ -860,6 +967,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.member.ban",
       "secret_input": true,
       "secret_output": true,
@@ -868,6 +976,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.member.kick",
       "secret_input": true,
       "secret_output": true,
@@ -876,6 +985,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.member.remove",
       "secret_input": true,
       "secret_output": true,
@@ -884,6 +994,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.members",
       "secret_input": false,
       "secret_output": true,
@@ -892,6 +1003,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.message.delete",
       "secret_input": true,
       "secret_output": true,
@@ -900,6 +1012,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.name.set",
       "secret_input": true,
       "secret_output": true,
@@ -908,6 +1021,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.owner.transfer",
       "secret_input": true,
       "secret_output": true,
@@ -916,6 +1030,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.read",
       "secret_input": true,
       "secret_output": true,
@@ -924,6 +1039,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.receive",
       "secret_input": true,
       "secret_output": true,
@@ -932,6 +1048,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -940,6 +1057,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.role.set",
       "secret_input": true,
       "secret_output": true,
@@ -948,6 +1066,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.send",
       "secret_input": true,
       "secret_output": true,
@@ -956,6 +1075,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": true,
       "name": "group.sender_key.export",
       "secret_input": true,
       "secret_output": true,
@@ -964,6 +1084,7 @@
     {
       "bridge_allowed": true,
       "capability": "group",
+      "key_export": false,
       "name": "group.sender_key.import",
       "secret_input": true,
       "secret_output": true,
@@ -972,6 +1093,7 @@
     {
       "bridge_allowed": true,
       "capability": "identity",
+      "key_export": false,
       "name": "identity.directory",
       "secret_input": false,
       "secret_output": true,
@@ -980,6 +1102,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.approval.denied",
       "secret_input": true,
       "secret_output": true,
@@ -988,6 +1111,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.approval.granted",
       "secret_input": true,
       "secret_output": true,
@@ -996,6 +1120,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.approval.list",
       "secret_input": false,
       "secret_output": true,
@@ -1004,6 +1129,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.audit.list",
       "secret_input": false,
       "secret_output": true,
@@ -1012,6 +1138,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.server.add",
       "secret_input": true,
       "secret_output": true,
@@ -1020,6 +1147,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.server.list",
       "secret_input": false,
       "secret_output": true,
@@ -1028,6 +1156,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.server.refresh",
       "secret_input": false,
       "secret_output": true,
@@ -1036,6 +1165,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.tool.list",
       "secret_input": false,
       "secret_output": true,
@@ -1044,6 +1174,7 @@
     {
       "bridge_allowed": true,
       "capability": "mcp",
+      "key_export": false,
       "name": "mcp.tool.started",
       "secret_input": true,
       "secret_output": true,
@@ -1052,6 +1183,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.ack",
       "secret_input": true,
       "secret_output": true,
@@ -1060,6 +1192,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.focus",
       "secret_input": true,
       "secret_output": true,
@@ -1068,6 +1201,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.delete",
       "secret_input": true,
       "secret_output": true,
@@ -1076,6 +1210,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.franking_evidence",
       "secret_input": false,
       "secret_output": true,
@@ -1084,6 +1219,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.list",
       "secret_input": false,
       "secret_output": true,
@@ -1092,6 +1228,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.read",
       "secret_input": false,
       "secret_output": true,
@@ -1100,6 +1237,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.receipt.delivered",
       "secret_input": true,
       "secret_output": true,
@@ -1108,6 +1246,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.receipt.read",
       "secret_input": true,
       "secret_output": true,
@@ -1116,6 +1255,7 @@
     {
       "bridge_allowed": true,
       "capability": "message",
+      "key_export": false,
       "name": "message.receive",
       "secret_input": true,
       "secret_output": true,
@@ -1124,6 +1264,7 @@
     {
       "bridge_allowed": true,
       "capability": "raw_message",
+      "key_export": false,
       "name": "message.submit",
       "secret_input": true,
       "secret_output": true,
@@ -1132,6 +1273,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.send",
       "secret_input": true,
       "secret_output": true,
@@ -1140,6 +1282,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.edit",
       "secret_input": true,
       "secret_output": true,
@@ -1148,6 +1291,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.react",
       "secret_input": true,
       "secret_output": true,
@@ -1156,6 +1300,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.reply",
       "secret_input": true,
       "secret_output": true,
@@ -1164,6 +1309,7 @@
     {
       "bridge_allowed": true,
       "capability": "conversation",
+      "key_export": false,
       "name": "conversation.delete",
       "secret_input": true,
       "secret_output": true,
@@ -1172,6 +1318,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.add",
       "secret_input": false,
       "secret_output": false,
@@ -1180,6 +1327,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.confirm",
       "secret_input": false,
       "secret_output": false,
@@ -1188,6 +1336,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.list",
       "secret_input": false,
       "secret_output": false,
@@ -1196,6 +1345,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.probe",
       "secret_input": false,
       "secret_output": false,
@@ -1204,6 +1354,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.remove",
       "secret_input": false,
       "secret_output": false,
@@ -1212,6 +1363,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.set_default",
       "secret_input": false,
       "secret_output": false,
@@ -1220,6 +1372,7 @@
     {
       "bridge_allowed": true,
       "capability": "node",
+      "key_export": false,
       "name": "node.set_enabled",
       "secret_input": false,
       "secret_output": false,
@@ -1228,6 +1381,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.delete",
       "secret_input": true,
       "secret_output": true,
@@ -1236,6 +1390,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.directory",
       "secret_input": false,
       "secret_output": true,
@@ -1244,6 +1399,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.fetch",
       "secret_input": true,
       "secret_output": true,
@@ -1252,6 +1408,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.get",
       "secret_input": true,
       "secret_output": true,
@@ -1260,6 +1417,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.get.begin",
       "secret_input": true,
       "secret_output": true,
@@ -1268,6 +1426,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.get.finish",
       "secret_input": true,
       "secret_output": true,
@@ -1276,6 +1435,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.get.read",
       "secret_input": true,
       "secret_output": true,
@@ -1284,6 +1444,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.get.status",
       "secret_input": false,
       "secret_output": true,
@@ -1292,6 +1453,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.import",
       "secret_input": true,
       "secret_output": true,
@@ -1300,6 +1462,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.list",
       "secret_input": false,
       "secret_output": true,
@@ -1308,6 +1471,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.put",
       "secret_input": true,
       "secret_output": true,
@@ -1316,6 +1480,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.put.begin",
       "secret_input": true,
       "secret_output": true,
@@ -1324,6 +1489,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.put.chunk",
       "secret_input": true,
       "secret_output": true,
@@ -1332,6 +1498,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.put.finish",
       "secret_input": true,
       "secret_output": true,
@@ -1340,6 +1507,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.put.status",
       "secret_input": false,
       "secret_output": true,
@@ -1348,6 +1516,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.share",
       "secret_input": true,
       "secret_output": true,
@@ -1356,6 +1525,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.transfer.resume",
       "secret_input": true,
       "secret_output": true,
@@ -1364,6 +1534,7 @@
     {
       "bridge_allowed": true,
       "capability": "object",
+      "key_export": false,
       "name": "object.transfer.status",
       "secret_input": false,
       "secret_output": true,
@@ -1372,6 +1543,7 @@
     {
       "bridge_allowed": true,
       "capability": "stream",
+      "key_export": false,
       "name": "stream.read",
       "secret_input": false,
       "secret_output": true,
@@ -1380,6 +1552,7 @@
     {
       "bridge_allowed": true,
       "capability": "subscription",
+      "key_export": false,
       "name": "subscription.close",
       "secret_input": false,
       "secret_output": false,
@@ -1388,6 +1561,7 @@
     {
       "bridge_allowed": true,
       "capability": "subscription",
+      "key_export": false,
       "name": "subscription.open",
       "secret_input": false,
       "secret_output": false,
@@ -1396,6 +1570,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.action",
       "secret_input": true,
       "secret_output": true,
@@ -1404,6 +1579,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.get",
       "secret_input": false,
       "secret_output": true,
@@ -1412,6 +1588,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.list",
       "secret_input": false,
       "secret_output": true,
@@ -1420,6 +1597,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.request_resync",
       "secret_input": true,
       "secret_output": true,
@@ -1428,6 +1606,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.resync",
       "secret_input": true,
       "secret_output": true,
@@ -1436,6 +1615,7 @@
     {
       "bridge_allowed": true,
       "capability": "surface",
+      "key_export": false,
       "name": "surface.send",
       "secret_input": true,
       "secret_output": true,
@@ -1444,6 +1624,7 @@
     {
       "bridge_allowed": true,
       "capability": "sync",
+      "key_export": false,
       "name": "sync.status.get",
       "secret_input": false,
       "secret_output": true,
@@ -1452,6 +1633,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.accept",
       "secret_input": true,
       "secret_output": true,
@@ -1460,6 +1642,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.cancel",
       "secret_input": true,
       "secret_output": true,
@@ -1468,6 +1651,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.decision.prove",
       "secret_input": true,
       "secret_output": true,
@@ -1476,6 +1660,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.decline",
       "secret_input": true,
       "secret_output": true,
@@ -1484,6 +1669,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.get",
       "secret_input": false,
       "secret_output": true,
@@ -1492,6 +1678,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.list",
       "secret_input": false,
       "secret_output": true,
@@ -1500,6 +1687,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.propose",
       "secret_input": true,
       "secret_output": true,
@@ -1508,6 +1696,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.resolve",
       "secret_input": true,
       "secret_output": true,
@@ -1516,6 +1705,7 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.start",
       "secret_input": true,
       "secret_output": true,
@@ -1524,11 +1714,12 @@
     {
       "bridge_allowed": true,
       "capability": "task",
+      "key_export": false,
       "name": "task.update",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
     }
   ],
-  "policy_version": 1
+  "policy_version": 2
 }

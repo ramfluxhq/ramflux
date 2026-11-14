@@ -56,7 +56,7 @@ operation key, retries a mutation or turns a lost response into success.
 
 `crates/ramflux-sdk/include/ramflux_sdk_methods.json` is the machine-readable
 native binding policy. Each row has `name`, `capability`, `secret_input`,
-`secret_output` and `show_once`. Capability is the SDK operation namespace used
+`secret_output`, `show_once` and `key_export`. Capability is the SDK operation namespace used
 for discovery, **not** an authorization grant. Secret flags conservatively mark
 confidential payloads/credentials; they never authorize logging other bodies.
 `show_once` describes the SDK's one-time phrase-disclosure operations.
@@ -70,7 +70,7 @@ same file beside the cbindgen header in `$CARGO_TARGET_DIR/include/`.
 policy names against the live SDK method table, custody operations and backup
 job methods, and compares all flags with the generated JSON. A new operation
 without a policy row fails this test. Negotiation includes this same manifest
-under `method_policy`, with `policy_version = 1`.
+under `method_policy`, with `policy_version = 2`.
 
 ## Operations
 
@@ -406,8 +406,8 @@ does not make invalid host pointers or foreign callback unwinds valid.
 The native bridge admits only explicitly classified SDK methods. `daemon.stop`
 and test-only methods are denied; use `client_close` to shut down. Negotiation
 omits denied methods, and method policy rows expose `bridge_allowed`. Raw routing
-still requires `allow_raw_messages:true`. Every policy row with `secret_output:true`
-requires the explicit trusted-host config capability `allow_secret_exports:true`;
+still requires `allow_raw_messages:true`. Only policy rows with `key_export:true`
+require the explicit trusted-host config capability `allow_secret_exports:true`;
 SDK authorization and custody checks apply independently. An operation key is
 nonempty and at most 256 UTF-8 bytes. Conversation send persists an intent
 fingerprint in account operation metadata before routing; changed conversation,
@@ -443,7 +443,7 @@ both successful and failed callbacks; load buffers and decoded temporary seeds
 are zeroized on every exit. Hosts must wipe their own temporary plaintext copies.
 
 `allow_secret_exports` gates **every** method whose generated policy row declares
-`secret_output:true`, including account lists containing private state, group sender
+`key_export:true`: agent credentials, account backups, group sender
 keys, device sync and both show-once calls. The policy column is the authority for
 this admission check; there is no per-method exception list.
 
@@ -468,11 +468,27 @@ later edits/deletion retire the current pending payload too; its receipt then
 returns a content-free retired/uncertain outcome without re-allocating or resending.
 
 Send and mutation receipts expire with the account's configured content-retention
-TTL and are bounded to 1,024 live rows per namespace. Admission at capacity refuses
-new operations rather than evicting an unexpired retry guarantee. Private pending
-rows have the same expiry. After expiry, old keys have no retry guarantee; hosts
+TTL and are bounded to 1,024 live rows per namespace. Admission at capacity evicts the oldest terminal
+receipt; only an all-pending window refuses new operations. Private pending
+rows have the same expiry. After expiry or terminal eviction, old keys have no retry guarantee; hosts
 must reconcile history and use fresh operation keys.
 
 The bundled SDK Card release is epoch/version 1/2 on the current catalog. Hosts
 must refresh their independently pinned trust-index and exact-descriptor digests
 when adopting this SDK commit; ABI majors remain SDK 2 and Card 4.
+
+
+### Receipt capacity and key exports (policy version 2)
+
+The export permission applies only to `account.export_agent_credentials`,
+`account.backup.export`, `group.sender_key.export`, `device.sync.export`,
+`account.create.show_once` and `account.custody.show_once`. Ordinary reads and
+conversation operations work with the default configuration; `secret_output`
+remains confidential-data handling metadata.
+
+Send and mutation receipts each have a 1,024-row limit and the account content
+TTL. At capacity, admission evicts the oldest terminal receipt first, including
+any leftover private intent. Such eviction ends that operation's retry window.
+Pending operations are never evicted for capacity: a window full of pending
+receipts returns `RateLimited` until one completes or expires. Successful sends
+mark their receipts terminal only after all deliveries are submitted.

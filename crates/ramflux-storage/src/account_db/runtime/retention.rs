@@ -24,7 +24,7 @@ impl AccountDb {
         if self.retain_indexed_own_copy_states(prefix, now, limit)? {
             return Ok(());
         }
-        self.retain_actor_states(prefix, now, limit, true)
+        self.retain_actor_states(prefix, now, Some(limit), true)
     }
 
     /// Delete expired (or legacy undated) records and retain at most `limit` live rows.
@@ -37,14 +37,21 @@ impl AccountDb {
         now: i64,
         limit: u32,
     ) -> Result<(), StorageError> {
-        self.retain_actor_states(prefix, now, limit.min(4096), false)
+        self.retain_actor_states(prefix, now, Some(limit.min(4096)), false)
+    }
+
+    /// Delete expired or legacy undated rows without evicting any live receipt.
+    /// # Errors
+    /// Rejects empty/non-ASCII prefixes and returns SQL errors atomically.
+    pub fn expire_actor_states(&self, prefix: &str, now: i64) -> Result<(), StorageError> {
+        self.retain_actor_states(prefix, now, None, false)
     }
 
     fn retain_actor_states(
         &self,
         prefix: &str,
         now: i64,
-        limit: u32,
+        limit: Option<u32>,
         pending_first: bool,
     ) -> Result<(), StorageError> {
         let mut bytes = prefix.as_bytes().to_vec();
@@ -59,10 +66,12 @@ impl AccountDb {
                 "DELETE FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 AND CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN COALESCE(CAST(json_extract(CAST(state_json AS TEXT),'$.expires_at') AS INTEGER),0) ELSE 0 END<=?3",
                 params![prefix,end,now],
             )?;
-            self.connection.execute(
+            if let Some(limit) = limit {
+                self.connection.execute(
                 "DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2 ORDER BY CASE WHEN ?4 THEN COALESCE(json_extract(CAST(state_json AS TEXT),'$.completed'),json_extract(CAST(state_json AS TEXT),'$.acknowledged'),0) ELSE 0 END ASC,CAST(json_extract(CAST(state_json AS TEXT),'$.expires_at') AS INTEGER) DESC,state_kind DESC LIMIT -1 OFFSET ?3)",
-                params![prefix,end,limit,pending_first],
-            )?;
+                    params![prefix,end,limit,pending_first],
+                )?;
+            }
             Ok(())
         })
     }
@@ -70,6 +79,33 @@ impl AccountDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expiry_only_retains_every_live_pending_row() -> Result<(), Box<dyn std::error::Error>> {
+        let (_root, db) = crate::tests::test_db("expiry-only")?;
+        for (key, expiry) in [("receipt/expired", 9), ("receipt/live", 11), ("receipt/other", 12)] {
+            db.persist_actor_state(
+                key,
+                &serde_json::json!({"expires_at":expiry,"completed":false}),
+            )?;
+        }
+        db.persist_actor_state("receipt0/neighbor", &"keep")?;
+        db.expire_actor_states("receipt/", 10)?;
+        assert_eq!(
+            db.actor_state_key_page("receipt/", 10)?,
+            vec!["receipt/live", "receipt/other"],
+            "expiry-only must preserve every live pending row"
+        );
+        assert!(
+            db.actor_state_exists("receipt0/neighbor")?,
+            "neighbor namespace remains untouched"
+        );
+        assert!(
+            db.expire_actor_states("", 10).is_err(),
+            "empty prefix cannot delete all namespaces"
+        );
+        Ok(())
+    }
+
     #[test]
     fn delivery_retention_keeps_pending_rows_and_supports_the_larger_stream_budget()
     -> Result<(), Box<dyn std::error::Error>> {

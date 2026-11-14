@@ -34,11 +34,12 @@ struct Registry {
 }
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(Registry::default()));
 
+#[derive(zeroize::ZeroizeOnDrop)]
 pub(super) struct Config {
     pub(super) allow_raw_messages: bool,
     pub(super) allow_secret_exports: bool,
-    pub(super) data_root: std::path::PathBuf,
-    pub(super) builtin_nodes: Vec<crate::NodeProfile>,
+    pub(super) data_root: String,
+    pub(super) builtin_nodes: Vec<super::input_config::OwnedProfile>,
 }
 
 struct Request {
@@ -222,7 +223,7 @@ fn open_inner(
 ) -> Result<(), CAbiError> {
     write_handle(out_client, 0)?;
     let mut config: Config = input(config, len)?;
-    if config.data_root.as_os_str().is_empty() || !config.data_root.is_absolute() {
+    if config.data_root.is_empty() || !std::path::Path::new(&config.data_root).is_absolute() {
         return Err(invalid("data_root must be absolute"));
     }
     std::fs::create_dir_all(&config.data_root).map_err(|_| invalid("data_root"))?;
@@ -251,7 +252,10 @@ fn open_inner(
     let _opening = Opening(candidate_root);
     let mut bus =
         LocalBusConfig::new(std::path::PathBuf::new(), std::mem::take(&mut config.data_root));
-    bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes);
+    bus.builtin_nodes = std::mem::take(&mut config.builtin_nodes)
+        .into_iter()
+        .map(|mut profile| profile.take_node())
+        .collect();
     bus.custody_vault = vault;
     let started = Client::start(bus);
     let mut registry = REGISTRY.lock().map_err(|_| internal())?;
@@ -314,7 +318,6 @@ pub extern "C" fn ramflux_v2_client_release(handle: u64) -> i32 {
 
 #[cfg(test)]
 pub(super) fn register_test_client(client: Arc<Client>) -> u64 {
-    client.shared.allow_secret_exports.store(true, std::sync::atomic::Ordering::Release);
     let mut registry = REGISTRY.lock().expect("test: registry");
     let id = next_id(&mut registry).expect("test: client id");
     registry.clients.insert(id, client);
@@ -347,7 +350,7 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "method"));
         }
         let client = client(handle)?;
-        if super::method_policy::requires_secret_export(&request.method)
+        if super::method_policy::requires_key_export(&request.method)
             && !client.shared.allow_secret_exports.load(std::sync::atomic::Ordering::Acquire)
         {
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "secret_export"));
@@ -735,32 +738,5 @@ impl super::input::Decode for Request {
         result.body =
             value.as_object_mut().and_then(|map| map.remove("body")).ok_or_else(i::invalid)?;
         Ok(result)
-    }
-}
-
-impl Drop for Config {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        if let Ok(mut path) = std::mem::take(&mut self.data_root).into_os_string().into_string() {
-            path.zeroize();
-        }
-        for node in &mut self.builtin_nodes {
-            node.discovery_url.zeroize();
-            node.node_id.zeroize();
-            node.node_public_key.zeroize();
-            node.ca_cert_pem.zeroize();
-            node.prekey_http_url.zeroize();
-            node.signaling_turn_addr.zeroize();
-            node.gateway.quic_addr.zeroize();
-            node.gateway.tcp_addr.zeroize();
-            node.gateway.server_name.zeroize();
-            node.relay.quic_addr.zeroize();
-            node.relay.server_name.zeroize();
-            node.protocol_versions.zeroize();
-            node.client_capabilities.zeroize();
-            for mut warning in std::mem::take(&mut node.safety_warnings) {
-                warning.zeroize();
-            }
-        }
     }
 }

@@ -241,15 +241,42 @@ fn closed_command_channel_returns_closed_before_atomic_shutdown_flags() {
 }
 
 #[test]
-fn every_secret_output_policy_row_requires_explicit_host_capability() {
-    let fixture = Fixture::configured_exports(false, false);
-    for policy in super::method_policy::METHOD_POLICIES.iter().filter(|row| row.secret_output) {
+fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
+    let fixture = Fixture::open();
+    let exports: std::collections::BTreeSet<_> = super::method_policy::METHOD_POLICIES
+        .iter()
+        .filter(|row| row.key_export)
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        exports,
+        std::collections::BTreeSet::from([
+            "account.export_agent_credentials",
+            "account.backup.export",
+            "group.sender_key.export",
+            "device.sync.export",
+            "account.create.show_once",
+            "account.custody.show_once",
+        ]),
+        "only key/backup disclosure operations require export permission"
+    );
+    assert_eq!(
+        fixture.result(fixture.submit("account.list", deadline()))["code"],
+        0,
+        "ordinary account operation works with the actual default config"
+    );
+    for method in ["message.list", "conversation.send"] {
+        let id = fixture.submit_body(method, &json!({}), deadline());
+        let result = fixture.result(id);
+        assert_ne!(result["code"], 12, "{method} reaches SDK validation without export permission");
+    }
+    for policy in super::method_policy::METHOD_POLICIES.iter().filter(|row| row.key_export) {
         let request=serde_json::to_vec(&json!({"sdk_api":policy.capability,"method":policy.name,"body":{},"deadline_ms":deadline()})).expect("test: classified operation");
         let mut operation = 99;
         assert_eq!(
             ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation),
             12,
-            "secret-output method {} must require explicit opt-in",
+            "key-export method {} must require explicit opt-in",
             policy.name
         );
         assert_eq!(operation, 0, "denied export allocates no operation");

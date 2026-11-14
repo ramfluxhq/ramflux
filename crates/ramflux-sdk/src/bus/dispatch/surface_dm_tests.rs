@@ -34,12 +34,33 @@ async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_devi
             json!({"conversation_id":"thread","text":"Native text"}),
         );
         request.operation_id = Some("host-send-1".into());
+        // Admission number 1,025 must recycle terminal metadata and reach the real send path.
+        let now = now_unix_timestamp();
+        source.client.account_db()?.write_transaction(|| {
+            for n in 0..super::conversation_journal::LIMIT {
+                source.client.account_db()?.persist_actor_state(
+                    &format!("conversation-send/seed-{n:04}"),
+                    &json!({"fingerprint":n.to_string(),"expires_at":now+3600,
+                        "completed":n != 1023,"completed_at":now-1024+i64::from(n)}),
+                )?;
+            }
+            Ok::<_, SdkError>(())
+        })?;
+
         let response =
             crate::bus::dispatch::conversation_send::send_account(&request, &mut source).await?;
         assert_eq!(
             response.response_body["delivery_state"], "submitted",
             "SDK fan-out must submit all peers"
         );
+        let db = source.client.account_db()?;
+        assert!(!db.actor_state_exists("conversation-send/seed-0000")?, "oldest terminal makes room for send 1,025");
+        assert!(db.actor_state_exists("conversation-send/seed-1023")?, "pending receipt survives actual send");
+        assert_eq!(db.actor_state_usage("conversation-send/")?.0, 1024, "actual send preserves receipt cap");
+        let key = format!("conversation-send/{}", ramflux_crypto::blake3_256_base64url(
+            "ramflux.conversation.send.operation.v1", b"host-send-1"));
+        let receipt = db.load_actor_state::<Value>(&key)?.ok_or("test: sent receipt")?;
+        assert_eq!(receipt["completed"], true, "real all-device submission marks receipt terminal");
         let envelopes = captured.lock().map_err(|_| "capture poisoned")?.clone();
         assert_eq!(envelopes.len(), 2, "verified two-device directory must determine fan-out");
         assert_ne!(

@@ -3,6 +3,8 @@
 # Copyright (c) 2026 Span Brain
 """Run existing serial libtest commands and capture their results as JUnit."""
 import argparse
+import contextlib
+import io
 from pathlib import Path
 import re
 import subprocess
@@ -57,6 +59,10 @@ def run(command, path):
         status = child.wait()
     suite, valid = junit("".join(output), status)
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+    failed = int(suite.get("failures"))
+    ignored = int(suite.get("skipped"))
+    passed = sum(not len(case) for case in suite)
+    print(f"LIBTEST_CAPTURE: passed={passed} failed={failed} ignored={ignored}", flush=True)
     return (status if status >= 0 else 128 - status) or (0 if valid else 1)
 
 
@@ -102,6 +108,13 @@ class Tests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(suite.get("tests"), "2")
         self.assertEqual(suite.get("failures"), "0")
+
+    def test_prints_ignored_count(self):
+        text = "test a ... ok\ntest b ... ignored\ntest result: ok. 1 passed; 0 failed; 1 ignored;\n"
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as capture:
+            status = run([sys.executable, "-c", f"print({text!r})"], Path(directory) / "junit.xml")
+        self.assertEqual(status, 0)
+        self.assertIn("LIBTEST_CAPTURE: passed=1 failed=0 ignored=1", capture.getvalue())
 
     def test_process_status_and_stale_output(self):
         with tempfile.TemporaryDirectory() as directory:

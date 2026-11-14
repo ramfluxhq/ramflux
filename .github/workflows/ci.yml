@@ -268,7 +268,6 @@ jobs:
           python3 -B scripts/generate-c-abi-card-trust.py --check
           python3 -B scripts/check-c-abi-header.py
 
-
   card-runtime:
     name: Card runtime (${{ matrix.target }})
     strategy:

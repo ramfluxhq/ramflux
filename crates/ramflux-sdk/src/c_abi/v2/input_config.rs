@@ -75,7 +75,46 @@ impl<'a> Profile<'a> {
             builtin: i::boolean(v, "builtin", None)?,
         })
     }
-    fn own(self) -> NodeProfile {
+    fn own(self) -> OwnedProfile {
+        OwnedProfile {
+            strings: self.strings.map(str::to_owned),
+            gateway: [self.gateway.0.into(), self.gateway.1.into(), self.gateway.2.into()],
+            relay: [self.relay.0.into(), self.relay.1.into()],
+            pin: self.pin,
+            protocol: self.protocol.into_iter().map(str::to_owned).collect(),
+            capabilities: self.capabilities.into_iter().map(str::to_owned).collect(),
+            warnings: self
+                .warnings
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            discovered: self.discovered,
+            expires: self.expires,
+            enabled: self.enabled,
+            builtin: self.builtin,
+        }
+    }
+}
+// Own only types whose cleanup can be derived. SDK profiles are constructed only at handoff.
+#[derive(zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+pub(super) struct OwnedProfile {
+    strings: [String; 6],
+    gateway: [String; 3],
+    relay: [String; 2],
+    #[zeroize(skip)] // Unit discriminator; contains no input bytes.
+    pin: NodePinSource,
+    protocol: Vec<String>,
+    capabilities: Vec<String>,
+    warnings: Vec<String>,
+    discovered: u64,
+    expires: u64,
+    enabled: bool,
+    builtin: bool,
+}
+impl OwnedProfile {
+    pub(super) fn take_node(&mut self) -> NodeProfile {
         let [
             discovery_url,
             node_id,
@@ -83,31 +122,22 @@ impl<'a> Profile<'a> {
             ca_cert_pem,
             prekey_http_url,
             signaling_turn_addr,
-        ] = self.strings;
+        ] = std::mem::take(&mut self.strings);
+        let [quic_addr, tcp_addr, server_name] = std::mem::take(&mut self.gateway);
+        let [relay_addr, relay_name] = std::mem::take(&mut self.relay);
         NodeProfile {
-            discovery_url: discovery_url.into(),
-            node_id: node_id.into(),
-            node_public_key: node_public_key.into(),
+            discovery_url,
+            node_id,
+            node_public_key,
+            ca_cert_pem,
+            prekey_http_url,
+            signaling_turn_addr,
             pin_source: self.pin,
-            ca_cert_pem: ca_cert_pem.into(),
-            gateway: NodeGateway {
-                quic_addr: self.gateway.0.into(),
-                tcp_addr: self.gateway.1.into(),
-                server_name: self.gateway.2.into(),
-            },
-            relay: NodeRelay { quic_addr: self.relay.0.into(), server_name: self.relay.1.into() },
-            prekey_http_url: prekey_http_url.into(),
-            signaling_turn_addr: signaling_turn_addr.into(),
-            protocol_versions: self.protocol.into_iter().map(str::to_owned).collect(),
-            client_capabilities: self.capabilities.into_iter().map(str::to_owned).collect(),
-            // Deduplicate borrowed values before allocating any owned warning string.
-            safety_warnings: self
-                .warnings
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            gateway: NodeGateway { quic_addr, tcp_addr, server_name },
+            relay: NodeRelay { quic_addr: relay_addr, server_name: relay_name },
+            protocol_versions: std::mem::take(&mut self.protocol),
+            client_capabilities: std::mem::take(&mut self.capabilities),
+            safety_warnings: std::mem::take(&mut self.warnings).into_iter().collect(),
             discovered_at: self.discovered,
             expires_at: self.expires,
             enabled: self.enabled,

@@ -11,7 +11,7 @@ SOURCE = ROOT / "crates/ramflux-sdk/src/c_abi/v2/method_policy.rs"
 OUTPUT = ROOT / "crates/ramflux-sdk/include/ramflux_sdk_methods.json"
 ROW = re.compile(
     r'"([a-z][a-z0-9_.]*)"\s*=>\s*\(\s*"([a-z][a-z0-9_]*)"\s*,\s*'
-    r'(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*\)', re.MULTILINE
+    r'(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*\)', re.MULTILINE
 )
 
 
@@ -28,9 +28,9 @@ def main():
     if not rows or len({row[0] for row in rows}) != len(rows):
         raise SystemExit("missing or duplicate SDK method policy rows")
     methods = [dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
-                    secret_output=out == "true", show_once=once == "true")
-               for name, capability, inp, out, once in rows]
-    data = dict(abi_major=2, policy_version=1, methods=methods)
+                    secret_output=out == "true", show_once=once == "true", key_export=export == "true")
+               for name, capability, inp, out, once, export in rows]
+    data = dict(abi_major=2, policy_version=2, methods=methods)
     encoded = json.dumps(data, indent=2, sort_keys=True) + "\n"
     if args.check:
         if OUTPUT.read_text(encoding="utf-8") != encoded:
