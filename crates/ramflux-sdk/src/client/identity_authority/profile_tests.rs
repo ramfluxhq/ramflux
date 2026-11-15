@@ -42,7 +42,11 @@ fn missing_confirmation_and_missing_custody_account_refuse_without_changing_the_
         peer.client.read_profile_facts("owner").ok_or("profile")?.profile.display_name,
         "Owner"
     );
-    assert_eq!(peer.client.verified_principal_kind("owner")?, None);
+    // A reader with no born account cannot treat the contact as unverified.
+    assert!(matches!(
+        peer.client.verified_principal_kind("owner"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     Ok(())
 }
 fn with_profile(
@@ -118,7 +122,13 @@ fn unsigned_legacy_and_spoofed_cached_kind_never_become_verified() -> TestResult
     row["kind_verified"] = serde_json::json!(true);
     row["kind"] = serde_json::json!("bot");
     db.persist_client_record("identity", "alice", &row)?;
-    assert_eq!(peer.client.contact_entry("alice")?["kind_verified"], false);
+    // The cached flag stays in the row. It does not become a verified kind, and a
+    // reader with no born account is refused instead of shown as unverified.
+    assert_eq!(
+        peer.client.account_db()?.client_record("identity", "alice")?.ok_or("row")?["kind_verified"],
+        true
+    );
+    assert!(matches!(peer.client.contact_entry("alice"), Err(SdkError::CustodyModeDowngrade)));
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "alice", "alice"));
     let mut unsigned = with_profile(&owner, legacy.clone(), "Alice", 1, 2)?;
     unsigned

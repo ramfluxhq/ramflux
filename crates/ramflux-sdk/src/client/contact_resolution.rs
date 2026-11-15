@@ -286,15 +286,12 @@ impl RamfluxClient {
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
         let verified = if let Some(commitment) = commitment {
-            match self
-                .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
-            {
-                Ok(state) => state == "verified",
-                // No custody account has not been manually verified. Authority
-                // unavailable is state A. A missing account root is an error.
-                Err(SdkError::CustodyModeDowngrade | SdkError::NetworkingPending) => false,
-                Err(error) => return Err(error),
-            }
+            // A missing born account is CustodyModeDowngrade. Authority that is
+            // still loading is NetworkingPending. Neither is a stored unverified bit.
+            self.contact_safety_verification_state(
+                commitment,
+                identity["device_set_hash"].as_str(),
+            )? == "verified"
         } else {
             false
         };

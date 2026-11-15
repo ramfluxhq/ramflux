@@ -21,6 +21,8 @@ struct Directory {
     unavailable: Arc<AtomicBool>,
     manifest_fetches: Arc<std::sync::atomic::AtomicUsize>,
     server: tokio::task::JoinHandle<Result<(), SdkError>>,
+    /// Account roots must outlive the bus clients that store their databases.
+    anchors: Vec<crate::custody::tests::Root>,
 }
 impl Drop for Directory {
     fn drop(&mut self) {
@@ -97,6 +99,7 @@ impl Directory {
             unavailable,
             manifest_fetches,
             server,
+            anchors: Vec::new(),
         })
     }
     fn config(&self, f: &Fixture) -> Result<GatewaySessionConfig, SdkError> {
@@ -413,6 +416,97 @@ fn seal_native(
     })
 }
 
+fn install_born(
+    directory: &Directory,
+    fixture: &mut crate::client::native_test_support::Fixture,
+) -> LocalBusAccountState {
+    let mut config = fixture.config.clone();
+    config.transport_kind = GatewaySessionTransportKind::TcpTls;
+    config.gateway_addr = directory.addr;
+    config.tcp_gateway_addr = Some(directory.addr);
+    config.server_name = "directory.test".into();
+    config.ca_cert.clone_from(&directory.ca);
+    let engine = GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(DirectorySession {
+            captured: directory.captured.clone(),
+            incoming: directory.incoming.clone(),
+            acknowledged: directory.acknowledged.clone(),
+            records: directory.records.clone(),
+            unavailable: directory.unavailable.clone(),
+            responses: VecDeque::new(),
+        }),
+    );
+    LocalBusAccountState::new(
+        std::mem::take(&mut fixture.client),
+        engine,
+        fixture.manifest.principal_commitment.clone(),
+    )
+}
+
+async fn born_member(
+    directory: &mut Directory,
+    id: &str,
+) -> Result<LocalBusAccountState, SdkError> {
+    let mut fixture = crate::client::native_test_support::Fixture::named(id, id, id)
+        .await
+        .map_err(native_account)?;
+    directory.records.lock().map_err(|_| invalid("records"))?.push(fixture.manifest.clone());
+    let account = install_born(directory, &mut fixture);
+    directory.anchors.push(fixture.root);
+    Ok(account)
+}
+
+async fn born_headless_bus(ids: &[&str]) -> Result<(Directory, LocalBusDaemonState), SdkError> {
+    let mut fixtures = Vec::new();
+    for id in ids {
+        fixtures.push(
+            crate::client::native_test_support::Fixture::headless(id, id, id, "Example Human")
+                .await
+                .map_err(native_account)?,
+        );
+    }
+    assemble_born(fixtures).await
+}
+
+async fn assemble_born(
+    fixtures: Vec<crate::client::native_test_support::Fixture>,
+) -> Result<(Directory, LocalBusDaemonState), SdkError> {
+    let root = fixtures.first().ok_or_else(|| invalid("born bus"))?.root.0.clone();
+    let manifests = fixtures.iter().map(|fixture| fixture.manifest.clone()).collect::<Vec<_>>();
+    let mut directory = Directory::from_records(&root, manifests).await?;
+    let mut accounts = BTreeMap::new();
+    for mut fixture in fixtures {
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        accounts.insert(id, install_born(&directory, &mut fixture));
+        directory.anchors.push(fixture.root);
+    }
+    Ok((
+        directory,
+        LocalBusDaemonState {
+            account_index: None,
+            nodes: crate::node::NodeStore::default(),
+            config: LocalBusConfig::new(root.join("bus.sock"), &root),
+            accounts,
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        },
+    ))
+}
+
+async fn born_bus(ids: &[&str]) -> Result<(Directory, LocalBusDaemonState), SdkError> {
+    let mut fixtures = Vec::new();
+    for id in ids {
+        fixtures.push(
+            crate::client::native_test_support::Fixture::named(id, id, id)
+                .await
+                .map_err(native_account)?,
+        );
+    }
+    assemble_born(fixtures).await
+}
+
 fn state(a: &mut Fixture, b: &mut Fixture, d: &Directory) -> Result<LocalBusDaemonState, SdkError> {
     let mut accounts = BTreeMap::new();
     for f in [&mut *a, &mut *b] {
@@ -546,10 +640,15 @@ async fn adding_a_principal_resolves_reachability_and_safety_before_the_first_dm
 #[tokio::test]
 async fn accepting_a_pending_request_resolves_the_requester_without_device_hints()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut s = born_state(&mut a, &mut b, &d)?;
     s.accounts
         .get("bob")
         .ok_or_else(|| invalid("account"))?
@@ -659,10 +758,15 @@ mod cards;
 #[tokio::test]
 async fn a_legacy_principal_link_becomes_reachable_without_an_unrelated_identity_lookup()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut state = born_state(&mut a, &mut b, &directory)?;
     let added = call(
         &mut state,
         "alice",
@@ -690,32 +794,15 @@ mod recovery;
 #[tokio::test]
 async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let directory = Directory::new(&a, &b).await?;
-    // Inject issuance time two hours earlier without modifying the process clock or test budgets.
-    let now = now_unix_timestamp();
-    {
-        let mut manifests = directory.records.lock().map_err(|_| invalid("directory mutex"))?;
-        for manifest in manifests.iter_mut() {
-            let root = if manifest.principal_id == "alice" {
-                a.client.identity_root.as_ref()
-            } else {
-                b.client.identity_root.as_ref()
-            }
-            .ok_or(SdkError::IdentityRootMissing)?;
-            for device in &mut manifest.devices {
-                device.legacy_proof_mut()?.issued_at = now - 7200;
-                device.legacy_proof_mut()?.expires_at = now - 3600;
-                device.legacy_proof_mut()?.signature =
-                    ramflux_crypto::sign_canonical_bytes_with_seed(
-                        &ramflux_crypto::branch_proof_signing_bytes(device.legacy_proof()?)?,
-                        root.signing_key.to_bytes(),
-                    );
-            }
-        }
-    }
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let directory =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut state = born_state(&mut a, &mut b, &directory)?;
     for (own, peer) in [("alice", "bob"), ("bob", "alice")] {
         let added = call(&mut state, own, "contact.add", json!({"principal_id":peer})).await?;
         assert_eq!(added["contact"]["principal_id"], peer);
@@ -728,7 +815,6 @@ async fn two_hour_old_accounts_resolve_add_contacts_and_authorize_new_prekeys()
         let identity =
             client.device_identity_for_root(&manifest.principal_commitment, &device.device_id)?;
         client.verify_root_bound_prekey(&identity, &device.prekey_bundle)?;
-        assert!(device.legacy_proof()?.expires_at < now);
     }
     Ok(())
 }

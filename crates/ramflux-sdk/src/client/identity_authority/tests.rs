@@ -391,7 +391,10 @@ fn missing_custody_account_does_not_assert_kind() -> TestResult {
     observe(&peer.client, &own)?;
     observe(&peer.client, &original)?;
     assert_eq!(peer.client.root_asserted_principal_kind("agent")?, Some(PrincipalKind::HeadlessAi));
-    assert_eq!(peer.client.verified_principal_kind("agent")?, None);
+    assert!(matches!(
+        peer.client.verified_principal_kind("agent"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     peer.client.establish_friend_link(
         "friend",
         &own.principal_commitment,
@@ -402,7 +405,10 @@ fn missing_custody_account_does_not_assert_kind() -> TestResult {
         &original.principal_commitment,
     );
     assert!(matches!(refused, Err(SdkError::CustodyModeDowngrade)), "{refused:?}");
-    assert_eq!(peer.client.verified_principal_kind("agent")?, None);
+    assert!(matches!(
+        peer.client.verified_principal_kind("agent"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     let row = peer.client.account_db()?.client_record("identity", "agent")?.ok_or("identity")?;
     assert_eq!(row["kind"], "headless_ai");
     mode(&owner, PrincipalKind::Human, LocalBusClientMode::HeadlessAi)?;

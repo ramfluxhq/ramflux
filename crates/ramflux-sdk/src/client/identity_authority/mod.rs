@@ -66,8 +66,9 @@ impl RamfluxClient {
     }
     /// Returns a signed kind only after the user verified this contact's current safety material.
     /// # Errors
-    /// Returns storage errors and [`SdkError::IdentityRootMissing`] when this account has no root.
-    /// An unverified or stale contact, or unavailable authority, returns None.
+    /// Returns storage errors. A missing born account is [`SdkError::CustodyModeDowngrade`].
+    /// Authority that is still loading is [`SdkError::NetworkingPending`].
+    /// An unverified or stale contact returns None.
     pub fn verified_principal_kind(
         &self,
         principal: &str,
@@ -78,13 +79,9 @@ impl RamfluxClient {
         let Some(commitment) = identity["contact_identity_commitment"].as_str() else {
             return Ok(None);
         };
-        let verified = match self
-            .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())
-        {
-            Ok(state) => state == "verified",
-            Err(SdkError::CustodyModeDowngrade | SdkError::NetworkingPending) => false,
-            Err(error) => return Err(error),
-        };
+        let verified = self
+            .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())?
+            == "verified";
         if verified { self.root_asserted_principal_kind(principal) } else { Ok(None) }
     }
     /// Verify and atomically cache a live manifest, including rollback and key lifecycle checks.

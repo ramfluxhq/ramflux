@@ -74,14 +74,15 @@ impl Fixture {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         let now = crate::custody::network_now()?;
-        crate::custody::tests::create(&root.0, "custodian", vault.as_ref(), now)?;
-        crate::custody::tests::mark_live(&root.0, "custodian", now)?;
+        let custodian = format!("custodian-{account}");
+        crate::custody::tests::create(&root.0, &custodian, vault.as_ref(), now)?;
+        crate::custody::tests::mark_live(&root.0, &custodian, now)?;
         let mut input = crate::custody::tests::input(account);
         input.principal_id = principal.into();
         input.device_id = device.into();
         input.display_name = display_name.into();
         input.principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
-        input.custodian_account_id = Some("custodian".into());
+        input.custodian_account_id = Some(custodian);
         let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
