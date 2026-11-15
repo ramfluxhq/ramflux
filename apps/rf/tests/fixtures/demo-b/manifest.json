@@ -1,0 +1,37 @@
+{
+  "name": "demo-b-fixtures",
+  "checklist": "im-bus/task/DEMO-B-message-structure-acceptance_2026-11-07.md",
+  "fixtures": [
+    {
+      "row": "B9",
+      "id": "b9-approval-refusal",
+      "status": "READY",
+      "driver": "apps/rf/tests/fixtures/demo-b/b9-approval-refusal.sh",
+      "runs_on": "activation branch and main",
+      "expected": "a2i append, list and ack each exit 1 with generated_authority; account status still answers",
+      "rust_twin": "apps/rf/tests/e2e_unified_gate.rs b9_a2i_approval_is_typed_refused_and_never_actionable_after_restart (#[ignore], itest-memory-vault)"
+    },
+    {
+      "row": "B9",
+      "id": "b9-surface-roundtrip",
+      "status": "BLOCKED",
+      "reason": "surface send/action take a wire file, but no rf command builds a valid A2uiConversationEvent or action for a chosen conversation, and no two-account driver sends and reads it back. Do not invent a wire builder. Needs an agreed generator fixture and actor consent/route setup."
+    },
+    {
+      "row": "B9",
+      "id": "b9-task-display",
+      "status": "BLOCKED",
+      "reason": "no rf task command (apps/rf/src/cli/mod.rs has none). The bus exposes task.propose/start/accept/update/resolve (crates/ramflux-sdk/src/bus/method_table.rs) but there is no CLI driver and no chosen Task producer."
+    },
+    {
+      "row": "B10",
+      "id": "b10-unknown-kind",
+      "status": "PARTIAL",
+      "runs_now": [
+        "crates/ramflux-sdk candidate_generated_tests::unknown_kind_is_acked_and_kept_with_raw_bytes (exact-byte ACK and retention)",
+        "crates/ramflux-sdk candidate_generated_tests::reparse_is_idempotent_and_erased_raw_stays_tombstoned (reparse)"
+      ],
+      "blocked": "the future-kind sender is an SDK test helper (candidate_generated_tests.rs unknown_inner), not an rf-drivable fixture. No rf inject, upgrade-decoder build or quota/raw read command exists."
+    }
+  ]
+}
