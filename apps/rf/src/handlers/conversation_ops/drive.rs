@@ -50,16 +50,19 @@ async fn send_text(bus: &mut LocalBusClient, send: ConversationSend) -> Result<(
 }
 
 async fn edit_text(bus: &mut LocalBusClient, edit: ConversationEdit) -> Result<(), RfError> {
-    let mut body = json!({
-        "conversation_id": edit.conversation,
-        "message_id": edit.message,
-        "text": edit.text,
-    });
-    if let Some(expected) = edit.expected_revision {
-        body["expected_revision"] = json!(expected);
-    }
-    let value =
-        call(bus, &edit.account, "conversation.edit", Some(edit.operation_id), body).await?;
+    let value = call(
+        bus,
+        &edit.account,
+        "conversation.edit",
+        Some(edit.operation_id),
+        json!({
+            "conversation_id": edit.conversation,
+            "message_id": edit.message,
+            "text": edit.text,
+            "expected_revision": edit.expected_revision,
+        }),
+    )
+    .await?;
     print_json(&value)
 }
 

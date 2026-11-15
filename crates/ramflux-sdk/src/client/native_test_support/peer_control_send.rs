@@ -430,7 +430,7 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
     assert_eq!(accepted.envelope.version, 2);
     peer.receive(accepted.envelope, 1).await?;
     for (sequence, method, fields) in [
-        (2, "conversation.edit", serde_json::json!({"text":"replacement"})),
+        (2, "conversation.edit", serde_json::json!({"text":"replacement","expected_revision":0})),
         (3, "conversation.react", serde_json::json!({"token":"👍"})),
         (4, "conversation.delete", serde_json::json!({"scope":"everyone"})),
     ] {
@@ -625,6 +625,35 @@ async fn native_conversation_edit_retry_survives_retirement_reopen_and_partial_f
     tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(durable_edit_retry())).await?
 }
 
+fn refuse_same_base_edit(client: &RamfluxClient, request: &crate::LocalBusFrame) -> TestResult {
+    use crate::bus::dispatch::{
+        conversation_journal as journal, conversation_mutation as mutation,
+    };
+    let mut pending = request.clone();
+    pending.operation_id = Some("superseded-pending".into());
+    pending.body["text"] = serde_json::json!("private superseded payload");
+    let conflict_key = journal::key("superseded-pending");
+    match mutation::prepare(client, &pending) {
+        Err(crate::SdkError::EditConflict { .. }) => {}
+        Err(error) => {
+            return Err(format!(
+                "a second edit of the same base must be edit_conflict, got {error}"
+            )
+            .into());
+        }
+        Ok(_) => {
+            return Err(
+                "a second edit of the same base must be edit_conflict, got a prepared edit".into(),
+            );
+        }
+    }
+    let db = client.account_db()?;
+    assert!(!db.actor_state_exists(&conflict_key)?, "refused edit keeps no operation receipt");
+    let intent = conflict_key.replace("conversation-operation/", "conversation-intent/");
+    assert!(!db.actor_state_exists(&intent)?, "refused edit stores no private payload");
+    Ok(())
+}
+
 async fn durable_edit_retry() -> TestResult {
     use crate::bus::dispatch::{
         conversation_delivery as delivery, conversation_journal as journal,
@@ -656,17 +685,14 @@ async fn durable_edit_retry() -> TestResult {
         Some("source".into()),
         "conversation",
         "conversation.edit",
-        serde_json::json!({"conversation_id":conversation,"message_id":target,"text":"replacement"}),
+        serde_json::json!({"conversation_id":conversation,"message_id":target,"text":"replacement","expected_revision":0}),
     );
     request.operation_id = Some("durable-edit-operation".into());
     let prepared = mutation::prepare(&source.client, &request)?;
     let expected = zeroize::Zeroizing::new(prepared.exact.clone());
     let event = prepared.identity.id.clone();
     let key = prepared.journal_key.clone();
-    let mut old_pending = request.clone();
-    old_pending.operation_id = Some("superseded-pending".into());
-    old_pending.body["text"] = serde_json::json!("private superseded payload");
-    let older = mutation::prepare(&source.client, &old_pending)?;
+    refuse_same_base_edit(&source.client, &request)?;
     let mut wire = engine(&source, &first, false)?;
     let reconcile = || delivery::reconcile_accepted(&source.client, &prepared, "first");
     let accepted = source
@@ -683,16 +709,6 @@ async fn durable_edit_retry() -> TestResult {
         )
         .await?;
     first.receive(accepted.envelope, 2).await?;
-    assert!(
-        !source.client.account_db()?.actor_state_exists(
-            &older.journal_key.replace("conversation-operation/", "conversation-intent/")
-        )?,
-        "edit retirement must erase OTHER pending private payloads"
-    );
-    assert!(
-        journal::load(&source.client, &older.journal_key)?.is_some(),
-        "superseded content-free identity remains reconcilable"
-    );
     drop(prepared);
     drop(wire);
     source.restart_authored_source().await?;

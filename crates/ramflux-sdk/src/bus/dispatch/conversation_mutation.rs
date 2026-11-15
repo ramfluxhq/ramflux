@@ -19,9 +19,17 @@ struct Intent {
     #[serde(default)]
     remove: bool,
     scope: Option<String>,
-    /// Revision the caller believes is current. A mismatch is `edit_conflict`.
+    /// Observed base revision. Required on `conversation.edit`. A mismatch, or a
+    /// base another local edit has already reserved, is `edit_conflict`.
     #[serde(default)]
     expected_revision: Option<u64>,
+}
+#[derive(Deserialize, Serialize)]
+struct EditReservation {
+    base: u64,
+    next: u64,
+    owner: String,
+    expires_at: i64,
 }
 impl Drop for Intent {
     fn drop(&mut self) {
@@ -181,7 +189,7 @@ pub(crate) fn prepare(
             }
             return Ok(prepared);
         }
-        let (identity, exact, wire) = encode_intent(client, request, &intent)?;
+        let (identity, exact, wire) = encode_intent(client, request, &intent, &key)?;
         let expires_at = super::conversation_journal::expiry(client, now_unix_timestamp())?;
         let prepared = Prepared {
             fingerprint: fingerprint.clone(),
@@ -212,8 +220,14 @@ fn encode_intent(
     client: &RamfluxClient,
     request: &LocalBusFrame,
     intent: &Intent,
+    owner: &str,
 ) -> Result<(g::EventIdentity, Vec<u8>, Vec<u8>), SdkError> {
     let Target { reference: target, stored, group } = target(client, intent)?;
+    // Reserve before allocating an event id, inside prepare's write transaction
+    // and before `submit_envelope`. A second local edit of this base fails here.
+    if request.method == "conversation.edit" {
+        claim_edit_revision(client, intent, edit_revision(&stored)?, owner)?;
+    }
     let mut content = content(client, &request.method, intent, &target, &stored, group.as_deref())?;
     RamfluxClient::prepare_generated_revision(&mut content)?;
     g::validation::validate_content(&content)
@@ -273,6 +287,9 @@ fn validate_intent(method: &str, intent: &Intent) -> Result<(), SdkError> {
         }
         _ => false,
     };
+    if method == "conversation.edit" && intent.expected_revision.is_none() {
+        return Err(refused(Code::InvalidArgument, "expected_revision is required"));
+    }
     if !valid
         || intent.conversation_id.is_empty()
         || intent.conversation_id.len() > 256
@@ -343,11 +360,7 @@ fn content(
     group: Option<&str>,
 ) -> Result<g::Content, SdkError> {
     let own = client.owned_device_identity()?;
-    let (_, current) = RamfluxClient::decode_generated_inner(stored)?;
-    let revision = match &current.value {
-        Some(g::content::Value::Edit(edit)) => edit.revision,
-        _ => 0,
-    };
+    let revision = edit_revision(stored)?;
     let state = StoredTarget {
         author_root: target.author_anchor.clone(),
         revision,
@@ -436,12 +449,20 @@ fn content(
     Ok(g::Content { value: Some(value) })
 }
 
+fn edit_revision(stored: &[u8]) -> Result<u64, SdkError> {
+    let (_, current) = RamfluxClient::decode_generated_inner(stored)?;
+    Ok(match current.value {
+        Some(g::content::Value::Edit(edit)) => edit.revision,
+        _ => 0,
+    })
+}
+
 /// `expected_revision` is the base the caller observed. The acceptable write is
 /// one past the stored revision; anything else is a typed conflict and is not sent.
 fn refuse_stale_expected(intent: &Intent, stored: u64) -> Result<(), SdkError> {
-    let Some(expected) = intent.expected_revision else {
-        return Ok(());
-    };
+    let expected = intent
+        .expected_revision
+        .ok_or_else(|| refused(Code::InvalidArgument, "expected_revision is required"))?;
     if expected == stored {
         return Ok(());
     }
@@ -453,6 +474,46 @@ fn refuse_stale_expected(intent: &Intent, stored: u64) -> Result<(), SdkError> {
         expected: stored.saturating_add(1),
         received,
     })
+}
+
+/// Claim `stored + 1` for `owner` before this edit is sealed or sent.
+///
+/// A live claim for the same base by another operation is `edit_conflict`.
+/// The call sits in `prepare`'s write transaction, so the loser rolls back
+/// with no event identity and nothing is submitted.
+fn claim_edit_revision(
+    client: &RamfluxClient,
+    intent: &Intent,
+    stored: u64,
+    owner: &str,
+) -> Result<(), SdkError> {
+    refuse_stale_expected(intent, stored)?;
+    let next = stored
+        .checked_add(1)
+        .ok_or_else(|| refused(Code::InvalidArgument, "edit revision exhausted"))?;
+    let key = format!("conversation-edit-reservation/{}", intent.message_id);
+    let db = client.account_db()?;
+    if let Some(held) = db.load_actor_state::<EditReservation>(&key)? {
+        let live = held.expires_at > now_unix_timestamp();
+        if live && held.base == stored && held.owner != owner {
+            return Err(SdkError::EditConflict {
+                target: intent.message_id.clone(),
+                expected: held.next.saturating_add(1),
+                received: next,
+            });
+        }
+    }
+    db.persist_message_actor_state(
+        &intent.message_id,
+        &key,
+        &EditReservation {
+            base: stored,
+            next,
+            owner: owner.to_owned(),
+            expires_at: super::conversation_journal::expiry(client, now_unix_timestamp())?,
+        },
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

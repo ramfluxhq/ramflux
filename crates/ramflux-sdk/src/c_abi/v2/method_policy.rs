@@ -179,6 +179,7 @@ policies! {
     "message.receive" => ("message", true, true, false, false),
     "message.submit" => ("raw_message", true, true, false, false),
     "conversation.send" => ("conversation", true, true, false, false),
+    // Body requires `expected_revision` (the observed base). The bus refuses a missing base.
     "conversation.edit" => ("conversation", true, true, false, false),
     "conversation.react" => ("conversation", true, true, false, false),
     "conversation.reply" => ("conversation", true, true, false, false),

@@ -50,9 +50,7 @@ pub(super) async fn send(
         };
         let delivery = match outcome {
             Ok(()) => json!({"target":target,"state":"submitted"}),
-            Err(SdkError::EditConflict { target: edited, expected, received }) => {
-                return Err(SdkError::EditConflict { target: edited, expected, received });
-            }
+            Err(error @ SdkError::EditConflict { .. }) => return Err(error),
             Err(error) => {
                 json!({"target":target,"state":"failed","error":AdapterError::from_sdk(&error)})
             }

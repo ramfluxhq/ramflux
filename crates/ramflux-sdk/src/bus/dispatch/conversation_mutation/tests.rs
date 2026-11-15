@@ -61,7 +61,8 @@ async fn active_mutation_missing_targets_allocate_nothing() -> TestResult {
                     method,
                     "absent",
                     match method {
-                        "conversation.edit" | "conversation.reply" => json!({"text":"content"}),
+                        "conversation.edit" => json!({"text":"content","expected_revision":0}),
+                        "conversation.reply" => json!({"text":"content"}),
                         "conversation.react" => json!({"token":"👍"}),
                         _ => json!({"scope":"everyone"}),
                     },
@@ -81,7 +82,7 @@ async fn native_mutation_intents_derive_references_revisions_and_exact_retry_pay
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let id = seed(&source.client)?;
     for (method, fields, kind) in [
-        ("conversation.edit", json!({"text":"replacement"}), 3),
+        ("conversation.edit", json!({"text":"replacement","expected_revision":0}), 3),
         ("conversation.react", json!({"token":"👍","remove":true}), 5),
         ("conversation.reply", json!({"text":"reply"}), 1),
         ("conversation.delete", json!({"scope":"everyone"}), 4),
@@ -184,8 +185,11 @@ async fn mutation_intents_refuse_forged_routing_cross_thread_and_deleted_targets
     let source = Fixture::new("intent-refusals").await?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let id = seed(&source.client)?;
-    let mut intent =
-        request("conversation.edit", &id, json!({"text":"replacement","sender_id":"forged"}));
+    let mut intent = request(
+        "conversation.edit",
+        &id,
+        json!({"text":"replacement","expected_revision":0,"sender_id":"forged"}),
+    );
     code(prepare(&source.client, &intent), Code::InvalidArgument);
     intent.body.as_object_mut().ok_or("body")?.remove("sender_id");
     intent.body["conversation_id"] = json!("other-thread");
@@ -251,6 +255,173 @@ async fn dispatcher_preserves_typed_input_refusals_and_local_delete_never_routes
     assert!(
         db.actor_state_keys("conversation-intent/")?.is_empty(),
         "target erasure must retire private prepared content"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn edit_without_expected_revision_is_refused() -> TestResult {
+    let source = Fixture::new("intent-edit-base-required").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let id = seed(&source.client)?;
+    let before = source.client.account_db()?.actor_state_keys("")?;
+    let missing = request("conversation.edit", &id, json!({"text":"replacement"}));
+    let Err(error) = prepare(&source.client, &missing) else {
+        return Err("edit without a base must be refused".into());
+    };
+    let adapter = AdapterError::from_sdk(&error);
+    assert_eq!(adapter.code, Code::InvalidArgument as i32, "a missing base is invalid_argument");
+    assert!(adapter.message.contains("expected_revision is required"), "{}", adapter.message);
+    assert_eq!(
+        source.client.account_db()?.actor_state_keys("")?,
+        before,
+        "a missing base allocates nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_base_reserves_one_edit_and_refuses_the_other_before_send() -> TestResult {
+    let source = Fixture::new("intent-edit-reserve").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let id = seed(&source.client)?;
+    let before = source.client.account_db()?.message_content(&id)?;
+    let mut first = request("conversation.edit", &id, json!({"text":"one","expected_revision":0}));
+    first.operation_id = Some("edit-a".into());
+    let prepared = prepare(&source.client, &first)?;
+    let mut second = request("conversation.edit", &id, json!({"text":"two","expected_revision":0}));
+    second.operation_id = Some("edit-b".into());
+    match prepare(&source.client, &second) {
+        Err(SdkError::EditConflict { target, expected, received }) => {
+            assert_eq!(target, id, "the conflict names the message");
+            assert_eq!((expected, received), (2, 1), "the reserved next revision is the conflict");
+        }
+        Err(error) => return Err(format!("second edit must be edit_conflict, got {error}").into()),
+        Ok(_) => return Err("second edit must be edit_conflict, got a prepared edit".into()),
+    }
+    let db = source.client.account_db()?;
+    assert_eq!(db.message_content(&id)?, before, "neither edit is applied before send");
+    assert_eq!(
+        db.actor_state_keys("conversation-intent/")?.len(),
+        1,
+        "only the winner is prepared"
+    );
+    let loser = super::super::conversation_journal::key("edit-b");
+    assert!(!db.actor_state_exists(&loser)?, "the loser has no operation receipt to send");
+    assert!(db.actor_state_exists(&prepared.journal_key)?, "the winner keeps its receipt");
+    assert!(
+        db.actor_state_exists(&format!("conversation-edit-reservation/{id}"))?,
+        "the base stays reserved for the winner"
+    );
+    let retry = prepare(&source.client, &first)?;
+    assert_eq!(retry.exact, prepared.exact, "the owner retries the same payload");
+    Ok(())
+}
+
+fn direct_edit(
+    client: &RamfluxClient,
+    original: &g::EventIdentity,
+    stored: &[u8],
+    revision: u64,
+    text: &str,
+) -> TestResult<Vec<u8>> {
+    let target = g::MessageRef {
+        id: original.id.clone(),
+        conversation_id: original.conversation_id.clone(),
+        author_anchor: client.own_account_anchor()?,
+    };
+    let digest = crate::client::message_mutations::previous_content_digest(&target, stored)?;
+    let identity = client.allocate_generated_identity(&original.conversation_id, 2_000, false)?;
+    Ok(RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Edit(g::Edit {
+                target: Some(target),
+                revision,
+                previous_content_digest: digest.to_vec(),
+                replacement: Some(g::Message { text: text.into(), ..Default::default() }),
+            })),
+        },
+    )?)
+}
+
+fn project_authored_edit(client: &RamfluxClient, exact: &[u8]) -> Result<bool, SdkError> {
+    let device = client.owned_device_identity()?;
+    let entry = crate::GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "local".into(),
+        envelope: ramflux_protocol::Envelope {
+            schema: "unused".into(),
+            version: 1,
+            domain: "unused".into(),
+            ext: ramflux_protocol::Ext::default(),
+            signed: ramflux_protocol::SignedFields {
+                signing_key_id: "unused".into(),
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: "unused".into(),
+            },
+            envelope_id: "unused".into(),
+            source_principal_id: "unused".into(),
+            source_device_id: "unused".into(),
+            target_delivery_id: "unused".into(),
+            routing_set_id: None,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
+            priority: ramflux_protocol::Priority::Normal,
+            ttl: 1,
+            created_at: 0,
+            encrypted_payload: String::new(),
+            payload_hash: String::new(),
+            delivery_mode: None,
+            collapse_tag: None,
+            report_commitment: None,
+        },
+    };
+    client.apply_generated_edit_authorized(
+        crate::client::message_mutations::EditContext {
+            entry: &entry,
+            source: &device,
+            imported: None,
+            own_sent: false,
+            author_submit: true,
+        },
+        "thread",
+        exact,
+        None,
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authored_projection_fork_is_edit_conflict_and_is_not_journalled() -> TestResult {
+    let source = Fixture::new("intent-authored-fork").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let id = seed(&source.client)?;
+    let original = source
+        .client
+        .account_db()?
+        .load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{id}"))?
+        .ok_or("identity")?;
+    let stored = source.client.account_db()?.message_content(&id)?.ok_or("stored")?;
+    let first = direct_edit(&source.client, &original, &stored, 1, "winner")?;
+    assert!(project_authored_edit(&source.client, &first)?, "the first authored edit applies");
+    let winner = source.client.account_db()?.message_content(&id)?;
+    let fork = direct_edit(&source.client, &original, &stored, 1, "loser")?;
+    match project_authored_edit(&source.client, &fork) {
+        Err(SdkError::EditConflict { target, expected, received }) => {
+            assert_eq!(target, id, "the fork names the message");
+            assert_eq!((expected, received), (2, 1), "an equal revision conflicts with the winner");
+        }
+        Err(error) => return Err(format!("fork must be edit_conflict, got {error}").into()),
+        Ok(applied) => return Err(format!("fork must be edit_conflict, applied={applied}").into()),
+    }
+    assert_eq!(
+        source.client.account_db()?.message_content(&id)?,
+        winner,
+        "the fork must not replace the winner"
+    );
+    assert!(
+        source.client.account_db()?.latest_journal_event("message.edit.conflict")?.is_none(),
+        "an author submit does not journal the fork"
     );
     Ok(())
 }

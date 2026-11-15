@@ -56,8 +56,13 @@ pub(crate) struct EditContext<'a> {
     pub imported: Option<&'a ramflux_protocol::message::HistoryItem>,
     pub own_sent: bool,
     /// The author's `conversation.edit` submission. A stale or forked revision
-    /// is a typed refusal. Receive and history import leave this false and keep
-    /// the journalled fork.
+    /// is a typed refusal and is not journalled. Prepare reserves the observed
+    /// base in the same local transaction before `submit_envelope`, so a second
+    /// local edit of that base never reaches the wire. This check is defence in
+    /// depth for a revision that moves after the reservation: the envelope is
+    /// already submitted, the author is refused, and the recipient keeps the
+    /// fork tie-break. Receive and history import leave this false and journal
+    /// the fork.
     pub author_submit: bool,
 }
 

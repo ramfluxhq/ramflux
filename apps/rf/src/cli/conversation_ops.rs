@@ -59,9 +59,9 @@ pub(crate) struct ConversationEdit {
     pub(crate) text: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: String,
-    /// Base revision the caller observed. A mismatch returns `edit_conflict`.
+    /// Base revision the caller observed. Required. A mismatch returns `edit_conflict`.
     #[arg(long)]
-    pub(crate) expected_revision: Option<u64>,
+    pub(crate) expected_revision: u64,
 }
 
 #[derive(Args)]
@@ -203,14 +203,13 @@ mod tests {
             "revised",
             "--operation-id",
             "op-edit",
+            "--expected-revision",
+            "0",
         ]) else {
             panic!("expected edit");
         };
         assert_eq!(edit.message, "m1", "test: edit keeps the target message");
-        assert_eq!(
-            edit.expected_revision, None,
-            "test: an omitted base revision stays unconstrained"
-        );
+        assert_eq!(edit.expected_revision, 0, "test: edit keeps the observed base revision");
 
         let ConversationAction::React(react) = parse(&[
             "rf",
@@ -278,10 +277,25 @@ mod tests {
         ]) else {
             panic!("expected edit");
         };
-        assert_eq!(
-            stale.expected_revision,
-            Some(0),
-            "test: expected-revision 0 is the caller's observed base"
+        assert_eq!(stale.expected_revision, 0, "test: expected-revision 0 is the observed base");
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "conversation",
+                "edit",
+                "--account",
+                "alice",
+                "--conversation",
+                "thread",
+                "--message",
+                "m1",
+                "--text",
+                "revised",
+                "--operation-id",
+                "op-edit",
+            ])
+            .is_err(),
+            "test: conversation edit requires --expected-revision"
         );
         assert!(
             Cli::try_parse_from([

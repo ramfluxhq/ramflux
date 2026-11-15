@@ -120,7 +120,7 @@ fn refuse_mutations(world: &World<'_>) -> e2e::Result<()> {
     let message = "absent-target";
     for (method, action, extra) in [
         ("conversation.reply", "reply", vec!["--text", "reply text"]),
-        ("conversation.edit", "edit", vec!["--text", "edited text"]),
+        ("conversation.edit", "edit", vec!["--text", "edited text", "--expected-revision", "0"]),
         ("conversation.react", "react", vec!["--token", "thumb"]),
         ("conversation.react", "react", vec!["--token", "thumb", "--remove"]),
         ("conversation.delete", "delete", vec!["--scope", "local"]),
@@ -184,6 +184,7 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
     let original =
         wait_view(world, false, &message, |view| view["text"] == "live conversation body")?;
     expect_kind(&original, "message")?;
+    let base = original.get("revision").and_then(Value::as_u64).unwrap_or(0).to_string();
     let reply = mutate(world, "reply", &message, &["--text", "live reply"])?;
     expect_submitted(&reply, "conversation.reply")?;
     let reply_id = required_str(&reply, "/body/message_id")?.to_owned();
@@ -194,7 +195,8 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
             && view["text"] == "live reply"
     })?;
     expect_kind(&reply_view, "message")?;
-    let edited = mutate(world, "edit", &message, &["--text", "live edit"])?;
+    let edited =
+        mutate(world, "edit", &message, &["--text", "live edit", "--expected-revision", &base])?;
     expect_submitted(&edited, "conversation.edit")?;
     let edited_view = wait_view(world, false, &message, |view| {
         view.pointer("/content/message/text").and_then(Value::as_str) == Some("live edit")
