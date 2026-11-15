@@ -174,6 +174,8 @@ fn invalid(reason: &str) -> SdkError {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum OwnPayloadKind {
     RawInner,
+    /// A compared-safety confirmation carried as its own exact origin Inner.
+    ContactInner,
     Sent,
     Control,
     Surface,

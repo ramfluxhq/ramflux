@@ -587,10 +587,7 @@ mod tests {
         CompleteReceivedFrameRef, EphemeralReceiver, LedgerProbe, ReceiverAdmit, ReceiverDequeue,
     };
     use crate::ephemeral::{ReceiverClock, ReceiverDropReason};
-    use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
-    use serde_json::Value;
-    use std::collections::BTreeMap;
 
     const NOW_MS: u64 = 1_000_000;
     const MONOTONIC_MS: u64 = 50_000;
@@ -617,6 +614,10 @@ mod tests {
     }
 
     fn sign_envelope(envelope: &mut Envelope) {
+        envelope.payload_hash = ramflux_protocol::hash_base64url(
+            ramflux_protocol::domain::ENVELOPE,
+            envelope.encrypted_payload.as_bytes(),
+        );
         let bytes = ramflux_protocol::envelope_sender_signed_bytes(envelope);
         assert!(bytes.is_ok(), "canonical sender bytes");
         if let Ok(bytes) = bytes {
@@ -626,14 +627,11 @@ mod tests {
     }
 
     fn base_envelope() -> Envelope {
-        let mut extensions = BTreeMap::new();
-        extensions
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
         Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.message".to_owned(),
-            ext: Ext { ext: extensions },
+            schema: "ramflux.envelope.v2".to_owned(),
+            version: 2,
+            domain: "ramflux.envelope.v2".to_owned(),
+            ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "key".to_owned(),
                 signature_alg: SignatureAlg::Ed25519,
@@ -648,11 +646,11 @@ mod tests {
             priority: Priority::Low,
             ttl: 5,
             created_at: 1_000,
-            encrypted_payload: "ct".to_owned(),
-            payload_hash: "hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            encrypted_payload: "Y3Q".to_owned(),
+            payload_hash: String::new(),
+            delivery_mode: Some("ephemeral".to_owned()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         }
     }
 
@@ -725,7 +723,7 @@ mod tests {
             let mid = lo.saturating_add(hi.saturating_sub(lo) / 2).max(1);
             let envelope = signed(|e| {
                 e.envelope_id = id.to_owned();
-                e.encrypted_payload = "x".repeat(mid);
+                e.target_delivery_id = "t".repeat(mid);
             });
             let encoded = complete_frame_bytes(&envelope, EXPIRES_AT_MS);
             assert!(encoded.is_some(), "padding frame must encode before its length is checked");
@@ -776,12 +774,12 @@ mod tests {
         let mut rx = EphemeralReceiver::new();
         let original = signed(|e| {
             e.envelope_id = "same".to_owned();
-            e.payload_hash = "hash-a".to_owned();
+            e.encrypted_payload = "YQ".to_owned();
         });
         assert!(matches!(admit(&mut rx, &original, NOW_MS), ReceiverAdmit::Displayed { .. }));
         let conflict = signed(|e| {
             e.envelope_id = "same".to_owned();
-            e.payload_hash = "hash-b".to_owned();
+            e.encrypted_payload = "Yg".to_owned();
         });
         assert_eq!(admit(&mut rx, &conflict, NOW_MS), ReceiverAdmit::HashConflict);
         assert_eq!(admit(&mut rx, &original, NOW_MS), ReceiverAdmit::Duplicate);
@@ -1399,7 +1397,7 @@ mod tests {
     fn row_lifetime_refusals_isolated() {
         let mut rx = EphemeralReceiver::new();
         let durable = signed(|e| {
-            e.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+            e.delivery_mode = Some("durable".to_owned());
         });
         assert_eq!(
             admit(&mut rx, &durable, NOW_MS),

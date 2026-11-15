@@ -143,16 +143,16 @@ async fn accepted_retry_uses_native_authority_when_manifest_payload_is_absent_bo
 }
 
 #[tokio::test]
-async fn accepted_native_retry_without_authority_payload_does_not_cache_a_number()
+async fn accepted_native_retry_without_a_stored_record_still_derives_the_number()
 -> Result<(), SdkError> {
     crate::client::native_test_support::watchdog::within(
-        accepted_native_retry_without_authority_payload_does_not_cache_a_number_body(),
+        accepted_native_retry_without_a_stored_record_still_derives_the_number_body(),
     )
     .await
     .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
 }
 
-async fn accepted_native_retry_without_authority_payload_does_not_cache_a_number_body()
+async fn accepted_native_retry_without_a_stored_record_still_derives_the_number_body()
 -> Result<(), SdkError> {
     let mut a = Box::pin(Fixture::native_named("alice", 33)).await?;
     let mut b = Box::pin(Fixture::native_named("bob", 43)).await?;
@@ -162,16 +162,17 @@ async fn accepted_native_retry_without_authority_payload_does_not_cache_a_number
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     let client = account(&state, "bob")?;
-    clear_cached_safety(client)?;
-    client.retire_custody_directory_payload(&root)?;
+    client
+        .account_db()?
+        .remove_actor_state(&crate::client::identity_authority::record_key(&root))?;
     directory.unavailable.store(true, Ordering::SeqCst);
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
     let accepted =
         contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
     assert_eq!(accepted["contact"]["principal_id"], "alice");
     let row = crate::bus::read_model::row(account(&state, "bob")?, "identity", "alice")?;
-    assert_eq!(row["safety_number_available"], false);
-    assert!(row["safety_number"].is_null());
+    assert_eq!(row["safety_number_available"], true);
+    assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
     Ok(())
 }
@@ -271,7 +272,7 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     let conflicting = card(&impostor)?;
     assert!(matches!(
         contact(&mut state, "bob", "contact.accept", json!({"card":conflicting})).await,
-        Err(SdkError::ContactInput(crate::ContactReason::AnchorMismatch))
+        Err(SdkError::ContactInput(crate::ContactReason::RootConflict))
     ));
     assert_eq!(account(&state, "bob")?.contact_entry("alice")?, upgraded);
     assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);

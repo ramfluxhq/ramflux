@@ -118,6 +118,28 @@ impl RamfluxClient {
                     &g::Content { value: Some(g::content::Value::Control(control)) },
                 );
             }
+            super::OwnPayloadKind::ContactInner => {
+                let scanned = g::validation::scan_inner(body)
+                    .map_err(|_| invalid("own contact origin Inner malformed"))?;
+                let carried = g::Inner::decode(body)
+                    .map_err(|_| invalid("own contact origin Inner malformed"))?;
+                let control = g::Control::decode(scanned.body)
+                    .map_err(|_| invalid("own contact origin Control missing"))?;
+                let own = self.owned_device_identity()?;
+                let authored =
+                    carried.identity.as_ref().and_then(|id| id.author.as_ref()).is_some_and(
+                        |author| {
+                            author.account_anchor == own.root_commitment()
+                                && author.device_id == own.device_id()
+                        },
+                    );
+                if !matches!(control.payload, Some(g::control::Payload::OwnContactSync(_)))
+                    || !authored
+                {
+                    return Err(invalid("own contact origin Inner is not authored here"));
+                }
+                return Ok(body.to_vec());
+            }
             super::OwnPayloadKind::Surface => {
                 g::validation::scan_message("Surface", body, g::registry::COMPILED_LAYER)
                     .map_err(|_| invalid("invalid own Surface"))?;

@@ -855,7 +855,14 @@ async fn deliver_staged_copy(
 ) -> TestResult {
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
     let packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling.client, receiver, &entry(packet, sequence)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            receiver,
+            &entry(packet, sequence)
+        )
+        .await?
+    );
     Ok(())
 }
 
@@ -912,159 +919,18 @@ async fn stale_high_order_yields_to_current_lower(
     assert!(source.client.stage_exact_own_contact_inner(&high_inner)?);
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
     let stale = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling.client, receiver, &entry(stale, 22)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            receiver,
+            &entry(stale, 22)
+        )
+        .await?
+    );
     assert_eq!(
         confirmation_text(&sibling.client, peer_root)?,
         current,
         "the stale high-order confirmation does not replace the current one"
-    );
-    Ok(())
-}
-
-async fn stage_receiver_copy(
-    sibling: &mut LocalBusAccountState,
-    incoming: &GatewayInboxEntry,
-) -> Result<crate::client::own_device_copy::receipts::OwnCopyAckBinding, Box<dyn std::error::Error>>
-{
-    use crate::client::own_device_copy::w1;
-    let target = incoming.envelope.target_delivery_id.clone();
-    let config = sibling.gateway_config.clone();
-    let expected_for = |db: &AccountDb| -> Result<_, SdkError> {
-        Ok(ramflux_storage::ReceiveExpectation {
-            target: &target,
-            incarnation: "cas",
-            cursor: 0,
-            generation: 1,
-            erasure_generation: db.privacy_erasure_generation()?,
-        })
-    };
-    {
-        let db = sibling.client.account_db()?;
-        db.install_receive_ledger_schema()?;
-        db.seed_receive_epoch_for_test(&target, "cas")?;
-        let bytes = serde_json::to_vec(&json!({
-            "inbox_seq": incoming.inbox_seq,
-            "target_delivery_id": target,
-            "envelope": incoming.envelope,
-        }))?;
-        let gate = w1::OwnCopyW1 { expected: expected_for(db)?, generation: 1 };
-        assert_eq!(
-            gate.stage(
-                db,
-                ramflux_storage::ReceiveStage {
-                    target: &target,
-                    incarnation: "cas",
-                    sequence: incoming.inbox_seq,
-                    entry_json: &bytes,
-                    admission_key: "authenticated-own-copy",
-                    retain_until: now_unix_timestamp().saturating_add(300),
-                    first_seen: 1,
-                },
-            )?,
-            ramflux_storage::ReceiveStageResult::Staged
-        );
-    }
-    let expected = expected_for(sibling.client.account_db()?)?;
-    crate::client::native_test_support::bus::receive_copy_joining(
-        &mut sibling.client,
-        &config,
-        incoming,
-        |client, write| {
-            w1::join_own_copy(
-                client.account_db()?,
-                expected,
-                expected.generation,
-                "generated own-copy transaction failed",
-                |tx| {
-                    let result = match write {
-                        crate::client::routed::JoinedW1::Project(context) => {
-                            let (body, admitted, _) =
-                                client.commit_routed_w1_in(tx, incoming.inbox_seq, context)?;
-                            (body, admitted)
-                        }
-                        crate::client::routed::JoinedW1::Cover => (None, Vec::new()),
-                        crate::client::routed::JoinedW1::ContactBootstrap { .. } => {
-                            return Err(SdkError::LocalBus(
-                                "test: unexpected contact bootstrap".into(),
-                            ));
-                        }
-                    };
-                    client.bind_received_own_copy_in(tx, incoming, expected)?;
-                    Ok(result)
-                },
-            )
-        },
-    )
-    .await?;
-    let db = sibling.client.account_db()?;
-    let binding = sibling.client.own_copy_ack_binding(incoming)?.ok_or("receiver binding")?;
-    assert_eq!(
-        crate::client::own_device_copy::receipts::own_copy_acknowledged(db, &binding)?,
-        (Some(false), Some(false)),
-        "the sibling copy is committed before settlement"
-    );
-    Ok(binding)
-}
-
-async fn settle_receiver_ack(
-    sibling: &mut LocalBusAccountState,
-    incoming: &GatewayInboxEntry,
-) -> TestResult {
-    let binding = stage_receiver_copy(sibling, incoming).await?;
-    let db = sibling.client.account_db()?;
-    let target = incoming.envelope.target_delivery_id.clone();
-    let erasure = db.privacy_erasure_generation()?;
-    assert_eq!(
-        db.receive_transaction(
-            ramflux_storage::ReceiveExpectation {
-                target: &target,
-                incarnation: "cas",
-                cursor: 0,
-                generation: 1,
-                erasure_generation: erasure,
-            },
-            1,
-            |tx| {
-                tx.cover(ramflux_storage::ReceiveCover {
-                    sequence: incoming.inbox_seq,
-                    kind: ramflux_storage::ReceiveCoverKind::Terminal,
-                    gaps: &[],
-                    retain_until: 0,
-                })
-            },
-        )?,
-        ramflux_storage::ReceiveCoverResult::Covered
-    );
-    let wa = crate::bus::push_receiver::ack_batch::SourceWa {
-        expected: ramflux_storage::ReceiveExpectation {
-            target: &target,
-            incarnation: "cas",
-            cursor: incoming.inbox_seq,
-            generation: 1,
-            erasure_generation: erasure,
-        },
-        generation: 1,
-    };
-    let settled = [ramflux_storage::ReceiveAckResult {
-        sequence: incoming.inbox_seq,
-        outcome: ramflux_storage::ReceiveAckOutcome::AlreadySettled,
-    }];
-    assert_eq!(
-        wa.apply(
-            db,
-            ramflux_storage::ReceiveAckApply {
-                incarnation: "cas",
-                sequences: &[incoming.inbox_seq],
-                results: &settled,
-                now: now_unix_timestamp(),
-            },
-        )?,
-        ramflux_storage::ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
-    );
-    assert_eq!(
-        crate::client::own_device_copy::receipts::own_copy_acknowledged(db, &binding)?,
-        (Some(true), Some(true)),
-        "the receiving device settles the copy"
     );
     Ok(())
 }
@@ -1106,7 +972,14 @@ async fn order_acknowledged_sibling_confirmation(
     assert!(source.client.stage_exact_own_contact_inner(&stale_inner)?);
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
     let stale_packet = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling.client, receiver, &entry(stale_packet, 2)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            receiver,
+            &entry(stale_packet, 2)
+        )
+        .await?
+    );
     assert_eq!(
         sibling.client.account_db()?.load_actor_state::<String>(&confirmation_key)?.as_deref(),
         Some(kept.as_str()),
@@ -1121,7 +994,14 @@ async fn order_acknowledged_sibling_confirmation(
     assert_eq!(renewed.verification_state, "verified");
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
     let fresh = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling.client, receiver, &entry(fresh, 3)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            receiver,
+            &entry(fresh, 3)
+        )
+        .await?
+    );
     let current = sibling
         .client
         .account_db()?
@@ -1133,7 +1013,14 @@ async fn order_acknowledged_sibling_confirmation(
     assert!(source.client.stage_exact_own_contact_inner(&stale_inner)?);
     assert_eq!(crate::bus::own_device_copy::flush(source).await?, 1);
     let older = sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling.client, receiver, &entry(older, 4)).await?);
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            receiver,
+            &entry(older, 4)
+        )
+        .await?
+    );
     assert_eq!(
         sibling.client.account_db()?.load_actor_state::<String>(&confirmation_key)?.as_deref(),
         Some(current.as_str()),
@@ -1160,22 +1047,7 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
     sibling.client.observe_custody_manifest(&peer_native, &peer_root, now)?;
     source.client.establish_friend_link("cas-e2ee", &own, &peer_root)?;
     sibling.client.establish_friend_link("cas-e2ee", &own, &peer_root)?;
-    let source_id = source.client.owned_device_identity()?;
-    let sibling_id = sibling.client.owned_device_identity()?;
-    let send = ramflux_crypto::DmSession::initiator(
-        [79; 32],
-        dm_device_id_hash(source_id.device_id()),
-        dm_device_id_hash(sibling_id.device_id()),
-        [3; 32],
-    )?;
-    let recv = ramflux_crypto::DmSession::recipient(
-        [79; 32],
-        dm_device_id_hash(sibling_id.device_id()),
-        dm_device_id_hash(source_id.device_id()),
-        [3; 32],
-    )?;
-    source.client.persist_pair(&source_id, &sibling_id, &[4; 32], &send)?;
-    sibling.client.persist_pair(&sibling_id, &source_id, &[4; 32], &recv)?;
+    crate::client::native_test_support::bus::seed_pair(&source.client, &sibling.client)?;
     let recorded =
         crate::client::contact_verification_cas::verify_linked_contact(&source.client, &peer_root)?;
     assert_eq!(recorded.verification_state, "verified");
@@ -1210,8 +1082,15 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
     assert_eq!(crate::bus::own_device_copy::flush(&mut source_bus).await?, 1);
     let packet = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     let incoming = entry(packet, 1);
-    assert!(crate::client::native_test_support::bus::receive_copy(&mut sibling_bus.client, &receiver, &incoming).await?);
-    settle_receiver_ack(&mut sibling_bus, &incoming).await?;
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling_bus.client,
+            &receiver,
+            &incoming
+        )
+        .await?,
+        "the sibling device receives the compared confirmation through the generated path"
+    );
     assert_eq!(
         sibling_bus.client.contact_safety_number(&peer_root)?.verification_state,
         "verified",

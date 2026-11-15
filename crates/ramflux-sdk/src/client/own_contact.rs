@@ -203,10 +203,23 @@ impl RamfluxClient {
         if active < 2 {
             return Ok(false);
         }
-        self.stage_own_contact_body(body)?;
+        self.stage_own_contact_payload(
+            body,
+            crate::client::own_device_copy::OwnPayloadKind::ContactInner,
+        )?;
         Ok(true)
     }
     fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
+        self.stage_own_contact_payload(
+            body,
+            crate::client::own_device_copy::OwnPayloadKind::Control,
+        )
+    }
+    fn stage_own_contact_payload(
+        &self,
+        body: &[u8],
+        payload_kind: crate::client::own_device_copy::OwnPayloadKind,
+    ) -> Result<(), SdkError> {
         let Some((_, _, authority_tag)) = self.own_contact_roster()? else {
             return Ok(());
         };
@@ -217,7 +230,7 @@ impl RamfluxClient {
         crate::bus::own_device_copy::stage(
             self,
             crate::client::own_device_copy::OwnMessageInput {
-                payload_kind: crate::client::own_device_copy::OwnPayloadKind::Control,
+                payload_kind,
                 id: &id,
                 created_at: crate::prelude::now_unix_timestamp(),
                 conversation: "own-contact",
