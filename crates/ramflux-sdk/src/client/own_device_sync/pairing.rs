@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Enrollment history uses the existing bounded exporter and ordinary encrypted control route.
-use crate::{GatewayDirectMessage, GatewaySessionAccess, RamfluxClient, SdkError};
+//! Enrollment history authority checks; the generation-1 history carrier is P13 work.
+use crate::{GatewaySessionAccess, RamfluxClient, SdkError};
 use ramflux_storage::PairingOwnSyncJob;
 impl RamfluxClient {
     pub(crate) async fn export_pairing_history(
@@ -41,55 +41,10 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        let options = self
-            .relay_transfer_options(None, None, None)?
-            .ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        let exported = Box::pin(self.export_own_device_sync(
-            engine,
-            pool,
-            root,
-            &job.target_ref.device_id,
-            &options.relay_endpoint,
-            None,
-            64 * 1024,
-        ))
-        .await?;
-        let now = crate::custody::network_now()?;
-        let current = self
-            .current_custody_authority(root, now)?
-            .ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        current.authorize(&job.source_ref, "sync", now)?;
-        current.authorize(&job.target_ref, "sync", now)?;
-        if ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
-        }
-        let bytes =
-            zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(&exported.envelope)?);
-        let identity = crate::new_surface_message_id()?;
-        let conversation = ramflux_crypto::blake3_256_base64url(
-            "ramflux.pairing.own_history.route.v1",
-            &ramflux_protocol::canonical_json_bytes(&(&job.source_ref, &job.target_ref))?,
-        );
-        let message = GatewayDirectMessage {
-            conversation_id: conversation,
-            message_id: identity.clone(),
-            envelope_id: identity,
-            source_principal_id: engine.config().principal_id.clone(),
-            sender_id: engine.config().device_id.clone(),
-            recipient_device_id: Some(job.target_ref.device_id.clone()),
-            recipient_principal_commitment: Some(root.clone()),
-            target_delivery_id: target.target_delivery_id,
-            encrypted_body: Vec::new(),
-            created_at: crate::time::now_unix_timestamp(),
-            ttl: self.content_ttl()?,
-        };
-        self.send_plaintext_direct_message_without_franking(
-            engine,
-            message,
-            &bytes,
-            crate::client::routed::Route::control(),
-        )
-        .await?;
-        Ok(())
+        // P13 TODO (MU-ACTIVATION-01): the generation-1 carrier for enrollment history is not
+        // built yet. The retired own-device-sync exporter is intentionally not restored, so the
+        // job stays unfinished (it completes only on target acknowledgement) and is retried.
+        let _ = (pool, target.target_delivery_id);
+        Err(SdkError::PairingCode("TodoP13HistoryCarrier"))
     }
 }
