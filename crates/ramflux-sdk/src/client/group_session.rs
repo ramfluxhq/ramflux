@@ -707,18 +707,6 @@ impl RamfluxClient {
     }
 
     #[cfg(test)]
-    pub(crate) fn decrypt_group_envelope(
-        &self,
-        envelope: &SdkGroupEncryptedEnvelope,
-        message_id: &str,
-    ) -> Result<Vec<u8>, SdkError> {
-        let source = self.device_identity(
-            &self.group_device_reference(&envelope.group_id, &envelope.sender_id)?,
-        )?;
-        self.decrypt_group_envelope_for_identity(envelope, message_id, &source)
-    }
-
-    #[cfg(test)]
     pub(crate) fn decrypt_group_envelope_for_identity(
         &self,
         envelope: &SdkGroupEncryptedEnvelope,

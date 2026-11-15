@@ -298,7 +298,7 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         )?;
     }
     let peer = &peers[0].client;
-    create_group(&source.client, peer.fixture_group_actor("peer-0")?.identity)?;
+    create_group(&source.client, peer.fixture_group_actor("device-peer-0")?.identity)?;
     let removed = source.client.fixture_group_change(
         "group",
         "sender",
@@ -321,10 +321,10 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
     let envelopes = captured.lock().map_err(|_| "capture lock")?.clone();
     assert_eq!(envelopes.len(), 1);
     let envelope = envelopes.into_iter().next().ok_or("missing boundary")?;
-    assert_eq!(envelope.target_delivery_id, "device-peer-0");
+    assert_eq!(envelope.target_delivery_id, peer.owned_device_identity()?.storage_key());
     peer.establish_friend_link(
         "owner-consent",
-        "sender",
+        &peer.own_account_anchor()?,
         source.client.owned_device_identity()?.root_commitment(),
     )?;
     let entry = GatewayInboxEntry {
@@ -334,14 +334,8 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         envelope,
     };
     let opened = peer.open_routed(&entry, "device-peer-0")?;
-    let packet: Value = serde_json::from_slice(&opened.body)?;
-    assert!(packet.get("distribution_base64").is_none());
-    let snapshot = ramflux_protocol::decode_base64url(
-        packet["snapshot_base64"].as_str().ok_or("missing proof")?,
-    )?;
-    let verified = ramflux_crypto::verify_group_state_snapshot(
-        ramflux_protocol::group_state::GroupStateSnapshot::from_wire_bytes(&snapshot)?,
-    )?;
+    let verified = crate::client::shared_group::decode_shared_group_packet(&opened.body)?
+        .ok_or("the removed device receives a signed boundary snapshot")?;
     assert_eq!(verified.view(), removed.view());
     assert_eq!(verified.view().name.as_deref(), Some("Shared name"));
     let alias = other_root_snapshot(&config)?;
@@ -424,17 +418,17 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     for envelope in envelopes {
-        let index =
-            names.iter().position(|name| *name == envelope.target_delivery_id).ok_or("target")?;
+        let index = peers
+            .iter()
+            .position(|peer| peer.gateway_config.target_delivery_id == envelope.target_delivery_id)
+            .ok_or("target")?;
         let peer = &mut peers[index];
         let commitment = source.client.owned_device_identity()?.root_commitment().to_owned();
-        peer.client.establish_friend_link("owner-consent", "peer", &commitment)?;
-        let mut receiver = config.clone();
-        receiver.principal_id = "peer".into();
-        receiver.device_id = names[index].into();
-        receiver.target_delivery_id = names[index].into();
+        let anchor = peer.client.own_account_anchor()?;
+        peer.client.establish_friend_link("owner-consent", &anchor, &commitment)?;
+        let receiver = crate::client::native_test_support::bus::config_for(&peer.client, &config)?;
         let mut receiver = GatewaySessionEngine::with_test_transport(
-            receiver.with_account_identity(&peer.client)?,
+            receiver,
             Box::new(super::fixture::RecordingGateway::new(Arc::default())),
         );
         let entry = GatewayInboxEntry {
