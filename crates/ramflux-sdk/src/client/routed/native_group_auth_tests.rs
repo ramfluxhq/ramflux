@@ -42,19 +42,22 @@ async fn setup_with_bootstrap(
     target.accept_peer(&source)?;
     outsider.accept_peer(&target)?;
     target.accept_peer(&outsider)?;
-    let primary = source
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native owner")?
-        .group_primary(source.vault.as_ref())?;
-    source.client.shared_group_create_with_primary(
-        GROUP,
-        THREAD,
-        None,
-        &source.config.target_delivery_id,
-        Some(&primary),
-    )?;
+    {
+        // The primary signing lease is exclusive; release it before `change` takes its own.
+        let primary = source
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("native owner")?
+            .group_primary(source.vault.as_ref())?;
+        source.client.shared_group_create_with_primary(
+            GROUP,
+            THREAD,
+            None,
+            &source.config.target_delivery_id,
+            Some(&primary),
+        )?;
+    }
     let mut state = change(
         &source,
         GroupStateChange::Add {
@@ -371,19 +374,22 @@ async fn stranger_snapshot_waits_for_creator_consent_before_native_group_deliver
         let source = Fixture::new("group-consent-source").await?;
         let mut target = Fixture::new("group-consent-target").await?;
         source.client.persist_fetched_identity_directory(&target.manifest)?;
-        let primary = source
-            .client
-            .born_v3_account
-            .as_ref()
-            .ok_or("native owner")?
-            .group_primary(source.vault.as_ref())?;
-        source.client.shared_group_create_with_primary(
-            GROUP,
-            THREAD,
-            None,
-            &source.config.target_delivery_id,
-            Some(&primary),
-        )?;
+        {
+            // The primary signing lease is exclusive; release it before `change` takes its own.
+            let primary = source
+                .client
+                .born_v3_account
+                .as_ref()
+                .ok_or("native owner")?
+                .group_primary(source.vault.as_ref())?;
+            source.client.shared_group_create_with_primary(
+                GROUP,
+                THREAD,
+                None,
+                &source.config.target_delivery_id,
+                Some(&primary),
+            )?;
+        }
         let state = change(
             &source,
             GroupStateChange::Add {

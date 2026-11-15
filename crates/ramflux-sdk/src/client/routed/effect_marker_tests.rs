@@ -213,6 +213,9 @@ async fn cut(
     conversation: &str,
     kind: commit_fault::Kind,
 ) -> Result<(), SdkError> {
+    // Account open backfills the canonical direct-conversation row for accepted friends.
+    // Materialize it before the pre-state so every comparison isolates the receive effects.
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     stage_w0(&receiver.client, &entry.target_delivery_id, entry)?;
     let pre = snap(&receiver.client, entry, conversation)?;
     assert!(!pre.seen);
@@ -531,6 +534,9 @@ async fn redrive_kind(
     conversation: &str,
     kind: commit_fault::Kind,
 ) -> Result<(), SdkError> {
+    // Account open backfills the canonical direct-conversation row for accepted friends.
+    // Materialize it before the pre-state so every comparison isolates the receive effects.
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     stage_w0(&receiver.client, &entry.target_delivery_id, entry)?;
     commit_fault::fail_before(kind);
     assert_fault(apply(receiver, entry).await);

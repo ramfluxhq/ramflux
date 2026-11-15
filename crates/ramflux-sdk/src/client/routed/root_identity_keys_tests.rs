@@ -233,9 +233,10 @@ async fn a_cold_native_head_defers_reset_without_retiring_durable_work() -> Resu
     let before = alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?;
     *alice.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
+    // A missing process-local head clock is not a relationship end: recovery stays allowed
+    // and the due reset is kept until the directory fetch restores the observation.
     assert!(
-        matches!(alice.client.pair_recovery_allowed(&local, &remote),
-        Err(SdkError::FreshHeadRequired { root }) if root == remote.root_commitment()),
+        alice.client.pair_recovery_allowed(&local, &remote)?,
         "a missing live observation must defer recovery instead of retiring the pair"
     );
     assert_eq!(alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?, before);
