@@ -103,6 +103,10 @@ impl RamfluxClient {
         }) {
             return Ok(skip(LocalBusBackupContactSkipReason::PinnedConflict));
         }
+        if let Some(native) = &contact.manifest.custody {
+            // A generation-1 contact carries its custody authority, never a signed device set.
+            return Ok(self.native_backup_authority_skip(native, peer)?.and_then(skip));
+        }
         let record = contact
             .manifest
             .signed_device_set
@@ -140,6 +144,39 @@ impl RamfluxClient {
                 return Ok(skip(LocalBusBackupContactSkipReason::Equivocation));
             }
             return Err(error);
+        }
+        Ok(None)
+    }
+
+    fn native_backup_authority_skip(
+        &self,
+        native: &ramflux_protocol::custody::CustodyManifest,
+        peer: &str,
+    ) -> Result<Option<LocalBusBackupContactSkipReason>, SdkError> {
+        let record = &native.publication.record;
+        let epoch = record.body.device_set_epoch;
+        let hash = ramflux_protocol::custody::object_hash(record)?;
+        if let Some((floor, retained)) = self
+            .account_db()?
+            .contact_request_authority_floor(peer, crate::time::now_unix_timestamp())?
+        {
+            if epoch < floor {
+                return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
+            }
+            if epoch == floor && hash != retained {
+                return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
+            }
+        }
+        if self.custody_epoch_floor(peer)?.is_some_and(|floor| floor > epoch) {
+            return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
+        }
+        if let Some(current) =
+            self.current_custody_authority(peer, crate::custody::network_now()?)?
+            && current.envelope().body.device_set_epoch == epoch
+            && ramflux_protocol::custody::object_hash(current.envelope())? != hash
+        {
+            tracing::warn!("backup contact custody authority equivocation skipped");
+            return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
         }
         Ok(None)
     }

@@ -46,6 +46,24 @@ async fn sibling_fixture_with_peer(
     ),
     Box<dyn std::error::Error>,
 > {
+    Box::pin(sibling_fixture_contacts(root, source, preseed, true)).await
+}
+/// `with_contact == false` models a freshly enrolled device that has not yet received any contact.
+async fn sibling_fixture_contacts(
+    root: &Path,
+    source: &mut LocalBusAccountState,
+    preseed: bool,
+    with_contact: bool,
+) -> Result<
+    (
+        LocalBusAccountState,
+        GatewaySessionConfig,
+        GatewaySessionConfig,
+        tokio::task::JoinHandle<()>,
+        LocalBusAccountState,
+    ),
+    Box<dyn std::error::Error>,
+> {
     use crate::client::native_test_support::bus;
     let mut peer = Box::pin(super::dm_tests::peer_fixture(root, source)).await?;
     peer.directory.abort();
@@ -64,11 +82,13 @@ async fn sibling_fixture_with_peer(
         .client
         .account_db()?
         .persist_actor_state("fixture/direct-conversation", &conversation)?;
-    sibling.client.establish_friend_link(
-        "surface-peer",
-        &own.principal_commitment,
-        &remote.principal_commitment,
-    )?;
+    if with_contact {
+        sibling.client.establish_friend_link(
+            "surface-peer",
+            &own.principal_commitment,
+            &remote.principal_commitment,
+        )?;
+    }
     let (address, directory) = super::fixture::directory(
         root,
         BTreeMap::from([
@@ -820,19 +840,19 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
         Arc::new(AtomicBool::new(false)),
     )?;
     let (mut sibling, config, receiver, directory, peer) =
-        sibling_fixture_with_peer(&root, &mut source, false).await?;
+        sibling_fixture_contacts(&root, &mut source, false, false).await?;
     let peer_root = peer.client.owned_device_identity()?.root_commitment().to_owned();
-    let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
     let db = sibling.client.account_db()?;
     db.remove_actor_state(&format!("identity/custody/{peer_root}"))?;
     db.remove_actor_state(&format!("identity/manifest-root/{peer_root}"))?;
     db.remove_actor_state("identity/manifest/peer")?;
     assert!(sibling.client.device_identity_for_root(&peer_root, "device-peer-one").is_err());
-    source.client.establish_friend_link("accepted-before-restore", &own_root, &peer_root)?;
+    assert!(
+        source.client.friend_link_peer_is_accepted(&peer_root)?,
+        "the source account already holds the accepted contact the restore must carry over"
+    );
     if backup {
-        (source, sibling) =
-            Box::pin(restore_contacts_from_encrypted_backup(&root, source, sibling, &peer_root))
-                .await?;
+        restore_contacts_from_backup(&source, &sibling, &peer_root)?;
     } else {
         let gateway = fresh_sibling_gateway(&source.client, &sibling.client)?;
         let own = Arc::clone(&gateway.own);
@@ -860,38 +880,45 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
         HeadUse::NewAuthorization,
         &sibling.client.device_identity_for_root(&peer_root, "device-peer-one")?,
     )?;
-    let mut peer_config = config;
-    peer_config.principal_id = "peer".into();
-    peer_config.device_id = "device-peer-one".into();
-    peer_config = peer_config.with_account_identity(&peer.client)?;
+    let peer_config = crate::client::native_test_support::bus::config_for(&peer.client, &config)?;
     let mut engine = GatewaySessionEngine::with_test_transport(
         peer_config,
         Box::new(fresh_sibling_gateway(&peer.client, &sibling.client)?),
     );
-    let target = super::super::task_transport::Target {
-        device: "device-sibling".into(),
-        identity: sibling.client.owned_device_identity()?,
-        delivery: receiver.target_delivery_id.clone(),
-        federation: None,
-        own: false,
+    let own_root = source.client.owned_device_identity()?.root_commitment().to_owned();
+    let conversation = ramflux_protocol::message::dm_scope::derive(&own_root, &peer_root)?;
+    let peer_identity = peer.client.owned_device_identity()?;
+    let message = GatewayDirectMessage {
+        conversation_id: conversation.clone(),
+        message_id: "new-after-restore".into(),
+        envelope_id: "new-after-restore-envelope".into(),
+        source_principal_id: peer_identity.root_commitment().into(),
+        sender_id: peer_identity.device_id().into(),
+        recipient_device_id: Some("device-sibling".into()),
+        recipient_principal_commitment: Some(own_root),
+        target_delivery_id: receiver.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 300,
     };
-    let sealed = super::super::task_transport::seal(
-        &peer,
-        &mut engine,
-        &target,
-        "new-after-restore",
-        b"peer to restored device",
-        crate::client::routed::Route::direct(),
-    )
-    .await?;
+    let sent = peer
+        .client
+        .send_plaintext_direct_message_via_gateway(&mut engine, message, b"peer to restored device")
+        .await?;
     let incoming = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 2,
-        target_delivery_id: sealed.envelope.target_delivery_id.clone(),
-        envelope: sealed.envelope,
+        target_delivery_id: sent.envelope.target_delivery_id.clone(),
+        envelope: sent.envelope,
     };
-    let (sibling, receiver_engine) =
-        Box::pin(receive_first_bootstrap(&root, sibling, receiver, incoming.clone())).await?;
+    let (sibling, receiver_engine) = Box::pin(receive_first_bootstrap(
+        &root,
+        sibling,
+        receiver,
+        incoming.clone(),
+        &conversation,
+    ))
+    .await?;
     let state = Box::pin(read_durable_message_despite_untrusted_ram_rows(
         &root,
         sibling,
@@ -905,46 +932,23 @@ async fn restored_contact_bootstrap(backup: bool) -> TestResult {
     Ok(())
 }
 
-async fn restore_contacts_from_encrypted_backup(
-    root: &Path,
-    mut source: LocalBusAccountState,
-    mut sibling: LocalBusAccountState,
+/// The account's contact snapshot restores the accepted contact on a freshly enrolled device of the
+/// same root before any sibling backfill tick or peer message. The legacy seed-manifest file wrapper
+/// (`account.backup.export` / `import`) cannot carry a born-v3 account, so the snapshot is applied
+/// through the client API that the retired wrapper called.
+fn restore_contacts_from_backup(
+    source: &LocalBusAccountState,
+    sibling: &LocalBusAccountState,
     peer_root: &str,
-) -> Result<(LocalBusAccountState, LocalBusAccountState), Box<dyn std::error::Error>> {
-    // Exercise the real encrypted export/import dispatch, without any sibling backfill tick.
-    let path = root.join("account-backup.json");
-    let mut source_state = receiving_state(&root.join("source"), source);
-    let export = LocalBusFrame::request(
-        "export",
-        Some("sender".into()),
-        "account",
-        "account.backup.export",
-        json!({"output_path":path,"passphrase":"restore-test-secret"}),
-    );
-    super::super::account::dispatch_account_bus_request(&export, &mut source_state).await?;
-    source = source_state.accounts.remove("sender").ok_or("source")?;
-    let encoded = std::fs::read_to_string(&path)?;
-    assert!(!encoded.contains(peer_root));
-    assert!(!encoded.contains("accepted-before-restore"));
+) -> TestResult {
+    let contacts = source.client.backup_contacts()?;
+    assert!(!contacts.is_empty(), "the source account must snapshot its accepted contact");
     assert!(!sibling.client.friend_link_peer_is_accepted(peer_root)?);
-    let mut restored = receiving_state(&root.join("sibling"), sibling);
-    let import = LocalBusFrame::request(
-        "import",
-        None,
-        "account",
-        "account.backup.import",
-        json!({"input_path":path,"passphrase":"restore-test-secret"}),
-    );
-    let response =
-        super::super::account::dispatch_account_bus_request(&import, &mut restored).await?;
-    assert_eq!(response.response_body["contact_restore"]["restored"], 1);
-    assert_eq!(response.response_body["contact_restore"]["skipped"], json!([]));
-    sibling = restored.accounts.remove("sender").ok_or("restored account")?;
-    assert!(sibling.engine.is_none(), "backup import must remain offline");
+    let report = sibling.client.restore_backup_contacts(&contacts)?;
+    assert_eq!(report.restored, 1, "the accepted contact is restored once");
+    assert!(report.skipped.is_empty(), "no contact may be skipped");
     assert!(sibling.client.friend_link_peer_is_accepted(peer_root)?);
-    // The already-published native fixture branch/prekeys model activation's fresh device.
-    sibling.client.create_device_branch("sender", "device-sibling", 1, [77; 32]);
-    Ok((source, sibling))
+    Ok(())
 }
 
 async fn receive_first_bootstrap(
@@ -952,6 +956,7 @@ async fn receive_first_bootstrap(
     mut sibling: LocalBusAccountState,
     config: GatewaySessionConfig,
     incoming: GatewayInboxEntry,
+    conversation: &str,
 ) -> Result<
     (LocalBusAccountState, crate::bus::connection_manager::SessionClient),
     Box<dyn std::error::Error>,
@@ -974,7 +979,7 @@ async fn receive_first_bootstrap(
         Some("sender".into()),
         "message",
         "message.receive",
-        json!({"limit":10,"conversation_id":"new-after-restore"}),
+        json!({"limit":10,"conversation_id":conversation}),
     );
     let response = super::super::message::dispatch_message_receive_request(
         &request,
@@ -984,11 +989,11 @@ async fn receive_first_bootstrap(
     .await?;
     assert!(rejected.load(std::sync::atomic::Ordering::SeqCst), "ACK fault was not reached");
     let client = &state.accounts["sender"].client;
-    let committed = client.direct_messages("new-after-restore")?;
+    let committed = client.direct_messages(conversation)?;
     assert_eq!(committed.len(), 1, "plaintext committed before ACK failure");
     assert_eq!(
-        client.account_db()?.message_content(&committed[0].message_id)?,
-        Some(b"peer to restored device".to_vec())
+        stored_text(client.account_db()?.message_content(&committed[0].message_id)?.as_deref())?,
+        "peer to restored device"
     );
     let db = client.account_db()?;
     let mut retryable = db.has_inbox_retry(&admission)?;
@@ -1006,14 +1011,8 @@ async fn receive_first_bootstrap(
         )?,
         "visibility must not fabricate a successful ACK"
     );
-    let rows = response.response_body["decrypted_messages"].as_array().ok_or("rows")?;
-    assert_eq!(rows.len(), 1, "first fresh bootstrap response: {}", response.response_body);
-    assert_eq!(
-        ramflux_protocol::decode_base64url(
-            rows[0]["plaintext_body_base64"].as_str().ok_or("body")?
-        )?,
-        b"peer to restored device"
-    );
+    // Plaintext is read only through the durable reader; the receive response carries no rows.
+    assert_eq!(response.response_body["durable_reader"], "message.read");
     let account = state.accounts.get_mut("sender").ok_or("account")?;
     account.pending_deliveries.clear(); // Stronger than eviction from the 64-entry RAM window.
     assert!(
@@ -1052,6 +1051,13 @@ async fn receive_first_bootstrap(
     let mut sibling = state.accounts.remove("sender").ok_or("account")?;
     let engine = sibling.session_client().await?;
     Ok((sibling, engine))
+}
+
+/// The text of a stored generation-1 message body (an `Inner` wrapping a `Message`).
+fn stored_text(content: Option<&[u8]>) -> Result<String, Box<dyn std::error::Error>> {
+    use prost::Message as _;
+    let inner = ramflux_protocol::message::Inner::decode(content.ok_or("stored content")?)?;
+    Ok(ramflux_protocol::message::Message::decode(inner.body.as_slice())?.text)
 }
 
 struct RejectFirstAck {
