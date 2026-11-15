@@ -4,43 +4,45 @@
 //! Slow directory responses must finish before automatic sibling discovery is projected.
 use super::*;
 use crate::bus::runtime_tests;
-use crate::client::identity_authority::test_support;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::test]
 async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_epoch_change()
 -> TestResult {
+    use crate::client::native_test_support::{
+        Fixture as Native, activation_send::tests::publish_layer_four, bus,
+    };
     let root = runtime_tests::root("slow-own-manifest");
-    let mut owner = runtime_tests::account(
-        &root.join("owner"),
-        "owner",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let mut sibling = runtime_tests::account(
-        &root.join("sibling"),
-        "sibling",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    sibling.client.create_identity_root(
-        "owner",
-        ramflux_crypto::blake3_256("ramflux.test.account.root.v1", b"owner"),
-    );
-    sibling.client.create_device_branch("owner", "device-sibling", 1, [0x73; 32]);
-    let previous = test_support::public_manifest(&owner.client)?;
-    owner.client.persist_identity_directory(&previous)?;
-    owner.client.shared_group_create("group", "thread", None, "target")?;
-    assert_eq!(owner.client.group_state("group")?.members.len(), 1);
-    let mut updated = previous;
-    updated.devices.extend(test_support::public_manifest(&sibling.client)?.devices);
-    test_support::sign_manifest(
-        owner.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &mut updated,
-        2,
-    )?;
+    std::fs::create_dir_all(&root)?;
+    let mut native = Box::pin(Native::with_principal("owner", "device-owner", "owner")).await?;
+    Box::pin(publish_layer_four(&mut native)).await?;
+    let mut owner = native.into_bus();
+    let anchor = owner.client.own_account_anchor()?;
+    let custody_key = format!("identity/custody/{anchor}");
+    let manifest_key = format!("identity/manifest-root/{anchor}");
+    let stale_custody: serde_json::Value =
+        owner.client.account_db()?.load_actor_state(&custody_key)?.ok_or("custody cache")?;
+    let stale_manifest: Option<serde_json::Value> =
+        owner.client.account_db()?.load_actor_state(&manifest_key)?;
+    // A real second device joins the certified root; the owner's cache then rolls back to the
+    // roster it knew before, so only the slow directory reply can teach it the sibling.
+    let sibling = Box::pin(bus::sibling(&mut owner, "owner", "device-sibling")).await?;
+    let updated =
+        owner.client.native_bus_fixture.as_ref().ok_or("native manifest")?.manifest.clone();
+    let db = owner.client.account_db()?;
+    db.persist_actor_state(&custody_key, &stale_custody)?;
+    match &stale_manifest {
+        Some(value) => db.persist_actor_state(&manifest_key, value)?,
+        None => db.remove_actor_state(&manifest_key)?,
+    }
+    let sibling_member = sibling.client.owned_device_identity()?.device_id().to_owned();
+    let own_member = owner.client.owned_device_identity()?.device_id().to_owned();
+    owner.client.fixture_group_create("group", "thread", None, "device-owner")?;
+    let before = owner.client.group_state("group")?;
+    assert_eq!(before.members.len(), 1);
+    assert!(before.members.contains(&own_member));
     let expected_root = updated.principal_commitment.clone();
     let (config, server) = slow_directory(&root, owner.gateway_config.clone(), updated).await?;
     owner.engine = None;
@@ -51,9 +53,14 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
     }
     result?;
     server.await??;
-    let observed = owner.client.observed_device_set(&expected_root)?.ok_or("device set missing")?;
-    assert_eq!(observed.device_set_epoch, 2);
-    assert!(observed.devices.iter().any(|device| device.device_id == "device-sibling"));
+    let authority = owner
+        .client
+        .current_custody_authority(&expected_root, crate::custody::network_now()?)?
+        .ok_or("custody authority missing")?;
+    assert!(authority.envelope().body.device_set_epoch >= 2);
+    assert!(
+        authority.envelope().body.devices.iter().any(|device| device.device_id == "device-sibling")
+    );
     let persisted: crate::prekey::SdkDeviceManifestResponse = owner
         .client
         .account_db()?
@@ -62,7 +69,7 @@ async fn slow_own_manifest_refresh_persists_sibling_and_expands_group_without_ep
     assert_eq!(persisted.devices.len(), 2);
     let group = owner.client.group_state("group")?;
     assert_eq!(group.group_epoch, 1);
-    assert!(group.members.contains("device-sibling"));
+    assert!(group.members.contains(&sibling_member));
     assert_eq!(group.members.len(), 2);
     drop((owner, sibling));
     Ok(())

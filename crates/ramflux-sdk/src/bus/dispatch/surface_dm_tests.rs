@@ -264,8 +264,14 @@ pub(super) fn conversation(client: &RamfluxClient) -> Result<String, SdkError> {
         .ok_or_else(|| invalid("test: canonical conversation missing"))
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
+    create_carrier_in(source, &conversation(source)?)
+}
+pub(super) fn create_carrier_in(
+    source: &RamfluxClient,
+    conversation: &str,
+) -> Result<Carrier, SdkError> {
     let request = crate::SurfaceSendRequest::event(
-        &conversation(source)?,
+        conversation,
         1,
         &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
             surface_id: "surface".into(),
@@ -286,7 +292,7 @@ pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError
         posted_at: None,
         updated_at: None,
         payload_kind: PayloadKind::Event,
-        conversation_id: conversation(source)?,
+        conversation_id: conversation.to_owned(),
         surface_id: "surface".into(),
         message_id: request.message_id,
         sender_principal_id: "sender".into(),
