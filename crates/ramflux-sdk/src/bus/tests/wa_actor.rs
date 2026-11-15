@@ -650,26 +650,14 @@ async fn connected_and_sweep_real() -> Case {
     stop_peer_session(&mut fixture).await;
     let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    // Pause before Live so Connected I/O is measured on the virtual clock.
+    // The handshake has to park on the wall clock. Pausing first makes this
+    // current-thread loop spin on yield, and the loopback session never
+    // becomes Live. Virtual time starts at Live so the catch-up Resume and
+    // the 900s sweep are still measured on the paused clock.
+    wait_until_live(&mut runtime, &handle).await?;
     tokio::time::pause();
-    let handshake = std::time::Instant::now();
-    let catch_up = Duration::from_millis(SweepSetting::CATCH_UP_MS);
-    handle.notify_receive_wake();
-    while handle.snapshot().state != NetworkingState::Live {
-        if handshake.elapsed() > Duration::from_secs(10) {
-            return Err("session did not become Live".into());
-        }
-        drain_ready(&mut runtime).await?;
-        poll_spawned().await;
-        match runtime.connection_work.try_recv() {
-            Ok(work) => runtime.apply_connection_work(work).await?,
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                return Err("connection work closed".into());
-            }
-        }
-    }
     let live_at = tokio::time::Instant::now();
+    let catch_up = Duration::from_millis(SweepSetting::CATCH_UP_MS);
     handle.notify_receive_wake();
     // spawn_blocking inhibits auto-advance while catch-up waits on redb / a
     // std-thread oneshot, and while the 900s sweep is jumped on a live TCP
@@ -1052,6 +1040,20 @@ async fn routed_committed_covers_and_acks_case() -> Case {
     let first = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
     {
         let account = account_of(&runtime)?;
+        // Unlock starts a new process-local head clock. The receipt key is a
+        // current observation of the directory this fixture already fetched.
+        for state in [&fixture.source, &fixture.peer] {
+            let manifest = serde_json::from_value(
+                gateway
+                    .lock()
+                    .map_err(|_| "gateway")?
+                    .manifests
+                    .get(&state.principal_commitment)
+                    .cloned()
+                    .ok_or("fetched manifest")?,
+            )?;
+            account.client.persist_fetched_identity_directory(&manifest)?;
+        }
         let key = account.client.authenticated_committed_key(
             crate::client::identity_authority::HeadUse::NewAuthorization,
             &first,
