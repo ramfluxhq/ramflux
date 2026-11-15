@@ -662,6 +662,14 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
     .await
 }
 
+/// Wall-clock deadline for a whole real-component scenario, fixtures included: the scenario
+/// future is dropped on expiry, so its temporary directories go before the runner's kill window.
+async fn bounded(seconds: u64, scenario: impl Future<Output = Case>) -> Case {
+    tokio::time::timeout(Duration::from_secs(seconds), scenario)
+        .await
+        .map_err(|_| format!("scenario exceeded its {seconds} s deadline"))?
+}
+
 async fn lock_during_fresh_preparation(
     sender: &mpsc::Sender<AccountCommand>,
     events: &mut mpsc::UnboundedReceiver<CourierEvent>,
@@ -681,22 +689,41 @@ async fn lock_during_fresh_preparation(
     tokio::time::timeout(Duration::from_secs(10), entered.recv())
         .await?
         .ok_or("fresh preparation never reached the stalled server")?;
-    assert!(
-        matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "fresh pass must have no buffered result before lock"
-    );
+    assert_pass_unfinished(events, "before lock");
     tokio::time::timeout(Duration::from_secs(3), command(sender, "account.lock", json!({})))
         .await
         .map_err(|_| "lock hang guard expired while preparation remained stalled")??;
-    assert!(
-        matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "lock must reply without awaiting a preparation result"
-    );
+    assert_pass_unfinished(events, "after lock");
     Ok(())
+}
+
+/// The fresh pass is stalled in its manifest request, so it cannot finish and no stalled
+/// item can report a result. Healthy forwards of the same pass keep progressing and report
+/// as they complete, at a pace that depends on the machine, so they are not a violation.
+fn assert_pass_unfinished(events: &mut mpsc::UnboundedReceiver<CourierEvent>, when: &str) {
+    while let Ok(event) = events.try_recv() {
+        match event {
+            CourierEvent::Item { key, .. } if key.starts_with("task/forward/healthy-") => {}
+            other => {
+                panic!("fresh pass reported {other:?} {when}: its preparation is still stalled")
+            }
+        }
+    }
 }
 
 #[tokio::test]
 async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_and_lock() -> Case {
+    bounded(
+        150,
+        Box::pin(
+            r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_and_lock_body(),
+        ),
+    )
+    .await
+}
+
+async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_and_lock_body() -> Case
+{
     LocalSet::new()
         .run_until(Box::pin(async {
             let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
@@ -782,6 +809,14 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
 
 #[tokio::test]
 async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound() -> Case {
+    bounded(
+        150,
+        Box::pin(r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound_body()),
+    )
+    .await
+}
+
+async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound_body() -> Case {
     LocalSet::new()
         .run_until(Box::pin(async {
             let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;

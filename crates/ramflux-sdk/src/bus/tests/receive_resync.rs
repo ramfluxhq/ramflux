@@ -57,17 +57,25 @@ struct Recovery {
     probe: Option<ramflux_storage::SqlWorkProbe>,
 }
 
+/// Wall-clock deadline for a whole resync scenario, fixtures included: the scenario future is
+/// dropped on expiry, so its temporary directories go before the runner's kill window.
+async fn bounded(scenario: impl std::future::Future<Output = Case>) -> Case {
+    tokio::time::timeout(Duration::from_secs(240), scenario)
+        .await
+        .map_err(|_| "resync scenario exceeded its 240 s deadline")?
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_entry_overflow_with_two_subscribers() -> Case {
-    run(266, None, true).await
+    bounded(Box::pin(run(266, None, true))).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_entry_overflow_without_subscribers() -> Case {
-    run(266, None, false).await
+    bounded(Box::pin(run(266, None, false))).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_byte_overflow_below_the_entry_cap() -> Case {
-    run(26, Some(384 * 1024), true).await
+    bounded(Box::pin(run(26, Some(384 * 1024), true))).await
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Completion {
