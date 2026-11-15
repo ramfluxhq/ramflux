@@ -507,9 +507,15 @@ async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_auth
         }
     })
     .await??;
+    // The in-flight reservation above held the root lease. Once shutdown cancels
+    // the confirm before authority.json exists, that unpublished row is removed.
     let ids = ramflux_storage::AccountIndex::open(&root.0)?.known_account_ids()?;
-    assert_eq!(ids.len(), 1);
-    assert!(!root.0.join("custody_accounts").join(&ids[0]).join("authority.json").exists());
+    assert_eq!(ids.len(), 0);
+    for parent in ["custody_accounts", "accounts"] {
+        let path = root.0.join(parent);
+        let leftover = if path.is_dir() { std::fs::read_dir(&path)?.count() } else { 0 };
+        assert_eq!(leftover, 0);
+    }
     assert_eq!(vault.inner.entry_count()?, 0);
     Ok(())
 }
