@@ -3,7 +3,6 @@
 
 //! Receive transaction fence shared by the live source-hold path and historical unit adapters.
 //! The generic gate stages and joins storage effects without interpreting application bytes.
-//! Retired DM/A2I adapters below are test-only and cannot select a production codec.
 //!
 //! Contract: W0 (`stage`) precedes the irreversible effect; ratchet, content/rejection/receipt
 //! and the authenticated dedup marker run inside one generation, incarnation, cursor and
@@ -12,10 +11,6 @@
 //! plaintext to make a step resumable.
 #![allow(dead_code)]
 
-#[cfg(test)]
-use crate::client::a2i::{self, LegacyA2iOpened};
-#[cfg(test)]
-use crate::client::dm::{LegacyDmDecrypt, LegacyDmPrepared};
 use crate::prelude::*;
 use ramflux_storage::{
     AccountDb, ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult,
@@ -111,8 +106,6 @@ fn current_fault() -> Fault {
 pub(crate) enum Fault {
     None,
     BeforeCommit,
-    /// Outer unbound check passed; the in-tx hold must redrive (`LegacyBindingChanged`).
-    BindingAppeared,
 }
 
 #[cfg(test)]
@@ -139,267 +132,6 @@ pub(crate) fn set_fault(fault: Fault) {
 }
 
 impl RamfluxClient {
-    #[cfg(test)]
-    pub(crate) fn w1_gate<'a>(
-        db: &'a AccountDb,
-        target: &'a str,
-    ) -> Result<LegacyW1<'a>, SdkError> {
-        Ok(LegacyW1 {
-            expected: ReceiveExpectation {
-                target,
-                incarnation: "e",
-                cursor: 0,
-                generation: 1,
-                erasure_generation: db.privacy_erasure_generation()?,
-            },
-            generation: 1,
-        })
-    }
-
-    /// Wired by P20. Decrypts a bound legacy DM and commits content+ratchet+marker through W1.
-    ///
-    /// Precondition: the caller has already run `ensure_inbound_device` for `entry` (it is async
-    /// and cannot run inside this sync W1 path). This function runs the same sync routing-binding
-    /// check the live DM path runs (`authorize_bound_legacy`), including the v2-blocks-legacy guard.
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_success_w1(
-        &self,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-        conversation: &str,
-        expected: ReceiveExpectation<'_>,
-        generation: u64,
-    ) -> Result<(), SdkError> {
-        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
-        if self.legacy_w1_committed(entry)? {
-            return Ok(());
-        }
-        let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation, entry)?;
-        let db = self.account_db()?;
-        let gate = LegacyW1 { expected, generation };
-        let sequence = entry.inbox_seq;
-        let message = entry.envelope.envelope_id.clone();
-        let principal =
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id.clone();
-        gate.effect(db, sequence, Some(&message), || {
-            self.commit_legacy_success_effect(
-                entry,
-                conversation,
-                &envelope,
-                &session,
-                &decrypted,
-                &principal,
-            )
-        })
-    }
-
-    /// Same cut as [`Self::apply_legacy_success_w1`], joining an already-open receive transaction.
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_success_w1_in(
-        &self,
-        tx: &ReceiveTransaction<'_>,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-        conversation: &str,
-        expected: ReceiveExpectation<'_>,
-        generation: u64,
-    ) -> Result<(), SdkError> {
-        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
-        if self.legacy_w1_committed(entry)? {
-            return Ok(());
-        }
-        let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation, entry)?;
-        let gate = LegacyW1 { expected, generation };
-        let sequence = entry.inbox_seq;
-        let message = entry.envelope.envelope_id.clone();
-        let principal =
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id.clone();
-        gate.effect_in(tx, sequence, Some(&message), || {
-            self.commit_legacy_success_effect(
-                entry,
-                conversation,
-                &envelope,
-                &session,
-                &decrypted,
-                &principal,
-            )
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    fn commit_legacy_success_effect(
-        &self,
-        entry: &GatewayInboxEntry,
-        conversation: &str,
-        envelope: &SdkDmEncryptedEnvelope,
-        session: &ramflux_crypto::DmSession,
-        decrypted: &ramflux_crypto::DmDecryptionOutput,
-        principal: &str,
-    ) -> Result<(), SdkError> {
-        if self.legacy_w1_committed(entry)? {
-            return Ok(());
-        }
-        match self.prepare_legacy_dm_after_decrypt(&LegacyDmDecrypt {
-            conversation,
-            entry,
-            target: &entry.target_delivery_id,
-            session,
-            envelope,
-            decrypted,
-            consume_erased: true,
-            persist_cursor: false,
-        })? {
-            LegacyDmPrepared::Finished => Ok(()),
-            LegacyDmPrepared::Message(prepared) => {
-                self.persist_legacy_dm_projection(
-                    conversation,
-                    entry,
-                    &prepared.projection_body,
-                    prepared.metadata.as_ref(),
-                    principal,
-                )?;
-                self.commit_legacy_effect(conversation, entry, session)
-            }
-        }
-    }
-
-    /// Wired by P20. Peer-rejection cut — reject row + ratchet + marker, no cursor.
-    ///
-    /// Same precondition as `apply_legacy_success_w1`: the caller has run `ensure_inbound_device`,
-    /// and the sync routing-binding check (incl. v2-blocks-legacy) runs here.
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_reject_w1(
-        &self,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-        conversation: &str,
-        expected: ReceiveExpectation<'_>,
-        generation: u64,
-    ) -> Result<(), SdkError> {
-        crate::RamfluxClient::require_legacy_routing_binding(local_device, entry, conversation)?;
-        if self.legacy_w1_committed(entry)? {
-            return Ok(());
-        }
-        let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation, entry)?;
-        let db = self.account_db()?;
-        let gate = LegacyW1 { expected, generation };
-        let sequence = entry.inbox_seq;
-        gate.effect(db, sequence, None, || {
-            if self.legacy_w1_committed(entry)? {
-                return Ok(());
-            }
-            match self.prepare_legacy_dm_after_decrypt(&LegacyDmDecrypt {
-                conversation,
-                entry,
-                target: &entry.target_delivery_id,
-                session: &session,
-                envelope: &envelope,
-                decrypted: &decrypted,
-                consume_erased: true,
-                persist_cursor: false,
-            })? {
-                LegacyDmPrepared::Finished => Ok(()),
-                LegacyDmPrepared::Message(_) => {
-                    Err(SdkError::LocalBus("legacy reject did not reject".into()))
-                }
-            }
-        })
-    }
-
-    /// Wired by P20. A2I ratchet + receipt + event, no ACK and no cursor.
-    ///
-    /// `local_device` is the receiver's own device id (`engine.config().device_id` on the live
-    /// path). It must NOT be derived from `entry.target_delivery_id`, which is the delivery id.
-    /// Precondition: the caller has run `ensure_inbound_device` for `entry`. Routing is checked
-    /// first and the receipt second, matching `receive_bound_legacy_a2i`.
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_a2i_w1(
-        &self,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-        expected: ReceiveExpectation<'_>,
-        generation: u64,
-    ) -> Result<(), SdkError> {
-        Self::require_a2i_binding_authority()?;
-        let db = self.account_db()?;
-        let gate = LegacyW1 { expected, generation };
-        let sequence = entry.inbox_seq;
-        if crate::RamfluxClient::legacy_a2i_is_unbound(local_device, entry)? {
-            return gate.effect(db, sequence, None, || {
-                self.commit_unbound_legacy_a2i(local_device, entry)
-            });
-        }
-        if self.load_legacy_a2i_receipt(entry)?.is_some() {
-            return Ok(());
-        }
-        let opened = Self::decrypt_bound_legacy_a2i(local_device, entry)?;
-        gate.effect(db, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))
-    }
-
-    /// Same cut as [`Self::apply_legacy_a2i_w1`], joining an already-open receive transaction.
-    ///
-    /// Returns `true` when the in-transaction binding check held the entry, `false` when it
-    /// applied. Callers cover from this value so held vs applied is one decision.
-    #[cfg(test)]
-    pub(crate) fn apply_legacy_a2i_w1_in(
-        &self,
-        tx: &ReceiveTransaction<'_>,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-        expected: ReceiveExpectation<'_>,
-        generation: u64,
-    ) -> Result<bool, SdkError> {
-        Self::require_a2i_binding_authority()?;
-        let gate = LegacyW1 { expected, generation };
-        let sequence = entry.inbox_seq;
-        if crate::RamfluxClient::legacy_a2i_is_unbound(local_device, entry)? {
-            gate.effect_in(tx, sequence, None, || {
-                self.commit_unbound_legacy_a2i(local_device, entry)
-            })?;
-            return Ok(true);
-        }
-        if self.load_legacy_a2i_receipt(entry)?.is_some() {
-            return Ok(false);
-        }
-        let opened = Self::decrypt_bound_legacy_a2i(local_device, entry)?;
-        gate.effect_in(tx, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))?;
-        Ok(false)
-    }
-
-    #[cfg(test)]
-    fn commit_unbound_legacy_a2i(
-        &self,
-        local_device: &str,
-        entry: &GatewayInboxEntry,
-    ) -> Result<(), SdkError> {
-        if matches!(current_fault(), Fault::BindingAppeared) {
-            return Err(SdkError::LegacyBindingChanged);
-        }
-        if self.hold_unbound_legacy_a2i(local_device, entry)? {
-            Ok(())
-        } else {
-            Err(SdkError::LegacyBindingChanged)
-        }
-    }
-
-    #[cfg(test)]
-    fn commit_legacy_a2i_w1(
-        &self,
-        entry: &GatewayInboxEntry,
-        opened: &LegacyA2iOpened,
-    ) -> Result<(), SdkError> {
-        if let Some(receipt) = self
-            .account_db()?
-            .load_actor_state::<a2i::LegacyControlReceipt>(&self.legacy_a2i_receipt_key(entry)?)?
-        {
-            a2i::reject_legacy_a2i_payload_reuse(&receipt, entry)?;
-            return Ok(());
-        }
-        Self::persist_legacy_a2i_effect(entry, opened)
-    }
-
     /// Wired by P20. Group local apply that cannot complete stays held; no terminal marker.
     pub(crate) fn apply_legacy_group_hold_w1(
         &self,
@@ -435,16 +167,6 @@ impl RamfluxClient {
             now_unix_timestamp(),
         )?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn legacy_w1_committed(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
-        Ok(self.account_db()?.actor_state_exists(&self.legacy_committed_key(entry)?)?)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn legacy_a2i_committed(&self, entry: &GatewayInboxEntry) -> Result<bool, SdkError> {
-        Ok(self.account_db()?.actor_state_exists(&self.legacy_a2i_receipt_key(entry)?)?)
     }
 }
 

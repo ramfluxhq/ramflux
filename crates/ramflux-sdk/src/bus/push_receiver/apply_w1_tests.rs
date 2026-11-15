@@ -18,9 +18,7 @@ use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
 use crate::bus::sync_driver::source::failure::{self as source_failure, SourceFailure};
-use crate::client::a2i::queue_unbound_answers;
 use crate::client::application_outbox::{ApplicationEvent, OUTBOX};
-use crate::client::legacy_w1::{self, Fault};
 use crate::client::reply_outbox::MARKER;
 use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
@@ -52,6 +50,14 @@ async fn open_real() -> Result<Harness, SdkError> {
     let (account, copy) = Box::pin(real::open(activate)).await?;
     let root = tempfile::tempdir().expect("tmp");
     Ok(Harness { root, account, real: Some(Box::new(copy)) })
+}
+
+/// The held effect of the current receive path: a directory miss on an entry no routed
+/// decoder accepts, admitted by the production failure mapping as a retryable hold (retry
+/// row, held receipt, no ACK, no cursor beyond the cover). A decodable routed entry never
+/// reaches this arm, so the carrier is `retryable_entry`, not a generated message.
+fn hold_retry() {
+    queue_policy_kind(ReceiveFailureKind::Retryable);
 }
 
 fn real_entry(harness: &Harness) -> Result<ReceiveEntry, SdkError> {
@@ -314,7 +320,7 @@ fn attach_counter(account: &mut crate::bus::state::LocalBusAccountState) -> Arc<
     sends
 }
 
-const BEFORE: &str = "legacy w1 before-commit";
+const BEFORE: &str = "source failure before-commit";
 
 #[tokio::test(flavor = "current_thread")]
 async fn apply_page_refuses_stale_generation_after_await() -> Result<(), SdkError> {
@@ -342,10 +348,8 @@ async fn apply_page_refuses_stale_generation_after_await() -> Result<(), SdkErro
 #[tokio::test(flavor = "current_thread")]
 async fn retired_a2i_bytes_settle_without_binding_retry() -> Result<(), SdkError> {
     let mut harness = open()?;
-    legacy_w1::set_fault(Fault::BindingAppeared);
     let entry = own_dummy(&harness.account);
     let result = drive(&mut harness.account, entry, || 1).await;
-    legacy_w1::set_fault(Fault::None);
     result?;
     let db = harness.account.client.account_db()?;
     assert_eq!(binding_attempts(), 0, "retired bytes must never enter binding retries");
@@ -403,11 +407,11 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
     let _clock = crate::time::FixedClock::set(START);
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    legacy_w1::set_fault(Fault::BeforeCommit);
-    let entry = own_dummy(&harness.account);
+    hold_retry();
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    let entry = retryable_entry(&harness.account);
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
-    legacy_w1::set_fault(Fault::None);
+    source_failure::set_fault(source_failure::Fault::None);
     let error = cut.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
@@ -426,6 +430,7 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
         (Some("staged".into()), 1),
         "W0 survives router retention and reopen"
     );
+    hold_retry();
     let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(recovered.0.is_none(), "recovery writes no ACK intent");
     assert_eq!(
@@ -446,11 +451,11 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
 
     let mut missing = open()?;
     let sends = attach_counter(&mut missing.account);
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    legacy_w1::set_fault(Fault::BeforeCommit);
-    let entry = own_dummy(&missing.account);
+    hold_retry();
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    let entry = retryable_entry(&missing.account);
     let cut = drive(&mut missing.account, entry.clone(), || 1).await;
-    legacy_w1::set_fault(Fault::None);
+    source_failure::set_fault(source_failure::Fault::None);
     let error = cut.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
@@ -460,6 +465,7 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
         missing.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1)
     );
+    hold_retry();
     set_after_classify(complete_w0);
     let refused = drive(&mut missing.account, entry, || 1).await;
     let error = refused.as_ref().err();
@@ -467,7 +473,7 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
         matches!(
             error,
             Some(SdkError::Storage(StorageError::Integrity(text)))
-                if *text == "source effect requires staged receive work"
+                if *text == "receive cover requires a receipt"
         ),
         "deleting W0 after the first W1 subcommit cannot recover: {error:?}"
     );
@@ -483,17 +489,18 @@ fn complete_w0(db: &AccountDb) {
 async fn receive_stage_redrive() -> Result<(), SdkError> {
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    legacy_w1::set_fault(Fault::BeforeCommit);
-    let entry = own_dummy(&harness.account);
+    hold_retry();
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    let entry = retryable_entry(&harness.account);
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
-    legacy_w1::set_fault(Fault::None);
+    source_failure::set_fault(source_failure::Fault::None);
     let error = cut.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
         "{error:?}"
     );
     reopen(&mut harness.account)?;
+    hold_retry();
     let once = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(once.0.is_none(), "W1 writes no ACK intent");
     let held = harness.account.client.account_db()?.receive_state_for_test(1)?;
@@ -509,6 +516,7 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
     );
     reopen(&mut harness.account)?;
     assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, held);
+    hold_retry();
     let again = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(again.0.is_none());
     assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, held);
@@ -520,11 +528,11 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
 async fn held_admission_stage_crash() -> Result<(), SdkError> {
     let mut blocked = open()?;
     let sends = attach_counter(&mut blocked.account);
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    legacy_w1::set_fault(Fault::BeforeCommit);
-    let entry = own_dummy(&blocked.account);
+    hold_retry();
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    let entry = retryable_entry(&blocked.account);
     let cut = drive(&mut blocked.account, entry.clone(), || 1).await;
-    legacy_w1::set_fault(Fault::None);
+    source_failure::set_fault(source_failure::Fault::None);
     let error = cut.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
@@ -535,6 +543,7 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
         (Some("staged".into()), 1)
     );
     reopen(&mut blocked.account)?;
+    hold_retry();
     let held = drive_disk(&mut blocked.account, 1, || 1).await?;
     assert!(held.0.is_none());
     assert_eq!(
@@ -543,32 +552,6 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
     );
     assert_eq!(cursor(&blocked.account)?, 1);
     assert_eq!(sends.load(Ordering::SeqCst), 0);
-
-    let mut unbound = open()?;
-    let sends = attach_counter(&mut unbound.account);
-    queue_unbound_answers(std::iter::repeat_n(true, 8));
-    legacy_w1::set_fault(Fault::BeforeCommit);
-    let entry = own_dummy(&unbound.account);
-    let cut = drive(&mut unbound.account, entry.clone(), || 1).await;
-    legacy_w1::set_fault(Fault::None);
-    let error = cut.as_ref().err();
-    assert!(
-        matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
-        "unbound hold cut: {error:?}"
-    );
-    assert_eq!(
-        unbound.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("staged".into()), 1)
-    );
-    reopen(&mut unbound.account)?;
-    let held = drive_disk(&mut unbound.account, 1, || 1).await?;
-    assert!(held.0.is_none());
-    assert_eq!(
-        unbound.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("held".into()), 1)
-    );
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
-    assert_eq!(cursor(&unbound.account)?, 1);
     Ok(())
 }
 
@@ -579,7 +562,6 @@ async fn erasure_late_stage_and_process() -> Result<(), SdkError> {
     let prepared_turn = turn(&harness.account, 1)?;
     erase_through_retention(harness.account.client.account_db()?)?;
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
-    queue_unbound_answers(std::iter::repeat_n(false, 8));
     let entry = own_dummy(&harness.account);
     let refused = drive_with_turn(&mut harness.account, &prepared_turn, entry, || 1).await;
     let error = refused.as_ref().err();
@@ -795,8 +777,8 @@ async fn held_local_expiry_and_eviction_crash() -> Result<(), SdkError> {
     const START: i64 = 1_700_000_000;
     let _clock = crate::time::FixedClock::set(START);
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    let entry = own_dummy(&harness.account);
+    hold_retry();
+    let entry = retryable_entry(&harness.account);
     drive(&mut harness.account, entry, || 1).await?;
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
@@ -857,10 +839,9 @@ fn arm_w1_cut(_db: &AccountDb) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn erase_while_w1_pending_is_object_erased() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let mut harness = open_real().await?;
     set_after_classify(erase_pending);
-    let entry = own_dummy(&harness.account);
+    let entry = real_entry(&harness)?;
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
     assert!(
@@ -877,12 +858,12 @@ async fn erase_while_w1_pending_is_object_erased() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn manifest_wait_refuses_stale_generation() -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open_real().await?;
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
     GENERATION.with(|cell| cell.set(1));
     queue_manifest_wait();
     set_manifest_await(bump_generation);
-    let entry = own_dummy(&harness.account);
+    let entry = real_entry(&harness)?;
     let refused = drive(&mut harness.account, entry, current_generation).await;
     let error = refused.as_ref().err();
     assert!(
@@ -1234,8 +1215,8 @@ async fn hold_expiry_prunes_reply_marker() -> Result<(), SdkError> {
     const START: i64 = 1_700_000_000;
     let _clock = crate::time::FixedClock::set(START);
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    let entry = own_dummy(&harness.account);
+    hold_retry();
+    let entry = retryable_entry(&harness.account);
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
     drive(&mut harness.account, entry, || 1).await?;
     seed_marker(&harness.account, &key)?;
@@ -1254,8 +1235,8 @@ async fn hold_expiry_prunes_reply_marker() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn settle_retained_prunes_reply_marker() -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    let entry = own_dummy(&harness.account);
+    hold_retry();
+    let entry = retryable_entry(&harness.account);
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
     drive(&mut harness.account, entry, || 1).await?;
     seed_marker(&harness.account, &key)?;

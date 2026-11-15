@@ -10,8 +10,6 @@ mod fanout_tests;
 #[cfg(test)]
 mod legacy_receive;
 #[cfg(test)]
-pub(crate) use legacy_receive::{LegacyDmDecrypt, LegacyDmPrepared};
-#[cfg(test)]
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
     pub auto_fetch_attachments: bool,

@@ -115,7 +115,7 @@ impl Fixture {
 }
 
 pub(crate) mod account;
-mod history;
+pub(crate) mod history;
 mod sibling;
 
 #[path = "native_test_support/authored.rs"]

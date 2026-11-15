@@ -706,14 +706,6 @@ pub(crate) fn dedup_gateway_entries(entries: Vec<GatewayInboxEntry>) -> Vec<Gate
     deduped
 }
 
-#[cfg(test)]
-pub(crate) fn a2i_control_conversation_id(
-    source_device_id: &str,
-    target_device_id: &str,
-) -> String {
-    format!("a2i.control:{source_device_id}:{target_device_id}")
-}
-
 /// Include the audited Message header in the sender signature before publishing the envelope.
 pub(crate) fn add_message_metadata_commitment(
     config: &GatewaySessionConfig,

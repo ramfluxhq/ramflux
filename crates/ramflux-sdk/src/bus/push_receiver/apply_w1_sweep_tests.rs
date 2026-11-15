@@ -15,16 +15,11 @@ use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
-use crate::client::a2i::queue_unbound_answers;
 use crate::client::identity_authority::test_support;
 use crate::client::own_device_copy::PREFIX;
 use crate::client::routed::{Committed, Kind, Routing};
-use crate::dm::{
-    SdkDmEncryptedEnvelope, dm_associated_data, dm_device_id_hash, gateway_direct_message_envelope,
-};
 use crate::gateway::GatewaySessionTransportKind;
 use crate::prelude::*;
-use ramflux_crypto::DmSession;
 use ramflux_node_core::{InboxEntry, RouterCore, RouterRedbStore};
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{AccountDb, ReceiveFailureKind, StorageError};
@@ -427,7 +422,6 @@ enum Sweep {
     LegacyHold,
     Failure,
     Projection,
-    LegacyDm,
 }
 
 fn arm_sweep(
@@ -443,8 +437,8 @@ fn arm_sweep(
             set_projection_key("authenticated-projection-key");
             queue_projection();
         }
-        // The real own copy and the legacy DM need no injection: production classifies them.
-        Sweep::OwnCopy | Sweep::LegacyDm => {}
+        // The real own copy needs no injection: production classifies it.
+        Sweep::OwnCopy => {}
     }
     Ok(())
 }
@@ -460,62 +454,8 @@ fn sweep_entry(sweep: Sweep, harness: &Harness) -> Result<ReceiveEntry, SdkError
             .clone()),
         Sweep::Failure => Ok(retryable_entry(account)),
         Sweep::Projection => Ok(live_dummy(account)),
-        Sweep::LegacyDm => legacy_dm_entry(account),
         Sweep::LegacyHold => Ok(own_dummy(account)),
     }
-}
-
-fn pin_own_directory(account: &crate::bus::state::LocalBusAccountState) -> Result<(), SdkError> {
-    let manifest = test_support::public_manifest(&account.client)?;
-    account.client.persist_root_verified_directory(&manifest)
-}
-
-fn legacy_dm_entry(
-    account: &crate::bus::state::LocalBusAccountState,
-) -> Result<ReceiveEntry, SdkError> {
-    pin_own_directory(account)?;
-    let local = account.gateway_config.device_id.clone();
-    let sender_hash = dm_device_id_hash(&local);
-    let transcript = [7u8; 32];
-    let seed = [9u8; 32];
-    let mut sending = DmSession::initiator(seed, sender_hash, sender_hash, transcript)?;
-    let receiving = DmSession::recipient(seed, sender_hash, sender_hash, transcript)?;
-    account.client.send_direct_message("legacy-dm-sweep", "prior", "alice", b"history")?;
-    account.client.persist_dm_session("legacy-dm-sweep", "bound-history", "recv", &receiving)?;
-    let ciphertext = sending.encrypt(b"body", dm_associated_data("legacy-dm-sweep"))?;
-    let inner = SdkDmEncryptedEnvelope {
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        source_principal_commitment: None,
-        x3dh: None,
-        ciphertext,
-        collapse_tag: None,
-        report_commitment: None,
-    };
-    let message = GatewayDirectMessage {
-        conversation_id: "legacy-dm-sweep".into(),
-        message_id: "legacy-dm-one".into(),
-        envelope_id: "legacy-dm-one".into(),
-        source_principal_id: account.gateway_config.principal_id.clone(),
-        sender_id: local.clone(),
-        recipient_device_id: Some(local.clone()),
-        recipient_principal_commitment: None,
-        target_delivery_id: account.target_delivery_id.clone(),
-        encrypted_body: serde_json::to_vec(&inner)?,
-        created_at: now_unix_timestamp(),
-        ttl: 86_400,
-    };
-    Ok(ReceiveEntry {
-        entry: crate::GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 1,
-            target_delivery_id: account.target_delivery_id.clone(),
-            envelope: gateway_direct_message_envelope(&account.gateway_config, &message, None)?,
-        },
-        retry_key: None,
-        replay: false,
-        turn: None,
-    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -543,7 +483,7 @@ fn ledger(account: &crate::bus::state::LocalBusAccountState) -> Result<Ledger, S
 
 fn expected_ledger(sweep: Sweep) -> Ledger {
     match sweep {
-        Sweep::OwnCopy | Sweep::LegacyDm | Sweep::Projection | Sweep::Failure => {
+        Sweep::OwnCopy | Sweep::Projection | Sweep::Failure => {
             Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
         }
         Sweep::LegacyHold => Ledger {
@@ -567,30 +507,11 @@ fn assert_ledger(got: &Ledger, sweep: Sweep) {
     assert_eq!(got.intents, want.intents, "{sweep:?} ack intents");
 }
 
-fn assert_legacy_dm_w1_effect(
-    account: &crate::bus::state::LocalBusAccountState,
-    entry: &ReceiveEntry,
-) -> Result<(), SdkError> {
-    assert!(account.client.legacy_w1_committed(&entry.entry)?, "legacy-DM W1 committed marker");
-    let rows = content_rows(account.client.account_db()?)?;
-    assert!(
-        rows.iter()
-            .any(|row| row.starts_with("direct_message_projection|")
-                && row.contains("legacy-dm-one")),
-        "legacy-DM W1 projection row: {rows:?}"
-    );
-    Ok(())
-}
-
 fn assert_sweep(
     account: &crate::bus::state::LocalBusAccountState,
     sweep: Sweep,
-    entry: &ReceiveEntry,
 ) -> Result<(), SdkError> {
     assert_ledger(&ledger(account)?, sweep);
-    if matches!(sweep, Sweep::LegacyDm) {
-        assert_legacy_dm_w1_effect(account, entry)?;
-    }
     Ok(())
 }
 
@@ -642,11 +563,11 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let _ = drive(&mut harness.account, recovered, || 1).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
+    assert_sweep(&harness.account, sweep)?;
     reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, entry.clone()).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
+    assert_sweep(&harness.account, sweep)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
@@ -667,7 +588,7 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, recovered).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
+    assert_sweep(&harness.account, sweep)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
@@ -706,7 +627,6 @@ async fn a2i_w1_refuses_before_effects_across_restart() -> Result<(), SdkError> 
             if restart {
                 reopen(&mut harness.account)?;
             }
-            queue_unbound_answers(std::iter::repeat_n(true, 8));
             let result = drive(&mut harness.account, entry.clone(), || 1).await;
             assert!(
                 matches!(
@@ -753,11 +673,6 @@ async fn failure_w1_commit_sweep() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn projection_w1_commit_sweep() -> Result<(), SdkError> {
     sweep_kind(Sweep::Projection).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn legacy_dm_w1_commit_sweep() -> Result<(), SdkError> {
-    sweep_kind(Sweep::LegacyDm).await
 }
 
 fn content_rows(db: &AccountDb) -> Result<Vec<String>, SdkError> {
@@ -849,10 +764,9 @@ async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn late_w1_fence_refuses_erase_during_commit() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let mut harness = open_real().await?;
     set_after_classify(arm_w1_erase);
-    let entry = own_dummy(&harness.account);
+    let entry = sweep_entry(Sweep::OwnCopy, &harness)?;
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
     assert!(matches!(error, Some(SdkError::ObjectErased)), "late W1 fence: {error:?}");

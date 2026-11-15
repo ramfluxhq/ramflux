@@ -195,7 +195,7 @@ async fn history_preserves_created_at() -> TestResult {
     Ok(())
 }
 
-pub(super) async fn receive_first_hand(
+pub(crate) async fn receive_first_hand(
     source: &mut Fixture,
     peer: &Fixture,
 ) -> TestResult<(g::EventIdentity, g::HistoryItem, String)> {

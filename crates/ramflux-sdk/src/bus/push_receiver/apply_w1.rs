@@ -174,13 +174,9 @@ async fn apply_once(
         return Ok(None);
     }
     #[cfg(test)]
-    let classification = if take_manifest_wait() {
+    if take_manifest_wait() {
         manifest_await().await;
-        Ok((Kind::LegacyHold, None))
-    } else {
-        classified_kind(account, entry, prepared.retry_key.as_deref())
-    };
-    #[cfg(not(test))]
+    }
     let classification = classified_kind(account, entry, prepared.retry_key.as_deref());
     let (kind, classified_pending) = classification?;
     #[cfg(test)]
