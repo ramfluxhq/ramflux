@@ -154,17 +154,38 @@ pub(super) fn append(
     client.attach_surface_snapshot(&mut carrier)?;
     client.sign_surface_carrier(carrier)
 }
+/// Aborts the directory task on every path, including an early return or a deadline.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[tokio::test]
 async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_object_uploads()
 -> TestResult {
+    // The root owns every temporary directory of the scenario. It is dropped here after the
+    // scenario future, so a failure or the deadline below still removes the directories.
     let root = runtime_tests::root("surface-own-stream");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(200),
+        Box::pin(streamed_surface_scenario(&root)),
+    )
+    .await;
+    drop(root);
+    outcome.map_err(|_| "streamed surface scenario exceeded its 200 s deadline")?
+}
+
+async fn streamed_surface_scenario(root: &ramflux_test_support::TestPath) -> TestResult {
     let mut source = runtime_tests::account(
         &root.join("source"),
         "sender",
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (mut sibling, config, receiver, directory) = sibling_fixture(&root, &mut source).await?;
+    let (mut sibling, config, receiver, directory) = sibling_fixture(root, &mut source).await?;
+    let directory = AbortOnDrop(directory);
     let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
     let own = Arc::clone(&gateway.own);
     // Only Submit/OwnDeviceFanout/PrekeyFetch frames are accepted by this fixture: relay uploads fail.
@@ -227,7 +248,7 @@ async fn streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_
             Vec::<String>::new()
         );
     }
-    directory.abort();
+    drop(directory);
     drop(sibling);
     drop(source);
     Ok(())

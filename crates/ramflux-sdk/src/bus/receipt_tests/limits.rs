@@ -614,6 +614,18 @@ async fn an_explicit_retry_across_a_second_boundary_resends_the_cached_receipt_p
     Ok(())
 }
 
+/// Wall-clock deadline for a whole scenario, cleanup included: the scenario future and its
+/// fixtures are dropped on expiry, so no temporary directory outlives a timeout.
+async fn bounded(
+    name: &str,
+    scenario: impl std::future::Future<Output = TestResult>,
+) -> TestResult {
+    match tokio::time::timeout(Duration::from_secs(90), scenario).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(format!("{name} exceeded its 90 s deadline").into()),
+    }
+}
+
 fn install_gateway_guard(p: &Pending) -> TestResult {
     let mut mail = p.mail.lock().map_err(|_| "mailbox")?;
     mail.guard = Some(ramflux_node_core::NodeReplayGuardState::new());
@@ -646,6 +658,11 @@ async fn fail_first_receipt(
 #[tokio::test]
 async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard()
 -> TestResult {
+    Box::pin(bounded(stringify!(a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard), Box::pin(a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard_scenario()))).await
+}
+
+async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard_scenario()
+-> TestResult {
     let start = now_unix_timestamp();
     let _clock = crate::time::FixedClock::set(start);
     let mut p = Box::pin(pending("receipt-retry-within-ttl")).await?;
@@ -667,6 +684,11 @@ async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_t
 
 #[tokio::test]
 async fn a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once()
+-> TestResult {
+    Box::pin(bounded(stringify!(a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once), Box::pin(a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once_scenario()))).await
+}
+
+async fn a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once_scenario()
 -> TestResult {
     let start = now_unix_timestamp();
     let _clock = crate::time::FixedClock::set(start);
