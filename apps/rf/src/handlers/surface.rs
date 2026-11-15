@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::{LocalBusClient, PathBuf, RfError, SurfaceAction, SurfaceCommand, print_json};
+use ramflux_sdk::LocalBusFrame;
 use serde_json::json;
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Upper bound for a typed surface command file; the bus frame budget is 700 KB.
+const SURFACE_COMMAND_MAX_BYTES: u64 = 262_144;
 pub(crate) async fn handle_surface(
     socket: PathBuf,
     command: SurfaceCommand,
@@ -47,12 +52,28 @@ pub(crate) async fn handle_surface(
             };
             (account, "surface.resync", json!({"surface_ref":surface_ref,"message_id":message}))
         }
-        action => {
-            let (send, method) = match action {
-                SurfaceAction::Send(send) => (send, "surface.send"),
-                SurfaceAction::Action(send) => (send, "surface.action"),
-                _ => return Err(RfError::Message("invalid surface command".into())),
-            };
+        SurfaceAction::Send(event) => {
+            let mut raw = Vec::new();
+            std::fs::File::open(event.command_file)?
+                .take(SURFACE_COMMAND_MAX_BYTES + 1)
+                .read_to_end(&mut raw)?;
+            if u64::try_from(raw.len()).unwrap_or(u64::MAX) > SURFACE_COMMAND_MAX_BYTES {
+                return Err(RfError::Message("surface command file exceeds 256 KiB".into()));
+            }
+            let command: ramflux_protocol::A2uiConversationCommand = serde_json::from_slice(&raw)?;
+            let mut request = ramflux_sdk::SurfaceSendRequest::event(
+                &event.conversation,
+                event.version,
+                &command,
+            )?;
+            if let Some(message) = event.message {
+                request.message_id = message;
+            }
+            request.author_principal_id = event.author;
+            (event.account, "surface.send", serde_json::to_value(request)?)
+        }
+        SurfaceAction::Action(send) => {
+            let method = "surface.action";
             let mut wire = Vec::new();
             std::fs::File::open(send.wire_file)?.take(700_001).read_to_end(&mut wire)?;
             if wire.len() > 700_000 {
@@ -69,6 +90,17 @@ pub(crate) async fn handle_surface(
             )
         }
     };
+    if matches!(method, "surface.send" | "surface.action") {
+        // Writes keep the daemon refusal code and details, as `rf conversation` does.
+        let frame = LocalBusFrame::request(request_id(), Some(account), "surface", method, body);
+        let response = bus.request_frame_response(frame).await?;
+        return print_json(&crate::handlers::conversation_ops::outcome(method, &response));
+    }
     let response = bus.request(Some(account), "surface", method, body).await?;
     print_json(&response)
+}
+
+fn request_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("rf-surface-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }

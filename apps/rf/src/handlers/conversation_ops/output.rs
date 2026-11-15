@@ -8,7 +8,7 @@ use ramflux_sdk::{LocalBusFrame, LocalBusFrameKind};
 use serde_json::{Value, json};
 
 #[must_use]
-pub(super) fn outcome(method: &str, response: &LocalBusFrame) -> Value {
+pub(crate) fn outcome(method: &str, response: &LocalBusFrame) -> Value {
     let refused = response.kind == LocalBusFrameKind::Error || response.ok == Some(false);
     if !refused {
         return json!({"ok": true, "method": method, "body": response.body});
