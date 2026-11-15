@@ -21,18 +21,32 @@ impl Fixture {
     fn new() -> Result<Self, SdkError> {
         let directory = tempfile::Builder::new().prefix("ramflux-read-model-").tempdir()?;
         let root = directory.path().to_path_buf();
-        let mut client = RamfluxClient::new();
-        client.create_identity_root("alice", [0x31; 32]);
-        client.create_device_branch("alice", "alice-phone", 1, [0x32; 32]);
-        client.open_account_index(&root)?;
-        client.create_account("local-alice", &commitment("alice"))?;
-        client.unlock_account("local-alice", b"test-secret")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        let born = runtime.block_on(crate::bus::runtime_tests::born_account(
+            &root,
+            "local-alice",
+            "alice",
+            "alice-phone",
+            b"native fixture data passphrase",
+            "alice-phone",
+        ))?;
+        let anchor = born.manifest.principal_commitment.clone();
+        let mut state = born.state;
+        let client = std::mem::replace(&mut state.client, RamfluxClient::new());
+        drop(state);
         client.account_db()?.persist_client_record(
             "self",
             "account",
             &json!({"principal_id":"alice","device_id":"alice-phone"}),
         )?;
-        client.account_db()?.persist_client_record("identity","alice",&json!({"id":"alice","principal_id":"alice","contact_identity_commitment":commitment("alice"),"devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}))?;
+        client.account_db()?.persist_client_record(
+            "identity",
+            "alice",
+            &json!({"id":"alice","principal_id":"alice","contact_identity_commitment":anchor,"devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}),
+        )?;
         Ok(Self { client, _directory: directory })
     }
     fn read(&self, method: &str, body: Value) -> Result<Value, SdkError> {

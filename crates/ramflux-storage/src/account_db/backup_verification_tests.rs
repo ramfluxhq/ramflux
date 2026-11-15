@@ -3,7 +3,7 @@
 
 //! Incoming archives cannot populate private verification-import bookkeeping.
 use super::{AccountDb, backup_database::BackupDatabase};
-use crate::{ContactVerificationUpdate, LEGACY_SAFETY_VERIFICATION_MARKER};
+use crate::ContactVerificationUpdate;
 use ramflux_protocol::{PrincipalKind, SignedDeviceSetEntry};
 use serde_json::json;
 
@@ -48,10 +48,9 @@ fn unstamped_contact(db: &AccountDb) -> Result<String, Box<dyn std::error::Error
 }
 
 #[test]
-fn legacy_merge_cannot_import_its_own_verification_scratch_table() -> TestResult {
+fn imported_scratch_table_does_not_stamp_a_contact() -> TestResult {
     let (source_root, source) = crate::tests::test_db("verification-scratch-source")?;
     let (local_root, local) = crate::tests::test_db("verification-scratch-local")?;
-    local.migrate_legacy_contact_verifications()?;
     let commitment = unstamped_contact(&local)?;
     // This archive imports no verification rows, only a table named like private scratch state.
     source
@@ -73,12 +72,6 @@ fn legacy_merge_cannot_import_its_own_verification_scratch_table() -> TestResult
         |r| r.get(0),
     )?;
     assert!(!stamped, "an incoming scratch row must not baseline an unrelated local contact");
-    let marker: Vec<u8> = merged.db.query_row(
-        "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
-        [LEGACY_SAFETY_VERIFICATION_MARKER],
-        |r| r.get(0),
-    )?;
-    assert!(serde_json::from_slice::<bool>(&marker)?);
     assert!(!merged.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='backup_imported_verification')",
         [],

@@ -293,7 +293,7 @@ mod dm_tests;
 
 #[cfg(test)]
 #[path = "surface_own_tests.rs"]
-mod own_tests;
+pub(crate) mod own_tests;
 
 #[cfg(test)]
 #[path = "surface_resync_tests.rs"]

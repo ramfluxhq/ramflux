@@ -363,6 +363,15 @@ pub extern "C" fn ramflux_v2_execute(
                 "raw_message capability is disabled",
             ));
         }
+        if request.method == "contact.verify" {
+            let digest = blake3::hash(crate::message::FILE_DESCRIPTOR_SET).to_hex().to_string();
+            if !super::method_policy::loaded_cas_descriptor_matches(&digest) {
+                return Err(CAbiError::new(
+                    RamfluxErrorCode::CapabilityRejected,
+                    "contact.verify.cas",
+                ));
+            }
+        }
         if client.closing.load(std::sync::atomic::Ordering::Acquire)
             || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
         {

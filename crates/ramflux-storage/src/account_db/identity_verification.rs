@@ -105,7 +105,7 @@ impl AccountDb {
         &self,
         update: ContactVerificationUpdate<'_>,
     ) -> Result<ContactVerificationRecord, StorageError> {
-        self.write_transaction(|| {
+        self.join_write(|| {
         self.connection.execute(
             "INSERT INTO contact_verification_projection (
                 contact_identity_commitment, verification_state, safety_number_hash,

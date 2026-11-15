@@ -123,6 +123,13 @@ pub(super) async fn publish(
                 .body
                 .get("contact_identity_commitment")
                 .or_else(|| request.body.get("approval_id"))
+                .or_else(|| {
+                    request.body.get("expected").and_then(|expected| {
+                        expected
+                            .get("contactIdentityCommitment")
+                            .or_else(|| expected.get("contact_identity_commitment"))
+                    })
+                })
                 .and_then(serde_json::Value::as_str)
         {
             db.acknowledge_journal_subject(subject)?;

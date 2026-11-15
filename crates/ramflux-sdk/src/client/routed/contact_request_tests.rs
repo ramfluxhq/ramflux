@@ -504,6 +504,7 @@ async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pend
             blocked: link.blocked,
             capability_revoked_at: link.capability_revoked_at,
         }),
+        ..Default::default()
     })?;
     assert_eq!(client.direct_messages(&direct_thread(&state)?)?.len(), 1);
     assert_eq!(client.account_db()?.held_contact_messages(root)?.len(), 0);

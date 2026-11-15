@@ -440,8 +440,9 @@ impl RamfluxClient {
             self.receive_generated_own_message_copy(opened, entry, copy)?;
         } else if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref()
         {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
-                self.receive_generated_own_contact(contact)
+                self.receive_generated_own_contact_with_origin(contact, &source, identity, bytes)
             })?;
         } else if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
             control.payload.as_ref()

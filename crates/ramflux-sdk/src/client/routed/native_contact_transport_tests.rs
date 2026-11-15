@@ -142,7 +142,7 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     {
         let receiver = requests::account(&state, "bob")?;
         if source == "verified" {
-            receiver.mark_contact_safety_verified(&root, "bob")?;
+            crate::client::contact_verification_cas::verify_linked_contact(receiver, &root)?;
         }
         clear_safety_cache(receiver, &principal)?;
         let verification = receiver.account_db()?.contact_verification(&root)?;

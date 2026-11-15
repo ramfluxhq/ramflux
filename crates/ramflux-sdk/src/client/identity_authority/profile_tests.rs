@@ -5,10 +5,9 @@
 use super::*;
 
 #[test]
-fn signed_authority_change_marks_manual_verification_stale_without_changing_active_device_hash()
+fn missing_confirmation_and_missing_custody_account_refuse_without_changing_the_profile()
 -> TestResult {
     let owner = Actor::new("owner", "phone", 231, 232, 1)?;
-    let late = Actor::new("owner", "unready", 231, 233, 1)?;
     let peer = Actor::new("peer", "peer", 234, 235, 1)?;
     let signed = with_profile(&owner, owner.manifest()?, "Owner", 1, 1)?;
     observe(&peer.client, &signed)?;
@@ -21,104 +20,34 @@ fn signed_authority_change_marks_manual_verification_stale_without_changing_acti
     )?;
     let db = peer.client.account_db()?;
     let before = db.client_record("identity", "owner")?.ok_or("row")?;
-    let hash = before["device_set_hash"].as_str().ok_or("hash")?;
+    let hash = before["device_set_hash"].as_str().ok_or("hash")?.to_owned();
     db.mark_contact_verified(ramflux_storage::ContactVerificationUpdate {
         contact_identity_commitment: &signed.principal_commitment,
         safety_number_hash: "verified-safety",
-        device_set_hash: hash,
+        device_set_hash: &hash,
         lineage_head: "lineage",
         verified_at: crate::time::now_unix_timestamp(),
         verified_by_device_id: "peer",
     })?;
-    db.persist_actor_state(
-        &format!("identity/safety_verified_set/{}", signed.principal_commitment),
-        &set_fingerprint(signed.signed_device_set.as_ref().ok_or("set")?)?,
-    )?;
+    let missing = peer.client.contact_safety_number(&signed.principal_commitment);
+    assert!(matches!(missing, Err(SdkError::CustodyModeDowngrade)), "{missing:?}");
+    let refused = crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &signed.principal_commitment,
+    );
+    assert!(matches!(refused, Err(SdkError::CustodyModeDowngrade)), "{refused:?}");
+    let after = db.client_record("identity", "owner")?.ok_or("row")?;
+    assert_eq!(after["device_set_hash"], before["device_set_hash"]);
     assert_eq!(
-        crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
-        "verification_stale"
+        peer.client.read_profile_facts("owner").ok_or("profile")?.profile.display_name,
+        "Owner"
     );
-    assert_eq!(
-        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verification_stale"
-    );
-    let stamp_key = format!("identity/safety_verified_set/{}", signed.principal_commitment);
-    let stamp = db.load_actor_state::<String>(&stamp_key)?.ok_or("stamp")?;
-    db.remove_actor_state(&stamp_key)?;
-    assert_eq!(
-        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verification_stale"
-    );
-    assert!(
-        db.load_actor_state::<String>(&stamp_key)?.is_none(),
-        "reads cannot repair a missing stamp after migration"
-    );
-    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
-    assert_eq!(db.load_actor_state::<String>(&stamp_key)?, Some(stamp.clone()));
-    let next = with_revoked_device(&owner, &signed, &late)?;
-    observe(&peer.client, &next)?;
-    let row = crate::bus::read_model::row(&peer.client, "identity", "owner")?;
-    assert_eq!(
-        row["device_set_hash"], before["device_set_hash"],
-        "a tombstone changes authority but not active safety material"
-    );
-    assert!(peer.client.verified_principal_kind("owner")?.is_none());
-    assert_eq!(db.load_actor_state::<String>(&stamp_key)?, Some(stamp));
-    assert_eq!(row["verified"], false, "a stale complete-set stamp also reaches contact flags");
-    assert_eq!(row["kind_verified"], true, "the public profile remains authenticated");
-    assert_eq!(
-        row["safety_state"], "verification_stale",
-        "manual verification covers the complete signed set"
-    );
-    assert_eq!(
-        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verification_stale"
-    );
-    assert_eq!(
-        peer.client
-            .contact_verification_status(&signed.principal_commitment)?
-            .ok_or("stored")?
-            .verification_state,
-        "verified",
-        "stored verification is audit history, not current authority"
-    );
-    peer.client.mark_contact_safety_verified(&signed.principal_commitment, "peer")?;
-    assert_eq!(
-        peer.client.contact_safety_number(&signed.principal_commitment)?.verification_state,
-        "verification_stale"
-    );
-    assert_eq!(
-        crate::bus::read_model::row(&peer.client, "identity", "owner")?["safety_state"],
-        "verification_stale"
-    );
+    // A reader with no born account cannot treat the contact as unverified.
+    assert!(matches!(
+        peer.client.verified_principal_kind("owner"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     Ok(())
-}
-fn with_revoked_device(
-    owner: &Actor,
-    signed: &SdkDeviceManifestResponse,
-    late: &Actor,
-) -> Result<SdkDeviceManifestResponse, SdkError> {
-    let mut next = signed.clone();
-    let old = next.signed_device_set.take().ok_or_else(|| invalid("fixture set"))?;
-    let mut devices = old.devices;
-    let mut retired =
-        late.manifest()?.signed_device_set.ok_or_else(|| invalid("fixture retired set"))?.devices;
-    for device in &mut retired {
-        device.status = ramflux_protocol::DeviceSetStatus::Revoked;
-        device.revoked_at = Some(crate::time::now_unix_timestamp());
-    }
-    devices.extend(retired);
-    devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-    next.signed_device_set = Some(ramflux_crypto::sign_device_set_with_profile(
-        owner.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: old.principal_kind,
-            device_set_epoch: 2,
-            devices,
-        },
-        old.profile.map(|p| *p),
-    )?);
-    Ok(next)
 }
 fn with_profile(
     owner: &Actor,
@@ -142,14 +71,18 @@ fn with_profile(
     )?);
     Ok(manifest)
 }
-#[test]
-fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contact_verification()
+#[tokio::test]
+async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contact_verification()
 -> TestResult {
-    let owner = Actor::new("agent", "agent-device", 131, 132, 1)?;
-    mode(&owner, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
-    let peer = Actor::new("bob", "bob", 141, 142, 1)?;
-    let signed = with_profile(&owner, owner.manifest()?, "Cafe\u{301} Agent", 1, 1)?;
-    observe(&peer.client, &signed)?;
+    let agent = crate::client::native_test_support::Fixture::headless(
+        "agent-home",
+        "agent",
+        "agent-device",
+        "Café Agent",
+    )
+    .await?;
+    let peer = crate::client::native_test_support::Fixture::new("bob").await?;
+    peer.client.persist_fetched_identity_directory(&agent.manifest)?;
     let row = crate::bus::read_model::row(&peer.client, "identity", "agent")?;
     assert_eq!(row["kind"], "headless_ai");
     assert_eq!(row["kind_verified"], true);
@@ -189,10 +122,13 @@ fn unsigned_legacy_and_spoofed_cached_kind_never_become_verified() -> TestResult
     row["kind_verified"] = serde_json::json!(true);
     row["kind"] = serde_json::json!("bot");
     db.persist_client_record("identity", "alice", &row)?;
+    // The cached flag stays in the row. It does not become a verified kind, and a
+    // reader with no born account is refused instead of shown as unverified.
     assert_eq!(
-        crate::bus::read_model::row(&peer.client, "identity", "alice")?["kind_verified"],
-        false
+        peer.client.account_db()?.client_record("identity", "alice")?.ok_or("row")?["kind_verified"],
+        true
     );
+    assert!(matches!(peer.client.contact_entry("alice"), Err(SdkError::CustodyModeDowngrade)));
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "alice", "alice"));
     let mut unsigned = with_profile(&owner, legacy.clone(), "Alice", 1, 2)?;
     unsigned
@@ -317,6 +253,3 @@ mod read_tests;
 
 #[path = "profile_restore_tests.rs"]
 mod restore_tests;
-
-#[path = "verification_migration_tests.rs"]
-mod verification_migration;

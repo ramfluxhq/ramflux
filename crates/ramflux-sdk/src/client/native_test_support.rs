@@ -64,19 +64,63 @@ impl Fixture {
         self.client.receive_generated_own_contact(&authored::authored_contact(self, peer)?)?;
         Ok(())
     }
-    pub(crate) async fn externally_custodied(id: &str) -> TestResult<Self> {
+
+    /// `principal` is the published id. Routed card tests keep it equal to the account id.
+    pub(crate) async fn named(account: &str, principal: &str, device: &str) -> TestResult<Self> {
+        Self::named_kind(account, principal, device, ramflux_protocol::PrincipalKind::Human).await
+    }
+
+    pub(crate) async fn named_kind(
+        account: &str,
+        principal: &str,
+        device: &str,
+        kind: ramflux_protocol::PrincipalKind,
+    ) -> TestResult<Self> {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         let now = crate::custody::network_now()?;
-        crate::custody::tests::create(&root.0, "custodian", vault.as_ref(), now)?;
-        crate::custody::tests::mark_live(&root.0, "custodian", now)?;
-        let mut input = crate::custody::tests::input(id);
-        input.principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
-        input.custodian_account_id = Some("custodian".into());
+        let mut input = crate::custody::tests::input(account);
+        input.principal_id = principal.into();
+        input.device_id = device.into();
+        input.principal_kind = kind;
         let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
-        let account = ceremony.confirm_with_passphrase(
+        let created = ceremony.confirm(
+            &crate::custody::tests::words(&phrase, positions)?,
+            vault.as_ref(),
+            now,
+        )?;
+        Box::pin(Self::finish_creation(root, vault, account, device, created.record().clone()))
+            .await
+    }
+    pub(crate) async fn externally_custodied(id: &str) -> TestResult<Self> {
+        Self::headless(id, &format!("principal-{id}"), "primary", "Example Human").await
+    }
+
+    /// Headless account with a live human custodian on the same root.
+    pub(crate) async fn headless(
+        account: &str,
+        principal: &str,
+        device: &str,
+        display_name: &str,
+    ) -> TestResult<Self> {
+        let root = Root::new()?;
+        let vault = Arc::new(TestVault::default());
+        let now = crate::custody::network_now()?;
+        let custodian = format!("custodian-{account}");
+        crate::custody::tests::create(&root.0, &custodian, vault.as_ref(), now)?;
+        crate::custody::tests::mark_live(&root.0, &custodian, now)?;
+        let mut input = crate::custody::tests::input(account);
+        input.principal_id = principal.into();
+        input.device_id = device.into();
+        input.display_name = display_name.into();
+        input.principal_kind = ramflux_protocol::PrincipalKind::HeadlessAi;
+        input.custodian_account_id = Some(custodian);
+        let mut ceremony = crate::custody::CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        let created = ceremony.confirm_with_passphrase(
             &crate::custody::tests::words(&phrase, positions)?,
             vault.as_ref(),
             now,
@@ -84,9 +128,9 @@ impl Fixture {
         )?;
         let mut client = RamfluxClient::new();
         client.open_account_index(&root.0)?;
-        client.unlock_account(id, b"external fixture passphrase")?;
-        client.initialize_born_v3_branch("primary", vault.clone()).await?;
-        Self::ready(client, root, vault, id, "primary", account.record().clone())
+        client.unlock_account(account, b"external fixture passphrase")?;
+        client.initialize_born_v3_branch(device, vault.clone()).await?;
+        Self::ready(client, root, vault, account, device, created.record().clone())
     }
     fn ready(
         client: RamfluxClient,

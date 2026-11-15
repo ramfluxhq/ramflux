@@ -41,9 +41,6 @@ pub(crate) fn invalid(reason: &str) -> SdkError {
 pub(crate) fn record_key(commitment: &str) -> String {
     format!("identity/signed_set/{commitment}")
 }
-pub(crate) fn set_fingerprint(record: &SignedDeviceSetRecord) -> Result<String, SdkError> {
-    Ok(ramflux_protocol::device_set_authority_fingerprint(record)?)
-}
 impl RamfluxClient {
     /// Returns an authenticated root assertion. It does not attest that a root holder is human.
     /// # Errors
@@ -71,7 +68,9 @@ impl RamfluxClient {
     }
     /// Returns a signed kind only after the user verified this contact's current safety material.
     /// # Errors
-    /// Returns storage errors. An unverified, stale or legacy contact returns None.
+    /// Returns storage errors. A missing born account is [`SdkError::CustodyModeDowngrade`].
+    /// Authority that is still loading is [`SdkError::NetworkingPending`].
+    /// An unverified or stale contact returns None.
     pub fn verified_principal_kind(
         &self,
         principal: &str,
@@ -82,14 +81,10 @@ impl RamfluxClient {
         let Some(commitment) = identity["contact_identity_commitment"].as_str() else {
             return Ok(None);
         };
-        if self
+        let verified = self
             .contact_safety_verification_state(commitment, identity["device_set_hash"].as_str())?
-            == "verified"
-        {
-            self.root_asserted_principal_kind(principal)
-        } else {
-            Ok(None)
-        }
+            == "verified";
+        if verified { self.root_asserted_principal_kind(principal) } else { Ok(None) }
     }
     /// Verify and atomically cache a live manifest, including rollback and key lifecycle checks.
     /// # Errors

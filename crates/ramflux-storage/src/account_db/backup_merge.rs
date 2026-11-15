@@ -317,7 +317,6 @@ impl BackupDatabase {
             let marker_ids = self.prepare_mac_verifiers(progress)?;
             super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
-            let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;
             let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
@@ -376,10 +375,6 @@ impl BackupDatabase {
                     self.db
                         .execute_batch("DROP TRIGGER IF EXISTS contact_message_erasure_fence")?;
                 }
-                if legacy_verifications && table == "contact_verification_projection" {
-                    // Capture only winning imported verifications before replacing local rows.
-                    self.db.execute_batch(&format!("INSERT OR IGNORE INTO backup_imported_verification SELECT r.contact_identity_commitment FROM incoming.contact_verification_projection r WHERE r.verification_state='verified' AND {filter} AND NOT EXISTS(SELECT 1 FROM main.contact_verification_projection l WHERE {join} AND NOT ({newer}));"))?;
-                }
                 let replacements=self.db.execute(&format!("DELETE FROM main.{t} AS l WHERE EXISTS(SELECT 1 FROM incoming.{t} r WHERE {join} AND {filter} AND ({newer}))",t=quoted(&table)),[])?;
                 let inserted=self.db.execute(&format!("INSERT OR IGNORE INTO main.{t}({names}) SELECT {selected} FROM incoming.{t} r WHERE {filter}",t=quoted(&table)),[])?;
                 if table == "contact_message_request" {
@@ -389,7 +384,7 @@ impl BackupDatabase {
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
             }
-            self.finish_pair_import(&preserved_actor, legacy_verifications)?;
+            self.finish_pair_import(&preserved_actor)?;
             self.merge_self_sync_values(&self_sync_floors)?;
             self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
@@ -411,15 +406,8 @@ impl BackupDatabase {
         self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
         Ok(())
     }
-    fn finish_pair_import(
-        &self,
-        preserved_actor: &str,
-        legacy_verifications: bool,
-    ) -> Result<(), StorageError> {
+    fn finish_pair_import(&self, preserved_actor: &str) -> Result<(), StorageError> {
         self.archive_imported_pair_sessions(preserved_actor)?;
-        if legacy_verifications {
-            self.finish_legacy_verification_import()?;
-        }
         Ok(())
     }
     fn archive_imported_pair_sessions(&self, preserved_actor: &str) -> Result<(), StorageError> {

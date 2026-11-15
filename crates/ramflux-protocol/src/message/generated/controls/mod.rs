@@ -14,6 +14,15 @@ pub use a2i_control_event_type_control_types::*;
 #[path = "contact_control.rs"]
 mod contact_control_types;
 pub use contact_control_types::*;
+#[path = "contact_safety_confirmation.rs"]
+mod contact_safety_confirmation_types;
+pub use contact_safety_confirmation_types::*;
+#[path = "contact_safety_verify_request.rs"]
+mod contact_safety_verify_request_types;
+pub use contact_safety_verify_request_types::*;
+#[path = "contact_safety_verify_result.rs"]
+mod contact_safety_verify_result_types;
+pub use contact_safety_verify_result_types::*;
 #[path = "control.rs"]
 mod control_types;
 pub use control_types::*;
@@ -35,6 +44,9 @@ pub use control_domain_message_types::*;
 #[path = "control_operation.rs"]
 mod control_operation_types;
 pub use control_operation_types::*;
+#[path = "expected_contact_safety.rs"]
+mod expected_contact_safety_types;
+pub use expected_contact_safety_types::*;
 #[path = "friend_control.rs"]
 mod friend_control_types;
 pub use friend_control_types::*;

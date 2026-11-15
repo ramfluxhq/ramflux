@@ -92,22 +92,6 @@ impl Fixture {
             native: Some(Box::new(fixture)),
         })
     }
-    async fn native_same_home(source: &Self, id: &str) -> Result<Self, SdkError> {
-        let mut fixture = source
-            .native
-            .as_ref()
-            .ok_or_else(|| invalid("native source"))?
-            .peer_at_same_home(id, id, id)
-            .await
-            .map_err(|error| invalid(&format!("native shared home: {error}")))?;
-        let client = std::mem::take(&mut fixture.client);
-        Ok(Self {
-            root: fixture.root.0.clone(),
-            client,
-            id: id.into(),
-            native: Some(Box::new(fixture)),
-        })
-    }
     async fn reopen_native(&mut self) -> Result<(), SdkError> {
         let vault = self.native.as_ref().ok_or_else(|| invalid("native fixture"))?.vault.clone();
         self.client.active_account_db = None;

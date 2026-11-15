@@ -418,6 +418,9 @@ impl RamfluxClient {
         &self,
         record: &ContactRequestRecord,
     ) -> Result<Value, SdkError> {
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
         let metadata = Metadata::read(record)?;
         let note =
             metadata.note.as_deref().map(ramflux_protocol::text_safety::quote_fallback_field);
@@ -427,28 +430,10 @@ impl RamfluxClient {
             Vec::new()
         };
         let own = self.read_device_identity()?.ok_or(SdkError::IdentityRootMissing)?;
-        let material = |root: &str| -> Result<_, SdkError> {
-            let manifest = self
-                .account_db()?
-                .load_actor_state::<crate::prekey::SdkDeviceManifestResponse>(&format!(
-                    "identity/manifest-root/{root}"
-                ))?
-                .ok_or_else(|| invalid("request safety material unavailable"))?;
-            super::contact::contact_safety_material_from_manifest(&manifest)
-        };
-        let safety = if self.born_v3_account.is_some() {
-            Some(ramflux_crypto::custody::safety_number(
-                own.root_commitment(),
-                &record.contact_identity_commitment,
-            )?)
-        } else {
-            material(own.root_commitment())
-                .and_then(|own| {
-                    material(&record.contact_identity_commitment)
-                        .map(|peer| ramflux_crypto::safety_number(&own, &peer))
-                })
-                .ok()
-        };
+        let safety = ramflux_crypto::custody::safety_number(
+            own.root_commitment(),
+            &record.contact_identity_commitment,
+        )?;
 
         let contact = self.contact_entry(&record.principal_id)?;
         Ok(

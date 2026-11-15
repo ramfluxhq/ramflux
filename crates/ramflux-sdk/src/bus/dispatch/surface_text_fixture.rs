@@ -224,6 +224,17 @@ pub(in crate::bus) async fn directory(
     root: &Path,
     manifests: BTreeMap<String, serde_json::Value>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
+    let (address, task, _) = directory_live(root, manifests).await?;
+    Ok((address, task))
+}
+
+pub(in crate::bus) async fn directory_live(
+    root: &Path,
+    manifests: BTreeMap<String, serde_json::Value>,
+) -> Result<
+    (SocketAddr, tokio::task::JoinHandle<()>, Arc<Mutex<BTreeMap<String, serde_json::Value>>>),
+    Box<dyn std::error::Error>,
+> {
     let certified = rcgen::generate_simple_self_signed(vec!["test-gateway".into()])?;
     std::fs::write(root.join("ca.pem"), certified.cert.pem())?;
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -238,11 +249,12 @@ pub(in crate::bus) async fn directory(
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let manifests = Arc::new(manifests);
+    let manifests = Arc::new(Mutex::new(manifests));
+    let served = Arc::clone(&manifests);
     let task = tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let acceptor = acceptor.clone();
-            let manifests = manifests.clone();
+            let manifests = Arc::clone(&manifests);
             tokio::spawn(async move {
                 let result = async {
                     let mut stream = acceptor.accept(tcp).await?;
@@ -256,8 +268,12 @@ pub(in crate::bus) async fn directory(
                         serde_json::from_slice(&bytes)?;
                     let commitment =
                         request.path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
-                    let body =
-                        manifests.get(commitment).cloned().unwrap_or(serde_json::Value::Null);
+                    let body = manifests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(commitment)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let response = serde_json::to_vec(
                         &serde_json::json!({"status":if body.is_null(){404}else{200},"body":body}),
                     )?;
@@ -275,7 +291,7 @@ pub(in crate::bus) async fn directory(
             });
         }
     });
-    Ok((address, task))
+    Ok((address, task, served))
 }
 
 fn own_target(envelope: &ramflux_protocol::Envelope) -> bool {

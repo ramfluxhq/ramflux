@@ -7,6 +7,9 @@ use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 mod backfill_retry;
+#[cfg(test)]
+#[path = "own_contact/cas_tests.rs"]
+mod cas_tests;
 mod generated;
 #[cfg(test)]
 mod native_tests;
@@ -14,7 +17,7 @@ mod native_tests;
 #[path = "own_contact/retry_tests.rs"]
 mod retry_tests;
 mod tombstone;
-
+pub(crate) use tombstone::is_restricted as contact_link_restricted;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Contact {
@@ -192,6 +195,16 @@ impl RamfluxClient {
         let link = self.account_db()?.friend_link(link)?;
         let body = Contact { manifest: manifest.clone(), link }.bytes()?;
         self.stage_own_contact_body(&body)
+    }
+    pub(crate) fn stage_exact_own_contact_inner(&self, body: &[u8]) -> Result<bool, SdkError> {
+        let Some((_, active, _)) = self.own_contact_roster()? else {
+            return Ok(false);
+        };
+        if active < 2 {
+            return Ok(false);
+        }
+        self.stage_own_contact_body(body)?;
+        Ok(true)
     }
     fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
         let Some((_, _, authority_tag)) = self.own_contact_roster()? else {
@@ -376,6 +389,7 @@ impl RamfluxClient {
                     };
                     progress.missing = None;
                     self.stage_own_contact(&manifest, &link.link_id)?;
+                    super::contact_verification_cas::stage_stored_origin(self, peer)?;
                     count += 1;
                 }
             }
@@ -526,7 +540,7 @@ pub(super) fn is_tombstone_packet(body: &[u8]) -> bool {
     tombstone::is_packet(body)
 }
 
-pub(super) fn contact_peer<'a>(
+pub(crate) fn contact_peer<'a>(
     link: &'a ramflux_storage::FriendLinkRecord,
     own: &str,
 ) -> Option<&'a str> {

@@ -18,7 +18,7 @@ struct Tombstone {
 pub(super) fn is_packet(body: &[u8]) -> bool {
     decode(body).is_ok_and(|value| value.is_some())
 }
-pub(super) fn is_restricted(link: &ramflux_storage::FriendLinkRecord) -> bool {
+pub(crate) fn is_restricted(link: &ramflux_storage::FriendLinkRecord) -> bool {
     link.state == "removed" || link.blocked || link.capability_revoked_at.is_some()
 }
 pub(super) fn encode(

@@ -520,6 +520,11 @@ impl ConnectionHandle {
     pub(crate) fn removals(&self) -> Vec<CallRemoval> {
         self.shared.removals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
+    pub(crate) fn wake_courier(&self, name: &'static str) {
+        if let Some(wake) = self.shared.courier_wakes.get(name) {
+            wake.notify_one();
+        }
+    }
     pub(crate) fn wake_couriers(&self) {
         for wake in self.shared.courier_wakes.values() {
             wake.notify_one();

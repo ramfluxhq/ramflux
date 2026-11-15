@@ -288,11 +288,27 @@ fn verification(
     if let Some(connection) = &view.connection {
         connection.refresh_contact_safety(&body.contact_identity_commitment);
     }
-    let safety = client.contact_safety_number(&body.contact_identity_commitment)?;
+    let compared = crate::client::contact_verification_cas::compared_safety_json(
+        client,
+        &body.contact_identity_commitment,
+    )?;
     let stored = client.contact_verification_status(&body.contact_identity_commitment)?;
-    Ok(
-        json!({"contact_identity_commitment":body.contact_identity_commitment,"verification_state":safety.verification_state,"stored_verification_state":stored.as_ref().map_or("unverified",|record|record.verification_state.as_str()),"verified_at":stored.as_ref().map(|record|record.verified_at),"verified_by_device_id":stored.as_ref().map(|record|record.verified_by_device_id.clone()),"safety_number":safety.safety_number,"fingerprint_hex":safety.fingerprint_hex}),
-    )
+    let state = compared.get("verification_state").cloned().ok_or_else(|| {
+        SdkError::LocalBus("contact safety snapshot missing verification_state".into())
+    })?;
+    let mut value = json!({
+        "contact_identity_commitment": body.contact_identity_commitment,
+        "verification_state": state,
+        "stored_verification_state": stored.as_ref().map_or("unverified", |record| record.verification_state.as_str()),
+        "verified_at": stored.as_ref().map(|record| record.verified_at),
+        "verified_by_device_id": stored.as_ref().map(|record| record.verified_by_device_id.clone()),
+        "safety_number": compared.get("safety_number").cloned().unwrap_or(Value::Null),
+        "fingerprint_hex": compared.get("fingerprint_hex").cloned().unwrap_or(Value::Null),
+    });
+    if let Some(expected) = compared.get("expected") {
+        value["expected"] = expected.clone();
+    }
+    Ok(value)
 }
 
 fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {

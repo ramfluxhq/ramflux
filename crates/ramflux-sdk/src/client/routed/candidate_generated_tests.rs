@@ -34,6 +34,7 @@ pub(super) fn pair(alice: u8, bob: u8) -> PairFuture {
                     blocked: link.blocked,
                     capability_revoked_at: link.capability_revoked_at,
                 }),
+                ..Default::default()
             })?;
         }
         Ok((a, b))

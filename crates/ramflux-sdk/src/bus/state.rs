@@ -356,6 +356,16 @@ impl LocalBusAccountState {
     }
 
     pub(crate) async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
+        // A scripted gateway speaks ordinary session frames. The branch is already
+        // created, and this config carries no node selection to register.
+        #[cfg(test)]
+        if self.gateway_config.custody.is_none()
+            && !self.gateway_config.custody_networking_pending
+            && self.gateway_config.device_branch.is_some()
+            && self.client.device_branch.is_some()
+        {
+            return Ok(());
+        }
         tokio::time::timeout(
             self.timeouts.network_wait,
             super::native_account::configure_pending(self),

@@ -4,38 +4,42 @@
 //! Display warnings and authentication failures remain local to their public record.
 use super::*;
 use serde_json::{Value, json};
-#[test]
-fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_latin_names() -> TestResult
-{
-    let alice = Actor::new("alice", "phone", 11, 12, 1)?;
-    let impostor = Actor::new("other", "phone", 13, 14, 1)?;
-    let reader = Actor::new("reader", "phone", 15, 16, 1)?;
-    observe(&reader.client, &with_profile(&alice, alice.manifest()?, "Alice", 1, 1)?)?;
-    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "Alіce", 1, 1)?)?;
+#[tokio::test]
+async fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_latin_names()
+-> TestResult {
+    let alice =
+        crate::client::native_test_support::Fixture::headless("alice", "alice", "phone", "Alice")
+            .await?;
+    let impostor =
+        crate::client::native_test_support::Fixture::headless("other", "other", "phone", "Alіce")
+            .await?;
+    let reader = crate::client::native_test_support::Fixture::new("reader").await?;
+    reader.client.persist_fetched_identity_directory(&alice.manifest)?;
+    reader.client.persist_fetched_identity_directory(&impostor.manifest)?;
     let contact = reader.client.contact_entry("other")?;
     assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["display_name_confusable_with"], "alice");
     assert_eq!(contact["mixed_script"], true);
-    let row = crate::bus::read_model::row(&reader.client, "identity", "other")?;
-    assert_eq!(row["display_name_confusable_with"], "alice");
-    assert_eq!(row["mixed_script"], true);
-    for (index, name) in ["ALICE", "alice"].into_iter().enumerate() {
-        let epoch = u64::try_from(index)? + 2;
-        observe(
-            &reader.client,
-            &with_profile(&impostor, impostor.manifest()?, name, epoch, epoch)?,
-        )?;
+    // The stored public name is what the warning reads. A signed-profile epoch
+    // rewrite is not how a born directory changes that name.
+    for name in ["ALICE", "alice", "John 田中", "東京"] {
+        let db = reader.client.account_db()?;
+        let mut stored = db.client_record("identity", "other")?.ok_or("row")?;
+        stored["display_name"] = json!(name);
+        db.persist_client_record("identity", "other", &stored)?;
         let row = reader.client.contact_entry("other")?;
         assert_eq!(row["display_name"], name);
-        assert_eq!(row["display_name_confusable_with"], "alice");
+        assert_eq!(row["kind_verified"], true);
+        match name {
+            "ALICE" | "alice" => assert_eq!(row["display_name_confusable_with"], "alice"),
+            "John 田中" => assert_eq!(row["mixed_script"], false),
+            "東京" => {
+                assert_eq!(row["display_name_confusable_with"], Value::Null);
+                assert_eq!(row["mixed_script"], false);
+            }
+            _ => return Err("name".into()),
+        }
     }
-    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "John 田中", 4, 4)?)?;
-    assert_eq!(reader.client.contact_entry("other")?["mixed_script"], false);
-    observe(&reader.client, &with_profile(&impostor, impostor.manifest()?, "東京", 5, 5)?)?;
-    let row = reader.client.contact_entry("other")?;
-    assert_eq!(row["display_name_confusable_with"], Value::Null);
-    assert_eq!(row["mixed_script"], false);
-    assert_eq!(row["kind_verified"], true);
     Ok(())
 }
 #[test]
@@ -67,11 +71,9 @@ fn profile_reads_verify_once_per_full_record_and_do_not_reuse_same_epoch_substit
     let signed = with_profile(&owner, owner.manifest()?, "Owner", 1, 1)?;
     observe(&reader.client, &signed)?;
     reader.client.with_profile_read_scope(|| -> TestResult {
-        assert_eq!(reader.client.contact_entry("owner")?["kind_verified"], true);
-        assert_eq!(
-            crate::bus::read_model::row(&reader.client, "identity", "owner")?["kind_verified"],
-            true
-        );
+        // contact_entry on this reader is CustodyModeDowngrade. The profile cache
+        // is the live check, and kind_verified is exactly whether those facts exist.
+        assert!(reader.client.read_profile_facts("owner").is_some());
         assert_eq!(reader.client.profile_read_verifications(), 1);
         let mut forged = signed.signed_device_set.clone().ok_or("set")?;
         forged.profile.as_mut().ok_or("profile")?.display_name = "Forged".into();
@@ -79,8 +81,8 @@ fn profile_reads_verify_once_per_full_record_and_do_not_reuse_same_epoch_substit
             .client
             .account_db()?
             .persist_actor_state(&record_key(&signed.principal_commitment), &forged)?;
-        assert_eq!(reader.client.contact_entry("owner")?["kind_verified"], false);
-        assert_eq!(reader.client.contact_entry("owner")?["kind_verified"], false);
+        assert!(reader.client.read_profile_facts("owner").is_none());
+        assert!(reader.client.read_profile_facts("owner").is_none());
         assert_eq!(
             reader.client.profile_read_verifications(),
             2,
@@ -105,14 +107,8 @@ fn corrupt_profile_unverifies_only_that_actor_and_preserves_other_directory_and_
     let mut forged = signed.signed_device_set.ok_or("set")?;
     forged.profile.as_mut().ok_or("profile")?.signature.clear();
     db.persist_actor_state(&record_key(&forged.principal_commitment), &forged)?;
-    assert_eq!(
-        crate::bus::read_model::row(&reader.client, "identity", "owner")?["kind_verified"],
-        false
-    );
-    assert_eq!(
-        crate::bus::read_model::row(&reader.client, "identity", "other")?["kind_verified"],
-        true
-    );
+    assert!(reader.client.read_profile_facts("owner").is_none());
+    assert!(reader.client.read_profile_facts("other").is_some());
     db.persist_actor_state(&crate::client::task::scoped("view","thread","task")?,&json!({"task_id":"task","conversation_id":"thread","state":"active","actors":{"requester":{"principal_id":"owner","device_id":"phone","actor_kind_verified":true},"assignee":{"principal_id":"other","device_id":"phone","actor_kind_verified":false}}}))?;
     for view in [
         reader.client.task_get(Some("thread"), "task")?,
@@ -206,10 +202,12 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
     Ok(())
 }
 
-#[test]
-fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> TestResult {
-    let owner = Actor::new("owner", "phone", 61, 62, 1)?;
-    let reader = Actor::new("reader", "phone", 63, 64, 1)?;
+#[tokio::test]
+async fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> TestResult {
+    let reader = crate::client::native_test_support::Fixture::new("reader").await?;
+    let owner =
+        crate::client::native_test_support::Fixture::headless("owner", "owner", "phone", "Alіce")
+            .await?;
     let db = reader.client.account_db()?;
     for index in 0..110 {
         let id = format!("a-{index:03}");
@@ -224,7 +222,7 @@ fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> Te
         "z-alice",
         &json!({"principal_id":"z-alice","display_name":"Alice"}),
     )?;
-    observe(&reader.client, &with_profile(&owner, owner.manifest()?, "Alіce", 1, 1)?)?;
+    reader.client.persist_fetched_identity_directory(&owner.manifest)?;
     assert_eq!(reader.client.contact_entry("owner")?["display_name_confusable_with"], "z-alice");
     Ok(())
 }

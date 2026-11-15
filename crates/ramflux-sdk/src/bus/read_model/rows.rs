@@ -152,10 +152,16 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved["devices"] = json!([]);
     }
     let commitment = saved.get("contact_identity_commitment").and_then(Value::as_str).unwrap_or("");
-    saved["safety_state"] = json!(client.contact_safety_verification_state(
+    saved["safety_state"] = match client.contact_safety_verification_state(
         commitment,
         saved.get("device_set_hash").and_then(Value::as_str),
-    )?);
+    ) {
+        Ok(state) => json!(state),
+        // Authority unavailable is state A and is not persisted as unverified.
+        // A missing born account is CustodyModeDowngrade and stays that error.
+        Err(SdkError::NetworkingPending) => Value::Null,
+        Err(error) => return Err(error),
+    };
     let profile = client.read_profile_facts(id).map(|facts| facts.profile.clone());
     saved["kind_verified"] = json!(profile.is_some());
     if let Some(profile) = &profile {
@@ -165,20 +171,27 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved["kind"] = json!(kind);
     }
     // Gateway-fetched safety material is persisted by the verified contact path.
-    let contact = client.contact_entry(id)?;
-    for field in [
-        "reachable",
-        "verified",
-        "kind_asserted",
-        "kind_verified",
-        "display_name",
-        "display_name_confusable_with",
-        "mixed_script",
-        "root_commitment",
-        "root_source",
-        "node",
-    ] {
-        saved[field] = contact[field].clone();
+    // Authority that is still loading is state A: leave the stored row and do not
+    // present it as unverified. A missing born account stays CustodyModeDowngrade.
+    match client.contact_entry(id) {
+        Ok(contact) => {
+            for field in [
+                "reachable",
+                "verified",
+                "kind_asserted",
+                "kind_verified",
+                "display_name",
+                "display_name_confusable_with",
+                "mixed_script",
+                "root_commitment",
+                "root_source",
+                "node",
+            ] {
+                saved[field] = contact[field].clone();
+            }
+        }
+        Err(SdkError::NetworkingPending) => {}
+        Err(error) => return Err(error),
     }
     saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
     saved["safety_number_available"] =

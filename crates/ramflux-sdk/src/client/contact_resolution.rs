@@ -142,24 +142,7 @@ impl RamfluxClient {
         &self,
         contact_root: &str,
     ) -> Result<Option<SdkContactSafetyNumber>, SdkError> {
-        if self.born_v3_account.is_some() {
-            return self.contact_safety_number(contact_root).map(Some);
-        }
-        let link = self
-            .friend_links()?
-            .into_iter()
-            .find(|link| {
-                link.state == "accepted"
-                    && (link.requester_id == contact_root || link.target_id == contact_root)
-            })
-            .ok_or_else(|| SdkError::LocalBus("accepted contact safety link unavailable".into()))?;
-        let own_root =
-            if link.requester_id == contact_root { link.target_id } else { link.requester_id };
-        if self.observed_device_set(contact_root)?.is_none()
-            || self.observed_device_set(&own_root)?.is_none()
-        {
-            return Ok(None);
-        }
+        let _account = self.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
         self.contact_safety_number(contact_root).map(Some)
     }
 
@@ -304,6 +287,8 @@ impl RamfluxClient {
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
         let verified = if let Some(commitment) = commitment {
+            // A missing born account is CustodyModeDowngrade. Authority that is
+            // still loading is NetworkingPending. Neither is a stored unverified bit.
             self.contact_safety_verification_state(
                 commitment,
                 identity["device_set_hash"].as_str(),
@@ -335,12 +320,14 @@ impl RamfluxClient {
             .or_else(|| retained_status.as_ref().and_then(|row| row["state"].as_str()));
         let request_id = outgoing_request.as_ref().map(|request| &request.request_id);
         let profile = self.read_profile_facts(principal).map(|facts| facts.profile.clone());
-        let display_name = profile
-            .as_ref()
-            .map_or_else(|| identity["display_name"].clone(), |p| json!(p.display_name));
-        let asserted = profile.as_ref().map_or_else(
-            || identity["kind_asserted"].as_str().map_or(Value::Null, |kind| json!(kind)),
-            |p| json!(p.kind),
+        let display_name = if identity["display_name"].is_null() {
+            profile.as_ref().map_or(Value::Null, |p| json!(p.display_name))
+        } else {
+            identity["display_name"].clone()
+        };
+        let asserted = identity["kind_asserted"].as_str().map_or_else(
+            || profile.as_ref().map_or(Value::Null, |p| json!(p.kind)),
+            |kind| json!(kind),
         );
         let warnings = self.identity_name_warnings(principal, display_name.as_str())?;
         Ok(

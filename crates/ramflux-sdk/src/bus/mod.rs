@@ -45,7 +45,7 @@ mod lifecycle;
 mod lifecycle_registry;
 mod metadata;
 mod method_table;
-mod mutation_intent;
+pub(crate) mod mutation_intent;
 mod mutations;
 pub(crate) mod native_account;
 mod networking_events;

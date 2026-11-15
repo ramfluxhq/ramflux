@@ -22,16 +22,14 @@ struct Intent {
     group: Option<String>,
     body: String,
     created_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_at: Option<i64>,
+    expires_at: i64,
     owner_record: Option<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     surface_reference: Option<String>,
 }
 impl Intent {
     fn expiry(&self) -> i64 {
-        // Pre-parameter queued work retains its original ten-minute lifetime.
-        self.expires_at.unwrap_or(self.created_at.saturating_add(600))
+        self.expires_at
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -150,7 +148,7 @@ fn stage_inner(
             group: input.group.map(str::to_owned),
             body: ramflux_protocol::encode_base64url(input.body),
             created_at: input.created_at,
-            expires_at: Some(input.created_at.saturating_add(i64::from(client.content_ttl()?))),
+            expires_at: input.created_at.saturating_add(i64::from(client.content_ttl()?)),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
             surface_reference: surface_reference(input)?,
         },
@@ -163,7 +161,7 @@ fn stage_inner(
         context_delivery: None,
         generated: None,
     };
-    db.write_transaction(|| {
+    db.join_write(|| {
         let (rows, bytes) = db.own_copy_actor_usage(PREFIX)?;
         if input.body.len() > crate::client::own_device_copy::MAX_PACKET_BYTES
             || rows >= u64::from(MAX_PENDING)
@@ -374,7 +372,7 @@ mod retention_compatibility_tests {
     #[test]
     fn own_copy_intent_without_payload_kind_is_refused() -> Result<(), SdkError> {
         let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
-            "group":null,"body":"","created_at":100,"owner_record":null});
+            "group":null,"body":"","created_at":100,"expires_at":900,"owner_record":null});
         let error = serde_json::from_value::<Intent>(old).err().ok_or_else(|| {
             SdkError::LocalBus("old intent row without payload_kind parsed".into())
         })?;
@@ -382,6 +380,22 @@ mod retention_compatibility_tests {
             error.to_string().contains("payload_kind"),
             "old intent row must be refused by name for payload_kind, got: {error}"
         );
+        Ok(())
+    }
+    #[test]
+    fn own_copy_intent_requires_expiry() -> Result<(), SdkError> {
+        let missing = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
+            "conversation":"thread","group":null,"body":"","created_at":100,"owner_record":null});
+        assert!(
+            serde_json::from_value::<Intent>(missing).is_err(),
+            "an intent row without expires_at must be refused"
+        );
+        let stored = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
+            "conversation":"thread","group":null,"body":"","created_at":100,"expires_at":900,
+            "owner_record":null});
+        let intent: Intent = serde_json::from_value(stored.clone())?;
+        assert_eq!(intent.expiry(), 900, "the stored expiry is the only lifetime");
+        assert_eq!(serde_json::to_value(intent)?, stored, "the intent must round trip unchanged");
         Ok(())
     }
 }

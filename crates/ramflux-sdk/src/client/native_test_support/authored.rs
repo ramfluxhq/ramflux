@@ -260,5 +260,6 @@ pub(super) fn authored_contact(source: &Fixture, peer: &Fixture) -> TestResult<g
             blocked: link.blocked,
             capability_revoked_at: link.capability_revoked_at,
         }),
+        ..Default::default()
     })
 }

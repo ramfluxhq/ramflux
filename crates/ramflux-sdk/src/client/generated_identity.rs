@@ -55,12 +55,11 @@ impl RamfluxClient {
         now_ms: u64,
         own_only: bool,
     ) -> Result<g::EventIdentity, SdkError> {
-        self.account_db()?.write_transaction(|| {
-            self.allocate_generated_identity_in(conversation, now_ms, own_only)
-        })
+        self.account_db()?
+            .join_write(|| self.allocate_generated_identity_in(conversation, now_ms, own_only))
     }
 
-    fn allocate_generated_identity_in(
+    pub(crate) fn allocate_generated_identity_in(
         &self,
         conversation: &str,
         now_ms: u64,
@@ -71,11 +70,7 @@ impl RamfluxClient {
         let author = g::QualifiedDevice {
             account_anchor: source.root_commitment().into(),
             device_id: source.device_id().into(),
-            device_epoch: self
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .device_epoch,
+            device_epoch: self.owned_author_epoch(&source)?,
         };
         let key = format!(
             "message-identity/counter/{}",
@@ -115,6 +110,28 @@ impl RamfluxClient {
             hlc,
             ..Default::default()
         })
+    }
+
+    fn owned_author_epoch(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<u64, SdkError> {
+        if let Some(branch) = &self.device_branch
+            && branch.device_id == source.device_id()
+        {
+            return Ok(branch.device_epoch);
+        }
+        let authority = self
+            .current_custody_authority(source.root_commitment(), crate::custody::network_now()?)?
+            .ok_or(SdkError::NetworkingPending)?;
+        authority
+            .envelope()
+            .body
+            .devices
+            .iter()
+            .find(|device| device.device_id == source.device_id())
+            .map(|device| device.device_epoch)
+            .ok_or(SdkError::IdentityRootMissing)
     }
 
     pub(crate) fn merge_generated_clock(&self, remote: u64, now_ms: u64) -> Result<(), SdkError> {

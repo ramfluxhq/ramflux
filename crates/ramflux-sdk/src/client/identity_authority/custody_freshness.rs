@@ -66,6 +66,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
+
     pub(crate) fn invalidate_changed_custody_head(&self, root: &str, hash: &str) {
         let mut cache = self.native_head_freshness.borrow_mut();
         if cache.heads.get(root).is_some_and(|(old, _)| old != hash) {

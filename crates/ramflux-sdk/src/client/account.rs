@@ -183,8 +183,8 @@ impl RamfluxClient {
         if let Some(device_branch) = self.device_branch.clone() {
             db.set_device_signer(device_branch);
         }
-        super::contact_verification::migrate_legacy_contact_verifications(&db)?;
         self.born_v3_account = born;
+        self.release_held_manifests();
         self.object_store.replace_persisted(Vec::new(), BTreeMap::new());
         self.active_account_db = Some(db);
         *self.self_sync_restore_clock.borrow_mut() = None;
