@@ -118,6 +118,7 @@ impl GatewaySessionFrameSource for Gateway {
                         envelope: submit.envelope,
                     },
                 },
+                None => return std::future::pending().await,
                 _ => {
                     GatewayServerFrame::Nack { reason: "unexpected test gateway frame".to_owned() }
                 }
@@ -309,97 +310,112 @@ async fn client(
     Ok((client, task))
 }
 
-fn actor_account_with_cancellation_notice(
-    root: &Path,
-    id: &str,
-    blocked: oneshot::Sender<()>,
-    cancelled: Arc<AtomicBool>,
-    notice: oneshot::Sender<()>,
-) -> AccountInitializer {
-    let root = root.to_path_buf();
-    let id = id.to_owned();
-    Box::new(move |index| {
-        account_with_setup(
-            &root,
-            &id,
-            Some(blocked),
-            cancelled,
-            Arc::new(AtomicUsize::new(0)),
-            AccountSetup {
-                index: Some(index),
-                blocked_submit_envelope: Some("slow-envelope".to_owned()),
-                cancelled_notice: Some(notice),
-                blocked_relay_token: false,
-            },
-        )
-    })
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Result<(), SdkError> {
     // This is a deadlock watchdog, not a latency assertion for account startup or fsync.
-    tokio::time::timeout(Duration::from_secs(60), LocalSet::new().run_until(async {
-        let root = root("independent");
-        let (entered, blocked) = oneshot::channel();
-        let (cancelled_notice, cancellation) = oneshot::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let alice = actor_account_with_cancellation_notice(
-            &root, "alice", entered, Arc::clone(&cancelled), cancelled_notice,
-        );
-        let bob = actor_account(&root, "bob", None, Arc::new(AtomicBool::new(false)));
-        let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]))?;
-        let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
-        let (two, server_two) = client(Rc::clone(&supervisor), 2).await?;
-        // Warm the sending accounts before timing isolation from Alice's blocked gateway.
-        // The checked send below keeps its original 500 ms deadline and unique response id.
-        two.request_frame(request("warm-send", "bob", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"warm-message", "envelope_id":"warm-envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        one.request_frame(request("warm-alice", "alice", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"warm-alice-message", "envelope_id":"warm-alice-envelope",
-            "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        // Background receive polls cannot consume this foreground submit's blocking signal.
-        let slow_client = one.clone();
-        let slow = tokio::task::spawn_local(async move {
-            slow_client.request_frame(request("slow", "alice", "message.submit", serde_json::json!({
-                "conversation_id":"conversation", "message_id":"slow-message", "envelope_id":"slow-envelope",
-                "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
-                "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-            }))).await
-        });
-        blocked.await.map_err(|_| failure("gateway dropped before entering its stall"))?;
-        assert!(!slow.is_finished());
-        assert!(!cancelled.load(Ordering::SeqCst));
-        let sent = two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        assert_eq!(sent["envelope"]["envelope_id"], "envelope");
-        let read = one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"}))).await?;
-        assert!(read["messages"].is_array());
-        let other_read = two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({}))).await?;
-        assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
-        // A completed receive or network timeout must not turn serialization into a false pass.
-        assert!(!slow.is_finished(), "the other account and both reads must finish during Alice's stall");
-        assert!(!cancelled.load(Ordering::SeqCst), "Alice's gateway must still be stalled");
-        slow.abort();
-        let _ = slow.await;
-        drop(one);
-        drop(two);
-        let _ = server_one.await;
-        let _ = server_two.await;
-        cancellation.await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
-        assert!(cancelled.load(Ordering::SeqCst));
-        supervisor.shutdown().await?;
-        drop(supervisor);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    })).await.map_err(|_| failure("cross-account progress or cancellation deadlocked"))?
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Box::pin(LocalSet::new().run_until(Box::pin(async {
+            let pair = native_actor::pair()
+                .await
+                .map_err(|error| failure(&format!("native pair: {error}")))?;
+            let conversation =
+                pair.conversation().map_err(|error| failure(&format!("conversation: {error}")))?;
+            let (entered, blocked) = oneshot::channel();
+            let (cancelled_notice, cancellation) = oneshot::channel();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stalled = native_actor::gateway(
+                Some(native_actor::stall(entered, "slow-envelope")),
+                Arc::clone(&cancelled),
+                Arc::default(),
+                Some(cancelled_notice),
+            );
+            let quiet =
+                native_actor::gateway(None, Arc::new(AtomicBool::new(false)), Arc::default(), None);
+            let alice = pair.alice.initializer(&pair.data_root, &pair.bob.manifest, stalled);
+            let bob = pair.bob.initializer(&pair.data_root, &pair.alice.manifest, quiet);
+            let root = pair.data_root.clone();
+            let supervisor = supervisor(
+                &root,
+                BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]),
+            )?;
+            let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
+            let (two, server_two) = client(Rc::clone(&supervisor), 2).await?;
+            let (alice, bob) = (&pair.alice, &pair.bob);
+            // Warm the sending accounts before timing isolation from Alice's blocked gateway.
+            // The checked send below keeps its original 500 ms deadline and unique response id.
+            let warm = ("warm-message", "warm-envelope");
+            let warm_alice = ("warm-alice-message", "warm-alice-envelope");
+            two.request_frame(bob.submit_request(alice, &conversation, "warm-send", warm, b"warm"))
+                .await?;
+            one.request_frame(alice.submit_request(
+                bob,
+                &conversation,
+                "warm-alice",
+                warm_alice,
+                b"warm",
+            ))
+            .await?;
+            // Background receive polls cannot consume this foreground submit's blocking signal.
+            let slow_client = one.clone();
+            let slow_frame = alice.submit_request(
+                bob,
+                &conversation,
+                "slow",
+                ("slow-message", "slow-envelope"),
+                b"opaque",
+            );
+            let slow =
+                tokio::task::spawn_local(
+                    async move { slow_client.request_frame(slow_frame).await },
+                );
+            blocked.await.map_err(|_| failure("gateway dropped before entering its stall"))?;
+            assert!(!slow.is_finished());
+            assert!(!cancelled.load(Ordering::SeqCst));
+            let sent = two
+                .request_frame(bob.submit_request(
+                    alice,
+                    &conversation,
+                    "send",
+                    ("message", "envelope"),
+                    b"opaque",
+                ))
+                .await?;
+            assert_eq!(sent["envelope"]["envelope_id"], "envelope");
+            let read = one
+                .request_frame(request(
+                    "read",
+                    "alice",
+                    "message.list",
+                    serde_json::json!({"conversation_id":conversation}),
+                ))
+                .await?;
+            assert!(read["messages"].is_array());
+            let other_read = two
+                .request_frame(request("list", "bob", "conversation.list", serde_json::json!({})))
+                .await?;
+            assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
+            // A completed receive or network timeout must not turn serialization into a false pass.
+            assert!(
+                !slow.is_finished(),
+                "the other account and both reads must finish during Alice's stall"
+            );
+            assert!(!cancelled.load(Ordering::SeqCst), "Alice's gateway must still be stalled");
+            slow.abort();
+            let _ = slow.await;
+            drop(one);
+            drop(two);
+            let _ = server_one.await;
+            let _ = server_two.await;
+            cancellation.await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
+            assert!(cancelled.load(Ordering::SeqCst));
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            Ok(())
+        }))),
+    )
+    .await
+    .map_err(|_| failure("cross-account progress or cancellation deadlocked"))?
 }
 
 fn failure(message: &str) -> SdkError {
@@ -483,39 +499,76 @@ async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_netw
 
 #[tokio::test(flavor = "current_thread")]
 async fn mutation_key_applies_once_and_survives_account_actor_restart() -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
-        let root = root("idempotency");
+    Box::pin(LocalSet::new().run_until(Box::pin(async {
+        let pair = native_actor::pair()
+            .await
+            .map_err(|error| failure(&format!("native pair: {error}")))?;
+        let conversation =
+            pair.conversation().map_err(|error| failure(&format!("conversation: {error}")))?;
+        let root = pair.data_root.clone();
         let submits = Arc::new(AtomicUsize::new(0));
-        let body = serde_json::json!({
-            "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-        });
+        let now = now_unix_timestamp();
+        let body = pair.bob.submit_body(
+            &pair.alice,
+            &conversation,
+            ("message", "envelope"),
+            b"opaque",
+            now,
+        );
         let mut expected = None;
         for round in 0..2 {
-            let bob = actor_account_with_counter(&root, "bob", None, Arc::new(AtomicBool::new(false)), Arc::clone(&submits));
+            let bob = pair.bob.initializer(
+                &root,
+                &pair.alice.manifest,
+                native_actor::gateway(
+                    None,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::clone(&submits),
+                    None,
+                ),
+            );
             let supervisor = supervisor(&root, BTreeMap::from([("bob".to_owned(), bob)]))?;
             let (client, server) = client(Rc::clone(&supervisor), 1).await?;
             for retry in 0..2 {
-                let mut frame = request(&format!("send-{round}-{retry}"), "bob", "message.submit", body.clone());
+                let mut frame = request(
+                    &format!("send-{round}-{retry}"),
+                    "bob",
+                    "message.submit",
+                    body.clone(),
+                );
                 frame.operation_id = Some("send-operation".to_owned());
                 let result = client.request_frame(frame).await?;
-                if let Some(expected) = &expected { assert_eq!(&result, expected); }
-                else { expected = Some(result); }
+                if let Some(expected) = &expected {
+                    assert_eq!(&result, expected);
+                } else {
+                    expected = Some(result);
+                }
             }
-            let mut conflict = request("conflict", "bob", "message.submit", serde_json::json!({"different":"intent"}));
+            let mut conflict = request(
+                "conflict",
+                "bob",
+                "message.submit",
+                serde_json::json!({"different":"intent"}),
+            );
             conflict.operation_id = Some("send-operation".to_owned());
             assert!(client.request_frame(conflict).await.is_err());
-            let messages = client.request_frame(request("messages", "bob", "message.list", serde_json::json!({"conversation_id":"conversation"}))).await?;
+            let messages = client
+                .request_frame(request(
+                    "messages",
+                    "bob",
+                    "message.list",
+                    serde_json::json!({"conversation_id":conversation}),
+                ))
+                .await?;
             assert_eq!(messages["messages"].as_array().map(Vec::len), Some(1));
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;
         }
         assert_eq!(submits.load(Ordering::SeqCst), 1);
-        std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    })))
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1175,6 +1228,7 @@ pub(crate) async fn assert_activated_group_unrouted_replay_refused() -> Result<(
 mod status_snapshot;
 
 mod group_actor;
+mod native_actor;
 
 #[path = "runtime_tests/native_busy.rs"]
 mod native_busy;

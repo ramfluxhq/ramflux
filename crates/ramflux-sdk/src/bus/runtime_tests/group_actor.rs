@@ -9,16 +9,8 @@ struct PublicationFault {
     entered: Option<oneshot::Sender<()>>,
     injected: Option<oneshot::Sender<()>>,
     release: Arc<tokio::sync::Notify>,
-    root: ramflux_test_support::TestPath,
-}
-fn fault_client(root: &Path) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    let root_seed = ramflux_crypto::blake3_256("ramflux.test.account.root.v1", b"alice");
-    client.create_identity_root("alice", root_seed);
-    client.create_device_branch("alice", "device-alice", 1, [0x62; 32]);
-    client.open_account_index(root)?;
-    client.unlock_account("alice", b"actor-test-secret")?;
-    Ok(client)
+    root: PathBuf,
+    alice: native_actor::Side,
 }
 impl GatewaySessionFrameSink for PublicationFault {
     fn send_frame<'a>(&'a mut self, frame: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
@@ -41,7 +33,7 @@ impl GatewaySessionFrameSource for PublicationFault {
                 let _ = entered.send(());
                 self.release.notified().await;
                 // A durable group-message projection failure must not end the account thread.
-                let client = fault_client(&self.root)
+                let client = native_actor::second_client(&self.root, &self.alice)
                     .map_err(|error| TransportError::Quic(error.to_string()))?;
                 client
                     .account_db()
@@ -70,25 +62,16 @@ impl GatewaySessionFrameSource for PublicationFault {
 #[tokio::test(flavor = "current_thread")]
 async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping_the_actor()
 -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
-        let root = root("group-actor-error");
+    Box::pin(LocalSet::new().run_until(Box::pin(async {
+        let pair = native_actor::pair().await.map_err(|error| failure(&format!("native pair: {error}")))?;
+        let root = pair.data_root.clone();
         let (entered, receiving) = oneshot::channel();
         let (injected, faulted) = oneshot::channel();
         let release = Arc::new(tokio::sync::Notify::new());
-        let fixture_root = root.clone();
-        let fixture_release = release.clone();
-        let initialize: AccountInitializer = Box::new(move |index| {
-            let mut account = account_with_counter(&fixture_root,"alice",None,
-                Arc::new(AtomicBool::new(false)),Arc::new(AtomicUsize::new(0)),Some(index))?;
-            let config = account.gateway_config.clone();
-            account.install_test_session(GatewaySessionEngine::with_test_transport(config,
-                Box::new(PublicationFault {
-                    inner:Gateway {last:None,pending_cursor:None,blocked:None,
-                        cancelled:Arc::new(AtomicBool::new(false)),submits:Arc::new(AtomicUsize::new(0)),
-                        cancelled_notice:None},
-                    entered:Some(entered),injected:Some(injected),release:fixture_release,root:fixture_root,
-                })));
-            Ok(account)
+        let initialize = pair.alice.initializer(&root, &pair.bob.manifest, PublicationFault {
+            inner: native_actor::gateway(None, Arc::new(AtomicBool::new(false)), Arc::default(), None),
+            entered: Some(entered), injected: Some(injected), release: Arc::clone(&release),
+            root: root.clone(), alice: pair.alice.clone(),
         });
         let supervisor = supervisor(&root,BTreeMap::from([("alice".into(),initialize)]))?;
         let (bus,server) = client(Rc::clone(&supervisor),1).await?;
@@ -122,7 +105,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         assert!(matches!(&error,SdkError::LocalBusRefused {code,..} if code=="ValidationFailed"),"{error}");
         assert!(!error.to_string().contains("account actor stopped"),"{error}");
         assert!(supervisor.account_actor("alice").is_some_and(|actor|!actor.has_stopped()));
-        fault_client(&root)?.account_db()?.remove_actor_state("routed/message-metadata/corrupt-group-msg")
+        native_actor::second_client(&root, &pair.alice)?.account_db()?.remove_actor_state("routed/message-metadata/corrupt-group-msg")
             .map_err(|error|failure(&format!("remove injected metadata: {error}")))?;
         let renamed=bus.request_frame(request("rename","alice","group.name.set",
             serde_json::json!({"group_id":"group","name":"Still alive"}))).await
@@ -132,7 +115,6 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         server.await.map_err(|_|failure("connection panicked"))??;
         supervisor.shutdown().await?;
         drop(supervisor);
-        std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    }))).await
 }

@@ -80,6 +80,97 @@ pub(super) async fn open(
     Box::pin(build(activate)).await.map_err(|error| SdkError::LocalBus(format!("test: {error}")))
 }
 
+/// A native account holding a real peer-authored message whose sender root it has never
+/// fetched: the peer's manifest is returned, not cached, so the receive must fetch it.
+pub(super) async fn open_peer_authored(
+    activate: fn(&AccountDb, &str) -> Result<(), SdkError>,
+) -> Result<(LocalBusAccountState, ReceiveEntry, crate::SdkDeviceManifestResponse), SdkError> {
+    Box::pin(build_peer_authored(activate))
+        .await
+        .map_err(|error| SdkError::LocalBus(format!("test: {error}")))
+}
+
+async fn build_peer_authored(
+    activate: fn(&AccountDb, &str) -> Result<(), SdkError>,
+) -> Case<(LocalBusAccountState, ReceiveEntry, crate::SdkDeviceManifestResponse)> {
+    let mut native_source =
+        Box::pin(Native::with_principal(ACCOUNT, "device-sender", ACCOUNT)).await?;
+    Box::pin(publish_layer_four(&mut native_source)).await?;
+    let mut source = native_source.into_bus();
+    let mut native_peer = Box::pin(Native::with_principal("peer", "device-peer", "peer")).await?;
+    Box::pin(publish_layer_four(&mut native_peer)).await?;
+    let peer = native_peer.into_bus();
+    let own = source.client.native_bus_fixture.as_ref().ok_or("native source")?.manifest.clone();
+    let remote = peer.client.native_bus_fixture.as_ref().ok_or("native peer")?.manifest.clone();
+    source.principal_commitment.clone_from(&own.principal_commitment);
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &own.principal_commitment,
+        &remote.principal_commitment,
+    )?;
+    // Only the peer knows both directories; the receiver has an accepted relationship and the
+    // pair session, but no cached authority for the sender's root.
+    peer.client.persist_fetched_identity_directory(&own)?;
+    for local in [&source, &peer] {
+        local.client.account_db()?.establish_friend_link(
+            "test-friend",
+            &own.principal_commitment,
+            &remote.principal_commitment,
+        )?;
+    }
+    bus::seed_pair(&source.client, &peer.client)?;
+    let engine_config = bus::config_for(&peer.client, &source.gateway_config)?;
+    let mut sender_engine = crate::GatewaySessionEngine::with_test_transport(
+        engine_config,
+        Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
+            std::sync::Arc::default(),
+        )),
+    );
+    let target = source.client.owned_device_identity()?;
+    let ttl = peer.client.content_ttl()?;
+    let sent = peer
+        .client
+        .send_plaintext_direct_message_via_gateway(
+            &mut sender_engine,
+            GatewayDirectMessage {
+                conversation_id: conversation,
+                message_id: "peer-authored".into(),
+                envelope_id: "peer-authored-envelope".into(),
+                source_principal_id: "peer".into(),
+                sender_id: "device-peer".into(),
+                recipient_device_id: Some(target.device_id().into()),
+                recipient_principal_commitment: Some(own.principal_commitment.clone()),
+                target_delivery_id: target.storage_key().into(),
+                encrypted_body: Vec::new(),
+                created_at: now_unix_timestamp(),
+                ttl,
+            },
+            b"peer authored for the manifest wait",
+        )
+        .await?;
+    let mut config = source.gateway_config.clone();
+    config.tcp_gateway_addr = Some("127.0.0.1:1".parse()?);
+    let mut engine = crate::GatewaySessionEngine::with_test_transport(config, Box::new(Quiet));
+    engine.mode = crate::gateway::session_push::SessionMode::Push {
+        incarnation: crate::gateway::session_push::IncarnationId::try_from(
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        )?,
+    };
+    source.install_test_session(engine);
+    let target_id = source.target_delivery_id.clone();
+    activate(source.client.account_db()?, &target_id)?;
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: sent.envelope.target_delivery_id.clone(),
+        envelope: sent.envelope,
+    };
+    if entry.target_delivery_id != target_id {
+        return Err("test: sealed message is not addressed to the receiving device".into());
+    }
+    drop(peer);
+    Ok((source, ReceiveEntry { entry, retry_key: None, replay: false, turn: None }, remote))
+}
+
 /// Restarts the receiving device from its stored account data.
 pub(super) fn reopen(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
     bus::reopen_account(account, ACCOUNT)

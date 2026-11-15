@@ -6,15 +6,15 @@
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
-    self, apply_page, queue_policy_kind, queue_projection, set_after_classify, set_before_commit,
-    set_before_commit_hook, set_manifest_await, set_projection_error, set_projection_key,
+    self, apply_page, queue_manifest_wait, queue_policy_kind, queue_projection, set_after_classify,
+    set_before_commit, set_before_commit_hook, set_manifest_await, set_projection_error,
+    set_projection_key,
 };
 use super::apply_w1_real_own_copy as real;
 use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
-use crate::client::identity_authority::test_support;
 use crate::client::own_device_copy::PREFIX;
 use crate::client::routed::{Committed, Kind, Routing};
 use crate::gateway::GatewaySessionTransportKind;
@@ -957,17 +957,26 @@ async fn serve_manifest(
 
 #[tokio::test(flavor = "current_thread")]
 async fn manifest_wait_drives_real_cache_verified_fetch() -> Result<(), SdkError> {
-    let mut harness = open()?;
+    // A peer-authored native message whose sender root the receiver has never fetched: the
+    // receive must resolve it through a real cache-verified directory fetch.
+    let (account, entry, manifest) = Box::pin(real::open_peer_authored(activate)).await?;
+    let root = tempfile::tempdir().expect("tmp");
+    let mut harness = Harness { root, account, real: None };
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
-    let manifest = test_support::public_manifest(&harness.account.client)?;
     let (config, server) =
         serve_manifest(harness.root.path(), harness.account.gateway_config.clone(), manifest)
             .await?;
-    harness.account.engine = None;
+    // The seed engine keeps its injected transport; only its directory coordinates point at
+    // the served manifest.
+    let engine = harness.account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    engine.config.tcp_gateway_addr = config.tcp_gateway_addr;
+    engine.config.ca_cert.clone_from(&config.ca_cert);
+    engine.config.server_name.clone_from(&config.server_name);
+    engine.config.timeout = config.timeout;
     harness.account.gateway_config = config;
     GENERATION.with(|cell| cell.set(1));
     set_manifest_await(bump_generation);
-    let entry = own_copy_packet(&harness.account)?;
+    queue_manifest_wait();
     let refused = drive(&mut harness.account, entry, current_generation).await;
     server.await.map_err(|error| SdkError::LocalBus(error.to_string()))??;
     let error = refused.as_ref().err();
