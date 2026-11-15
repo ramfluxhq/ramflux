@@ -19,7 +19,8 @@ pub const MAX_DEVICE_NAME_BYTES: usize = 128;
 /// Length of a root commitment (43 base64url characters) inside a native delivery address.
 const ROOT_COMMITMENT_BYTES: usize = 43;
 /// Length of the native delivery address for a device name of `device_bytes` bytes that needs no
-/// JSON escaping: `root~` plus the base64url of `["<root>","<device>"]`.
+/// JSON escaping: `root~` plus the base64url of `["<root>","<device>"]`. Names whose JSON form
+/// grows (`"`, `\\`, controls) are measured exactly by `validate_device_name`.
 const fn native_delivery_id_bytes(device_bytes: usize) -> usize {
     // `["<root>","<device>"]`: two brackets, four quotes, one comma.
     let json = ROOT_COMMITMENT_BYTES + device_bytes + 7;
@@ -34,13 +35,23 @@ const _: () = assert!(
 /// # Errors
 /// Rejects empty, oversized, control/format-containing, blank or reserved-prefix device names.
 pub fn validate_device_name(name: &str) -> Result<(), ProtocolError> {
+    if !crate::text_safety::single_line_is_safe(name) {
+        return Err(ProtocolError::DeviceNameControlCharacter);
+    }
     if name.trim().is_empty()
         || name.len() > MAX_DEVICE_NAME_BYTES
-        || !crate::text_safety::single_line_is_safe(name)
         || name.starts_with("root~")
         || name.starts_with("legacy~")
     {
         return Err(ProtocolError::InvalidIdentityRecord("invalid or reserved live device name"));
+    }
+    // JSON escaping can grow the name, so measure the exact derived delivery id of a
+    // standard-length root commitment instead of trusting the byte cap alone.
+    let json = serde_json::to_vec(&("r".repeat(ROOT_COMMITMENT_BYTES), name))?;
+    let actual = 5 + (json.len() * 4).div_ceil(3);
+    let limit = crate::message::outer::MAX_IDENTIFIER_BYTES;
+    if actual > limit {
+        return Err(ProtocolError::DeviceDeliveryIdTooLong { actual, limit });
     }
     Ok(())
 }
@@ -96,6 +107,36 @@ mod tests {
         for name in ["中文", "téléphone", "🦀", "phone 2"] {
             assert!(validate_device_name(name).is_ok(), "{name:?}");
         }
+    }
+    #[test]
+    fn control_characters_are_a_typed_refusal() {
+        for name in ["phone\n", "a\u{202e}b", "tab\there"] {
+            assert!(
+                matches!(
+                    validate_device_name(name),
+                    Err(ProtocolError::DeviceNameControlCharacter)
+                ),
+                "{name:?} must be refused with the control-character error"
+            );
+        }
+    }
+    #[test]
+    fn json_escaping_cannot_push_the_delivery_id_past_the_identifier_cap() {
+        let quotes = "\"".repeat(MAX_DEVICE_NAME_BYTES);
+        assert!(
+            matches!(
+                validate_device_name(&quotes),
+                Err(ProtocolError::DeviceDeliveryIdTooLong { actual, limit })
+                    if actual > limit
+            ),
+            "a 128-byte name of quotes doubles in JSON and must be refused by length"
+        );
+        let slashes = "\\".repeat(MAX_DEVICE_NAME_BYTES);
+        assert!(validate_device_name(&slashes).is_err(), "backslashes escape the same way");
+        assert!(
+            validate_device_name(&"d".repeat(MAX_DEVICE_NAME_BYTES)).is_ok(),
+            "a 128-byte plain name stays accepted"
+        );
     }
     #[test]
     fn device_names_are_capped_at_128_bytes_and_max_name_fits_the_delivery_id()

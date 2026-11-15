@@ -19,6 +19,7 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("WrongContext"));
         }
+        self.require_native_publication_settled(root)?;
         let target = self
             .assert_manifest_active_device_cached(
                 engine.config(),

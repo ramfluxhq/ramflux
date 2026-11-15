@@ -21,6 +21,20 @@ impl NativeOperation {
     }
 }
 impl RamfluxClient {
+    /// A pairing or own-device sync step must not run while this account's head publication is
+    /// still pending: the installed authority and the adopted head have not yet agreed.
+    pub(crate) fn require_native_publication_settled(&self, root: &str) -> Result<(), SdkError> {
+        if let Some(account) = &self.born_v3_account
+            && account.record().body.account_anchor == root
+            && !crate::custody::pairing::ordinary_session_admitted(
+                self,
+                account.local_account_id(),
+            )?
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        Ok(())
+    }
     pub(crate) fn require_native_operation(
         &self,
         device: &RootQualifiedDeviceRef,

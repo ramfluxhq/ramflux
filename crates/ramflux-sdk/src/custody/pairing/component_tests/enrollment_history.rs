@@ -44,3 +44,44 @@ async fn run() -> TestResult {
     rig.secondary.lock().await?;
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn pairing_history_step_refuses_while_the_head_publication_is_pending() -> TestResult {
+    let hold = ClockHold::new();
+    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(pending_gate())).await;
+    hold.finish().await?;
+    result
+}
+async fn pending_gate() -> TestResult {
+    let mut rig = Box::pin(Rig::open()).await?;
+    Box::pin(super::enrollment::enroll(&mut rig)).await?;
+    let mut target = crate::RamfluxClient::new();
+    rig.participant_b.return_client(&mut target)?;
+    let native = crate::custody::load_account(
+        &rig.participant_b.root,
+        &rig.participant_b.account_id,
+        crate::custody::network_now()?,
+    )?;
+    target
+        .initialize_born_v3_branch(native.local_device_id()?, rig.participant_b.vault.clone())
+        .await?;
+    let root = target.own_account_anchor()?;
+    target
+        .require_native_publication_settled(&root)
+        .map_err(|error| format!("test: admitted device was refused: {error}"))?;
+    // Losing the installed marker while the adoption row remains is exactly an unsettled head.
+    std::fs::remove_file(super::super::install_store::installed_path(
+        &rig.participant_b.root,
+        &rig.participant_b.account_id,
+    ))?;
+    assert!(
+        matches!(
+            target.require_native_publication_settled(&root),
+            Err(SdkError::PairingCode("PublicationPending"))
+        ),
+        "test: a history step ran while the head publication was pending"
+    );
+    rig.primary.lock().await?;
+    rig.secondary.lock().await?;
+    Ok(())
+}

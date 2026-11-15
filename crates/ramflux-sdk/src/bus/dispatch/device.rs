@@ -367,6 +367,8 @@ fn dispatch_device_sync_export(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
     let account = local_bus_account_mut(state, request_account_id(request)?)?;
+    let root = account.client.own_account_anchor()?;
+    account.client.require_native_publication_settled(&root)?;
     let staged = account.client.start_generated_history_transfer(&body.target_device_id)?;
     Ok(local_bus_ok(serde_json::json!({"target_device_id":body.target_device_id,"staged":staged})))
 }
