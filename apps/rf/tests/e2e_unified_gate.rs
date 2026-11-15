@@ -19,14 +19,6 @@ use std::time::Duration;
 
 const SCHEMA: &str = "ramflux.message.read_model.v1";
 
-fn dormant(row: &str) -> bool {
-    let dormant = !ramflux_protocol::schema_profile::schema_v1_live();
-    if dormant {
-        eprintln!("unified gate row `{row}` not exercised: message schema v1 is dormant");
-    }
-    dormant
-}
-
 fn rows<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value.get(key).and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
@@ -77,6 +69,7 @@ fn wait_synced(
     conversation: &str,
     expected: &[String],
 ) -> e2e::Result<Value> {
+    let reported = std::cell::Cell::new(0);
     wait_json(
         daemon,
         &[
@@ -91,7 +84,12 @@ fn wait_synced(
         ],
         |value| {
             let got = texts(value, "changes");
-            expected.iter().all(|text| got.contains(text))
+            let matched = expected.iter().filter(|text| got.contains(text)).count();
+            if matched == expected.len() || matched / 16 > reported.get() / 16 {
+                eprintln!("unified gate: reader matched {matched} of {}", expected.len());
+                reported.set(matched);
+            }
+            matched == expected.len()
         },
     )
 }
@@ -99,9 +97,6 @@ fn wait_synced(
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
 #[test]
 fn unified_messages_survive_a_crash_and_a_backlog_beyond_the_delivery_page() -> e2e::Result<()> {
-    if dormant("durable reader") {
-        return Ok(());
-    }
     let stack = boot_stack()?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -110,21 +105,27 @@ fn unified_messages_survive_a_crash_and_a_backlog_beyond_the_delivery_page() -> 
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("unified-dm");
+    eprintln!("unified gate: native accounts and contact consent ready");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     // More than the 64-entry in-memory delivery page of the generation-zero reader.
     let bodies = (0..70).map(|index| format!("unified body {index}")).collect::<Vec<_>>();
-    for body in &bodies {
+    for (index, body) in bodies.iter().enumerate() {
         dm_send(&alice_d, &alice, &bob, &conversation, &unique("msg"), body)?;
+        if (index + 1) % 16 == 0 || index + 1 == bodies.len() {
+            eprintln!("unified gate: submitted {} of {}", index + 1, bodies.len());
+        }
     }
     wait_synced(&bob_d, &bob, &conversation, &bodies)
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
 
+    eprintln!("unified gate: backlog committed through the public reader");
     // Abrupt process death after commit: nothing may depend on memory of the old process.
     let (socket, root) = crash_daemon(bob_d)?;
     let bob_d = start_daemon_at(socket, root)?;
     unlock_account_with_timeout(&bob_d, &bob, Duration::from_secs(10))
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
 
+    eprintln!("unified gate: crashed recipient restarted and unlocked");
     // `dm list` performs no sync: every row below comes from the durable store alone.
     let mut cursor = 0;
     let mut served = Vec::new();
@@ -169,9 +170,6 @@ fn unified_messages_survive_a_crash_and_a_backlog_beyond_the_delivery_page() -> 
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
 #[test]
 fn unified_receipt_and_delete_reach_the_peer_read_model() -> e2e::Result<()> {
-    if dormant("receipt and erasure") {
-        return Ok(());
-    }
     let stack = boot_stack()?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -180,7 +178,8 @@ fn unified_receipt_and_delete_reach_the_peer_read_model() -> e2e::Result<()> {
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("unified-dm");
+    eprintln!("unified gate: native accounts and contact consent ready");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let body = "unified body to acknowledge and erase".to_owned();
     dm_send(&alice_d, &alice, &bob, &conversation, &unique("msg"), &body)?;
     let received = wait_synced(&bob_d, &bob, &conversation, std::slice::from_ref(&body))
@@ -268,9 +267,6 @@ fn unified_receipt_and_delete_reach_the_peer_read_model() -> e2e::Result<()> {
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
 #[test]
 fn unified_tampered_commitment_never_reaches_the_reader_after_restart() -> e2e::Result<()> {
-    if dormant("tampered binding") {
-        return Ok(());
-    }
     let stack = boot_stack()?;
     let alice_d = start_daemon(&stack, "alice")?;
     let bob_d = start_daemon(&stack, "bob")?;
@@ -279,7 +275,8 @@ fn unified_tampered_commitment_never_reaches_the_reader_after_restart() -> e2e::
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("unified-binding");
+    eprintln!("unified gate: native accounts and contact consent ready");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let calibration = "untouched binding calibration".to_owned();
     dm_send(&alice_d, &alice, &bob, &conversation, &unique("good"), &calibration)?;
     wait_synced(&bob_d, &bob, &conversation, std::slice::from_ref(&calibration))?;

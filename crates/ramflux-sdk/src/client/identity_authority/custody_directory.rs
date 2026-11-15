@@ -386,12 +386,30 @@ impl RamfluxClient {
         } else {
             None
         };
-        let verified = ramflux_crypto::custody::verify_record(
-            &publication.record,
-            now,
-            publication.compacted_ids.as_deref(),
-            human.as_ref(),
-        )?;
+        let fingerprint = ramflux_crypto::blake3_256(
+            "ramflux.sdk.verified-authority-cache.v1",
+            // Private cache fingerprint: serialize every field without constructing a
+            // second canonical JSON tree. This is never a wire or signing transcript.
+            &serde_json::to_vec(&(&state, human.as_ref().map(VerifiedRecord::envelope)))?,
+        );
+        let cached = self.verified_authority_cache.borrow().get(anchor, now, &fingerprint);
+        let verified = if let Some(cached) = cached {
+            cached
+        } else {
+            let verified = ramflux_crypto::custody::verify_record(
+                &publication.record,
+                now,
+                publication.compacted_ids.as_deref(),
+                human.as_ref(),
+            )?;
+            self.verified_authority_cache.borrow_mut().remember(
+                anchor,
+                now,
+                fingerprint,
+                verified.clone(),
+            );
+            verified
+        };
         state.pins.require_current(&verified)?;
         Ok(Some(verified))
     }
@@ -457,7 +475,12 @@ impl RamfluxClient {
                 Some(root) => root.as_path(),
                 None => self.account_index()?.root(),
             };
-            let current = crate::custody::load_account(root, owned.local_account_id(), now)?;
+            let current = crate::custody::load_account_with_cache(
+                root,
+                owned.local_account_id(),
+                now,
+                &mut self.verified_durable_authority.borrow_mut(),
+            )?;
             if ramflux_protocol::custody::object_hash(current.record())?
                 != ramflux_protocol::custody::object_hash(cached.envelope())?
             {
@@ -636,4 +659,71 @@ pub(crate) fn native_fingerprint(authority: &VerifiedRecord) -> Result<String, S
             &body.delegations,
         ))?,
     ))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::client::native_test_support::{Fixture, TestResult};
+    #[tokio::test]
+    async fn cached_native_authority_rechecks_changed_storage_and_verification_time() -> TestResult
+    {
+        let fixture = Fixture::new("authority-cache").await?;
+        let anchor = fixture.client.own_account_anchor()?;
+        let now = crate::custody::network_now()?;
+        let original =
+            fixture.client.current_custody_authority(&anchor, now)?.ok_or("verified authority")?;
+        assert_eq!(
+            fixture
+                .client
+                .current_custody_authority(&anchor, now)?
+                .ok_or("cached authority")?
+                .envelope(),
+            original.envelope()
+        );
+        let db = fixture.client.account_db()?;
+        let storage_key = key(&anchor)?;
+        let mut state: RetainedAuthority =
+            db.load_actor_state(&storage_key)?.ok_or("retained authority")?;
+        let valid = ramflux_protocol::canonical_json_bytes(&state)?;
+        state.publication.as_mut().ok_or("publication")?.record.signature =
+            ramflux_protocol::encode_base64url([0; 64]);
+        db.persist_actor_state(&storage_key, &state)?;
+        assert!(
+            fixture.client.current_custody_authority(&anchor, now).is_err(),
+            "a same-second signature mutation cannot use the cached verification"
+        );
+        let state: RetainedAuthority = serde_json::from_slice(&valid)?;
+        db.persist_actor_state(&storage_key, &state)?;
+        assert!(fixture.client.current_custody_authority(&anchor, now)?.is_some());
+        assert!(
+            fixture.client.current_custody_authority(&anchor, 0).is_err(),
+            "verification time changes must check the signed record again"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn durable_floor_signature_cache_rechecks_same_second_file_changes() -> TestResult {
+        use std::io::Read as _;
+        const MAX_FIXTURE_AUTHORITY: u64 = 1024 * 1024;
+        let fixture = Fixture::new("durable-floor-cache").await?;
+        let own = fixture.client.owned_device_identity()?;
+        fixture.client.trusted_device(HeadUse::NewAuthorization, &own)?;
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        let path = fixture.root.0.join("custody_accounts").join(id).join("authority.json");
+        let mut original = Vec::new();
+        std::fs::File::open(&path)?.take(MAX_FIXTURE_AUTHORITY + 1).read_to_end(&mut original)?;
+        assert!(u64::try_from(original.len())? <= MAX_FIXTURE_AUTHORITY);
+        let mut changed: serde_json::Value = serde_json::from_slice(&original)?;
+        changed["record"]["signature"] =
+            serde_json::json!(ramflux_protocol::encode_base64url([0; 64]));
+        std::fs::write(&path, serde_json::to_vec(&changed)?)?;
+        assert!(
+            fixture.client.trusted_device(HeadUse::NewAuthorization, &own).is_err(),
+            "durable authority mutation must invalidate signature reuse even in the same second"
+        );
+        std::fs::write(&path, original)?;
+        fixture.client.trusted_device(HeadUse::NewAuthorization, &own)?;
+        Ok(())
+    }
 }

@@ -53,6 +53,30 @@ impl AccountDb {
         self.insert_direct_message_projection(message)
     }
 
+    /// Mark a verified generated author from this account as the owner of its projection.
+    /// # Errors
+    /// Refuses a missing/deleted projection, a foreign account or mismatched generated author.
+    pub fn mark_generated_message_owned(
+        &self,
+        message_id: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE direct_message_projection SET is_own=1
+             WHERE message_id=?1 AND deleted=0
+               AND EXISTS(SELECT 1 FROM runtime_account_identity WHERE singleton=1 AND principal_commitment=?2)
+               AND EXISTS(SELECT 1 FROM runtime_actor_state
+                          WHERE state_kind='routed/generated-identity/'||?1
+                            AND json_valid(CAST(state_json AS TEXT))
+                            AND json_extract(CAST(state_json AS TEXT),'$.author.accountAnchor')=?2)",
+            params![message_id, owner.root_commitment()],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn import_direct_message_projection(

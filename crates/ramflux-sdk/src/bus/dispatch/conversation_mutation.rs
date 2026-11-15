@@ -32,6 +32,8 @@ pub(crate) struct Prepared {
     pub(crate) journal_key: String,
     expires_at: i64,
     pub(crate) identity: g::EventIdentity,
+    pub(crate) created_at: i64,
+    pub(crate) ttl: u32,
     pub(crate) exact: Vec<u8>,
     pub(crate) wire: Vec<u8>,
 }
@@ -59,9 +61,6 @@ pub(crate) async fn execute(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Err(refused(Code::PeerUpgradeRequired, "generation inactive"));
-    }
     super::conversation_journal::prune(&account.client, now_unix_timestamp())?;
     let operation = request
         .operation_id
@@ -73,9 +72,6 @@ pub(crate) async fn execute(
         Zeroizing::new(ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?);
     let fingerprint =
         ramflux_crypto::blake3_256_base64url("ramflux.conversation.intent.v1", &canonical);
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Err(refused(Code::PeerUpgradeRequired, "generation inactive"));
-    }
     if let Some(receipt) = super::conversation_journal::load(&account.client, &journal_key)? {
         if receipt.fingerprint != fingerprint {
             return Err(refused(Code::InvalidArgument, "operation_id reused"));
@@ -137,10 +133,6 @@ pub(crate) fn prepare(
     client: &RamfluxClient,
     request: &LocalBusFrame,
 ) -> Result<Prepared, SdkError> {
-    // Generation zero remains inert: no counter, plaintext, ratchet or outbox allocation.
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Err(refused(Code::PeerUpgradeRequired, "message schema v1 is not active"));
-    }
     let intent: Intent = serde_json::from_value(request.body.clone())
         .map_err(|_| refused(Code::InvalidArgument, "invalid conversation mutation fields"))?;
     validate_intent(&request.method, &intent)?;
@@ -193,6 +185,8 @@ pub(crate) fn prepare(
             journal_key: journal_key.clone(),
             expires_at,
             identity,
+            created_at: now_unix_timestamp(),
+            ttl: client.content_ttl()?,
             exact,
             wire,
         };

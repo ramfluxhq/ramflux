@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native sent-copy admission follows certified sync membership without root private keys.
-use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 
 #[tokio::test]
@@ -79,53 +78,35 @@ async fn native_own_sent_admission_tracks_enrollment_scope_and_revocation() -> T
 
 #[tokio::test]
 async fn native_live_sent_copy_keeps_a_private_replay_claim_after_deletion() -> TestResult {
-    let own = Fixture::new("native-copy-deletion").await?;
-    let source = own.client.owned_device_identity()?;
+    crate::client::native_test_support::watchdog::within(
+        crate::client::native_test_support::live_own_copy::exercise(true),
+    )
+    .await?
+}
+
+#[tokio::test]
+async fn own_manifest_signature_cache_rechecks_changed_native_material() -> TestResult {
+    let own = Fixture::new("own-manifest-cache").await?;
+    let anchor = own.client.own_account_anchor()?;
+    let key = format!("identity/manifest-root/{anchor}");
+    own.client.local_own_copy_manifest()?;
+    own.client.local_own_copy_manifest()?;
     let db = own.client.account_db()?;
-    let ciphertext = b"authenticated original ciphertext";
-    let mut bytes = b"ramflux.own_sent_message.v1\n".to_vec();
-    bytes.extend(serde_json::to_vec(&json!({
-        "envelope_id":"private-copy-envelope","message_id":"original-text-id","sender_id":source.device_id(),
-        "context":{"conversation_id":"native-copy-thread","participants":[own.manifest.principal_id,"peer"],"group":null,"friend":null},
-        "ciphertext_hash":crate::client::own_sent_message::own_sent_ciphertext_hash(ciphertext),
-        "body_base64":ramflux_protocol::encode_base64url(b"copied body")
-    }))?);
-    let input = crate::client::own_device_copy::OwnMessageInput {
-        id: "private-copy-envelope",
-        conversation: "native-copy-thread",
-        group: None,
-        created_at: crate::time::now_unix_timestamp(),
-        body: &bytes,
-    };
-    assert!(own.client.receive_own_sent_message(&source, input)?);
-    let rows = own.client.direct_messages("native-copy-thread")?;
-    assert_eq!(rows.len(), 1);
-    let id = &rows[0].message_id;
-    assert_eq!(
-        own.client.message_origin("native-copy-thread", id)?.ok_or("origin")?["direction"],
-        "outgoing"
+    let original: crate::prekey::SdkDeviceManifestResponse =
+        db.load_actor_state(&key)?.ok_or("own manifest")?;
+    let mut changed = original.clone();
+    changed
+        .devices
+        .first_mut()
+        .ok_or("native device")?
+        .prekey_bundle
+        .signature_by_device_identity = ramflux_protocol::encode_base64url([0; 64]);
+    db.persist_actor_state(&key, &changed)?;
+    assert!(
+        own.client.local_own_copy_manifest().is_err(),
+        "same-second material mutation must invalidate signature reuse"
     );
-    db.delete_direct_message("native-copy-thread", id, "self", "delete")?;
-    assert!(own.client.message_origin("native-copy-thread", id)?.is_none());
-    assert!(own.client.receive_own_sent_message(&source, input)?);
-    let rows = own.client.direct_messages("native-copy-thread")?;
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].deleted);
-    assert!(rows[0].is_own);
-    assert_eq!(rows[0].sender_id, "");
-    assert!(db.message_content(id)?.is_none());
-    assert!(own.client.message_origin("native-copy-thread", id)?.is_none());
-    assert_eq!(db.actor_state_usage("own-device/sent-ciphertext/")?.0, 1);
-    let retained =
-        serde_json::to_string(&db.list_actor_states::<serde_json::Value>("own-device/")?)?;
-    for forbidden in [
-        source.device_id(),
-        source.root_commitment(),
-        source.storage_key(),
-        "private-copy-envelope",
-        "copied body",
-    ] {
-        assert!(!retained.contains(forbidden), "private replay state retained {forbidden}");
-    }
+    db.persist_actor_state(&key, &original)?;
+    own.client.local_own_copy_manifest()?;
     Ok(())
 }

@@ -17,11 +17,15 @@ EPHEMERAL = {
     'client/routed/reset_prepare.rs': 'crate::offline_retention::RESET_TTL_SECS',
 }
 FORWARD = {
+    # Mutation headers retain the first admitted content TTL across all recipient retries.
+    'bus/dispatch/conversation_delivery.rs': ('prepared.ttl', 'Some(prepared.ttl)'),
     'dm.rs': 'message.ttl',
     'bus/protocol.rs': 'self.ttl',
     'bus/task_delivery.rs': 'envelope.ttl',
     'client/routed/mod.rs': 'persist.message.ttl',
     'client/routed/report.rs': 'message.ttl',
+    # Retain the already classified first-send TTL across exact operation retries.
+    'client/authored_send.rs': 'message.ttl',
 }
 
 

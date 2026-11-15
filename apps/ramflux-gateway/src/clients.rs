@@ -1476,7 +1476,7 @@ pub(crate) mod tests {
             source_device_id: "device_gateway_test".to_owned(),
             target_delivery_id: "target_notify_mesh".to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
             created_at: i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(0),

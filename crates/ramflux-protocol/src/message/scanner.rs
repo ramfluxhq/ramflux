@@ -214,6 +214,7 @@ fn scan_field(
                 ("Thumbnail", "encoded_image") => 16 * 1024,
                 (_, "native_authority_proof") | ("CallControl", "call_start") => 8 * 1024,
                 ("NativeGroupSnapshot", "canonical") => crate::group_state::MAX_GROUP_STATE_BYTES,
+                ("NativeCustodyManifest", "canonical") => super::validation::MAX_INNER_BYTES,
                 (name, "canonical") if name.starts_with("Native") => 8 * 1024,
                 _ => super::validation::MAX_INNER_BYTES,
             };
@@ -287,16 +288,18 @@ mod tests {
     use prost::Message as _;
 
     #[test]
-    fn native_snapshot_leaf_uses_native_cap_without_expanding_other_leaves()
+    fn native_snapshot_and_custody_leaves_preserve_other_leaf_caps()
     -> Result<(), Box<dyn std::error::Error>> {
         let pool = prost_reflect::DescriptorPool::decode(super::super::FILE_DESCRIPTOR_SET)?;
-        for name in ["NativeGroupSnapshot", "NativeGroupActor"] {
+        for name in ["NativeGroupSnapshot", "NativeCustodyManifest", "NativeGroupActor"] {
             let descriptor = pool
                 .all_messages()
                 .find(|value| value.name() == name)
                 .ok_or("native descriptor missing")?;
             let cap = if name == "NativeGroupSnapshot" {
                 crate::group_state::MAX_GROUP_STATE_BYTES
+            } else if name == "NativeCustodyManifest" {
+                super::super::validation::MAX_INNER_BYTES
             } else {
                 8192
             };

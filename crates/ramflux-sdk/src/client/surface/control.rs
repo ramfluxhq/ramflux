@@ -3,13 +3,15 @@
 
 //! Authenticated surface transport controls; account-owned forwarding preserves original wire bytes.
 use super::{Carrier, Payload, PayloadKind, SurfaceSender, invalid};
+#[cfg(test)]
 use crate::client::identity_authority::HeadUse;
 use crate::own_device_sync::SdkOwnDeviceGroupSnapshot;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub(crate) const CONTROL_PREFIX: &[u8] = b"ramflux.surface.control.v1\n";
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlKind {
@@ -34,9 +36,26 @@ pub(crate) struct OwnContext {
     pub(crate) friend: Option<ramflux_storage::FriendLinkRecord>,
 }
 impl SurfaceControl {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(invalid("surface control byte budget exceeded"));
+        }
+        if !matches!(
+            g::validation::scan_message("Surface", bytes, g::registry::COMPILED_LAYER),
+            Ok(g::validation::ScanOutcome::Supported)
+        ) {
+            return Ok(None);
+        }
+        let value = g::Surface::decode(bytes).map_err(|_| invalid("invalid typed Surface"))?;
+        let Some(g::surface::Payload::Delivery(delivery)) = value.payload else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_generated(&delivery)?))
+    }
     pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = CONTROL_PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
+        let bytes =
+            g::Surface { payload: Some(g::surface::Payload::Delivery(self.to_generated()?)) }
+                .encode_to_vec();
         if bytes.len() > 2 * 1024 * 1024 {
             return Err(invalid("surface control byte budget exceeded"));
         }
@@ -154,6 +173,7 @@ impl RamfluxClient {
         }
         Ok(manifests)
     }
+    #[cfg(test)]
     pub(crate) fn receive_surface_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -161,7 +181,7 @@ impl RamfluxClient {
         group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        if !body.starts_with(CONTROL_PREFIX) {
+        if SurfaceControl::decode(body)?.is_none() {
             return Ok(false);
         }
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
@@ -175,14 +195,26 @@ impl RamfluxClient {
         group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Some(raw) = body.strip_prefix(CONTROL_PREFIX) else {
+        self.receive_surface_control_scoped(
+            entry,
+            source_identity,
+            (conversation, group, None),
+            body,
+            None,
+        )
+    }
+    pub(in crate::client) fn receive_surface_control_scoped(
+        &self,
+        entry: &GatewayInboxEntry,
+        source_identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        scope: (&str, Option<&str>, Option<&str>),
+        body: &[u8],
+        expires_at: Option<i64>,
+    ) -> Result<bool, SdkError> {
+        let (conversation, group, logical_message) = scope;
+        let Some(control) = SurfaceControl::decode(body)? else {
             return Ok(false);
         };
-        if body.len() > 2 * 1024 * 1024 {
-            return Err(invalid("surface control byte budget exceeded"));
-        }
-        let control: SurfaceControl = ramflux_protocol::parse_i_json(raw)
-            .map_err(|_| SdkError::InboundRejected("invalid surface control JSON".into()))?;
         let bytes = ramflux_protocol::decode_base64url(&control.carrier_base64)
             .map_err(|_| invalid("invalid surface control carrier encoding"))?;
         let carrier =
@@ -248,7 +280,7 @@ impl RamfluxClient {
                         return Err(invalid("own surface snapshot is below the joined epoch"));
                     }
                 }
-                self.import_surface_context(context, &entry.envelope.source_device_id)?;
+                self.import_surface_context(context)?;
             } else {
                 self.require_existing_own_surface_context(
                     conversation,
@@ -267,68 +299,40 @@ impl RamfluxClient {
                 control.group_epoch,
             )?;
         }
-        self.project_surface_control(entry, group, &carrier, &control)
+        self.project_surface_control(entry, &carrier, &control, logical_message, expires_at)
     }
     fn project_surface_control(
         &self,
         entry: &GatewayInboxEntry,
-        group: Option<&str>,
         carrier: &Carrier,
         control: &SurfaceControl,
+        logical_message: Option<&str>,
+        expires_at: Option<i64>,
     ) -> Result<bool, SdkError> {
         let conversation = carrier.conversation_id.as_str();
         let signer = self.verified_surface_signer(carrier)?;
         let bytes = carrier.bytes()?;
-        let message = Self::surface_timeline_id(carrier)?;
+        let message = match logical_message {
+            Some(message) => message.to_owned(),
+            None => Self::surface_timeline_id(carrier)?,
+        };
         let sender = SurfaceSender {
             principal: &signer,
             device: &carrier.sender_device_id,
             envelope_id: &entry.envelope.envelope_id,
-            expires_at: Some(
-                entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-            ),
+            expires_at: Some(expires_at.unwrap_or_else(|| {
+                entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl))
+            })),
             group_epoch: control.group_epoch,
         };
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let outbound = control.kind == ControlKind::Own
             && carrier.sender_principal_id == local.principal_id
             && carrier.payload_kind == PayloadKind::Action;
-        let outcome = self
-            .project_surface_message(conversation, &message, sender, &bytes, outbound)?
-            .ok_or_else(|| invalid("surface projection absent"))?;
-        if carrier.payload_kind == PayloadKind::ActionReceipt {
-            return Ok(true);
-        }
-        if self.direct_message_by_id(&message)?.is_none() {
-            let metadata = ramflux_storage::MessageMetadata::default();
-            self.send_direct_message_with_metadata(
-                conversation,
-                &message,
-                &carrier.sender_device_id,
-                entry.envelope.encrypted_payload.as_bytes(),
-                &metadata,
-            )?;
-            let routing = crate::client::routed::Routing {
-                group_message_id: None,
-                kind: if group.is_some() {
-                    crate::client::routed::Kind::GroupMessage
-                } else {
-                    crate::client::routed::Kind::Direct
-                },
-                conversation_id: conversation.into(),
-                group_id: group.map(str::to_owned),
-                message_id: message.clone(),
-                attachments: false,
-            };
-            self.account_db()?
-                .persist_actor_state(&format!("routed/message-metadata/{message}"), &routing)?;
-        }
-        self.account_db()?.replace_surface_message_content(
-            conversation,
-            &message,
-            outcome.fallback_text.as_bytes(),
-        )?;
-        Ok(true)
+        // The generated receiver writes the exact Inner after this native transition.
+        // Native history restores application state independently of message projection.
+        self.project_surface_message(conversation, &message, sender, &bytes, outbound)
+            .map(|outcome| outcome.is_some())
     }
     pub(crate) fn surface_timeline_id(carrier: &Carrier) -> Result<String, SdkError> {
         Ok(format!(

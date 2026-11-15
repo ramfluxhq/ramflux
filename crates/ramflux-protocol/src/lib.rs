@@ -14,8 +14,8 @@ pub mod a2ui_state;
 mod core_types;
 mod device_address;
 pub use device_address::{
-    RootQualifiedDeviceIdentity, parse_qualified_device_id, qualified_device_id,
-    validate_device_name,
+    MAX_DEVICE_NAME_BYTES, RootQualifiedDeviceIdentity, parse_qualified_device_id,
+    qualified_device_id, validate_device_name,
 };
 pub mod dm_fs_v3;
 pub mod domain;

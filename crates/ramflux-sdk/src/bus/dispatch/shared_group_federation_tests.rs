@@ -144,7 +144,7 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
         config,
         Box::new(super::fixture::RecordingGateway::new(local.clone())),
     ));
-    source.client.shared_group_create(
+    source.client.fixture_group_create(
         "group",
         "group-thread",
         Some("Federated name".into()),

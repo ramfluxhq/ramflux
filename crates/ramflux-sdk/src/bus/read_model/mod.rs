@@ -189,3 +189,6 @@ fn legacy_list(
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;
     Ok(response)
 }
+
+#[cfg(test)]
+mod native_capture_tests;

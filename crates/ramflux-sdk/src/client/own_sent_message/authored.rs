@@ -24,9 +24,6 @@ impl RamfluxClient {
         &self,
         input: OwnSentInput<'_>,
     ) -> Result<(), SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(());
-        }
         let Ok(scanned) = g::validation::scan_inner(input.body) else { return Ok(()) };
         if !matches!(scanned.kind, 1 | 3) {
             return Ok(());

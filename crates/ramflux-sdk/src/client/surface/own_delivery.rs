@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Context suppression follows confirmed fanout to one exact active sibling set.
-use super::control::{CONTROL_PREFIX, ControlKind, SurfaceControl};
+use super::control::{ControlKind, SurfaceControl};
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -37,10 +37,9 @@ impl RamfluxClient {
         body: &[u8],
         targets: &[String],
     ) -> Result<(Zeroizing<Vec<u8>>, Option<OwnContextDelivery>), SdkError> {
-        let Some(raw) = body.strip_prefix(CONTROL_PREFIX) else {
+        let Some(mut control) = SurfaceControl::decode(body)? else {
             return Ok((Zeroizing::new(body.to_vec()), None));
         };
-        let mut control: SurfaceControl = ramflux_protocol::parse_i_json(raw)?;
         if control.kind != ControlKind::Own {
             return Ok((Zeroizing::new(body.to_vec()), None));
         }

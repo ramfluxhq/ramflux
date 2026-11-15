@@ -25,23 +25,22 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("e2e-dm");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let message = unique("msg");
     let body = "hello from Alice over the real wire";
     let sent = dm_send(&alice_d, &alice, &bob, &conversation, &message, body)?;
     let received = wait_dm_texts(&bob_d, &bob, &conversation, &[body])?;
     assert_texts_once_in_order(&received, &[body])?;
-    let envelope =
-        envelope_id_from_read(&received).or_else(|| envelope_id_from_read(&sent)).ok_or_else(
-            || format!("receive JSON missing wire envelope_id; sent={sent} received={received}"),
-        )?;
+    let envelope = envelope_id_from_read(&sent).ok_or_else(|| {
+        format!("receive JSON missing wire envelope_id; sent={sent} received={received}")
+    })?;
     wait_node_observed_ack(&stack, &bob, &envelope).map_err(|error| {
         format!(
             "node ACK for envelope {envelope} missing after receive: {error}; logs={}",
             dump_logs(&stack, &[&alice_d, &bob_d])
         )
     })?;
-    let inbox_seq = inbox_seq_from_read(&received, &envelope).ok_or_else(|| {
+    let inbox_seq = inbox_seq_from_read(&sent, &envelope).ok_or_else(|| {
         format!("receive JSON missing inbox_seq for {envelope}; received={received}")
     })?;
     // Default-on Push installs the receive ledger, so public `message.ack` /
@@ -58,7 +57,8 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
             .into());
         }
     }
-    let receipt = dm_receipt_delivered(&bob_d, &bob, &conversation, &message).map_err(|error| {
+    let logical = sent["message_id"].as_str().ok_or("sender canonical message identity missing")?;
+    let receipt = dm_receipt_delivered(&bob_d, &bob, &conversation, logical).map_err(|error| {
         format!(
             "receipt delivered failed: {error}; logs={}",
             dump_logs(&stack, &[&alice_d, &bob_d])
@@ -67,7 +67,7 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     if receipt.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
         return Err(format!("B receipt delivered was refused: {receipt}").into());
     }
-    wait_dm_receipt(&alice_d, &alice, &conversation, &message, &bob)
+    wait_dm_receipt(&alice_d, &alice, &conversation, logical, &bob)
         .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
     // Reopen the receiving store and read the same body back. Linux already covers this
     // through the restart jobs; the Windows acceptance requires it in this test.
@@ -93,16 +93,21 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("demo-b-live");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     for (sender_d, sender, recipient_d, recipient, body) in [
         (&alice_d, &alice, &bob_d, &bob, "B1 Alice to Bob"),
         (&bob_d, &bob, &alice_d, &alice, "B1 Bob to Alice"),
     ] {
         let before = e2e::wait_receive_settled(recipient_d, recipient)?;
         let ids = [unique("b1-first"), unique("b1-second")];
-        for id in &ids {
-            dm_send(sender_d, sender, recipient, &conversation, id, body)?;
-        }
+        let sent = ids
+            .iter()
+            .map(|id| dm_send(sender_d, sender, recipient, &conversation, id, body))
+            .collect::<e2e::Result<Vec<_>>>()?;
+        let logical = sent
+            .iter()
+            .map(|entry| entry["message_id"].as_str().ok_or("canonical sender identity missing"))
+            .collect::<Result<Vec<_>, _>>()?;
         for id in &ids {
             wait_node_observed_ack(&stack, recipient, id)?;
         }
@@ -115,20 +120,19 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
         for counter in ["resume_requests", "page_fetches", "catch_up_passes"] {
             assert_eq!(after[counter], before[counter], "B1 {counter}: {before} -> {after}");
         }
-        let received = wait_dm_texts(recipient_d, recipient, &conversation, &[body, body])?;
+        wait_dm_texts(recipient_d, recipient, &conversation, &[body, body])?;
         for owner in [(sender_d, sender), (recipient_d, recipient)] {
             let view = e2e::rf_json(
                 &owner.0.socket,
                 &["dm", "read", "--account", &owner.1.id, "--conversation", &conversation],
             )?;
-            for id in &ids {
+            for id in &logical {
                 let rows =
                     view["messages"].as_array().ok_or("canonical message projection missing")?;
                 let count = rows
                     .iter()
                     .filter(|row| {
-                        row["message_id"].as_str().or_else(|| row["id"].as_str())
-                            == Some(id.as_str())
+                        row["message_id"].as_str().or_else(|| row["id"].as_str()) == Some(*id)
                     })
                     .count();
                 assert_eq!(
@@ -138,8 +142,16 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
                 );
             }
         }
-        let first = inbox_seq_from_read(&received, &ids[0]).ok_or("first inbox sequence")?;
-        let second = inbox_seq_from_read(&received, &ids[1]).ok_or("second inbox sequence")?;
+        let [first_sent, second_sent] = sent.as_slice() else {
+            return Err("two sender transport entries required".into());
+        };
+        let [first_id, second_id] = ids.as_slice() else {
+            return Err("two envelope IDs required".into());
+        };
+        let first = inbox_seq_from_read(first_sent, first_id)
+            .ok_or("first node-assigned inbox sequence missing from submit result")?;
+        let second = inbox_seq_from_read(second_sent, second_id)
+            .ok_or("second node-assigned inbox sequence missing from submit result")?;
         assert_eq!(second, first + 1, "B1 Deliver sequences must be consecutive");
         assert!(
             e2e::receive_counter(&after, "last_acked_seq")?

@@ -7,7 +7,7 @@ pub(super) mod a2i;
 mod a2i_authority;
 mod delivery;
 mod group_key;
-mod guardian;
+pub(in crate::client) mod guardian;
 mod object_revoke;
 mod produce;
 

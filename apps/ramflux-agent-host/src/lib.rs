@@ -6,6 +6,7 @@ mod bus;
 mod checkpoint;
 mod config;
 mod engine;
+mod message_input;
 mod participant;
 mod provisioning;
 mod prx;

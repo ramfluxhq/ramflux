@@ -44,8 +44,7 @@ fn recording(nack: Option<&str>) -> (super::fixture::RecordingGateway, Sent) {
 
 /// A real reopen: the account DB handle is dropped and unlocked again from disk.
 fn reopen(account: &mut LocalBusAccountState, local_account_id: &str) -> TestResult {
-    account.client.active_account_db = None;
-    account.client.unlock_account(local_account_id, b"actor-test-secret")?;
+    crate::client::native_test_support::bus::reopen_account(account, local_account_id)?;
     Ok(())
 }
 
@@ -80,12 +79,12 @@ async fn state_delivery(case: Case) -> TestResult {
         super::dm_tests::peer_fixture_devices(&root, &mut source, &["device-peer-0"]).await?;
     source.gateway_config = config.clone();
     source.target_delivery_id = config.target_delivery_id.clone();
-    source.client.shared_group_create("group", "group-thread", None, "sender")?;
-    source.client.shared_group_change(
+    source.client.fixture_group_create("group", "group-thread", None, "sender")?;
+    source.client.fixture_group_change(
         "group",
         "sender",
         ramflux_protocol::group_state::GroupStateChange::Add {
-            member: peers[0].client.owned_group_actor("device-peer-0")?.identity,
+            member: peers[0].client.fixture_group_actor("device-peer-0")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
@@ -183,26 +182,22 @@ async fn control_courier(case: Case) -> TestResult {
     let mut admin = peers.remove(0);
     owner.gateway_config = config.clone();
     owner.target_delivery_id = config.target_delivery_id.clone();
-    let mut admin_config = config.clone();
-    admin_config.principal_id = "peer".into();
-    admin_config.device_id = "device-peer-one".into();
-    admin_config.target_delivery_id = "device-peer-one".into();
-    admin_config = admin_config.with_account_identity(&admin.client)?;
+    let admin_config = crate::client::native_test_support::bus::config_for(&admin.client, &config)?;
     admin.gateway_config = admin_config.clone();
     admin.target_delivery_id = admin_config.target_delivery_id.clone();
-    owner.client.shared_group_create("group", "group-thread", None, "sender")?;
-    let base = owner.client.shared_group_change(
+    owner.client.fixture_group_create("group", "group-thread", None, "sender")?;
+    let base = owner.client.fixture_group_change(
         "group",
         "sender",
         ramflux_protocol::GroupStateChange::Add {
-            member: admin.client.owned_group_actor("device-peer-one")?.identity,
+            member: admin.client.fixture_group_actor("device-peer-one")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
-    admin.client.accept_shared_group_state(&base, "device-peer-one")?;
+    admin.client.fixture_accept_group_state(&base, "device-peer-one")?;
     let request = admin.client.stage_group_change_request(
         "group",
-        "device-peer-one",
+        admin.target_delivery_id.as_str(),
         ramflux_protocol::GroupStateChange::SetName { name: "Requested name".into() },
         Some("refusal-request"),
     )?;

@@ -3,46 +3,80 @@
 
 //! Abandoned transfers release without a user retry, including revoked participants.
 use super::*;
-use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
-use crate::client::shared_group::tests::{person, temp_root};
+use crate::bus::state::LocalBusAccountState;
+use crate::client::native_test_support::Fixture as Native;
+use crate::client::shared_group::tests::temp_root;
 use ramflux_protocol::{GroupStateChange, SharedGroupRole};
 
+fn native_err(error: &dyn std::error::Error) -> SdkError {
+    SdkError::LocalBus(error.to_string())
+}
+
+/// Device storage key that the raw transfer entry points expect as their target.
+fn skey(client: &RamfluxClient) -> Result<String, SdkError> {
+    Ok(client.owned_device_identity()?.storage_key().into())
+}
+
 struct Fixture {
-    phone: RamfluxClient,
+    /// Holds the phone's primary so that it can sign the revocations in these tests.
+    phone: LocalBusAccountState,
     laptop: RamfluxClient,
     next: RamfluxClient,
     base: VerifiedGroupState,
     probe: TransferProbe,
     path: ramflux_test_support::TestPath,
+    /// Data root of the laptop sibling, whose custody store must also adopt revocations.
+    laptop_root: std::path::PathBuf,
 }
 impl Fixture {
     fn new(name: &str) -> Result<Self, SdkError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(Box::pin(Self::build(name)))
+    }
+    async fn build(name: &str) -> Result<Self, SdkError> {
         let path = temp_root(name)?;
-        let phone = person(&path.join("phone"), "owner", "phone", 11, 12)?;
-        let laptop = person(&path.join("laptop"), "owner", "laptop", 11, 32)?;
-        let next = person(&path.join("next"), "next", "next", 21, 22)?;
-        super::tests::install_transfer_directories(&phone, &laptop, &next)?;
-        phone.shared_group_create("group", "thread", None, "target-phone")?;
-        let base = phone.shared_group_change(
+        std::fs::create_dir_all(&path)?;
+        let mut phone = Native::with_device(&format!("{name}-owner"), "phone")
+            .await
+            .map_err(|error| native_err(&*error))?;
+        let laptop = Box::pin(phone.enroll_sibling(&format!("{name}-laptop"), "laptop"))
+            .await
+            .map_err(|error| native_err(&*error))?;
+        let next = Native::with_device(&format!("{name}-next"), "next")
+            .await
+            .map_err(|error| native_err(&*error))?;
+        phone.accept_peer(&next).map_err(|error| native_err(&*error))?;
+        next.accept_peer(&phone).map_err(|error| native_err(&*error))?;
+        laptop.client.persist_fetched_identity_directory(&next.manifest)?;
+        next.client.persist_fetched_identity_directory(&laptop.manifest)?;
+        let laptop_bus = laptop.into_bus();
+        let laptop_root = laptop_bus
+            .native_setup
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .data_root
+            .clone();
+        let laptop = laptop_bus.client;
+        let next = next.into_bus().client;
+        let phone = phone.into_bus();
+        phone.client.fixture_group_create("group", "thread", None, "phone")?;
+        let base = phone.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             GroupStateChange::Add {
-                member: next.owned_group_actor("target-next")?.identity,
+                member: next.fixture_group_actor("next")?.identity,
                 role: SharedGroupRole::Member,
             },
         )?;
-        laptop.accept_shared_group_state(&base, "target-laptop")?;
-        next.account_db()?.establish_friend_link(
-            "owner",
-            next.owned_device_identity()?.root_commitment(),
-            phone.owned_device_identity()?.root_commitment(),
-        )?;
-        next.accept_shared_group_state(&base, "target-next")?;
+        laptop.fixture_accept_group_state(&base, "laptop")?;
+        next.fixture_accept_group_state(&base, "next")?;
         let now = now_unix_timestamp();
         let probe = TransferProbe {
             id: ramflux_protocol::encode_base64url([97; 32]),
-            actor: phone.owned_group_actor("target-phone")?,
-            creator: next.owned_group_actor("target-next")?,
+            actor: phone.client.fixture_group_actor("phone")?,
+            creator: next.fixture_group_actor("next")?,
             base: base.snapshot().clone(),
             required: vec![
                 TransferDevice {
@@ -57,11 +91,11 @@ impl Fixture {
             issued_at: now,
             expires_at: now + 60,
         };
-        Ok(Self { phone, laptop, next, base, probe, path })
+        Ok(Self { phone, laptop, next, base, probe, path, laptop_root })
     }
     fn pending(&self, probe: &TransferProbe) -> Result<(), SdkError> {
-        self.phone.reserve_group_transfer(probe, &self.base)?;
-        self.phone.account_db()?.persist_actor_state(
+        self.phone.client.reserve_group_transfer(probe, &self.base)?;
+        self.phone.client.account_db()?.persist_actor_state(
             &key(PENDING, "group"),
             &Pending {
                 probe: probe.clone(),
@@ -71,30 +105,67 @@ impl Fixture {
         )?;
         Ok(())
     }
-    fn revoke(&self, name: &str, receiver: &RamfluxClient) -> Result<(), SdkError> {
-        let root = self.phone.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let mut manifest = public_manifest(&self.phone)?;
-        manifest.devices.extend(public_manifest(&self.laptop)?.devices);
-        sign_manifest(root, &mut manifest, 2)?;
-        let old = manifest.signed_device_set.take().ok_or(StorageError::AuthorizationRejected)?;
-        let mut devices = old.devices;
-        let removed = devices
-            .iter_mut()
-            .find(|device| device.device_id == name)
-            .ok_or(StorageError::AuthorizationRejected)?;
-        removed.status = ramflux_protocol::DeviceSetStatus::Revoked;
-        removed.revoked_at = Some(now_unix_timestamp());
-        manifest.devices.retain(|device| device.device_id != name);
-        manifest.signed_device_set = Some(ramflux_crypto::sign_device_set_with_profile(
-            root,
-            ramflux_crypto::DeviceSetSigningInput {
-                principal_kind: ramflux_protocol::PrincipalKind::Human,
-                device_set_epoch: 3,
-                devices,
-            },
-            old.profile.as_deref().cloned(),
-        )?);
-        receiver.persist_identity_directory(&manifest)
+    /// Primary-signed revocation of `name` on the phone, which holds the account primary.
+    /// Returns the manifest that receivers must adopt. The revoked device's own branch is not
+    /// re-initialised, because the phone may be the device being revoked.
+    fn revoke(&mut self, name: &str) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+        let root = self
+            .phone
+            .native_setup
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .data_root
+            .clone();
+        let (mut manifest, vault) = {
+            let material = self
+                .phone
+                .client
+                .native_bus_fixture
+                .as_ref()
+                .ok_or(SdkError::CustodySetupInvalid)?;
+            (material.manifest.clone(), material.vault.clone())
+        };
+        let mut native = manifest.custody.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let now = crate::custody::network_now()?.max(native.publication.record.body.issued_at);
+        let current = self
+            .phone
+            .client
+            .current_custody_authority(&manifest.principal_commitment, now)?
+            .ok_or(SdkError::CustodySetupInvalid)?;
+        let primary = vault.primary_for_public_key(
+            &native.publication.record.body.master_certificate.body.self_signing_public_key,
+        )?;
+        native.publication.record = primary.revoke_device(&current, name, now)?;
+        native.devices.retain(|entry| entry.device_ref.device_id != name);
+        manifest.devices.retain(|entry| entry.device_id != name);
+        manifest.custody = Some(native.clone());
+        let id = self.phone.client.account_db()?.local_account_id.clone();
+        let authority = ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication,
+            custodian_publication: native.custodian_publication,
+        };
+        crate::custody::accept_publication(&root, &id, &authority, now)?;
+        // The revoked device itself does not adopt its own revocation; every other device does.
+        if name != "laptop" {
+            let laptop_id = self.laptop.account_db()?.local_account_id.clone();
+            crate::custody::accept_publication(&self.laptop_root, &laptop_id, &authority, now)?;
+        }
+        if let Some(material) = self.phone.client.native_bus_fixture.as_mut() {
+            material.manifest = manifest.clone();
+        }
+        self.phone.client.persist_identity_directory(&manifest)?;
+        Ok(manifest)
+    }
+    /// Group changes on the laptop are signed with the account primary held by the phone.
+    /// A sibling vault never holds the primary, so the fixture supplies the phone's copy.
+    fn laptop_change(&self, change: GroupStateChange) -> Result<VerifiedGroupState, SdkError> {
+        let primary = self.phone.client.fixture_primary()?;
+        self.laptop.shared_group_change_with_primary(
+            "group",
+            &skey(&self.laptop)?,
+            change,
+            primary.as_ref(),
+        )
     }
     fn close(self) -> Result<(), SdkError> {
         let path = self.path.clone();
@@ -111,11 +182,7 @@ fn r8_lost_issuer_reservation_releases_after_issue_deadline_and_skew() -> Result
     assert!(f.laptop.check_group_transfer_lease("group", None).is_err());
     f.laptop.advance_group_transfer_deadlines(f.probe.expires_at + 301)?;
     f.laptop.check_group_transfer_lease("group", None)?;
-    f.laptop.shared_group_change(
-        "group",
-        "target-laptop",
-        GroupStateChange::SetName { name: "unfrozen without issuer".into() },
-    )?;
+    f.laptop_change(GroupStateChange::SetName { name: "unfrozen without issuer".into() })?;
     assert!(
         f.laptop.reserve_group_transfer(&f.probe, &f.base).is_err(),
         "delayed completed proposal remains fenced"
@@ -125,73 +192,75 @@ fn r8_lost_issuer_reservation_releases_after_issue_deadline_and_skew() -> Result
 #[test]
 fn r8_abandoned_issuer_automatically_signs_cancellation_and_revocation_releases_sibling()
 -> Result<(), SdkError> {
-    let f = Fixture::new("auto-transfer-cancel")?;
+    let mut f = Fixture::new("auto-transfer-cancel")?;
     f.pending(&f.probe)?;
     f.laptop.reserve_group_transfer(&f.probe, &f.base)?;
-    f.phone.advance_group_transfer_deadlines(f.probe.expires_at + 301)?;
-    assert!(!f.phone.account_db()?.actor_state_exists(&key(PENDING, "group"))?);
-    f.phone.check_group_transfer_lease("group", None)?;
-    let rows = f.phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
+    f.phone.client.advance_group_transfer_deadlines(f.probe.expires_at + 301)?;
+    assert!(!f.phone.client.account_db()?.actor_state_exists(&key(PENDING, "group"))?);
+    f.phone.client.check_group_transfer_lease("group", None)?;
+    let rows = f.phone.client.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
     let cancel = rows
         .iter()
         .find(|row| matches!(&row.control.body,TransferBody::Head{reply} if reply.cancelled))
         .ok_or(StorageError::AuthorizationRejected)?;
     cancel.control.verify(now_unix_timestamp())?;
-    f.revoke("phone", &f.laptop)?;
+    let manifest = f.revoke("phone")?;
+    f.laptop.persist_identity_directory(&manifest)?;
     // Before timeout, a verified revoked issuer is already released.
     f.laptop.advance_group_transfer_deadlines(f.probe.expires_at)?;
     f.laptop.check_group_transfer_lease("group", None)?;
-    f.laptop.shared_group_change(
-        "group",
-        "target-laptop",
-        GroupStateChange::SetName { name: "revoked issuer released".into() },
-    )?;
+    f.laptop_change(GroupStateChange::SetName { name: "revoked issuer released".into() })?;
     f.close()
 }
 #[test]
 fn r8_revoked_cancel_target_does_not_block_a_fresh_completed_transfer() -> Result<(), SdkError> {
-    let f = Fixture::new("revoked-cancel-target")?;
+    let mut f = Fixture::new("revoked-cancel-target")?;
     f.pending(&f.probe)?;
-    f.phone.cancel_group_transfer(&f.probe)?;
-    f.revoke("laptop", &f.phone)?;
-    assert!(f.phone.cancellation_delivery_pending("group")?);
-    let rows = f.phone.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
+    f.phone.client.cancel_group_transfer(&f.probe)?;
+    f.revoke("laptop")?;
+    assert!(f.phone.client.cancellation_delivery_pending("group")?);
+    let rows = f.phone.client.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
     let cancel = rows
         .iter()
         .find(|row| matches!(&row.control.body,TransferBody::Head{reply} if reply.cancelled))
         .ok_or(StorageError::AuthorizationRejected)?;
-    f.next.apply_group_transfer_control(&cancel.control, "target-next")?;
+    f.next.apply_group_transfer_control(&cancel.control, &skey(&f.next)?)?;
     let replies = f.next.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
     let ack = replies
         .iter()
         .find(|row| matches!(&row.control.body,TransferBody::Head{reply} if reply.cancel_ack))
         .ok_or(StorageError::AuthorizationRejected)?;
-    f.phone.apply_group_transfer_control(&ack.control, "target-phone")?;
-    assert!(!f.phone.cancellation_delivery_pending("group")?);
+    f.phone.client.apply_group_transfer_control(&ack.control, &skey(&f.phone.client)?)?;
+    assert!(!f.phone.client.cancellation_delivery_pending("group")?);
     let mut fresh = f.probe.clone();
     fresh.id = ramflux_protocol::encode_base64url([98; 32]);
     fresh.required.retain(|target| target.device != "laptop");
     f.pending(&fresh)?;
-    let wire = TransferControl::sign(&f.phone, TransferBody::Probe { probe: Box::new(fresh) })?;
-    f.next.apply_group_transfer_control(&wire, "target-next")?;
+    let wire =
+        TransferControl::sign(&f.phone.client, TransferBody::Probe { probe: Box::new(fresh) })?;
+    f.next.apply_group_transfer_control(&wire, &skey(&f.next)?)?;
     let replies = f.next.account_db()?.list_actor_states::<TransferDelivery>(SEND_PREFIX)?;
-    let head = replies.iter().find(|row|matches!(&row.control.body,TransferBody::Head{reply} if reply.acceptance.is_some())).ok_or(StorageError::AuthorizationRejected)?;
-    f.phone.apply_group_transfer_control(&head.control, "target-phone")?;
+    let head = replies
+        .iter()
+        .find(|row| matches!(&row.control.body,TransferBody::Head{reply} if reply.acceptance.is_some()))
+        .ok_or(StorageError::AuthorizationRejected)?;
+    f.phone.client.apply_group_transfer_control(&head.control, &skey(&f.phone.client)?)?;
     let pending: Pending = f
         .phone
+        .client
         .account_db()?
         .load_actor_state(&key(PENDING, "group"))?
         .ok_or(StorageError::AuthorizationRejected)?;
-    let acceptance = f.phone.completed_group_transfer(&pending, &f.base)?;
-    let transferred = f.phone.shared_group_change(
+    let acceptance = f.phone.client.completed_group_transfer(&pending, &f.base)?;
+    let transferred = f.phone.client.fixture_group_change(
         "group",
-        "target-phone",
+        "phone",
         GroupStateChange::TransferOwnership {
-            creator: f.next.owned_group_actor("target-next")?,
+            creator: f.next.fixture_group_actor("next")?,
             acceptance: Box::new(acceptance),
         },
     )?;
-    assert_eq!(transferred.creator().identity, f.next.owned_group_actor("target-next")?.identity);
+    assert_eq!(transferred.creator().identity, f.next.fixture_group_actor("next")?.identity);
     f.close()
 }
 
@@ -200,28 +269,31 @@ fn r8_restored_or_merged_transfer_backups_never_freeze_group_changes() -> Result
     use ramflux_storage::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase};
     let f = Fixture::new("restore-transfer-state")?;
     f.pending(&f.probe)?;
-    f.phone.stage_group_transfer_control(TransferControl::sign(
-        &f.phone,
+    f.phone.client.stage_group_transfer_control(TransferControl::sign(
+        &f.phone.client,
         TransferBody::Probe { probe: Box::new(f.probe.clone()) },
     )?)?;
     assert!(
         f.phone
-            .shared_group_change(
+            .client
+            .fixture_group_change(
                 "group",
-                "target-phone",
+                "phone",
                 GroupStateChange::SetName { name: "must wait".into() }
             )
             .is_err()
     );
-    assert_eq!(f.phone.account_db()?.actor_state_usage("group-transfer/")?.0, 4);
+    assert_eq!(f.phone.client.account_db()?.actor_state_usage("group-transfer/")?.0, 4);
     let incoming = f.path.join("pending-backup.db");
-    let snapshot = f.phone.account_db()?.write_backup_snapshot(&incoming)?;
+    let snapshot = f.phone.client.account_db()?.write_backup_snapshot(&incoming)?;
+    let primary = f.phone.client.fixture_primary()?;
+    let target = skey(&f.phone.client)?;
     for merge in [false, true] {
         let index = AccountIndex::open(f.path.join(if merge { "merge" } else { "restore" }))?;
-        index.create_account("acct", f.phone.owned_device_identity()?.root_commitment())?;
+        index.create_account("acct", f.phone.client.owned_device_identity()?.root_commitment())?;
         let key = AccountDbKey::generate()?;
-        let target = index.root().join(index.account("acct")?.db_relative_path);
-        std::fs::create_dir_all(target.parent().ok_or(StorageError::AuthorizationRejected)?)?;
+        let target_path = index.root().join(index.account("acct")?.db_relative_path);
+        std::fs::create_dir_all(target_path.parent().ok_or(StorageError::AuthorizationRejected)?)?;
         if merge {
             let live = AccountDb::open(&index, "acct", &key)?;
             live.persist_actor_state(
@@ -229,27 +301,28 @@ fn r8_restored_or_merged_transfer_backups_never_freeze_group_changes() -> Result
                 &serde_json::json!({"inert_after_install":true}),
             )?;
             drop(live);
-            let mut staging = BackupDatabase::open(&target, &key)?;
+            let mut staging = BackupDatabase::open(&target_path, &key)?;
             staging.merge_backup_with_group_actor(
                 &incoming,
                 &snapshot.key,
-                Some(&f.phone.owned_group_actor("target-phone")?),
+                Some(&f.phone.client.fixture_group_actor("phone")?),
                 || Ok(()),
             )?;
         } else {
-            BackupDatabase::open(&incoming, &snapshot.key)?.copy_to(&target, &key)?;
-            BackupDatabase::open(&target, &key)?.archive_outbound()?;
+            BackupDatabase::open(&incoming, &snapshot.key)?.copy_to(&target_path, &key)?;
+            BackupDatabase::open(&target_path, &key)?.archive_outbound()?;
         }
         let mut restored = RamfluxClient::new();
-        restored.create_identity_root("owner", [11; 32]);
-        restored.create_device_branch("owner", "phone", 2, [12; 32]);
+        restored.born_v3_account.clone_from(&f.phone.client.born_v3_account);
+        restored.device_branch.clone_from(&f.phone.client.device_branch);
         restored.active_account_db = Some(AccountDb::open(&index, "acct", &key)?);
         restored.account_index = Some(index);
         assert_eq!(restored.account_db()?.actor_state_usage("group-transfer/")?.0, 0);
-        restored.shared_group_change(
+        restored.shared_group_change_with_primary(
             "group",
-            "target-phone",
+            &target,
             GroupStateChange::SetName { name: "unfrozen after restore".into() },
+            primary.as_ref(),
         )?;
     }
     f.close()
@@ -271,11 +344,9 @@ fn a_poisoned_deadline_item_does_not_block_healthy_lease_release() -> Result<(),
                 Some(poison.clone())
             );
         }
-        f.laptop.shared_group_change(
-            "group",
-            "target-laptop",
-            GroupStateChange::SetName { name: "healthy after poisoned deadline".into() },
-        )?;
+        f.laptop_change(GroupStateChange::SetName {
+            name: "healthy after poisoned deadline".into(),
+        })?;
         f.close()?;
     }
     Ok(())

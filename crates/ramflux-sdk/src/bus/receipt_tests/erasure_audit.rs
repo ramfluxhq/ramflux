@@ -23,7 +23,7 @@ const IDENTITY_TABLES: &[&str] = &[
     "runtime_inbox_changes",
     "root_group_control_event_seen",
 ];
-const IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
+const IDENTITY_ACTOR_FILTER: &str = "state_kind GLOB 'directory/identity/*' OR state_kind GLOB 'directory/device/*' OR state_kind GLOB 'directory/contact/*' OR state_kind GLOB 'directory/commitment/*' OR state_kind GLOB 'directory/conversation/*' OR state_kind GLOB 'directory/group/*' OR state_kind GLOB 'directory/group-local/*' OR state_kind GLOB 'directory/group-name/*' OR state_kind GLOB 'group-state/*' OR state_kind GLOB 'task/verified_roster_v2/*' OR state_kind GLOB 'identity/*' OR state_kind GLOB 'authority/*'";
 const IDENTITY_EVENT_FILTER: &str = "event_type GLOB 'identity.*' OR event_type GLOB 'device.*' OR event_type GLOB 'prekey.*' OR event_type GLOB 'x3dh.prekey.*' OR event_type IN ('dm.ratchet_session','group.sender_key.state','group.member.route')";
 // Static migration descriptions are schema metadata, never account or message copies.
 const STRUCTURAL_TABLES: &[&str] = &["schema_migration"];
@@ -146,33 +146,7 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
         {
             continue;
         }
-        let filter =
-            if matches!(table.as_str(), "runtime_actor_state" | "backup_archived_actor_state") {
-                format!(" WHERE NOT ({IDENTITY_ACTOR_FILTER})")
-            } else if table == "runtime_outbox" {
-                let actor_key = IDENTITY_ACTOR_FILTER
-                    .replace("state_kind", "json_extract(keys_json,'$.state_kind')");
-                format!(
-                    " WHERE table_name NOT IN ({})
-                  AND NOT (table_name='runtime_actor_state' AND (({actor_key}) OR EXISTS(
-                   SELECT 1 FROM runtime_actor_state a WHERE a.rowid=runtime_outbox.row_id
-                    AND ({IDENTITY_ACTOR_FILTER}))))
-                  AND NOT (table_name='local_event_log' AND EXISTS(
-                   SELECT 1 FROM local_event_log e WHERE e.rowid=runtime_outbox.row_id
-                    AND ({IDENTITY_EVENT_FILTER})))",
-                    IDENTITY_TABLES
-                        .iter()
-                        .map(|table| format!("'{table}'"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            } else if matches!(table.as_str(), "local_event_log" | "backup_archived_local_event") {
-                format!(" WHERE NOT ({IDENTITY_EVENT_FILTER})")
-            } else if table == "runtime_journal" {
-                " WHERE topic NOT IN ('safety.changed','account.state')".to_owned()
-            } else {
-                String::new()
-            };
+        let filter = inspection_filter(&table);
         let quoted = table.replace('"', "\"\"");
         let mut q = db.prepare(&format!("SELECT * FROM \"{quoted}\"{filter}"))?;
         let names = q.column_names().map(ToString::to_string).collect::<Vec<_>>();
@@ -187,6 +161,11 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                 .position(|name| name == "state_kind")
                 .and_then(|i| row.get::<_, String>(i).ok())
                 .is_some_and(|key| key == format!("directory/message/{message}"));
+            let retained_identity = names
+                .iter()
+                .position(|name| name == "state_kind")
+                .and_then(|i| row.get::<_, String>(i).ok())
+                .is_some_and(|key| key == format!("routed/generated-identity/{message}"));
             let notice = table == "runtime_outbox"
                 && source_table.as_deref().is_some_and(|name| {
                     matches!(
@@ -201,12 +180,23 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                 let value = row.get_ref(column)?;
                 let (ValueRef::Text(bytes) | ValueRef::Blob(bytes)) = value else { continue };
                 let text = String::from_utf8_lossy(bytes);
+                if retained_identity && name == "state_kind" {
+                    continue;
+                }
+                if retained_identity && name == "state_json" {
+                    check_tombstone_identity(&serde_json::from_slice(bytes)?, message)?;
+                    checked += 1;
+                    continue;
+                }
                 // The retained projection ID is explicitly part of the deletion contract.
                 if name == "message_id" && text == message || directory && name == "state_kind" {
                     continue;
                 }
                 let rendered =
                     if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                        if table == "runtime_journal" && name == "body_json" {
+                            strip_generated_tombstone(&mut value, message)?;
+                        }
                         strip_deleted_id(&mut value, message);
                         if notice {
                             strip_projection_notice(&mut value, message);
@@ -274,4 +264,100 @@ fn row_context(row: &rusqlite::Row<'_>, columns: usize) -> Vec<String> {
             value => format!("{value:?}"),
         })
         .collect()
+}
+
+fn check_tombstone_identity(value: &serde_json::Value, message: &str) -> TestResult {
+    assert!(value.as_object().ok_or("tombstone identity object")?.keys().all(|key| matches!(
+        key.as_str(),
+        "id" | "conversationId" | "author" | "deviceSequence" | "hlc" | "groupId" | "groupEpoch"
+    )));
+    assert!(
+        value["author"]
+            .as_object()
+            .ok_or("tombstone author")?
+            .keys()
+            .all(|key| matches!(key.as_str(), "accountAnchor" | "deviceId" | "deviceEpoch"))
+    );
+    let identity: ramflux_protocol::message::EventIdentity = serde_json::from_value(value.clone())?;
+    assert_eq!(ramflux_protocol::encode_base64url(identity.id), message);
+    Ok(())
+}
+fn strip_generated_tombstone(value: &mut serde_json::Value, message: &str) -> TestResult {
+    if value.get("update").is_none() {
+        return Ok(());
+    }
+    let update: ramflux_protocol::message::MessageUpdate =
+        serde_json::from_value(value["update"].clone())?;
+    assert!(
+        matches!(
+            update.state,
+            Some(ramflux_protocol::message::message_update::State::Tombstone(_))
+        ),
+        "erased generated journal must be a tombstone"
+    );
+    assert!(value["update"].as_object().ok_or("typed tombstone update")?.keys().all(
+        |key| matches!(key.as_str(), "accountId" | "journalSequence" | "identity" | "tombstone")
+    ));
+    check_tombstone_identity(&value["update"]["identity"], message)?;
+    let identity = update.identity.as_ref().ok_or("tombstone identity")?;
+    let Some(ramflux_protocol::message::message_update::State::Tombstone(tombstone)) =
+        &update.state
+    else {
+        return Err("typed tombstone state".into());
+    };
+    assert!(
+        value["update"]["tombstone"]
+            .as_object()
+            .ok_or("tombstone object")?
+            .keys()
+            .all(|key| matches!(key.as_str(), "scope" | "targets" | "tombstoneId"))
+    );
+    let targets = value["update"]["tombstone"]["targets"].as_array().ok_or("qualified targets")?;
+    for target in targets {
+        assert!(
+            target
+                .as_object()
+                .ok_or("qualified target object")?
+                .keys()
+                .all(|key| matches!(key.as_str(), "id" | "authorAnchor" | "conversationId"))
+        );
+    }
+    assert_eq!(tombstone.targets.len(), 1, "local erasure retains one qualified target");
+    let target = tombstone.targets.first().ok_or("tombstone target")?;
+    assert_eq!(target.id, identity.id, "tombstone target matches its immutable identity");
+    assert_eq!(target.conversation_id, identity.conversation_id);
+    assert_eq!(
+        target.author_anchor,
+        identity.author.as_ref().ok_or("tombstone author")?.account_anchor
+    );
+    value["update"]["tombstone"]["targets"] = serde_json::Value::Null;
+    value["update"]["identity"] = serde_json::Value::Null;
+    assert_eq!(value["message_id"].as_str(), Some(message));
+    value.as_object_mut().ok_or("typed tombstone envelope")?.remove("message_id");
+    Ok(())
+}
+
+fn inspection_filter(table: &str) -> String {
+    if matches!(table, "runtime_actor_state" | "backup_archived_actor_state") {
+        format!(" WHERE NOT ({IDENTITY_ACTOR_FILTER})")
+    } else if table == "runtime_outbox" {
+        let actor_key =
+            IDENTITY_ACTOR_FILTER.replace("state_kind", "json_extract(keys_json,'$.state_kind')");
+        format!(
+            " WHERE table_name NOT IN ({})
+                  AND NOT (table_name='runtime_actor_state' AND (({actor_key}) OR EXISTS(
+                   SELECT 1 FROM runtime_actor_state a WHERE a.rowid=runtime_outbox.row_id
+                    AND ({IDENTITY_ACTOR_FILTER}))))
+                  AND NOT (table_name='local_event_log' AND EXISTS(
+                   SELECT 1 FROM local_event_log e WHERE e.rowid=runtime_outbox.row_id
+                    AND ({IDENTITY_EVENT_FILTER})))",
+            IDENTITY_TABLES.iter().map(|table| format!("'{table}'")).collect::<Vec<_>>().join(",")
+        )
+    } else if matches!(table, "local_event_log" | "backup_archived_local_event") {
+        format!(" WHERE NOT ({IDENTITY_EVENT_FILTER})")
+    } else if table == "runtime_journal" {
+        " WHERE topic NOT IN ('safety.changed','account.state')".to_owned()
+    } else {
+        String::new()
+    }
 }

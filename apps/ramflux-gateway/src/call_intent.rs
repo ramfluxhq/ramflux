@@ -145,7 +145,8 @@ pub(crate) fn verify_submission(
     {
         anyhow::bail!("call intent rejected");
     }
-    if envelope.delivery_class != DeliveryClass::OpaqueEvent {
+    // Generated Call controls use the generation-one Message envelope.
+    if envelope.delivery_class != DeliveryClass::Message {
         anyhow::bail!("call intent rejected");
     }
     signed.body.validate_shape().map_err(|_source| anyhow::anyhow!("call intent rejected"))?;

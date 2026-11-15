@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Enrollment history uses the existing bounded exporter and ordinary encrypted control route.
-use crate::{GatewayDirectMessage, GatewaySessionAccess, RamfluxClient, SdkError};
+//! Enrollment history over the generation-1 own-device history path. The job is finished when the
+//! gateway has durably accepted every history page for the target's inbox (the transfer row is
+//! done); an explicit target acknowledgement is a post-Demo-B design follow-up.
+use crate::{GatewaySessionAccess, RamfluxClient, SdkError};
 use ramflux_storage::PairingOwnSyncJob;
+/// Whether the durable history transfer for an enrolled device has finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PairingHistoryProgress {
+    /// Pages remain; the transfer is durable and resumes after a restart.
+    Pending,
+    /// The gateway durably accepted every page for the target.
+    Complete,
+}
 impl RamfluxClient {
     pub(crate) async fn export_pairing_history(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         job: &PairingOwnSyncJob,
-    ) -> Result<(), SdkError> {
+    ) -> Result<PairingHistoryProgress, SdkError> {
         let root = &job.source_ref.account_anchor;
         if self.born_v3_account.is_none()
             || self.own_account_anchor()? != *root
@@ -19,6 +29,7 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("WrongContext"));
         }
+        self.require_native_publication_settled(root)?;
         let target = self
             .assert_manifest_active_device_cached(
                 engine.config(),
@@ -41,55 +52,15 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        let options = self
-            .relay_transfer_options(None, None, None)?
-            .ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        let exported = Box::pin(self.export_own_device_sync(
-            engine,
-            pool,
-            root,
-            &job.target_ref.device_id,
-            &options.relay_endpoint,
-            None,
-            64 * 1024,
-        ))
-        .await?;
-        let now = crate::custody::network_now()?;
-        let current = self
-            .current_custody_authority(root, now)?
-            .ok_or(SdkError::PairingCode("UpdateRequired"))?;
-        current.authorize(&job.source_ref, "sync", now)?;
-        current.authorize(&job.target_ref, "sync", now)?;
-        if ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash {
-            return Err(SdkError::PairingCode("HeadChanged"));
+        let _ = pool;
+        let target = self.device_identity_for_root(root, &job.target_ref.device_id)?;
+        match self.generated_history_transfer_done(&target)? {
+            Some(true) => Ok(PairingHistoryProgress::Complete),
+            Some(false) => Ok(PairingHistoryProgress::Pending),
+            None => {
+                self.stage_generated_history_transfer(&target)?;
+                Ok(PairingHistoryProgress::Pending)
+            }
         }
-        let bytes =
-            zeroize::Zeroizing::new(ramflux_protocol::canonical_json_bytes(&exported.envelope)?);
-        let identity = crate::new_surface_message_id()?;
-        let conversation = ramflux_crypto::blake3_256_base64url(
-            "ramflux.pairing.own_history.route.v1",
-            &ramflux_protocol::canonical_json_bytes(&(&job.source_ref, &job.target_ref))?,
-        );
-        let message = GatewayDirectMessage {
-            conversation_id: conversation,
-            message_id: identity.clone(),
-            envelope_id: identity,
-            source_principal_id: engine.config().principal_id.clone(),
-            sender_id: engine.config().device_id.clone(),
-            recipient_device_id: Some(job.target_ref.device_id.clone()),
-            recipient_principal_commitment: Some(root.clone()),
-            target_delivery_id: target.target_delivery_id,
-            encrypted_body: Vec::new(),
-            created_at: crate::time::now_unix_timestamp(),
-            ttl: self.content_ttl()?,
-        };
-        self.send_plaintext_direct_message_without_franking(
-            engine,
-            message,
-            &bytes,
-            crate::client::routed::Route::control(),
-        )
-        .await?;
-        Ok(())
     }
 }

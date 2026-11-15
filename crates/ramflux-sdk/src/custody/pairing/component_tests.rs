@@ -416,6 +416,14 @@ fn assert_enrollment_own_sync(
     );
     assert!(db.claim_pairing_own_sync(&job)?, "test: first automatic history attempt was lost");
     assert!(!db.claim_pairing_own_sync(&job)?, "test: automatic history ran twice");
+    // A pending history transfer returns the attempt to the queue, and a crash while attempted
+    // is recovered the same way; neither changes pairing authority.
+    db.requeue_pairing_own_sync(&job)?;
+    assert_eq!(db.next_pairing_own_sync()?.as_ref(), Some(&job), "test: requeue lost the job");
+    assert!(db.claim_pairing_own_sync(&job)?, "test: requeued job could not be claimed again");
+    assert_eq!(db.requeue_interrupted_pairing_own_sync()?, 1, "test: crash recovery missed it");
+    assert_eq!(db.next_pairing_own_sync()?.as_ref(), Some(&job), "test: recovery lost the job");
+    assert!(db.claim_pairing_own_sync(&job)?, "test: recovered job could not be claimed again");
     db.finish_pairing_own_sync(&job, Some("NodeTimeout"))?;
     assert!(
         db.next_pairing_own_sync()?.is_none(),

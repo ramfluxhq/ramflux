@@ -10,7 +10,7 @@ fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(message.into())
 }
 
-fn link(
+pub(super) fn link(
     value: Option<&g::FriendLinkRecord>,
 ) -> Result<ramflux_storage::FriendLinkRecord, SdkError> {
     let value = value.ok_or_else(|| invalid("own contact link missing"))?;
@@ -33,6 +33,46 @@ fn link(
         blocked: value.blocked,
         capability_revoked_at: value.capability_revoked_at,
     })
+}
+
+pub(super) fn generated_link(value: &ramflux_storage::FriendLinkRecord) -> g::FriendLinkRecord {
+    g::FriendLinkRecord {
+        link_id: value.link_id.clone(),
+        requester_id: value.requester_id.clone(),
+        target_id: value.target_id.clone(),
+        state: value.state.clone(),
+        remove_scope: value.remove_scope.clone(),
+        blocked: value.blocked,
+        capability_revoked_at: value.capability_revoked_at,
+    }
+}
+impl Contact {
+    pub(super) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
+        use prost::Message as _;
+        Ok(crate::client::generated_control::control_from_payload(
+            g::control::Payload::OwnContactSync(g::OwnContactSync {
+                manifest: Some(g::NativeDeviceManifest::try_from(&self.manifest)?),
+                link: Some(generated_link(&self.link)),
+                ..Default::default()
+            }),
+        )?
+        .encode_to_vec())
+    }
+    pub(super) fn decode(body: &[u8]) -> Result<Option<Self>, SdkError> {
+        use prost::Message as _;
+        if g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let control = g::Control::decode(body).map_err(|_| invalid("invalid own Control"))?;
+        crate::client::generated_control::validate_control_operation(&control)?;
+        let Some(g::control::Payload::OwnContactSync(value)) = control.payload else {
+            return Ok(None);
+        };
+        let manifest = crate::client::task::generated::manifest::generated_manifest_fields(
+            value.manifest.as_ref().ok_or_else(|| invalid("own contact manifest missing"))?,
+        )?;
+        Ok(Some(Self { manifest, link: link(value.link.as_ref())? }))
+    }
 }
 
 impl RamfluxClient {
@@ -64,61 +104,31 @@ impl RamfluxClient {
         let contact = self.generated_own_contact(value)?;
         self.account_db()?.join_write(|| {
             self.apply_own_contact(&contact)?;
-            self.bind_generated_contact_conversation(&contact)
+            self.ensure_direct_conversation(
+                &contact.manifest.principal_commitment,
+                &contact.manifest.principal_id,
+            )
+            .map(drop)
         })
     }
 
     pub(crate) fn receive_generated_own_contact_with_origin(
         &self,
         value: &g::OwnContactSync,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         identity: &g::EventIdentity,
         exact_inner: &[u8],
     ) -> Result<(), SdkError> {
         self.receive_generated_own_contact(value)?;
         self.account_db()?.join_write(|| {
-            super::super::contact_verification_cas::install_sibling_confirmation(
+            super::super::contact_verification_cas::install_sibling_confirmation_from(
                 self,
+                source,
                 value,
                 identity,
                 exact_inner,
             )
         })
-    }
-
-    fn bind_generated_contact_conversation(&self, contact: &Contact) -> Result<(), SdkError> {
-        let own = self.own_account_anchor()?;
-        let peer = &contact.manifest.principal_commitment;
-        if !self.accepted_contact_source(peer, &contact.manifest.principal_id)? {
-            return Ok(());
-        }
-        let conversation =
-            g::dm_scope::derive(&own, peer).map_err(|_| invalid("own contact DM scope"))?;
-        let db = self.account_db()?;
-        let roots = std::collections::BTreeSet::from([own, peer.clone()]);
-        if let Some(old) = db.client_record("conversation", &conversation)? {
-            let bound = old["participant_roots"].as_array().map(|values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<std::collections::BTreeSet<_>>()
-            });
-            if old["kind"] != "direct" || !old["group_id"].is_null() || bound != Some(roots) {
-                return Err(invalid("own contact conflicts with bound DM roots"));
-            }
-            return Ok(());
-        }
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        db.persist_client_record(
-            "conversation",
-            &conversation,
-            &serde_json::json!({
-                "kind":"direct", "group_id":null, "title":null, "direct_route":null,
-                "participants":[local.principal_id,contact.manifest.principal_id],
-                "participant_roots":roots,
-            }),
-        )?;
-        Ok(())
     }
 
     pub(crate) fn authorize_generated_contact_tombstone(

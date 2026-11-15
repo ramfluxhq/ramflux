@@ -18,7 +18,6 @@ mod native_tests;
 mod retry_tests;
 mod tombstone;
 pub(crate) use tombstone::is_restricted as contact_link_restricted;
-const PREFIX: &[u8] = b"ramflux.own_contact.v1\n";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Contact {
@@ -74,10 +73,9 @@ impl RamfluxClient {
         if tombstone::is_packet(body) {
             return Ok(None);
         }
-        let Some(raw) = body.strip_prefix(PREFIX) else {
+        let Some(contact) = Contact::decode(body)? else {
             return Ok(None);
         };
-        let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
         let own = self.owned_device_identity()?;
         let peer = &contact.manifest.principal_commitment;
         let link = &contact.link;
@@ -107,6 +105,10 @@ impl RamfluxClient {
             old["contact_identity_commitment"].as_str().is_some_and(|root| root != peer)
         }) {
             return Ok(skip(LocalBusBackupContactSkipReason::PinnedConflict));
+        }
+        if let Some(native) = &contact.manifest.custody {
+            // A generation-1 contact carries its custody authority, never a signed device set.
+            return Ok(self.native_backup_authority_skip(native, peer)?.and_then(skip));
         }
         let record = contact
             .manifest
@@ -149,6 +151,39 @@ impl RamfluxClient {
         Ok(None)
     }
 
+    fn native_backup_authority_skip(
+        &self,
+        native: &ramflux_protocol::custody::CustodyManifest,
+        peer: &str,
+    ) -> Result<Option<LocalBusBackupContactSkipReason>, SdkError> {
+        let record = &native.publication.record;
+        let epoch = record.body.device_set_epoch;
+        let hash = ramflux_protocol::custody::object_hash(record)?;
+        if let Some((floor, retained)) = self
+            .account_db()?
+            .contact_request_authority_floor(peer, crate::time::now_unix_timestamp())?
+        {
+            if epoch < floor {
+                return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
+            }
+            if epoch == floor && hash != retained {
+                return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
+            }
+        }
+        if self.custody_epoch_floor(peer)?.is_some_and(|floor| floor > epoch) {
+            return Ok(Some(LocalBusBackupContactSkipReason::StaleAuthority));
+        }
+        if let Some(current) =
+            self.current_custody_authority(peer, crate::custody::network_now()?)?
+            && current.envelope().body.device_set_epoch == epoch
+            && ramflux_protocol::custody::object_hash(current.envelope())? != hash
+        {
+            tracing::warn!("backup contact custody authority equivocation skipped");
+            return Ok(Some(LocalBusBackupContactSkipReason::Equivocation));
+        }
+        Ok(None)
+    }
+
     pub(crate) fn stage_own_contact(
         &self,
         manifest: &SdkDeviceManifestResponse,
@@ -158,8 +193,7 @@ impl RamfluxClient {
             return Ok(());
         }
         let link = self.account_db()?.friend_link(link)?;
-        let mut body = PREFIX.to_vec();
-        body.extend(serde_json::to_vec(&Contact { manifest: manifest.clone(), link })?);
+        let body = Contact { manifest: manifest.clone(), link }.bytes()?;
         self.stage_own_contact_body(&body)
     }
     pub(crate) fn stage_exact_own_contact_inner(&self, body: &[u8]) -> Result<bool, SdkError> {
@@ -169,10 +203,23 @@ impl RamfluxClient {
         if active < 2 {
             return Ok(false);
         }
-        self.stage_own_contact_body(body)?;
+        self.stage_own_contact_payload(
+            body,
+            crate::client::own_device_copy::OwnPayloadKind::ContactInner,
+        )?;
         Ok(true)
     }
     fn stage_own_contact_body(&self, body: &[u8]) -> Result<(), SdkError> {
+        self.stage_own_contact_payload(
+            body,
+            crate::client::own_device_copy::OwnPayloadKind::Control,
+        )
+    }
+    fn stage_own_contact_payload(
+        &self,
+        body: &[u8],
+        payload_kind: crate::client::own_device_copy::OwnPayloadKind,
+    ) -> Result<(), SdkError> {
         let Some((_, _, authority_tag)) = self.own_contact_roster()? else {
             return Ok(());
         };
@@ -183,6 +230,7 @@ impl RamfluxClient {
         crate::bus::own_device_copy::stage(
             self,
             crate::client::own_device_copy::OwnMessageInput {
+                payload_kind,
                 id: &id,
                 created_at: crate::prelude::now_unix_timestamp(),
                 conversation: "own-contact",
@@ -259,9 +307,7 @@ impl RamfluxClient {
                         else {
                             continue;
                         };
-                        let mut body = PREFIX.to_vec();
-                        body.extend(serde_json::to_vec(&Contact { manifest, link: link.clone() })?);
-                        body
+                        Contact { manifest, link: link.clone() }.bytes()?
                     } else {
                         continue;
                     };
@@ -419,6 +465,7 @@ impl RamfluxClient {
     }
     /// The caller must authenticate the containing owned-root payload first: either an active
     /// sibling packet or the account backup AEAD. This decoder never establishes that authority.
+    #[cfg(test)]
     pub(super) fn receive_own_contact(&self, body: &[u8]) -> Result<bool, SdkError> {
         Ok(self.receive_own_contact_outcome(body, OwnContactReceiveMode::Sibling)?
             != OwnContactReceiveOutcome::NotPacket)
@@ -431,10 +478,9 @@ impl RamfluxClient {
         if let Some(outcome) = self.receive_own_contact_tombstone(body, mode)? {
             return Ok(outcome);
         }
-        let Some(raw) = body.strip_prefix(PREFIX) else {
+        let Some(contact) = Contact::decode(body)? else {
             return Ok(OwnContactReceiveOutcome::NotPacket);
         };
-        let contact: Contact = ramflux_protocol::parse_i_json(raw)?;
         self.apply_own_contact(&contact)
     }
 
@@ -502,6 +548,7 @@ impl RamfluxClient {
     }
 }
 
+#[cfg(test)]
 pub(super) fn is_tombstone_packet(body: &[u8]) -> bool {
     tombstone::is_packet(body)
 }
@@ -555,11 +602,7 @@ mod tests {
         let link = own.account_db()?.friend_link("accepted")?;
         let packet = |manifest: SdkDeviceManifestResponse,
                       link: ramflux_storage::FriendLinkRecord|
-         -> Result<Vec<u8>, SdkError> {
-            let mut bytes = PREFIX.to_vec();
-            bytes.extend(serde_json::to_vec(&Contact { manifest, link })?);
-            Ok(bytes)
-        };
+         -> Result<Vec<u8>, SdkError> { Contact { manifest, link }.bytes() };
         assert!(own.account_db()?.client_record("identity", "alice")?.is_none());
         assert!(own.receive_own_contact(&packet(manifest.clone(), link.clone())?)?);
         assert_eq!(own.trusted_recipient_root("shared")?, manifest.principal_commitment);
@@ -603,8 +646,7 @@ mod tests {
         link.blocked = false;
         link.state = "accepted".into();
         link.capability_revoked_at = None;
-        let mut packet = PREFIX.to_vec();
-        packet.extend(serde_json::to_vec(&Contact { manifest, link })?);
+        let packet = Contact { manifest, link }.bytes()?;
         assert!(own.receive_own_contact(&packet).is_err());
         assert_eq!(own.account_db()?.friend_link("collision")?, before);
         drop((own, peer, other));

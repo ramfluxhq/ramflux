@@ -12,8 +12,11 @@ use super::*;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// The frozen test clock for the whole row.
-const START: i64 = 1_794_100_000;
+// The frozen test clock for the whole row.
+thread_local! { static START_AT: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) }; }
+fn start() -> i64 {
+    START_AT.with(std::cell::Cell::get).expect("test: pending pair pins the clock")
+}
 
 #[derive(Clone, Copy)]
 enum Case {
@@ -45,9 +48,16 @@ impl Case {
     }
 }
 
-fn reopen(client: &mut RamfluxClient) -> TestResult {
+async fn reopen(
+    client: &mut RamfluxClient,
+    config: &GatewaySessionConfig,
+    peer: &Fixture,
+) -> TestResult {
     client.active_account_db = None;
-    client.unlock_account("bob", b"routed-test")?;
+    client.unlock_account("bob", b"native fixture data passphrase")?;
+    let custody = config.custody.as_ref().ok_or("native custody config")?;
+    client.initialize_born_v3_branch(&config.device_id, custody.vault.clone()).await?;
+    client.persist_fetched_identity_directory(&peer.manifest()?)?;
     Ok(())
 }
 
@@ -87,20 +97,24 @@ fn manual(client: &RamfluxClient) -> Result<Option<serde_json::Value>, SdkError>
     ))?)
 }
 
-/// A settled pair whose receive gap started a reset at `START` (accepted on the wire).
-async fn pending() -> Result<(Fixture, Fixture), Box<dyn std::error::Error>> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+/// A settled pair whose receive gap started a reset at `start()` (accepted on the wire).
+async fn pending() -> Result<(Fixture, Fixture, crate::time::FixedClock), Box<dyn std::error::Error>>
+{
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
+    let now = i64::try_from(crate::custody::network_now()?)?;
+    START_AT.with(|clock| clock.set(Some(now)));
+    let clock = crate::time::FixedClock::set(now);
     let stale = gap(&alice, &bob, "refusal-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
     assert_eq!(sent.lock().map_err(|_| "sent")?.len(), 1, "the first reset was submitted");
     let first = work(&bob.client)?.ok_or("work")?;
     assert_eq!(first["attempts"], 1);
-    assert_eq!(first["first_at"], START);
-    assert_eq!(first["next_at"], START + 60);
-    Ok((alice, bob))
+    assert_eq!(first["first_at"], start());
+    assert_eq!(first["next_at"], start() + 60);
+    Ok((alice, bob, clock))
 }
 
 /// What a refusal leaves behind (identical for both sites).
@@ -119,7 +133,7 @@ fn assert_state(case: Case, client: &RamfluxClient) -> TestResult {
                     "local_device_id": local.storage_key(),
                     "device_id": remote.storage_key(),
                     "state": "needs_manual_recovery",
-                    "at": START + 61,
+                    "at": start() + 61,
                 })
             );
             assert_eq!(
@@ -141,8 +155,8 @@ fn assert_state(case: Case, client: &RamfluxClient) -> TestResult {
             // 1000 ms floor), no terminal state.
             let kept = work(client)?.ok_or("kept work")?;
             assert_eq!(kept["attempts"], 2);
-            assert_eq!(kept["first_at"], START);
-            assert_eq!(kept["next_at"], START + 181);
+            assert_eq!(kept["first_at"], start());
+            assert_eq!(kept["next_at"], start() + 181);
             assert!(manual(client)?.is_none());
             assert_eq!(journal(client, "refused")?, 0);
         }
@@ -166,40 +180,39 @@ fn submitted(sent: &super::session_record::Sent) -> Result<usize, SdkError> {
 
 /// The shared sender `send_pair_control` (via `send_pair_reset`).
 async fn sender_row(case: Case) -> TestResult {
-    let _clock = crate::time::FixedClock::set(START);
-    let (alice, mut bob) = Box::pin(pending()).await?;
-    crate::time::FixedClock::advance_to(START + 61);
+    let (alice, mut bob, _clock) = Box::pin(pending()).await?;
+    crate::time::FixedClock::advance_to(start() + 61);
     let local = bob.client.local_device_identity("bob")?;
     let remote = bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?;
-    assert!(bob.client.begin_pair_recovery(&local, &remote, START + 61)?);
+    assert!(bob.client.begin_pair_recovery(&local, &remote, start() + 61)?);
     let (mut engine, attempted) = Wire::engine_nacking(&bob, &alice, case.nack())?;
     let error = bob.client.send_pair_reset(&mut engine, &remote).await.err().ok_or("refused")?;
     assert_eq!(error.to_string(), case.text());
     assert_eq!(submitted(&attempted)?, 1, "one refused submit was written");
     assert_state(case, &bob.client)?;
 
-    reopen(&mut bob.client)?;
+    let config = bob.config()?;
+    reopen(&mut bob.client, &config, &alice).await?;
     assert_state(case, &bob.client)?;
     let (mut accept, resent) = Wire::engine(&bob, &alice)?;
-    crate::time::FixedClock::advance_to(START + 100);
-    bob.client.retry_pair_resets(&mut accept, START + 100).await?;
+    crate::time::FixedClock::advance_to(start() + 100);
+    bob.client.retry_pair_resets(&mut accept, start() + 100).await?;
     let early = submitted(&resent)?;
-    crate::time::FixedClock::advance_to(START + 181);
-    bob.client.retry_pair_resets(&mut accept, START + 181).await?;
+    crate::time::FixedClock::advance_to(start() + 181);
+    bob.client.retry_pair_resets(&mut accept, start() + 181).await?;
     assert_resend(case, early, submitted(&resent)?);
     Ok(())
 }
 
 /// The pair-reset courier (`couriers/reset.rs`), driven with a real account writer.
 async fn courier_row(case: Case) -> TestResult {
-    let _clock = crate::time::FixedClock::set(START);
-    let (alice, mut bob) = Box::pin(pending()).await?;
+    let (alice, mut bob, _clock) = Box::pin(pending()).await?;
     let (refusing, attempted) = Wire::engine_nacking(&bob, &alice, case.nack())?;
     let (accepting, resent) = Wire::engine(&bob, &alice)?;
     let root = bob.client.surface_local_root_commitment()?;
     let mut account =
         crate::prelude::LocalBusAccountState::new(std::mem::take(&mut bob.client), refusing, root);
-    crate::time::FixedClock::advance_to(START + 61);
+    crate::time::FixedClock::advance_to(start() + 61);
     let result =
         crate::bus::couriers::test_pass::drive(&mut account, crate::bus::couriers::reset::pass)
             .await;
@@ -207,16 +220,16 @@ async fn courier_row(case: Case) -> TestResult {
     assert_eq!(submitted(&attempted)?, 1, "one refused submit was written");
     assert_state(case, &account.client)?;
 
-    reopen(&mut account.client)?;
+    reopen(&mut account.client, &account.gateway_config, &alice).await?;
     assert_state(case, &account.client)?;
     account.install_test_session(accepting);
-    crate::time::FixedClock::advance_to(START + 100);
+    crate::time::FixedClock::advance_to(start() + 100);
     assert!(
         !crate::bus::couriers::test_pass::drive(&mut account, crate::bus::couriers::reset::pass)
             .await?
     );
     let early = submitted(&resent)?;
-    crate::time::FixedClock::advance_to(START + 181);
+    crate::time::FixedClock::advance_to(start() + 181);
     let due =
         crate::bus::couriers::test_pass::drive(&mut account, crate::bus::couriers::reset::pass)
             .await?;
@@ -230,8 +243,7 @@ async fn courier_row(case: Case) -> TestResult {
 /// stale: the pair, its secrets and the cleared work stay as the receive left them. Without the
 /// receive, a Conflict applies its terminal and a capacity refusal keeps the schedule.
 async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
-    let _clock = crate::time::FixedClock::set(START);
-    let (alice, mut bob) = Box::pin(pending()).await?;
+    let (alice, mut bob, _clock) = Box::pin(pending()).await?;
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let (refusing, attempted) =
@@ -239,7 +251,7 @@ async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
     let root = bob.client.surface_local_root_commitment()?;
     let mut account =
         crate::prelude::LocalBusAccountState::new(std::mem::take(&mut bob.client), refusing, root);
-    crate::time::FixedClock::advance_to(START + 61);
+    crate::time::FixedClock::advance_to(start() + 61);
     let local = account.client.local_device_identity("bob")?;
     let remote =
         account.client.device_identity(&fixture_peer_reference(&account.client, "alice")?)?;
@@ -293,7 +305,7 @@ async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
         assert!(
             account.client.account_db()?.load_actor_state::<bool>("secrets/retired")?.is_none()
         );
-        reopen(&mut account.client)?;
+        reopen(&mut account.client, &account.gateway_config, &alice).await?;
         assert_eq!(
             account.client.active_pair(&local, &remote)?.map(|(session, _)| session.session_id),
             after
@@ -312,8 +324,8 @@ async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
         assert_eq!(after, Some(before));
         let kept = work(&account.client)?.ok_or("kept work")?;
         assert_eq!(kept["attempts"], 2);
-        assert_eq!(kept["next_at"], START + 181);
-        assert!(kept["next_at"].as_i64().ok_or("next_at")? > START + 61);
+        assert_eq!(kept["next_at"], start() + 181);
+        assert!(kept["next_at"].as_i64().ok_or("next_at")? > start() + 61);
         assert!(manual(&account.client)?.is_none());
         assert_eq!(refusals(&account.client)?, Vec::<serde_json::Value>::new());
     }
@@ -333,18 +345,20 @@ enum Competing {
 /// final state is coherent: a cleared row is never recreated and a replacement never receives
 /// the old refusal.
 async fn capacity_interleave_row(competing: Competing) -> TestResult {
-    let _clock = crate::time::FixedClock::set(START);
-    let (alice, mut bob) = Box::pin(pending()).await?;
-    crate::time::FixedClock::advance_to(START + 61);
+    let (alice, mut bob, _clock) = Box::pin(pending()).await?;
+    crate::time::FixedClock::advance_to(start() + 61);
     let local = bob.client.local_device_identity("bob")?;
     let remote = bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?;
-    assert!(bob.client.begin_pair_recovery(&local, &remote, START + 61)?);
+    assert!(bob.client.begin_pair_recovery(&local, &remote, start() + 61)?);
     let submitted = bob.client.pair_reset_fingerprint(&local, &remote)?.ok_or("reset work")?;
-    assert_eq!(submitted["next_at"], START + 181);
+    assert_eq!(submitted["next_at"], start() + 181);
     let key = RamfluxClient::reset_work_key(&local, &remote)?;
     // The second writer connection, opened the way the account unlock opens the first.
     let vault = bob.client.vault_secret_source()?.vault_secret("bob")?;
-    let kek = crate::client::account::account_db_key_encryption_key(&vault, b"routed-test");
+    let kek = crate::client::account::account_db_key_encryption_key(
+        &vault,
+        b"native fixture data passphrase",
+    );
     let wrapped =
         bob.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped database key")?;
     let db_key = crate::prelude::unwrap_with_vault_secret(&kek, &wrapped)?;
@@ -353,10 +367,10 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
     // The competing writer reports a busy database at once instead of waiting for it.
     second.fail_fast_busy_for_test()?;
     // A replacement is a later reset: a different row whose schedule is earlier than the floor
-    // the old refusal would impose (`now + 1 s` = START + 62).
+    // the old refusal would impose (`now + 1 s` = start() + 62).
     let replacement = serde_json::json!({
         "local": submitted["local"], "remote": submitted["remote"],
-        "attempts": 3, "next_at": START + 10, "first_at": START,
+        "attempts": 3, "next_at": start() + 10, "first_at": start(),
     });
     let during = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     {
@@ -408,13 +422,14 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
     }
     // Close the competing writer, genuinely reopen the account, and repeat the final assertions.
     drop(second);
-    reopen(&mut bob.client)?;
+    let config = bob.config()?;
+    reopen(&mut bob.client, &config, &alice).await?;
     match competing {
         Competing::Clear => assert!(work(&bob.client)?.is_none(), "still absent after reopen"),
         Competing::Replace => {
             let kept = work(&bob.client)?.ok_or("replacement after reopen")?;
             assert_eq!(kept, replacement);
-            assert_eq!(kept["next_at"], START + 10);
+            assert_eq!(kept["next_at"], start() + 10);
         }
     }
     drop(alice);

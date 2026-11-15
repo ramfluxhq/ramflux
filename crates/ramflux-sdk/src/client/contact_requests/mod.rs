@@ -29,7 +29,7 @@ pub(crate) use delivery::background::{
 #[cfg(test)]
 pub(crate) use delivery::flush;
 pub(crate) use delivery::status as delivery_status;
-pub(crate) use wire::{Control, Decision, ENVELOPE_SCHEMA, conversation};
+pub(crate) use wire::{Control, Decision, conversation};
 use wire::{TTL, invalid};
 pub(super) const DECLINE_COOLDOWN_SECONDS: i64 = 24 * 3600;
 
@@ -136,32 +136,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    pub(crate) fn receive_contact_control(
-        &self,
-        entry: &GatewayInboxEntry,
-        route: &crate::client::routed::Routing,
-        bytes: &[u8],
-    ) -> Result<bool, SdkError> {
-        #[derive(serde::Deserialize)]
-        struct Header {
-            body: HeaderBody,
-        }
-        #[derive(serde::Deserialize)]
-        struct HeaderBody {
-            schema: String,
-        }
-        if !serde_json::from_slice::<Header>(bytes).is_ok_and(|header| {
-            matches!(
-                header.body.schema.as_str(),
-                wire::DOMAIN | ramflux_protocol::domain::CONTACT_REQUEST_V2
-            )
-        }) {
-            return Ok(false);
-        }
-        let control = self.verify_contact_control(entry, route, bytes)?;
-        self.apply_contact_control(&control)?;
-        Ok(true)
-    }
+
     pub(crate) fn apply_contact_control(&self, control: &Control) -> Result<(), SdkError> {
         let body = &control.body;
         let db = self.account_db()?;
@@ -191,6 +166,10 @@ impl RamfluxClient {
             }
             if old.request_id == body.request_id {
                 if old.state == "accepted" {
+                    self.ensure_direct_conversation(
+                        &old.contact_identity_commitment,
+                        &old.principal_id,
+                    )?;
                     self.stage_contact_response(&old, Decision::Accept)?;
                 }
                 return Ok(());
@@ -257,6 +236,12 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("contact response has no matching outbound request"))?;
         let state = if body.kind == Decision::Accept { "accepted" } else { "declined" };
         if request.state == state {
+            if state == "accepted" {
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
+                )?;
+            }
             return Ok(());
         }
         if request.expires_at <= now_unix_timestamp()
@@ -267,24 +252,34 @@ impl RamfluxClient {
         if self.friend_rejection_reason(&body.actor_root)?.is_some() {
             return Ok(());
         }
-        db.decide_contact_request(
-            &body.target_root,
-            "outbound",
-            &body.request_id,
-            state,
-            now_unix_timestamp(),
-        )?;
-        self.record_outbound_contact_state(&body.target_root, state, now_unix_timestamp())?;
-        if body.kind == Decision::Accept {
-            self.establish_friend_link(&request.link_id, &body.requester_root, &body.target_root)?;
-            self.replicate_contact_acceptance(&request)?;
-            self.promote_contact_request_cache(&request.contact_identity_commitment)?;
-            self.persist_native_accepted_contact_safety(
-                &request.principal_id,
-                &request.contact_identity_commitment,
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.decide_contact_request(
+                &body.target_root,
+                "outbound",
+                &body.request_id,
+                state,
+                now_unix_timestamp(),
             )?;
-        }
-        Ok(())
+            self.record_outbound_contact_state(&body.target_root, state, now_unix_timestamp())?;
+            if body.kind == Decision::Accept {
+                self.establish_friend_link(
+                    &request.link_id,
+                    &body.requester_root,
+                    &body.target_root,
+                )?;
+                self.replicate_contact_acceptance(&request)?;
+                self.promote_contact_request_cache(&request.contact_identity_commitment)?;
+                self.persist_native_accepted_contact_safety(
+                    &request.principal_id,
+                    &request.contact_identity_commitment,
+                )?;
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
+                )?;
+            }
+            Ok(())
+        })
     }
     pub(crate) fn decide_inbound_contact(
         &self,
@@ -301,6 +296,15 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         if request.state == state {
+            if state == "accepted" {
+                db.write_transaction(|| {
+                    self.ensure_direct_conversation(
+                        &request.contact_identity_commitment,
+                        &request.principal_id,
+                    )
+                    .map(drop)
+                })?;
+            }
             return Ok(());
         }
         db.write_transaction(|| -> Result<(), SdkError> {
@@ -352,6 +356,10 @@ impl RamfluxClient {
                 self.persist_native_accepted_contact_safety(
                     &request.principal_id,
                     &request.contact_identity_commitment,
+                )?;
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
                 )?;
                 self.stage_contact_response(request, Decision::Accept)?;
                 self.release_contact_messages(
@@ -435,12 +443,5 @@ impl RamfluxClient {
             "preview":Self::contact_message_preview(held.first().map(Vec::as_slice))?,
             "safety_number":safety}),
         )
-    }
-}
-
-#[cfg(test)]
-impl RamfluxClient {
-    pub(crate) fn test_release_contact_messages(&self, root: &str) -> Result<(), SdkError> {
-        self.release_contact_messages(root, true)
     }
 }

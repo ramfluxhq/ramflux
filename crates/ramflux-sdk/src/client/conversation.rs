@@ -272,12 +272,40 @@ impl RamfluxClient {
         delete_scope: &str,
         tombstone_id: &str,
     ) -> Result<MessageTombstoneRecord, SdkError> {
-        Ok(self.account_db()?.delete_direct_message(
-            conversation_id,
-            message_id,
-            delete_scope,
-            tombstone_id,
-        )?)
+        let valid_tombstone = ramflux_protocol::decode_base64url(tombstone_id).is_ok_and(|bytes| {
+            bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == tombstone_id
+        });
+        if delete_scope != "local" || !valid_tombstone {
+            return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "local erasure requires local scope and a canonical 32-byte tombstone; use generated Delete for peer effects".into(),
+        });
+        }
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if let Some(old) = db.message_tombstone_for_message(conversation_id, message_id)? {
+                return if old.tombstone_id == tombstone_id {
+                    Ok(old)
+                } else {
+                    Err(SdkError::ReplayMismatch)
+                };
+            }
+            let tombstone =
+                db.delete_direct_message(conversation_id, message_id, "local", tombstone_id)?;
+            if db.actor_state_exists(&format!("routed/generated-identity/{message_id}"))? {
+                let row = db.direct_message_by_id(message_id)?.ok_or_else(|| {
+                    SdkError::InboundRejected("local erase target missing".into())
+                })?;
+                let update = self.generated_message_update(&row, conversation_id, 0)?;
+                db.append_message_update(
+                    &format!("generated/local-delete/{tombstone_id}/{message_id}"),
+                    "message.updated",
+                    &update,
+                    crate::time::now_unix_timestamp(),
+                )?;
+            }
+            Ok(tombstone)
+        })
     }
 
     /// # Errors
@@ -353,30 +381,13 @@ impl RamfluxClient {
 mod tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
-        let nanos =
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(format!("ramflux-sdk-conversation-list-{test_name}-{nanos}"))
-    }
-
-    fn client_with_account(
-        test_name: &str,
-    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
-        let root = temp_root(test_name);
-        let mut client = RamfluxClient::new();
-        client.create_identity_root("principal_conv", [0x71; 32]);
-        client.create_device_branch("principal_conv", "device_conv", 1, [0x72; 32]);
-        client.open_account_index(&root)?;
-        client.create_account("acct", "principal_conv")?;
-        client.unlock_account("acct", b"conversation-list-test")?;
-        Ok((root, client))
-    }
-
     #[test]
     fn conversation_list_returns_inserted_conversations() -> Result<(), SdkError> {
-        let (_root, client) = client_with_account("returns-inserted")?;
+        let fixture = crate::client::native_test_support::account::blocking(
+            "returns-inserted",
+            "device_conv",
+        )?;
+        let client = &fixture.client;
         let metadata = MessageMetadata::default();
         client.account_db()?.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "conv_one",

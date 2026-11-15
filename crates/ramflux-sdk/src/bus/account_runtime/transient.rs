@@ -74,8 +74,7 @@ impl AccountRuntime {
         if let Some(account) = self.state.accounts.get(&self.id) {
             account.client.reset_transient_content();
         }
-        if crate::client::target_selection::schema_v1_selected()
-            && let Some(mut session) = session
+        if let Some(mut session) = session
             && session.ephemeral_negotiated()
         {
             self.transient.consumer = session.take_ephemeral_consumer().await.ok().flatten();

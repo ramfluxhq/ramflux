@@ -152,6 +152,7 @@ impl RamfluxClient {
         }
         Ok(json!({"surfaces":rows,"next_cursor":cursor}))
     }
+    #[cfg(test)]
     pub(crate) fn surface_message_fallback(
         &self,
         message: &str,

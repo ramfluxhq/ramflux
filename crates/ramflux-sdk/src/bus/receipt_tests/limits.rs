@@ -23,18 +23,14 @@ async fn pending(name: &str) -> Result<Pending, Box<dyn std::error::Error>> {
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
-    source
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            a.message(&b, "first"),
-            b"first",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    a.send_text(&source.client, &mut engine, a.message(&b, "first"), b"first").await?;
     drop(engine);
     drop(source);
-    let receipt = crate::client::delivery_receipts::id("thread", "first", &b.identity()?)?;
+    let receipt = crate::client::delivery_receipts::id(
+        &a.conversation(&b)?,
+        &a.event("first")?,
+        &b.identity()?,
+    )?;
     mail.lock().map_err(|_| "mailbox")?.reject_id = Some(format!("receipt_evt_{receipt}"));
     let mut receiver = b.account(None, mail.clone())?;
     crate::bus::sync_driver::run(&mut receiver).await?;
@@ -76,6 +72,8 @@ fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
                 sender: a.identity()?.storage_key().into(),
                 root: root.clone(),
                 at: now_unix_timestamp(),
+                sealed_at: now_unix_timestamp(),
+                retry_from: now_unix_timestamp(),
                 attempts: 1,
                 next_at: now_unix_timestamp() + 60,
                 packet: None,
@@ -113,15 +111,7 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     p.receiver.client.account_db()?.persist_actor_state(&p.key, &held)?;
     let mut sender = p.a.account(None, p.mail.clone())?;
     let mut engine = sender.session_client().await?;
-    sender
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            p.a.message(&p.b, "second"),
-            b"second",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    p.a.send_text(&sender.client, &mut engine, p.a.message(&p.b, "second"), b"second").await?;
     drop(engine);
     drop(sender);
     crate::bus::sync_driver::run(&mut p.receiver).await?;
@@ -129,7 +119,11 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "second", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("second")?,
+                &p.b.identity()?
+            )?
             .ok_or("second status")?["state"],
         "sent"
     );
@@ -146,14 +140,22 @@ async fn a_failed_receipt_is_backed_off_without_blocking_another_message_and_sto
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
             .ok_or("terminal")?["state"],
         "failed"
     );
     assert_eq!(p.receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
     let second_id = format!(
         "receipt_evt_{}",
-        crate::client::delivery_receipts::id("thread", "second", &p.b.identity()?)?
+        crate::client::delivery_receipts::id(
+            &p.a.conversation(&p.b)?,
+            &p.a.event("second")?,
+            &p.b.identity()?
+        )?
     );
     let packets = p
         .mail
@@ -186,6 +188,7 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
         let mut work = ready(&p)?;
         if reason == "expired" {
             work.at = now_unix_timestamp() - 601;
+            work.retry_from = work.at;
             p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
         } else if reason == "revoked" {
             p.receiver.client.account_db()?.persist_actor_state(
@@ -214,7 +217,11 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
         assert_eq!(
             p.receiver
                 .client
-                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                .delivery_receipt_status(
+                    &p.a.conversation(&p.b)?,
+                    &p.a.event("first")?,
+                    &p.b.identity()?
+                )?
                 .ok_or("terminal")?["state"],
             "failed"
         );
@@ -232,15 +239,7 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     fixture::seed_pair(&a, &b)?;
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
-    let entry = source
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            a.message(&b, "first"),
-            b"first",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    let entry = a.send_text(&source.client, &mut engine, a.message(&b, "first"), b"first").await?;
     drop(engine);
     drop(source);
     let mut receiver = b.account(None, mail)?;
@@ -248,7 +247,16 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     let pool = receiver.relay_quic_pool()?;
     backlog(&receiver.client, &a, &b)?;
     receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    assert_eq!(receiver.client.account_db()?.message_content("first")?, Some(b"first".to_vec()));
+    assert_eq!(
+        receiver
+            .client
+            .generated_message_detail(&a.conversation(&b)?, &a.event("first")?)?
+            .message
+            .text
+            .as_deref(),
+        Some("first"),
+        "authenticated generated plaintext must commit behind the receipt backlog"
+    );
     assert_eq!(receiver.client.account_db()?.actor_state_usage(PREFIX)?.0, 257);
     drop(engine);
     drop(receiver);
@@ -263,110 +271,75 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let source = a.client(None)?;
-    let receiver = b.client(None)?;
-    for (spec, client) in [(&a, &source), (&b, &receiver)] {
-        spec.trust(client, &a)?;
-        spec.trust(client, &b)?;
-        client.create_group("group", a.identity()?.storage_key())?;
-        client.add_group_member_with_root(
-            "group",
-            &b.device,
-            "member",
-            b.identity()?.root_commitment(),
-        )?;
-    }
-    receiver.import_group_sender_key_distribution(
-        &source.export_group_sender_key_distribution("group", &a.device)?,
+    let target = b.client(None)?;
+    a.prepare_group(&source, "group", "thread", &[(&b, &target)])?;
+    let mut account = a.account(None, mail.clone())?;
+    let id =
+        Box::pin(a.send_group_text(&mut account, "group", "group-admission", "group body")).await?;
+    target.import_group_sender_key_distribution(
+        &account.client.export_group_sender_key_distribution("group", &a.device)?,
     )?;
-    let raw = source.encrypt_group_message("group", &a.device, b"group body")?;
-    let group: SdkGroupEncryptedEnvelope = serde_json::from_slice(&raw)?;
-    let mut account = a.account(None, mail)?;
-    let mut engine = account.session_client().await?;
-    let mut message = a.message(&b, "group-admission");
-    let sealed = source
-        .seal_routed_as(
-            &mut engine,
-            &message,
-            &raw,
-            crate::client::routed::Route::group_message("group"),
-        )
-        .await?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.device.clone(),
-        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
-    };
-    backlog(&receiver, &a, &b)?;
-    let db = receiver.account_db()?;
-    let aborted = db.write_transaction(|| -> Result<(), SdkError> {
-        receiver.append_or_pending_group_message(
-            "thread",
-            "group-admission",
-            &entry,
-            &raw,
-            &group,
-        )?;
-        Err(SdkError::LocalBus("injected commit abort".into()))
-    });
-    assert!(aborted.is_err());
-    assert!(receiver.direct_message_by_id("group-admission")?.is_none());
-    assert!(db.message_content("group-admission")?.is_none());
-    assert_eq!(db.actor_state_usage(PREFIX)?.0, 256);
-    assert_eq!(
-        receiver.append_or_pending_group_message(
-            "thread",
-            "group-admission",
-            &entry,
-            &raw,
-            &group
-        )?,
-        b"group body"
-    );
-    assert_eq!(db.message_content("group-admission")?, Some(b"group body".to_vec()));
-    drop(engine);
-    drop(account);
     drop(source);
-    drop(receiver);
+    drop(target);
+    let mut receiver = b.account(None, mail.clone())?;
+    let entry = mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .messages
+        .iter()
+        .rev()
+        .find(|entry| entry.target_delivery_id == receiver.target_delivery_id)
+        .cloned()
+        .ok_or("group delivery")?;
+    let mut engine = receiver.session_client().await?;
+    let pool = receiver.relay_quic_pool()?;
+    backlog(&receiver.client, &a, &b)?;
+    let aborted = Box::pin(receiver.client.apply_routed_entry_joining(
+        &mut engine,
+        &pool,
+        &entry,
+        None,
+        |client, write| {
+            client.account_db()?.write_transaction(|| {
+                client.persist_routed_projection_for_fixture(write)?;
+                Err(SdkError::LocalBus("injected commit abort".into()))
+            })
+        },
+    ))
+    .await;
+    assert!(
+        matches!(aborted, Err(SdkError::LocalBus(reason)) if reason == "injected commit abort"),
+        "native group receive must reach the transactional abort"
+    );
+    assert!(
+        receiver.client.direct_message_by_id(&id)?.is_none(),
+        "aborted group projection leaked"
+    );
+    assert!(
+        receiver.client.account_db()?.message_content(&id)?.is_none(),
+        "aborted generated plaintext leaked"
+    );
+    assert_eq!(
+        receiver.client.account_db()?.actor_state_usage(PREFIX)?.0,
+        256,
+        "receipt must roll back with the group message"
+    );
+    Box::pin(receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false)).await?;
+    assert_eq!(
+        receiver.client.generated_message_detail("thread", &id)?.message.text.as_deref(),
+        Some("group body"),
+        "committed native group content must reach the durable reader"
+    );
+    assert_eq!(
+        receiver.client.account_db()?.actor_state_usage(PREFIX)?.0,
+        257,
+        "one receipt must commit with the native group message"
+    );
     Ok(())
 }
 #[tokio::test]
 async fn own_principal_messages_never_stage_a_peer_delivery_receipt() -> TestResult {
-    let root = runtime_tests::root("receipt-own-exclusion");
-    let a = Spec::new(&root, "alice", 51);
-    let b = Spec::new(&root, "bob", 61);
-    let mail: Shared = Arc::new(Mutex::default());
-    fixture::seed_pair(&a, &b)?;
-    let mut source = a.account(None, mail)?;
-    let engine = source.session_client().await?;
-    let mut message = a.message(&a, "own-message");
-    message.recipient_device_id = Some("own-sibling".into());
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: "own-sibling".into(),
-        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
-    };
-    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
-    assert_eq!(source.client.account_db()?.actor_state_usage(PREFIX)?.0, 0);
-    let origin = source.client.message_origin("thread", "own-message")?.ok_or("own provenance")?;
-    assert_eq!(origin["direction"], "outgoing");
-    assert_eq!(
-        origin["sender_root_commitment"],
-        source.client.owned_device_identity()?.root_commitment()
-    );
-    assert_eq!(origin["sender_device_id"], entry.envelope.source_device_id);
-    let db = source.client.account_db()?;
-    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 0);
-    db.send_direct_message("thread", "own-message", "alice", b"body")?;
-    source.client.stage_delivery_receipt("thread", "own-message", &entry)?;
-    assert_eq!(db.actor_state_usage(PREFIX)?.0, 0);
-    assert_eq!(db.actor_state_usage("own-device/sent-alias/")?.0, 1);
-
-    drop(engine);
-    drop(source);
-    Ok(())
+    Box::pin(crate::client::native_test_support::live_own_copy::exercise(false)).await
 }
 
 #[tokio::test]
@@ -390,7 +363,11 @@ async fn a_page_of_backed_off_receipts_cannot_hide_later_due_work() -> TestResul
     assert_eq!(
         p.receiver
             .client
-            .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
             .ok_or("sent")?["state"],
         "sent"
     );
@@ -410,15 +387,7 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
     for id in ["first", "second"] {
-        source
-            .client
-            .send_plaintext_direct_message_without_franking(
-                &mut engine,
-                a.message(&b, id),
-                id.as_bytes(),
-                crate::client::routed::Route::direct(),
-            )
-            .await?;
+        a.send_text(&source.client, &mut engine, a.message(&b, id), id.as_bytes()).await?;
     }
     drop(engine);
     drop(source);
@@ -444,8 +413,13 @@ async fn stalled_receipts_cannot_consume_the_whole_sync_pass_or_prevent_message_
     );
     for id in ["first", "second"] {
         assert_eq!(
-            receiver.client.account_db()?.message_content(id)?,
-            Some(id.as_bytes().to_vec())
+            receiver
+                .client
+                .generated_message_detail(&a.conversation(&b)?, &a.event(id)?)?
+                .message
+                .text
+                .as_deref(),
+            Some(id)
         );
     }
     let db = receiver.client.account_db()?;
@@ -560,7 +534,7 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
             Some(p.b.principal.clone()),
             "test",
             "message.receipt.delivered",
-            json!({"conversation_id":"thread","message_id":"first","receiver_device_id":p.b.device}),
+            json!({"conversation_id":p.a.conversation(&p.b)?,"message_id":p.a.event("first")?,"receiver_device_id":p.b.device}),
         );
         let response =
             crate::bus::dispatch::dispatch_message_bus_request(&request, &mut state, &connection)
@@ -576,18 +550,192 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
             .load_actor_state::<Work>(&p.key)?
             .ok_or("restaged work")?;
         assert_eq!(retry.attempts, 0);
-        assert!(retry.packet.is_none());
-        assert_eq!(flush(receiver).await?, 1);
+        assert_eq!(retry.sealed_at, retry.at, "a restage inside the TTL keeps the envelope time");
+        assert_eq!(flush(receiver).await?, 1, "legacy={legacy}: the restaged receipt is delivered");
         assert_eq!(
             receiver
                 .client
-                .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                .delivery_receipt_status(
+                    &p.a.conversation(&p.b)?,
+                    &p.a.event("first")?,
+                    &p.b.identity()?
+                )?
                 .ok_or("status")?["state"],
             "sent"
         );
         drop(state);
         std::fs::remove_dir_all(p.root)?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_explicit_retry_across_a_second_boundary_resends_the_cached_receipt_packet() -> TestResult
+{
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-boundary")).await?;
+    let mut work = ready(&p)?;
+    assert_eq!(work.at, start, "the receipt identity is the time of its first seal");
+    work.attempts = 8;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?, "work retired as failed");
+    let first_seal = p
+        .mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the first attempt reached the gateway and was refused")?;
+    // The retry lands in a later second than the first seal.
+    crate::time::FixedClock::advance_to(start + 5);
+    p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start), "the restaged receipt keeps its original identity time");
+    let retry = p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?;
+    assert_eq!((retry.at, retry.retry_from, retry.attempts), (start, start + 5, 0));
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the retry sends instead of ReplayMismatch");
+    let sent = p
+        .mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the retry reached the gateway")?;
+    assert_eq!(sent, first_seal, "the exact cached packet is retransmitted");
+    drop(p.receiver);
+    Ok(())
+}
+
+/// Wall-clock deadline for a whole scenario, cleanup included: the scenario future and its
+/// fixtures are dropped on expiry, so no temporary directory outlives a timeout.
+async fn bounded(
+    name: &str,
+    scenario: impl std::future::Future<Output = TestResult>,
+) -> TestResult {
+    match tokio::time::timeout(Duration::from_secs(90), scenario).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(format!("{name} exceeded its 90 s deadline").into()),
+    }
+}
+
+fn install_gateway_guard(p: &Pending) -> TestResult {
+    let mut mail = p.mail.lock().map_err(|_| "mailbox")?;
+    mail.guard = Some(ramflux_node_core::NodeReplayGuardState::new());
+    mail.guard_sources = vec![p.a.identity()?, p.b.identity()?];
+    mail.reject_id = None;
+    Ok(())
+}
+
+/// Exhausts the attempts of the first receipt so it ends `failed`, and returns its first seal.
+async fn fail_first_receipt(
+    p: &mut Pending,
+    start: i64,
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let mut work = ready(p)?;
+    assert_eq!(work.at, start, "the receipt identity is the time of its first seal");
+    assert_eq!(work.sealed_at, start, "the first envelope is created at the identity time");
+    work.attempts = 8;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?, "work retired as failed");
+    Ok(p.mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the first attempt reached the gateway and was refused")?)
+}
+
+#[tokio::test]
+async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard()
+-> TestResult {
+    Box::pin(bounded(stringify!(a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard), Box::pin(a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard_scenario()))).await
+}
+
+async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard_scenario()
+-> TestResult {
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-within-ttl")).await?;
+    let first_seal = fail_first_receipt(&mut p, start).await?;
+    install_gateway_guard(&p)?;
+    crate::time::FixedClock::advance_to(start + 300);
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start));
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the real gateway guard accepts the retry");
+    let sent = p.mail.lock().map_err(|_| "mailbox")?.submissions.last().cloned().ok_or("sent")?;
+    assert_eq!(sent, first_seal, "within the TTL the cached sealed bytes are resent unchanged");
+    drop(p.receiver);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once()
+-> TestResult {
+    Box::pin(bounded(stringify!(a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once), Box::pin(a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once_scenario()))).await
+}
+
+async fn a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once_scenario()
+-> TestResult {
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-after-ttl")).await?;
+    let first_seal = fail_first_receipt(&mut p, start).await?;
+    install_gateway_guard(&p)?;
+    let later = start + 601;
+    crate::time::FixedClock::advance_to(later);
+    // The real guard refuses the stale envelope, which is exactly why a retry must re-seal.
+    let mut stale = ramflux_node_core::NodeReplayGuardState::new();
+    let stale_refusal =
+        stale.accept_envelope_once(&p.b.identity()?, &first_seal, later).err().ok_or("stale")?;
+    assert!(
+        matches!(stale_refusal, ramflux_node_core::NodeCoreError::TtlExpired { .. }),
+        "the cached envelope is past created_at + ttl: {stale_refusal}"
+    );
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start), "the logical receipt identity is unchanged");
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the real gateway guard accepts the fresh seal");
+    let sent = p.mail.lock().map_err(|_| "mailbox")?.submissions.last().cloned().ok_or("sent")?;
+    assert_ne!(sent, first_seal, "the expired envelope is re-sealed");
+    assert_eq!(sent.created_at, later, "the transport carries a fresh created_at");
+    assert_eq!(sent.envelope_id, first_seal.envelope_id, "the receipt envelope id is stable");
+    assert_eq!(
+        p.receiver
+            .client
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
+            .ok_or("status")?["delivered_at"],
+        start,
+        "delivered_at keeps the identity time"
+    );
+    // The recipient deduplicates by the logical identity: exactly one delivered receipt.
+    let mut alice = p.a.account(None, p.mail.clone())?;
+    crate::bus::sync_driver::run(&mut alice).await?;
+    let row = alice.client.direct_message_by_id(&p.a.event("first")?)?.ok_or("alice row")?;
+    assert_eq!(row.receipts.len(), 1, "the recipient records exactly one receipt");
+    assert_eq!(row.receipts[0].state, "delivered");
+    drop(alice);
+    drop(p.receiver);
     Ok(())
 }
 
@@ -630,7 +778,11 @@ async fn malformed_receipt_retention_metadata_does_not_abort_the_sync_pass() -> 
             assert_eq!(
                 p.receiver
                     .client
-                    .delivery_receipt_status("thread", "first", &p.b.identity()?)?
+                    .delivery_receipt_status(
+                        &p.a.conversation(&p.b)?,
+                        &p.a.event("first")?,
+                        &p.b.identity()?
+                    )?
                     .ok_or("status")?["state"],
                 "sent"
             );

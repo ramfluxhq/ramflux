@@ -2,111 +2,117 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
-use crate::client::surface::{ControlKind, control::SurfaceControl};
+use crate::client::surface::{ControlKind, control::SurfaceControl, invalid};
 use std::path::PathBuf;
 pub(super) struct Terminals {
     pub(super) clients: Vec<RamfluxClient>,
-    _root: ramflux_test_support::TestPath,
+    _fixtures: Vec<crate::client::native_test_support::Fixture>,
 }
 impl Terminals {
-    pub(super) fn new() -> Result<Self, SdkError> {
-        let root = ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(crate::new_surface_message_id()?);
+    pub(super) async fn new() -> Result<Self, SdkError> {
+        use crate::client::native_test_support::Fixture;
+        let mut author = Box::pin(Fixture::with_principal("author", "author-device", "author"))
+            .await
+            .map_err(|error| invalid(&error.to_string()))?;
+        let sibling = Box::pin(author.enroll_sibling("author-two", "author-two"))
+            .await
+            .map_err(|error| invalid(&error.to_string()))?;
+        let mut human = Box::pin(Fixture::with_principal("human", "human-device", "human"))
+            .await
+            .map_err(|error| invalid(&error.to_string()))?;
+        let human_two = Box::pin(human.enroll_sibling("human-two", "human-two"))
+            .await
+            .map_err(|error| invalid(&error.to_string()))?;
+        let manifests = [author.manifest.clone(), human.manifest.clone()];
+        let mut fixtures = vec![author, sibling, human, human_two];
         let mut clients = Vec::new();
-        for (principal, device, root_seed, device_seed) in [
-            ("author", "author-device", 31, 32),
-            ("author", "author-two", 31, 33),
-            ("human", "human-device", 35, 36),
-            ("human", "human-two", 35, 37),
-        ] {
-            let mut c = RamfluxClient::new();
-            c.create_identity_root(principal, [root_seed; 32]);
-            c.create_device_branch(principal, device, 1, [device_seed; 32]);
-            c.open_account_index(root.join(device))?;
-            c.create_account(principal, &c.surface_local_root_commitment()?)?;
-            c.unlock_account(principal, b"surface-test-secret")?;
-            clients.push(c);
-        }
-        let mut manifests =
-            std::collections::BTreeMap::<String, crate::prekey::SdkDeviceManifestResponse>::new();
-        for remote in &clients {
-            let next = crate::client::identity_authority::test_support::public_manifest(remote)?;
-            manifests
-                .entry(next.principal_id.clone())
-                .and_modify(|current| current.devices.extend(next.devices.clone()))
-                .or_insert(next);
-        }
-        for (principal, manifest) in &mut manifests {
-            let owner = clients
-                .iter()
-                .find(|client| {
-                    client
-                        .identity_root
-                        .as_ref()
-                        .is_some_and(|root| root.principal_id == *principal)
-                })
-                .ok_or(SdkError::IdentityRootMissing)?;
-            crate::client::identity_authority::test_support::sign_manifest(
-                owner.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                manifest,
-                2,
-            )?;
-        }
-        for local in &clients {
-            for manifest in manifests.values() {
-                local.persist_root_verified_directory(manifest)?;
+        for fixture in &mut fixtures {
+            for manifest in &manifests {
+                fixture.client.persist_fetched_identity_directory(manifest)?;
             }
-            local.account_db()?.persist_client_record(
+            fixture.client.account_db()?.persist_client_record(
                 "conversation",
                 "thread",
                 &json!({"kind":"direct","participants":["author","human"]}),
             )?;
+            clients.push(std::mem::take(&mut fixture.client));
         }
-        Ok(Self { clients, _root: root })
-    }
-}
-impl Drop for Terminals {
-    fn drop(&mut self) {
-        self.clients.clear();
+        Ok(Self { clients, _fixtures: fixtures })
     }
 }
 pub(super) fn entry(
     source: &RamfluxClient,
+    target: &RamfluxClient,
     id: &str,
 ) -> Result<crate::GatewayInboxEntry, SdkError> {
-    let d = source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let endpoint = crate::GatewayQuicEndpointConfig {
-        bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::LocalBus("test address".into()))?,
-        gateway_addr: "127.0.0.1:1"
-            .parse()
-            .map_err(|_| SdkError::LocalBus("test address".into()))?,
+    use crate::client::routed::{Route, SendMaterial};
+    use ramflux_protocol::message as g;
+    let local = source.owned_device_identity()?;
+    let remote = target.owned_device_identity()?;
+    let mut config = crate::GatewaySessionConfig::quic(crate::GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("test bind"))?,
+        gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("test gateway"))?,
         server_name: "test".into(),
         ca_cert: PathBuf::new(),
-        principal_id: d.principal_id.clone(),
-        device_id: d.device_id.clone(),
-        target_delivery_id: "test-target".into(),
+        principal_id: source
+            .device_branch
+            .as_ref()
+            .ok_or(SdkError::IdentityRootMissing)?
+            .principal_id
+            .clone(),
+        device_id: local.device_id().into(),
+        target_delivery_id: local.storage_key().into(),
         prekey_http_url: None,
-    };
-    let config = crate::GatewaySessionConfig::quic(endpoint).with_account_identity(source)?;
-    let message = crate::GatewayDirectMessage {
+    });
+    // This component fixture installs its genuinely certified local proof directly;
+    // it creates no session handshake and claims no custodian login acceptance.
+    config.device_branch = Some(std::sync::Arc::new(
+        source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+    ));
+    config.source_identity = Some(local.clone());
+    let identity = source.allocate_generated_identity(
+        "thread",
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let mut message = crate::GatewayDirectMessage {
         conversation_id: "thread".into(),
-        message_id: id.into(),
+        message_id: ramflux_protocol::encode_base64url(&identity.id),
         envelope_id: id.into(),
-        source_principal_id: d.principal_id.clone(),
-        sender_id: d.device_id.clone(),
-        recipient_device_id: None,
-        recipient_principal_commitment: None,
-        target_delivery_id: "test-target".into(),
-        encrypted_body: b"surface control".to_vec(),
-        created_at: crate::prelude::now_unix_timestamp(),
+        source_principal_id: config.principal_id.clone(),
+        sender_id: local.device_id().into(),
+        recipient_device_id: Some(remote.device_id().into()),
+        recipient_principal_commitment: Some(remote.root_commitment().into()),
+        target_delivery_id: remote.storage_key().into(),
+        encrypted_body: Vec::new(),
+        created_at: crate::time::now_unix_timestamp(),
         ttl: 600,
     };
+    let exact = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "surface transport fixture".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let bundle = target.load_x3dh_private_state(&remote)?.bundle;
+    let envelope = source.account_db()?.write_transaction(|| {
+        let sealed = source.seal_generated_routed_prepared(
+            &config,
+            &message,
+            &exact,
+            Route::direct(),
+            SendMaterial { manifest: None, bundle: Some(bundle) },
+        )?;
+        crate::dm::gateway_generated_envelope_from_sealed(&config, &mut message, sealed)
+    })?;
     Ok(crate::GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "test-target".into(),
-        envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
+        target_delivery_id: remote.storage_key().into(),
+        envelope,
     })
 }
 
@@ -115,20 +121,26 @@ fn own_forward(
     target: &RamfluxClient,
     signed: &Carrier,
 ) -> Result<(), SdkError> {
-    // Device records stand in for already verified directory responses; no directory I/O is needed.
+    // Every terminal already cached the genuine enrolled-device publications.
     let mut control = source.surface_control_packet(signed, ControlKind::Own, None)?;
     control.manifests.clear();
     target.receive_surface_control(
-        &entry(source, &signed.message_id)?,
+        &entry(source, target, &signed.message_id)?,
         "thread",
         None,
         &control.bytes()?,
     )?;
     Ok(())
 }
-#[test]
-fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestResult {
-    let t = Terminals::new()?;
+#[tokio::test(flavor = "current_thread")]
+async fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        two_terminals_per_identity_share_one_action_executor_and_decision_body(),
+    )
+    .await?
+}
+async fn two_terminals_per_identity_share_one_action_executor_and_decision_body() -> TestResult {
+    let t = Box::pin(Terminals::new()).await?;
     let [b1, b2, a1, a2] = t.clients.as_slice() else { return Err("terminals".into()) };
     let mut create =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
@@ -169,7 +181,7 @@ fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestRe
         }),
         manifests: Vec::new(),
     };
-    b2.receive_surface_control(&entry(b1, "receipt")?, "thread", None, &control.bytes()?)?;
+    b2.receive_surface_control(&entry(b1, b2, "receipt")?, "thread", None, &control.bytes()?)?;
     assert!(project(b2, &first, "b2-replay")?.accepted);
     let retry = action(a2, "another-terminal", 1, &hash)?;
     assert_eq!(
@@ -193,9 +205,16 @@ fn two_terminals_per_identity_share_one_action_executor_and_decision() -> TestRe
     assert_eq!(executable[1]["actions"][0]["actionable"], false);
     Ok(())
 }
-#[test]
-fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> TestResult {
-    let t = Terminals::new()?;
+#[tokio::test(flavor = "current_thread")]
+async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        own_forwarding_requires_the_same_root_even_if_principal_label_matches_body(),
+    )
+    .await?
+}
+async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches_body() -> TestResult
+{
+    let t = Box::pin(Terminals::new()).await?;
     let b1 = &t.clients[0];
     let b2 = &t.clients[1];
     let mut c =
@@ -215,9 +234,17 @@ fn own_forwarding_requires_the_same_root_even_if_principal_label_matches() -> Te
     Ok(())
 }
 
-#[test]
-fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult {
-    let t = Terminals::new()?;
+#[tokio::test(flavor = "current_thread")]
+async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() -> TestResult
+{
+    crate::client::native_test_support::watchdog::within(
+        own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback_body(),
+    )
+    .await?
+}
+async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback_body()
+-> TestResult {
+    let t = Box::pin(Terminals::new()).await?;
     let source = &t.clients[0];
     let target = &t.clients[1];
     let mut first =
@@ -248,9 +275,16 @@ fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallback() 
     Ok(())
 }
 
-#[test]
-fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
-    let t = Terminals::new()?;
+#[tokio::test(flavor = "current_thread")]
+async fn own_surface_history_omits_group_state_below_the_current_membership_floor() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        own_surface_history_omits_group_state_below_the_current_membership_floor_body(),
+    )
+    .await?
+}
+async fn own_surface_history_omits_group_state_below_the_current_membership_floor_body()
+-> TestResult {
+    let t = Box::pin(Terminals::new()).await?;
     let source = &t.clients[0];
     source.create_group("g", "author-device")?;
     let db = source.account_db()?;
@@ -278,9 +312,15 @@ fn own_surface_history_omits_group_state_below_the_current_membership_floor() ->
     Ok(())
 }
 
-#[test]
-fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
-    let t = Terminals::new()?;
+#[tokio::test(flavor = "current_thread")]
+async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestResult {
+    crate::client::native_test_support::watchdog::within(
+        live_deltas_omit_repeated_context_while_explicit_history_keeps_it_body(),
+    )
+    .await?
+}
+async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it_body() -> TestResult {
+    let t = Box::pin(Terminals::new()).await?;
     let author = &t.clients[0];
     let create =
         carrier(author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
@@ -309,9 +349,8 @@ fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestRe
     let staged = author.live_surface_control_packet(&delta, None)?;
     assert!(staged.context.is_some(), "staging retains context until current targets are known");
     let (bytes, _) = author.prepare_own_surface_context(&staged.bytes()?, &targets)?;
-    let live: super::super::SurfaceControl = ramflux_protocol::parse_i_json(
-        bytes.strip_prefix(super::super::CONTROL_PREFIX).ok_or("control prefix")?,
-    )?;
+    let live: super::super::SurfaceControl =
+        super::super::SurfaceControl::decode(&bytes)?.ok_or("typed Surface missing")?;
     assert!(live.context.is_none());
     assert_eq!(live.manifests.len(), 0);
     assert!(author.surface_control_packet(&delta, ControlKind::Own, None)?.context.is_some());
@@ -319,9 +358,8 @@ fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it() -> TestRe
         &author.live_surface_control_packet(&delta, Some(2))?.bytes()?,
         &targets,
     )?;
-    let changed: super::super::SurfaceControl = ramflux_protocol::parse_i_json(
-        bytes.strip_prefix(super::super::CONTROL_PREFIX).ok_or("control prefix")?,
-    )?;
+    let changed: super::super::SurfaceControl =
+        super::super::SurfaceControl::decode(&bytes)?.ok_or("typed Surface missing")?;
     assert!(changed.context.is_some());
     Ok(())
 }

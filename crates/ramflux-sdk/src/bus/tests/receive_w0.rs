@@ -27,23 +27,6 @@ use std::cell::Cell;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
 
-fn served_manifest(
-    fixture: &Fixture,
-    client: &RamfluxClient,
-) -> Result<crate::prekey::SdkDeviceManifestResponse, Box<dyn std::error::Error>> {
-    let root = client.owned_device_identity()?.root_commitment().to_owned();
-    Ok(serde_json::from_value(
-        fixture
-            .gateway
-            .lock()
-            .map_err(|_| "gateway")?
-            .manifests
-            .get(&root)
-            .cloned()
-            .ok_or("manifest")?,
-    )?)
-}
-
 fn turn(db: &AccountDb, generation: u64, incarnation: &str) -> Result<ReceiveTurn, SdkError> {
     Ok(ReceiveTurn {
         target: "t".into(),
@@ -105,21 +88,8 @@ fn ledger(account: &LocalBusAccountState) -> Case {
 }
 
 /// A real reopen: the account DB handle is dropped and unlocked again from disk.
-/// Unlock drops the in-memory branch. This fence is the same device coming back,
-/// so the signer returns with the database.
 fn reopen(account: &mut LocalBusAccountState) -> Case {
-    let branch = account.client.device_branch.clone();
-    account.client.active_account_db = None;
-    account.client.unlock_account("sender", b"native fixture data passphrase")?;
-    if let Some(branch) = branch {
-        account.client.device_branch = Some(branch.clone());
-        account
-            .client
-            .active_account_db
-            .as_mut()
-            .ok_or(SdkError::AccountDbNotUnlocked)?
-            .set_device_signer(branch);
-    }
+    crate::client::native_test_support::bus::reopen_account(account, "sender")?;
     Ok(())
 }
 
@@ -214,7 +184,7 @@ fn reset_prior(
         peer.device_id(),
         peer.root_commitment(),
         "prior-observation",
-        1,
+        now_unix_timestamp(),
     )?;
     Ok(())
 }
@@ -238,7 +208,14 @@ async fn case() -> Case {
     ledger(&fixture.source)?;
     fixture.inbound().await?;
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = served_manifest(&fixture, &fixture.peer.client)?;
+    let peer_manifest = fixture
+        .peer
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("native peer material")?
+        .manifest
+        .clone();
 
     // Row 1: native.rs prepare, `prepare_inbound_device_manifest` then the committing
     // `apply_inbound_device_manifest` (source "inbound_signature").
@@ -270,7 +247,7 @@ async fn case() -> Case {
     )?;
 
     // Row 3: group.rs `accept_group_actor_manifest` for a received shared-group packet.
-    let group_entry = Box::pin(super::receive_group::group_entry(&mut fixture)).await?;
+    let group_entry = super::receive_group::group_entry(&mut fixture)?;
     let local = fixture.source.gateway_config.device_id.clone();
     let (route, body) =
         fixture.source.client.preview_inbound_route(&group_entry, &local)?.ok_or("group route")?;
@@ -306,7 +283,14 @@ async fn expiry() -> Case {
     ledger(&fixture.source)?;
     let _clock = crate::time::FixedClock::set(now_unix_timestamp());
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = served_manifest(&fixture, &fixture.peer.client)?;
+    let peer_manifest = fixture
+        .peer
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("native peer material")?
+        .manifest
+        .clone();
     let root = peer_manifest.principal_commitment.clone();
     reset_prior(&fixture.source, &peer)?;
     let accept = |client: &RamfluxClient| {

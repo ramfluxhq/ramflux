@@ -35,13 +35,17 @@ pub(crate) fn envelope(
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error + Send + Sync>> {
     let authority = source()?;
     let mut envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
-        "schema":"ramflux.envelope.v1", "version":1, "domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2", "version":2, "domain":"ramflux.envelope.v2",
         "signing_key_id":"device", "signature_alg":"ed25519", "signature":"",
         "envelope_id":id, "source_principal_id":authority.principal_id,
         "source_device_id":"device", "target_delivery_id":"target-route",
         "delivery_class":"opaque_event", "priority":"low", "ttl":5,
-        "created_at":created_at, "encrypted_payload":"presealed", "payload_hash":"hash",
-        "ext":{"delivery_mode":"ephemeral", "source_root_commitment":authority.device.root_commitment()}
+        "created_at":created_at, "encrypted_payload":"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+        "payload_hash":ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA"),
+        "delivery_mode":"ephemeral",
+        "collapse_tag":ramflux_protocol::encode_base64url([0x22;32]),
+        "report_commitment":ramflux_protocol::encode_base64url([0x33;32]),
+        "ext":{"source_root_commitment":authority.device.root_commitment()}
     }))?;
     let branch = ramflux_crypto::create_device_branch("session-source", "device", 1, [12; 32]);
     envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(

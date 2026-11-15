@@ -41,6 +41,7 @@ fn conversation_actions_reply_edit_react_delete_and_typing() -> e2e::Result<()> 
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    settle_contact_requests(&alice_d, &alice, &bob_d, &bob)?;
     let conversation = ramflux_protocol::message::dm_scope::derive(
         &alice.principal_commitment,
         &bob.principal_commitment,
@@ -162,6 +163,21 @@ fn refuse_mutations(world: &World<'_>) -> e2e::Result<()> {
     expect_code(&peer, "conversation.delete", REFUSAL)
 }
 
+/// Typed content JSON carries event ids as padded standard base64; the view `id` is unpadded
+/// base64url. Compare the normalized spelling of the same 32 bytes.
+fn same_event_id(typed: &str, view_id: &str) -> bool {
+    let normalized: String = typed
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            other => other,
+        })
+        .collect();
+    normalized == view_id
+}
+
 fn live(world: &mut World<'_>) -> e2e::Result<()> {
     let sent = require_submitted(world, "live conversation body")?;
     let message = required_str(&sent, "/body/message_id")?.to_owned();
@@ -172,35 +188,30 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
     expect_submitted(&reply, "conversation.reply")?;
     let reply_id = required_str(&reply, "/body/message_id")?.to_owned();
     let reply_view = wait_view(world, false, &reply_id, |view| {
-        view.pointer("/content/message/replyTo/id").and_then(Value::as_str)
-            == Some(message.as_str())
+        view.pointer("/content/message/replyTo/id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| same_event_id(id, &message))
             && view["text"] == "live reply"
     })?;
     expect_kind(&reply_view, "message")?;
     let edited = mutate(world, "edit", &message, &["--text", "live edit"])?;
     expect_submitted(&edited, "conversation.edit")?;
     let edited_view = wait_view(world, false, &message, |view| {
-        view.pointer("/content/edit/replacement/text").and_then(Value::as_str) == Some("live edit")
+        view.pointer("/content/message/text").and_then(Value::as_str) == Some("live edit")
             && view["revision"] == 1
             && view["edited"] == true
     })?;
-    if !edited_view["text"].is_null() || edited_view["kind"].as_str() != Some("edit") {
+    if edited_view["text"] != "live edit" || edited_view["kind"].as_str() != Some("message") {
         return Err(format!("recipient edit view: {edited_view}").into());
     }
+    expect_submitted(&mutate(world, "react", &message, &["--token", "👍"])?, "conversation.react")?;
+    wait_view(world, false, &message, |view| reaction_tokens(view).contains(&"👍"))?;
     expect_submitted(
-        &mutate(world, "react", &message, &["--token", "thumb"])?,
+        &mutate(world, "react", &message, &["--token", "👍", "--remove"])?,
         "conversation.react",
     )?;
-    wait_view(world, false, &message, |view| reaction_tokens(view).contains(&"thumb"))?;
-    expect_submitted(
-        &mutate(world, "react", &message, &["--token", "thumb", "--remove"])?,
-        "conversation.react",
-    )?;
-    let cleared =
-        wait_view(world, false, &message, |view| !reaction_tokens(view).contains(&"thumb"))?;
-    if cleared.pointer("/content/edit/replacement/text").and_then(Value::as_str)
-        != Some("live edit")
-    {
+    let cleared = wait_view(world, false, &message, |view| !reaction_tokens(view).contains(&"👍"))?;
+    if cleared.pointer("/content/message/text").and_then(Value::as_str) != Some("live edit") {
         return Err(format!("reaction removal changed the edit: {cleared}").into());
     }
     let peer = mutate_as_bob(world, &message)?;
@@ -244,8 +255,65 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
 
 const NODE_STORES: &[&str] =
     &["ramflux-router", "ramflux-federation", "ramflux-gateway", "ramflux-retention"];
-const RATCHET_PREFIXES: &[&str] =
-    &["dm-pair/session/", "dm-pair/ephemeral-seals/", "dm-pair/active/", "dm-pair/local/"];
+/// One client row key that the typing at-rest comparison skips, and why typing cannot live there.
+enum ClientKey {
+    /// The whole key.
+    Exact(&'static str),
+    /// `prefix` followed by exactly one non-empty segment without a further `/`.
+    Scoped(&'static str),
+}
+
+/// Exact client `runtime_actor_state` keys (and the `runtime_outbox` rows that publish them).
+const CLIENT_EXEMPT: &[(ClientKey, &str)] = &[
+    (
+        ClientKey::Exact("own-contact/last-refresh"),
+        "wall-clock stamp of the contact backfill timer",
+    ),
+    (ClientKey::Exact("sync/tick"), "monotonic tick counter of the sync status timer"),
+    (ClientKey::Exact("sync/status"), "published sync status snapshot, no message data"),
+    (ClientKey::Exact("sync/health"), "published node health snapshot, no message data"),
+    (ClientKey::Exact("sync/status/event"), "sequence and time of the last status event"),
+    (ClientKey::Exact("sync/health/event"), "sequence and time of the last health event"),
+    (ClientKey::Exact("account/networking"), "connectivity state flipped by the offline step"),
+    (ClientKey::Exact("inbox/recovery-revision"), "revision stamped on every reconnect"),
+    (ClientKey::Scoped("dm-pair/session/"), "message ratchet state, advanced by durable traffic"),
+    (ClientKey::Scoped("dm-pair/ephemeral-seals/"), "seal counter, advanced by any sealed frame"),
+    (ClientKey::Scoped("dm-pair/active/"), "active pair index written with the ratchet"),
+    (ClientKey::Scoped("dm-pair/local/"), "local pair marker written with the ratchet"),
+];
+
+/// Exact `runtime_outbox` row kinds (first column) that the comparison skips.
+const CLIENT_OUTBOX_KINDS: &[(&str, &str)] = &[(
+    "device_directory",
+    "directory refreshes drain after a daemon restart; no conversation data",
+)];
+
+/// Exact node store tables whose rows change on every handshake or replay-guard admission.
+/// Anything not listed here must be identical before and after the typing phase.
+const NODE_EXEMPT: &[(&str, &str, &str)] = &[
+    ("ramflux-gateway", "gateway_sessions_v2", "one row per session; every reconnect writes it"),
+    ("ramflux-gateway", "gateway_session_expiry_v2", "expiry index of gateway_sessions_v2"),
+    ("ramflux-gateway", "gateway_resume_tokens_v2", "resume token issued by every handshake"),
+    ("ramflux-gateway", "gateway_resume_expiry_v2", "expiry index of gateway_resume_tokens_v2"),
+    ("ramflux-gateway", "gateway_replay_entries_v3", "replay-guard tuples of admitted envelopes"),
+    ("ramflux-gateway", "gateway_replay_expiry_v3", "expiry index of the replay tuples"),
+    ("ramflux-gateway", "gateway_replay_metadata_v3", "replay-guard counters"),
+    (
+        "ramflux-gateway",
+        "gateway_replay_owner_expiry_v3",
+        "owner expiry index of the replay tuples",
+    ),
+    ("ramflux-gateway", "gateway_replay_root_expiry_v3", "root expiry index of the replay tuples"),
+    ("ramflux-gateway", "gateway_replay_roots_v3", "per-root replay-guard budget rows"),
+    (
+        "ramflux-gateway",
+        "gateway_state_v1",
+        "pre-auth admission counters bumped by every connection",
+    ),
+    ("ramflux-router", "router_session_entry_v1", "router session binding written on reconnect"),
+    ("ramflux-router", "router_replay_tuple_v1", "router replay-guard tuples of admitted frames"),
+    ("ramflux-router", "router_replay_expiry_v1", "expiry index of the router replay tuples"),
+];
 const STORE_CAP: u64 = 32 * 1024 * 1024;
 
 type TableRows = BTreeMap<String, Vec<String>>;
@@ -265,7 +333,7 @@ struct Persistence {
 
 fn observe_typing(world: &mut World<'_>) -> e2e::Result<TypingObservation> {
     let before_ids = message_ids(world, false)?;
-    let before = capture_stores(world)?;
+    let before = settled_stores(world)?;
     let mut ids = explicit_stop(world)?;
     ids.push(unforced_expiry(world)?);
     ids.push(replay_while_live(world)?);
@@ -440,7 +508,11 @@ fn watch_ready(
             Ok(stopped) if stopped.get("ok").and_then(Value::as_bool) == Some(true) => {}
             Ok(stopped) => {
                 let watched = join_watch(worker)?;
-                return Err(format!("typing stop: {stopped}; watch={watched}").into());
+                return Err(format!(
+                    "typing stop: {stopped}; start={started}; watch={watched}; logs={}",
+                    logs(world)
+                )
+                .into());
             }
             Err(error) => {
                 let _ = join_watch(worker);
@@ -456,8 +528,11 @@ fn watch_ready(
 }
 
 fn typing_emit(world: &World<'_>, action: &str, operation: &str) -> e2e::Result<Value> {
-    rf_json(
-        &world.alice_d.socket,
+    // Active frames are admitted at most once per 4 s cadence per conversation and target. A
+    // frame inside that window reads `rate_limited`; the same operation id is retried until the
+    // cadence opens, inside the bounded poll budget.
+    wait_json(
+        world.alice_d,
         &[
             "conversation",
             "typing",
@@ -469,6 +544,7 @@ fn typing_emit(world: &World<'_>, action: &str, operation: &str) -> e2e::Result<
             "--operation-id",
             operation,
         ],
+        |value| value.pointer("/error/code").and_then(Value::as_str) != Some("rate_limited"),
     )
 }
 
@@ -602,6 +678,28 @@ fn value_rows<'a>(value: &'a Value, key: &str) -> Vec<&'a Value> {
     value.get(key).and_then(Value::as_array).map(|rows| rows.iter().collect()).unwrap_or_default()
 }
 
+/// Earlier sends and reads still produce asynchronous receipts and acknowledgements. Take the
+/// baseline only once consecutive captures agree, inside the bounded poll budget.
+fn settled_stores(world: &World<'_>) -> e2e::Result<Persistence> {
+    const AGREEING_CAPTURES: u32 = 4;
+    let last = std::cell::RefCell::new(None::<Persistence>);
+    let agreeing = std::cell::Cell::new(0_u32);
+    wait_json(world.alice_d, &["account", "status", "--account", &world.alice.id], |_| {
+        let Ok(now) = capture_stores(world) else {
+            agreeing.set(0);
+            return false;
+        };
+        let same = last
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| assert_same_stores(previous, &now).is_ok());
+        agreeing.set(if same { agreeing.get() + 1 } else { 0 });
+        *last.borrow_mut() = Some(now);
+        agreeing.get() >= AGREEING_CAPTURES
+    })?;
+    last.into_inner().ok_or_else(|| "no settled store capture".into())
+}
+
 fn capture_stores(world: &World<'_>) -> e2e::Result<Persistence> {
     let mut client = BTreeMap::new();
     let mut files = Vec::new();
@@ -701,19 +799,45 @@ fn comparable(snapshot: &Persistence) -> Persistence {
     }
     Persistence {
         client,
-        node: snapshot.node.clone(),
+        // Only the exact handshake and replay-guard tables listed in NODE_EXEMPT are skipped.
+        node: snapshot
+            .node
+            .iter()
+            .map(|(service, tables)| {
+                let kept = tables
+                    .iter()
+                    .filter(|(table, _)| !exempt_node_table(service, table))
+                    .map(|(table, rows)| (table.clone(), rows.clone()))
+                    .collect();
+                (service.clone(), kept)
+            })
+            .collect(),
         wal: snapshot.wal.clone(),
         files: Vec::new(),
     }
 }
 
+fn exempt_node_table(service: &str, table: &str) -> bool {
+    NODE_EXEMPT.iter().any(|(svc, name, _)| *svc == service && *name == table)
+}
+
 fn exempt_client_row(table: &str, line: &str) -> bool {
-    let kind = match table {
+    let key = match table {
         "runtime_actor_state" => field(line, 0),
-        "runtime_outbox" => field(line, 2),
+        "runtime_outbox" => {
+            if CLIENT_OUTBOX_KINDS.iter().any(|(kind, _)| *kind == field(line, 0)) {
+                return true;
+            }
+            field(line, 2)
+        }
         _ => return false,
     };
-    RATCHET_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
+    CLIENT_EXEMPT.iter().any(|(entry, _)| match entry {
+        ClientKey::Exact(exact) => key == *exact,
+        ClientKey::Scoped(prefix) => {
+            key.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        }
+    })
 }
 
 fn rows_of<'a>(tables: Option<&'a TableRows>, table: &str) -> &'a [String] {
@@ -1048,50 +1172,185 @@ fn unforced_expiry_requires_an_observed_clear() {
 }
 
 #[test]
-fn ratchet_and_seal_rows_are_the_only_client_exemption() {
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/session/abc\t01"),
-        "test: a session ratchet row is exempt"
-    );
-    assert!(
-        exempt_client_row(
-            "runtime_outbox",
-            "runtime_actor_state\tupdate\tdm-pair/ephemeral-seals/1\t{}"
-        ),
-        "test: an outbox row that only publishes a seal counter is exempt"
-    );
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/active/pair\t01"),
-        "test: the active pair index written with the ratchet is exempt"
-    );
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/local/session\t01"),
-        "test: local pair metadata written with the ratchet is exempt"
-    );
-    assert!(
-        !exempt_client_row("runtime_actor_state", "dm-pair/retired/abc\t01"),
-        "test: a retired pair is not a ratchet exemption"
-    );
-    assert!(
-        !exempt_client_row("message_projection", "dm-pair/session/abc"),
-        "test: a message row is never exempt"
-    );
-    assert!(
-        !exempt_client_row("outbox_queue", "id\tenv\tclass\tstate\tcipher"),
-        "test: the delivery outbox is never exempt"
-    );
-    assert!(
-        !exempt_client_row("local_event_log", "event\ttype\tok\tok\tbody"),
-        "test: an event row is never exempt"
-    );
-    assert!(
-        !exempt_client_row("receipt_projection", "receipt\tconv\tmsg\tread\tdevice"),
-        "test: a receipt row is never exempt"
-    );
+fn only_listed_client_rows_are_exempt() {
+    for (table, row) in [
+        ("runtime_actor_state", "dm-pair/session/abc\t01"),
+        ("runtime_outbox", "runtime_actor_state\tupdate\tdm-pair/ephemeral-seals/1\t{}"),
+        ("runtime_actor_state", "dm-pair/active/pair\t01"),
+        ("runtime_actor_state", "dm-pair/local/session\t01"),
+        ("runtime_actor_state", "sync/tick\t7"),
+        ("runtime_actor_state", "sync/status/event\t{}"),
+        ("runtime_actor_state", "own-contact/last-refresh\t1"),
+        ("runtime_actor_state", "account/networking\t{}"),
+        ("runtime_actor_state", "inbox/recovery-revision\t3"),
+        ("runtime_outbox", "device_directory\tupdate\tx\t{}"),
+    ] {
+        assert!(exempt_client_row(table, row), "test: {table} row `{row}` is listed as exempt");
+    }
+    for (table, row) in [
+        ("runtime_actor_state", "dm-pair/retired/abc\t01"),
+        ("runtime_actor_state", "dm-pair/session/abc/extra\t01"),
+        ("runtime_actor_state", "dm-pair/session/\t01"),
+        ("runtime_actor_state", "sync/attachment/a\t01"),
+        ("runtime_actor_state", "sync/tickets\t01"),
+        ("runtime_actor_state", "own-contact/last-refresh-extra\t1"),
+        ("runtime_outbox", "runtime_actor_state\tupdate\tsync/attachment/a\t{}"),
+        ("runtime_outbox", "device_directory_x\tupdate\tx\t{}"),
+        ("message_projection", "dm-pair/session/abc"),
+        ("outbox_queue", "id\tenv\tclass\tstate\tcipher"),
+        ("local_event_log", "event\ttype\tok\tok\tbody"),
+        ("receipt_projection", "receipt\tconv\tmsg\tread\tdevice"),
+    ] {
+        assert!(!exempt_client_row(table, row), "test: {table} row `{row}` must be compared");
+    }
+}
+
+fn node_snapshot(service: &str, table: &str, rows: &[&str]) -> Persistence {
+    let tables = BTreeMap::from([(
+        table.to_owned(),
+        rows.iter().map(|row| (*row).to_owned()).collect::<Vec<_>>(),
+    )]);
+    Persistence {
+        client: BTreeMap::new(),
+        node: BTreeMap::from([(service.to_owned(), tables)]),
+        wal: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+#[test]
+fn a_new_unlisted_node_table_that_changes_during_typing_fails_the_comparison() {
+    for (service, table) in NODE_EXEMPT.iter().map(|(service, table, _)| (*service, *table)) {
+        let result = assert_same_stores(
+            &node_snapshot(service, table, &["a"]),
+            &node_snapshot(service, table, &["a", "b"]),
+        );
+        assert!(result.is_ok(), "test: listed table {service}.{table} may change: {result:?}");
+    }
+    for (service, table) in [
+        ("ramflux-gateway", "gateway_typing_cache_v1"),
+        ("ramflux-gateway", "gateway_frames_v2"),
+        ("ramflux-gateway", "gateway_call_intent_v1"),
+        ("ramflux-gateway", "gateway_sessions_v2_shadow"),
+        ("ramflux-router", "router_inbox_v1"),
+        ("ramflux-router", "gateway_sessions_v2"),
+        ("ramflux-federation", "federation_session_log_v1"),
+        ("ramflux-retention", "retention_replay_notes_v1"),
+    ] {
+        let result = assert_same_stores(
+            &node_snapshot(service, table, &["a"]),
+            &node_snapshot(service, table, &["a", "b"]),
+        );
+        assert!(
+            result.is_err(),
+            "test: unlisted table {service}.{table} must fail when it changes"
+        );
+    }
 }
 
 fn logs(world: &World<'_>) -> String {
     let bob = world.bob_d.as_ref();
     let daemons = bob.map_or_else(|| vec![world.alice_d], |daemon| vec![world.alice_d, daemon]);
     dump_logs(world.stack, &daemons)
+}
+
+/// A first message to a contact whose request is still in flight is refused until the request
+/// settles, so wait for both outbound requests to read accepted before the first send.
+fn settle_contact_requests(
+    first: &Daemon,
+    first_account: &Account,
+    second: &Daemon,
+    second_account: &Account,
+) -> e2e::Result<()> {
+    for (daemon, account) in [(first, first_account), (second, second_account)] {
+        wait_json(daemon, &["contact", "list", "--account", &account.id], |value| {
+            value.pointer("/contacts/0/request_state").and_then(Value::as_str) == Some("accepted")
+        })?;
+    }
+    Ok(())
+}
+
+/// The packed HLC is about 1.2e17, above 2^53. A read through the CLI and the I-JSON ingress
+/// guard must carry the split pair and never the packed field.
+fn expect_split_hlc(read: &Value) -> e2e::Result<()> {
+    let rows = read.get("messages").and_then(Value::as_array).ok_or("read has no messages")?;
+    if rows.is_empty() {
+        return Err("read returned no message rows".into());
+    }
+    for row in rows {
+        let ms = row.get("hlc_ms").and_then(Value::as_u64).ok_or("row has no hlc_ms")?;
+        if ms == 0 || ms >= 1 << 53 || row.get("hlc_logical").and_then(Value::as_u64).is_none() {
+            return Err(format!("row carries a bad HLC pair: {row}").into());
+        }
+        let sequence = row.get("device_sequence").and_then(Value::as_str).ok_or("no sequence")?;
+        if sequence.len() != 20 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("device_sequence is not a 20-digit decimal string: {row}").into());
+        }
+        if row.get("hlc").is_some() {
+            return Err(format!("row still carries the packed hlc: {row}").into());
+        }
+    }
+    Ok(())
+}
+
+fn first_send(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    text: &str,
+) -> e2e::Result<()> {
+    let op = unique("first-send-op");
+    let sent = wait_json(
+        daemon,
+        &[
+            "conversation",
+            "send",
+            "--account",
+            &account.id,
+            "--conversation",
+            conversation,
+            "--text",
+            text,
+            "--operation-id",
+            &op,
+        ],
+        send_settled,
+    )?;
+    if sent.pointer("/body/delivery_state").and_then(Value::as_str) != Some("submitted") {
+        return Err(format!("first conversation.send was not submitted: {sent}").into());
+    }
+    Ok(())
+}
+
+/// Becoming friends creates the canonical direct conversation on both sides: each side can send
+/// the very first message with no seed message, no sibling device and no Surface.
+#[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
+#[test]
+fn befriending_creates_the_direct_conversation_on_both_sides() -> e2e::Result<()> {
+    let stack = boot_stack()?;
+    let alice_d = start_daemon(&stack, "alice")?;
+    let bob_d = start_daemon(&stack, "bob")?;
+    configure_node(&alice_d, &stack.discovery_url)?;
+    configure_node(&bob_d, &stack.discovery_url)?;
+    let alice = create_account(&alice_d, "Alice")?;
+    let bob = create_account(&bob_d, "Bob")?;
+    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    settle_contact_requests(&alice_d, &alice, &bob_d, &bob)?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.principal_commitment,
+        &bob.principal_commitment,
+    )?;
+    let from_alice = unique("first-from-alice");
+    let from_bob = unique("first-from-bob");
+    let daemons = [&alice_d, &bob_d];
+    first_send(&alice_d, &alice, &conversation, &from_alice)
+        .and_then(|()| {
+            wait_dm_texts(&bob_d, &bob, &conversation, &[from_alice.as_str()])
+                .and_then(|read| expect_split_hlc(&read))
+        })
+        .and_then(|()| first_send(&bob_d, &bob, &conversation, &from_bob))
+        .and_then(|()| {
+            wait_dm_texts(&alice_d, &alice, &conversation, &[from_bob.as_str()]).map(drop)
+        })
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &daemons)).into())
 }

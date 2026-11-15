@@ -131,6 +131,7 @@ impl AccountDb {
         let account = index.account(local_account_id)?;
         crate::account_erase::refuse_removed(&account)?;
         let path = index.root().join(&account.db_relative_path);
+        crate::schema_generation::creation::initialize_if_absent(&path, Some(key))?;
         let connection = Connection::open_account_writer(&path, writer)?;
         // If G2 raced between selecting the path and capturing this worker's epoch,
         // refuse before its first SQL (including migrations) can touch the old file.

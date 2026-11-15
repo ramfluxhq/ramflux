@@ -41,12 +41,12 @@ async fn lying_lookup()
 #[tokio::test]
 async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retires_the_old_session()
 -> Result<(), SdkError> {
-    let (mut a, mut b, fake, _d, _origin, mut s, old) = Box::pin(lying_lookup()).await?;
+    let (mut a, _b, fake, _d, _origin, mut s, old) = Box::pin(lying_lookup()).await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client);
     let local = a.client.owned_device_identity()?;
     let fake_identity = fake.client.owned_device_identity()?;
-    seal_native(&a, &fake, "old-session", "thread", b"old")?;
+    crate::client::native_test_support::bus::seed_pair(&a.client, &fake.client)?;
     assert!(a.client.active_pair(&local, &fake_identity)?.is_some());
     s.accounts.get_mut("alice").ok_or_else(|| invalid("account"))?.client =
         std::mem::take(&mut a.client);
@@ -91,9 +91,6 @@ async fn genuine_card_replaces_a_lying_lookup_only_after_confirmation_and_retire
     call(&mut s, "bob", "contact.add", json!({"principal_id":"alice"})).await?;
     a.client =
         std::mem::take(&mut s.accounts.get_mut("alice").ok_or_else(|| invalid("alice"))?.client);
-    b.client = std::mem::take(&mut s.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?.client);
-    let first = seal_native(&a, &b, "genuine-first", "thread", b"to the real bob")?;
-    assert_eq!(b.client.open_routed(&first, "bob")?.body.as_slice(), b"to the real bob");
     a.client.active_account_db.take();
     a.client.unlock_account("alice", b"native fixture data passphrase")?;
     assert_eq!(a.client.contact_entry("bob")?["root_source"], "card");
@@ -295,79 +292,22 @@ async fn principal_add_and_accept_use_the_same_link_id_for_both_sides() -> Resul
     Ok(())
 }
 #[tokio::test]
-async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_before_accept()
--> Result<(), SdkError> {
-    for forged in [true, false] {
-        let a = Fixture::new("alice", 21)?;
-        let mut b = Fixture::new("bob", 31)?;
-        super::super::review::trust(&b, &a)?;
-        b.client.establish_friend_link("prior-friend", "alice", "bob")?;
-        let mut message = message("legacy-control", "history");
-        let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
-        let (mut session, header) =
-            a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
-        let body = serde_json::to_vec(
-            &json!({"type":"friend.requested","link_id":"incoming-request","requester":if forged{"carol"}else{"alice"},"target":"bob"}),
-        )?;
-        let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
-        message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-            source_principal_commitment: Some(
-                a.client.owned_device_identity()?.root_commitment().into(),
-            ),
-            schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-            version: 1,
-            x3dh: header.clone(),
-            ciphertext,
-            collapse_tag: None,
-            report_commitment: None,
-        })?;
-        let entry = GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 1,
-            target_delivery_id: "bob".into(),
-            envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-        };
-        let receiving = b.client.load_or_create_recv_dm_session("history", header.as_ref())?;
-        b.client.send_direct_message("history", "old-history", "alice", b"prior bound thread")?;
-        b.client.persist_dm_session("history", "old-history", "recv", &receiving)?;
-        let mut engine =
-            GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-        let result = b
-            .client
-            .receive_legacy_entry(
-                &mut engine,
-                &super::super::review::pool()?,
-                entry,
-                crate::client::dm::LegacyReceive {
-                    conversation_id: "history",
-                    auto_fetch_attachments: false,
-                    relay_service_key_base64: None,
-                },
-            )
-            .await;
-        if forged {
-            assert!(result?.is_none());
-            assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
-            valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
-            assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
-        } else {
-            result?;
-            let link = b.client.account_db()?.friend_link("incoming-request")?;
-            assert_eq!(link.requester_id, "alice");
-            assert_eq!(link.state, "pending");
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_contact()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
+    let mut a = Fixture::native_named("alice", 21).await?;
+    let mut b = Fixture::native_named("bob", 31).await?;
     let d = Directory::new(&a, &b).await?;
-    d.records.lock().map_err(|_| invalid("mutex"))?[1].devices[0].legacy_proof_mut()?.signature =
-        ramflux_protocol::encode_base64url([0; 64]);
+    d.records
+        .lock()
+        .map_err(|_| invalid("mutex"))?
+        .get_mut(1)
+        .ok_or_else(|| invalid("peer publication"))?
+        .custody
+        .as_mut()
+        .ok_or_else(|| invalid("native authority"))?
+        .publication
+        .record
+        .signature = ramflux_protocol::encode_base64url([0; 64]);
     let mut s = state(&mut a, &mut b, &d)?;
     let error = call(&mut s, "alice", "contact.add", json!({"principal_id":"bob"}))
         .await
@@ -378,112 +318,6 @@ async fn invalid_directory_signatures_return_a_typed_manifest_error_without_a_co
     assert_eq!(body.reason_code.as_deref(), Some("manifest_invalid"));
     assert_eq!(client(&s)?.friend_links()?.len(), 0);
     assert!(client(&s)?.account_db()?.client_record("identity", "bob")?.is_none());
-    Ok(())
-}
-
-async fn valid_delivery_after_rejected_control(
-    a: &Fixture,
-    b: &mut Fixture,
-    engine: &mut impl crate::GatewaySessionAccess,
-    session: &mut ramflux_crypto::DmSession,
-) -> Result<(), SdkError> {
-    let mut next = super::super::message("legacy-next", "history");
-    next.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(
-            a.client.owned_device_identity()?.root_commitment().into(),
-        ),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        x3dh: None,
-        ciphertext: session.encrypt(b"after rejected control", dm_associated_data("history"))?,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let next = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 2,
-        target_delivery_id: "bob".into(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &next, None)?,
-    };
-    let delivered = b
-        .client
-        .receive_legacy_entry(
-            engine,
-            &super::super::review::pool()?,
-            next,
-            crate::client::dm::LegacyReceive {
-                conversation_id: "history",
-                auto_fetch_attachments: false,
-                relay_service_key_base64: None,
-            },
-        )
-        .await?;
-    assert!(delivered.is_some());
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 2);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arrives()
--> Result<(), SdkError> {
-    let a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    super::super::review::trust(&b, &a)?;
-    b.client.establish_friend_link("prior-friend", "alice", "bob")?;
-    let mut message = message("legacy-control", "history");
-    let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
-    let (mut session, header) =
-        a.client.create_send_dm_session_from_bundle(&message, "bob", bundle, "alice")?;
-    let body = serde_json::to_vec(
-        &json!({"type":"friend.removed","link_id":"incoming-request","requester":"alice","target":"bob"}),
-    )?;
-    let ciphertext = session.encrypt(&body, dm_associated_data("history"))?;
-    message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: Some(
-            a.client.owned_device_identity()?.root_commitment().into(),
-        ),
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        x3dh: header.clone(),
-        ciphertext,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: "bob".into(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-    };
-    let receiving = b.client.load_or_create_recv_dm_session("history", header.as_ref())?;
-    b.client.send_direct_message("history", "old-history", "alice", b"prior bound thread")?;
-    b.client.persist_dm_session("history", "old-history", "recv", &receiving)?;
-    let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let result = b
-        .client
-        .receive_legacy_entry(
-            &mut engine,
-            &super::super::review::pool()?,
-            entry,
-            crate::client::dm::LegacyReceive {
-                conversation_id: "history",
-                auto_fetch_attachments: false,
-                relay_service_key_base64: None,
-            },
-        )
-        .await;
-    assert!(result?.is_none());
-    assert_eq!(b.client.gateway_receive_cursor("bob")?, 1);
-    assert!(
-        b.client
-            .account_db()?
-            .journal_after(0, 128)?
-            .iter()
-            .any(|event| event.body["error_code"] == "legacy_control_rejected")
-    );
-    valid_delivery_after_rejected_control(&a, &mut b, &mut engine, &mut session).await?;
-    assert!(!b.client.friend_links()?.iter().any(|l| l.link_id == "incoming-request"));
     Ok(())
 }
 

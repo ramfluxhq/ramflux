@@ -30,20 +30,18 @@ use serde_json::json;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
 const BEFORE: &str = "own-copy w1 before-commit";
-const TARGET: &str = "sender";
 const INCARNATION: &str = "e";
-const MESSAGE: &str = "incoming-sibling-envelope";
 const SEQUENCE: u64 = 1;
 const RECOVERY_SEQ: u64 = 2;
 
-fn gate(db: &AccountDb) -> Result<OwnCopyW1<'static>, SdkError> {
-    gate_at(db, 0)
+fn gate<'a>(db: &AccountDb, target: &'a str) -> Result<OwnCopyW1<'a>, SdkError> {
+    gate_at(db, target, 0)
 }
 
-fn gate_at(db: &AccountDb, cursor: u64) -> Result<OwnCopyW1<'static>, SdkError> {
+fn gate_at<'a>(db: &AccountDb, target: &'a str, cursor: u64) -> Result<OwnCopyW1<'a>, SdkError> {
     Ok(OwnCopyW1 {
         expected: ReceiveExpectation {
-            target: TARGET,
+            target,
             incarnation: INCARNATION,
             cursor,
             generation: 1,
@@ -53,9 +51,9 @@ fn gate_at(db: &AccountDb, cursor: u64) -> Result<OwnCopyW1<'static>, SdkError> 
     })
 }
 
-fn staged(entry: &[u8], sequence: u64) -> ReceiveStage<'_> {
+fn staged<'a>(target: &'a str, entry: &'a [u8], sequence: u64) -> ReceiveStage<'a> {
     ReceiveStage {
-        target: TARGET,
+        target,
         incarnation: INCARNATION,
         sequence,
         entry_json: entry,
@@ -65,10 +63,10 @@ fn staged(entry: &[u8], sequence: u64) -> ReceiveStage<'_> {
     }
 }
 
-fn unique_entry(sequence: u64, payload_hash: &str) -> Result<Vec<u8>, SdkError> {
+fn unique_entry(target: &str, sequence: u64, payload_hash: &str) -> Result<Vec<u8>, SdkError> {
     Ok(serde_json::to_vec(&json!({
         "inbox_seq": sequence,
-        "target_delivery_id": TARGET,
+        "target_delivery_id": target,
         "envelope": {
             "schema": "test",
             "version": 1,
@@ -79,7 +77,7 @@ fn unique_entry(sequence: u64, payload_hash: &str) -> Result<Vec<u8>, SdkError> 
             "envelope_id": format!("env-{sequence}"),
             "source_principal_id": "source",
             "source_device_id": "device",
-            "target_delivery_id": TARGET,
+            "target_delivery_id": target,
             "delivery_class": "opaque_event",
             "priority": "normal",
             "ttl": 60,
@@ -106,19 +104,7 @@ fn ledger(account: &LocalBusAccountState, target: &str) -> Case {
 }
 
 fn reopen(account: &mut LocalBusAccountState) -> Case {
-    // Unlock drops the in-memory branch. The same device is coming back.
-    let branch = account.client.device_branch.clone();
-    account.client.active_account_db = None;
-    account.client.unlock_account("sender", b"native fixture data passphrase")?;
-    if let Some(branch) = branch {
-        account.client.device_branch = Some(branch.clone());
-        account
-            .client
-            .active_account_db
-            .as_mut()
-            .ok_or(SdkError::AccountDbNotUnlocked)?
-            .set_device_signer(branch);
-    }
+    crate::client::native_test_support::bus::reopen_account(account, "sender")?;
     Ok(())
 }
 
@@ -130,6 +116,52 @@ fn reset_work_present(account: &LocalBusAccountState) -> Result<bool, SdkError> 
     Ok(!account.client.account_db()?.actor_state_keys("dm-pair/reset-work/")?.is_empty())
 }
 
+async fn apply_native_copy(
+    account: &mut LocalBusAccountState,
+    entry: &GatewayInboxEntry,
+    expected: ReceiveExpectation<'_>,
+    fault: Option<Fault>,
+) -> Result<(), SdkError> {
+    let config = account.gateway_config.clone();
+    crate::client::native_test_support::bus::receive_copy_joining(
+        &mut account.client,
+        &config,
+        entry,
+        |client, write| {
+            let persist = || {
+                w1::join_own_copy(
+                    client.account_db()?,
+                    expected,
+                    expected.generation,
+                    "generated own-copy transaction failed",
+                    |tx| {
+                        let result = match write {
+                            crate::client::routed::JoinedW1::Project(context) => {
+                                let (body, admitted, _) =
+                                    client.commit_routed_w1_in(tx, entry.inbox_seq, context)?;
+                                (body, admitted)
+                            }
+                            crate::client::routed::JoinedW1::Cover => (None, Vec::new()),
+                            crate::client::routed::JoinedW1::ContactBootstrap { .. } => {
+                                return Err(SdkError::LocalBus(
+                                    "test: unexpected contact bootstrap".into(),
+                                ));
+                            }
+                        };
+                        client.bind_received_own_copy_in(tx, entry, expected)?;
+                        Ok(result)
+                    },
+                )
+            };
+            match fault {
+                Some(fault) => run(fault, persist),
+                None => persist(),
+            }
+        },
+    )
+    .await
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn own_copy_ack_binding() -> Case {
     LocalSet::new()
@@ -139,60 +171,53 @@ async fn own_copy_ack_binding() -> Case {
 
 async fn case() -> Case {
     let mut fixture = Box::pin(Fixture::new("own-copy-ack-binding")).await?;
-    ledger(&fixture.source, TARGET)?;
+    let target = fixture.source.target_delivery_id.clone();
+    ledger(&fixture.source, &target)?;
     let entry = own_copy(&fixture)?;
     let bytes = wire(&entry)?;
-    let root = fixture.sibling.client.owned_device_identity()?.root_commitment().to_owned();
-    let manifest: crate::SdkDeviceManifestResponse = serde_json::from_value(
-        fixture
-            .gateway
-            .lock()
-            .map_err(|_| "gateway")?
-            .manifests
-            .get(&root)
-            .cloned()
-            .ok_or("manifest")?,
-    )?;
-    fixture.source.client.account_db()?.send_direct_message(
-        "healthy",
-        MESSAGE,
-        "peer",
-        b"own-copy-locator-owner",
-    )?;
-
+    let message = entry.envelope.envelope_id.clone();
     let db = fixture.source.client.account_db()?;
-    let refused = gate(db)?.effect(db, SEQUENCE, MESSAGE, None, || Ok(()));
+    let refused = gate(db, &target)?.effect(db, SEQUENCE, &message, None, || Ok(()));
     assert!(
         matches!(&refused, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == INTEGRITY),
         "{refused:?}"
     );
-    assert!(!locator_present(&fixture.source, MESSAGE)?);
+    assert!(!locator_present(&fixture.source, &message)?);
 
-    assert_eq!(gate(db)?.stage(db, staged(&bytes, SEQUENCE))?, ReceiveStageResult::Staged);
-    let expected = gate(db)?.expected;
+    assert_eq!(
+        gate(db, &target)?.stage(db, staged(&target, &bytes, SEQUENCE))?,
+        ReceiveStageResult::Staged
+    );
+    let expected = gate(db, &target)?.expected;
     let pre_kill = db.durable_rows_for_test()?;
-    let rolled_packet = run(Fault::BeforeCommit, || {
-        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE)
-    });
+    let rolled_packet = Box::pin(apply_native_copy(
+        &mut fixture.source,
+        &entry,
+        expected,
+        Some(Fault::BeforeCommit),
+    ))
+    .await;
     assert!(
         matches!(&rolled_packet, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
         "{rolled_packet:?}"
     );
-    assert!(!locator_present(&fixture.source, MESSAGE)?);
-    assert_eq!(db.durable_rows_for_test()?, pre_kill, "kill-before the real packet writes nothing");
-    assert!(
-        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE,)?
+    assert!(!locator_present(&fixture.source, &message)?);
+    assert_eq!(
+        fixture.source.client.account_db()?.durable_rows_for_test()?,
+        pre_kill,
+        "kill-before the real packet writes nothing"
     );
-    let once_packet = db.durable_rows_for_test()?;
+    Box::pin(apply_native_copy(&mut fixture.source, &entry, expected, None)).await?;
+    let once_packet = fixture.source.client.account_db()?.durable_rows_for_test()?;
     assert_ne!(once_packet, pre_kill, "the real control/slot/receipt packet must write");
-    assert!(locator_present(&fixture.source, MESSAGE)?);
+    assert!(locator_present(&fixture.source, &message)?);
     let locator = fixture
         .source
         .client
         .account_db()?
-        .load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?
+        .load_actor_state::<w1::SequenceLocator>(&locator_key(&message))?
         .ok_or("locator")?;
-    assert_eq!(locator.target, TARGET);
+    assert_eq!(locator.target, target);
     assert_eq!(locator.incarnation, INCARNATION);
     assert_eq!(locator.sequence, SEQUENCE);
     let binding = fixture.source.client.own_copy_ack_binding(&entry)?.ok_or("binding")?;
@@ -208,12 +233,11 @@ async fn case() -> Case {
     );
 
     reopen(&mut fixture.source)?;
-    assert!(locator_present(&fixture.source, MESSAGE)?);
+    assert!(locator_present(&fixture.source, &message)?);
     let db = fixture.source.client.account_db()?;
-    let expected = gate(db)?.expected;
-    assert!(
-        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE,)?
-    );
+    let expected = gate(db, &target)?.expected;
+    let reopened = db.durable_rows_for_test()?;
+    Box::pin(apply_native_copy(&mut fixture.source, &entry, expected, None)).await?;
     assert_eq!(
         fixture.source.client.account_db()?.actor_state_keys("own-device/sequence-locator/")?.len(),
         1,
@@ -221,13 +245,13 @@ async fn case() -> Case {
     );
     assert_eq!(
         fixture.source.client.account_db()?.durable_rows_for_test()?,
-        once_packet,
+        reopened,
         "re-drive of the real packet is exactly one effect"
     );
 
     let db = fixture.source.client.account_db()?;
     assert_eq!(
-        db.receive_transaction(gate(db)?.expected, 1, |tx| {
+        db.receive_transaction(gate(db, &target)?.expected, 1, |tx| {
             tx.cover(ReceiveCover {
                 sequence: SEQUENCE,
                 kind: ReceiveCoverKind::Terminal,
@@ -239,10 +263,10 @@ async fn case() -> Case {
         "W2 removes work and writes the ACK intent"
     );
     assert_eq!(db.receive_state_for_test(SEQUENCE)?.0, None, "W2 drops the receipt");
-    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
+    assert_eq!(db.receive_ledger_snap_for_test(&target)?.intents, vec![SEQUENCE]);
     let wa = SourceWa {
         expected: ReceiveExpectation {
-            target: TARGET,
+            target: &target,
             incarnation: INCARNATION,
             cursor: SEQUENCE,
             generation: 1,
@@ -264,14 +288,14 @@ async fn case() -> Case {
         ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
     );
     let locator =
-        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(&message))?.ok_or("locator")?;
     assert!(!locator.acknowledged, "lost ACK reply retains the locator unmarked");
     assert_eq!(
         own_copy_acknowledged(db, &binding)?,
         (Some(false), Some(false)),
         "a lost reply leaves the replay marker and receipt unacknowledged"
     );
-    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
+    assert_eq!(db.receive_ledger_snap_for_test(&target)?.intents, vec![SEQUENCE]);
     let settled =
         [ReceiveAckResult { sequence: SEQUENCE, outcome: ReceiveAckOutcome::AlreadySettled }];
     // A fault after the last own-copy mark, right before COMMIT, rolls back every mark.
@@ -293,9 +317,9 @@ async fn case() -> Case {
     );
     assert_eq!(own_copy_acknowledged(db, &binding)?, (Some(false), Some(false)));
     let locator =
-        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(&message))?.ok_or("locator")?;
     assert!(!locator.acknowledged, "the killed settlement left the locator unmarked");
-    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
+    assert_eq!(db.receive_ledger_snap_for_test(&target)?.intents, vec![SEQUENCE]);
     assert_eq!(
         wa.apply(
             db,
@@ -309,28 +333,31 @@ async fn case() -> Case {
         ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
     );
     let locator =
-        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(&message))?.ok_or("locator")?;
     assert!(locator.acknowledged, "already_settled WA marks the locator");
     assert_eq!(
         own_copy_acknowledged(db, &binding)?,
         (Some(true), Some(true)),
         "the same transaction marks the existing replay marker and receipt"
     );
-    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, Vec::<u64>::new());
+    assert_eq!(db.receive_ledger_snap_for_test(&target)?.intents, Vec::<u64>::new());
 
-    db.delete_direct_message("healthy", MESSAGE, "local", "erase-before-wa")?;
-    assert!(!locator_present(&fixture.source, MESSAGE)?, "erase before WA must drop the locator");
+    let conversation = super::fixture::direct_conversation(&fixture.source.client)?;
+    let messages = db.direct_messages(&conversation)?;
+    let [original] = messages.as_slice() else { return Err("one authored sibling message".into()) };
+    db.delete_direct_message(&conversation, &original.message_id, "local", "erase-before-wa")?;
+    assert!(!locator_present(&fixture.source, &message)?, "erase before WA must drop the locator");
     assert!(
         db.actor_state_keys("own-device/sequence-locator/")?
             .iter()
-            .all(|key| key != &locator_key(MESSAGE)),
+            .all(|key| key != &locator_key(&message)),
         "erased message must not keep its locator"
     );
 
-    let recovery_bytes = unique_entry(RECOVERY_SEQ, "recovery-hash")?;
-    let expected = gate_at(db, 1)?.expected;
+    let recovery_bytes = unique_entry(&target, RECOVERY_SEQ, "recovery-hash")?;
+    let expected = gate_at(db, &target, 1)?.expected;
     assert_eq!(
-        gate_at(db, 1)?.stage(db, staged(&recovery_bytes, RECOVERY_SEQ))?,
+        gate_at(db, &target, 1)?.stage(db, staged(&target, &recovery_bytes, RECOVERY_SEQ))?,
         ReceiveStageResult::Staged
     );
     let now = now_unix_timestamp();
@@ -351,16 +378,16 @@ async fn case() -> Case {
     // unchanged. P20 routes that exact error to `recover`; the effect path never leaves reset work.
     let pair_db = fixture.source.client.account_db()?;
     pair_db.send_direct_message("healthy", "pair-recovery", "peer", b"pair")?;
-    let pair_bytes = unique_entry(5, "pair-recovery-hash")?;
+    let pair_bytes = unique_entry(&target, 5, "pair-recovery-hash")?;
     let expected = ReceiveExpectation {
-        target: TARGET,
+        target: &target,
         incarnation: INCARNATION,
         cursor: 1,
         generation: 1,
         erasure_generation: pair_db.privacy_erasure_generation()?,
     };
     assert_eq!(
-        OwnCopyW1 { expected, generation: 1 }.stage(pair_db, staged(&pair_bytes, 5))?,
+        OwnCopyW1 { expected, generation: 1 }.stage(pair_db, staged(&target, &pair_bytes, 5))?,
         ReceiveStageResult::Staged
     );
     let pair =
@@ -382,17 +409,17 @@ async fn case() -> Case {
         "peer",
         b"omit",
     )?;
-    let omit_bytes = unique_entry(4, "omit-hash")?;
+    let omit_bytes = unique_entry(&target, 4, "omit-hash")?;
     let db = fixture.source.client.account_db()?;
     let expected = ReceiveExpectation {
-        target: TARGET,
+        target: &target,
         incarnation: INCARNATION,
         cursor: 1,
         generation: 1,
         erasure_generation: db.privacy_erasure_generation()?,
     };
     assert_eq!(
-        OwnCopyW1 { expected, generation: 1 }.stage(db, staged(&omit_bytes, 4))?,
+        OwnCopyW1 { expected, generation: 1 }.stage(db, staged(&target, &omit_bytes, 4))?,
         ReceiveStageResult::Staged
     );
     with_omit_locator(|| {

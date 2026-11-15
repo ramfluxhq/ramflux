@@ -119,9 +119,12 @@ impl Fake {
                 }
                 json!({"head_seq":10,"floor_seq":1,"subscribed":true})
             }
-            "message.read" => {
-                json!({"messages":[{"conversation_id":body["conversation_id"],"message_id":"ping","sender_id":if self.faults.contains(&Fault::SelfSender){"agent-principal"}else{"human-device"},"sender_root_commitment":"human-commitment","body_utf8":"@agent ping","created_at":1000,"deleted":false}]})
-            }
+            "message.list" => message_detail(
+                body["conversation_id"].as_str().ok_or(Error::State)?,
+                body["message_id"].as_str().ok_or(Error::State)?,
+                "@agent ping",
+                self.faults.contains(&Fault::SelfSender),
+            ),
             "message.submit" | "group.send" => {
                 let id = operation.ok_or(Error::Bus)?;
                 if let Some(previous) = self.receipts.get(id) {
@@ -167,4 +170,12 @@ pub fn incoming(seq: u64, group: bool) -> LocalBusFrame {
     event.kind = LocalBusFrameKind::Event;
     event.seq = Some(seq);
     event
+}
+
+pub fn message_detail(conversation: &str, id: &str, text: &str, own: bool) -> Value {
+    json!({"schema":ramflux_sdk::typed_read_model::READ_MODEL_SCHEMA,"snapshot_sequence":11,
+        "message":{"id":id,"conversation_id":conversation,"is_own":own,"state":"content",
+            "kind":"message","author":{"account_anchor":if own {"agent-commitment"} else {"human-commitment"},
+                "device_id":if own {"agent-device"} else {"human-device"},"device_epoch":1},
+            "text":text,"content":{"message":{"text":text}},"revision":0}})
 }

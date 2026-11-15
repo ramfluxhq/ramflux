@@ -17,6 +17,8 @@ mod genesis;
 mod networking;
 pub(crate) mod pairing;
 mod publication;
+mod verification_cache;
+pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
 mod race_hooks;
 mod recovery;
@@ -709,18 +711,27 @@ pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
 /// # Errors
 /// Rejects missing/corrupt records, bad signatures, changed modes or missing custodian evidence.
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
-    read_account(root, id, now, true)
+    read_account(root, id, now, true, None)
 }
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
-    read_account(root, id, now, false)
+    read_account(root, id, now, false, None)
+}
+pub(crate) fn load_account_with_cache(
+    root: &Path,
+    id: &str,
+    now: u64,
+    cache: &mut PublicAuthorityCache,
+) -> Result<BornAccount, SdkError> {
+    read_account(root, id, now, true, Some(cache))
 }
 fn read_account(
     root: &Path,
     id: &str,
     now: u64,
     require_current: bool,
+    cache: Option<&mut PublicAuthorityCache>,
 ) -> Result<BornAccount, SdkError> {
     let path = directory(root, id)?.join("authority.json");
     let file = fs::File::open(path)?;
@@ -744,8 +755,12 @@ fn read_account(
     } else {
         stored.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?
     };
-    let verified =
-        verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?;
+    // Namespace/recovery selection and an external custodian are checked on every read.
+    let verified = if let Some(cache) = cache {
+        cache.verify(&stored, human.as_ref(), now)?
+    } else {
+        verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?
+    };
     let authority_blocked = stored.pins.require_current(&verified).is_err();
     if require_current {
         require_current_authority(&stored.pins, &verified)?;
@@ -1076,7 +1091,7 @@ impl BornAccount {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mark_live_for_test(&mut self, root: &Path) -> Result<(), SdkError> {
         self.mark_live(root)
     }

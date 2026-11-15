@@ -32,6 +32,10 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("typed refusal construction; no envelope persist"),
     ),
     (
+        "durable_mode.rs:rejected_class_for_target",
+        Class::NonIngress("typed refusal construction; no envelope persist"),
+    ),
+    (
         "durable_mode.rs:rejected_security_for_target",
         Class::NonIngress("typed refusal construction; no envelope persist"),
     ),
@@ -109,7 +113,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, edge_count, non_ingress_count), (18, 6, 13));
+    assert_eq!((ingress_count, edge_count, non_ingress_count), (18, 6, 14));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
@@ -186,7 +190,8 @@ fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
     );
 }
 
-const CONTROL_AUTHORITY_ERR: &str = "source authority refused: AuthorityMismatch";
+const CONTROL_FOREIGN_AUTH: &str =
+    "unauthorized: foreign authority requires an authenticated federation peer";
 const CONTROL_FORWARDED: &str = "sender_authority_refused";
 
 fn control_submit_ok<T>(
@@ -223,7 +228,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 ),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.outcome.as_str(),
             );
         }
@@ -235,7 +240,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 ),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -250,7 +255,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 ),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -263,7 +268,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 )),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.outcome.as_str(),
             );
         }
@@ -276,7 +281,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 )),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -291,7 +296,7 @@ fn exercise_router_control(
             ) else {
                 return Err(format!("control {entry} admitted unexpectedly").into());
             };
-            assert_eq!(error.to_string(), CONTROL_AUTHORITY_ERR, "{entry}");
+            assert_eq!(error.to_string(), CONTROL_FOREIGN_AUTH, "{entry}");
         }
         "router_runtime.rs:submit_forwarded" => {
             control_forwarded_value(entry, handle.submit_forwarded(forwarded_request(envelope)));
@@ -342,7 +347,7 @@ fn exercise_router_control(
                     Instant::now(),
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 )),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -387,7 +392,7 @@ fn control_handler_submit(
             control_submit_ok(
                 entry,
                 crate::handlers::handle_mvp0_envelope(&body, handle),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.outcome.as_str(),
             );
         }
@@ -401,7 +406,7 @@ fn control_handler_submit(
                     handle,
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 ),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -414,7 +419,7 @@ fn control_handler_submit(
                     handle,
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 ),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.outcome.as_str(),
             );
         }
@@ -428,7 +433,7 @@ fn control_handler_submit(
                     handle,
                     ramflux_node_core::RouterEnvelopeOrigin::Gateway,
                 )),
-                CONTROL_AUTHORITY_ERR,
+                CONTROL_FOREIGN_AUTH,
                 |response| response.delivery.outcome.as_str(),
             );
         }
@@ -483,7 +488,7 @@ fn control_fanout_captured(
     let Err(error) = handle.own_device_fanout(&fanout_request(envelope)) else {
         return Err(format!("control {entry} admitted unexpectedly").into());
     };
-    assert_eq!(error.to_string(), CONTROL_AUTHORITY_ERR, "{entry}");
+    assert_eq!(error.to_string(), CONTROL_FOREIGN_AUTH, "{entry}");
     Ok(())
 }
 
@@ -506,7 +511,7 @@ fn control_mesh_fanout(
             let value: serde_json::Value = serde_json::from_slice(&reply.body)?;
             return Err(format!("control {entry} admitted: {value}").into());
         }
-        Err(error) => assert_eq!(error.to_string(), CONTROL_AUTHORITY_ERR, "{entry}"),
+        Err(error) => assert_eq!(error.to_string(), CONTROL_FOREIGN_AUTH, "{entry}"),
     }
     Ok(())
 }
@@ -521,7 +526,7 @@ fn control_itest_http(
         Ok((status, body)) => {
             return Err(format!("control {entry} admitted: {status} {body}").into());
         }
-        Err(error) => assert_eq!(error.to_string(), CONTROL_AUTHORITY_ERR, "{entry}"),
+        Err(error) => assert_eq!(error.to_string(), CONTROL_FOREIGN_AUTH, "{entry}"),
     }
     Ok(())
 }
@@ -1606,6 +1611,12 @@ fn marked_envelope(
     envelope.priority = ramflux_protocol::Priority::Low;
     envelope.ttl = ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS_U32;
     envelope.created_at = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    // Mode controls carry an explicit root mismatch, so passing the mode guard reaches
+    // authority refusal without creating an inbox entry.
+    envelope.ext.ext.insert(
+        "source_root_commitment".into(),
+        serde_json::json!(ramflux_protocol::encode_base64url([0x44; 32])),
+    );
     envelope.ext.ext.insert("delivery_mode".into(), mode);
     resign_envelope(&mut envelope)?;
     Ok(envelope)

@@ -509,6 +509,37 @@ fn federation_handshake_requires_pinned_invitation_key() -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// Generation 1 forwards only `message` and `call_wake` inner envelopes.
+fn assert_inner_delivery_classes(
+    target_state: &FederationTrustState,
+    forward: &FederatedEnvelopeForwardRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut call_wake = forward.clone();
+    call_wake.envelope.delivery_class = DeliveryClass::CallWake;
+    target_state.ensure_federated_envelope_allowed(&call_wake, "node_a.example", 1_760_000_020)?;
+    for refused_class in [
+        DeliveryClass::OpaqueEvent,
+        DeliveryClass::NotificationWake,
+        DeliveryClass::SelfDeviceControl,
+        DeliveryClass::ObjectManifest,
+        DeliveryClass::ObjectChunk,
+        DeliveryClass::FederationControl,
+    ] {
+        let mut refused = forward.clone();
+        refused.envelope.delivery_class = refused_class.clone();
+        let rejected = target_state.ensure_federated_envelope_allowed(
+            &refused,
+            "node_a.example",
+            1_760_000_020,
+        );
+        assert!(
+            matches!(rejected, Err(NodeCoreError::DeliveryClassRefused)),
+            "generation 1 refuses {refused_class:?} with the typed class error: {rejected:?}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn std::error::Error>> {
     let source_seed = seed_from_nonce(0xa1, 4);
@@ -580,7 +611,7 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
         target_node_id: "node_b.example".to_owned(),
         delivery_class: "opaque_event".to_owned(),
         required_capability: "opaque_delivery".to_owned(),
-        envelope: envelope("env_true_key_forward", "target_node_b", DeliveryClass::OpaqueEvent),
+        envelope: envelope("env_true_key_forward", "target_node_b", DeliveryClass::Message),
     };
     let mut self_attested_capability = forward.clone();
     self_attested_capability.required_capability = "federation_relay".to_owned();
@@ -602,14 +633,7 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
     verify_federated_envelope_forward(&forward, &pinned_a)?;
     target_state.ensure_federated_envelope_allowed(&forward, "node_a.example", 1_760_000_020)?;
 
-    let mut control_class = forward.clone();
-    control_class.envelope.delivery_class = DeliveryClass::SelfDeviceControl;
-    let rejected = target_state.ensure_federated_envelope_allowed(
-        &control_class,
-        "node_a.example",
-        1_760_000_020,
-    );
-    assert!(matches!(rejected, Err(NodeCoreError::ItestHttp(_))));
+    assert_inner_delivery_classes(&target_state, &forward)?;
 
     let wrong_key = ramflux_crypto::public_key_base64url_from_seed(seed_from_nonce(0xcc, 8));
     let rejected = verify_federated_envelope_forward(&forward, &wrong_key);

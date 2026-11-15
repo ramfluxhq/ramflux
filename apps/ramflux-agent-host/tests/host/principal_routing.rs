@@ -18,8 +18,8 @@ impl AgentBus for PrincipalBus {
         if method == "identity.directory" {
             value["identities"].as_array_mut().ok_or(ramflux_agent_host::Error::Bus)?.insert(0, json!({"principal_id":"outsider","contact_identity_commitment":"outsider-root","devices":[{"device_id":"human-principal","target_delivery_id":"outsider-target"}]}));
         }
-        if method == "message.read" {
-            value["messages"][0]["sender_id"] = json!("human-principal");
+        if method == "message.list" {
+            value["message"]["sender_id"] = json!("human-principal");
         }
         Ok(value)
     }

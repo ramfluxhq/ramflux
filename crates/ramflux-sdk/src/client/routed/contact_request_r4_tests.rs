@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Held-request quota, restored consent and global-pressure overflow regressions.
-use super::super::born_bus;
 use super::*;
 const PRESSURE: &str = "contact-admission/backpressure";
 async fn sync(state: &mut LocalBusDaemonState) -> Result<(), SdkError> {
@@ -61,7 +60,19 @@ fn sender_budget_left(state: &LocalBusDaemonState) -> Result<bool, SdkError> {
 #[tokio::test]
 async fn contact02_r4_account_pressure_redrives_do_not_spend_the_held_sender_quota()
 -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_account_pressure_redrives_do_not_spend_the_held_sender_quota_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_account_pressure_redrives_do_not_spend_the_held_sender_quota_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 171)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 181)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
     charge(&state, "inbound-account", 64)?;
     *directory.incoming.lock().map_err(|_| invalid("inbox"))? = vec![entry];
@@ -79,7 +90,19 @@ async fn contact02_r4_account_pressure_redrives_do_not_spend_the_held_sender_quo
 #[tokio::test]
 async fn contact02_r4_pending_cap_held_request_is_admitted_when_capacity_frees()
 -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_pending_cap_held_request_is_admitted_when_capacity_frees_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_pending_cap_held_request_is_admitted_when_capacity_frees_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 191)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 201)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let filler = fill_pending(&state)?;
     *directory.incoming.lock().map_err(|_| invalid("inbox"))? = vec![entry];
@@ -104,7 +127,19 @@ async fn contact02_r4_pending_cap_held_request_is_admitted_when_capacity_frees()
 #[tokio::test]
 async fn contact02_r4_unblock_restores_admission_and_accepted_links_are_never_fenced()
 -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_unblock_restores_admission_and_accepted_links_are_never_fenced_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_unblock_restores_admission_and_accepted_links_are_never_fenced_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 211)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 221)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     let entry = pending(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     contact(&mut state, "bob", "contact.block", json!({"root_commitment":source})).await?;
@@ -135,7 +170,19 @@ async fn contact02_r4_unblock_restores_admission_and_accepted_links_are_never_fe
 #[tokio::test]
 async fn contact02_r4_local_re_add_after_decline_accepts_the_peer_response() -> Result<(), SdkError>
 {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_local_re_add_after_decline_accepts_the_peer_response_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_local_re_add_after_decline_accepts_the_peer_response_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 231)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 241)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     contact(&mut state, "bob", "contact.decline", json!({"root_commitment":source})).await?;
@@ -191,7 +238,19 @@ async fn held_under_global_pressure(
 
 #[tokio::test]
 async fn contact02_r4_global_pressure_rescans_skip_the_manifest_fetch() -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_global_pressure_rescans_skip_the_manifest_fetch_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_global_pressure_rescans_skip_the_manifest_fetch_body() -> Result<(), SdkError>
+{
+    let mut a = Box::pin(Fixture::native_named("alice", 5)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 15)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     held_under_global_pressure(&mut state, &directory, None).await?;
     let fetched = directory.manifest_fetches.load(Ordering::SeqCst);
     for _ in 0..3 {
@@ -209,7 +268,19 @@ async fn contact02_r4_global_pressure_rescans_skip_the_manifest_fetch() -> Resul
 
 #[tokio::test]
 async fn contact02_r4_deferred_slot_expiry_is_capped_like_state_expiry() -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_deferred_slot_expiry_is_capped_like_state_expiry_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_deferred_slot_expiry_is_capped_like_state_expiry_body() -> Result<(), SdkError>
+{
+    let mut a = Box::pin(Fixture::native_named("alice", 45)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 55)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     held_under_global_pressure(&mut state, &directory, Some(u32::MAX)).await?;
     let pressure = account(&state, "bob")?
         .account_db()?
@@ -225,7 +296,19 @@ async fn contact02_r4_deferred_slot_expiry_is_capped_like_state_expiry() -> Resu
 #[tokio::test]
 async fn contact02_r4_root_overflow_under_global_pressure_stays_unacknowledged()
 -> Result<(), SdkError> {
-    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r4_root_overflow_under_global_pressure_stays_unacknowledged_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r4_root_overflow_under_global_pressure_stays_unacknowledged_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 25)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 35)).await?;
+    let directory = Directory::new(&a, &b).await?;
+    let mut state = state(&mut a, &mut b, &directory)?;
     let mut entry = r2::outbound(&mut state, &directory).await?;
     entry.inbox_seq = 5000;
     let now = now_unix_timestamp();

@@ -6,24 +6,19 @@
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
-    self, apply_page, queue_legacy_hold, queue_own_copy, queue_policy_kind, queue_projection,
-    set_after_classify, set_before_commit, set_before_commit_hook, set_manifest_await,
-    set_projection_error, set_projection_key,
+    self, apply_page, queue_manifest_wait, queue_policy_kind, queue_projection, set_after_classify,
+    set_before_commit, set_before_commit_hook, set_manifest_await, set_projection_error,
+    set_projection_key,
 };
-use super::erase_support::{erase_message_through_retention, erase_through_retention};
+use super::apply_w1_real_own_copy as real;
+use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
-use crate::client::a2i::queue_unbound_answers;
-use crate::client::identity_authority::test_support;
 use crate::client::own_device_copy::PREFIX;
 use crate::client::routed::{Committed, Kind, Routing};
-use crate::dm::{
-    SdkDmEncryptedEnvelope, dm_associated_data, dm_device_id_hash, gateway_direct_message_envelope,
-};
 use crate::gateway::GatewaySessionTransportKind;
 use crate::prelude::*;
-use ramflux_crypto::DmSession;
 use ramflux_node_core::{InboxEntry, RouterCore, RouterRedbStore};
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{AccountDb, ReceiveFailureKind, StorageError};
@@ -39,6 +34,29 @@ use std::time::Duration;
 struct Harness {
     root: tempfile::TempDir,
     account: crate::bus::state::LocalBusAccountState,
+    /// Present when the account receives a real generated own copy.
+    real: Option<Box<real::Real>>,
+}
+
+fn activate(db: &AccountDb, target: &str) -> Result<(), SdkError> {
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(target, "e")?;
+    Ok(())
+}
+
+/// A native account that holds a real sibling-sealed own copy; the router lives in a scratch dir.
+async fn open_real() -> Result<Harness, SdkError> {
+    let (account, copy) = Box::pin(real::open(activate)).await?;
+    let root = tempfile::tempdir().expect("tmp");
+    Ok(Harness { root, account, real: Some(Box::new(copy)) })
+}
+
+fn reopen_any(harness: &mut Harness) -> Result<(), SdkError> {
+    if harness.real.is_some() {
+        real::reopen(&mut harness.account)
+    } else {
+        reopen(&mut harness.account)
+    }
 }
 
 fn open() -> Result<Harness, SdkError> {
@@ -57,7 +75,7 @@ fn open() -> Result<Harness, SdkError> {
     let db = account.client.account_db()?;
     db.install_receive_ledger_schema()?;
     db.seed_receive_epoch_for_test(&target, "e")?;
-    Ok(Harness { root, account })
+    Ok(Harness { root, account, real: None })
 }
 
 fn turn(
@@ -74,13 +92,19 @@ fn envelope(
     device: &str,
     seq: u64,
 ) -> serde_json::Value {
+    // These transaction-boundary fixtures carry the active sender profile even when
+    // their intentionally opaque application bytes are handled by a fault hook.
+    let payload = ramflux_protocol::decode_base64url(payload)
+        .ok()
+        .filter(|bytes| ramflux_protocol::encode_base64url(bytes) == payload)
+        .map_or_else(|| encode_base64url(payload.as_bytes()), |_| payload.to_owned());
     json!({
         "inbox_seq": seq,
         "target_delivery_id": target,
         "envelope": {
-            "schema": "test",
-            "version": 1,
-            "domain": "test",
+            "schema": "ramflux.envelope.v2",
+            "version": 2,
+            "domain": "ramflux.envelope.v2",
             "signing_key_id": "key",
             "signature_alg": "ed25519",
             "signature": "sig",
@@ -93,7 +117,11 @@ fn envelope(
             "ttl": 60,
             "created_at": 1,
             "encrypted_payload": payload,
-            "payload_hash": format!("H{seq}")
+            "payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, payload.as_bytes()),
+            "delivery_mode":"durable",
+            "collapse_tag":encode_base64url([0x22;32]),
+            "report_commitment":encode_base64url([0x33;32]),
+            "ext":{"source_root_commitment":encode_base64url([0x11;32])}
         }
     })
 }
@@ -390,10 +418,8 @@ fn receive_from_inbox(row: &InboxEntry) -> ReceiveEntry {
 #[derive(Clone, Copy, Debug)]
 enum Sweep {
     OwnCopy,
-    LegacyHold,
     Failure,
     Projection,
-    LegacyDm,
 }
 
 fn arm_sweep(
@@ -402,82 +428,30 @@ fn arm_sweep(
     entry: &ReceiveEntry,
 ) -> Result<(), SdkError> {
     match sweep {
-        Sweep::OwnCopy => queue_own_copy(),
-        Sweep::LegacyHold => queue_legacy_hold(std::iter::repeat_n(true, 8)),
         Sweep::Failure => queue_policy_kind(ReceiveFailureKind::Deterministic),
         Sweep::Projection => {
             persist_projection_receipt(account, &entry.entry, "authenticated-projection-key")?;
             set_projection_key("authenticated-projection-key");
             queue_projection();
         }
-        Sweep::LegacyDm => {}
+        // The real own copy needs no injection: production classifies it.
+        Sweep::OwnCopy => {}
     }
     Ok(())
 }
 
-fn sweep_entry(
-    sweep: Sweep,
-    account: &crate::bus::state::LocalBusAccountState,
-) -> Result<ReceiveEntry, SdkError> {
+fn sweep_entry(sweep: Sweep, harness: &Harness) -> Result<ReceiveEntry, SdkError> {
+    let account = &harness.account;
     match sweep {
+        Sweep::OwnCopy => Ok(harness
+            .real
+            .as_ref()
+            .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+            .entry
+            .clone()),
         Sweep::Failure => Ok(retryable_entry(account)),
         Sweep::Projection => Ok(live_dummy(account)),
-        Sweep::LegacyDm => legacy_dm_entry(account),
-        _ => Ok(own_dummy(account)),
     }
-}
-
-fn pin_own_directory(account: &crate::bus::state::LocalBusAccountState) -> Result<(), SdkError> {
-    let manifest = test_support::public_manifest(&account.client)?;
-    account.client.persist_root_verified_directory(&manifest)
-}
-
-fn legacy_dm_entry(
-    account: &crate::bus::state::LocalBusAccountState,
-) -> Result<ReceiveEntry, SdkError> {
-    pin_own_directory(account)?;
-    let local = account.gateway_config.device_id.clone();
-    let sender_hash = dm_device_id_hash(&local);
-    let transcript = [7u8; 32];
-    let seed = [9u8; 32];
-    let mut sending = DmSession::initiator(seed, sender_hash, sender_hash, transcript)?;
-    let receiving = DmSession::recipient(seed, sender_hash, sender_hash, transcript)?;
-    account.client.send_direct_message("legacy-dm-sweep", "prior", "alice", b"history")?;
-    account.client.persist_dm_session("legacy-dm-sweep", "bound-history", "recv", &receiving)?;
-    let ciphertext = sending.encrypt(b"body", dm_associated_data("legacy-dm-sweep"))?;
-    let inner = SdkDmEncryptedEnvelope {
-        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
-        version: 1,
-        source_principal_commitment: None,
-        x3dh: None,
-        ciphertext,
-        collapse_tag: None,
-        report_commitment: None,
-    };
-    let message = GatewayDirectMessage {
-        conversation_id: "legacy-dm-sweep".into(),
-        message_id: "legacy-dm-one".into(),
-        envelope_id: "legacy-dm-one".into(),
-        source_principal_id: account.gateway_config.principal_id.clone(),
-        sender_id: local.clone(),
-        recipient_device_id: Some(local.clone()),
-        recipient_principal_commitment: None,
-        target_delivery_id: account.target_delivery_id.clone(),
-        encrypted_body: serde_json::to_vec(&inner)?,
-        created_at: now_unix_timestamp(),
-        ttl: 86_400,
-    };
-    Ok(ReceiveEntry {
-        entry: crate::GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 1,
-            target_delivery_id: account.target_delivery_id.clone(),
-            envelope: gateway_direct_message_envelope(&account.gateway_config, &message, None)?,
-        },
-        retry_key: None,
-        replay: false,
-        turn: None,
-    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -505,17 +479,9 @@ fn ledger(account: &crate::bus::state::LocalBusAccountState) -> Result<Ledger, S
 
 fn expected_ledger(sweep: Sweep) -> Ledger {
     match sweep {
-        Sweep::OwnCopy | Sweep::LegacyDm | Sweep::Projection | Sweep::Failure => {
+        Sweep::OwnCopy | Sweep::Projection | Sweep::Failure => {
             Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
         }
-        Sweep::LegacyHold => Ledger {
-            state: (Some("held".into()), 1),
-            cursor: 1,
-            journals: 1,
-            holds: 1,
-            work: 1,
-            intents: Vec::new(),
-        },
     }
 }
 
@@ -529,30 +495,11 @@ fn assert_ledger(got: &Ledger, sweep: Sweep) {
     assert_eq!(got.intents, want.intents, "{sweep:?} ack intents");
 }
 
-fn assert_legacy_dm_w1_effect(
-    account: &crate::bus::state::LocalBusAccountState,
-    entry: &ReceiveEntry,
-) -> Result<(), SdkError> {
-    assert!(account.client.legacy_w1_committed(&entry.entry)?, "legacy-DM W1 committed marker");
-    let rows = content_rows(account.client.account_db()?)?;
-    assert!(
-        rows.iter()
-            .any(|row| row.starts_with("direct_message_projection|")
-                && row.contains("legacy-dm-one")),
-        "legacy-DM W1 projection row: {rows:?}"
-    );
-    Ok(())
-}
-
 fn assert_sweep(
     account: &crate::bus::state::LocalBusAccountState,
     sweep: Sweep,
-    entry: &ReceiveEntry,
 ) -> Result<(), SdkError> {
     assert_ledger(&ledger(account)?, sweep);
-    if matches!(sweep, Sweep::LegacyDm) {
-        assert_legacy_dm_w1_effect(account, entry)?;
-    }
     Ok(())
 }
 
@@ -571,10 +518,14 @@ async fn redrive_once(
     Ok(())
 }
 
+async fn open_sweep(sweep: Sweep) -> Result<Harness, SdkError> {
+    if matches!(sweep, Sweep::OwnCopy) { open_real().await } else { open() }
+}
+
 async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open_sweep(sweep).await?;
     let sends = attach_counter(&mut harness.account);
-    let entry = sweep_entry(sweep, &harness.account)?;
+    let entry = sweep_entry(sweep, &harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
     let store = open_router(&path, mode)?;
@@ -597,23 +548,23 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     );
     let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
     let recovered = receive_from_inbox(&rows[0]);
-    reopen(&mut harness.account)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let _ = drive(&mut harness.account, recovered, || 1).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
-    reopen(&mut harness.account)?;
+    assert_sweep(&harness.account, sweep)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, entry.clone()).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
+    assert_sweep(&harness.account, sweep)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
 }
 
 async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open_sweep(sweep).await?;
     let sends = attach_counter(&mut harness.account);
-    let entry = sweep_entry(sweep, &harness.account)?;
+    let entry = sweep_entry(sweep, &harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
     let store = open_router(&path, mode)?;
@@ -622,10 +573,10 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let _ = drive(&mut harness.account, entry.clone(), || 1).await?;
     let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
     let recovered = receive_from_inbox(&rows[0]);
-    reopen(&mut harness.account)?;
+    reopen_any(&mut harness)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, recovered).await?;
-    assert_sweep(&harness.account, sweep, &entry)?;
+    assert_sweep(&harness.account, sweep)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
@@ -645,65 +596,6 @@ async fn own_copy_w1_commit_sweep() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn legacy_hold_w1_commit_sweep() -> Result<(), SdkError> {
-    sweep_kind(Sweep::LegacyHold).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a2i_w1_refuses_before_effects_across_restart() -> Result<(), SdkError> {
-    for mode in [Mode::Wal, Mode::RedbOnly] {
-        let mut harness = open()?;
-        let sends = attach_counter(&mut harness.account);
-        let entry = own_dummy(&harness.account);
-        let path = router_path(harness.root.path());
-        let store = open_router(&path, mode)?;
-        seed_router_row(&store, &entry.entry)?;
-        pin_mode(&path, mode);
-        let mut before_restart = None;
-        for restart in [false, true] {
-            if restart {
-                reopen(&mut harness.account)?;
-            }
-            queue_unbound_answers(std::iter::repeat_n(true, 8));
-            let result = drive(&mut harness.account, entry.clone(), || 1).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(SdkError::GeneratedRefused {
-                        code: crate::error::GeneratedRefusalCode::Authority,
-                        ..
-                    })
-                ),
-                "refused A2I must never reach a legacy effect"
-            );
-            let current = ledger(&harness.account)?;
-            assert_eq!(current.state, (Some("staged".into()), 1));
-            assert_eq!(current.cursor, 0);
-            assert_eq!(current.journals, 0);
-            assert_eq!(current.holds, 0);
-            assert_eq!(current.intents, Vec::<u64>::new());
-            assert_eq!(sends.load(Ordering::SeqCst), 0);
-            assert_eq!(
-                harness
-                    .account
-                    .client
-                    .account_db()?
-                    .list_actor_states::<A2iControlEvent>("a2i/scoped/")?
-                    .len(),
-                0
-            );
-            if let Some(before) = &before_restart {
-                assert_eq!(&current, before);
-            }
-            before_restart = Some(current);
-        }
-        let (_store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
-        assert_eq!(rows.len(), 1, "refusal must not acknowledge the router row");
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn failure_w1_commit_sweep() -> Result<(), SdkError> {
     sweep_kind(Sweep::Failure).await
 }
@@ -711,11 +603,6 @@ async fn failure_w1_commit_sweep() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn projection_w1_commit_sweep() -> Result<(), SdkError> {
     sweep_kind(Sweep::Projection).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn legacy_dm_w1_commit_sweep() -> Result<(), SdkError> {
-    sweep_kind(Sweep::LegacyDm).await
 }
 
 fn content_rows(db: &AccountDb) -> Result<Vec<String>, SdkError> {
@@ -732,23 +619,24 @@ fn content_rows(db: &AccountDb) -> Result<Vec<String>, SdkError> {
 }
 
 thread_local! {
-    static ERASE_MESSAGE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static ERASE_MESSAGE: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn erase_pending_message(db: &AccountDb) {
-    let owner = ERASE_MESSAGE.with(|cell| cell.borrow().clone()).expect("pending message");
-    erase_message_through_retention(db, &owner).expect("erase pending message");
+    let (conversation, owner) =
+        ERASE_MESSAGE.with(|cell| cell.borrow().clone()).expect("pending message");
+    real::erase_message_in(db, &conversation, &owner).expect("erase pending message");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let owner = "pending-w1".to_owned();
-    harness.account.client.send_direct_message("thread", &owner, "peer", b"body")?;
-    let mut entry = own_dummy(&harness.account);
-    entry.entry.envelope.envelope_id = owner.clone();
-    ERASE_MESSAGE.with(|cell| cell.replace(Some(owner.clone())));
-    queue_own_copy();
+    let mut harness = open_real().await?;
+    let copy = harness.real.as_ref().ok_or(SdkError::LocalBus("test: real own copy".into()))?;
+    let owner = copy.message.clone();
+    let conversation = copy.conversation.clone();
+    let entry = copy.entry.clone();
+    harness.account.client.send_direct_message(&conversation, &owner, "peer", b"body")?;
+    ERASE_MESSAGE.with(|cell| cell.replace(Some((conversation, owner.clone()))));
     set_after_classify(erase_pending_message);
     let refused = drive(&mut harness.account, entry.clone(), || 1).await;
     let error = refused.as_ref().err();
@@ -757,8 +645,7 @@ async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError>
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1)
     );
-    reopen(&mut harness.account)?;
-    queue_own_copy();
+    reopen_any(&mut harness)?;
     let _ = drive_disk(&mut harness.account, 1, || 1).await?;
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
@@ -807,10 +694,9 @@ async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn late_w1_fence_refuses_erase_during_commit() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let mut harness = open_real().await?;
     set_after_classify(arm_w1_erase);
-    let entry = own_dummy(&harness.account);
+    let entry = sweep_entry(Sweep::OwnCopy, &harness)?;
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
     assert!(matches!(error, Some(SdkError::ObjectErased)), "late W1 fence: {error:?}");
@@ -860,9 +746,16 @@ async fn projection_propagates(
 }
 
 async fn settled_propagates(error: SdkError, pin: fn(&SdkError) -> bool) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    // The settled-routed probe derives the sender device first, so the entry must be a real
+    // authenticated own copy; only then does the injected key-derivation error reach it.
+    let mut harness = open_real().await?;
     set_projection_error(error);
-    let entry = retryable_entry(&harness.account);
+    let entry = harness
+        .real
+        .as_ref()
+        .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+        .entry
+        .clone();
     let refused = drive(&mut harness.account, entry, || 1).await;
     let got = refused.as_ref().err();
     assert!(pin(got.expect("propagated")), "settled arm: {got:?}");
@@ -922,31 +815,55 @@ async fn nothing_owed_propagates_inbound_pending() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn nothing_owed_propagates_directory_unavailable() -> Result<(), SdkError> {
     projection_propagates(injected_directory(), is_directory).await?;
-    settled_propagates(injected_directory(), is_directory).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn identity_absence_is_nothing_owed() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_own_copy();
-    set_projection_error(SdkError::IdentityRootMissing);
-    let entry = live_dummy(&harness.account);
+    // A directory miss in the settled probe is not "nothing owed": the entry falls through
+    // to the full routed W1, which re-resolves the authority and commits the real message.
+    let mut harness = open_real().await?;
+    set_projection_error(injected_directory());
+    let copy = harness.real.as_ref().ok_or(SdkError::LocalBus("test: real own copy".into()))?;
+    let (entry, message) = (copy.entry.clone(), copy.message.clone());
     drive(&mut harness.account, entry, || 1).await?;
-    let mut harness = open()?;
-    queue_own_copy();
-    set_projection_error(SdkError::InboundRejected("identity authority: missing".into()));
-    let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
+    let db = harness.account.client.account_db()?;
+    assert!(
+        db.message_content(&message)?.is_some(),
+        "the routed W1 must commit the real own copy after the probe's directory miss"
+    );
+    assert_eq!(db.receive_state_for_test(1)?, (None, 0), "the commit covers the entry");
     Ok(())
 }
 
+/// A real own copy is an ordinary routed entry: its projection key must be derivable.
+/// When the identity authority cannot answer, the receive refuses with the typed miss and
+/// commits no W1 effect, no locator, no cover and no ACK intent.
 #[tokio::test(flavor = "current_thread")]
-async fn own_copy_does_not_require_a_routed_projection_key() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_own_copy();
-    set_projection_error(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed));
-    let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
+async fn own_copy_without_projection_key_is_refused() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let entry = harness
+        .real
+        .as_ref()
+        .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+        .entry
+        .clone();
+    set_projection_error(SdkError::IdentityRootMissing);
+    let refused = drive(&mut harness.account, entry.clone(), || 1).await;
+    assert!(
+        matches!(refused, Err(SdkError::IdentityRootMissing)),
+        "an own copy without a projection key must be refused: {:?}",
+        refused.as_ref().err()
+    );
+    let db = harness.account.client.account_db()?;
+    assert_eq!(db.receive_state_for_test(1)?, (Some("staged".into()), 1), "W0 stays staged");
+    assert_eq!(cursor(&harness.account)?, 0, "no cover advanced the cursor");
+    assert!(
+        !db.actor_state_exists(&crate::client::own_device_copy::w1::locator_key(
+            &entry.entry.envelope.envelope_id
+        ))?,
+        "no W1 locator was committed"
+    );
+    assert_eq!(
+        db.receive_ledger_snap_for_test(&harness.account.target_delivery_id)?.intents,
+        Vec::<u64>::new(),
+        "no ACK intent was written"
+    );
     Ok(())
 }
 
@@ -1040,17 +957,26 @@ async fn serve_manifest(
 
 #[tokio::test(flavor = "current_thread")]
 async fn manifest_wait_drives_real_cache_verified_fetch() -> Result<(), SdkError> {
-    let mut harness = open()?;
+    // A peer-authored native message whose sender root the receiver has never fetched: the
+    // receive must resolve it through a real cache-verified directory fetch.
+    let (account, entry, manifest) = Box::pin(real::open_peer_authored(activate)).await?;
+    let root = tempfile::tempdir().expect("tmp");
+    let mut harness = Harness { root, account, real: None };
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
-    let manifest = test_support::public_manifest(&harness.account.client)?;
     let (config, server) =
         serve_manifest(harness.root.path(), harness.account.gateway_config.clone(), manifest)
             .await?;
-    harness.account.engine = None;
+    // The seed engine keeps its injected transport; only its directory coordinates point at
+    // the served manifest.
+    let engine = harness.account.engine.as_mut().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    engine.config.tcp_gateway_addr = config.tcp_gateway_addr;
+    engine.config.ca_cert.clone_from(&config.ca_cert);
+    engine.config.server_name.clone_from(&config.server_name);
+    engine.config.timeout = config.timeout;
     harness.account.gateway_config = config;
     GENERATION.with(|cell| cell.set(1));
     set_manifest_await(bump_generation);
-    let entry = own_copy_packet(&harness.account)?;
+    queue_manifest_wait();
     let refused = drive(&mut harness.account, entry, current_generation).await;
     server.await.map_err(|error| SdkError::LocalBus(error.to_string()))??;
     let error = refused.as_ref().err();

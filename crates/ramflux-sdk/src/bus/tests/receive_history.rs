@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! A routed history page refreshes sibling authority without occupying the account writer.
-
+//! A generated history page refreshes sibling authority without occupying the writer.
 use super::fixture::{Case, Fixture, GatewayHold};
 use super::receive_ack::{command, controls, start};
+use crate::client::native_test_support::bus;
 use crate::client::routed::{Route, SendMaterial};
 use crate::prelude::*;
 use serde_json::json;
@@ -18,8 +18,11 @@ async fn held_inbound_history_manifest_keeps_local_mutations_available() -> Case
 }
 async fn case() -> Case {
     let mut fixture = Box::pin(Fixture::new("receive-own-history-manifest")).await?;
-    let entry = cached_history(&mut fixture)?;
+    let (entry, logical) = cached_history(&mut fixture).await?;
+    *fixture.source.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
     let root = fixture.source.client.owned_device_identity()?.root_commitment().to_owned();
+    assert_eq!(fixture.source.client.inbound_device_manifest_request(&entry)?, Some(root.clone()));
     fixture
         .source
         .client
@@ -48,98 +51,105 @@ async fn case() -> Case {
         }
     })
     .await
-    .map_err(|_| "history entry not acknowledged")??;
+    .map_err(|_| "generated history entry not acknowledged")??;
     let response = started
         .actor
-        .request(command("message.read", json!({"conversation_id":"history-thread"})))
+        .request(command(
+            "message.read",
+            json!({"conversation_id":started.conversation,"read_model":true}),
+        ))
         .await?;
     let messages = response.body["messages"].as_array().ok_or("history messages")?;
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["message_id"], "history-message");
-    assert_eq!(messages[0]["body_utf8"], "history transport stays responsive");
-    let wall = std::time::Instant::now();
+    assert_eq!(messages[0]["id"], logical);
+    assert_eq!(messages[0]["text"], "history transport stays responsive");
     started.actor.stop().await?;
-    assert!(wall.elapsed() < Duration::from_secs(1));
-    let root = started.root.clone();
     started.router.await?;
-    drop(started.actor);
-    std::fs::remove_dir_all(root)?;
     Ok(())
 }
-fn cached_history(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
-    let root = fixture.source.client.owned_device_identity()?.root_commitment().to_owned();
-    let now = now_unix_timestamp();
-    let bundle = history_bundle(&root, now);
-    let object = fixture
-        .source
-        .client
-        .put_encrypted_object("history-object", &serde_json::to_vec(&bundle)?)?;
-    let mut sync =
-        crate::client::own_device_sync::tests::envelope("device-sibling", "device-sender");
-    sync.principal_commitment = root;
-    sync.snapshot_id = "history-snapshot".into();
-    sync.created_at = now;
-    sync.expires_at = now + 600;
-    sync.history_ref.object_id.clone_from(&object.object_id);
-    sync.history_ref.manifest_hash.clone_from(&object.manifest_hash);
-    sync.history_ref.plaintext_hash.clone_from(&object.plaintext_hash);
-    sync.history_ref.key_slot.object_id.clone_from(&object.object_id);
-    sync.history_ref.key_slot.conversation_id =
-        crate::own_device_sync::own_device_sync_slot_conversation_id(
-            &sync.snapshot_id,
-            &object.object_id,
-            "device-sender",
-        );
-    history_entry(fixture, sync)
-}
 
-pub(super) fn history_bundle(root: &str, now: i64) -> serde_json::Value {
-    let body: &[u8] = b"history transport stays responsive";
-    json!({
-        "schema":"ramflux.sdk.own_device_history_bundle.v1","version":1,
-        "principal_commitment":root,"source_device_id":"device-sibling","target_device_id":"device-sender","snapshot_id":"history-snapshot",
-        "messages":[{"conversation_id":"history-thread","message_id":"history-message","sender_id":"sender","encrypted_body":[17,18],"metadata":MessageMetadata::default(),"deleted":false,"is_own":false,"created_at":now}],
-        "contents":{"history-message":body},"dm_sessions":[],"groups":[],"sender_key_distributions_base64":[],
-    })
-}
-
-pub(super) fn history_entry(
-    fixture: &Fixture,
-    mut sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope,
-) -> Case<GatewayInboxEntry> {
-    let now = sync.created_at;
+async fn cached_history(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, String)> {
+    let peer = &fixture.peer.client;
     let sibling = &fixture.sibling.client;
-    sync.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-        sibling.device_branch.as_ref().ok_or("sibling branch")?,
-        &crate::own_device_sync::own_device_sync_signing_body(&sync),
-    )?;
-    let config =
-        super::fixture::bind_scripted_device(fixture.source.gateway_config.clone(), sibling)?;
+    bus::seed_pair(peer, sibling)?;
+    let peer_config = bus::config_for(peer, &fixture.source.gateway_config)?;
+    let sibling_config = bus::config_for(sibling, &fixture.source.gateway_config)?;
+    let scope = super::fixture::direct_conversation(peer)?;
+    let target = sibling.owned_device_identity()?;
     let mut message = GatewayDirectMessage {
-        conversation_id: "history-control".into(),
-        message_id: "incoming-history".into(),
-        envelope_id: "incoming-history".into(),
-        source_principal_id: config.principal_id.clone(),
-        sender_id: config.device_id.clone(),
-        recipient_device_id: Some("device-sender".into()),
-        recipient_principal_commitment: Some(sync.principal_commitment.clone()),
-        target_delivery_id: "sender".into(),
+        conversation_id: scope,
+        message_id: "history-original".into(),
+        envelope_id: "history-original".into(),
+        source_principal_id: peer_config.principal_id.clone(),
+        sender_id: peer_config.device_id.clone(),
+        recipient_device_id: Some(target.device_id().into()),
+        recipient_principal_commitment: Some(target.root_commitment().into()),
+        target_delivery_id: target.storage_key().into(),
         encrypted_body: Vec::new(),
-        created_at: now,
+        created_at: now_unix_timestamp(),
         ttl: 600,
     };
-    let packet = sibling.seal_routed_prepared(
-        &config,
+    let content = ramflux_protocol::message::Content {
+        value: Some(ramflux_protocol::message::content::Value::Message(
+            ramflux_protocol::message::Message {
+                text: "history transport stays responsive".into(),
+                ..Default::default()
+            },
+        )),
+    };
+    let prepared = peer.prepare_authored_content(&mut message, None, &content)?;
+    let logical = message.message_id.clone();
+    let sealed = peer.seal_generated_routed_prepared(
+        &peer_config,
         &message,
-        &serde_json::to_vec(&sync)?,
-        Route::control(),
+        &prepared.wire,
+        Route::from_inner(&prepared.wire)?,
         SendMaterial { manifest: None, bundle: None },
     )?;
-    message.encrypted_body = serde_json::to_vec(&packet)?;
-    Ok(GatewayInboxEntry {
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&peer_config, &mut message, sealed)?;
+    let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "sender".into(),
-        envelope: gateway_direct_message_envelope(&config, &message, None)?,
-    })
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
+    };
+    bus::receive_copy(&mut fixture.sibling.client, &sibling_config, &entry).await?;
+    let sibling = &fixture.sibling.client;
+    let built = sibling
+        .build_generated_history_page(&[64; 32], 0, &[0; 32], None)?
+        .ok_or("history page with real first-hand evidence")?;
+    let (identity, exact) = sibling.encode_generated_history_page(&built)?;
+    let target = fixture.source.client.owned_device_identity()?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: identity.conversation_id,
+        message_id: ramflux_protocol::encode_base64url(identity.id),
+        envelope_id: "incoming-history".into(),
+        source_principal_id: sibling_config.principal_id.clone(),
+        sender_id: sibling_config.device_id.clone(),
+        recipient_device_id: Some(target.device_id().into()),
+        recipient_principal_commitment: Some(target.root_commitment().into()),
+        target_delivery_id: target.storage_key().into(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 600,
+    };
+    let sealed = sibling.seal_generated_routed_prepared(
+        &sibling_config,
+        &message,
+        &exact,
+        Route::from_inner(&exact)?,
+        SendMaterial { manifest: None, bundle: None },
+    )?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&sibling_config, &mut message, sealed)?;
+    Ok((
+        GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            envelope,
+        },
+        logical,
+    ))
 }

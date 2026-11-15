@@ -97,6 +97,7 @@ impl RamfluxClient {
             )
         ))
     }
+    #[cfg(test)]
     pub(crate) fn persist_legacy_committed(
         &self,
         entry: &GatewayInboxEntry,
@@ -120,15 +121,13 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         let key = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
-        db.write_transaction(|| self.write_inbox_projection_claim_at(db, &key, entry))
+        db.write_transaction(|| Self::write_inbox_projection_claim_at(db, &key))
     }
 
     /// Writes the projected flag on the caller's open connection (live claim and P16 W1).
     pub(crate) fn write_inbox_projection_claim_at(
-        &self,
         db: &ramflux_storage::AccountDb,
         key: &str,
-        entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
         if let Some(mut receipt) = db.load_actor_state::<Committed>(key)? {
             if receipt.projected {
@@ -138,16 +137,7 @@ impl RamfluxClient {
             db.persist_actor_state(key, &receipt)?;
             return Ok(true);
         }
-        let legacy = self.legacy_committed_key(entry)?;
-        if db.load_actor_state::<String>(&legacy)?.is_none() {
-            return Ok(false);
-        }
-        let marker = format!("{legacy}/projected");
-        if db.load_actor_state::<bool>(&marker)?.unwrap_or(true) {
-            return Ok(false);
-        }
-        db.persist_actor_state(&marker, &true)?;
-        Ok(true)
+        Ok(false)
     }
     pub(crate) fn committed_routing(
         &self,
@@ -177,7 +167,31 @@ impl RamfluxClient {
                 "envelope id reused with a different authenticated payload".to_owned(),
             ));
         }
+        if receipt.entry.envelope.signed.signature != entry.envelope.signed.signature
+            || retained_sender_header(&receipt.entry.envelope)?
+                != retained_sender_header(&entry.envelope)?
+        {
+            return Err(SdkError::InboundRejected(
+                "envelope id reused with a different authenticated payload or header".into(),
+            ));
+        }
+        if !entry.envelope.encrypted_payload.is_empty() {
+            super::validate_routed_ciphertext(entry)?;
+        }
         Ok(Some(key))
+    }
+
+    /// A stripped local receipt can cover only its exact previously authenticated header.
+    pub(crate) fn validate_routed_receipt_or_ciphertext(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if entry.envelope.encrypted_payload.is_empty()
+            && self.retained_committed_receipt_key(entry)?.is_some()
+        {
+            return Ok(());
+        }
+        super::validate_routed_ciphertext(entry)
     }
 }
 
@@ -299,16 +313,17 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<(String, String)>, SdkError> {
-        if let Some(route) = self.committed_routing(HeadUse::NewAuthorization, entry)? {
-            return Ok((route.kind == super::Kind::Direct)
-                .then_some((route.conversation_id, route.message_id)));
-        }
-        Ok(self
-            .account_db()?
-            .load_actor_state::<String>(&self.legacy_committed_key(entry)?)?
-            .map(|conversation| (conversation, entry.envelope.envelope_id.clone())))
+        // Prefetch only follows an exact previously committed delivery. A stripped
+        // control or an erased original is not an attachment-bearing Message.
+        let Some(key) = self.retained_committed_receipt_key(entry)? else { return Ok(None) };
+        let Some(receipt) = self.account_db()?.load_actor_state::<Committed>(&key)? else {
+            return Ok(None);
+        };
+        Ok((receipt.routing.kind == super::Kind::Direct)
+            .then_some((receipt.routing.conversation_id, receipt.routing.message_id)))
     }
 
+    #[cfg(test)]
     pub(crate) fn legacy_committed_key(
         &self,
         entry: &GatewayInboxEntry,
@@ -318,4 +333,20 @@ impl RamfluxClient {
             self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
         ))
     }
+}
+
+/// Compare prior authenticated origin evidence; this never authenticates new ciphertext.
+fn retained_sender_header(envelope: &ramflux_protocol::Envelope) -> Result<Vec<u8>, SdkError> {
+    let mut evidence = serde_json::to_value(envelope)?;
+    evidence
+        .as_object_mut()
+        .ok_or_else(|| invalid("retained envelope object missing"))?
+        .remove("encrypted_payload");
+    // The checked transcript retains every sender field and excludes only independently
+    // appended node metadata. Its signature is compared separately to the committed one.
+    Ok(ramflux_protocol::sender_signed_transcript(
+        &evidence,
+        ramflux_protocol::SenderTranscriptMode::Evidence,
+    )?
+    .bytes)
 }

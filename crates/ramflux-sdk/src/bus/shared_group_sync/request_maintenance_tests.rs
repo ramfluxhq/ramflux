@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
-
 //! Real transfer packet selection must distinguish storage failure from malformed persisted rows.
 use super::*;
+use crate::bus::state::LocalBusAccountState;
+use crate::client::native_test_support::{Fixture as Native, TestResult};
 use crate::client::shared_group::{TransferBody, TransferControl};
-use std::sync::{Arc, atomic::AtomicBool};
 
-fn staged_account(root: &Path) -> Result<LocalBusAccountState, SdkError> {
-    let account =
-        crate::bus::runtime_tests::account(root, "owner", None, Arc::new(AtomicBool::new(false)))?;
+async fn staged_account_async() -> TestResult<LocalBusAccountState> {
+    let account = Native::with_device("owner", "owner").await?.into_bus();
     let client = &account.client;
-    let state = client.shared_group_create("group", "thread", None, "target")?;
-    let actor = client.owned_group_actor("target")?;
+    let state = client.fixture_group_create("group", "thread", None, "owner")?;
+    let actor = client.fixture_group_actor("owner")?;
     let now = now_unix_timestamp();
     let body: TransferBody = serde_json::from_value(serde_json::json!({
         "kind":"probe", "probe":{
@@ -25,10 +24,17 @@ fn staged_account(root: &Path) -> Result<LocalBusAccountState, SdkError> {
     Ok(account)
 }
 
+fn staged_account() -> Result<LocalBusAccountState, SdkError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(staged_account_async())
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
 #[test]
 fn shared_group_packet_selection_propagates_real_sqlite_write_refusal() -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("transfer-packet-storage");
-    let mut account = staged_account(&root)?;
+    let mut account = staged_account()?;
     assert_eq!(pending_packets(&account.client, now_unix_timestamp())?.len(), 1);
     let reader = account.client.account_db()?.open_reader()?;
     account.client.active_account_db = Some(reader);
@@ -44,8 +50,7 @@ fn shared_group_packet_selection_propagates_real_sqlite_write_refusal() -> Resul
 #[test]
 fn shared_group_packet_selection_backs_off_bad_row_without_hiding_healthy_packet()
 -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("transfer-packet-backoff");
-    let account = staged_account(&root)?;
+    let account = staged_account()?;
     let db = account.client.account_db()?;
     let bad = format!("{TRANSFER_SEND_PREFIX}!bad");
     db.persist_actor_state(&bad, &serde_json::json!({"bad":true}))?;
@@ -66,8 +71,8 @@ fn shared_group_packet_selection_backs_off_bad_row_without_hiding_healthy_packet
 
 #[tokio::test]
 async fn bad_deadline_item_does_not_abort_later_courier_work() -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("transfer-deadline-continues");
-    let mut account = staged_account(&root)?;
+    let mut account =
+        staged_account_async().await.map_err(|error| SdkError::LocalBus(error.to_string()))?;
     let bad = "group-transfer/pending/!bad";
     account.client.account_db()?.persist_actor_state(bad, &serde_json::json!({"bad":true}))?;
     assert!(background::prepare_for_test(&mut account)?);

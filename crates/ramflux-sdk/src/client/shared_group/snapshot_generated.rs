@@ -9,9 +9,6 @@ use ramflux_protocol::{group_state::GroupStateSnapshot, message as g};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Option<SharedGroupPacket>, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Ok(None);
-    }
     if bytes.first() != Some(&8) {
         return Ok(None);
     }
@@ -61,8 +58,7 @@ fn distribution_bytes(value: &g::GroupKeyDistribution) -> Result<Zeroizing<Vec<u
         || value.sender_key_seed.len() != 32
         || !matches!(
             (value.schema.as_str(), value.version),
-            ("ramflux.sdk.group_sender_key.distribution.v3", 3)
-                | ("ramflux.sdk.group_sender_key.distribution.v4", 4)
+            ("ramflux.sdk.group_sender_key.distribution.v4", 4)
         )
     {
         return Err(invalid("group snapshot distribution grammar invalid"));
@@ -143,11 +139,15 @@ impl crate::RamfluxClient {
             self.require_native_operation(recipient, NativeOperation::Group)?;
             self.ensure_shared_group_device(state, recipient)?;
         }
-        let packet = Zeroizing::new(self.shared_group_packet(state, eligible)?);
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(packet.to_vec());
-        }
-        let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(&packet)?;
+        self.shared_group_packet(state, eligible)
+    }
+
+    pub(super) fn generated_snapshot_packet(
+        &self,
+        state: &ramflux_crypto::VerifiedGroupState,
+        eligible: bool,
+    ) -> Result<Vec<u8>, SdkError> {
+        let packet = self.snapshot_material(state, eligible)?;
         let distribution = packet
             .distribution_base64
             .as_ref()
@@ -197,7 +197,7 @@ impl crate::RamfluxClient {
         self.generated_snapshot_inner(state, &control)
     }
 
-    fn generated_snapshot_inner(
+    pub(super) fn generated_snapshot_inner(
         &self,
         state: &ramflux_crypto::VerifiedGroupState,
         control: &g::Control,
@@ -229,15 +229,10 @@ impl crate::RamfluxClient {
                 db.persist_actor_state(&key, &identity)?;
                 identity
             };
-            let bytes = g::Inner {
-                layer: g::registry::COMPILED_LAYER,
-                kind: 8,
-                identity: Some(identity),
-                body: control.encode_to_vec(),
-            }
-            .encode_to_vec();
-            g::validation::scan_inner(&bytes).map_err(|_| invalid("snapshot encoding invalid"))?;
-            Ok(bytes)
+            Self::encode_generated_inner(
+                identity,
+                &g::Content { value: Some(g::content::Value::Control(control.clone())) },
+            )
         })
     }
 }
@@ -245,11 +240,8 @@ impl crate::RamfluxClient {
 impl crate::RamfluxClient {
     pub(crate) fn shared_group_packet_message_id(
         bytes: &[u8],
-        fallback: &str,
+        _fallback: &str,
     ) -> Result<String, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(fallback.into());
-        }
         let inner = g::Inner::decode(bytes).map_err(|_| invalid("snapshot identity missing"))?;
         let identity =
             inner.identity.as_ref().ok_or_else(|| invalid("snapshot identity missing"))?;

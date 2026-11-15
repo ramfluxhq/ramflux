@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(super) const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
-const CONVERSATION: &str = "healthy";
 /// Inner real-time watchdog budget. QA default-thread whole-module wall time
 /// of `held()`+`ack_fence()` was 20.8-25.0 s over 5 runs (worst 24.976 s);
 /// 45 s is ~1.8x that worst case and stays below the CI nextest kill point
@@ -38,26 +37,29 @@ pub(super) fn limits() -> RuntimeTimeouts {
     RuntimeTimeouts::held_for_test()
 }
 
+/// Installs the scripted gateway config on a reopened account and binds its pairing admission
+/// to that account's current database. The config was cloned from the account that opened the
+/// fixture; its admission reader points at a database that is closed by now, and a closed
+/// reader makes the custody connection refuse with `PublicationPending`.
+pub(super) fn bind_config(
+    account: &mut LocalBusAccountState,
+    config: &GatewaySessionConfig,
+) -> Result<(), SdkError> {
+    account.gateway_config = config.clone();
+    account.gateway_config.pairing_admission =
+        Some(Arc::new(account.client.account_db()?.pairing_admission_reader()));
+    account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
+    Ok(())
+}
+
 pub(super) fn open_account(
     root: &Path,
     config: &GatewaySessionConfig,
     commitment: &str,
 ) -> Result<LocalBusAccountState, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.open_account_index(root.join("source"))?;
-    client.unlock_account("sender", b"native fixture data passphrase")?;
-    let branch =
-        config.device_branch.as_ref().ok_or(SdkError::CustodySetupInvalid)?.as_ref().clone();
-    client.device_branch = Some(branch.clone());
-    client
-        .active_account_db
-        .as_mut()
-        .ok_or(SdkError::AccountDbNotUnlocked)?
-        .set_device_signer(branch);
-    let mut account =
-        LocalBusAccountState::disconnected(client, config.clone(), commitment.to_owned());
-    account.gateway_config = config.clone();
-    account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
+    let mut account = super::fixture::open_source(&root.join("source"), config)?;
+    account.principal_commitment = commitment.to_owned();
+    bind_config(&mut account, config)?;
     account.engine = None;
     crate::bus::dispatch::object::hydrate_local_object_state(&mut account)?;
     Ok(account)
@@ -122,7 +124,10 @@ pub(super) fn account_of(
 }
 
 fn messages(runtime: &super::super::AccountRuntime) -> Result<usize, SdkError> {
-    Ok(account_of(runtime)?.client.direct_messages(CONVERSATION)?.len())
+    Ok(account_of(runtime)?
+        .client
+        .direct_messages(&super::fixture::direct_conversation(&account_of(runtime)?.client)?)?
+        .len())
 }
 
 pub(super) fn acked(
@@ -323,19 +328,7 @@ async fn held() -> Case {
     while runtime.connection_work.try_recv().is_ok() {}
     {
         let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
-        account.gateway_config = config.clone();
-        account.target_delivery_id = config.target_delivery_id.clone();
-        // Unlock drops the branch. The scripted session still signs with the
-        // branch that opened the fixture, so put that signer back before connect.
-        let branch =
-            config.device_branch.as_ref().ok_or(SdkError::CustodySetupInvalid)?.as_ref().clone();
-        account.client.device_branch = Some(branch.clone());
-        account
-            .client
-            .active_account_db
-            .as_mut()
-            .ok_or(SdkError::AccountDbNotUnlocked)?
-            .set_device_signer(branch);
+        bind_config(account, &config)?;
     }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);

@@ -981,19 +981,24 @@ fn assert_committed_request(
 #[cfg(feature = "itest-http")]
 fn seed_federation_sweep(fixture: &Fixture) -> Result<(), Box<dyn std::error::Error>> {
     let store = ramflux_node_core::FederationRedbStore::open(&fixture.database)?;
+    let payload = "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA";
     for index in 0..2 {
         let forward = serde_json::from_value(serde_json::json!({
             "source_node_id": "localhost", "target_node_id": "shutdown-peer",
             "signing_key_id": "fixture", "signature_alg": "ed25519", "signature": "fixture",
             "delivery_class": "opaque_event", "required_capability": "opaque_delivery",
             "envelope": {
-                "schema": "ramflux.envelope.v1", "version": 1, "domain": "ramflux.envelope.v1",
+                "schema": "ramflux.envelope.v2", "version": 2, "domain": "ramflux.envelope.v2",
                 "signing_key_id": "fixture", "signature_alg": "ed25519", "signature": "fixture",
                 "envelope_id": format!("shutdown-envelope-{index}"),
                 "source_principal_id": "shutdown-source", "source_device_id": "shutdown-device",
                 "target_delivery_id": "shutdown-target", "routing_set_id": null,
-                "delivery_class": "opaque_event", "priority": "normal", "ttl": 1,
-                "created_at": 100, "encrypted_payload": "ciphertext", "payload_hash": "fixture"
+                "delivery_class": "message", "priority": "normal", "ttl": 1,
+                "created_at": 100, "encrypted_payload": payload,
+                "payload_hash": "t5J7WmUF0HkCOxc0NiyRR1miPSZpsv8RN1SroHWzAfM",
+                "delivery_mode": "durable",
+                "collapse_tag": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+                "report_commitment": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM"
             }
         }))?;
         store.spool_outbound_forward("shutdown-peer", &forward, 100, 1)?;

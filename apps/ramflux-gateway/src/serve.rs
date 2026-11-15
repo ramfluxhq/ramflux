@@ -660,11 +660,11 @@ mod tests {
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
 
     #[test]
-    fn candidate_profile_token_is_not_advertised_while_gate_off() {
-        assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    fn active_profile_token_is_advertised() {
+        assert!(ramflux_protocol::schema_profile::schema_v1_live());
         let versions = super::advertised_client_protocol_versions(&["v1".to_owned()]);
-        assert_eq!(versions, vec!["v1".to_owned()]);
-        assert!(!versions.iter().any(|version| {
+        assert!(versions.iter().any(|version| version == "v1"));
+        assert!(versions.iter().any(|version| {
             version == ramflux_protocol::message::outer::MESSAGE_SCHEMA_V1_PROFILE
         }));
     }
@@ -789,7 +789,7 @@ mod tests {
             source_device_id: "device_gateway_forward".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
             created_at: 1_760_000_000,

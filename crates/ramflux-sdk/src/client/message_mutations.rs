@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant Edit/Delete/Reaction authorization and layer admission (S10a P14).
+//! Edit/Delete/Reaction authorization and active layer admission.
 //! This module neither sends a carrier nor admits a stored event.
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message::registry::{COMPILED_LAYER, kind_binding};
@@ -68,7 +68,6 @@ impl RamfluxClient {
         conversation: &str,
         delete: &ramflux_protocol::message::Delete,
     ) -> Result<(), SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let source = self.authenticated_device_identity(
             crate::client::identity_authority::HeadUse::NewAuthorization,
             entry,
@@ -229,7 +228,6 @@ impl RamfluxClient {
         conversation: &str,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         self.apply_generated_edit_with_metadata(entry, conversation, exact_inner, None)
     }
 

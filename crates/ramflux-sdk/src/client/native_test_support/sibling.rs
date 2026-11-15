@@ -16,7 +16,7 @@ impl Fixture {
         let primary = self.vault.primary_for_public_key(
             &native.publication.record.body.master_certificate.body.self_signing_public_key,
         )?;
-        let now = crate::custody::network_now()?;
+        let now = crate::custody::network_now()?.max(native.publication.record.body.issued_at);
         let current =
             ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
         let mut seeds = Zeroizing::new([0; 64]);
@@ -50,6 +50,10 @@ impl Fixture {
             },
             now,
         )?;
+        // The accepted publication moved the on-disk head; reload this device's native account so
+        // later primary-signing steps (group changes) see the same head instead of HeadChanged.
+        let local_device = self.client.owned_device_identity()?.device_id().to_owned();
+        self.client.initialize_born_v3_branch(&local_device, self.vault.clone()).await?;
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
@@ -110,7 +114,7 @@ impl Fixture {
     }
 }
 
-struct NoNetwork;
+pub(super) struct NoNetwork;
 impl ramflux_transport::GatewaySessionFrameSink for NoNetwork {
     fn send_frame<'a>(
         &'a mut self,

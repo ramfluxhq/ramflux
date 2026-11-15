@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant generated Message/Service/Forward/Receipt Inner conversion.
+//! Generated Message/Service/Receipt Inner conversion and required field-layer selection.
 //! This module neither sends a carrier nor admits a stored event.
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
@@ -69,6 +69,20 @@ impl GeneratedEventStream {
 }
 
 impl RamfluxClient {
+    pub(crate) fn validate_generated_media(content: &g::Content) -> Result<(), SdkError> {
+        let message = match content.value.as_ref() {
+            Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => {
+                Some(message)
+            }
+            Some(g::content::Value::Edit(edit)) => edit.replacement.as_ref(),
+            _ => None,
+        };
+        if let Some(message) = message {
+            Self::attachment_message_content(&message.text, &message.media)?;
+        }
+        Ok(())
+    }
+
     /// Encode generated Inner bytes. Additive candidate API; does not send or persist.
     /// # Errors
     /// Rejects empty identity, invalid content, noncanonical wire, or the Inner byte cap.
@@ -76,15 +90,64 @@ impl RamfluxClient {
         identity: g::EventIdentity,
         content: &g::Content,
     ) -> Result<Vec<u8>, SdkError> {
+        let layer = Self::required_content_layer(content)?;
+        Self::encode_generated_inner_at_layer(identity, content, layer)
+    }
+
+    pub(crate) fn required_content_layer(content: &g::Content) -> Result<u32, SdkError> {
+        // This clone is only a structural layer probe. The private nonce is generated
+        // once by encode_generated_inner_at_layer after authorization, never from this probe.
+        let mut probe = content.clone();
+        let message = match probe.value.as_mut() {
+            Some(g::content::Value::Message(message)) => Some(message),
+            Some(g::content::Value::Edit(edit)) => edit.replacement.as_mut(),
+            _ => None,
+        };
+        if let Some(message) = message
+            && message.sealed_group.is_none()
+            && message.erasure_nonce.is_empty()
+        {
+            message.erasure_nonce = vec![0; 32];
+        }
+        if let Some(g::content::Value::Delete(delete)) = probe.value.as_mut()
+            && delete.tombstone_id.is_empty()
+        {
+            delete.tombstone_id = vec![0; 32];
+        }
+        let (kind, body) = registry::encode_body(&probe).map_err(content_error)?;
+        let binding =
+            registry::kind_binding(kind).ok_or_else(|| invalid("unsupported generated kind"))?;
+        let floor = registry::PROFILE_FLOOR.max(binding.first_layer);
+        if validation::scan_message(binding.body, &body, floor).map_err(content_error)?
+            == ScanOutcome::Supported
+        {
+            return Ok(floor);
+        }
+        if validation::scan_message(binding.body, &body, COMPILED_LAYER).map_err(content_error)?
+            != ScanOutcome::Supported
+        {
+            return Err(invalid("unsupported generated fields"));
+        }
+        Ok(COMPILED_LAYER)
+    }
+
+    pub(crate) fn encode_generated_inner_at_layer(
+        identity: g::EventIdentity,
+        content: &g::Content,
+        layer: u32,
+    ) -> Result<Vec<u8>, SdkError> {
         if identity.id.len() != 32 {
             return Err(invalid("generated event id must be source-qualified"));
+        }
+        if !(registry::PROFILE_FLOOR..=COMPILED_LAYER).contains(&layer) {
+            return Err(invalid("unsupported source layer"));
         }
         let mut content = content.clone();
         Self::prepare_generated_revision(&mut content)?;
         validation::validate_content(&content).map_err(content_error)?;
+        Self::validate_generated_media(&content)?;
         let (kind, body) = registry::encode_body(&content).map_err(content_error)?;
-        let inner = g::Inner { layer: COMPILED_LAYER, kind, identity: Some(identity), body };
-        let bytes = inner.encode_to_vec();
+        let bytes = g::Inner { layer, kind, identity: Some(identity), body }.encode_to_vec();
         check_wire(&bytes)?;
         Ok(bytes)
     }
@@ -219,6 +282,7 @@ impl RamfluxClient {
         }
         let content =
             registry::decode_body(inner.kind, &inner.body, inner.layer).map_err(content_error)?;
+        Self::validate_generated_media(&content)?;
         Ok((identity, content))
     }
 }
@@ -227,8 +291,8 @@ fn check_wire(bytes: &[u8]) -> Result<(), SdkError> {
     if bytes.len() > validation::MAX_INNER_BYTES {
         return Err(invalid("generated inner exceeds the byte cap"));
     }
-    let scanned =
-        validation::scan_inner(bytes).map_err(|_| invalid("noncanonical generated inner"))?;
+    let scanned = validation::scan_inner(bytes)
+        .map_err(|error| invalid(format!("generated inner validation: {error}")))?;
     if scanned.outcome != ScanOutcome::Supported {
         return Err(invalid("unsupported generated inner"));
     }

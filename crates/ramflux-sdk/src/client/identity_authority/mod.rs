@@ -10,6 +10,8 @@ pub(crate) enum HeadUse {
     NewAuthorization,
 }
 mod custody_directory;
+mod verification_cache;
+pub(crate) use verification_cache::VerifiedAuthorityCache;
 mod custody_freshness;
 pub(crate) use custody_freshness::NativeHeadFreshness;
 mod custody_lifecycle;

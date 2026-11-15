@@ -5,11 +5,7 @@
 
 use crate::GatewayQuicContext;
 use ramflux_sdk::EphemeralSendOutcome;
-use ramflux_sdk::{
-    AccountSessionFixture, AccountSessionHarness, GatewayQuicEndpointConfig, GatewaySessionConfig,
-    GatewaySessionState,
-};
-use ramflux_storage::{AccountDb, AccountDbKey, AccountIndex};
+use ramflux_sdk::{AccountSessionHarness, GatewaySessionState, NativeCallAccount};
 use ramflux_transport::{
     GatewaySessionFrameFuture, GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError,
 };
@@ -71,14 +67,11 @@ pub(super) struct Account {
 }
 impl Account {
     pub async fn attach(
-        root: &Path,
+        native: NativeCallAccount,
         context: &GatewayQuicContext,
         runtime: &crate::GatewaySessionRuntime,
         incarnation: &str,
     ) -> anyhow::Result<Self> {
-        let index = AccountIndex::open(root)?;
-        index.create_account("client", runtime.source_identity.root_commitment())?;
-        let db = AccountDb::open(&index, "client", &AccountDbKey::from_bytes([12; 32]))?;
         let (to_gateway, gateway_input) = mpsc::unbounded_channel();
         let (to_client, client_input) = mpsc::unbounded_channel();
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -95,26 +88,6 @@ impl Account {
             None,
             None,
         ));
-        let (root_seed, device_seed) =
-            if runtime.principal_id == "agent" { (3, 4) } else { (6, 7) };
-        let identity = ramflux_crypto::create_identity_root(&runtime.principal_id, [root_seed; 32]);
-        let branch = ramflux_crypto::create_device_branch(
-            &runtime.principal_id,
-            &runtime.device_id,
-            1,
-            [device_seed; 32],
-        );
-        let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse()?,
-            gateway_addr: "127.0.0.1:1".parse()?,
-            server_name: "unused.fixture".into(),
-            ca_cert: root.join("unused.pem"),
-            principal_id: runtime.principal_id.clone(),
-            device_id: runtime.device_id.clone(),
-            target_delivery_id: runtime.target_delivery_id.clone(),
-            prekey_http_url: None,
-        })
-        .with_owned_device(&identity, branch)?;
         let session = GatewaySessionState {
             call_session_generation: None,
             session_id: runtime.session_id.clone(),
@@ -125,19 +98,15 @@ impl Account {
         };
         let host = crate::ephemeral::tests::guard_10s(
             "SDK account writer and resident host ready",
-            Box::pin(AccountSessionHarness::attach(AccountSessionFixture {
-                index,
-                db,
-                identity,
-                config,
+            Box::pin(native.attach_negotiated(
                 session,
-                stream: Box::new(FrameStream {
+                incarnation.to_owned(),
+                runtime.ephemeral,
+                Box::new(FrameStream {
                     sink: FrameSink { send: to_gateway, observed: writes.clone() },
                     source: FrameSource(client_input),
                 }),
-                incarnation: Some(incarnation.to_owned()),
-                ephemeral: runtime.ephemeral,
-            })),
+            )),
         )
         .await
         .map_err(|error| anyhow::anyhow!("attached account startup: {error:?}"))?;
@@ -153,12 +122,13 @@ impl Account {
         id: &str,
         change: impl FnOnce(&mut ramflux_protocol::Envelope),
     ) -> anyhow::Result<EphemeralSendOutcome> {
-        let ciphertext = presealed_ciphertext()?;
+        let ciphertext = presealed_ciphertext();
         let payload_hash = ramflux_crypto::blake3_256_base64url(
-            "ramflux.encrypted_payload.v1",
+            ramflux_protocol::domain::ENVELOPE,
             ciphertext.as_bytes(),
         );
         let submit = crate::ephemeral::handler_tests::submit(runtime, id, 5, |envelope| {
+            envelope.target_delivery_id = target().into();
             envelope.encrypted_payload = ciphertext;
             envelope.payload_hash = payload_hash;
             change(envelope);
@@ -184,11 +154,13 @@ impl Account {
         runtime: &crate::GatewaySessionRuntime,
         id: &str,
     ) -> anyhow::Result<EphemeralSendOutcome> {
-        let mut envelope =
-            crate::ephemeral::handler_tests::submit(runtime, id, 5, |_| {})?.envelope;
-        envelope.encrypted_payload = presealed_ciphertext()?;
+        let mut envelope = crate::ephemeral::handler_tests::submit(runtime, id, 5, |envelope| {
+            envelope.target_delivery_id = target().into();
+        })?
+        .envelope;
+        envelope.encrypted_payload = presealed_ciphertext();
         envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
-            "ramflux.encrypted_payload.v1",
+            ramflux_protocol::domain::ENVELOPE,
             envelope.encrypted_payload.as_bytes(),
         );
         envelope.ext.ext.insert("padding".into(), Value::String(String::new()));
@@ -202,7 +174,7 @@ impl Account {
         envelope.ext.ext.insert("padding".into(), Value::String("x".repeat(30_000 - base)));
         envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
             &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-            [4; 32],
+            crate::ephemeral::handler_tests::signing_seed(runtime),
         );
         Ok(self.host.submit(envelope).await?)
     }
@@ -227,30 +199,73 @@ pub(super) fn source(runtime: &crate::GatewaySessionRuntime) -> ramflux_sdk::Eph
     }
 }
 
+static TARGETS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Delivery target of the receiving native account (the fixture default before accounts exist).
+pub(super) fn target() -> &'static str {
+    TARGETS.get().map_or("alice-target", |targets| targets.1.as_str())
+}
+
+/// Delivery target of the sending native account.
+pub(super) fn source_target() -> &'static str {
+    TARGETS.get().map_or("agent-target", |targets| targets.0.as_str())
+}
+
+/// Phrase-created native accounts addressed by the strings the router fixture already uses for
+/// principal and device; their delivery targets are the accounts' real device addresses.
+pub(super) async fn native_pair(
+    root: &Path,
+) -> anyhow::Result<(NativeCallAccount, NativeCallAccount)> {
+    let sender =
+        NativeCallAccount::named(&root.join("sender"), "agent", "agent", "agent-device").await?;
+    let receiver =
+        NativeCallAccount::named(&root.join("receiver"), "alice", "alice", "alice-device").await?;
+    let targets =
+        (sender.identity.storage_key().to_owned(), receiver.identity.storage_key().to_owned());
+    anyhow::ensure!(
+        TARGETS.get_or_init(|| targets.clone()) == &targets,
+        "one native account pair per process"
+    );
+    Ok((sender, receiver))
+}
+
+/// Make the gateway-side session identity the native account's real device and branch key.
+pub(super) fn nativize(
+    runtime: &mut crate::GatewaySessionRuntime,
+    account: &NativeCallAccount,
+) -> anyhow::Result<()> {
+    let branch = account
+        .config
+        .device_branch
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("native account branch"))?;
+    runtime.source_identity = account.identity.clone();
+    runtime.target_delivery_id = account.config.target_delivery_id.clone();
+    runtime.branch_public_key =
+        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
+    crate::ephemeral::handler_tests::register_signing_seed(
+        &runtime.branch_public_key,
+        branch.signing_key.to_bytes(),
+    );
+    Ok(())
+}
+
 pub(super) fn recipient_runtime(
     source: &crate::GatewaySessionRuntime,
+    receiver: &NativeCallAccount,
     incarnation: &str,
 ) -> anyhow::Result<crate::GatewaySessionRuntime> {
-    let root = ramflux_crypto::create_identity_root("alice", [6; 32]);
-    let branch = ramflux_crypto::create_device_branch("alice", "alice-device", 1, [7; 32]);
     let mut runtime = source.clone();
     runtime.session_push = Some(incarnation.into());
     runtime.principal_id = "alice".into();
     runtime.device_id = "alice-device".into();
-    runtime.source_identity =
-        ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-    runtime.branch_public_key =
-        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
-    runtime.target_delivery_id = "alice-target".into();
+    nativize(&mut runtime, receiver)?;
     runtime.session_id = "alice-session".into();
     Ok(runtime)
 }
 
-/// Seal outside the measured SDK transport: endpoint ratchet state is not part of this oracle.
-pub(super) fn presealed_ciphertext() -> anyhow::Result<String> {
-    let mut endpoint =
-        ramflux_crypto::DmSession::initiator([31; 32], [32; 32], [33; 32], [34; 32])?;
-    let sealed =
-        endpoint.encrypt(b"known transient ciphertext fixture", b"transport handoff fixture")?;
-    Ok(ramflux_protocol::encode_base64url(serde_json::to_vec(&sealed)?))
+/// A valid compact generation-1 cryptobox, built outside the measured SDK transport: endpoint
+/// ratchet state is not part of this oracle.
+pub(super) fn presealed_ciphertext() -> String {
+    "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".to_owned()
 }

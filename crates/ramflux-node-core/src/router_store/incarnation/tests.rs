@@ -50,9 +50,9 @@ fn stored(
 fn entry(seq: u64) -> InboxEntry {
     let mut inbox = OpaqueDeviceInbox::new();
     let envelope = ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
         ext: ramflux_protocol::Ext::default(),
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "incarnation-test".into(),
@@ -64,15 +64,18 @@ fn entry(seq: u64) -> InboxEntry {
         source_device_id: "sender-device".into(),
         target_delivery_id: "target".into(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: ramflux_protocol::Priority::Normal,
         ttl: 3600,
         created_at: i64::try_from(crate::now_unix_seconds()).expect("server time"),
-        encrypted_payload: "ciphertext".into(),
-        payload_hash: "hash".into(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+        payload_hash: ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::ENVELOPE,
+            b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+        ),
+        delivery_mode: Some("durable".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     };
     let mut entry = inbox.append(envelope);
     entry.inbox_seq = seq;

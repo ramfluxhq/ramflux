@@ -16,7 +16,9 @@ pub(super) const WRAPPER_SCHEMA: &str = "ramflux.sdk.group_sender_key.distributi
 const MAX_DISTRIBUTION_BYTES: usize = 4096;
 
 /// Closed grammar of the typed distribution, bounded before any native parsing.
-fn distribution(body: &g::GroupKeyControl) -> Result<&g::GroupKeyDistribution, SdkError> {
+pub(super) fn distribution(
+    body: &g::GroupKeyControl,
+) -> Result<&g::GroupKeyDistribution, SdkError> {
     if body.schema != WRAPPER_SCHEMA || body.version != 1 {
         return Err(content("group key wrapper schema or version unknown"));
     }
@@ -28,8 +30,7 @@ fn distribution(body: &g::GroupKeyControl) -> Result<&g::GroupKeyDistribution, S
         || value.group_key_epoch == 0
         || !matches!(
             (value.schema.as_str(), value.version),
-            ("ramflux.sdk.group_sender_key.distribution.v3", 3)
-                | ("ramflux.sdk.group_sender_key.distribution.v4", 4)
+            ("ramflux.sdk.group_sender_key.distribution.v4", 4)
         )
     {
         return Err(content("group key distribution grammar invalid"));
@@ -124,7 +125,7 @@ impl RamfluxClient {
         }
         let bytes = native_bytes(distribution(body)?)?;
         self.apply_generated_peer_control_once(entry, identity, exact_inner, 5, |source| {
-            self.import_group_key_for_identity(&bytes, source, false).map(|_| ())
+            self.import_group_key_for_identity(&bytes, source).map(|_| ())
         })
     }
 }

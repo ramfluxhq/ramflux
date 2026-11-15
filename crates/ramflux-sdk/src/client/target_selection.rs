@@ -3,8 +3,7 @@
 
 //! Candidate dm/group/own recipient target selection (S10a P05).
 //!
-//! Adapters call [`RamfluxClient::candidate_target_plan`] behind the existing
-//! generation-0 schema gate. Live producers stay unfed until activation.
+//! Activated producers select current native cohorts and refuse unsupported content layers.
 use crate::client::identity_authority::VerifiedLayerRoster;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
@@ -12,7 +11,6 @@ use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::SignedLayerDeclaration;
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
-use ramflux_protocol::schema_profile::schema_v1_live;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -162,23 +160,6 @@ pub(crate) struct SelectionPlan {
     pub variant_counter_high_water: u64,
 }
 
-/// True only after PR24 flips the live generation to message schema v1.
-#[must_use]
-pub(crate) fn schema_v1_selected() -> bool {
-    schema_v1_live()
-}
-
-/// Refuse effectful generated entry points before any local allocation or write.
-pub(crate) fn require_schema_v1() -> Result<(), SdkError> {
-    if !schema_v1_selected() {
-        return Err(SdkError::GeneratedRefused {
-            code: crate::error::GeneratedRefusalCode::Content,
-            reason: "generated profile is not selected".into(),
-        });
-    }
-    Ok(())
-}
-
 /// Map a kind onto an admitted layer. Never substitutes text for a control.
 /// # Errors
 /// Rejects the unspecified kind id.
@@ -308,6 +289,23 @@ fn assignment_equal(left: &SelectionPlan, right: &SelectionPlan) -> bool {
         && fingerprint(left) == fingerprint(right)
 }
 
+pub(crate) fn require_layer(plan: Option<SelectionPlan>, required: u32) -> Result<(), SdkError> {
+    if let Some(plan) = plan
+        && plan.representations.iter().all(|row| {
+            row.selected_layer >= required && matches!(row.encoding, Encoding::Typed { .. })
+        })
+    {
+        return Ok(());
+    }
+    Err(SdkError::LocalBusRefused {
+        code: "PeerUpgradeRequired".into(),
+        message: format!(
+            "content requires a verified message layer {required}; no representation fallback is permitted"
+        ),
+        body: Box::new(json!({"required_layer":required})),
+    })
+}
+
 fn peer_upgrade() -> SdkError {
     SdkError::LocalBusRefused {
         code: "PeerUpgradeRequired".into(),
@@ -387,9 +385,6 @@ impl RamfluxClient {
     pub(crate) fn candidate_target_plan(
         build: impl Fn() -> Result<SelectionRequest, SdkError>,
     ) -> Result<Option<SelectionPlan>, SdkError> {
-        if !schema_v1_selected() {
-            return Ok(None);
-        }
         Ok(Some(select_with_current_membership(build)?))
     }
 
@@ -453,16 +448,13 @@ impl RamfluxClient {
         logical_event_id: &str,
         kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
-        if let Some(state) = self.account_db()?.shared_group_state(group_id)? {
-            return self.shared_group_selection_request(
-                group_id,
-                sender_id,
-                logical_event_id,
-                kind,
-                &state,
-            );
-        }
-        self.legacy_group_selection_request(group_id, sender_id, logical_event_id, kind)
+        let state = self.account_db()?.shared_group_state(group_id)?.ok_or_else(|| {
+            SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Authority,
+                reason: "verified native group state required for selection".into(),
+            }
+        })?;
+        self.shared_group_selection_request(group_id, sender_id, logical_event_id, kind, &state)
     }
 
     fn pair_selection_request(
@@ -522,18 +514,6 @@ impl RamfluxClient {
             let roster = self.cached_roster(root)?;
             if let Some(roster) = roster.as_ref() {
                 manifests.insert(root.to_owned(), roster.group_devices(now));
-            } else if !self.custody_mode_observed(root)?
-                && let Some(legacy) = self.observed_device_set(root)?
-            {
-                manifests.insert(
-                    root.to_owned(),
-                    legacy
-                        .devices
-                        .iter()
-                        .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
-                        .map(|device| device.device_id.clone())
-                        .collect(),
-                );
             }
             rosters.insert(root.to_owned(), roster);
         }
@@ -552,24 +532,6 @@ impl RamfluxClient {
         }
         let source = self.cached_target(sender.root_commitment(), sender.device_id())?;
         finish_group_request(logical_event_id, kind, state.snapshot().epoch, source, targets)
-    }
-
-    fn legacy_group_selection_request(
-        &self,
-        group_id: &str,
-        sender_id: &str,
-        logical_event_id: &str,
-        kind: KindId,
-    ) -> Result<SelectionRequest, SdkError> {
-        let group = self.group_state(group_id)?;
-        let source = TargetDevice::without_declaration(String::new(), sender_id.to_owned(), 0);
-        let targets = group
-            .members
-            .into_iter()
-            .filter(|member| member != sender_id)
-            .map(|member| TargetDevice::without_declaration(String::new(), member, 0))
-            .collect();
-        finish_group_request(logical_event_id, kind, group.group_epoch, source, targets)
     }
 }
 

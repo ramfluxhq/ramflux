@@ -100,12 +100,43 @@ async fn receive(runtime: &mut AccountRuntime) -> TestResult<crate::bus::actor::
     runtime.apply(command).await?;
     Ok(result.await??)
 }
-fn assert_message(response: &crate::bus::actor::ActorResponse) {
+async fn assert_message(
+    runtime: &AccountRuntime,
+    response: &crate::bus::actor::ActorResponse,
+) -> TestResult {
     assert_eq!(
-        response.body["decrypted_messages"][0]["body_utf8"], "after rename",
-        "receive must return the message whose refresh it waited for"
+        response.body["durable_reader"], "message.read",
+        "receive must hand clients to the durable read model"
     );
-    assert_eq!(response.body["messages"].as_array().map(Vec::len), Some(1));
+    assert!(
+        response.body.get("decrypted_messages").is_none(),
+        "receive must not expose a parallel plaintext page"
+    );
+    let account = runtime.state.accounts.get("sender").ok_or("test: receiving account")?;
+    let readers = crate::bus::readers::AccountReaders::start(
+        account.client.account_db()?,
+        Some(account.client.owned_device_identity()?),
+    )?;
+    let result = readers
+        .request(crate::LocalBusFrame::request(
+            "refreshed-read",
+            Some("sender".into()),
+            "message",
+            "message.list",
+            json!({"conversation_id":"thread", "read_model":true}),
+        ))
+        .await;
+    readers.stop().await;
+    let page = result?;
+    assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+    let rows = page["messages"].as_array().ok_or("test: durable message page")?;
+    assert_eq!(rows.len(), 1, "the receive must commit exactly one refreshed message");
+    assert_eq!(
+        rows.first().ok_or("test: refreshed row")?["text"],
+        "after rename",
+        "the durable reader must serve the message whose refresh the command waited for"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -114,7 +145,7 @@ async fn receive_applies_message_refreshed_inside_its_command() -> TestResult {
         .run_until(Box::pin(async {
             let mut case = Box::pin(setup_refreshed()).await?;
             let response = receive(&mut case.runtime).await?;
-            assert_message(&response);
+            assert_message(&case.runtime, &response).await?;
             assert_eq!(
                 case.resumes.load(Ordering::SeqCst),
                 2,
@@ -165,7 +196,7 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
             account.client.persist_fetched_identity_directory(&case.bob.manifest)?;
             let before = case.resumes.load(Ordering::SeqCst);
             let response = receive(&mut case.runtime).await?;
-            assert_message(&response);
+            assert_message(&case.runtime, &response).await?;
             assert_eq!(
                 case.resumes.load(Ordering::SeqCst) - before,
                 2,

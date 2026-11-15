@@ -5,6 +5,7 @@
 use super::*;
 use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture, TestResult};
+use ramflux_protocol::message as g;
 
 fn carrier(
     owner: &Fixture,
@@ -12,11 +13,29 @@ fn carrier(
     conversation: &str,
     id: &str,
 ) -> TestResult<GatewayInboxEntry> {
-    let logical = owner.client.qualify_outgoing_group_message("group", id)?.0;
-    let bytes = owner.client.encrypt_group_message(
-        "group",
-        &owner.config.device_id,
-        b"native group reply",
+    let mut identity = owner.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    identity.group_id = Some("group".into());
+    identity.group_epoch = Some(owner.client.group_state("group")?.group_epoch);
+    let logical = ramflux_protocol::encode_base64url(&identity.id);
+    let mut content = g::Content {
+        value: Some(g::content::Value::Message(g::Message {
+            text: "native group reply".into(),
+            ..Default::default()
+        })),
+    };
+    RamfluxClient::prepare_generated_revision(&mut content)?;
+    let Some(g::content::Value::Message(content)) = content.value else {
+        return Err("test: prepared Message missing".into());
+    };
+    let sealed =
+        owner.client.encrypt_generated_group_message("group", &owner.config.device_id, &content)?;
+    let bytes = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content { value: Some(g::content::Value::Message(sealed)) },
     )?;
     let mut message = GatewayDirectMessage {
         conversation_id: conversation.into(),
@@ -50,12 +69,13 @@ fn carrier(
             bundle,
         },
     )?;
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&owner.config, &mut message, packet, None)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 42,
         target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&owner.config, &message, None)?,
+        envelope,
     })
 }
 

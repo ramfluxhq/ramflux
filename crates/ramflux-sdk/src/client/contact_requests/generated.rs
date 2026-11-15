@@ -11,9 +11,6 @@ use ramflux_protocol::{
 use zeroize::Zeroizing;
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Option<Envelope<ContactConsentV2>>, SdkError> {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return Ok(None);
-    }
     let Ok(inner) = g::Inner::decode(bytes) else {
         return Ok(None);
     };
@@ -66,6 +63,8 @@ impl RamfluxClient {
                 }),
             }),
         )?;
+        let frame = g::Content { value: Some(g::content::Value::Control(control.clone())) };
+        let layer = Self::required_content_layer(&frame)?;
         if let Some(bytes) = cached {
             if g::validation::scan_inner(bytes).map_err(|_| SdkError::ReplayMismatch)?.outcome
                 != g::validation::ScanOutcome::Supported
@@ -75,7 +74,7 @@ impl RamfluxClient {
             let inner = g::Inner::decode(bytes).map_err(|_| SdkError::ReplayMismatch)?;
             let identity = inner.identity.as_ref().ok_or(SdkError::ReplayMismatch)?;
             if inner.kind != 8
-                || inner.layer != g::registry::COMPILED_LAYER
+                || inner.layer != layer
                 || inner.body != control.encode_to_vec()
                 || identity.conversation_id != conversation
                 || identity.group_id.is_some()

@@ -6,6 +6,7 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
+mod applications;
 mod bootstrap;
 pub(crate) mod delivery;
 mod import;

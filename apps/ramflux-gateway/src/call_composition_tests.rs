@@ -48,6 +48,14 @@ impl GatewaySessionFrameSink for Sink {
             if body.len() > 64 * 1024 {
                 return Err(TransportError::FrameTooLarge { len: body.len() });
             }
+            let kind: serde_json::Value = ramflux_protocol::parse_i_json(body)?;
+            if kind.get("frame_type").and_then(serde_json::Value::as_str) != Some("call_resolved") {
+                self.sender
+                    .send(body.to_vec())
+                    .await
+                    .map_err(|_| TransportError::ShutdownDraining)?;
+                return Ok(());
+            }
             let frame: GatewayServerFrame = if self.replies.is_some() {
                 serde_json::from_slice(body)?
             } else {
@@ -185,7 +193,7 @@ async fn router_postcard(
     anyhow::ensure!(request.body.len() <= 64 * 1024, "bounded envelope");
     let envelope: ramflux_protocol::Envelope = ramflux_protocol::parse_i_json(&request.body)?;
     let target = envelope.target_delivery_id.clone();
-    let (outcome, inbox_seq) = ramflux_node_core::publication::capture(|| {
+    let (outcome, inbox_seq, assignment) = ramflux_node_core::publication::capture(|| {
         let source =
             system.router.authenticated_envelope_source_durable(&envelope, &system.router_store)?;
         let replay = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
@@ -218,24 +226,58 @@ async fn router_postcard(
             Some(source.root_commitment()),
             Some(lease),
         )?;
-        Ok::<_, anyhow::Error>((outcome, inbox_seq))
+        let assignment = system
+            .router_store
+            .sender_assignment(
+                source.root_commitment(),
+                &entry.envelope,
+                entry.envelope.created_at,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("committed sender assignment"))?;
+        Ok::<_, anyhow::Error>((outcome, inbox_seq, assignment))
     })?
     .published()
     .await?;
     request
         .write_postcard_response(
             200,
-            &ramflux_node_core::EnvelopeSubmitResponse {
-                migration_refusal: None,
-                outcome: outcome.into(),
-                target_delivery_id: target,
-                inbox_seq: Some(inbox_seq),
-                cursor: None,
-                nack: None,
+            &ramflux_node_core::SessionPushSubmitResponse {
+                delivery: ramflux_node_core::EnvelopeSubmitResponse {
+                    migration_refusal: None,
+                    outcome: outcome.into(),
+                    target_delivery_id: target,
+                    inbox_seq: Some(inbox_seq),
+                    cursor: None,
+                    nack: None,
+                },
+                incarnation_id: Some(assignment.inbox_incarnation_id),
+                retain_until: Some(assignment.retain_until),
             },
         )
         .await?;
     Ok(())
+}
+
+fn capable_page(system: &NativeScenario, path: &str) -> anyhow::Result<serde_json::Value> {
+    let path = path.strip_prefix("/mvp1/inbox/").ok_or_else(|| anyhow::anyhow!("inbox route"))?;
+    let (target, query) =
+        path.split_once('?').ok_or_else(|| anyhow::anyhow!("capable inbox query"))?;
+    let fields = query
+        .split('&')
+        .filter_map(|field| field.split_once('='))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    anyhow::ensure!(fields.get("session_push") == Some(&"1"), "capable inbox required");
+    let after = fields.get("after").ok_or_else(|| anyhow::anyhow!("after"))?.parse()?;
+    let limit = fields.get("limit").ok_or_else(|| anyhow::anyhow!("limit"))?.parse()?;
+    let page = system
+        .router
+        .resume_page(target, after, limit, i64::try_from(ramflux_node_core::now_unix_seconds())?)
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    anyhow::ensure!(
+        page.incarnation_id.as_deref() == fields.get("incarnation_id").copied(),
+        "actual inbox incarnation"
+    );
+    Ok(serde_json::to_value(page)?)
 }
 
 async fn router_connection(
@@ -286,10 +328,26 @@ async fn router_connection(
                             .custody_prekey_response(target, now, &system.router_store)?
                             .ok_or_else(|| anyhow::anyhow!("native prekey missing"))?,
                     )?
-                } else if let Some(target) = request.path.strip_prefix("/mvp1/inbox/") {
-                    let target =
-                        target.split('?').next().ok_or_else(|| anyhow::anyhow!("inbox target"))?;
-                    serde_json::to_value(system.router.mvp1_inbox(target, 0, 128))?
+                } else if request.path == "/mvp0/issued-seqs" {
+                    let input: ramflux_node_core::IssuedSeqsRequest =
+                        serde_json::from_value(request.body.clone())?;
+                    serde_json::to_value(ramflux_node_core::IssuedSeqsResponse {
+                        issued: input
+                            .targets
+                            .iter()
+                            .map(|target| system.router.session_push_status(target))
+                            .collect(),
+                    })?
+                } else if request.path == "/mvp0/ack-bound-batch" {
+                    let input = serde_json::from_value(request.body.clone())?;
+                    serde_json::to_value(
+                        system
+                            .router
+                            .session_ack_batch(&system.router_store, &input)
+                            .map_err(|error| anyhow::anyhow!("{error:?}"))?,
+                    )?
+                } else if request.path.starts_with("/mvp1/inbox/") {
+                    capable_page(&system, &request.path)?
                 } else if let Some(target) = request.path.strip_prefix("/mvp0/cursor/") {
                     serde_json::to_value(
                         system
@@ -313,7 +371,12 @@ async fn attach_native(
     context: &crate::state::GatewayQuicContext,
     replies: &Arc<Mutex<Replies>>,
     tasks: &mut Tasks,
+    system: &NativeScenario,
 ) -> anyhow::Result<ramflux_sdk::AccountSessionHarness> {
+    let incarnation = system.router_store.initialize_inbox(&account.config.target_delivery_id)?;
+    system
+        .router
+        .prepare_publication_target(&system.router_store, &account.config.target_delivery_id)?;
     let branch =
         account.config.device_branch.as_ref().ok_or_else(|| anyhow::anyhow!("native branch"))?;
     let mut runtime = crate::session::submit_fixtures::test_runtime()?;
@@ -324,6 +387,7 @@ async fn attach_native(
     runtime.branch_public_key =
         ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes());
     runtime.call_session_generation = Some(ramflux_protocol::encode_base64url([27; 32]));
+    runtime.session_push = Some(incarnation.clone());
     let (to_gateway, input) = mpsc::channel(4);
     let (to_sdk, received) = mpsc::channel(4);
     let send: crate::GatewaySendHandle = Arc::new(tokio::sync::Mutex::new(Box::new(Sink {
@@ -347,14 +411,19 @@ async fn attach_native(
         None,
         None,
     )));
-    let host = Box::pin(account.attach(
+    let attached = Box::pin(account.attach(
         session,
+        incarnation,
         Box::new(Stream {
             sink: Sink { sender: to_gateway, replies: None },
             source: Source(received),
         }),
     ))
-    .await?;
+    .await;
+    if attached.is_err() {
+        tasks.check().await?;
+    }
+    let host = attached?;
     Ok(host)
 }
 
@@ -402,7 +471,7 @@ async fn run(mode: ReplyMode, follow: Option<&'static str>) -> anyhow::Result<()
         bob.config.ca_cert=alice.config.ca_cert.clone();
         bob.prepare_call_peer(alice.manifest.clone())?;
         let replies=Arc::new(Mutex::new(Replies {first:None,mode,answered_only:false,count:0,decisions:Vec::new()}));
-        let mut host=Box::pin(attach_native(alice,&context,&replies,&mut tasks)).await?;
+        let mut host=Box::pin(attach_native(alice,&context,&replies,&mut tasks,&system)).await?;
         let ids=host.stage_calls(bob.manifest.clone())?;
         let first=ids.first().ok_or_else(||anyhow::anyhow!("first call"))?;
         let second=ids.get(1).ok_or_else(||anyhow::anyhow!("second call"))?;
@@ -418,7 +487,7 @@ async fn run(mode: ReplyMode, follow: Option<&'static str>) -> anyhow::Result<()
                 host.wait_call_attempt(first).await?;
                 assert!(!host.call_media(first)?,"cancelled caller regained media");
             } else {
-                let mut owner=Box::pin(attach_native(bob,&context,&replies,&mut tasks)).await?;
+                let mut owner=Box::pin(attach_native(bob,&context,&replies,&mut tasks,&system)).await?;
                 owner.wait_call_present(first).await?;
                 owner.wait_call_attempt(first).await?;
                 assert!(owner.call_media(first)?,"real incoming Ringing courier never resolved: {:?}",owner.call_error(first));

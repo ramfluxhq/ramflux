@@ -24,8 +24,8 @@ pub(super) fn broadcast(
             if event.account_id.as_deref() == Some(&subscriber.account_id)
                 && subscriber.topics.contains(&event.method)
             {
-                // Keep the final slot available for the durable stream's lagged notice.
-                if is_transient(event) && subscriber.outbound.capacity() <= 1 {
+                // Transient traffic leaves room for a durable event and its lagged notice.
+                if is_transient(event) && subscriber.outbound.capacity() <= 2 {
                     return !subscriber.outbound.is_closed();
                 }
                 if !is_transient(event) && signals_lag() && subscriber.outbound.capacity() <= 1 {
@@ -50,9 +50,9 @@ pub(super) fn broadcast(
     }
 }
 
-/// Unified message events never drop a slow subscriber silently. Dormant with the generation.
+/// Unified message events never drop a slow subscriber silently.
 fn signals_lag() -> bool {
-    crate::client::target_selection::schema_v1_selected()
+    true
 }
 
 /// Final frame of an overflowing subscription. Committed events stay in the durable journal;
@@ -148,7 +148,7 @@ mod transient_tests {
 
     #[test]
     fn transient_overflow_keeps_subscriber_and_durable_slot() -> Result<(), SdkError> {
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(3);
         let mut subscribers = BTreeMap::from([(
             1,
             LocalBusSubscriber {

@@ -51,6 +51,36 @@ async fn native_generated_receipt_opens_on_receipt_route_with_exact_inner() -> T
     Ok(())
 }
 
+fn refuse_group_key_wrong_scope(
+    source: &Fixture,
+    target: &Fixture,
+    epoch: u64,
+    distribution: &crate::SdkGroupSenderKeyDistribution,
+) -> TestResult {
+    let before = super::generation_zero_tests::actors(&source.client)?;
+    assert!(
+        matches!(
+            source.client.generated_group_key_inner(
+                "wrong-group-thread",
+                epoch,
+                distribution,
+                &target.client.owned_device_identity()?
+            ),
+            Err(crate::SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                ..
+            })
+        ),
+        "a group key must use its verified group's conversation"
+    );
+    assert_eq!(
+        super::generation_zero_tests::actors(&source.client)?,
+        before,
+        "scope refusal must precede identity allocation and capture writes"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_generated_group_key_imports_only_on_its_group_route_and_decrypts_next_message()
 -> TestResult {
@@ -99,12 +129,21 @@ async fn native_generated_group_key_imports_only_on_its_group_route_and_decrypts
             )
             .is_err()
     );
+    refuse_group_key_wrong_scope(&source, &target, state.view().epoch, &distribution)?;
+    refuse_retired_group_distribution(&source, &target, state.view().epoch, &distribution)?;
     let exact = source.client.generated_group_key_inner(
         "typed-key-thread",
         state.view().epoch,
         &distribution,
         &target.client.owned_device_identity()?,
     )?;
+    let retry = source.client.generated_group_key_inner(
+        "typed-key-thread",
+        state.view().epoch,
+        &distribution,
+        &target.client.owned_device_identity()?,
+    )?;
+    assert_eq!(retry, exact, "minimum-layer control retry must retain exact identity and bytes");
     target.receive(source.seal_inner_to(&target, &exact)?, 1).await?;
     assert!(
         target
@@ -133,6 +172,40 @@ async fn native_generated_group_key_imports_only_on_its_group_route_and_decrypts
     assert_eq!(
         target.client.generated_message_detail("typed-key-thread", &owner)?.message.text.as_deref(),
         Some("key imported by typed control")
+    );
+    Ok(())
+}
+
+fn refuse_retired_group_distribution(
+    source: &Fixture,
+    target: &Fixture,
+    epoch: u64,
+    current: &crate::SdkGroupSenderKeyDistribution,
+) -> TestResult {
+    let before = super::generation_zero_tests::actors(&source.client)?;
+    let mut retired = current.clone();
+    retired.schema = "ramflux.sdk.group_sender_key.distribution.v3".into();
+    retired.version = 3;
+    retired.sender_key_signature = None;
+    assert!(
+        matches!(
+            source.client.generated_group_key_inner(
+                "typed-key-thread",
+                epoch,
+                &retired,
+                &target.client.owned_device_identity()?
+            ),
+            Err(crate::SdkError::GeneratedRefused {
+                code: crate::GeneratedRefusalCode::Content,
+                ..
+            })
+        ),
+        "a retired distribution must be refused before becoming a typed GroupKey event"
+    );
+    assert_eq!(
+        super::generation_zero_tests::actors(&source.client)?,
+        before,
+        "retired distribution refusal must precede source identity allocation or key/history writes"
     );
     Ok(())
 }

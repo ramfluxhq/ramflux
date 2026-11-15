@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT W1 adapter for own-copy receive (S6b P14). No production caller reaches it: the
-//! live `apply_own_receive` path is unchanged. The expectation values come from the caller;
-//! P20 (the actor contract) supplies them.
+//! W1 adapter for own-copy receive. `bind_received_own_copy_in` is live; the other entry
+//! points are reached only from the receive transaction and tests. The expectation values
+//! come from the caller.
 //!
 //! Contract: W0 (`stage`) precedes the own-copy effect; replay marker, control, pair slot,
 //! receipt, erased/backup-safe (T,E,s) locator and late bind run inside one generation,
@@ -127,7 +127,7 @@ impl OwnCopyW1<'_> {
     }
 }
 
-fn join_own_copy<T>(
+pub(crate) fn join_own_copy<T>(
     db: &AccountDb,
     expected: ReceiveExpectation<'_>,
     generation: u64,
@@ -244,39 +244,30 @@ pub(crate) fn with_omit_locator<T>(f: impl FnOnce() -> T) -> T {
 }
 
 impl RamfluxClient {
-    /// Decrypts an own-copy packet and commits through the dormant W1 adapter.
-    pub(crate) fn apply_own_copy_w1(
-        &self,
-        entry: &crate::GatewayInboxEntry,
-        manifest: &crate::SdkDeviceManifestResponse,
-        expected: ReceiveExpectation<'_>,
-        sequence: u64,
-        message: &str,
-    ) -> Result<bool, SdkError> {
-        let db = self.account_db()?;
-        let generation = expected.generation;
-        let gate = OwnCopyW1 { expected, generation };
-        let ack = self.own_copy_ack_binding(entry)?;
-        gate.effect(db, sequence, message, ack, || self.commit_own_copy_from_entry(entry, manifest))
-    }
-
-    /// Same cut as [`Self::apply_own_copy_w1`], joining an already-open receive transaction.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apply_own_copy_w1_in(
+    /// Bind generated own-copy settlement to its committed receipt's erasure owners.
+    pub(crate) fn bind_received_own_copy_in(
         &self,
         tx: &ReceiveTransaction<'_>,
         entry: &crate::GatewayInboxEntry,
-        manifest: &crate::SdkDeviceManifestResponse,
         expected: ReceiveExpectation<'_>,
-        sequence: u64,
-        message: &str,
-    ) -> Result<bool, SdkError> {
-        let generation = expected.generation;
-        let gate = OwnCopyW1 { expected, generation };
-        let ack = self.own_copy_ack_binding(entry)?;
-        gate.effect_in(tx, sequence, message, ack, || {
-            self.commit_own_copy_from_entry(entry, manifest)
-        })
+    ) -> Result<(), SdkError> {
+        let Some(ack) = self.own_copy_ack_binding(entry)? else { return Ok(()) };
+        tx.require_open_input(entry.inbox_seq)?;
+        if entry.target_delivery_id != expected.target {
+            return Err(StorageError::AuthorizationRejected.into());
+        }
+        let key = locator_key(&entry.envelope.envelope_id);
+        let locator = SequenceLocator {
+            target: expected.target.into(),
+            incarnation: expected.incarnation.into(),
+            sequence: entry.inbox_seq,
+            acknowledged: false,
+            ack: Some(ack.clone()),
+        };
+        tx.account().persist_actor_state(&key, &locator)?;
+        tx.account().bind_actor_container_reference(&ack.receipt_key, &key)?;
+        before_commit_fault()?;
+        Ok(())
     }
 
     /// Recovery W1 cut for the pair-reset durable writes.

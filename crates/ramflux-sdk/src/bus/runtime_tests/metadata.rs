@@ -7,7 +7,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn typed_account_and_attachment_metadata_reach_client_records() -> Result<(), SdkError> {
+fn typed_account_and_object_metadata_reach_client_records() -> Result<(), SdkError> {
     let root = root("typed-metadata");
     let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
     let create: LocalBusAccountCreateRequest = serde_json::from_value(json!({
@@ -28,26 +28,19 @@ fn typed_account_and_attachment_metadata_reach_client_records() -> Result<(), Sd
         db.client_record("identity", "alice")?.ok_or_else(|| failure("missing identity"))?;
     assert_eq!(identity["display_name"], "Alice profile");
     assert_eq!(identity["kind"], "bot");
-    let attachment = LocalBusMessageAttachmentInput {
-        name: Some("sample.txt".to_owned()),
-        mime: Some("text/plain".to_owned()),
-        object_id: "object".to_owned(),
-        plaintext_base64: ramflux_protocol::encode_base64url(b"sample"),
-        chunk_size: 4096,
-        relay_endpoint: "quic://relay.example:443".to_owned(),
-        owner_home_node_id: None,
-        relay_audience_node_id: None,
-        relay_service_key_base64: None,
-    };
-    let submit = request(
-        "submit",
+    // The retired message.submit attachment input is gone; object metadata now reaches the
+    // client records through the live object.put route.
+    let put = request(
+        "put",
         "alice",
-        "message.submit",
+        "object.put",
         json!({
-            "conversation_id":"thread", "message_id":"message", "attachments":[attachment]
+            "object_id":"object", "name":"sample.txt", "mime":"text/plain",
+            "plaintext_base64":ramflux_protocol::encode_base64url(b"sample"), "chunk_size":4096,
+            "relay_endpoint":"quic://relay.example:443"
         }),
     );
-    super::super::read_model::capture(&account, &submit, &json!({}))?;
+    super::super::read_model::capture(&account, &put, &json!({}))?;
     let object =
         db.client_record("object", "object")?.ok_or_else(|| failure("missing attachment"))?;
     assert_eq!(object["name"], "sample.txt");

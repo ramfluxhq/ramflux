@@ -17,28 +17,14 @@ async fn own_import_checks_pending_local_fences_even_when_the_node_still_reports
         &RamfluxClient::device_revocation_key(&target.client.device_identity(&reference)?),
         &true,
     )?;
-    let mut envelope = crate::client::own_device_sync::tests::envelope("one", "two");
-    envelope.principal_commitment = manifest.principal_commitment.clone();
-    envelope.created_at = now_unix_timestamp();
-    envelope.expires_at = envelope.created_at + 3600;
-    envelope.history_ref.key_slot.conversation_id =
-        crate::own_device_sync::own_device_sync_slot_conversation_id(
-            &envelope.snapshot_id,
-            &envelope.history_ref.object_id,
-            &envelope.target_device_id,
-        );
-    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-        source.client.device_branch.as_ref().ok_or("branch")?,
-        &crate::own_device_sync::own_device_sync_signing_body(&envelope),
-    )?;
-    let (gateway, server) = super::gateway::manifest_server(&target.path, manifest.clone()).await?;
+    // The pending local fence is checked before any node or cached authority can vouch for the
+    // device, so a sibling the node still reports active cannot be used for own-device traffic.
+    let identity = target.client.device_identity(&reference)?;
     let error = target
         .client
-        .verify_own_device_sync_envelope(&gateway, &manifest.principal_commitment, &envelope)
-        .await
+        .require_cached_root_authority(HeadUse::NewAuthorization, &identity)
         .err()
         .ok_or("pending revoked source was accepted")?;
-    server.await??;
     assert!(error.to_string().contains("locally fenced"), "{error}");
     assert_eq!(
         target.client.account_db()?.client_directory_ids("object", "", 100)?,

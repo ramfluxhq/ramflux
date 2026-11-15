@@ -18,7 +18,7 @@ fn command() -> AccountCommand {
             Some("sender".into()),
             "group",
             "group.send",
-            json!({"group_id":"group", "conversation_id":"thread", "message_id":"msg", "sender_id":"device", "encrypted_body_base64":"aGk"}),
+            json!({"group_id":"group", "conversation_id":"thread", "message_id":"msg", "sender_id":"device", "plaintext_body_base64":"aGk","encrypted_body_base64":""}),
         ),
         connection_id: 1,
         topics: BTreeSet::new(),

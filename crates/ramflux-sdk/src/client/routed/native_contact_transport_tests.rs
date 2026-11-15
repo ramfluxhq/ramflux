@@ -171,9 +171,13 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn native_contact_request_crosses_the_ordinary_transport_before_first_direct_message()
 -> TestResult {
+    crate::client::native_test_support::watchdog::within(native_contact_request_crosses_body())
+        .await?
+}
+async fn native_contact_request_crosses_body() -> TestResult {
     let sender = NativeFixture::with_device("native-transport-alice", "alice-device").await?;
     let target = NativeFixture::with_device("native-transport-bob", "bob-device").await?;
     let directory = Directory::from_records(
@@ -237,8 +241,19 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
         )
         .await?;
     target.client.commit_contact_request_bootstrap(&entry, &sender.manifest, "bob-device")?;
-    let message = GatewayDirectMessage {
-        conversation_id: "native-transport-thread".into(),
+    first_direct_after_native_contact(&sender, &target, &mut engine).await
+}
+
+async fn first_direct_after_native_contact(
+    sender: &NativeFixture,
+    target: &NativeFixture,
+    engine: &mut GatewaySessionEngine,
+) -> TestResult {
+    let mut message = GatewayDirectMessage {
+        conversation_id: ramflux_protocol::message::dm_scope::derive(
+            &sender.client.own_account_anchor()?,
+            &target.client.own_account_anchor()?,
+        )?,
         message_id: "first-direct".into(),
         envelope_id: "first-direct".into(),
         source_principal_id: sender.manifest.principal_id.clone(),
@@ -250,9 +265,55 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    let _sealed = sender
+    assert!(
+        sender
+            .client
+            .account_db()?
+            .client_record("conversation", &message.conversation_id)?
+            .is_none(),
+        "first-contact calibration must have no preexisting root-pair conversation"
+    );
+    assert!(
+        !sender.client.friend_link_peer_is_accepted(&target.manifest.principal_commitment)?,
+        "outbound consent must still be pending before the first DM"
+    );
+    let prepared = sender.client.prepare_authored_message(
+        &mut message,
+        None,
+        &ramflux_protocol::message::Message { text: "first message".into(), ..Default::default() },
+    )?;
+    let context = sender
         .client
-        .seal_routed_as(&mut engine, &message, b"first message", Route::direct())
-        .await?;
+        .account_db()?
+        .client_record("conversation", &message.conversation_id)?
+        .ok_or("first DM context")?;
+    assert_eq!(
+        context["participant_roots"],
+        serde_json::json!([
+            sender.manifest.principal_commitment,
+            target.manifest.principal_commitment
+        ]),
+        "authored capture must bind the verified immutable root pair"
+    );
+    assert!(
+        !sender.client.friend_link_peer_is_accepted(&target.manifest.principal_commitment)?,
+        "creating local root context must not grant contact consent"
+    );
+    let sealed =
+        sender.client.seal_routed_as(engine, &message, &prepared.wire, Route::direct()).await?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, sealed, None)?;
+    let entry = GatewayInboxEntry {
+        envelope,
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: target.config.target_delivery_id.clone(),
+    };
+    let opened = target.client.open_routed(&entry, &target.config.device_id)?;
+    assert_eq!(
+        opened.body.as_slice(),
+        prepared.exact,
+        "request bootstrap must preserve the first ordinary generated DM"
+    );
     Ok(())
 }

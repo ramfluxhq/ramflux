@@ -52,7 +52,7 @@ fn overflow_operations() -> anyhow::Result<Vec<GatewayClientFrame>> {
         }
     };
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
-    let mut envelope = crate::session::submit_fixtures::test_envelope(now)?;
+    let mut envelope = crate::session::submit_fixtures::test_envelope(now);
     envelope.source_principal_id = "outage-principal-8".into();
     envelope.source_device_id = "outage-device-8".into();
     envelope.target_delivery_id = "outage-delivery-9".into();

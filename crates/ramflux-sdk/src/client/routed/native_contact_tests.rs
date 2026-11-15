@@ -11,48 +11,11 @@ pub(super) fn carrier(
     bytes: &[u8],
     id: &str,
 ) -> TestResult<GatewayInboxEntry> {
-    let mut message = GatewayDirectMessage {
-        conversation_id: crate::client::contact_requests::conversation(
-            &sender.manifest.principal_commitment,
-            &target.manifest.principal_commitment,
-        )?,
-        message_id: id.into(),
-        envelope_id: id.into(),
-        source_principal_id: sender.manifest.principal_id.clone(),
-        sender_id: "primary".into(),
-        recipient_device_id: Some("primary".into()),
-        recipient_principal_commitment: Some(target.manifest.principal_commitment.clone()),
-        target_delivery_id: target.client.owned_device_identity()?.storage_key().into(),
-        encrypted_body: Vec::new(),
-        created_at: crate::time::now_unix_timestamp(),
-        ttl: 3600,
-    };
-    let local = sender.client.owned_device_identity()?;
-    let remote = target.client.owned_device_identity()?;
-    let (mut session, header, bundle) = sender.client.new_send_pair(
-        &local,
-        &message,
-        target.client.load_x3dh_private_state(&remote)?.bundle,
-    )?;
-    let mut packet = sender.client.seal_routed_with_route(
-        &message,
-        bytes,
-        Route::control(),
-        SealPair {
-            local: "primary",
-            remote: remote.storage_key(),
-            session: &mut session,
-            header,
-            bundle,
-        },
-    )?;
-    packet.packet.schema = crate::client::contact_requests::ENVELOPE_SCHEMA.into();
-    message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+        target_delivery_id: target.config.target_delivery_id.clone(),
+        envelope: sender.seal_inner_to_with_id(target, bytes, id)?,
     })
 }
 
@@ -66,9 +29,11 @@ async fn ordinary_native_contact_preview_rolls_back_and_commit_consumes_replay_s
         crate::client::contact_requests::native_tests::approve_request(&sender, &target).await?;
     let mut invalid: ramflux_protocol::custody::Envelope<
         ramflux_protocol::custody::ContactConsentV2,
-    > = serde_json::from_slice(&bytes)?;
+    > = crate::client::contact_requests::native_tests::decoded_consent(&bytes)?;
     invalid.body.note = Some("tampered primary intent".into());
-    let bad = carrier(&sender, &target, &serde_json::to_vec(&invalid)?, "bad-native-contact")?;
+    let invalid =
+        crate::client::contact_requests::native_tests::encoded_consent(&sender, &invalid)?;
+    let bad = carrier(&sender, &target, &invalid, "bad-native-contact")?;
     let (route, preview) = target
         .client
         .preview_native_contact_request(&bad, &sender.manifest, "primary")?

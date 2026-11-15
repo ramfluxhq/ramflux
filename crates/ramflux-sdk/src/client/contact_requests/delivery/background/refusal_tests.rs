@@ -69,10 +69,9 @@ async fn deliver_once(
     account: &mut LocalBusAccountState,
     recipient: &RecipientPlan,
 ) -> Result<Option<Plan>, SdkError> {
-    let envelope = crate::dm::gateway_direct_message_envelope(
-        &recipient.plan.config,
+    let envelope = crate::bus::delivery_receipts::background::retained_receipt_fixture(
+        account,
         &recipient.message,
-        None,
     )?;
     let session = account.session_client().await?;
     account.apply_session_metadata(session);

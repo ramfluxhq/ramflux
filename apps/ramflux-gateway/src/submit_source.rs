@@ -17,10 +17,10 @@ pub(crate) fn bind_source(
     ramflux_node_core::check_entry_bound(envelope)?;
     let mut envelope = envelope.clone();
     envelope.ext.ext.remove("source_device_authority");
-    if ramflux_protocol::schema_profile::schema_v1_live() {
-        ramflux_protocol::message::outer::refuse_live_bridge(&envelope)
-            .map_err(|error| anyhow::anyhow!(error))?;
-    }
+
+    ramflux_protocol::message::outer::refuse_live_bridge(&envelope)
+        .map_err(|error| anyhow::anyhow!(error))?;
+
     ramflux_protocol::verify_envelope_sender_signature(&envelope, &runtime.branch_public_key)?;
     // The router resolves the current signed set for every submission.
     // A session-open snapshot must never be propagated as current authority.
@@ -99,31 +99,15 @@ pub(crate) mod tests {
             supports_forward_ack: false,
             ephemeral_rate: std::sync::Arc::default(),
         };
-        let mut envelope = ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".into(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.into(),
-            ext: ramflux_protocol::Ext::default(),
-            signed: ramflux_protocol::SignedFields {
-                signing_key_id: "shared".into(),
-                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-                signature: String::new(),
-            },
-            envelope_id: "one".into(),
-            source_principal_id: "alice".into(),
-            source_device_id: "shared".into(),
-            target_delivery_id: "peer".into(),
-            routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-            priority: ramflux_protocol::Priority::Normal,
-            ttl: 600,
-            created_at: 1000,
-            encrypted_payload: "encrypted".into(),
-            payload_hash: "hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
-        };
+        let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+            "one",
+            "peer",
+            ramflux_protocol::DeliveryClass::Message,
+        );
+        envelope.source_device_id = "shared".into();
+        envelope.signed.signing_key_id = "shared".into();
+        envelope.ttl = 600;
+        envelope.created_at = 1000;
         envelope.ext.ext.insert(
             "source_root_commitment".into(),
             serde_json::json!(runtime.source_identity.root_commitment()),
@@ -137,6 +121,24 @@ pub(crate) mod tests {
             .ext
             .insert("source_device_authority".into(), serde_json::json!({"forged":true}));
         assert!(!bind_source(&runtime, &envelope)?.ext.ext.contains_key("source_device_authority"));
+        for refused in [
+            ramflux_protocol::DeliveryClass::OpaqueEvent,
+            ramflux_protocol::DeliveryClass::NotificationWake,
+            ramflux_protocol::DeliveryClass::SelfDeviceControl,
+        ] {
+            let mut wrong_class = envelope.clone();
+            wrong_class.delivery_class = refused.clone();
+            let error = bind_source(&runtime, &wrong_class)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("{refused:?} must be refused"))?;
+            assert!(
+                matches!(
+                    error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                    Some(ramflux_node_core::NodeCoreError::DeliveryClassRefused)
+                ),
+                "generation 1 session ingress refuses {refused:?} with the typed class error: {error}"
+            );
+        }
         let mut forged = envelope.clone();
         forged.source_principal_id = "mallory".into();
         assert!(bind_source(&runtime, &forged).is_err());

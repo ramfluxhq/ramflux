@@ -5,6 +5,42 @@ use super::*;
 use prost::Message as _;
 use ramflux_protocol::message as g;
 
+pub(super) type PairFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Fixture, Fixture), SdkError>>>>;
+pub(super) fn pair(alice: u8, bob: u8) -> PairFuture {
+    Box::pin(async move {
+        let a = Box::pin(Fixture::native("alice", alice)).await?;
+        let b = Box::pin(Fixture::native("bob", bob)).await?;
+        for (local, peer) in [(&a, &b), (&b, &a)] {
+            local.client.persist_fetched_identity_directory(&peer.manifest()?)?;
+            local.client.establish_friend_link(
+                "link",
+                &local.client.own_account_anchor()?,
+                &peer.client.own_account_anchor()?,
+            )?;
+            let manifest = g::NativeDeviceManifest::decode(
+                local.client.encode_generated_task_manifest(&peer.manifest()?)?.as_slice(),
+            )
+            .map_err(|_| invalid("native fixture manifest"))?;
+            let link = local.client.account_db()?.friend_link("link")?;
+            local.client.receive_generated_own_contact(&g::OwnContactSync {
+                manifest: Some(manifest),
+                link: Some(g::FriendLinkRecord {
+                    link_id: link.link_id,
+                    requester_id: link.requester_id,
+                    target_id: link.target_id,
+                    state: link.state,
+                    remove_scope: link.remove_scope,
+                    blocked: link.blocked,
+                    capability_revoked_at: link.capability_revoked_at,
+                }),
+                ..Default::default()
+            })?;
+        }
+        Ok((a, b))
+    })
+}
+
 fn generated_identity(sender: &Fixture, id: &str) -> Result<g::EventIdentity, SdkError> {
     let source = sender.client.owned_device_identity()?;
     let author = g::QualifiedDevice {
@@ -27,7 +63,7 @@ fn generated_identity(sender: &Fixture, id: &str) -> Result<g::EventIdentity, Sd
     })
 }
 
-fn seal(
+pub(super) fn seal(
     a: &Fixture,
     b: &Fixture,
     message: GatewayDirectMessage,
@@ -63,7 +99,7 @@ fn seal_as(
 
 fn unknown_inner(sender: &Fixture, id: &str) -> Result<Vec<u8>, SdkError> {
     Ok(g::Inner {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 900,
         identity: Some(generated_identity(sender, id)?),
         body: vec![0xff, 0, 0x80],
@@ -112,7 +148,7 @@ fn edit(target: &g::MessageRef, revision: u64, digest: [u8; 32], text: &str) -> 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_original_redelivery_never_replaces_current_edit() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(185, 187)?;
+    let (a, mut b) = pair(185, 187).await?;
     commit_content(
         &a,
         &mut b,
@@ -192,7 +228,7 @@ async fn retired_original_redelivery_never_replaces_current_edit() -> Result<(),
 async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(239, 241)?;
+    let (a, mut b) = pair(239, 241).await?;
     commit_content(
         &a,
         &mut b,
@@ -275,7 +311,7 @@ async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(211, 213)?;
+    let (a, mut b) = pair(211, 213).await?;
     let raw = unknown_inner(&a, "unknown-wire")?;
     let entry = seal(&a, &b, message("unknown-wire", "c"), &raw)?;
     let (engine, writes) = super::super::review::Inbox::engine(b.config()?, vec![entry.clone()])?;
@@ -322,7 +358,15 @@ async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError>
         page.first().and_then(|update| update.state.as_ref())
     );
     let owner = ramflux_protocol::encode_base64url(generated_identity(&a, "unknown-wire")?.id);
-    b.client.delete_direct_message("c", &owner, "local", "erase-unsupported-handle")?;
+    b.client.delete_direct_message(
+        "c",
+        &owner,
+        "local",
+        &ramflux_protocol::hash_base64url(
+            "ramflux.test.local-delete.v1",
+            b"erase-unsupported-handle",
+        ),
+    )?;
     assert!(
         !b.client.account_db()?.actor_state_exists(&handle_key)?,
         "erasure retained private handle mapping"
@@ -334,13 +378,21 @@ async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError>
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_field_entity_layer_and_signed_payload_keep_exact_bytes() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(215, 217)?;
-    let mut body =
-        g::Message { text: "exact unknown field".into(), ..Default::default() }.encode_to_vec();
+    let (a, mut b) = pair(215, 217).await?;
+    let mut body = g::Message {
+        text: "exact unknown field".into(),
+        erasure_nonce: vec![0x71; 32],
+        ..Default::default()
+    }
+    .encode_to_vec();
     body.extend_from_slice(&[0xfa, 0x07, 1, 0x42]);
-    let raw =
-        g::Inner { layer: 2, kind: 1, identity: Some(generated_identity(&a, "field-wire")?), body }
-            .encode_to_vec();
+    let raw = g::Inner {
+        layer: g::registry::PROFILE_FLOOR,
+        kind: 1,
+        identity: Some(generated_identity(&a, "field-wire")?),
+        body,
+    }
+    .encode_to_vec();
     let entry = seal(&a, &b, message("field-wire", "c"), &raw)?;
     apply(&mut b, &entry).await?;
     let copy_id = b.client.authenticated_committed_key(
@@ -369,7 +421,7 @@ async fn unknown_field_entity_layer_and_signed_payload_keep_exact_bytes() -> Res
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(219, 221)?;
+    let (a, mut b) = pair(219, 221).await?;
     let mut control = g::Control {
         operation: 15,
         payload: Some(g::control::Payload::OwnMessageCopy(g::OwnMessageCopy::default())),
@@ -377,7 +429,7 @@ async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<
     .encode_to_vec();
     control.extend_from_slice(&[0xf8, 0x07, 1]);
     let raw = g::Inner {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 8,
         identity: Some(generated_identity(&a, "forged-own")?),
         body: control,
@@ -393,7 +445,7 @@ async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_preserves_unicode_and_unsupported_projection() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(223, 225)?;
+    let (a, mut b) = pair(223, 225).await?;
     let known = RamfluxClient::encode_generated_inner(
         generated_identity(&a, "known-wire")?,
         &g::Content {
@@ -420,7 +472,7 @@ async fn message_page_preserves_unicode_and_unsupported_projection() -> Result<(
 #[tokio::test(flavor = "current_thread")]
 async fn raw_inner_crash_commit_precedes_ack() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(231, 233)?;
+    let (a, mut b) = pair(231, 233).await?;
     let raw = unknown_inner(&a, "crash-wire")?;
     let entry = seal(&a, &b, message("crash-wire", "c"), &raw)?;
     let key = b.client.authenticated_committed_key(
@@ -466,7 +518,7 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         DirectMessageWrite, MessageMetadata, RawInnerCopyKind, RawInnerCopyWrite,
     };
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(235, 237)?;
+    let (a, mut b) = pair(235, 237).await?;
     let identity = generated_identity(&a, "upgrade-target")?;
     let id = ramflux_protocol::encode_base64url(&identity.id);
     let raw = RamfluxClient::encode_generated_inner(
@@ -481,6 +533,11 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     let entry = seal(&a, &b, message("upgrade-target", "c"), &raw)?;
     let opened = b.client.open_routed(&entry, &b.id)?;
     let copy_id = b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
+    let origin = b
+        .client
+        .capture_retained_origin(&opened, &entry)?
+        .ok_or_else(|| invalid("upgrade fixture origin missing"))?;
+    let origin_copy = origin.copy_id()?;
     let receipt = crate::client::routed::Committed {
         routing: opened.routing.clone(),
         entry: entry.clone(),
@@ -499,11 +556,18 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         source_epoch: 1,
         original_route: serde_json::to_string(&opened.routing)?,
         outer_receipt_key: copy_id.clone(),
-        source_evidence_copy: None,
+        source_evidence_copy: Some(origin_copy.clone()),
         received_erasure_generation: b.client.account_db()?.privacy_erasure_generation()?,
     })?;
     let db = b.client.account_db()?;
     db.write_transaction(|| -> Result<(), SdkError> {
+        b.client.retain_raw_origin_copy(
+            &id,
+            source.root_commitment(),
+            &origin_copy,
+            &origin,
+            None,
+        )?;
         db.persist_message_actor_state(&id, &copy_id, &receipt)?;
         db.put_unsupported_raw_copy(RawInnerCopyWrite {
             owner_id: &id,
@@ -535,20 +599,45 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     assert_eq!(b.client.account_db()?.journal_bounds()?.head_seq, head);
     assert!(b.client.account_db()?.raw_inner_copy("redundant-known-copy")?.is_none());
-    b.client.delete_direct_message("c", &id, "local", "erase-upgrade")?;
-    let db = b.client.account_db()?;
+    assert_reparse_erasure_fence(
+        &mut b.client,
+        &id,
+        source.root_commitment(),
+        &copy_id,
+        &raw,
+        &metadata,
+    )?;
+    Ok(())
+}
+
+fn assert_reparse_erasure_fence(
+    client: &mut RamfluxClient,
+    id: &str,
+    source: &str,
+    copy_id: &str,
+    raw: &[u8],
+    metadata: &[u8],
+) -> Result<(), SdkError> {
+    use ramflux_storage::{RawInnerCopyKind, RawInnerCopyWrite};
+    client.delete_direct_message(
+        "c",
+        id,
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase-upgrade"),
+    )?;
+    let db = client.account_db()?;
     assert!(
         db.write_transaction(|| db.put_unsupported_raw_copy(RawInnerCopyWrite {
-            owner_id: &id,
-            verified_source_anchor: source.root_commitment(),
-            copy_id: &copy_id,
+            owner_id: id,
+            verified_source_anchor: source,
+            copy_id,
             kind: RawInnerCopyKind::OuterInner,
-            bytes: &raw,
-            bounded_metadata: &metadata,
+            bytes: raw,
+            bounded_metadata: metadata,
         }))
         .is_err()
     );
-    assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
+    assert_eq!(client.reparse_raw_inner_page()?.projected, 0);
     Ok(())
 }
 
@@ -641,27 +730,23 @@ fn assert_group_authority_guard(
 
 async fn group_authority_case(change: &str) -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(231, 233)?;
+    let (a, mut b) = pair(231, 233).await?;
     for client in [&a.client, &b.client] {
         for peer in [&a, &b] {
-            let manifest = crate::client::identity_authority::test_support::manifest(&peer.client)?;
-            client.observe_device_manifest_json(
-                serde_json::to_value(&manifest)?,
-                &manifest.principal_commitment,
-            )?;
+            let manifest = peer.manifest()?;
+            client.persist_fetched_identity_directory(&manifest)?;
         }
     }
-    b.client.shared_group_create("generated-group", "c", None, "target-bob")?;
-    let alice = a.client.owned_group_actor("target-alice")?;
-    let state = b.client.shared_group_change(
+    b.create_shared_group("generated-group", "c")?;
+    let alice = a.client.owned_group_actor(&a.config()?.target_delivery_id)?;
+    let state = b.change_shared_group(
         "generated-group",
-        "target-bob",
         ramflux_protocol::group_state::GroupStateChange::Add {
             member: alice.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    a.client.accept_shared_group_state(&state, "target-alice")?;
+    a.client.accept_shared_group_state(&state, &a.config()?.target_delivery_id)?;
     b.client.import_group_sender_key_distribution(
         &a.client.export_group_sender_key_distribution("generated-group", "alice")?,
     )?;
@@ -681,9 +766,8 @@ async fn group_authority_case(change: &str) -> Result<(), SdkError> {
                 b.client.own_account_anchor()?;
         }
         "member" => {
-            b.client.shared_group_change(
+            b.change_shared_group(
                 "generated-group",
-                "target-bob",
                 ramflux_protocol::group_state::GroupStateChange::Remove {
                     root_commitment: a.client.own_account_anchor()?,
                     device_id: "alice".into(),
@@ -760,10 +844,10 @@ async fn generated_refusals_settle_and_never_stage_locally()
 -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for kind in [3, 4, 5, 7, 108, 110] {
-        let (a, mut b) = pair(201, 203)?;
+        let (a, mut b) = pair(201, 203).await?;
         // A known malformed payload has no target/replacement/operation. This is peer input.
         let bad_bytes = g::Inner {
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
             kind: if kind >= 100 { 8 } else { kind },
             identity: Some(generated_identity(&a, "bad")?),
             body: match kind {
@@ -836,10 +920,44 @@ async fn generated_refusals_settle_and_never_stage_locally()
     Ok(())
 }
 
+fn assert_only_original_header_retained(client: &RamfluxClient, id: &str) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    assert_eq!(
+        db.actor_state_usage("routed/pending-edit/")?.0,
+        0,
+        "every resolved or foreign pending Edit must retire"
+    );
+    let copies = db.raw_inner_reparse_page("pending-edit-cleanup-check")?;
+    assert_eq!(copies.len(), 1, "only the immutable original header may remain");
+    let copy = copies.first().ok_or_else(|| invalid("retained original header"))?;
+    assert_eq!(copy.copy.copy_id, format!("history/original-header/{id}"));
+    assert_eq!(copy.copy.kind, ramflux_storage::RawInnerCopyKind::HistoryContainer);
+    let header: crate::client::generated_history::OriginalHeader = db
+        .load_actor_state(&format!("routed/original-header/{id}"))?
+        .ok_or_else(|| invalid("original header actor"))?;
+    assert_eq!(
+        copy.copy.bytes,
+        serde_json::to_vec(&header)?,
+        "retained copy must contain only the fixed original-header DTO"
+    );
+    let outer: serde_json::Value =
+        ramflux_protocol::parse_i_json(&header.evidence.canonical_sender_envelope)?;
+    assert!(
+        outer.get("encrypted_payload").is_none(),
+        "immutable header evidence must not retain replaced ciphertext"
+    );
+    assert_eq!(
+        db.unsupported_raw_quota(None)?.owners,
+        1,
+        "the body-free original header is the sole quota owner"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(207, 209)?;
+    let (a, mut b) = pair(207, 209).await?;
     let target = g::MessageRef {
         id: generated_identity(&a, "late-target")?.id,
         conversation_id: "c".into(),
@@ -870,9 +988,17 @@ async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Res
     );
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 1);
     // No transport retry row owns this work: its exact bytes remain after ordinary retry expiry.
-    let _clock = crate::time::FixedClock::set(crate::time::now_unix_timestamp() + 31 * 86400);
-    super::super::review::trust(&b, &a)?;
-    super::super::review::trust(&a, &b)?;
+    let expired_at = crate::time::now_unix_timestamp() + 31 * 86400;
+    b.client.account_db()?.expire_inbox_holds(expired_at)?;
+    assert!(
+        !b.client.account_db()?.has_inbox_retry(&committed)?,
+        "committed early Edit must not own a transport retry"
+    );
+    assert_eq!(
+        b.client.account_db()?.unsupported_raw_quota(None)?.owners,
+        1,
+        "real retry-expiry cleanup must preserve the pending Edit"
+    );
     commit_content(
         &a,
         &mut b,
@@ -885,7 +1011,10 @@ async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Res
     .await?;
     let page = b.client.generated_message_page("c", None, 100)?.messages;
     assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content { value: Some(g::content::Value::Message(message)) })) if message.text == "late edit wins")));
-    assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
+    assert_only_original_header_retained(
+        &b.client,
+        &ramflux_protocol::encode_base64url(&target.id),
+    )?;
     Ok(())
 }
 
@@ -893,7 +1022,7 @@ async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Res
 async fn message_receipt_requires_matching_metadata_commitment() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for row in 0..3 {
-        let (a, mut b) = pair(199, 201)?;
+        let (a, mut b) = pair(199, 201).await?;
         let identity = generated_identity(&a, "header-receipt")?;
         let value = if row == 2 {
             g::content::Value::Reaction(g::Reaction {
@@ -946,10 +1075,57 @@ async fn message_receipt_requires_matching_metadata_commitment() -> Result<(), S
     Ok(())
 }
 
+fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkError> {
+    use ramflux_protocol::large_attachment as large;
+    let recipient = target.client.owned_device_identity()?;
+    let slots = vec![large::MediaKeySlot {
+        recipient: large::QualifiedDevice {
+            account_anchor: recipient.root_commitment().into(),
+            device_id: recipient.device_id().into(),
+            device_epoch: 1,
+        },
+        encrypted_key: format!("old-key-{index}-canary").into_bytes(),
+        format: 1,
+    }];
+    let manifest = large::MediaManifest {
+        manifest_id: [index + 1; 32],
+        plaintext_digest: [9; 32],
+        plaintext_length: 100,
+        ciphertext_length: 116,
+        encrypted_segment_bytes: large::SEGMENT_BYTES,
+        network_chunk_bytes: 524_288,
+        segment_digests: vec![[8; 32]],
+        key_slots: slots.clone(),
+        relay_origin: "https://relay.example".into(),
+        read_capability: vec![7; 32],
+        expires_at: 4_000_000_000,
+        retention_class: "relay_retained.v1".into(),
+    };
+    let reference = large::MediaRef {
+        mime_type: "image/jpeg".into(),
+        file_name: Some(format!("old-media-{index}-canary")),
+        inline_thumbnail: Some(large::Thumbnail {
+            mime_type: "image/jpeg".into(),
+            width: 1,
+            height: 1,
+            encoded_image: format!("old-thumb-{index}-canary").into_bytes(),
+        }),
+        object_id: ramflux_protocol::encode_base64url([index + 3; 32]),
+        manifest_digest: manifest.hash().map_err(|_| invalid("media fixture manifest"))?,
+        size: 100,
+        key_slots: slots,
+        large_manifest: manifest,
+    };
+    g::MediaRef::decode(
+        reference.canonical_bytes().map_err(|_| invalid("media fixture reference"))?.as_slice(),
+    )
+    .map_err(|_| invalid("media fixture generated reference"))
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn full_message_edit_drops_reply_forward_and_two_media() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(195, 197)?;
+    let (a, mut b) = pair(195, 197).await?;
     let reference = g::MessageRef {
         id: vec![7; 32],
         conversation_id: "old-reply-conversation-canary".into(),
@@ -963,26 +1139,7 @@ async fn full_message_edit_drops_reply_forward_and_two_media() -> Result<(), Sdk
             original_display_name: Some("old-forward-name-canary".into()),
             origin_assertion: Vec::new(),
         }),
-        media: (0..2)
-            .map(|index| g::MediaRef {
-                object_id: format!("old-media-{index}-canary"),
-                manifest_digest: vec![8; 32],
-                mime_type: "image/png".into(),
-                size: 100,
-                key_slots: vec![g::MediaKeySlot {
-                    encrypted_key: format!("old-key-{index}-canary").into_bytes(),
-                    format: 1,
-                    ..Default::default()
-                }],
-                inline_thumbnail: Some(g::Thumbnail {
-                    mime_type: "image/png".into(),
-                    width: 1,
-                    height: 1,
-                    encoded_image: format!("old-thumb-{index}-canary").into_bytes(),
-                }),
-                ..Default::default()
-            })
-            .collect(),
+        media: (0..2).map(|index| edit_media_reference(&b, index)).collect::<Result<_, _>>()?,
         ..Default::default()
     };
     commit_content(&a, &mut b, "body-free-target", g::content::Value::Message(original)).await?;
@@ -1046,7 +1203,7 @@ async fn reaction_at(
 async fn reaction_signed_order_advances_absent_noops_and_bounds_visible_tokens()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(181, 183)?;
+    let (a, mut b) = pair(181, 183).await?;
     commit_content(
         &a,
         &mut b,
@@ -1088,7 +1245,7 @@ async fn reaction_signed_order_advances_absent_noops_and_bounds_visible_tokens()
 async fn reaction_register_capacity_counts_absent_markers_and_allows_existing_updates()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(177, 179)?;
+    let (a, mut b) = pair(177, 179).await?;
     commit_content(
         &a,
         &mut b,
@@ -1138,7 +1295,7 @@ async fn reaction_register_capacity_counts_absent_markers_and_allows_existing_up
 async fn message_logical_id_refuses_changed_body_or_hlc_without_retaining_a_body_digest()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(173, 175)?;
+    let (a, mut b) = pair(173, 175).await?;
     commit_content(
         &a,
         &mut b,
@@ -1166,9 +1323,9 @@ async fn message_logical_id_refuses_changed_body_or_hlc_without_retaining_a_body
     Ok(())
 }
 
-fn moderator_group_fixture() -> Result<(Fixture, Fixture, Fixture, u64), SdkError> {
-    let (a, b) = pair(141, 143)?;
-    let c = Fixture::new("carol", 145)?;
+async fn moderator_group_fixture() -> Result<(Fixture, Fixture, Fixture, u64), SdkError> {
+    let (a, b) = pair(141, 143).await?;
+    let c = Box::pin(Fixture::native("carol", 145)).await?;
     b.client.establish_friend_link(
         "carol-link",
         &c.client.own_account_anchor()?,
@@ -1176,23 +1333,19 @@ fn moderator_group_fixture() -> Result<(Fixture, Fixture, Fixture, u64), SdkErro
     )?;
     for client in [&a.client, &b.client, &c.client] {
         for peer in [&a, &b, &c] {
-            let manifest = crate::client::identity_authority::test_support::manifest(&peer.client)?;
-            client.observe_device_manifest_json(
-                serde_json::to_value(&manifest)?,
-                &manifest.principal_commitment,
-            )?;
+            let manifest = peer.manifest()?;
+            client.persist_fetched_identity_directory(&manifest)?;
         }
     }
-    b.client.shared_group_create("moderator-group", "c", None, "target-bob")?;
-    for (peer, role, target) in [
-        (&a, ramflux_protocol::SharedGroupRole::Admin, "target-alice"),
-        (&c, ramflux_protocol::SharedGroupRole::Member, "target-carol"),
+    b.create_shared_group("moderator-group", "c")?;
+    for (peer, role) in [
+        (&a, ramflux_protocol::SharedGroupRole::Admin),
+        (&c, ramflux_protocol::SharedGroupRole::Member),
     ] {
-        b.client.shared_group_change(
+        b.change_shared_group(
             "moderator-group",
-            "target-bob",
             ramflux_protocol::group_state::GroupStateChange::Add {
-                member: peer.client.owned_group_actor(target)?.identity,
+                member: peer.client.owned_group_actor(&peer.config()?.target_delivery_id)?.identity,
                 role,
             },
         )?;
@@ -1203,8 +1356,8 @@ fn moderator_group_fixture() -> Result<(Fixture, Fixture, Fixture, u64), SdkErro
         .shared_group_state("moderator-group")?
         .ok_or_else(|| invalid("moderator group state"))?;
     let epoch = state.snapshot().epoch;
-    a.client.accept_shared_group_state(&state, "target-alice")?;
-    c.client.accept_shared_group_state(&state, "target-carol")?;
+    a.client.accept_shared_group_state(&state, &a.config()?.target_delivery_id)?;
+    c.client.accept_shared_group_state(&state, &c.config()?.target_delivery_id)?;
     b.client.import_group_sender_key_distribution(
         &c.client.export_group_sender_key_distribution("moderator-group", "carol")?,
     )?;
@@ -1246,7 +1399,7 @@ fn moderator_delete_entry(
 async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_target()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b, c, epoch) = moderator_group_fixture()?;
+    let (a, mut b, c, epoch) = moderator_group_fixture().await?;
     let mut target_identity = generated_identity(&c, "late-moderated-target")?;
     target_identity.group_id = Some("moderator-group".into());
     target_identity.group_epoch = Some(epoch);
@@ -1256,10 +1409,11 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
         author_anchor: c.client.own_account_anchor()?,
     };
     let entry = moderator_delete_entry(&a, &b, epoch, &target)?;
-    apply(&mut b, &entry).await?;
-    b.client.shared_group_change(
+    apply(&mut b, &entry)
+        .await
+        .map_err(|error| invalid(&format!("moderator fixture receive: {error:?}")))?;
+    b.change_shared_group(
         "moderator-group",
-        "target-bob",
         ramflux_protocol::group_state::GroupStateChange::SetRole {
             root_commitment: a.client.own_account_anchor()?,
             device_id: "alice".into(),
@@ -1283,7 +1437,9 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
     draft.source_principal_id = "carol".into();
     draft.sender_id = "carol".into();
     let entry = seal_as(&c, &b, draft, &raw, Route::group_message("moderator-group"))?;
-    apply(&mut b, &entry).await?;
+    apply(&mut b, &entry)
+        .await
+        .map_err(|error| invalid(&format!("post-demotion target receive: {error:?}")))?;
     let id = ramflux_protocol::encode_base64url(&target.id);
     assert!(!b.client.account_db()?.message_is_deleted(&id)?);
     assert!(b.client.generated_message_page("c", None, 100)?.messages.iter().any(|update| matches!(update.state.as_ref(),
@@ -1296,7 +1452,7 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
 async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_actual_cache()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(131, 133)?;
+    let (a, mut b) = pair(131, 133).await?;
     let mut cache = crate::typed_messages::MessageCache::default();
     for (name, local) in [("everyone-reader", false), ("local-reader", true)] {
         commit_content(
@@ -1378,7 +1534,7 @@ async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_ac
 async fn typed_identity_retention_never_preserves_payload_shadows_or_unbound_headers()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(127, 129)?;
+    let (a, mut b) = pair(127, 129).await?;
     for case in 0..7 {
         let name = format!("invalid-header-{case}");
         commit_content(
@@ -1424,7 +1580,7 @@ async fn typed_identity_retention_never_preserves_payload_shadows_or_unbound_hea
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_projects_generated_content_and_unsupported() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(151, 153)?;
+    let (a, mut b) = pair(151, 153).await?;
     let mut expected = Vec::new();
     for index in 0..8 {
         let name = format!("paged-{index}");
@@ -1501,7 +1657,7 @@ async fn message_page_projects_generated_content_and_unsupported() -> Result<(),
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_respects_encoded_byte_cap_and_continuation() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(161, 163)?;
+    let (a, mut b) = pair(161, 163).await?;
     for index in 0..4 {
         commit_content(
             &a,
@@ -1542,7 +1698,7 @@ async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Res
     for ordinal in 0..7 {
         // Each refusal is independent; the receive-pass settlement regression covers
         // ratchet progress after refused peer input on the same pair.
-        let (a, mut b) = pair(201, 203)?;
+        let (a, mut b) = pair(201, 203).await?;
         let scope =
             g::dm_scope::derive(&a.client.own_account_anchor()?, &b.client.own_account_anchor()?)
                 .map_err(|_| invalid("fixture DM roots"))?;
@@ -1631,7 +1787,7 @@ async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Res
 #[tokio::test(flavor = "current_thread")]
 async fn early_edit_register_is_qualified_by_original_author_root() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(173, 175)?;
+    let (a, mut b) = pair(173, 175).await?;
     let c = Fixture::new("carol", 177)?;
     b.client.establish_friend_link(
         "carol-link",
@@ -1694,7 +1850,10 @@ async fn early_edit_register_is_qualified_by_original_author_root() -> Result<()
     assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content {
         value:Some(g::content::Value::Message(message))
     })) if message.text=="rightful edit")), "foreign root replaced the legitimate pending Edit");
-    assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
+    assert_only_original_header_retained(
+        &b.client,
+        &ramflux_protocol::encode_base64url(&target.id),
+    )?;
     Ok(())
 }
 

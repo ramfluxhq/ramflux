@@ -68,6 +68,20 @@ fn install(client: &RamfluxClient, sync: &g::OwnContactSync, inner: &[u8]) -> Re
     )
 }
 
+/// Delivers the exact inner as the generated receive path does: through the authenticated source.
+fn install_from(
+    client: &RamfluxClient,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    inner: &[u8],
+) -> TestResult {
+    let sync = sync_of(inner)?;
+    let identity = g::Inner::decode(inner).map_err(|_| "inner")?.identity.ok_or("identity")?;
+    crate::client::contact_verification_cas::install_sibling_confirmation_from(
+        client, source, &sync, &identity, inner,
+    )?;
+    Ok(())
+}
+
 fn reject_wrong_context(client: &RamfluxClient, commitment: &str, inner: &[u8]) -> TestResult {
     let before = origin_id(&load_pair(client, commitment)?.0)?;
     let mut sync = sync_of(inner)?;
@@ -282,11 +296,7 @@ fn addition_and_convergence(
     );
     let (before, current) = load_pair(&own.client, peer_root)?;
     let kept = origin_id(&before)?;
-    assert!(crate::client::contact_verification_cas::accept_staged_safety_inner(
-        &own.client,
-        &sibling,
-        &current
-    )?);
+    install_from(&own.client, &sibling, &current)?;
     assert_eq!(
         origin_id(&load_pair(&own.client, peer_root)?.0)?,
         kept,
@@ -365,11 +375,7 @@ async fn verify_cas_sibling_evidence_is_context_bound() -> TestResult {
     let higher = install_later_origin(&local.client, &peer_root, &inner)?;
     reinstall_keeps_higher(&local.client, &peer_root, &inner, &higher)?;
     let foreign = peer.client.owned_device_identity()?;
-    assert!(crate::client::contact_verification_cas::accept_staged_safety_inner(
-        &local.client,
-        &foreign,
-        &higher
-    )?);
+    install_from(&local.client, &foreign, &higher)?;
     assert_eq!(
         state(&local.client, &peer_root)?,
         "verified",

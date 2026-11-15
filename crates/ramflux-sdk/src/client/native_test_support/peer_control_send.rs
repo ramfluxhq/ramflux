@@ -8,11 +8,15 @@ use super::*;
 use crate::gateway::{GatewayClientFrame, GatewayServerFrame};
 use crate::{GatewayDirectMessage, GatewayInboxEntry, GatewaySessionEngine};
 use std::{collections::VecDeque, future::Future, pin::Pin};
+pub(crate) type Captured = Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>;
 type WireResult<T> = Result<T, ramflux_transport::TransportError>;
 struct Wire {
     bundle: ramflux_crypto::PrekeyBundle,
+    root: String,
+    target: String,
     replies: VecDeque<Vec<u8>>,
     nack: bool,
+    captured: Captured,
 }
 impl ramflux_transport::GatewaySessionFrameSink for Wire {
     fn finish(&mut self) -> WireResult<()> {
@@ -24,15 +28,28 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
     ) -> Pin<Box<dyn Future<Output = WireResult<()>> + Send + 'a>> {
         Box::pin(async move {
             let reply = match serde_json::from_slice::<GatewayClientFrame>(bytes)? {
+                GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
+                GatewayClientFrame::Resume { .. } => {
+                    GatewayServerFrame::Resume { entries: Vec::new() }
+                }
                 GatewayClientFrame::PrekeyFetch { device_id } => GatewayServerFrame::Prekey {
                     response: crate::prekey::SdkPrekeyResponse {
                         device_id: device_id.clone(),
                         bundle: Some(self.bundle.clone()),
-                        principal_commitment: device_id.clone(),
-                        target_delivery_id: Some(device_id),
+                        principal_commitment: self.root.clone(),
+                        target_delivery_id: Some(self.target.clone()),
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {
+                    let mut captured = self.captured.lock().map_err(|_| {
+                        ramflux_transport::TransportError::Quic("capture poisoned".into())
+                    })?;
+                    if captured.len() >= 64 {
+                        return Err(ramflux_transport::TransportError::Quic(
+                            "capture limit".into(),
+                        ));
+                    }
+                    captured.push(submit.envelope.clone());
                     if self.nack {
                         GatewayServerFrame::Nack { reason: "fixture refusal".into() }
                     } else {
@@ -58,6 +75,11 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for Wire {
+    fn recv_idle_frame(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = WireResult<Vec<u8>>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
     fn recv_frame(&mut self) -> Pin<Box<dyn Future<Output = WireResult<Vec<u8>>> + Send + '_>> {
         Box::pin(async move {
             self.replies
@@ -66,14 +88,35 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
         })
     }
 }
-fn engine(source: &Fixture, target: &Fixture, nack: bool) -> TestResult<GatewaySessionEngine> {
+pub(crate) fn engine(
+    source: &Fixture,
+    target: &Fixture,
+    nack: bool,
+) -> TestResult<GatewaySessionEngine> {
+    engine_capture(source, target, nack).map(|(engine, _)| engine)
+}
+pub(crate) fn engine_capture(
+    source: &Fixture,
+    target: &Fixture,
+    nack: bool,
+) -> TestResult<(GatewaySessionEngine, Captured)> {
     let bundle =
         target.client.load_x3dh_private_state(&target.client.owned_device_identity()?)?.bundle;
-    Ok(GatewaySessionEngine::with_test_transport(
+    let captured = Captured::default();
+    let engine = GatewaySessionEngine::with_test_transport(
         source.config.clone(),
-        Box::new(Wire { bundle, replies: VecDeque::new(), nack }),
-    ))
+        Box::new(Wire {
+            bundle,
+            root: target.manifest.principal_commitment.clone(),
+            target: target.config.target_delivery_id.clone(),
+            replies: VecDeque::new(),
+            nack,
+            captured: captured.clone(),
+        }),
+    );
+    Ok((engine, captured))
 }
+
 fn message(source: &Fixture, target: &Fixture) -> TestResult<GatewayDirectMessage> {
     Ok(GatewayDirectMessage {
         conversation_id: ramflux_protocol::message::dm_scope::derive(
@@ -284,7 +327,7 @@ async fn native_guardian_accept_capture_keeps_colliding_owner_invite_ids_indepen
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_guardian_invites_refuses_generation_zero_without_expiry_writes() -> TestResult {
+async fn pending_guardian_invites_erases_only_expired_pending_shares() -> TestResult {
     super::watchdog::within(pending_guardian_invites_expiry_body()).await?
 }
 
@@ -320,12 +363,6 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     }
     let _clock = crate::time::FixedClock::set(expires_at.checked_add(1).ok_or("expiry overflow")?);
     let before = super::generation_zero_tests::actors(&guardian.client)?;
-    super::generation_zero_tests::dormant(guardian.client.pending_guardian_invites());
-    assert!(
-        super::generation_zero_tests::actors(&guardian.client)? == before,
-        "generation-zero expiry lookup must preserve pending shares and all actor bytes"
-    );
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(
         guardian.client.pending_guardian_invites()?.is_empty(),
         "active-profile lookup must still erase expired invitations"

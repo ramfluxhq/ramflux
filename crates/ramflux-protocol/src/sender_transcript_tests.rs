@@ -208,26 +208,72 @@ fn v1_signature_not_accepted_as_v2_and_vice_versa() -> Result<(), ProtocolError>
 }
 
 #[test]
-fn transport_verifiers_use_checked_sender_transcript() {
+fn transport_verifiers_use_checked_sender_transcript() -> Result<(), Box<dyn std::error::Error>> {
+    use quote::ToTokens as _;
+    use syn::visit::Visit as _;
+    #[derive(Default)]
+    struct Calls {
+        checked: bool,
+        manual: bool,
+    }
+    fn test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg") && attr.meta.to_token_stream().to_string().contains("test")
+        })
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Calls {
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_impl_item_fn(self, item);
+            }
+        }
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = call.func.as_ref()
+                && let Some(segment) = path.path.segments.last()
+            {
+                self.checked |= segment.ident == "verify_envelope_sender_signature";
+                self.manual |= segment.ident == "verify_canonical_signature";
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
     let verifiers = [
         ("SDK ephemeral", include_str!("../../ramflux-sdk/src/ephemeral/lifetime.rs")),
-        ("SDK durable", include_str!("../../ramflux-sdk/src/client/routed/auth.rs")),
-        ("SDK own copy", include_str!("../../ramflux-sdk/src/client/own_device_copy.rs")),
+        // Generated own copies use the same authenticated outer receive path as durable input.
+        (
+            "SDK durable and own-copy outer",
+            include_str!("../../ramflux-sdk/src/client/routed/auth.rs"),
+        ),
         ("node source and forwarder", include_str!("../../ramflux-node-core/src/device_source.rs")),
         ("custody", include_str!("../../ramflux-node-core/src/custody_delivery.rs")),
         ("gateway", include_str!("../../../apps/ramflux-gateway/src/submit_source.rs")),
     ];
     for (name, source) in verifiers {
-        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
-        assert!(
-            production.contains("verify_envelope_sender_signature("),
-            "missing checked verifier: {name}"
-        );
-        assert!(
-            !production.contains("verify_canonical_signature("),
-            "manual envelope verification bypass: {name}"
-        );
+        let mut calls = Calls::default();
+        calls.visit_file(&syn::parse_file(source)?);
+        assert!(calls.checked, "missing checked verifier: {name}");
+        assert!(!calls.manual, "manual envelope verification bypass: {name}");
     }
+    let own_copy =
+        include_str!("../../ramflux-sdk/src/client/own_device_copy/generated_authority.rs");
+    assert!(
+        own_copy.contains("self.authenticated_device_identity("),
+        "generated own-copy author must derive from the authenticated outer"
+    );
+    assert!(
+        own_copy.contains("Self::verify_history_message_origin(item)"),
+        "generated own-copy nested origin must be verified independently"
+    );
     assert!(
         include_str!("../../ramflux-node-core/src/router/c1_view.rs")
             .contains("authority.verify_envelope_source(envelope)")
@@ -236,6 +282,7 @@ fn transport_verifiers_use_checked_sender_transcript() {
         include_str!("../../ramflux-node-core/src/router_store/sender_retry.rs")
             .contains("envelope_sender_signed_bytes(envelope)")
     );
+    Ok(())
 }
 
 #[test]

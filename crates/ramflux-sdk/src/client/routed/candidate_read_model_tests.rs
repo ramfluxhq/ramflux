@@ -42,7 +42,7 @@ fn assert_detail_and_missing_ids(
 async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> Result<(), SdkError>
 {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(211, 213)?;
+    let (a, mut b) = pair(211, 213).await?;
     commit_content(&a, &mut b, "target", text("first body zq")).await?;
     let target = g::MessageRef {
         id: generated_identity(&a, "target")?.id,
@@ -147,7 +147,7 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> R
 #[tokio::test(flavor = "current_thread")]
 async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(215, 217)?;
+    let (a, mut b) = pair(215, 217).await?;
     let total = 70_usize;
     for index in 0..total {
         commit_content(&a, &mut b, &format!("bulk-{index}"), text(&format!("body {index}")))
@@ -189,7 +189,7 @@ async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Resu
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_committed_binding_is_refused_and_never_served() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(219, 221)?;
+    let (a, mut b) = pair(219, 221).await?;
     commit_content(&a, &mut b, "calibration", text("calibration body")).await?;
     assert_eq!(b.client.generated_message_changes("c", 0, 100)?.changes.len(), 1);
 
@@ -228,5 +228,33 @@ fn assert_cursor_bounds(client: &RamfluxClient, sequence: u64) -> Result<(), Sdk
     for limit in [0, 101] {
         assert!(client.generated_message_changes("c", 0, limit).is_err());
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn read_model_splits_the_hlc_so_the_whole_view_stays_inside_the_ingress_guard()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(221, 223).await?;
+    commit_content(&a, &mut b, "target", text("hlc body")).await?;
+    let identity = generated_identity(&a, "target")?;
+    let target_id = ramflux_protocol::encode_base64url(&identity.id);
+    let detail = b.client.generated_message_detail("c", &target_id)?;
+    let json = serde_json::to_vec(&detail)?;
+    let value: serde_json::Value = serde_json::from_slice(&json)?;
+    let message = &value["message"];
+    assert!(message.get("hlc").is_none(), "the packed hlc field must not be emitted");
+    assert_eq!(message["hlc_ms"], identity.hlc >> 16);
+    assert_eq!(message["hlc_logical"], identity.hlc & 0xffff);
+    ramflux_protocol::validate_i_json_bytes(&json)?;
+    assert_eq!(
+        message["device_sequence"],
+        format!("{:020}", identity.device_sequence),
+        "device_sequence is a zero-padded 20-digit decimal string"
+    );
+    assert!(
+        message["hlc_ms"].as_u64().is_some_and(|ms| ms < 1 << 53),
+        "the millisecond part must stay inside the I-JSON safe range"
+    );
     Ok(())
 }

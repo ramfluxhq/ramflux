@@ -182,6 +182,7 @@ fn new_shared(
             "own-device-copy",
             "self-sync",
             "own-history",
+            "authored-history",
             "contact-control",
             "surface-resync",
             "pair-reset",

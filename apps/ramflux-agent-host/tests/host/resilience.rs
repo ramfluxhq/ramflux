@@ -49,8 +49,8 @@ impl AgentBus for RoutedBus {
             );
         }
         let mut value = self.inner.request(method, body.clone(), operation).await?;
-        if method == "message.read" {
-            value["messages"][0]["sender_id"] = json!("human-principal");
+        if method == "message.list" {
+            value["message"]["sender_id"] = json!("human-principal");
         }
         if method == "identity.directory" {
             value["identities"][1]["devices"] = json!([

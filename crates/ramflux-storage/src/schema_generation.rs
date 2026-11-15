@@ -5,6 +5,7 @@
 
 use crate::{StorageError, database::Connection};
 use ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION;
+pub(crate) mod creation;
 
 pub(crate) fn validate(db: &rusqlite::Connection) -> Result<(), StorageError> {
     let generation = db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;

@@ -46,6 +46,7 @@ async fn case() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ]),
         ..ordinary::SessionScript::default()
     });
+    let conversation = super::keyed::conversation(&client, &peer)?;
     let actor = Box::pin(NativeActor::start(
         client,
         config,
@@ -80,7 +81,7 @@ async fn case() -> std::result::Result<(), Box<dyn std::error::Error>> {
     })?;
     started.await?;
     let generation = connection.generation();
-    let mut request = super::keyed::contact(&own, &peer, &forward)?;
+    let mut request = super::keyed::contact(&conversation, &own, &peer, &forward)?;
     request.operation_id = Some("native-preempted-rpc".into());
     let fingerprint = ramflux_crypto::blake3_256_base64url(
         "ramflux.operation.v1",

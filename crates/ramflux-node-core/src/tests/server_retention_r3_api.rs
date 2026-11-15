@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn failed_checkpoint_saves_are_retried_not_dropped() {
     let mut inbox = OpaqueDeviceInbox::new();
-    let mut message = envelope("expiring", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("expiring", "mailbox", DeliveryClass::Message);
     message.created_at = 1_000;
     message.ttl = 10;
     inbox.append_at(message, 1_000);

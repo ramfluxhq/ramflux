@@ -143,6 +143,7 @@ impl RamfluxClient {
             ),
         )?;
         let candidate = Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: record.created_at,

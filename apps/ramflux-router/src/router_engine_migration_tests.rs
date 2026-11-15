@@ -17,7 +17,7 @@ pub(super) fn envelope(
     target: &str,
     id: &str,
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
-    use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
+    use ramflux_protocol::{DeliveryClass, SignatureAlg, SignedFields};
     let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
     let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
     let key = ramflux_crypto::fixture_public_key_base64url();
@@ -54,30 +54,17 @@ pub(super) fn envelope(
         revoked: false,
     };
     let source = authority.authenticated_device_identity()?;
-    let mut envelope = Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.into(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.into(),
-        ext: Ext::default(),
-        signed: SignedFields {
-            signing_key_id: "sender".into(),
-            signature_alg: SignatureAlg::Ed25519,
-            signature: String::new(),
-        },
-        envelope_id: id.into(),
-        source_principal_id: "alice".into(),
-        source_device_id: "sender".into(),
-        target_delivery_id: target.into(),
-        routing_set_id: None,
-        delivery_class: DeliveryClass::OpaqueEvent,
-        priority: Priority::Normal,
-        ttl: 3600,
-        created_at: i64::try_from(ramflux_node_core::now_unix_seconds())?,
-        encrypted_payload: "opaque".into(),
-        payload_hash: ramflux_protocol::encode_base64url([43; 32]),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+    let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+        id,
+        target,
+        DeliveryClass::Message,
+    );
+    envelope.source_device_id = "sender".into();
+    envelope.created_at = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    envelope.signed = SignedFields {
+        signing_key_id: "sender".into(),
+        signature_alg: SignatureAlg::Ed25519,
+        signature: String::new(),
     };
     envelope
         .ext

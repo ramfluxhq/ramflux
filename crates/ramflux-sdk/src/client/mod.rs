@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 pub mod a2i;
-mod a2i_identity;
 pub mod account;
 mod account_authority;
 pub(crate) mod attachment_diagnostics;
@@ -16,9 +15,12 @@ pub(crate) mod contact_roots;
 mod contact_safety_preview;
 pub(crate) mod contact_verification_cas;
 pub mod conversation;
+pub(crate) mod conversation_projection;
 mod deferred_attachment;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod application_outbox;
+mod authored_delete;
+mod authored_send;
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
@@ -29,10 +31,12 @@ pub(crate) mod generated_content;
 pub(crate) mod generated_control;
 mod generated_delete_fence;
 mod generated_edit_retirement;
+mod generated_fields;
 pub(crate) mod generated_group;
 mod generated_history;
 mod generated_identity;
 mod generated_pending_edit;
+mod generated_receipts;
 mod generated_restore;
 pub(crate) mod generated_surface;
 pub mod group;
@@ -41,7 +45,8 @@ pub mod group_delivery;
 mod group_distribution_auth;
 mod group_identity;
 mod group_key_safety;
-mod group_pending;
+#[cfg(test)]
+#[cfg(test)]
 pub(crate) mod group_quarantine;
 pub mod group_session;
 pub mod home_migration;
@@ -50,7 +55,6 @@ pub mod identity_authority;
 pub(crate) mod inbox_failure;
 #[cfg(test)]
 mod legacy_activation_guard_tests;
-pub(crate) mod legacy_w1;
 pub mod mcp_a2ui;
 pub(crate) mod message_mutations;
 mod native_branch;
@@ -61,9 +65,8 @@ pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;
 mod own_device_group_pins;
-mod own_device_group_restore;
+mod own_device_group_state;
 pub mod own_device_sync;
-mod own_device_sync_receipts;
 mod own_group_lazy_authority;
 mod own_sent_delivery;
 pub(crate) mod own_sent_message;
@@ -101,6 +104,9 @@ pub struct RamfluxClient {
     pub(crate) self_sync_restore_clock:
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
+    pub(crate) verified_authority_cache:
+        std::cell::RefCell<identity_authority::VerifiedAuthorityCache>,
+    pub(crate) verified_durable_authority: std::cell::RefCell<crate::custody::PublicAuthorityCache>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
     pub(crate) born_v3_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault>>,
     // Fetched compare material. Preview keeps it here; only a successful CAS commit stores it.
@@ -124,16 +130,22 @@ pub struct RamfluxClient {
     pub(crate) object_store: ObjectStore,
     pub(crate) mcp_registry: McpRegistry,
     pub(crate) federation_mesh: FederationMesh,
+    #[cfg(test)]
+    pub(crate) native_bus_fixture: Option<Box<native_test_support::bus::Material>>,
 }
 
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
+            native_bus_fixture: None,
             typing_receiver: std::cell::RefCell::default(),
             typing_sender: std::cell::RefCell::default(),
             self_sync_live_generation: std::cell::Cell::new(None),
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
+            verified_authority_cache: std::cell::RefCell::default(),
+            verified_durable_authority: std::cell::RefCell::default(),
             born_v3_account: None,
             born_v3_vault: None,
             held_manifests: std::cell::RefCell::new(BTreeMap::new()),
@@ -176,4 +188,3 @@ impl RamfluxClient {
 }
 
 mod own_device_history_authority;
-mod own_device_history_pages;

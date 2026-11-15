@@ -438,7 +438,7 @@ async fn prepare_entry(
     let EntryInput { entry, source: prepared_source } = input;
     let PageContext { replay, defer_controls, now, retry_keys } = context;
     let mut replies = Vec::new();
-    let checked_ciphertext = crate::client::routed::validate_routed_ciphertext(&entry);
+    let checked_ciphertext = account.client.validate_routed_receipt_or_ciphertext(&entry);
     let already_seen =
         checked_ciphertext.is_ok() && account.client.routed_seen_marker(&entry)?.is_some();
     let (key, committed_retry) = retry_context(&account.client, &entry, retry_keys)?;
@@ -569,9 +569,6 @@ impl Processed {
     fn control() -> Self {
         Self { consumed: true, publish: false, reply: None, call_control: false, pair_reply: None }
     }
-    fn held() -> Self {
-        Self { consumed: false, publish: false, reply: None, call_control: false, pair_reply: None }
-    }
 }
 
 #[cfg(test)]
@@ -593,91 +590,23 @@ async fn process_with_prepared_source(
     defer_controls: bool,
     prepared_source: source::PreparedSource,
 ) -> Result<Processed, SdkError> {
-    crate::client::routed::validate_routed_ciphertext(entry)?;
+    account.client.validate_routed_receipt_or_ciphertext(entry)?;
     if account.client.routed_seen_marker(entry)?.is_some() {
         return Ok(Processed::control());
     }
-    let mut prepared_source = prepared_source.map(|prepared| *prepared).transpose()?;
-    if let Some(manifest) =
-        prepared_source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take())
-    {
-        if account.client.receive_prepared_own_device_message(entry, manifest)? {
-            return Ok(Processed::control());
-        }
-    } else if account.client.receive_own_device_message(engine.config(), entry).await? {
-        return Ok(Processed::control());
-    }
-    if crate::client::routed::decode(&entry.envelope).is_ok() {
-        let delivery = if let Some(prepared) = prepared_source {
-            account.client.apply_routed_prepared_entry(engine, pool, entry, Ok(prepared)).await?
-        } else {
-            account.client.apply_routed_entry(engine, pool, entry, false).await?
-        };
-        let reply =
-            if defer_controls { None } else { account.client.take_surface_resync_answer(entry)? };
-        let mut processed = Processed::message(reply);
-        processed.call_control = delivery.call_control;
-        processed.pair_reply = delivery.pair_reply;
-        return Ok(processed);
-    }
-    let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        .map_err(|_| SdkError::InboundRejected("invalid payload encoding".to_owned()))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    if !matches!(
-        value["schema"].as_str(),
-        Some("ramflux.sdk.dm_x3dh_envelope.v1" | "ramflux.sdk.group_sender_key.message.v1")
-    ) || value["version"] != 1
-    {
-        return Err(SdkError::InboundRejected("unsupported envelope schema or version".to_owned()));
-    }
-    if value["schema"] == "ramflux.sdk.group_sender_key.message.v1" {
-        account.client.retain_legacy_group_entry(entry)?;
-        log_unrouted_hold(entry, "legacy group entry awaits compatibility receive");
-        return Ok(Processed::held());
-    }
-    if account.client.v2_blocks_legacy(&account.client.inbound_device_reference(entry)?)? {
-        let db = account.client.account_db()?;
-        db.hold_unrouted(
-            &account.client.inbox_admission_key(entry)?,
-            entry.inbox_seq,
-            &serde_json::to_vec(entry)?,
-            now_unix_timestamp(),
-        )?;
-        log_unrouted_hold(entry, "legacy traffic blocked by v2 binding");
-        return Ok(Processed::held());
-    }
-    if let Some(conversation) =
-        account.client.legacy_routing_binding(&engine.config().device_id, entry)?
-    {
-        account
-            .client
-            .receive_legacy_entry(
-                engine,
-                pool,
-                entry.clone(),
-                crate::client::dm::LegacyReceive {
-                    conversation_id: &conversation,
-                    auto_fetch_attachments: false,
-                    relay_service_key_base64: None,
-                },
-            )
-            .await?;
-        return Ok(Processed::message(None));
-    }
-    let db = account.client.account_db()?;
-    let key = account.client.inbox_admission_key(entry)?;
-    db.hold_unrouted(&key, entry.inbox_seq, &serde_json::to_vec(entry)?, now_unix_timestamp())?;
-    db.append_journal(&format!("unrouted:{key}"),"message.unrouted",&json!({"envelope_id":entry.envelope.envelope_id,"claimed_source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash,"inbox_seq":entry.inbox_seq}),now_unix_timestamp(),None)?;
-    log_unrouted_hold(entry, "no authenticated conversation binding");
-    Ok(Processed::held())
-}
-
-fn log_unrouted_hold(entry: &GatewayInboxEntry, reason: &str) {
-    tracing::info!(inbox_seq = entry.inbox_seq, kind = "unrouted",
-        envelope_id = %entry.envelope.envelope_id,
-        source_device_id = %entry.envelope.source_device_id,
-        target_delivery_id = %entry.target_delivery_id,
-        reason, "gateway inbound entry held");
+    let prepared_source = prepared_source.map(|prepared| *prepared).transpose()?;
+    crate::client::routed::decode(&entry.envelope)?;
+    let delivery = if let Some(prepared) = prepared_source {
+        account.client.apply_routed_prepared_entry(engine, pool, entry, Ok(prepared)).await?
+    } else {
+        account.client.apply_routed_entry(engine, pool, entry, false).await?
+    };
+    let reply =
+        if defer_controls { None } else { account.client.take_surface_resync_answer(entry)? };
+    let mut processed = Processed::message(reply);
+    processed.call_control = delivery.call_control;
+    processed.pair_reply = delivery.pair_reply;
+    Ok(processed)
 }
 
 fn contact_capacity_refusal(error: SdkError) -> SdkError {

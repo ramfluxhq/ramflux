@@ -274,44 +274,15 @@ members. `delivery_target_known` describes available routing metadata, not netwo
 identity directory row.
 
 
-## Autonomous receive and compatibility reads
+## Autonomous receive and durable reads
 
-The unlocked account's driver owns network receive, decryption and gateway acknowledgement.
-A gateway ACK follows a durable projection/ratchet commit and does not consume a client's local
-read. `message.receive {conversation_id, limit}` runs a synchronization pass and returns decrypted
-Direct deliveries retained in the account's recent delivery cache, including messages the driver
-already committed and ACKed before the request. The caller's conversation ID filters authenticated
-routing; it never authorizes or invents a legacy binding. Existing Direct conversations still require
-explicit sender participation. With an omitted/null conversation ID, the response includes committed Direct deliveries across
-conversations, selected from their authenticated routing. The limit applies after filtering.
-Unbound legacy or malformed opaque payloads are never guessed into decrypted messages. Attachment
-auto-fetch uses the same selected page and its existing shared timeout.
-The cache holds at most 64 deliveries, is shared by local clients,
-and is not a per-connection read cursor. Repeated compatibility reads can return the same retained
-message until explicit `message.ack` removes it from this cache. Across restart or cache eviction,
-use durable `message.list` / `message.read`; resumable `bus.subscribe` provides change cursors.
-
-An outgoing envelope signed by a registered device derives `source_principal_id` from that device's
-account principal. Passing the account's root commitment in the legacy submit field does not change
-wire attribution. Receivers continue to verify device ownership and the envelope signature; they
-never accept a caller-supplied unrelated principal as the signing device's owner.
-
-For received messages in native accounts, `sender_id` is the sender's authenticated principal.
-Device detail is in `sender_device_id` on `message.list` / `message.read` rows;
-`sender_root_commitment` records that device's authenticated account anchor. These origin fields
-are null when no retained authenticated origin is available, including erased/deleted messages.
-They are separate from the principal-level `sender_id` and must not be inferred from it.
-
-Message identity is `(authenticated source device, envelope_id)`. Returned projection IDs remain
-compatible in the ordinary case; cross-sender collisions receive stable sender-qualified opaque
-IDs. The `routed:` namespace is reserved and escaped for caller-chosen wire IDs, preventing a peer
-from squatting another sender's qualified ID. Treat returned IDs as opaque; do not predict group
-fan-out IDs, which are independently randomized for each recipient.
-
-Receipts require participation in the authenticated conversation and have sender-scoped receipt IDs.
-A2I events also have sender-scoped identity. An ambiguous event ID cannot acknowledge a different
-sender's event; use the `acknowledge_id` returned by `a2i.list` / `a2i.list_pending` as the acknowledge request's `event_id`. Acknowledgements are durable across
-restart. Legacy A2I commits its event and ratchet atomically before ACK, like the v2 path.
+The unlocked account driver owns receive, decryption and gateway acknowledgement.
+A gateway ACK follows a durable projection and ratchet commit. `message.receive`
+runs synchronization and returns `durable_reader: "message.read"` plus
+`snapshot_sequence`; it does not return a volatile message page. Use `message.read`
+for typed messages, changes, receipts, edits, reactions and erasure state. Use
+`bus.subscribe` cursors to resume changes after reconnect. Message IDs identify
+logical events; journal sequences and node inbox sequences have separate scopes.
 
 ## Inbox ordering and recovery
 

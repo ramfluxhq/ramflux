@@ -28,13 +28,6 @@ impl AccountDb {
             .query_map(params![local.storage_key(), remote.storage_key()], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
-    /// Recovers the original start of a legacy pending reset from retained journal evidence.
-    /// # Errors
-    /// Returns SQLite errors; missing evidence is explicit rather than renewing the lifetime.
-    pub fn legacy_pair_reset_first_at(&self, pair: &str) -> Result<Option<i64>, StorageError> {
-        let prefix = format!("pair-reset-attempt:dm-pair/reset-work/{pair}:");
-        Ok(self.connection.query_row("SELECT max(at) FROM runtime_journal WHERE substr(source_key,1,length(?1))=?1 AND json_extract(CAST(body_json AS TEXT),'$.attempt')=1",params![prefix],|row|row.get(0))?)
-    }
     /// Finds every peer owned by a local device, including work with no remaining live state.
     /// # Errors
     /// Returns SQLite errors.

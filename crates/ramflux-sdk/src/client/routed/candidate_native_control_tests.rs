@@ -96,8 +96,10 @@ fn invite(
         expires_at: now + 300,
         signed: signed_fields(&branch.device_id),
     };
-    invite.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &invite)?;
+    invite.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &crate::client::routed::native_control::guardian::invite_transcript(&invite)?,
+        branch,
+    );
     Ok(invite)
 }
 
@@ -122,8 +124,10 @@ fn accept(
         accepted_at: crate::time::now_unix_timestamp(),
         signed: signed_fields(&branch.device_id),
     };
-    accept.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &accept)?;
+    accept.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &crate::client::routed::native_control::guardian::accept_transcript(&accept)?,
+        branch,
+    );
     Ok(accept)
 }
 
@@ -216,8 +220,8 @@ async fn generated_object_revoke_requires_the_owner_of_the_received_reference()
         })
     };
     // The object belongs to a third root: the authenticated sender cannot revoke it.
-    let (a, mut b) = pair(201, 203)?;
-    let other = Fixture::new("third", 231)?;
+    let (a, mut b) = pair(201, 203).await?;
+    let other = Box::pin(Fixture::native("third", 231)).await?;
     b.client.establish_friend_link(
         "third-link",
         &other.client.own_account_anchor()?,
@@ -234,12 +238,12 @@ async fn generated_object_revoke_requires_the_owner_of_the_received_reference()
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
 
     // A revoke for a reference this account never received is refused, not deferred.
-    let (a, mut b) = pair(205, 207)?;
+    let (a, mut b) = pair(205, 207).await?;
     let entry = manual_entry(&a, &b, "revoke-missing", &revoke(&b)?, false)?;
     assert!(refused(&run(&mut b, &entry).await, Authority), "revoke invented a reference");
 
     // The owner's revoke reaches the native tombstone once; replay is exact.
-    let (a, mut b) = pair(209, 211)?;
+    let (a, mut b) = pair(209, 211).await?;
     received_object_reference(&a, &mut b, "owned-object-message").await?;
     let entry = manual_entry(&a, &b, "revoke-own", &revoke(&b)?, false)?;
     run(&mut b, &entry).await?;
@@ -266,7 +270,7 @@ async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_
     use crate::error::GeneratedRefusalCode::Authority;
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     // No accepted contact link: refused before any share is stored.
-    let (a, mut b) = pair(213, 215)?;
+    let (a, mut b) = pair(213, 215).await?;
     b.client.remove_friend_link("link", "both")?;
     let native = invite(&a, &b, "invite-no-contact")?;
     let raw = a.client.generated_guardian_invite_inner(&native, &b.client.own_account_anchor()?)?;
@@ -275,7 +279,7 @@ async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_
     assert_eq!(b.client.pending_guardian_invites()?.len(), 0);
 
     // A signature that does not cover the delivered fields is refused.
-    let (a, mut b) = pair(217, 219)?;
+    let (a, mut b) = pair(217, 219).await?;
     let mut forged = invite(&a, &b, "invite-forged")?;
     forged.expires_at += 1;
     let raw = a.client.generated_guardian_invite_inner(&forged, &b.client.own_account_anchor()?)?;
@@ -285,7 +289,7 @@ async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_
 
     // Verified invite: stored as pending, never as an accepted share; producer retry and
     // redelivery reuse the same event and leave exactly one row.
-    let (a, mut b) = pair(221, 223)?;
+    let (a, mut b) = pair(221, 223).await?;
     let native = invite(&a, &b, "invite-good")?;
     let guardian_root = b.client.own_account_anchor()?;
     let raw = a.client.generated_guardian_invite_inner(&native, &guardian_root)?;
@@ -325,7 +329,7 @@ async fn generated_recovery_accept_is_bound_to_a_locally_issued_invite() -> Resu
     use crate::error::GeneratedRefusalCode::Authority;
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     // The owner never issued this invite: a valid guardian signature is not enough.
-    let (guardian, mut owner) = pair(225, 227)?;
+    let (guardian, mut owner) = pair(225, 227).await?;
     let native = invite(&owner, &guardian, "invite-unissued")?;
     let reply = accept(&guardian, &native)?;
     let raw = guardian
@@ -335,7 +339,7 @@ async fn generated_recovery_accept_is_bound_to_a_locally_issued_invite() -> Resu
     assert!(refused(&run(&mut owner, &entry).await, Authority), "unissued accept recorded");
     assert_eq!(owner.client.account_db()?.actor_state_keys("recovery/guardian-accept/")?.len(), 0);
 
-    let (guardian, mut owner) = pair(229, 231)?;
+    let (guardian, mut owner) = pair(229, 231).await?;
     let native = invite(&owner, &guardian, "invite-issued")?;
     owner
         .client
@@ -415,7 +419,7 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
         .into_iter()
         .flat_map(|grant| [false, true].map(|unknown| (grant, unknown)))
     {
-        let (a, mut b) = pair(233, 235)?;
+        let (a, mut b) = pair(233, 235).await?;
         let mut event = a2i_event(&a, &b, "a2i-closed")?;
         event.grant_id = grant.map(str::to_owned);
         let branch = a.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
@@ -475,7 +479,7 @@ async fn generated_group_key_off_its_group_route_is_refused_without_retention()
         ("group-key-direct", false, crate::error::GeneratedRefusalCode::Authority, "route"),
         ("group-key-bootstrap", true, crate::error::GeneratedRefusalCode::Content, "bootstrap"),
     ] {
-        let (a, mut b) = pair(245, 247)?;
+        let (a, mut b) = pair(245, 247).await?;
         let entry = manual_entry(&a, &b, id, &key(event), true)?;
         let result = run(&mut b, &entry).await;
         // The reason is part of the assertion: later sender checks must not mask a lost route check.
@@ -493,7 +497,7 @@ async fn generated_group_key_off_its_group_route_is_refused_without_retention()
 #[tokio::test(flavor = "current_thread")]
 async fn peer_control_author_must_be_the_authenticated_pair_peer() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(249, 251)?;
+    let (a, mut b) = pair(249, 251).await?;
     b.client.account_db()?.persist_client_record(
         "object",
         "obj-1",

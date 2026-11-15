@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant Task event conversion. Native event signatures keep their existing
+//! Typed Task event conversion. Native event signatures keep their existing
 //! signing view; this module neither sends a carrier nor admits a stored event.
 use super::invalid;
 use crate::{RamfluxClient, SdkError};
@@ -66,57 +66,7 @@ impl RamfluxClient {
         check_wire(bytes)?;
         let generated =
             g::TaskEvent::decode(bytes).map_err(|_| invalid("invalid generated task event"))?;
-        if generated.schema != ramflux_protocol::TASK_EVENT_SCHEMA
-            || generated.version != 1
-            || generated.domain != ramflux_protocol::domain::TASK_EVENT
-        {
-            return Err(invalid("generated task framing mismatch"));
-        }
-        let fields = generated.signed.ok_or_else(|| invalid("task signer fields missing"))?;
-        if !matches!(
-            fields.signature_alg.and_then(|alg| alg.value),
-            Some(g::signature_alg::Value::Ed25519(_))
-        ) {
-            return Err(invalid("task signature algorithm missing"));
-        }
-        let body = generated.event.ok_or_else(|| invalid("task body missing"))?;
-        let value = serde_json::to_value(body)?;
-        let choices = value.as_object().ok_or_else(|| invalid("invalid task choice"))?;
-        if choices.len() != 1 {
-            return Err(invalid("task must select exactly one event"));
-        }
-        let (kind, wrapper) =
-            choices.iter().next().ok_or_else(|| invalid("task choice missing"))?;
-        let mut payload =
-            wrapper.get("value").cloned().ok_or_else(|| invalid("task payload missing"))?;
-        payload_shape(&mut payload, false)?;
-        if matches!(kind.as_str(), "proposal" | "update") {
-            payload
-                .as_object_mut()
-                .ok_or_else(|| invalid("invalid task payload"))?
-                .entry("steps")
-                .or_insert_with(|| json!([]));
-        }
-        let ext = generated
-            .ext
-            .and_then(|ext| ext.ext)
-            .ok_or_else(|| invalid("task extensions missing"))?;
-        let native_body =
-            serde_json::from_value(json!({"type":kind,"body":payload})).map_err(|error| {
-                crate::task_refusal::protocol(&ramflux_protocol::TaskReject::Protocol(error.into()))
-            })?;
-        let native_ext = serde_json::from_value(object_value(&ext)?)?;
-        let event = TaskEvent::new(
-            generated.conversation_id,
-            native_body,
-            ramflux_protocol::SignedFields {
-                signing_key_id: fields.signing_key_id,
-                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-                signature: fields.signature,
-            },
-        )
-        .and_then(|event| event.with_extensions(ramflux_protocol::Ext { ext: native_ext }))
-        .map_err(|error| crate::task_refusal::protocol(&error))?;
+        let event = native_task_event(&generated)?;
         event.verify(signer).map_err(|error| crate::task_refusal::protocol(&error))?;
         Ok(event)
     }
@@ -216,7 +166,7 @@ fn snake(value: &str) -> String {
     result
 }
 
-fn json_object(values: &Map<String, Value>) -> Result<g::JsonObject, SdkError> {
+pub(crate) fn json_object(values: &Map<String, Value>) -> Result<g::JsonObject, SdkError> {
     let mut members = values.iter().collect::<Vec<_>>();
     members.sort_by(|(left, _), (right, _)| left.encode_utf16().cmp(right.encode_utf16()));
     Ok(g::JsonObject {
@@ -229,7 +179,7 @@ fn json_object(values: &Map<String, Value>) -> Result<g::JsonObject, SdkError> {
     })
 }
 
-fn json_value(value: &Value) -> Result<g::JsonValue, SdkError> {
+pub(crate) fn json_value(value: &Value) -> Result<g::JsonValue, SdkError> {
     use g::json_value::Value as J;
     ramflux_protocol::validate_i_json_value(value)?;
     Ok(g::JsonValue {
@@ -246,7 +196,7 @@ fn json_value(value: &Value) -> Result<g::JsonValue, SdkError> {
     })
 }
 
-fn object_value(object: &g::JsonObject) -> Result<Value, SdkError> {
+pub(crate) fn object_value(object: &g::JsonObject) -> Result<Value, SdkError> {
     let mut values = Map::new();
     for member in &object.members {
         if values.contains_key(&member.key) {
@@ -262,7 +212,7 @@ fn object_value(object: &g::JsonObject) -> Result<Value, SdkError> {
     Ok(Value::Object(values))
 }
 
-fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
+pub(crate) fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
     use g::json_value::Value as J;
     let value =
         match value.value.as_ref().ok_or_else(|| invalid("task extension choice missing"))? {
@@ -288,11 +238,11 @@ fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
 
 mod approval;
 mod carrier;
-mod certificate;
+pub(crate) mod certificate;
 mod control;
 mod history;
 mod history_fields;
-mod manifest;
+pub(crate) mod manifest;
 
 #[cfg(test)]
 mod certificate_tests;
@@ -305,7 +255,7 @@ mod manifest_tests;
 #[cfg(test)]
 mod tests;
 
-fn typed_transcript(name: &str, bytes: &[u8]) -> Result<Vec<u8>, SdkError> {
+pub(crate) fn typed_transcript(name: &str, bytes: &[u8]) -> Result<Vec<u8>, SdkError> {
     let domain = format!("ramflux.message.typed.{name}.v1");
     let mut result = Vec::new();
     for field in [domain.as_bytes(), bytes] {
@@ -318,3 +268,60 @@ fn typed_transcript(name: &str, bytes: &[u8]) -> Result<Vec<u8>, SdkError> {
     }
     Ok(result)
 }
+
+/// Reconstruct fields for the native validator. This grants no signer or membership authority.
+pub(crate) fn native_task_event(value: &g::TaskEvent) -> Result<TaskEvent, SdkError> {
+    check_wire(&value.encode_to_vec())?;
+    let generated = value.clone();
+    if generated.schema != ramflux_protocol::TASK_EVENT_SCHEMA
+        || generated.version != 1
+        || generated.domain != ramflux_protocol::domain::TASK_EVENT
+    {
+        return Err(invalid("generated task framing mismatch"));
+    }
+    let fields = generated.signed.ok_or_else(|| invalid("task signer fields missing"))?;
+    if !matches!(
+        fields.signature_alg.and_then(|alg| alg.value),
+        Some(g::signature_alg::Value::Ed25519(_))
+    ) {
+        return Err(invalid("task signature algorithm missing"));
+    }
+    let body = generated.event.ok_or_else(|| invalid("task body missing"))?;
+    let value = serde_json::to_value(body)?;
+    let choices = value.as_object().ok_or_else(|| invalid("invalid task choice"))?;
+    if choices.len() != 1 {
+        return Err(invalid("task must select exactly one event"));
+    }
+    let (kind, wrapper) = choices.iter().next().ok_or_else(|| invalid("task choice missing"))?;
+    let mut payload =
+        wrapper.get("value").cloned().ok_or_else(|| invalid("task payload missing"))?;
+    payload_shape(&mut payload, false)?;
+    if matches!(kind.as_str(), "proposal" | "update") {
+        payload
+            .as_object_mut()
+            .ok_or_else(|| invalid("invalid task payload"))?
+            .entry("steps")
+            .or_insert_with(|| json!([]));
+    }
+    let ext =
+        generated.ext.and_then(|ext| ext.ext).ok_or_else(|| invalid("task extensions missing"))?;
+    let native_body =
+        serde_json::from_value(json!({"type":kind,"body":payload})).map_err(|error| {
+            crate::task_refusal::protocol(&ramflux_protocol::TaskReject::Protocol(error.into()))
+        })?;
+    let native_ext = serde_json::from_value(object_value(&ext)?)?;
+    let event = TaskEvent::new(
+        generated.conversation_id,
+        native_body,
+        ramflux_protocol::SignedFields {
+            signing_key_id: fields.signing_key_id,
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: fields.signature,
+        },
+    )
+    .and_then(|event| event.with_extensions(ramflux_protocol::Ext { ext: native_ext }))
+    .map_err(|error| crate::task_refusal::protocol(&error))?;
+    Ok(event)
+}
+
+mod native_control;

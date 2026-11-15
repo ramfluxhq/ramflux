@@ -14,7 +14,7 @@ impl RamfluxClient {
         body: &[u8],
         outbound: bool,
     ) -> Result<Option<Outcome>, SdkError> {
-        if !body.starts_with(super::carrier::PREFIX) {
+        if Carrier::decode(body)?.is_none() {
             return Ok(None);
         }
         self.account_db()?.surface_transaction(|| {
@@ -143,7 +143,7 @@ impl RamfluxClient {
         sender: SurfaceSender<'_>,
         result: &Outcome,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
+        self.account_db()?.persist_message_actor_state(message,&key("message",message),&json!({"surface_ref":carrier.surface_reference()?,"surface_id":carrier.surface_id,"conversation_id":carrier.conversation_id,"group_id":self.account_db()?.client_record("conversation",&carrier.conversation_id)?.and_then(|v|v["group_id"].as_str().map(str::to_owned)),"group_epoch":sender.group_epoch,"accepted":result.accepted,"fallback_text":result.fallback_text,"kind":carrier.payload_kind}))?;
         if result.accepted
             && let Some(epoch) = sender.group_epoch
         {

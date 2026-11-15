@@ -15,6 +15,9 @@ pub(super) struct Device {
     pub(super) participant: Arc<LocalPairingParticipant>,
     pub(super) credential: Arc<Credential>,
     pub(super) phrase: Option<Zeroizing<String>>,
+    /// Conversation and message id of the generation-1 DM seeded before enrollment.
+    pub(super) history: Option<(String, String)>,
+    _peer: Option<tempfile::TempDir>,
     local: Arc<Local>,
 }
 impl std::ops::Deref for Device {
@@ -123,7 +126,10 @@ impl Device {
             config.clone(),
         );
         actor.set_participant(participant.clone());
-        Ok((actor, Self { client, participant, credential, phrase, local }))
+        Ok((
+            actor,
+            Self { client, participant, credential, phrase, history: None, _peer: None, local },
+        ))
     }
     pub(super) fn full_frontend(
         &mut self,

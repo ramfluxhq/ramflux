@@ -171,6 +171,8 @@ async fn typing_generated_send_bypasses_durable_operation_capture() -> TestResul
         subscribers: BTreeMap::new(),
     };
     let snapshot = account(&state)?.client.account_db()?.test_table_fingerprints(&allowed)?;
+    assert_durable_passthrough(&mut state, &conversation).await?;
+    unchanged(&state, &allowed, &snapshot)?;
     let focus = command(
         "ephemeral-source",
         "message.focus",
@@ -266,4 +268,35 @@ fn typing_never_prepares_network_or_durable_intent() {
         None
     ));
     assert!(super::generated_typing::is_transient("message.focus", &serde_json::Value::Null));
+}
+
+async fn assert_durable_passthrough(
+    state: &mut LocalBusDaemonState,
+    conversation: &str,
+) -> TestResult {
+    let durable = command(
+        "ephemeral-source",
+        "message.submit",
+        serde_json::json!({
+            "content": g::Content { value: Some(g::content::Value::Message(g::Message {
+                text: "durable Message must reach ordinary dispatch".into(),
+                ..Default::default()
+            })) },
+            "conversation_id": conversation,
+            "message_id": "durable-operation",
+            "envelope_id": "durable-envelope",
+            "source_principal_id": "source",
+            "sender_id": "source-device",
+            "target_delivery_id": "peer",
+            "encrypted_body_base64": "",
+            "created_at": 1,
+            "ttl": 300,
+            "attachments": [],
+        }),
+    );
+    assert!(
+        super::generated_typing::execute(state, "ephemeral-source", &durable).await?.is_none(),
+        "ordinary generated Message input must reach durable dispatch without an ephemeral decode",
+    );
+    Ok(())
 }

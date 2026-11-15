@@ -150,23 +150,23 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::shared_group::tests::{person, temp_root};
+    use crate::client::shared_group::tests::{install_native_directories, native_person};
     #[test]
     fn implicit_siblings_are_capped_without_hiding_other_member_roots() -> Result<(), SdkError> {
-        let root = temp_root("device-cap")?;
-        let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-        let peer = person(&root.join("peer"), "peer", "phone", 21, 22)?;
-        owner.shared_group_create("group", "thread", None, "target-phone")?;
-        let state = owner.shared_group_change(
+        let owner = native_person("owner", "phone")?;
+        let peer = native_person("peer", "phone")?;
+        install_native_directories(&[&owner, &peer])?;
+        owner.client.fixture_group_create("group", "thread", None, "phone")?;
+        let state = owner.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             ramflux_protocol::GroupStateChange::Add {
-                member: peer.owned_group_actor("target-phone")?.identity,
+                member: peer.client.fixture_group_actor("phone")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        let own = owner.owned_device_identity()?;
-        let remote = peer.owned_device_identity()?;
+        let own = owner.client.owned_device_identity()?;
+        let remote = peer.client.owned_device_identity()?;
         let mut devices: BTreeSet<_> = (0..80).map(|i| format!("d{i:02}")).collect();
         devices.insert("phone".into());
         let manifests = BTreeMap::from([
@@ -179,7 +179,6 @@ mod tests {
         assert_eq!(selected[remote.root_commitment()].len(), 1);
         assert!(selected.values().map(BTreeSet::len).sum::<usize>() <= 1024);
         drop((owner, peer));
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

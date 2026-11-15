@@ -16,9 +16,6 @@ const GATEWAY_SESSION_AUTH_TTL_SECONDS: i64 = 300;
 pub(crate) fn admit_candidate_outer_frame(
     frame: &[u8],
 ) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        return Err(SdkError::InboundRejected("candidate outer is dormant".into()));
-    }
     ramflux_transport::decode_candidate_outer_frame(frame)
         .map_err(|error| SdkError::InboundRejected(error.to_string()))
 }

@@ -50,7 +50,8 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
     let crossed = sibling_own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
     // Select delivery by the real session ordering, forcing both branches on every run.
     let winner =
-        converge(&source.client, &sibling.client, &config, &receiver, first, crossed).await?;
+        converge(&mut source.client, &mut sibling.client, &config, &receiver, first, crossed)
+            .await?;
     let next = append(&source.client, &create, 2)?;
     assert_eq!(
         send(&mut source, &next).await.map_err(|e| format!("author next copy: {e:?}"))?["own_device_copy_state"],
@@ -63,11 +64,13 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
         .cloned()
         .ok_or("second own copy")?;
     assert!(
-        sibling
-            .client
-            .receive_own_device_message(&receiver, &entry(second, 2))
-            .await
-            .map_err(|e| format!("author next copy at sibling: {e:?}"))?
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(second, 2)
+        )
+        .await
+        .map_err(|e| format!("author next copy at sibling: {e:?}"))?
     );
     assert_eq!(sibling.client.surface_get("surface", 0, None)?["version"], 2);
     // A distinct consent copy tests the reverse ratchet direction after convergence.
@@ -80,7 +83,7 @@ async fn sibling_acceptance_copy_does_not_block_the_authors_surface_copies() -> 
         .last()
         .cloned()
         .ok_or("reverse own copy")?;
-    receive_copy(&source.client, &config, reverse, 2).await?;
+    receive_copy(&mut source.client, &config, reverse, 2).await?;
     assert_eq!(active(&source.client, &sibling.client.owned_device_identity()?)?, winner);
     assert_eq!(active(&sibling.client, &source.client.owned_device_identity()?)?, winner);
     directory.abort();
@@ -98,23 +101,25 @@ fn active(
     Ok(session.session_id.clone())
 }
 async fn receive_copy(
-    client: &RamfluxClient,
+    client: &mut RamfluxClient,
     config: &GatewaySessionConfig,
     envelope: ramflux_protocol::Envelope,
     sequence: u64,
 ) -> TestResult {
-    let mut incoming = entry(envelope, sequence);
-    incoming.target_delivery_id.clone_from(&config.target_delivery_id);
-    incoming.envelope.target_delivery_id.clone_from(&config.target_delivery_id);
+    let incoming = entry(envelope, sequence);
+    assert_eq!(
+        incoming.target_delivery_id, config.target_delivery_id,
+        "deliver the sender's exact signed envelope to its certified target"
+    );
     assert!(
-        client.receive_own_device_message(config, &incoming).await?,
-        "own copy must be authenticated and applied"
+        crate::client::native_test_support::bus::receive_copy(client, config, &incoming).await?,
+        "generated own copy must be authenticated and applied"
     );
     Ok(())
 }
 async fn converge(
-    source: &RamfluxClient,
-    sibling: &RamfluxClient,
+    source: &mut RamfluxClient,
+    sibling: &mut RamfluxClient,
     config: &GatewaySessionConfig,
     receiver: &GatewaySessionConfig,
     first: ramflux_protocol::Envelope,

@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Generation-zero immutable quarantine must not install authenticated transport state.
+//! Retired crypto wrappers cannot install or advance authenticated transport state.
 use super::*;
 
 fn pair_rows(client: &RamfluxClient) -> Result<Vec<(String, Vec<u8>)>, SdkError> {
+    const MAX_ROWS: u32 = 4096;
     let db = client.account_db()?;
-    db.actor_state_keys("dm-pair/")?
+    if db.actor_state_usage("dm-pair/")?.0 >= u64::from(MAX_ROWS) {
+        return Err(SdkError::PayloadTooLarge);
+    }
+    db.actor_state_key_page("dm-pair/", MAX_ROWS)?
         .into_iter()
         .map(|key| {
             let value = db
@@ -18,65 +22,53 @@ fn pair_rows(client: &RamfluxClient) -> Result<Vec<(String, Vec<u8>)>, SdkError>
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn legacy_body_invalid_quarantine_preserves_pair_bootstrap_and_ratchet()
--> Result<(), SdkError> {
-    crate::client::native_test_support::watchdog::within(
-        legacy_body_invalid_quarantine_preserves_pair_bootstrap_and_ratchet_body(),
-    )
-    .await
-    .map_err(|_| invalid("test: legacy quarantine component exceeded its watchdog"))?
+async fn retired_wrapper_quarantine_preserves_pair_bootstrap_and_ratchet() -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(retired_wrapper_quarantine_body())
+        .await
+        .map_err(|_| invalid("test: retired-wrapper component exceeded its watchdog"))?
 }
 
-async fn legacy_body_invalid_quarantine_preserves_pair_bootstrap_and_ratchet_body()
--> Result<(), SdkError> {
-    let (a, mut b) = pair(201, 205)?;
-    assert!(
-        !crate::client::target_selection::schema_v1_selected(),
-        "test requires generation zero"
-    );
-    review::trust(&b, &a)?;
-    review::trust(&a, &b)?;
-    let mut message = message("legacy-invalid-body", "thread");
-    message.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
-    let bundle = b.client.load_x3dh_private_state(&b.client.owned_device_identity()?)?.bundle;
-    let hash = prekey_bundle_hash(&bundle)?;
-    let aad = associated_data(&message.envelope_id, &a.id, &b.id, &hash)?;
-    let (mut session, header) =
-        a.client.create_send_dm_session_with_aad(&message, &b.id, bundle, &a.id, Some(&aad))?;
-    message.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
-        source_principal_commitment: None,
-        schema: "ramflux.sdk.dm_x3dh_envelope.v2".into(),
-        version: 2,
-        x3dh: header,
-        ciphertext: session.encrypt(b"{", &aad)?,
-        collapse_tag: None,
-        report_commitment: None,
-    })?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.id.clone(),
-        envelope: gateway_direct_message_envelope(&a.config()?, &message, None)?,
-    };
+async fn retired_wrapper_quarantine_body() -> Result<(), SdkError> {
+    let (a, mut b) = pair(201, 205).await?;
+    let calibration = seal(&a, &b, message("native-calibration", "c"), b"native calibration")?;
+    apply(&mut b, &calibration).await?;
     let before = pair_rows(&b.client)?;
+    assert!(!before.is_empty(), "calibration must establish a real native pair");
+    let mut entry = seal(&a, &b, message("retired-wrapper", "c"), b"never admitted")?;
+    let retired = serde_json::to_vec(&serde_json::json!({
+        "schema":"ramflux.sdk.dm_x3dh_envelope.v1", "version":1,
+        "x3dh":null, "ciphertext":{},
+    }))?;
+    entry.inbox_seq = 2;
+    entry.envelope.encrypted_payload = ramflux_protocol::encode_base64url(retired);
+    entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        entry.envelope.encrypted_payload.as_bytes(),
+    );
+    // A genuine native sender authenticates this malformed transport; it is still
+    // not permission to select an obsolete decoder or mutate the live pair.
+    resign(&a, &mut entry.envelope)?;
+    assert!(
+        ramflux_node_core::check_entry_bound(&entry.envelope).is_err(),
+        "the node must reject a retired non-RF1C wrapper before inbox admission"
+    );
+    // Also exercise an already durable malformed entry: refusal cannot mutate the pair.
     Box::pin(settle_through(&mut b, vec![entry])).await?;
     let failure = b
         .client
         .account_db()?
         .latest_journal_event("message.undeliverable")?
-        .ok_or_else(|| invalid("test: immutable invalid body was not quarantined"))?;
+        .ok_or_else(|| invalid("test: retired wrapper was not quarantined"))?;
     assert_eq!(
-        failure.body["error_code"], "schema_invalid",
-        "AEAD-valid malformed body must take ordinary legacy quarantine"
+        failure.body["error_code"], "generated_content",
+        "retired wire gets an immutable refusal"
     );
-    assert!(
-        pair_rows(&b.client)? == before,
-        "quarantine must leave pair/bootstrap/ratchet bytes identical"
-    );
+    assert_eq!(pair_rows(&b.client)?, before, "refusal must preserve pair/bootstrap/ratchet bytes");
     assert_eq!(
-        b.client.gateway_receive_cursor(&b.id)?,
-        1,
-        "quarantine must settle the real inbox entry"
+        b.client.gateway_receive_cursor(&b.config()?.target_delivery_id)?,
+        2,
+        "immutable refusal must settle the real inbox entry"
     );
+    assert_eq!(projected(&b, "c")?, 1, "only the valid calibration may be rendered");
     Ok(())
 }

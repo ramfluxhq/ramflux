@@ -41,16 +41,20 @@ pub const LANE_GATES_GREEN: &str = "lane_gates_green";
 
 /// Every row must be `met: true` in the same change that flips the generation.
 pub const PRECONDITIONS: [Precondition; 10] = [
-    Precondition { name: NATIVE_CONTROLS_COMPLETE, met: false },
-    Precondition { name: HISTORY_TRANSPORT_COMPLETE, met: false },
-    Precondition { name: RESTORE_MERGE_COMPLETE, met: false },
-    Precondition { name: SELF_SYNC_COMPLETE, met: false },
-    Precondition { name: TYPED_RUNTIME_COMPLETE, met: false },
-    Precondition { name: LEGACY_CODEC_REMOVED, met: false },
-    Precondition { name: RAW_WIRE_RESET_INSTALLED, met: false },
-    Precondition { name: REAL_COMPONENT_GATE_GREEN, met: false },
-    Precondition { name: TAMPERED_BINDING_GATE_GREEN, met: false },
-    Precondition { name: LANE_GATES_GREEN, met: false },
+    Precondition { name: NATIVE_CONTROLS_COMPLETE, met: true },
+    Precondition { name: HISTORY_TRANSPORT_COMPLETE, met: true },
+    Precondition { name: RESTORE_MERGE_COMPLETE, met: true },
+    Precondition { name: SELF_SYNC_COMPLETE, met: true },
+    Precondition { name: TYPED_RUNTIME_COMPLETE, met: true },
+    Precondition { name: LEGACY_CODEC_REMOVED, met: true },
+    // Attested by the storage schema_generation and raw_inner schema tests.
+    Precondition { name: RAW_WIRE_RESET_INSTALLED, met: true },
+    // Attested by cli-e2e including e2e_unified_gate.
+    Precondition { name: REAL_COMPONENT_GATE_GREEN, met: true },
+    // Attested by tampered_committed_binding_is_refused_and_never_served and candidate_binding.
+    Precondition { name: TAMPERED_BINDING_GATE_GREEN, met: true },
+    // Attested by QA lane-gates ALL_GATES_OK and PR CI.
+    Precondition { name: LANE_GATES_GREEN, met: true },
 ];
 
 /// True when every listed precondition is attested.
@@ -79,7 +83,7 @@ pub fn is_met(name: &str) -> bool {
 
 const _: () = assert!(
     activation_allowed(ACTIVE_STORAGE_GENERATION, &PRECONDITIONS),
-    "ACTIVE_STORAGE_GENERATION is not zero while an activation precondition is unmet; \
+    "ACTIVE_STORAGE_GENERATION requires every activation precondition to be attested; \
      see schema_activation::PRECONDITIONS"
 );
 

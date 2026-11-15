@@ -151,6 +151,9 @@ pub enum NodeCoreError {
     PushRouteOwnerMismatch,
     #[error("delivery_mode_refused")]
     DeliveryModeRefused,
+    /// Generation 1 admits only `message` and `call_wake` as envelope delivery classes.
+    #[error("delivery_class_refused")]
+    DeliveryClassRefused,
 }
 
 impl From<ramflux_protocol::ephemeral::EphemeralModeError> for NodeCoreError {

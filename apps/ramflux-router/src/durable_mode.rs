@@ -25,6 +25,16 @@ impl std::fmt::Display for DeliveryModeRefused {
 
 impl std::error::Error for DeliveryModeRefused {}
 
+/// Generation 1 admits only `message` and `call_wake`; any other delivery class is refused.
+pub(crate) fn rejected_class_for_target(
+    target_delivery_id: &str,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        outcome: "rejected_security:delivery_class_refused".into(),
+        ..rejected_security_for_target(target_delivery_id)
+    }
+}
+
 pub(crate) fn rejected_security(
     envelope: &ramflux_protocol::Envelope,
 ) -> ramflux_node_core::EnvelopeSubmitResponse {

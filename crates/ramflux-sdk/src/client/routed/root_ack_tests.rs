@@ -145,8 +145,11 @@ fn ack_cache_keeps_distinct_deliveries_with_the_same_envelope_id() -> Result<(),
     );
     assert_eq!(account.merge_deliveries(vec![first.clone()])?.len(), 1);
     account.mark_acked("same-id")?;
-    assert_eq!(account.merge_deliveries(vec![first, second.clone()])?.len(), 1);
-    assert_eq!(account.pending_page(10)[0].inbox_seq, 2);
+    let merged = account.merge_deliveries(vec![first, second.clone()])?;
+    let [remaining] = merged.as_slice() else {
+        return Err(SdkError::LocalBus("test: one delivery remains".into()));
+    };
+    assert_eq!(remaining.inbox_seq, 2, "distinct source delivery must remain unacknowledged");
     let db = account.client.account_db()?;
     let own = account.client.owned_device_identity()?;
     assert!(!db.has_gateway_ack(&own, &second.target_delivery_id, second.inbox_seq)?);

@@ -261,6 +261,7 @@ impl LocalBusAccountState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn merge_deliveries(
         &mut self,
         entries: Vec<GatewayInboxEntry>,
@@ -286,10 +287,6 @@ impl LocalBusAccountState {
             fresh.push(entry);
         }
         Ok(fresh)
-    }
-
-    pub(crate) fn pending_page(&self, limit: usize) -> Vec<GatewayInboxEntry> {
-        self.pending_deliveries.iter().take(limit).cloned().collect()
     }
 
     pub(crate) fn mark_acked(&mut self, envelope_id: &str) -> Result<(), SdkError> {

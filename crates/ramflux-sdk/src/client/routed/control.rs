@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Typed control projections, with source/target ownership checked before transactional mutation.
-use super::{A2iControlEvent, GatewayInboxEntry, Kind, Opened, RamfluxClient, SdkError, invalid};
+use super::{GatewayInboxEntry, Kind, Opened, RamfluxClient, SdkError, invalid};
 use crate::client::identity_authority::HeadUse;
+#[cfg(test)]
 use serde_json::Value;
+#[cfg(test)]
 fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
     match error {
         ramflux_storage::StorageError::AuthorizationRejected => {
@@ -73,157 +75,7 @@ impl RamfluxClient {
         })
     }
 
-    fn project_generated_own_message_copy(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<bool, SdkError> {
-        let Ok((identity, content)) = Self::decode_generated_inner(body) else {
-            return Ok(false);
-        };
-        if let Some(ramflux_protocol::message::content::Value::SelfSync(sync)) = &content.value {
-            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-            if identity.conversation_id != opened.routing.conversation_id
-                || identity.author.as_ref().is_none_or(|author| {
-                    author.account_anchor != source.root_commitment()
-                        || author.device_id != source.device_id()
-                })
-            {
-                return Err(invalid("self sync identity differs from authenticated route"));
-            }
-            self.apply_self_sync_in(&source, &identity.conversation_id, sync)?;
-            return Ok(true);
-        }
-        let Some(ramflux_protocol::message::content::Value::Control(control)) = content.value
-        else {
-            return Ok(false);
-        };
-        let Some(ramflux_protocol::message::control::Payload::OwnMessageCopy(copy)) =
-            control.payload
-        else {
-            return Ok(false);
-        };
-        self.receive_generated_own_message_copy(opened, entry, &copy)?;
-        Ok(true)
-    }
-
-    pub(super) fn project_routed_control(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<Option<Vec<u8>>, SdkError> {
-        if self.project_generated_own_message_copy(opened, entry, body)? {
-            return Ok(None);
-        }
-        if self.receive_contact_control(entry, &opened.routing, body)? {
-            return Ok(None);
-        }
-        if self.project_call_control(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
-        if self.receive_surface_resync_request(entry, &opened.routing.conversation_id, body)? {
-            return Ok(None);
-        }
-        if self.receive_task_approval(entry, &opened.routing.conversation_id, body)? {
-            return Ok(None);
-        }
-        if self.receive_task_control(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? || self.receive_task_own(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
-        if self.receive_surface_control(
-            entry,
-            &opened.routing.conversation_id,
-            opened.routing.group_id.as_deref(),
-            body,
-        )? {
-            return Ok(None);
-        }
-        self.project_json_control(opened, entry, body)
-    }
-
-    fn project_json_control(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<Option<Vec<u8>>, SdkError> {
-        let value: Value = serde_json::from_slice(body)?;
-        if value["schema"] == "ramflux.sdk.own_device_sync.v1" {
-            let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
-                ramflux_protocol::parse_i_json(body)?;
-            if sync.source_device_id != entry.envelope.source_device_id
-                || sync.target_device_id != opened.local_device.device_id()
-                || !self.account_db()?.actor_state_exists(&Self::own_sync_receipt_key(&sync)?)?
-            {
-                return Err(invalid("own-device history has not been authenticated and imported"));
-            }
-            return Ok(None);
-        }
-        if serde_json::from_slice::<A2iControlEvent>(body).is_ok() {
-            Self::require_a2i_binding_authority()?;
-        } else {
-            self.project_pair_or_contact_control(opened, entry, body)?;
-        }
-        Ok(None)
-    }
-
-    fn project_pair_or_contact_control(
-        &self,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<(), SdkError> {
-        let event: Value = serde_json::from_slice(body)?;
-        if matches!(
-            event["type"].as_str(),
-            Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-        ) {
-            if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
-                return Err(invalid("pair recovery forbidden for removed or blocked contact"));
-            }
-            if event["type"] == "pair.session.reset.v1"
-                && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
-            {
-                self.abandon_unconfirmed_candidate(
-                    &opened.local_device,
-                    &opened.remote_device,
-                    floor,
-                )?;
-            }
-            self.account_db()?.append_journal(
-                &format!(
-                    "pair-reset:{}",
-                    self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
-                ),
-                "session.reset",
-                &serde_json::json!({
-                    "device_id": opened.remote_device.storage_key(),
-                    "reason": "authenticated_reset_request"
-                }),
-                super::now_unix_timestamp(),
-                None,
-            )?;
-            return Ok(());
-        }
-        self.project_contact_control(entry, &event)
-    }
+    #[cfg(test)]
     pub(crate) fn project_legacy_contact_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -238,6 +90,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn project_contact_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -346,9 +199,7 @@ impl RamfluxClient {
         &mut self,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        if crate::client::target_selection::schema_v1_selected()
-            && ramflux_protocol::message::validation::scan_inner(body).is_ok()
-        {
+        if ramflux_protocol::message::validation::scan_inner(body).is_ok() {
             if let Ok((_, content)) = Self::decode_generated_inner(body) {
                 use ramflux_protocol::message::{content, control};
                 match content.value {
@@ -376,33 +227,15 @@ impl RamfluxClient {
         opened: &Opened,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if self.refresh_generated_control_cache(body)? {
-            return Ok(());
-        }
-        if self.refresh_call_control(body)? {
-            return Ok(());
-        }
-        if body.starts_with(crate::client::task::approval::PREFIX)
-            || body.starts_with(crate::client::task::own_history::PREFIX)
-            || body.starts_with(crate::client::task::control::PREFIX)
-        {
-            return Ok(());
-        }
-        if opened.routing.kind == Kind::Control
-            && !body.starts_with(crate::client::surface::CONTROL_PREFIX)
-        {
-            let value: Value = serde_json::from_slice(body)?;
-            if value["type"] == "object.revoke_access"
-                && let Some(id) = value.get("object_id").and_then(Value::as_str)
-                && self.object_store.cached_object(id).is_some()
-            {
-                self.object_store.tombstone(id)?;
-            }
+        let _ = opened;
+        if !self.refresh_generated_control_cache(body)? {
+            return Err(invalid("generated Inner required for control cache"));
         }
         Ok(())
     }
 }
 
+#[cfg(test)]
 pub(crate) fn a2i_key(
     source: &ramflux_crypto::RootQualifiedDeviceRef,
     event: &str,

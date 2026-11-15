@@ -47,7 +47,7 @@ fn code<T>(result: Result<T, SdkError>, expected: Code) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn generation_zero_mutation_intents_allocate_nothing() -> TestResult {
+async fn active_mutation_missing_targets_allocate_nothing() -> TestResult {
     let source = Fixture::new("intent-generation-zero").await?;
     let db = source.client.account_db()?;
     let before = db.actor_state_keys("")?;
@@ -55,8 +55,19 @@ async fn generation_zero_mutation_intents_allocate_nothing() -> TestResult {
         ["conversation.edit", "conversation.react", "conversation.reply", "conversation.delete"]
     {
         code(
-            prepare(&source.client, &request(method, "absent", json!({}))),
-            Code::PeerUpgradeRequired,
+            prepare(
+                &source.client,
+                &request(
+                    method,
+                    "absent",
+                    match method {
+                        "conversation.edit" | "conversation.reply" => json!({"text":"content"}),
+                        "conversation.react" => json!({"token":"👍"}),
+                        _ => json!({"scope":"everyone"}),
+                    },
+                ),
+            ),
+            Code::TargetNotFound,
         );
     }
     assert_eq!(db.actor_state_keys("")?, before);
@@ -130,25 +141,29 @@ async fn mutation_intents_refuse_forged_routing_cross_thread_and_deleted_targets
     intent.body["conversation_id"] = json!("other-thread");
     code(prepare(&source.client, &intent), Code::TargetNotFound);
     intent.body["conversation_id"] = json!("thread");
-    source.client.delete_direct_message("thread", &id, "local", "test-delete")?;
+    source.client.delete_direct_message(
+        "thread",
+        &id,
+        "local",
+        &ramflux_protocol::encode_base64url([17; 32]),
+    )?;
     code(prepare(&source.client, &intent), Code::TargetDeleted);
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn dispatcher_preserves_typed_generation_refusals_and_local_delete_never_routes() -> TestResult
-{
-    let root = tempfile::tempdir()?;
-    let account = crate::bus::runtime_tests::account(
-        root.path(),
-        "source",
-        None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
+async fn dispatcher_preserves_typed_input_refusals_and_local_delete_never_routes() -> TestResult {
+    let mut native = Fixture::new("source").await?;
+    let root = native.root.0.clone();
+    let account = LocalBusAccountState::disconnected(
+        std::mem::take(&mut native.client),
+        native.config.clone(),
+        native.manifest.principal_commitment.clone(),
+    );
     let mut state = LocalBusDaemonState {
         account_index: None,
         nodes: crate::node::NodeStore::default(),
-        config: LocalBusConfig::new(root.path().join("bus.sock"), root.path()),
+        config: LocalBusConfig::new(root.join("bus.sock"), &root),
         accounts: BTreeMap::from([("source".into(), account)]),
         active_account_id: None,
         attended_accounts: BTreeSet::new(),
@@ -165,10 +180,10 @@ async fn dispatcher_preserves_typed_generation_refusals_and_local_delete_never_r
             &connection,
         ))
         .await;
-        let error = result.err().ok_or("generation-zero effect was accepted")?;
+        let error = result.err().ok_or("invalid intent was accepted")?;
         let frame = crate::bus::io::local_bus_error(&request(method, "absent", json!({})), &error);
-        assert_eq!(frame.body["name"], "peer_upgrade_required");
-        assert_eq!(frame.body["code"], Code::PeerUpgradeRequired as i32);
+        assert_eq!(frame.body["name"], "invalid_argument");
+        assert_eq!(frame.body["code"], Code::InvalidArgument as i32);
     }
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let id = seed(&state.accounts.get("source").ok_or("account")?.client)?;

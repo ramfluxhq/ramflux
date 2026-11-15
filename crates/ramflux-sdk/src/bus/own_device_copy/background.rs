@@ -9,11 +9,11 @@ use super::{
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::{
-    own_device_copy::{OwnCopyDraft, OwnDeviceMessage, OwnMessageInput},
+    own_device_copy::{OwnCopyDraft, OwnMessageInput},
     routed::{SendMaterial, SendMaterialRequest},
 };
-use crate::prelude::{LocalBusAccountState, gateway_direct_message_envelope, now_unix_timestamp};
-use crate::{GatewayDirectMessage, GatewaySessionConfig, SdkDeviceManifestResponse, SdkError};
+use crate::prelude::{LocalBusAccountState, now_unix_timestamp};
+use crate::{GatewaySessionConfig, SdkDeviceManifestResponse, SdkError};
 use ramflux_protocol::Envelope;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
@@ -25,6 +25,7 @@ pub(crate) struct Plan {
     config: GatewaySessionConfig,
     root: String,
     manifest: Option<SdkDeviceManifestResponse>,
+    cached_manifest: bool,
 }
 pub(crate) struct DraftPlan {
     plan: Plan,
@@ -33,8 +34,6 @@ pub(crate) struct DraftPlan {
 }
 pub(crate) struct SendPlan {
     plan: Plan,
-    packet: Option<OwnDeviceMessage>,
-    envelope: Option<Envelope>,
     generated: Vec<(String, Envelope)>,
 }
 pub(crate) enum Prepared {
@@ -226,8 +225,7 @@ fn finish(
 fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
     for (key, mut work) in pending_ordered(&account.client, now)? {
-        if (!work.local_manifest && message_owner(&work).is_some())
-            || work.intent.expiry() <= now
+        if work.intent.expiry() <= now
             || (!sealed(&work) && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
@@ -282,6 +280,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             key,
             root: account.client.surface_local_root_commitment()?,
             config: account.gateway_config.clone(),
+            cached_manifest: manifest.is_some(),
             manifest,
         }));
     }
@@ -307,40 +306,19 @@ fn draft(
         return resume_generated(account, plan, generated)
             .map(|plan| plan.map(|plan| Prepared::Send(Box::new(plan))));
     }
-    if let Some(packet) = &plan.work.packet {
-        let Ok(packet) = serde_json::from_value::<OwnDeviceMessage>(packet.clone()) else {
-            finish(account, &plan.key, &plan.work, "failed")?;
-            return Ok(None);
-        };
-        let mut plan = plan;
-        let now = now_unix_timestamp();
-        if plan.work.targets.is_empty() {
-            plan.work.targets = packet
-                .slots
-                .iter()
-                .map(|slot| Target::new(slot.recipient_device_id.clone(), plan.work.attempts, 0))
-                .collect();
+    let manifest = manifest?
+        .ok_or_else(|| SdkError::InboundPending("own-device manifest unavailable".into()))?;
+    let manifest = if plan.cached_manifest {
+        let current = account.client.local_own_copy_manifest()?;
+        if serde_json::to_value(&current)? != serde_json::to_value(&manifest)? {
+            return Err(SdkError::InboundPending(
+                "own-device local manifest changed during preparation".into(),
+            ));
         }
-        if plan.work.targets.iter().all(Target::finished) {
-            let status = if plan.work.targets.iter().all(Target::acknowledged) {
-                "submitted"
-            } else {
-                "failed"
-            };
-            finish(account, &plan.key, &plan.work, status)?;
-            return Ok(None);
-        }
-        if !plan.work.targets.iter().any(|target| target.due(now)) {
-            return Ok(None);
-        }
-        return envelope(account, plan, packet).map(|plan| Some(Prepared::Send(Box::new(plan))));
-    }
-    let manifest = account.client.accept_fetched_device_manifest(
-        manifest?
-            .ok_or_else(|| SdkError::InboundPending("own-device manifest unavailable".into()))?,
-        &plan.root,
-        "own_device_message",
-    )?;
+        current
+    } else {
+        account.client.accept_fetched_device_manifest(manifest, &plan.root, "own_device_message")?
+    };
     let body = zeroize::Zeroizing::new(
         ramflux_protocol::decode_base64url(&plan.work.intent.body)
             .map_err(|_| SdkError::LocalBus("own-device intent encoding".into()))?,
@@ -349,6 +327,7 @@ fn draft(
     let prepared = account.client.prepare_own_copy_draft_until(
         &plan.config,
         OwnMessageInput {
+            payload_kind: intent.payload_kind,
             id: &intent.id,
             created_at: intent.created_at,
             conversation: &intent.conversation,
@@ -367,10 +346,13 @@ fn draft(
         }
         result => result?,
     };
-    let Some(draft) = prepared else {
+    let Some(mut draft) = prepared else {
         finish(account, &plan.key, &plan.work, "not_needed")?;
         return Ok(None);
     };
+    if let Some(target) = plan.work.audience.as_ref() {
+        crate::RamfluxClient::restrict_own_copy_target(&mut draft, target)?;
+    }
     let requests = account.client.own_copy_material_requests(&plan.config, &draft)?;
     Ok(Some(Prepared::Draft(Box::new(DraftPlan { plan, draft, requests }))))
 }
@@ -379,37 +361,12 @@ fn seal(
     draft: DraftPlan,
     materials: Result<Vec<SendMaterial>, SdkError>,
 ) -> Result<Option<SendPlan>, SdkError> {
-    let DraftPlan { mut plan, draft, .. } = draft;
+    let DraftPlan { plan, draft, .. } = draft;
     if !current(account, &plan)? {
         return Ok(None);
     }
-    if crate::client::target_selection::schema_v1_selected() {
-        return seal_generated(account, plan, draft, materials);
-    }
-    let result = account.client.seal_own_copy_prepared(&plan.config, draft, materials?);
-    let packet = match result {
-        Err(SdkError::InboundRejected(reason))
-            if reason == crate::client::own_device_copy::TOO_LARGE =>
-        {
-            finish(account, &plan.key, &plan.work, "failed")?;
-            return Ok(None);
-        }
-        result => result?,
-    };
-    plan.work.context_delivery.clone_from(&packet.context_delivery);
-    plan.work.targets = packet
-        .slots
-        .iter()
-        .map(|slot| Target::new(slot.recipient_device_id.clone(), 0, now_unix_timestamp()))
-        .collect();
-    plan.work.packet = Some(serde_json::to_value(&packet)?);
-    plan.work.intent.body.zeroize();
-    if !persist_work(&account.client, &plan.key, &plan.work)? {
-        finish(account, &plan.key, &plan.work, "failed")?;
-        return Ok(None);
-    }
-    plan.fingerprint = serde_json::to_value(&plan.work)?;
-    envelope(account, plan, packet).map(Some)
+
+    seal_generated(account, plan, draft, materials)
 }
 
 fn seal_generated(
@@ -503,51 +460,13 @@ fn persist_generated(
     plan.fingerprint = serde_json::to_value(&plan.work)?;
     Ok(SendPlan {
         plan,
-        packet: None,
-        envelope: None,
         generated: generated
             .into_iter()
             .filter(|(device, _)| due.iter().any(|id| id == device))
             .collect(),
     })
 }
-fn envelope(
-    account: &LocalBusAccountState,
-    mut plan: Plan,
-    packet: OwnDeviceMessage,
-) -> Result<SendPlan, SdkError> {
-    let message = GatewayDirectMessage {
-        conversation_id: packet.id.clone(),
-        message_id: packet.id.clone(),
-        envelope_id: crate::new_surface_message_id()?,
-        source_principal_id: plan.config.principal_id.clone(),
-        sender_id: plan.config.device_id.clone(),
-        recipient_device_id: None,
-        recipient_principal_commitment: None,
-        target_delivery_id: plan.config.target_delivery_id.clone(),
-        encrypted_body: packet.bytes()?,
-        created_at: now_unix_timestamp(),
-        ttl: account.client.content_ttl()?.min(
-            u32::try_from(plan.work.intent.expiry().saturating_sub(now_unix_timestamp()).max(1))
-                .map_err(|_| SdkError::LocalBus("own-copy TTL overflow".into()))?,
-        ),
-    };
-    let mut envelope = gateway_direct_message_envelope(&plan.config, &message, None)?;
-    envelope.delivery_class = ramflux_protocol::DeliveryClass::SelfDeviceControl;
-    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-        account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &envelope,
-    )?;
-    let now = now_unix_timestamp();
-    for target in &mut plan.work.targets {
-        target.charge(now);
-    }
-    if !persist_work(&account.client, &plan.key, &plan.work)? {
-        return Err(SdkError::LocalBus("own-device retry capacity exceeded".into()));
-    }
-    plan.fingerprint = serde_json::to_value(&plan.work)?;
-    Ok(SendPlan { plan, packet: Some(packet), envelope: Some(envelope), generated: Vec::new() })
-}
+
 fn complete(
     account: &LocalBusAccountState,
     plan: &SendPlan,
@@ -590,48 +509,7 @@ pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<boo
 }
 
 async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<Vec<String>, SdkError> {
-    if !plan.generated.is_empty() {
-        return fanout_generated(context, plan).await;
-    }
-    let principal = plan.plan.config.principal_id.clone();
-    let source = plan.plan.config.device_id.clone();
-    let packet = plan
-        .packet
-        .clone()
-        .ok_or_else(|| SdkError::LocalBus("own-device packet missing".into()))?;
-    let envelope = plan
-        .envelope
-        .clone()
-        .ok_or_else(|| SdkError::LocalBus("own-device envelope missing".into()))?;
-    context
-        .call(
-            move |engine| {
-                Box::pin(async move {
-                    let response = engine
-                        .own_device_fanout(principal.clone(), source.clone(), envelope)
-                        .await?;
-                    if response.principal_id != principal || response.source_device_id != source {
-                        return Err(SdkError::LocalBus(
-                            "own-device fanout acknowledgement mismatch".into(),
-                        ));
-                    }
-                    Ok(response
-                        .delivered
-                        .into_iter()
-                        .filter(|delivery| {
-                            packet
-                                .slots
-                                .iter()
-                                .any(|slot| slot.recipient_device_id == delivery.device_id)
-                                && matches!(delivery.outcome.as_str(), "online" | "offline_queued")
-                        })
-                        .map(|delivery| delivery.device_id)
-                        .collect())
-                })
-            },
-            context.call_deadline(),
-        )
-        .await
+    fanout_generated(context, plan).await
 }
 
 async fn fanout_generated(
@@ -639,6 +517,7 @@ async fn fanout_generated(
     plan: &SendPlan,
 ) -> Result<Vec<String>, SdkError> {
     let mut delivered = Vec::new();
+    let mut failure = None;
     for (device, envelope) in &plan.generated {
         let envelope = envelope.clone();
         let device = device.clone();
@@ -652,10 +531,20 @@ async fn fanout_generated(
                 },
                 context.call_deadline(),
             )
-            .await?;
-        delivered.push(submitted);
+            .await;
+        match submitted {
+            Ok(device) => delivered.push(device),
+            Err(error) => {
+                // The target stays unconfirmed, so the existing per-target retry parks it.
+                tracing::warn!(%error, "own-device target copy deferred");
+                failure = failure.or(Some(error));
+            }
+        }
     }
-    Ok(delivered)
+    match failure {
+        Some(error) if delivered.is_empty() => Err(error),
+        _ => Ok(delivered),
+    }
 }
 
 #[cfg(test)]
@@ -663,16 +552,21 @@ mod budget_tests {
     use super::*;
     #[test]
     fn own_copy_prepare_does_not_double_charge_target_budget() -> Result<(), SdkError> {
-        let root = crate::bus::runtime_tests::root("own-copy-single-charge");
-        let account = crate::bus::runtime_tests::account(
-            &root,
-            "sender",
-            None,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )?;
+        use crate::client::native_test_support::{Fixture as Native, bus as native_bus};
+        // A native account with one enrolled sibling: the own copy has a real target.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let (account, sibling) = runtime
+            .block_on(async {
+                let mut account = Native::with_device("sender", "phone").await?.into_bus();
+                let sibling =
+                    Box::pin(native_bus::sibling(&mut account, "sender-laptop", "laptop")).await?;
+                Ok::<_, Box<dyn std::error::Error>>((account, sibling))
+            })
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
         super::super::stage(
             &account.client,
             OwnMessageInput {
+                payload_kind: crate::client::own_device_copy::OwnPayloadKind::RawInner,
                 id: "copy",
                 created_at: now_unix_timestamp(),
                 conversation: "thread",
@@ -706,6 +600,7 @@ mod budget_tests {
         }
         assert!(prepare(&account)?.is_none());
         assert!(!account.client.account_db()?.actor_state_exists(&key)?);
+        drop(sibling);
         drop(account);
         Ok(())
     }

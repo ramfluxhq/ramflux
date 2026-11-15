@@ -19,7 +19,7 @@ use ramflux_protocol::{
 };
 use ramflux_storage::AccountDb;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 const NOW_MS: u64 = 1_000_000;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -83,13 +83,11 @@ fn both_caps() -> Vec<String> {
 }
 
 fn base_envelope() -> Envelope {
-    let mut extensions = BTreeMap::new();
-    extensions.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
     Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.message".to_owned(),
-        ext: Ext { ext: extensions },
+        schema: "ramflux.envelope.v2".to_owned(),
+        version: 2,
+        domain: "ramflux.envelope.v2".to_owned(),
+        ext: Ext::default(),
         signed: SignedFields {
             signing_key_id: "key".to_owned(),
             signature_alg: SignatureAlg::Ed25519,
@@ -106,9 +104,9 @@ fn base_envelope() -> Envelope {
         created_at: 1_000,
         encrypted_payload: "ct".to_owned(),
         payload_hash: "hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        delivery_mode: Some("ephemeral".to_owned()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     }
 }
 
@@ -217,11 +215,11 @@ fn row_missing_capability_sends_nothing(envelope: &Envelope) -> TestResult {
 
 fn row_invalid_mode_priority_ttl_sends_nothing() -> TestResult {
     let mut mode = base_envelope();
-    mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("burst".to_owned()));
+    mode.delivery_mode = Some("burst".to_owned());
     let mut object_mode = base_envelope();
     object_mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), serde_json::json!({}));
     let mut durable = base_envelope();
-    durable.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+    durable.delivery_mode = Some("durable".to_owned());
     let mut priority = base_envelope();
     priority.priority = Priority::Normal;
     let mut ttl_zero = base_envelope();

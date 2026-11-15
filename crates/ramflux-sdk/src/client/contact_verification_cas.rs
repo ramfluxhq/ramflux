@@ -644,40 +644,26 @@ pub(crate) fn install_sibling_confirmation(
     install_matching(client, confirmation, exact_inner, &snapshot)
 }
 
-pub(crate) fn accept_staged_safety_inner(
+/// Installs a sibling confirmation only when its origin is the authenticated source device.
+/// A confirmation authored by any other device, or whose origin differs from the carrying
+/// identity, is dropped without a trace.
+pub(crate) fn install_sibling_confirmation_from(
     client: &RamfluxClient,
     source: &ramflux_crypto::RootQualifiedDeviceRef,
-    body: &[u8],
-) -> Result<bool, SdkError> {
-    let Ok(inner) = g::Inner::decode(body) else {
-        return Ok(false);
-    };
-    let Some(identity) = inner.identity.clone() else {
-        return Ok(false);
-    };
-    let Ok(scanned) = g::validation::scan_inner(body) else {
-        return Ok(false);
-    };
-    let Ok(control) = g::Control::decode(scanned.body) else {
-        return Ok(false);
-    };
-    let Some(g::control::Payload::OwnContactSync(sync)) = control.payload else {
-        return Ok(false);
-    };
-    let Some(confirmation) = sync.safety_confirmation.as_ref() else {
-        return Ok(false);
-    };
-    let Some(origin) = confirmation.origin.as_ref() else {
-        return Ok(true);
+    sync: &g::OwnContactSync,
+    identity: &g::EventIdentity,
+    exact_inner: &[u8],
+) -> Result<(), SdkError> {
+    let Some(origin) = sync.safety_confirmation.as_ref().and_then(|c| c.origin.as_ref()) else {
+        return Ok(());
     };
     let Some(author) = origin.author.as_ref() else {
-        return Ok(true);
+        return Ok(());
     };
-    if origin != &identity || !author_matches(client, source, author)? {
-        return Ok(true);
+    if origin != identity || !author_matches(client, source, author)? {
+        return Ok(());
     }
-    install_sibling_confirmation(client, &sync, &identity, body)?;
-    Ok(true)
+    install_sibling_confirmation(client, sync, identity, exact_inner)
 }
 
 pub(crate) fn stage_stored_origin(

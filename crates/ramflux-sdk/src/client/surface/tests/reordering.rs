@@ -165,16 +165,14 @@ fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> TestResul
     let f = Fixture::new()?;
     create(&f)?;
     let mut accepted = 0;
-    for version in 3..=8 {
-        let mut signed = stream(&f.author, &format!("large-{version}"), version, "x")?;
-        let mut raw = ramflux_protocol::decode_base64url(&signed.wire_base64)?;
-        raw.extend(std::iter::repeat_n(b' ', 200_000));
-        signed.wire_base64 = ramflux_protocol::encode_base64url(raw);
-        signed = f.author.sign_surface_carrier(signed)?;
+    // Authenticated future events are bounded before the missing revision arrives,
+    // even when their eventual renderer validation will refuse oversized text.
+    for version in 3..=26 {
+        let signed = stream(&f.author, &format!("large-{version}"), version, &"x".repeat(200_000))?;
         let held = project(&f.human, &signed, &signed.message_id)?;
         accepted += usize::from(held.queued);
     }
-    assert!(accepted > 0 && accepted < 6);
+    assert!(accepted > 0 && accepted < 24, "future typed payloads must hit the byte budget");
     assert_eq!(pending_count(&f.human)?, accepted);
     let mut expired = stream(&f.author, "already-expired", 3, "x")?;
     expired.message_id = "expired-wire".into();

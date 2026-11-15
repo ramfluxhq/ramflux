@@ -95,29 +95,34 @@ impl AccountSessionHarness {
         Box::pin(self.runtime.service_pairing_own_sync()).await
     }
 
-    /// Inspect only message presence in this fixture's independently owned account.
+    /// Inspect only message presence in this fixture's independently owned account, through the
+    /// generation-1 read model.
     /// # Errors
     /// Returns the actual writer's storage or account error.
-    pub fn has_pairing_history(&self, message: &str) -> Result<bool, SdkError> {
+    pub fn has_pairing_history(&self, conversation: &str, message: &str) -> Result<bool, SdkError> {
         let account = self
             .runtime
             .state
             .accounts
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
-        Ok(account.client.account_db()?.message_content(message)?.is_some())
+        Ok(account.client.generated_message_detail(conversation, message).is_ok())
     }
 
-    /// Service actual writer requests until an imported known message becomes readable.
+    /// Service the actual writers of this device and its source until an imported message is
+    /// readable through the generation-1 read model with the expected text. The history courier
+    /// of the source runs on the source's own writer, so both are serviced.
     /// The surrounding real-component test supplies its existing bounded deadline.
     /// # Errors
-    /// Refuses a different plaintext or a closed account/session writer.
+    /// Refuses a different text or a closed account/session writer.
     pub async fn wait_pairing_history(
         &mut self,
+        source: &mut Self,
+        conversation: &str,
         message: &str,
-        expected: &[u8],
+        expected: &str,
     ) -> Result<(), SdkError> {
-        const MAX_WRITER_STEPS: usize = 128;
+        const MAX_WRITER_STEPS: usize = 4096;
         for _ in 0..MAX_WRITER_STEPS {
             let account = self
                 .runtime
@@ -125,25 +130,83 @@ impl AccountSessionHarness {
                 .accounts
                 .get(&self.runtime.id)
                 .ok_or(SdkError::AccountDbNotUnlocked)?;
-            if let Some(body) = account.client.account_db()?.message_content(message)? {
-                let body = zeroize::Zeroizing::new(body);
-                return if body.as_slice() == expected {
+            if let Ok(view) = account.client.generated_message_detail(conversation, message) {
+                return if view.message.text.as_deref() == Some(expected) {
                     Ok(())
                 } else {
-                    Err(SdkError::InboundRejected("paired history plaintext mismatch".into()))
+                    Err(SdkError::InboundRejected("paired history text mismatch".into()))
                 };
             }
-            let work = self
-                .runtime
-                .connection_work
-                .recv()
-                .await
-                .ok_or(SdkError::GatewaySessionNotEstablished)?;
-            Box::pin(self.runtime.apply_connection_work(work)).await?;
+            // The enrollment history job re-checks its durable transfer on every pass.
+            Box::pin(source.runtime.service_pairing_own_sync()).await?;
+            // Either writer may have work; a bounded wait on each keeps both advancing.
+            if let Ok(Some(work)) = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                source.runtime.connection_work.recv(),
+            )
+            .await
+            {
+                Box::pin(source.runtime.apply_connection_work(work)).await?;
+            }
+            if let Ok(work) = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                self.runtime.connection_work.recv(),
+            )
+            .await
+            {
+                let work = work.ok_or(SdkError::GatewaySessionNotEstablished)?;
+                Box::pin(self.runtime.apply_connection_work(work)).await?;
+            }
         }
         Err(SdkError::PairingCode("TransferCapacity"))
     }
-}
 
-#[path = "testing_pairing_media.rs"]
-mod media;
+    /// Whether the account's job ledger still holds an unfinished enrollment history attempt.
+    /// # Errors
+    /// Returns the actual writer's storage or account error.
+    pub fn pairing_history_pending(&self) -> Result<bool, SdkError> {
+        let account = self
+            .runtime
+            .state
+            .accounts
+            .get(&self.runtime.id)
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        Ok(account.client.account_db()?.next_pairing_own_sync()?.is_some())
+    }
+
+    /// Service this writer and run the enrollment history job until the job is finished, which
+    /// happens only after the gateway durably accepted every history page.
+    /// # Errors
+    /// Refuses a job that does not finish within the bounded number of passes.
+    pub async fn settle_pairing_history(&mut self) -> Result<(), SdkError> {
+        const MAX_PASSES: usize = 256;
+        for _ in 0..MAX_PASSES {
+            Box::pin(self.runtime.service_pairing_own_sync()).await?;
+            if !self.pairing_history_pending()? {
+                return Ok(());
+            }
+            if let Ok(Some(work)) = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                self.runtime.connection_work.recv(),
+            )
+            .await
+            {
+                Box::pin(self.runtime.apply_connection_work(work)).await?;
+            }
+        }
+        Err(SdkError::PairingCode("TransferCapacity"))
+    }
+
+    /// Pair-session records held by this device (never their secrets).
+    /// # Errors
+    /// Returns the actual writer's storage or account error.
+    pub fn pairing_pair_sessions(&self) -> Result<Vec<String>, SdkError> {
+        let account = self
+            .runtime
+            .state
+            .accounts
+            .get(&self.runtime.id)
+            .ok_or(SdkError::AccountDbNotUnlocked)?;
+        Ok(account.client.account_db()?.actor_state_keys("dm-pair/")?)
+    }
+}

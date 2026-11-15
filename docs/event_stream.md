@@ -27,7 +27,7 @@ On refusal, reload the account's read models and subscribe from the returned
 head, retaining subsequent events while reconciling the snapshot. The ordinary
 read-model/snapshot APIs and the subscription cursor must both participate in
 this reconciliation; an old cached view alone cannot fill a journal gap.
-A slow client receives `stream.lagged` with `last_delivered_seq` and reconnects
+A slow client receives `stream.lagged` with `last_delivered_seq`, `dropped_frame_id` and `dropped_topic` and reconnects
 from that cursor. Replay is bounded and the account writer never waits for a
 slow subscriber. Account lock or daemon stop closes the stream.
 

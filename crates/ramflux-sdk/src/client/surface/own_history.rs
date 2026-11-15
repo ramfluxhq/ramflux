@@ -3,8 +3,7 @@
 
 //! Bounded surface proofs in the existing authenticated own-device history snapshot.
 use super::{Carrier, ControlKind, OwnedSurfaceCheckpoint, SurfaceControl, invalid, key};
-use crate::own_device_sync::SdkOwnDeviceSyncEnvelope;
-use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -25,24 +24,6 @@ impl SurfaceExportMetadata {
     }
 }
 impl RamfluxClient {
-    pub(crate) fn surface_message_group_epoch(
-        &self,
-        message: &str,
-    ) -> Result<Option<(String, u64)>, SdkError> {
-        let Some(binding) =
-            self.account_db()?.load_actor_state::<Value>(&key("message", message))?
-        else {
-            return Ok(None);
-        };
-        if let Some(group) = binding["group_id"].as_str() {
-            let epoch = binding["group_epoch"]
-                .as_u64()
-                .ok_or_else(|| invalid("surface group message epoch missing"))?;
-            Ok(Some((group.into(), epoch)))
-        } else {
-            Ok(None)
-        }
-    }
     #[cfg(test)]
     pub(crate) fn own_surface_history_controls(&self) -> Result<Vec<SurfaceControl>, SdkError> {
         Ok(self.own_surface_history_export(None)?.controls)
@@ -201,88 +182,6 @@ impl RamfluxClient {
         controls.reverse();
         Ok(controls)
     }
-    pub(crate) fn import_own_surface_history(
-        &self,
-        envelope: &SdkOwnDeviceSyncEnvelope,
-        controls: &[SurfaceControl],
-    ) -> Result<(), SdkError> {
-        if controls.len() > 64 * 129 || serde_json::to_vec(controls)?.len() > 8 * 1024 * 1024 {
-            return Err(invalid("own surface history budget exceeded"));
-        }
-        let page_scope = ramflux_protocol::hash_base64url(
-            "ramflux.surface.history_page.v1",
-            &serde_json::to_vec(controls)?,
-        );
-        for (index, control) in controls.iter().enumerate() {
-            let imported = self.account_db()?.surface_transaction(|| {
-                if control.kind != ControlKind::Own {
-                    return Err(invalid("own history contains peer control"));
-                }
-                let context = control
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| invalid("own history context missing"))?;
-                let source_identity =
-                    self.owned_account_device_identity(&envelope.source_device_id)?;
-                let source = self
-                    .account_db()?
-                    .client_device_record(&source_identity)?
-                    .ok_or_else(|| invalid("own history source missing"))?;
-                let principal = source["principal_id"]
-                    .as_str()
-                    .ok_or_else(|| invalid("own history principal missing"))?;
-                // This adapter runs only after verify_own_device_sync_envelope authenticated the
-                // same-root source, target and encrypted snapshot. It forwards that authenticated
-                // provenance into the normal surface control guard; it grants no peer authority.
-                let entry = GatewayInboxEntry {
-                    forwarded: false,
-                    inbox_seq: 0,
-                    target_delivery_id: envelope.target_device_id.clone(),
-                    envelope: ramflux_protocol::Envelope {
-                        schema: "ramflux.envelope.v1".into(),
-                        version: 1,
-                        domain: ramflux_protocol::domain::SURFACE_CARRIER.into(),
-                        ext: ramflux_protocol::Ext::default(),
-                        signed: envelope.signed.clone(),
-                        envelope_id: format!("{}:{page_scope}:{index}", envelope.snapshot_id),
-                        source_principal_id: principal.into(),
-                        source_device_id: envelope.source_device_id.clone(),
-                        target_delivery_id: envelope.target_device_id.clone(),
-                        routing_set_id: None,
-                        delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
-                        priority: ramflux_protocol::Priority::Normal,
-                        ttl: self.content_ttl()?,
-                        created_at: envelope
-                            .expires_at
-                            .saturating_sub(i64::from(self.content_ttl()?)),
-                        encrypted_payload: String::new(),
-                        payload_hash: String::new(),
-                        delivery_mode: None,
-                        collapse_tag: None,
-                        report_commitment: None,
-                    },
-                };
-                self.receive_surface_control_from(
-                    &entry,
-                    &source_identity,
-                    &context.conversation_id,
-                    context.group.as_ref().map(|g| g.group_id.as_str()),
-                    &control.bytes()?,
-                )?;
-                Ok::<_, SdkError>(())
-            });
-            if let Err(error) = imported {
-                self.account_db()?.persist_actor_state(
-                    &key(
-                        "import_control_skip",
-                        &format!("{}:{page_scope}:{index}", envelope.snapshot_id),
-                    ),
-                    &serde_json::json!({"reason":error.to_string()}),
-                )?;
-            }
-        }
-        Ok(())
-    }
 }
 
 const HISTORY_BYTES: usize = 8 * 1024 * 1024;
@@ -329,26 +228,6 @@ fn fit_export(page: &mut SurfaceHistoryExport, budget: usize) -> Result<(), SdkE
     page.controls.drain(..controls_removed);
     page.checkpoints.drain(..checkpoints_removed);
     Ok(())
-}
-
-impl RamfluxClient {
-    pub(crate) fn skip_owned_surface_message(
-        &self,
-        bundle: &crate::own_device_sync::SdkOwnDeviceHistoryBundle,
-        message: &str,
-        floors: &std::collections::BTreeMap<String, u64>,
-    ) -> Result<bool, SdkError> {
-        let Some((group, epoch)) = bundle.surface_message_epochs.get(message) else {
-            return Ok(false);
-        };
-        let reason = match floors.get(group) {
-            None => "group_message_unavailable",
-            Some(floor) if epoch < floor => "group_message_below_join_floor",
-            Some(_) => return Ok(false),
-        };
-        self.account_db()?.record_own_device_restore_skip(&bundle.snapshot_id, message, reason)?;
-        Ok(true)
-    }
 }
 
 #[cfg(test)]

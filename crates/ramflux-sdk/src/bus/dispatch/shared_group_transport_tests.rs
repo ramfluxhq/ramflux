@@ -4,6 +4,8 @@
 //! Real encrypted group-state fanout across partial drains and one failed recipient.
 use super::*;
 use crate::bus::runtime_tests;
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 #[path = "shared_group_member_cap_fixture.rs"]
 mod member_cap_fixture;
@@ -20,8 +22,8 @@ fn create_group(
     source: &RamfluxClient,
     target: ramflux_protocol::group_state::GroupMemberIdentity,
 ) -> Result<(), SdkError> {
-    source.shared_group_create("group", "group-thread", Some("Shared name".into()), "sender")?;
-    source.shared_group_change(
+    source.fixture_group_create("group", "group-thread", Some("Shared name".into()), "sender")?;
+    source.fixture_group_change(
         "group",
         "sender",
         ramflux_protocol::group_state::GroupStateChange::Add {
@@ -54,11 +56,11 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
     source.gateway_config = config.clone();
     source.target_delivery_id = config.target_delivery_id.clone();
     source.principal_commitment = source.client.owned_device_identity()?.root_commitment().into();
-    let target = peers[0].client.owned_group_actor(devices[0])?.identity;
+    let target = peers[0].client.fixture_group_actor(devices[0])?.identity;
     create_group(&source.client, target)?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(captured.clone());
-    gateway.fail_target = Some(devices[0].into());
+    gateway.fail_target = Some(peers[0].client.owned_device_identity()?.storage_key().into());
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config.clone(),
         Box::new(gateway),
@@ -86,23 +88,22 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
     );
     let entries = captured.lock().map_err(|_| "capture lock")?.clone();
     assert_eq!(entries.len(), 6);
-    let body =
-        source.client.encrypt_group_message("group", "device-sender", b"first group message")?;
-    let encrypted: crate::group::SdkGroupEncryptedEnvelope = serde_json::from_slice(&body)?;
+    let (logical, encrypted) = prepared_group_frame(&source.client, &config)?;
     for envelope in entries {
-        let index = devices
+        let index = peers
             .iter()
-            .position(|device| *device == envelope.target_delivery_id)
-            .ok_or("unexpected target")?;
+            .position(|peer| peer.gateway_config.target_delivery_id == envelope.target_delivery_id)
+            .ok_or("unexpected certified target")?;
         let peer = &mut peers[index];
         let root_commitment = source.client.owned_device_identity()?.root_commitment().to_owned();
-        peer.client.establish_friend_link("owner-consent", "peer", &root_commitment)?;
-        let mut receiver = config.clone();
-        receiver.principal_id = "peer".into();
-        receiver.device_id = devices[index].into();
-        receiver.target_delivery_id = devices[index].into();
+        peer.client.establish_friend_link(
+            "owner-consent",
+            &peer.client.own_account_anchor()?,
+            &root_commitment,
+        )?;
+        let receiver = crate::client::native_test_support::bus::config_for(&peer.client, &config)?;
         let mut receiver = GatewaySessionEngine::with_test_transport(
-            receiver.with_account_identity(&peer.client)?,
+            receiver,
             Box::new(super::fixture::RecordingGateway::new(Arc::default())),
         );
         let pool = ramflux_transport::RelayQuicPool::new(
@@ -116,19 +117,38 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
         };
         peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
         assert_eq!(peer.client.group_state("group")?.group_epoch, 2);
-        let sender = peer.client.device_identity_for_root(&root_commitment, "device-sender")?;
-        assert_eq!(
-            peer.client.decrypt_group_envelope_for_identity(
-                &encrypted,
-                "first-group-message",
-                &sender
-            )?,
-            b"first group message"
-        );
+        let sender = peer.client.device_identity_for_root(&root_commitment, &config.device_id)?;
+        let plaintext =
+            peer.client.decrypt_group_envelope_for_identity(&encrypted, &logical, &sender)?;
+        assert_eq!(g::Message::decode(plaintext.as_slice())?.text, "first group message");
     }
     directory.abort();
     drop((source, peers));
     Ok(())
+}
+
+fn prepared_group_frame(
+    source: &RamfluxClient,
+    config: &GatewaySessionConfig,
+) -> Result<(String, crate::group::SdkGroupEncryptedEnvelope), Box<dyn std::error::Error>> {
+    let identity = source.allocate_generated_identity(
+        "group-thread",
+        u64::try_from(now_unix_timestamp())?.saturating_mul(1_000),
+        false,
+    )?;
+    let exact = source.encrypt_generated_group_inner(
+        "group",
+        &config.device_id,
+        identity,
+        &g::Message { text: "first group message".into(), ..Default::default() },
+    )?;
+    let inner = g::Inner::decode(exact.as_slice())?;
+    let logical = ramflux_protocol::encode_base64url(&inner.identity.ok_or("group identity")?.id);
+    let message = g::Message::decode(inner.body.as_slice())?;
+    let encrypted = crate::client::generated_group::to_native(
+        message.sealed_group.as_ref().ok_or("sealed group Message")?,
+    )?;
+    Ok((logical, encrypted))
 }
 
 #[tokio::test]
@@ -159,7 +179,7 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
         "group",
         &source.config.target_delivery_id,
         GroupStateChange::Add {
-            member: peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity,
+            member: peer.client.fixture_group_actor(&peer.config.target_delivery_id)?.identity,
             role: SharedGroupRole::Member,
         },
         Some(&primary),
@@ -270,7 +290,7 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
     source.target_delivery_id = config.target_delivery_id.clone();
     source.principal_commitment = source.client.owned_device_identity()?.root_commitment().into();
     for index in 0..40 {
-        source.client.shared_group_create(
+        source.client.fixture_group_create(
             &format!("pending-{index}"),
             &format!("thread-{index}"),
             None,
@@ -278,8 +298,8 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         )?;
     }
     let peer = &peers[0].client;
-    create_group(&source.client, peer.owned_group_actor("peer-0")?.identity)?;
-    let removed = source.client.shared_group_change(
+    create_group(&source.client, peer.fixture_group_actor("device-peer-0")?.identity)?;
+    let removed = source.client.fixture_group_change(
         "group",
         "sender",
         GroupStateChange::Remove {
@@ -287,7 +307,7 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
             device_id: "device-peer-0".into(),
         },
     )?;
-    source.client.shared_group_change(
+    source.client.fixture_group_change(
         "group",
         "sender",
         GroupStateChange::SetName { name: "Private later title".into() },
@@ -301,10 +321,10 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
     let envelopes = captured.lock().map_err(|_| "capture lock")?.clone();
     assert_eq!(envelopes.len(), 1);
     let envelope = envelopes.into_iter().next().ok_or("missing boundary")?;
-    assert_eq!(envelope.target_delivery_id, "device-peer-0");
+    assert_eq!(envelope.target_delivery_id, peer.owned_device_identity()?.storage_key());
     peer.establish_friend_link(
         "owner-consent",
-        "sender",
+        &peer.own_account_anchor()?,
         source.client.owned_device_identity()?.root_commitment(),
     )?;
     let entry = GatewayInboxEntry {
@@ -314,14 +334,8 @@ async fn shared_group_removal_is_delivered_first_above_forty_pending_groups_with
         envelope,
     };
     let opened = peer.open_routed(&entry, "device-peer-0")?;
-    let packet: Value = serde_json::from_slice(&opened.body)?;
-    assert!(packet.get("distribution_base64").is_none());
-    let snapshot = ramflux_protocol::decode_base64url(
-        packet["snapshot_base64"].as_str().ok_or("missing proof")?,
-    )?;
-    let verified = ramflux_crypto::verify_group_state_snapshot(
-        ramflux_protocol::group_state::GroupStateSnapshot::from_wire_bytes(&snapshot)?,
-    )?;
+    let verified = crate::client::shared_group::decode_shared_group_packet(&opened.body)?
+        .ok_or("the removed device receives a signed boundary snapshot")?;
     assert_eq!(verified.view(), removed.view());
     assert_eq!(verified.view().name.as_deref(), Some("Shared name"));
     let alias = other_root_snapshot(&config)?;
@@ -370,7 +384,7 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
         super::dm_tests::peer_fixture_devices(&root, &mut source, &names).await?;
     source.gateway_config = config.clone();
     source.target_delivery_id = config.target_delivery_id.clone();
-    create_group(&source.client, peers[0].client.owned_group_actor(names[0])?.identity)?;
+    create_group(&source.client, peers[0].client.fixture_group_actor(names[0])?.identity)?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config.clone(),
@@ -404,17 +418,17 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
     for envelope in envelopes {
-        let index =
-            names.iter().position(|name| *name == envelope.target_delivery_id).ok_or("target")?;
+        let index = peers
+            .iter()
+            .position(|peer| peer.gateway_config.target_delivery_id == envelope.target_delivery_id)
+            .ok_or("target")?;
         let peer = &mut peers[index];
         let commitment = source.client.owned_device_identity()?.root_commitment().to_owned();
-        peer.client.establish_friend_link("owner-consent", "peer", &commitment)?;
-        let mut receiver = config.clone();
-        receiver.principal_id = "peer".into();
-        receiver.device_id = names[index].into();
-        receiver.target_delivery_id = names[index].into();
+        let anchor = peer.client.own_account_anchor()?;
+        peer.client.establish_friend_link("owner-consent", &anchor, &commitment)?;
+        let receiver = crate::client::native_test_support::bus::config_for(&peer.client, &config)?;
         let mut receiver = GatewaySessionEngine::with_test_transport(
-            receiver.with_account_identity(&peer.client)?,
+            receiver,
             Box::new(super::fixture::RecordingGateway::new(Arc::default())),
         );
         let entry = GatewayInboxEntry {

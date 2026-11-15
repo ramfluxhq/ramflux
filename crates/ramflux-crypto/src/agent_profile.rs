@@ -349,7 +349,9 @@ mod tests {
         let (human_key, mut human_record) = genesis(0, PrincipalKind::Human, None)?;
         let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[0; 32])?)?;
         let mut cert = human_record.body.master_certificate.body.clone();
-        cert.primary_device_ref.device_id = "\\".repeat(256);
+        // Longest all-escape device name a live roster admits: its JSON form must still fit the
+        // 256-byte native delivery id (`validate_device_name`), which allows 69 backslashes.
+        cert.primary_device_ref.device_id = "\\".repeat(69);
         cert.primary_device_ref.device_epoch = MAX_SAFE_JSON_INTEGER;
         let reference = cert.primary_device_ref.clone();
         human_record.body.master_certificate = master.certify(cert)?;
@@ -373,7 +375,7 @@ mod tests {
         full.persona_version = MAX_SAFE_JSON_INTEGER;
         let full = key.sign_agent_profile(full, &agent, &human, NOW)?;
         let bytes = encode_agent_profile(&full)?;
-        assert_eq!(bytes.len(), 2215); // Independent JSON maximum, including escape expansion.
+        assert_eq!(bytes.len(), 1841); // Independent JSON maximum, including escape expansion.
         assert!(bytes.len() <= 4096);
         assert_eq!(verify_agent_profile(&bytes, &agent, &human, NOW)?, full);
         Ok(())

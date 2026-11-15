@@ -24,12 +24,6 @@ pub(crate) struct VerifiedOrigin {
     pub author: crate::client::generated_history::Author,
     pub outer: ramflux_protocol::Envelope,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Carrier {
-    routing: Routing,
-    body_base64: String,
-}
 impl RetainedOrigin {
     pub(crate) fn copy_id(&self) -> Result<String, SdkError> {
         // Private content address, not a wire identity or an authority grant. Two genuine
@@ -119,16 +113,7 @@ impl RetainedOrigin {
         ramflux_crypto::verify_report_opening(&opening, reported, &a0, &commitment)
             .map_err(|_| bad)?;
         if reported != exact_inner {
-            if ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION >= 1 {
-                return Err(bad.into());
-            }
-            let carrier: Carrier = ramflux_protocol::parse_i_json(reported).map_err(|_| bad)?;
-            if carrier.routing != self.routing
-                || ramflux_protocol::decode_base64url(&carrier.body_base64).map_err(|_| bad)?
-                    != exact_inner
-            {
-                return Err(bad.into());
-            }
+            return Err(bad.into());
         }
         if identity.conversation_id != self.routing.conversation_id {
             return Err(bad.into());

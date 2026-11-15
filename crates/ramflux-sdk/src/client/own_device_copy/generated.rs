@@ -45,11 +45,19 @@ impl RamfluxClient {
         let messages = std::mem::take(&mut draft.messages);
         let siblings = std::mem::take(&mut draft.siblings);
         let mut envelopes = Vec::with_capacity(messages.len());
-        let identity = self.allocate_generated_identity(
+        let mut identity = self.allocate_generated_identity(
             &draft.conversation,
             crate::client::generated_identity::now_ms(),
             true,
         )?;
+        if let Some(group) = draft.group.as_deref() {
+            let state = self
+                .account_db()?
+                .shared_group_state(group)?
+                .ok_or_else(|| invalid("own copy group state missing"))?;
+            identity.group_id = Some(group.into());
+            identity.group_epoch = Some(state.view().epoch);
+        }
         for (mut message, (material, sibling)) in
             messages.into_iter().zip(materials.into_iter().zip(siblings))
         {
@@ -67,7 +75,7 @@ impl RamfluxClient {
                 config,
                 &message,
                 &inner,
-                Route::control(),
+                Route::from_inner(&inner)?,
                 material,
             )?;
             let envelope =
@@ -84,27 +92,91 @@ impl RamfluxClient {
         body: &[u8],
         identity: g::EventIdentity,
     ) -> Result<Vec<u8>, SdkError> {
-        let payload = if let Some(sent) =
-            crate::client::own_sent_message::generated_own_sent_from_prefix(body)?
-        {
-            own_message_copy::Payload::Sent(sent)
-        } else {
-            let inner =
-                g::Inner::decode(body).map_err(|_| invalid("own copy requires exact Inner"))?;
-            let target = if inner.kind == 3 {
-                g::Edit::decode(inner.body.as_slice())
-                    .map_err(|_| invalid("own copy Edit missing"))?
-                    .target
-                    .ok_or_else(|| invalid("own copy Edit target missing"))?
-                    .id
-            } else {
-                inner.identity.ok_or_else(|| invalid("own copy original identity missing"))?.id
-            };
-            let item = self.export_generated_history_item(&target)?;
-            if item.exact_inner != body {
-                return Err(g::original_header::EvidenceError::ReportOpeningRetired.into());
+        let payload = match draft.payload_kind {
+            super::OwnPayloadKind::Sent => {
+                g::validation::scan_message("OwnSentMessage", body, g::registry::COMPILED_LAYER)
+                    .map_err(|_| invalid("invalid typed sent message"))?;
+                let sent = g::OwnSentMessage::decode(body)
+                    .map_err(|_| invalid("invalid typed sent message"))?;
+                self.authorize_generated_own_sent(
+                    &self.owned_device_identity()?,
+                    &draft.conversation,
+                    &sent,
+                )?;
+                own_message_copy::Payload::Sent(sent)
             }
-            own_message_copy::Payload::Item(item)
+            super::OwnPayloadKind::Control => {
+                g::validation::scan_message("Control", body, g::registry::COMPILED_LAYER)
+                    .map_err(|_| invalid("invalid own Control"))?;
+                let control =
+                    g::Control::decode(body).map_err(|_| invalid("invalid own Control"))?;
+                if !matches!(control.operation, 6 | 13 | 14) {
+                    return Err(invalid("own control operation mismatch"));
+                }
+                return Self::encode_generated_inner(
+                    identity,
+                    &g::Content { value: Some(g::content::Value::Control(control)) },
+                );
+            }
+            super::OwnPayloadKind::ContactInner => {
+                let scanned = g::validation::scan_inner(body)
+                    .map_err(|_| invalid("own contact origin Inner malformed"))?;
+                let carried = g::Inner::decode(body)
+                    .map_err(|_| invalid("own contact origin Inner malformed"))?;
+                let control = g::Control::decode(scanned.body)
+                    .map_err(|_| invalid("own contact origin Control missing"))?;
+                let own = self.owned_device_identity()?;
+                let authored =
+                    carried.identity.as_ref().and_then(|id| id.author.as_ref()).is_some_and(
+                        |author| {
+                            author.account_anchor == own.root_commitment()
+                                && author.device_id == own.device_id()
+                        },
+                    );
+                if !matches!(control.payload, Some(g::control::Payload::OwnContactSync(_)))
+                    || !authored
+                {
+                    return Err(invalid("own contact origin Inner is not authored here"));
+                }
+                return Ok(body.to_vec());
+            }
+            super::OwnPayloadKind::Surface => {
+                g::validation::scan_message("Surface", body, g::registry::COMPILED_LAYER)
+                    .map_err(|_| invalid("invalid own Surface"))?;
+                let surface =
+                    g::Surface::decode(body).map_err(|_| invalid("invalid own Surface"))?;
+                return Self::encode_generated_inner(
+                    identity,
+                    &g::Content { value: Some(g::content::Value::Surface(surface)) },
+                );
+            }
+            super::OwnPayloadKind::Task => {
+                g::validation::scan_message("Task", body, g::registry::COMPILED_LAYER)
+                    .map_err(|_| invalid("invalid own Task"))?;
+                let task = g::Task::decode(body).map_err(|_| invalid("invalid own Task"))?;
+                return Self::encode_generated_inner(
+                    identity,
+                    &g::Content { value: Some(g::content::Value::Task(task)) },
+                );
+            }
+            super::OwnPayloadKind::RawInner => {
+                let inner =
+                    g::Inner::decode(body).map_err(|_| invalid("own copy requires exact Inner"))?;
+                let target = if inner.kind == 3 {
+                    g::Edit::decode(inner.body.as_slice())
+                        .map_err(|_| invalid("own copy Edit missing"))?
+                        .target
+                        .ok_or_else(|| invalid("own copy Edit target missing"))?
+                        .id
+                } else {
+                    inner.identity.ok_or_else(|| invalid("own copy original identity missing"))?.id
+                };
+                let item = self.export_generated_history_item(&target)?;
+                if item.exact_inner != body {
+                    return Err(g::original_header::EvidenceError::ReportOpeningRetired.into());
+                }
+                own_message_copy::Payload::Item(item)
+            }
         };
         let control =
             control_from_payload(g::control::Payload::OwnMessageCopy(g::OwnMessageCopy {

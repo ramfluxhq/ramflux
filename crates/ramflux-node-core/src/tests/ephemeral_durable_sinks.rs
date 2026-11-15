@@ -82,10 +82,7 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("ramflux_protocol::Envelope", "protocol envelope type (no storage)"),
     ("ramflux_protocol::Priority", "protocol priority enum (no storage)"),
     ("ramflux_protocol::ephemeral", "ephemeral mode types and deadline helper (no storage)"),
-    (
-        "ramflux_protocol::message::outer::refuse_named_fields_while_gate_off",
-        "pure gate-off predicate, no storage",
-    ),
+    ("ramflux_protocol::message::outer::refuse_live_bridge", "pure gate-off predicate, no storage"),
     (
         "ramflux_protocol::envelope_sender_signed_bytes",
         "canonical sender-signed bytes (no storage)",

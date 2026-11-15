@@ -116,7 +116,8 @@ async fn seal_and_send(
     let mut engine = account.session_client().await?;
     let result = async {
         let route = crate::client::routed::Route::group_control(packet.group());
-        let bytes = serde_json::to_vec(&packet)?;
+        let bytes = account.client.generated_group_control_inner(&packet)?;
+        message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
         let sealed = if let Some(federation) = &federation {
             account.client.seal_routed_federated_as(
                 &engine,
@@ -497,12 +498,9 @@ async fn process_incoming(account: &LocalBusAccountState, now: i64) -> Result<()
         .load_actor_state::<String>("group-courier/process-cursor")?
         .unwrap_or_default();
     let mut waiting = Vec::new();
-    for record in client.group_change_records()?.into_iter().filter(|record| {
-        record.incoming
-            && record.result.is_none()
-            && record.local_status == "waiting_for_owner"
-            && record.request.expires_at > now
-    }) {
+    for record in
+        client.group_change_records()?.into_iter().filter(|record| record.awaits_creator(now))
+    {
         waiting.push((
             crate::client::shared_group::request_record_key(&record.request, true)?,
             record,

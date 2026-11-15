@@ -24,7 +24,7 @@ fn f2_restart_catchup_three_dms_once_in_order() -> e2e::Result<()> {
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("e2e-resume");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let (bob_socket, bob_root) = shutdown_daemon(bob_d)?;
     let bodies = ["resume-one", "resume-two", "resume-three"];
     for (index, body) in bodies.iter().enumerate() {
@@ -81,7 +81,7 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    let conversation = unique("demo-b-offline-dm");
+    let conversation = e2e::dm_conversation(&alice, &bob)?;
     let group = unique("demo-b-offline-group");
     establish_group(&stack, (&alice_d, &alice), (&bob_d, &bob), &group, read_before_ack)?;
     let base = e2e::wait_receive_settled(&bob_d, &bob)?;
@@ -132,6 +132,7 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
         "one Connected catch-up, no later poll: {receive}; logs={}",
         dump_logs(&stack, &[&alice_d, &bob_d])
     );
+    eprintln!("B7_EVIDENCE catch_up_passes = {}", receive["catch_up_passes"]);
     assert!(
         e2e::receive_counter(&receive, "last_acked_seq")?
             <= e2e::receive_counter(&receive, "committed_cursor")?,

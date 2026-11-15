@@ -3,11 +3,9 @@
 
 //! Candidate outer envelope, named `delivery_mode` profile, and size preflight (S10a P06).
 //!
-//! Dormant until the storage generation flips to message schema v1. Live
-//! [`crate::Envelope`] and `ext.delivery_mode` stay the wire profile while the
-//! gate is off.
+//! Generation 1 uses the compact cryptobox and named delivery metadata.
+//! The retired `ext.delivery_mode` bridge is refused.
 
-use crate::schema_profile::schema_v1_live;
 use crate::{ProtocolError, SignedFields, ephemeral};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -145,8 +143,6 @@ pub enum OuterProfileError {
     CompactCiphertextField,
     #[error("compact candidate sidecar ciphertext field is required")]
     MissingCompactCiphertext,
-    #[error("named delivery_mode and collapse_tag are refused while schema v1 is off")]
-    NamedFieldsWhileGateOff,
 }
 
 /// Measured sizes checked before any ratchet or outbox commit.
@@ -485,24 +481,6 @@ pub fn refuse_live_bridge(envelope: &crate::Envelope) -> Result<(), OuterProfile
     Ok(())
 }
 
-/// Refuse any named candidate-profile field while the v1 profile is off.
-///
-/// # Errors
-/// [`OuterProfileError::NamedFieldsWhileGateOff`] when
-/// [`crate::Envelope::candidate_fields_present`] is true and [`schema_v1_live`]
-/// is false.
-pub fn refuse_named_fields_while_gate_off(
-    envelope: &crate::Envelope,
-) -> Result<(), OuterProfileError> {
-    if schema_v1_live() {
-        return Ok(());
-    }
-    if envelope.candidate_fields_present() {
-        return Err(OuterProfileError::NamedFieldsWhileGateOff);
-    }
-    Ok(())
-}
-
 /// Parse the live envelope's named `delivery_mode` as [`NamedDeliveryMode`].
 ///
 /// # Errors
@@ -606,9 +584,6 @@ pub fn discover_verified_message_schema(
 pub fn admit_discovered_profile(
     record: &crate::VerifiedWellKnownClientRecord,
 ) -> Result<(), ProtocolError> {
-    if !schema_v1_live() {
-        return Ok(());
-    }
     discover_candidate_message_schema(record)
 }
 
@@ -617,7 +592,7 @@ pub fn admit_discovered_profile(
 #[must_use]
 pub fn advertised_client_protocol_versions(base: &[String]) -> Vec<String> {
     let mut versions = base.to_vec();
-    if schema_v1_live() && !versions.iter().any(|version| version == MESSAGE_SCHEMA_V1_PROFILE) {
+    if !versions.iter().any(|version| version == MESSAGE_SCHEMA_V1_PROFILE) {
         versions.push(MESSAGE_SCHEMA_V1_PROFILE.to_owned());
     }
     versions
@@ -660,24 +635,8 @@ fn live_cryptobox(
     encrypted_header: &[u8],
     bootstrap_capsule: &[u8],
 ) -> Result<LiveCryptobox, OuterProfileError> {
-    if let Ok(compact) = decode_compact_cryptobox(decoded) {
-        return cryptobox_from_sidecar(
-            compact.ciphertext,
-            compact.sidecar,
-            encrypted_header,
-            bootstrap_capsule,
-        );
-    }
-    if let Ok(value) = crate::parse_i_json::<Value>(decoded) {
-        sidecar::decode_sidecar_value(&value, false)?;
-        let ciphertext = compact::nested_byte_field(&value, "ciphertext", "ciphertext")?;
-        return cryptobox_from_value(&value, ciphertext, encrypted_header, bootstrap_capsule);
-    }
-    Ok(LiveCryptobox {
-        ciphertext: decoded.to_vec(),
-        header: encrypted_header.to_vec(),
-        bootstrap: bootstrap_capsule.to_vec(),
-    })
+    let compact = decode_compact_cryptobox(decoded)?;
+    cryptobox_from_sidecar(compact.ciphertext, compact.sidecar, encrypted_header, bootstrap_capsule)
 }
 
 fn cryptobox_from_sidecar(

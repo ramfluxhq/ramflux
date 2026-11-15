@@ -414,6 +414,8 @@ pub(crate) fn default_device_capability_scope() -> Vec<String> {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusMessageSubmitRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<ramflux_protocol::message::Content>,
     pub conversation_id: String,
     pub message_id: String,
     pub envelope_id: String,
@@ -506,10 +508,12 @@ pub struct LocalBusMessageDeleteRequest {
     pub delete_scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tombstone_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 fn default_message_delete_scope() -> String {
-    "own_devices".to_owned()
+    "local".to_owned()
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -701,6 +705,8 @@ fn default_group_message_delete_scope() -> String {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusGroupSendRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<ramflux_protocol::message::Content>,
     pub group_id: String,
     pub conversation_id: String,
     pub message_id: String,
@@ -1250,12 +1256,6 @@ impl LocalBusMessageSubmitRequest {
                     .map_err(|error| SdkError::LocalBus(format!("invalid plaintext body: {error}")))
             })
             .transpose()
-    }
-
-    pub(crate) fn into_gateway_message(self) -> Result<GatewayDirectMessage, SdkError> {
-        let encrypted_body = ramflux_protocol::decode_base64url(&self.encrypted_body_base64)
-            .map_err(|error| SdkError::LocalBus(format!("invalid encrypted body: {error}")))?;
-        Ok(self.into_gateway_message_with_body(encrypted_body))
     }
 
     pub(crate) fn into_gateway_message_with_body(

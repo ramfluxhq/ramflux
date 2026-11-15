@@ -5,8 +5,8 @@
 
 use super::fixture::{Case, Fixture, GatewayHold};
 use super::receive_ack::{command, controls, start};
-use crate::bus::dispatch::task_transport::{Target, seal};
 use crate::prelude::*;
+use prost::Message as _;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -22,9 +22,8 @@ async fn held_inbound_group_manifest_keeps_local_mutations_available() -> Case {
         .await
 }
 async fn case() -> Case {
-    let _trace = tracing::subscriber::set_default(ReceiveTrace);
     let mut fixture = Box::pin(Fixture::new("receive-group-directory")).await?;
-    let entry = Box::pin(group_entry(&mut fixture)).await?;
+    let entry = group_entry(&mut fixture)?;
     let root = fixture.peer.client.owned_device_identity()?.root_commitment().to_owned();
     fixture
         .source
@@ -67,54 +66,33 @@ async fn case() -> Case {
     Ok(())
 }
 
-pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
-    let source_delivery = fixture.source.client.owned_device_identity()?.storage_key().to_owned();
-    // Apply rebuilds the local actor from the session delivery id, which born
-    // authority requires to be the qualified storage key. The scripted Open
-    // already completed with the short name; only this mailbox changes.
-    if let Some(engine) = fixture.source.engine.as_mut() {
-        engine.config.target_delivery_id.clone_from(&source_delivery);
-    }
-    fixture.source.target_delivery_id.clone_from(&source_delivery);
-    fixture.source.gateway_config.target_delivery_id.clone_from(&source_delivery);
+pub(super) fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     let member = fixture
         .source
         .client
-        .owned_group_actor(&source_delivery)
+        .fixture_group_actor("sender")
         .map_err(|error| format!("member actor: {error}"))?
         .identity;
-    let vault = fixture.peer.client.born_v3_vault.clone().ok_or("group vault")?;
-    let primary = fixture
-        .peer
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("group account")?
-        .group_primary(vault.as_ref())
-        .map_err(|error| format!("group primary: {error}"))?;
-    let peer_delivery = fixture.peer.client.owned_device_identity()?.storage_key().to_owned();
     fixture
         .peer
         .client
-        .shared_group_create_with_primary(
+        .fixture_group_create(
             "receive-group",
             "receive-group-thread",
             Some("Received group".into()),
-            &peer_delivery,
-            Some(&primary),
+            "peer",
         )
         .map_err(|error| format!("group create: {error}"))?;
     let state = fixture
         .peer
         .client
-        .shared_group_change_with_primary(
+        .fixture_group_change(
             "receive-group",
-            &peer_delivery,
+            "peer",
             ramflux_protocol::GroupStateChange::Add {
                 member,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
-            Some(&primary),
         )
         .map_err(|error| format!("group change: {error}"))?;
     let body = fixture
@@ -122,181 +100,36 @@ pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry
         .client
         .shared_group_packet(&state, true)
         .map_err(|error| format!("group packet: {error}"))?;
-    let target = Target {
-        device: "device-sender".into(),
-        identity: fixture.source.client.owned_device_identity()?,
-        delivery: source_delivery.clone(),
-        federation: None,
-        own: false,
+    let identity = ramflux_protocol::message::Inner::decode(body.as_slice())?
+        .identity
+        .ok_or("group identity")?;
+    let target = fixture.source.client.owned_device_identity()?;
+    let config = &fixture.peer.gateway_config;
+    let mut message = GatewayDirectMessage {
+        conversation_id: identity.conversation_id,
+        message_id: ramflux_protocol::encode_base64url(identity.id),
+        envelope_id: "incoming-group-state".into(),
+        source_principal_id: config.principal_id.clone(),
+        sender_id: config.device_id.clone(),
+        recipient_device_id: Some(target.device_id().into()),
+        recipient_principal_commitment: Some(target.root_commitment().into()),
+        target_delivery_id: fixture.source.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 600,
     };
-    let mut engine = fixture.peer.session_client().await?;
-    let delivery = seal(
-        &fixture.peer,
-        &mut engine,
-        &target,
-        "receive-group-thread",
+    let sealed = fixture.peer.client.seal_generated_routed_prepared(
+        config,
+        &message,
         &body,
-        crate::client::routed::Route::group_control("receive-group"),
-    )
-    .await?;
-    fixture.peer.install_test_session(engine);
+        crate::client::routed::Route::from_inner(&body)?,
+        crate::client::routed::SendMaterial { manifest: None, bundle: None },
+    )?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: source_delivery,
-        envelope: delivery.envelope,
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
     })
-}
-
-struct ReceiveTrace;
-impl tracing::Subscriber for ReceiveTrace {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.target().starts_with("ramflux_sdk") && *metadata.level() <= tracing::Level::INFO
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Reason;
-        impl tracing::field::Visit for Reason {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if matches!(field.name(), "message" | "reason") {
-                    eprintln!("receive group {}={value:?}", field.name());
-                }
-            }
-        }
-        event.record(&mut Reason);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn held_inbound_legacy_join_manifest_keeps_local_mutations_available() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            legacy_join_case(),
-        ))))
-        .await
-}
-async fn legacy_join_case() -> Case {
-    let _trace = tracing::subscriber::set_default(ReceiveTrace);
-    let mut fixture = Box::pin(Fixture::new("receive-legacy-group-directory")).await?;
-    let (entry, root) = Box::pin(legacy_join_entry(&mut fixture)).await?;
-    let hold = Arc::new(GatewayHold::default());
-    {
-        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
-        gateway.inbox.push(entry);
-        gateway.manifest_hold = Some((root, Arc::clone(&hold)));
-    }
-    let gateway = Arc::clone(&fixture.gateway);
-    let started = Box::pin(start(fixture)).await?;
-    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified())
-        .await
-        .map_err(|_| "legacy manifest hold was not entered")?;
-    controls(&started.actor).await?;
-    assert!(gateway.lock().map_err(|_| "gateway")?.acked.is_empty());
-    hold.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if gateway.lock().map_err(|_| "gateway")?.acked.len() == 1 {
-                return Ok::<_, Box<dyn std::error::Error>>(());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(|_| "legacy inbox entry was not acknowledged after manifest release")??;
-    let response = started
-        .actor
-        .request(command("group.members", json!({"group_id":"receive-legacy"})))
-        .await?;
-    assert_eq!(response.body["group_epoch"], 3);
-    assert!(
-        response.body["members"]
-            .as_array()
-            .is_some_and(|members| members.iter().any(|id| id == "device-joined"))
-    );
-    started.actor.stop().await?;
-    let root = started.root.clone();
-    started.router.await?;
-    drop(started.actor);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-async fn legacy_join_entry(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, String)> {
-    let joined = crate::bus::runtime_tests::account(
-        &fixture.root.join("joined"),
-        "joined",
-        None,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
-    let manifest =
-        crate::client::identity_authority::test_support::public_manifest(&joined.client)?;
-    let root = fixture.peer.client.owned_device_identity()?.root_commitment().to_owned();
-    for client in [&fixture.source.client, &fixture.peer.client] {
-        client.create_group(
-            "receive-legacy",
-            fixture.peer.client.owned_device_identity()?.storage_key(),
-        )?;
-        client.add_group_member(
-            "receive-legacy",
-            fixture.source.client.owned_device_identity()?.storage_key(),
-            "member",
-        )?;
-    }
-    fixture.peer.client.persist_identity_directory(&manifest)?;
-    fixture.peer.client.add_group_member(
-        "receive-legacy",
-        joined.client.owned_device_identity()?.storage_key(),
-        "member",
-    )?;
-    let event = fixture.peer.client.create_signed_group_member_join_event(
-        "receive-legacy",
-        "device-peer",
-        "device-joined",
-        "member",
-        &root,
-    )?;
-    let joined_root = manifest.principal_commitment.clone();
-    fixture
-        .gateway
-        .lock()
-        .map_err(|_| "gateway")?
-        .manifests
-        .insert(manifest.principal_commitment.clone(), serde_json::to_value(manifest)?);
-    let wrapper = crate::group::SdkGroupControlEnvelope {
-        schema: "ramflux.sdk.group_control.v1".into(),
-        version: 1,
-        event,
-    };
-    let target = Target {
-        device: "device-sender".into(),
-        identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
-        federation: None,
-        own: false,
-    };
-    let mut engine = fixture.peer.session_client().await?;
-    let delivery = seal(
-        &fixture.peer,
-        &mut engine,
-        &target,
-        "receive-legacy-thread",
-        &serde_json::to_vec(&wrapper)?,
-        crate::client::routed::Route::group_control("receive-legacy"),
-    )
-    .await?;
-    fixture.peer.install_test_session(engine);
-    Ok((
-        GatewayInboxEntry {
-            forwarded: false,
-            inbox_seq: 1,
-            target_delivery_id: "sender".into(),
-            envelope: delivery.envelope,
-        },
-        joined_root,
-    ))
 }

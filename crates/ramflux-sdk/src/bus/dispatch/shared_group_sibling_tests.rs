@@ -12,13 +12,10 @@ fn configure(
     base: &GatewaySessionConfig,
     device: &str,
 ) -> Result<GatewaySessionConfig, SdkError> {
-    let mut config = base.clone();
-    config.principal_id = "peer".into();
-    config.device_id = device.into();
-    config.target_delivery_id = device.into();
-    config = config.with_account_identity(&account.client)?;
+    let config = crate::client::native_test_support::bus::config_for(&account.client, base)?;
+    assert_eq!(config.device_id, device, "configured certified branch");
     account.gateway_config = config.clone();
-    account.target_delivery_id = device.into();
+    account.target_delivery_id.clone_from(&config.target_delivery_id);
     account.principal_commitment = account.client.owned_device_identity()?.root_commitment().into();
     Ok(config)
 }
@@ -51,7 +48,8 @@ fn prepare_group(
             dm_device_id_hash(sender.device_id()),
             dm_device_id_hash(recipient.device_id()),
             [3; 32],
-        )?,
+        )?
+        .with_collapse_key_from_x3dh_sk(&[71; 32], &[4; 32])?,
     )?;
     owner.client.persist_pair(
         &recipient,
@@ -62,24 +60,25 @@ fn prepare_group(
             dm_device_id_hash(recipient.device_id()),
             dm_device_id_hash(sender.device_id()),
             [3; 32],
-        )?,
+        )?
+        .with_collapse_key_from_x3dh_sk(&[71; 32], &[4; 32])?,
     )?;
-    owner.client.shared_group_create(
+    owner.client.fixture_group_create(
         "group",
         "group-thread",
         Some("Sibling group".into()),
         "device-owner",
     )?;
-    let state = owner.client.shared_group_change(
+    let state = owner.client.fixture_group_change(
         "group",
         "device-owner",
         ramflux_protocol::group_state::GroupStateChange::Add {
-            member: peer.client.owned_group_actor("sender")?.identity,
+            member: peer.client.fixture_group_actor("sender")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    sibling.client.accept_shared_group_state(&state, "device-sibling")?;
-    peer.client.accept_shared_group_state(&state, "sender")?;
+    sibling.client.fixture_accept_group_state(&state, "device-sibling")?;
+    peer.client.fixture_accept_group_state(&state, "sender")?;
     assert_eq!(state.view().members.len(), 2, "the sibling has not explicitly joined");
     Ok(())
 }
@@ -107,9 +106,11 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
         seed_existing_message(&owner.client, logical)?;
     }
     let captured = Arc::new(Mutex::new(Vec::new()));
+    let gateway = super::fixture::RecordingGateway::new(captured.clone());
+    let own = Arc::clone(&gateway.own);
     sibling.install_test_session(GatewaySessionEngine::with_test_transport(
         sibling_config,
-        Box::new(super::fixture::RecordingGateway::new(captured.clone())),
+        Box::new(gateway),
     ));
     let request = LocalBusFrame::request(
         "sibling-first",
@@ -118,8 +119,13 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
         "group.send",
         json!({"group_id":"group","conversation_id":"group-thread","message_id":logical,"sender_id":"device-sibling","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url("first from implicit sibling")}),
     );
-    Box::pin(super::super::group::dispatch_group_send_request(&request, &mut sibling)).await?;
-    let entries = captured.lock().map_err(|_| "capture")?.clone();
+    let sent =
+        Box::pin(super::super::group::dispatch_group_send_request(&request, &mut sibling)).await?;
+    let canonical = sent.response_body["message_id"].as_str().ok_or("allocated group identity")?;
+    assert_eq!(sent.response_body["client_message_id"], logical);
+    let owner_target = owner.client.owned_device_identity()?.storage_key().to_owned();
+    let mut entries = captured.lock().map_err(|_| "capture")?.clone();
+    entries.extend(own.lock().map_err(|_| "own capture")?.iter().cloned());
     let mut engine = GatewaySessionEngine::with_test_transport(
         owner_config,
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
@@ -130,7 +136,7 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     let mut count = 0;
     for (index, envelope) in entries
         .into_iter()
-        .filter(|envelope| envelope.target_delivery_id == "device-owner")
+        .filter(|envelope| envelope.target_delivery_id == owner_target)
         .enumerate()
     {
         let entry = GatewayInboxEntry {
@@ -146,16 +152,8 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     let rows = owner.client.direct_messages("group-thread")?;
     assert_eq!(rows.len(), 1, "first group message must be present exactly once");
     let row = &rows[0];
-    let sender = sibling.client.owned_device_identity()?;
-    assert_eq!(
-        row.message_id,
-        ramflux_protocol::group_message_id(
-            "group",
-            sender.root_commitment(),
-            sender.device_id(),
-            logical
-        )?
-    );
+    assert_eq!(row.message_id, canonical);
+    assert_ne!(canonical, logical, "caller tokens cannot reserve canonical message ids");
     if collision {
         assert_eq!(
             owner.client.account_db()?.message_content(logical)?,
@@ -167,8 +165,13 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
         );
     }
     assert_eq!(
-        owner.client.account_db()?.message_content(&row.message_id)?,
-        Some(b"first from implicit sibling".to_vec())
+        owner
+            .client
+            .generated_message_detail("group-thread", &row.message_id)?
+            .message
+            .text
+            .as_deref(),
+        Some("first from implicit sibling")
     );
     directory.abort();
     drop((owner, sibling, peer));

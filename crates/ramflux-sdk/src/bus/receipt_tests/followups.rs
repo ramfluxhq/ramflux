@@ -5,33 +5,31 @@
 use super::*;
 use serde_json::json;
 
-#[test]
-fn missing_local_root_does_not_roll_back_an_incoming_message_transaction() -> TestResult {
-    let root = runtime_tests::root("receipt-no-root");
+#[tokio::test]
+async fn native_receive_does_not_require_a_legacy_identity_root() -> TestResult {
+    let root = runtime_tests::root("receipt-no-legacy-root");
     let a = Spec::new(&root, "alice", 51);
     let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
-    let sender = a.client(None)?;
-    let config = a.config(&sender)?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.device.clone(),
-        envelope: gateway_direct_message_envelope(&config, &a.message(&b, "incoming"), None)?,
-    };
-    let mut receiver = b.client(None)?;
-    receiver.identity_root = None;
-    let db = receiver.account_db()?;
-    db.write_transaction(|| -> Result<(), SdkError> {
-        receiver.send_direct_message("thread", "incoming", &a.device, b"ciphertext")?;
-        db.store_message_content("thread", "incoming", b"incoming plaintext")?;
-        receiver.stage_delivery_receipt("thread", "incoming", &entry)
-    })?;
-    assert!(receiver.direct_message_by_id("incoming")?.is_some());
-    assert_eq!(db.message_content("incoming")?, Some(b"incoming plaintext".to_vec()));
-    assert_eq!(db.actor_state_usage(PREFIX)?.0, 0);
-    drop(receiver);
-    drop(sender);
+    let mut sender = a.account(None, mail.clone())?;
+    let mut engine = sender.session_client().await?;
+    let entry = a
+        .send_text(&sender.client, &mut engine, a.message(&b, "incoming"), b"incoming plaintext")
+        .await?;
+    let mut receiver = b.account(None, mail)?;
+    assert!(receiver.client.identity_root.is_none(), "native receive has no legacy root");
+    let pool = receiver.relay_quic_pool()?;
+    let mut transport = receiver.session_client().await?;
+    crate::bus::sync_driver::process(&mut receiver, &mut transport, &pool, &entry).await?;
+    let view =
+        receiver.client.generated_message_detail(&a.conversation(&b)?, &a.event("incoming")?)?;
+    assert_eq!(view.message.text.as_deref(), Some("incoming plaintext"));
+    assert_eq!(
+        receiver.client.account_db()?.actor_state_usage(PREFIX)?.0,
+        1,
+        "native authority permits the receipt in the incoming transaction"
+    );
     Ok(())
 }
 
@@ -137,65 +135,57 @@ fn legacy_receipt_enrollment_advances_bounded_pages_and_preserves_the_original_g
     Ok(())
 }
 
-#[test]
-fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_message() -> TestResult
-{
+#[tokio::test]
+async fn message_attribution_survives_receipt_expiry_and_is_removed_only_with_its_message()
+-> TestResult {
     let root = runtime_tests::root("durable-message-origin");
     let a = Spec::new(&root, "alice", 51);
     let b = Spec::new(&root, "bob", 61);
+    let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
-    let sender = a.client(None)?;
-    let receiver = b.client(None)?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.device.clone(),
-        envelope: gateway_direct_message_envelope(
-            &a.config(&sender)?,
-            &a.message(&b, "origin"),
-            None,
-        )?,
-    };
-    let db = receiver.account_db()?;
-    db.write_transaction(|| -> Result<(), SdkError> {
-        receiver.send_direct_message("thread", "origin", &a.device, b"ciphertext")?;
-        receiver.stage_delivery_receipt("thread", "origin", &entry)
-    })?;
-    let original = receiver.message_origin("thread", "origin")?.ok_or("origin")?;
-    let request = LocalBusFrame::request(
-        "origin-read",
-        Some("bob".into()),
-        "test",
-        "message.read",
-        json!({"conversation_id":"thread"}),
-    );
-    let before = crate::bus::readers::read(&receiver, &request)?;
-    assert_eq!(original["sender_device_id"], a.device);
+    let mut sender = a.account(None, mail.clone())?;
+    let mut transport = sender.session_client().await?;
+    let entry = a
+        .send_text(&sender.client, &mut transport, a.message(&b, "origin"), b"attributed body")
+        .await?;
+    let mut receiver = b.account(None, mail)?;
+    let pool = receiver.relay_quic_pool()?;
+    let mut transport = receiver.session_client().await?;
+    crate::bus::sync_driver::process(&mut receiver, &mut transport, &pool, &entry).await?;
+    let conversation = a.conversation(&b)?;
+    let id = a.event("origin")?;
+    let client = &receiver.client;
+    let db = client.account_db()?;
+    let original = client.message_origin(&conversation, &id)?.ok_or("origin")?;
+    let before = client.generated_message_detail(&conversation, &id)?.message;
+    assert_eq!(before.author.as_ref().ok_or("author")?.device_id, a.device);
     for _ in 0..3 {
         db.retain_delivery_receipts(now_unix_timestamp() + 90 * 24 * 60 * 60, 128)?;
     }
-    assert_eq!(receiver.message_origin("thread", "origin")?, Some(original.clone()));
-    let after = crate::bus::readers::read(&receiver, &request)?;
-    for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
-        assert_eq!(after["messages"][0][field], before["messages"][0][field]);
-        assert!(!after["messages"][0][field].is_null());
-    }
-    receiver.delete_direct_message("thread", "origin", "local", "deleted-origin")?;
-    assert!(receiver.message_origin("thread", "origin")?.is_none());
+    assert_eq!(client.message_origin(&conversation, &id)?, Some(original.clone()));
+    assert_eq!(client.generated_message_detail(&conversation, &id)?.message.author, before.author);
+    client.delete_direct_message(
+        &conversation,
+        &id,
+        "local",
+        &ramflux_protocol::encode_base64url([67; 32]),
+    )?;
+    assert!(client.message_origin(&conversation, &id)?.is_none());
     let stale_key = format!(
         "message/origin/{}",
         ramflux_crypto::blake3_256_base64url(
             "ramflux.delivery-receipt.v1",
-            &ramflux_protocol::canonical_json_bytes(&("thread", "origin", ""))?
+            &ramflux_protocol::canonical_json_bytes(&(&conversation, &id, ""))?
         )
     );
     db.persist_actor_state(&stale_key, &original)?;
-    let deleted = crate::bus::readers::read(&receiver, &request)?;
-    assert_eq!(deleted["messages"][0]["deleted"], true);
-    for field in ["sender_device_id", "sender_root_commitment", "sender_device_display"] {
-        assert!(deleted["messages"][0][field].is_null());
-    }
-    drop(receiver);
-    drop(sender);
+    let deleted = client.generated_message_detail(&conversation, &id)?.message;
+    assert_eq!(deleted.state, "tombstone");
+    assert_eq!(
+        deleted.author, before.author,
+        "immutable author comes from the event identity, never the stale auxiliary origin row"
+    );
+    assert!(deleted.content.is_none());
+    assert!(deleted.text.is_none());
     Ok(())
 }

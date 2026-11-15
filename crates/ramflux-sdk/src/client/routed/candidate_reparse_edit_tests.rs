@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Upgrade-install regressions using the dormant generation-zero receipt fixture.
+//! Decoder-upgrade regressions with retained native source and ciphertext evidence.
 //! Ciphertext, sender authority, C and pair crypto are real; decoder upgrade is staged locally.
 use super::*;
 
@@ -14,6 +14,11 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
     let entry = seal(a, b, message("upgrade-opaque-original", "c"), raw)?;
     let opened = b.client.open_routed(&entry, &b.id)?;
     let copy = b.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
+    let origin = b
+        .client
+        .capture_retained_origin(&opened, &entry)?
+        .ok_or_else(|| invalid("upgrade fixture origin missing"))?;
+    let origin_copy = origin.copy_id()?;
     let source = &opened.remote_device;
     let provenance = crate::client::routed::generated_receive::Provenance {
         source: source.storage_key().into(),
@@ -26,7 +31,7 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
         source_epoch: 1,
         original_route: serde_json::to_string(&opened.routing)?,
         outer_receipt_key: copy.clone(),
-        source_evidence_copy: None,
+        source_evidence_copy: Some(origin_copy.clone()),
         received_erasure_generation: b.client.account_db()?.privacy_erasure_generation()?,
     };
     let receipt = crate::client::routed::Committed {
@@ -37,6 +42,13 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
     };
     let db = b.client.account_db()?;
     db.write_transaction(|| -> Result<(), SdkError> {
+        b.client.retain_raw_origin_copy(
+            &id,
+            source.root_commitment(),
+            &origin_copy,
+            &origin,
+            None,
+        )?;
         b.client.persist_pair(
             &opened.local_device,
             source,
@@ -80,7 +92,7 @@ fn retain_original_for_upgrade(a: &Fixture, b: &Fixture, raw: &[u8]) -> Result<S
 async fn reparse_message_resolves_parked_edit_before_publishing_content_in_force()
 -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, mut b) = pair(165, 167)?;
+    let (a, mut b) = pair(165, 167).await?;
     commit_content(
         &a,
         &mut b,

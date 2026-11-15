@@ -45,7 +45,7 @@ fn a_requesters_second_device_reads_the_remote_approval_and_returns_a_task_bound
     sibling.create_device_branch("human", "human2-device", 1, [65; 32]);
     // The same-root history carries the task and verified peer device key, never an executable grant.
     super::own::manifests(&f)?;
-    sibling.import_own_task_packets(&f.human.own_task_packets("human2-device")?, "human-device")?;
+    sibling.import_own_task_packets(&f.human.own_task_packets("human2-device")?)?;
     sibling.accept_task_approval(&packet)?;
     let rows = sibling.task_remote_approvals()?;
     assert_eq!(rows.len(), 1);

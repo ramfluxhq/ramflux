@@ -3,7 +3,9 @@
 
 //! Read-only logical snapshots of node redb stores and the router WAL.
 //! The live service keeps the writable database. redb rows are read from a
-//! byte copy. WAL segments are read in place and never repaired or truncated.
+//! byte copy, opened writable so a copy of a live store (which redb marks as needing
+//! recovery) is repaired in the copy only. WAL segments are read in place and never
+//! repaired or truncated.
 
 use redb::{MultimapTableHandle, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use std::collections::BTreeMap;
@@ -19,6 +21,10 @@ const RECORD_COUNT_CAP: usize = 100_000;
 const FILE_CAP: usize = 4_000;
 /// Same header as `router_wal`. A mismatch is an error, not a skipped file.
 const WAL_MAGIC: &[u8] = b"ramflux-router-wal-v1\n";
+/// Chained segment header: this magic, then a 32-byte chain identity and a 16-byte segment
+/// position. Records follow it directly.
+const WAL_CHAINED_MAGIC: &[u8] = b"ramflux-router-wal-v2\n";
+const WAL_CHAIN_IDENTITY_BYTES: usize = 32 + 16;
 const SHARD_PREFIX: &str = "router-wal-shard-";
 
 /// Logical rows of every normal table in `path`, plus the multimap table names.
@@ -34,7 +40,7 @@ pub fn logical_redb_rows(path: &Path) -> Result<BTreeMap<String, Vec<String>>, N
     let copy = TempCopy::create();
     std::fs::write(&copy.path, &bytes)
         .map_err(|error| NodeCoreError::Redb(format!("write {}: {error}", copy.path.display())))?;
-    let database = redb::ReadOnlyDatabase::open(&copy.path)
+    let database = redb::Database::open(&copy.path)
         .map_err(|error| NodeCoreError::Redb(format!("open {}: {error}", path.display())))?;
     let transaction =
         database.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
@@ -270,7 +276,12 @@ fn segment_digests(path: &Path) -> Result<Vec<String>, NodeCoreError> {
     let mut magic = vec![0_u8; WAL_MAGIC.len()];
     file.read_exact(&mut magic)
         .map_err(|error| NodeCoreError::Redb(format!("header {}: {error}", path.display())))?;
-    if magic != WAL_MAGIC {
+    if magic == WAL_CHAINED_MAGIC {
+        let mut identity = [0_u8; WAL_CHAIN_IDENTITY_BYTES];
+        file.read_exact(&mut identity).map_err(|error| {
+            NodeCoreError::Redb(format!("chain header {}: {error}", path.display()))
+        })?;
+    } else if magic != WAL_MAGIC {
         return Err(NodeCoreError::Redb(format!("wal header mismatch: {}", path.display())));
     }
     let mut digests = Vec::new();
@@ -419,6 +430,22 @@ mod tests {
         assert_eq!(wal.files, vec![segment], "test: the regular segment is selected");
         let digest = super::hex(&ramflux_crypto::blake3_256("ramflux.node.wal-record.v1", payload));
         assert_eq!(wal.records, vec![digest], "test: the incomplete tail is not a record");
+    }
+
+    #[test]
+    fn wal_snapshot_reads_a_chained_segment_after_its_identity_header() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let payload = b"chained-record";
+        let mut bytes = b"ramflux-router-wal-v2\n".to_vec();
+        bytes.extend([7_u8; super::WAL_CHAIN_IDENTITY_BYTES]);
+        let len = u32::try_from(payload.len()).expect("len");
+        bytes.extend(len.to_le_bytes());
+        bytes.extend(crc32fast::hash(payload).to_le_bytes());
+        bytes.extend(payload);
+        std::fs::write(dir.path().join("router-wal-1.wal"), &bytes).expect("segment");
+        let wal = logical_wal_records(dir.path()).expect("wal");
+        let digest = super::hex(&ramflux_crypto::blake3_256("ramflux.node.wal-record.v1", payload));
+        assert_eq!(wal.records, vec![digest], "test: the chained identity header is skipped");
     }
 
     fn assert_one_row(

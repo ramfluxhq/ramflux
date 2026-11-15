@@ -154,16 +154,9 @@ fn terminal_count_retention_compacts_old_bodies_and_fully_prunes_older_projectio
     Ok(())
 }
 
-#[test]
-fn a_requester_can_cancel_after_its_assignee_leaves_the_group() -> TestResult {
-    let f = Fixture::new()?;
-    f.human.create_group("group", "human-device")?;
-    f.human.add_group_member("group", &member(&f.human, "agent-device")?, "member")?;
-    f.human.account_db()?.persist_client_record(
-        "conversation",
-        "group-thread",
-        &json!({"kind":"group","group_id":"group"}),
-    )?;
+#[tokio::test]
+async fn a_requester_can_cancel_after_its_assignee_leaves_the_group() -> TestResult {
+    let f = Box::pin(native_group::fixture(false, "other")).await?;
     assert!(
         project(
             &f.human,
@@ -171,7 +164,14 @@ fn a_requester_can_cancel_after_its_assignee_leaves_the_group() -> TestResult {
         )?
         .accepted
     );
-    f.human.remove_group_member("group", "human-device", "agent-device")?;
+    f.human.fixture_group_change(
+        "group",
+        "human-device",
+        ramflux_protocol::GroupStateChange::Remove {
+            root_commitment: f.agent.own_account_anchor()?,
+            device_id: "agent-device".into(),
+        },
+    )?;
     let c = sign(
         &f.human,
         "group-thread",
@@ -312,7 +312,12 @@ fn attachment_erasure_removes_task_fallback_metadata_and_refuses_replay_residue(
     let client = &fixture.human;
     client.send_direct_message("thread", "proposal", "peer", b"task body")?;
     assert!(client.task_message_metadata("thread", "proposal")?.is_some());
-    client.delete_direct_message("thread", "proposal", "local", "erase-task-message")?;
+    client.delete_direct_message(
+        "thread",
+        "proposal",
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase-task-message"),
+    )?;
     assert!(client.task_message_metadata("thread", "proposal")?.is_none());
     client.store_task_message_metadata(
         &super::Delivery {

@@ -106,8 +106,10 @@ struct Done {
 }
 
 impl Done {
+    /// Envelopes the task courier submitted; own-device copies of the same account share the
+    /// gateway and are not counted.
     fn wire(&self) -> usize {
-        self.gateway.lock().unwrap().attempts.len()
+        self.gateway.lock().unwrap().task_attempts()
     }
 }
 
@@ -126,6 +128,37 @@ fn reopen(account: &mut LocalBusAccountState) -> Case {
             .ok_or(SdkError::AccountDbNotUnlocked)?
             .set_device_signer(branch);
     }
+    // The gateway config still holds the pairing-admission reader of the database that was just
+    // closed; without rebinding it the next connection is refused with PublicationPending and
+    // the courier never sends.
+    account.gateway_config.pairing_admission =
+        Some(Arc::new(account.client.account_db()?.pairing_admission_reader()));
+    Ok(())
+}
+
+/// Makes the gateway tell the account's own-device copies (submitted by the actor's copy courier
+/// to the account's other device) from task courier attempts, so the wire counts of these rows
+/// stay about the task courier. The probe reads the copy rows at submit time, when the row that
+/// carries the envelope necessarily exists.
+fn separate_own_copies(
+    gateway: &Arc<Mutex<super::fixture::Gateway>>,
+    account: &LocalBusAccountState,
+) -> Case {
+    let reader = Mutex::new(account.client.account_db()?.open_reader()?);
+    let probe = move |id: &str| -> bool {
+        let Ok(db) = reader.lock() else { return false };
+        let Ok(keys) = db.actor_state_key_page("own-device/send/", 64) else { return false };
+        keys.iter().any(|key| {
+            db.load_actor_state::<serde_json::Value>(key).ok().flatten().is_some_and(|row| {
+                row["generated"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|copy| copy["envelope"]["envelope_id"].as_str() == Some(id))
+            })
+        })
+    };
+    gateway.lock().map_err(|_| "gateway")?.own_copy_probe = Some(Box::new(probe));
     Ok(())
 }
 
@@ -411,6 +444,7 @@ async fn scenario(row: Row, script: Script) -> Case<Done> {
                 .persist_actor_state(key, &approval::Job { packet, attempts: 0, next_at: 0 })?;
         }
     }
+    separate_own_copies(&fixture.gateway, &fixture.source)?;
     {
         let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
         gateway.nack_submit = script.nack.map(str::to_owned);
@@ -508,17 +542,21 @@ fn placeholder() -> Result<LocalBusAccountState, SdkError> {
 #[tokio::test]
 async fn sender_refusal_policy_task() -> Case {
     let _clock = crate::time::FixedClock::set(now_unix_timestamp());
-    LocalSet::new()
-        .run_until(Box::pin(async {
-            let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
-            conflict_rows().await?;
-            Box::pin(decision::lifecycle_rows()).await?;
-            envelope_rows().await?;
-            deferral_rows().await?;
-            stale_revision_row().await?;
-            Box::pin(task_delivery_rows()).await
-        }))
+    let local = LocalSet::new();
+    let rows = local.run_until(Box::pin(async {
+        let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
+        conflict_rows().await?;
+        Box::pin(decision::lifecycle_rows()).await?;
+        envelope_rows().await?;
+        deferral_rows().await?;
+        stale_revision_row().await?;
+        Box::pin(task_delivery_rows()).await
+    }));
+    // The whole matrix, fixtures included, ends by its own deadline so its temporary
+    // directories are dropped before the runner's kill window.
+    tokio::time::timeout(Duration::from_secs(200), rows)
         .await
+        .map_err(|_| "sender refusal policy rows exceeded their 200 s deadline")?
 }
 
 async fn conflict_rows() -> Case {
@@ -666,7 +704,8 @@ async fn task_delivery_rows() -> Case {
             matches!(&result, Err(SdkError::GatewaySessionRejected(reason)) if reason == nack),
             "{nack}: {result:?}"
         );
-        let view_key = crate::client::task::scoped("view", "healthy", "healthy-task")?;
+        let conversation = super::fixture::direct_conversation(&fixture.source.client)?;
+        let view_key = crate::client::task::scoped("view", &conversation, "healthy-task")?;
         let expect_failed = |db: &AccountDb| -> Case {
             let view: serde_json::Value = db.load_actor_state(&view_key)?.ok_or("task view")?;
             assert_eq!(view["delivery_state"], "failed", "{nack}");

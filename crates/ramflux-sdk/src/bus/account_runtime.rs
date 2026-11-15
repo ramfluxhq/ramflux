@@ -531,6 +531,8 @@ pub mod testing_calls;
 #[cfg(feature = "test-support")]
 mod testing_authority;
 
+#[cfg(feature = "test-support")]
+pub mod testing_messages;
 async fn wait_pairing_signal(signal: Option<std::sync::Arc<tokio::sync::Notify>>) {
     match signal {
         Some(signal) => signal.notified().await,

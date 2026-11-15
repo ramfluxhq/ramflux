@@ -238,6 +238,39 @@ impl AccountDb {
             Ok(true)
         })
     }
+    /// Return one attempted job to the queue because its durable history transfer is not yet
+    /// complete. Pairing, native authority and device admission are untouched.
+    /// # Errors
+    /// Refuses another request or a receipt that is not in the attempted phase.
+    pub fn requeue_pairing_own_sync(&self, job: &PairingOwnSyncJob) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            let mut value = self.own_sync_stored(&job.operation_id)?.ok_or_else(wrong)?;
+            if value.job != *job || value.phase != Phase::Attempted { return Err(wrong()); }
+            value.phase = Phase::Queued;
+            self.connection.execute("UPDATE pairing_own_sync SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,key(&job.operation_id),KIND])?;
+            Ok(())
+        })
+    }
+    /// Crash recovery: the single history service runs one attempt at a time, so any receipt
+    /// still marked attempted when the service starts was interrupted. Queue it again.
+    /// # Errors
+    /// Refuses corrupt receipts or transaction failure.
+    pub fn requeue_interrupted_pairing_own_sync(&self) -> Result<u64, StorageError> {
+        self.write_transaction(|| {
+            let mut stmt = self.connection.prepare("SELECT operation_id FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END='attempted' ORDER BY operation_id LIMIT 128")?;
+            let ids = stmt.query_map(params![KIND],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            drop(stmt);
+            let mut count = 0_u64;
+            for id in ids {
+                let operation = id.strip_prefix("pairing-own-sync:").ok_or_else(wrong)?;
+                let mut value = self.own_sync_stored(operation)?.ok_or_else(wrong)?;
+                value.phase = Phase::Queued;
+                self.connection.execute("UPDATE pairing_own_sync SET response_json=?1 WHERE operation_id=?2 AND operation_kind=?3",params![String::from_utf8(value.encode(self)?).map_err(|_| wrong())?,id,KIND])?;
+                count += 1;
+            }
+            Ok(count)
+        })
+    }
     /// Store the outcome without changing pairing, native authority or any device's admission.
     /// # Errors
     /// Refuses another request, a non-attempted receipt or an oversized local error code.

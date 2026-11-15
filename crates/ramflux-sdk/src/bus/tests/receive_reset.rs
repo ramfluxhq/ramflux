@@ -28,14 +28,33 @@ async fn retry() -> Case {
     let reader = fixture.source.client.account_db()?.open_reader()?;
     let key = format!("dm-pair/reset-work/{}", RamfluxClient::pair_key(&local, &remote)?);
     let hold = Arc::new(GatewayHold::default());
-    fixture.gateway.lock().map_err(|_| "gateway")?.prekey_hold = Some(Arc::clone(&hold));
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.prekey_hold = Some(Arc::clone(&hold));
+        gateway.prekey_hold_target =
+            Some(fixture.source.client.root_qualified_device_lookup(remote.storage_key())?);
+    }
     let gateway = Arc::clone(&fixture.gateway);
     let mut started = Box::pin(start(fixture)).await?;
-    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await.map_err(|_| {
+        format!(
+            "reset prekey not held; work={:?}; manifest_requests={:?}",
+            reader.load_actor_state::<serde_json::Value>(&key),
+            gateway.lock().map_err(|_| "gateway").map(|state| state.manifest_requests.clone())
+        )
+    })?;
     controls(&started.actor).await?;
     assert_eq!(gateway.lock().map_err(|_| "gateway")?.inbox.len(), 0);
     hold.release.notify_one();
-    let envelope = submitted(&gateway).await?;
+    let envelope =
+        submitted(&gateway, started.peer().client.owned_device_identity()?.storage_key())
+            .await
+            .map_err(|error| {
+                format!(
+                    "reset submit absent after prekey release: {error}; work={:?}",
+                    reader.load_actor_state::<serde_json::Value>(&key)
+                )
+            })?;
     let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
@@ -43,8 +62,7 @@ async fn retry() -> Case {
         envelope,
     };
     let opened = started.peer().client.open_routed(&entry, "device-peer")?;
-    let body: serde_json::Value = serde_json::from_slice(&opened.body)?;
-    assert_eq!(body["type"], "pair.session.reset.v1");
+    assert_reset_kind(&opened.body, false)?;
     let work: serde_json::Value = reader.load_actor_state(&key)?.ok_or("reset work")?;
     assert_eq!(work["attempts"], 2);
     assert!(work["next_at"].as_i64().is_some_and(|next| next > now_unix_timestamp()));
@@ -70,7 +88,12 @@ async fn recovery() -> Case {
         .account_db()?
         .remove_actor_state(&format!("dm-pair/session/{}", session.session_id))?;
     let hold = Arc::new(GatewayHold::default());
-    fixture.gateway.lock().map_err(|_| "gateway")?.prekey_hold = Some(Arc::clone(&hold));
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.prekey_hold = Some(Arc::clone(&hold));
+        gateway.prekey_hold_target =
+            Some(fixture.source.client.root_qualified_device_lookup(remote.storage_key())?);
+    }
     let gateway = Arc::clone(&fixture.gateway);
     let mut started = Box::pin(start(fixture)).await?;
     tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
@@ -78,7 +101,8 @@ async fn recovery() -> Case {
     assert_eq!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 0);
     assert_eq!(gateway.lock().map_err(|_| "gateway")?.acked.len(), 0);
     hold.release.notify_one();
-    let envelope = submitted(&gateway).await?;
+    let envelope =
+        submitted(&gateway, started.peer().client.owned_device_identity()?.storage_key()).await?;
     let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
@@ -86,8 +110,7 @@ async fn recovery() -> Case {
         envelope,
     };
     let opened = started.peer().client.open_routed(&entry, "device-peer")?;
-    let body: serde_json::Value = serde_json::from_slice(&opened.body)?;
-    assert_eq!(body["type"], "pair.session.reset.v1");
+    assert_reset_kind(&opened.body, false)?;
     finish(Box::new(started)).await
 }
 
@@ -108,6 +131,8 @@ async fn reply() -> Case {
         let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
         gateway.inbox.push(entry);
         gateway.submit_hold = Some(Arc::clone(&hold));
+        gateway.submit_hold_target =
+            Some(fixture.peer.client.owned_device_identity()?.storage_key().into());
     }
     let gateway = Arc::clone(&fixture.gateway);
     let mut started = Box::pin(start(fixture)).await?;
@@ -116,7 +141,8 @@ async fn reply() -> Case {
     controls(&started.actor).await?;
     assert_eq!(gateway.lock().map_err(|_| "gateway")?.acked.len(), 0);
     hold.release.notify_one();
-    let envelope = submitted(&gateway).await?;
+    let envelope =
+        submitted(&gateway, started.peer().client.owned_device_identity()?.storage_key()).await?;
     let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
@@ -124,8 +150,7 @@ async fn reply() -> Case {
         envelope,
     };
     let opened = started.peer().client.open_routed(&entry, "device-peer")?;
-    let body: serde_json::Value = serde_json::from_slice(&opened.body)?;
-    assert_eq!(body["type"], "pair.session.reset.ack.v1");
+    assert_reset_kind(&opened.body, true)?;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if gateway.lock().map_err(|_| "gateway")?.acked.len() == 1 {
@@ -141,22 +166,31 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     let source = &fixture.source.client;
     let remote = fixture.peer.client.owned_device_identity()?;
     let mut message = GatewayDirectMessage {
-        conversation_id: "healthy".into(),
+        conversation_id: super::fixture::direct_conversation(source)?,
         message_id: "reset-trigger".into(),
         envelope_id: "reset-trigger".into(),
         source_principal_id: "sender".into(),
-        sender_id: "sender".into(),
+        sender_id: source.owned_device_identity()?.device_id().into(),
         recipient_device_id: Some(remote.device_id().to_owned()),
         recipient_principal_commitment: Some(remote.root_commitment().to_owned()),
-        target_delivery_id: "peer".into(),
+        target_delivery_id: remote.storage_key().into(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
         ttl: 300,
     };
-    let packet = source.seal_routed_prepared(
+    let content = ramflux_protocol::message::Content {
+        value: Some(ramflux_protocol::message::content::Value::Message(
+            ramflux_protocol::message::Message {
+                text: "recovery trigger".into(),
+                ..Default::default()
+            },
+        )),
+    };
+    let prepared = source.prepare_authored_content(&mut message, None, &content)?;
+    let packet = source.seal_generated_routed_prepared(
         &fixture.source.gateway_config,
         &message,
-        b"recovery trigger",
+        &prepared.wire,
         crate::client::routed::Route::direct(),
         SendMaterial { manifest: None, bundle: None },
     )?;
@@ -164,8 +198,12 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     let trigger = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "peer".into(),
-        envelope: gateway_direct_message_envelope(&fixture.source.gateway_config, &message, None)?,
+        target_delivery_id: remote.storage_key().into(),
+        envelope: crate::dm::gateway_generated_envelope_from_sealed(
+            &fixture.source.gateway_config,
+            &mut message,
+            packet,
+        )?,
     };
     let peer = &fixture.peer.client;
     let config = &fixture.peer.gateway_config;
@@ -185,16 +223,24 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "sender".into(),
+        target_delivery_id: envelope.target_delivery_id.clone(),
         envelope,
     })
 }
 async fn submitted(
     gateway: &Arc<std::sync::Mutex<super::fixture::Gateway>>,
+    target: &str,
 ) -> Case<ramflux_protocol::Envelope> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(envelope) = gateway.lock().map_err(|_| "gateway")?.sent.first().cloned() {
+            if let Some(envelope) = gateway
+                .lock()
+                .map_err(|_| "gateway")?
+                .sent
+                .iter()
+                .find(|envelope| envelope.target_delivery_id == target)
+                .cloned()
+            {
                 return Ok(envelope);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -210,5 +256,22 @@ async fn finish(started: Box<super::receive_ack::Started>) -> Case {
     started.router.await?;
     drop(started.actor);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn assert_reset_kind(exact: &[u8], ack: bool) -> Case {
+    use ramflux_protocol::message as g;
+    let (_, content) = RamfluxClient::decode_generated_inner(exact)?;
+    let Some(g::content::Value::Control(control)) = content.value else {
+        return Err("typed reset Control required".into());
+    };
+    assert!(
+        matches!(
+            (&control.payload, ack),
+            (Some(g::control::Payload::Reset(_)), false)
+                | (Some(g::control::Payload::ResetAck(_)), true)
+        ),
+        "pair recovery must send the correct generated reset kind"
+    );
     Ok(())
 }

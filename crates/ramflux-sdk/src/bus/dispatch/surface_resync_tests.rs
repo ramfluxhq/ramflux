@@ -5,7 +5,7 @@
 use super::*;
 use crate::bus::runtime_tests;
 use ramflux_protocol::{A2uiConversationCommand, CreateSurfaceCommand, SurfaceType};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 struct Group {
     source: LocalBusAccountState,
@@ -13,20 +13,14 @@ struct Group {
     config: GatewaySessionConfig,
     directory: tokio::task::JoinHandle<()>,
     create: Carrier,
+    baseline: usize,
     _root: ramflux_test_support::TestPath,
 }
 impl Group {
     async fn new() -> TestResult<Self> {
         let root = runtime_tests::root("surface-private-resync");
-        let mut source = runtime_tests::account(
-            &root.join("source"),
-            "sender",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let peers = super::tests::members(&root, &source, 3)?;
-        let (config, directory) =
-            super::tests::directory_config(&root, &mut source, &peers).await?;
+        let super::tests::NativeGroup { mut source, mut peers, config, directory } =
+            Box::pin(super::tests::native_group(&root, 3)).await?;
         source.client.account_db()?.persist_client_record(
             "conversation",
             "thread",
@@ -52,77 +46,39 @@ impl Group {
                 allowed_actions: Vec::new(),
             }),
         )?;
-        let mut create = super::dm_tests::create_carrier(&source.client)?;
+        let mut create = super::dm_tests::create_carrier_in(&source.client, "thread")?;
         create.wire_base64 = wire.wire_base64;
         create.snapshot = None;
         source.client.attach_surface_snapshot(&mut create)?;
         create = source.client.sign_surface_carrier(create)?;
         send(&mut source, &create).await?;
         let frames = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        let mut deliveries = Vec::new();
-        for peer in &peers {
-            let principal = &peer
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .principal_id;
-            deliveries.extend(
-                frames
-                    .iter()
-                    .filter(|frame| &frame.target_delivery_id == principal)
-                    .cloned()
-                    .map(|envelope| super::tests::Delivery { envelope }),
-            );
-        }
-        super::tests::assert_receivers(
-            &peers,
-            &deliveries,
-            source.client.group_state("group")?.group_epoch,
-            1,
-        )?;
-        for peer in &peers {
-            peer.client.persist_identity_directory(&super::fixture::manifest(&source.client)?)?;
-            let branch = peer.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            let envelope = frames
-                .iter()
-                .rev()
-                .find(|e| e.target_delivery_id == branch.principal_id)
-                .ok_or("delivery")?
-                .clone();
-            let entry = GatewayInboxEntry {
-                forwarded: false,
-                inbox_seq: 2,
-                target_delivery_id: envelope.target_delivery_id.clone(),
-                envelope,
-            };
-            let opened = peer.client.open_routed(&entry, &branch.device_id)?;
-            peer.client.persist_pair(
-                &opened.local_device,
-                &opened.remote_device,
-                &opened.bundle_hash,
-                &opened.session,
-            )?;
-            peer.client.send_direct_message(
-                "thread",
-                "initial-visible",
-                "device-sender",
-                b"encrypted",
-            )?;
-        }
+        assert_eq!(
+            super::tests::deliver_to_peers(&source, &mut peers, &config, &frames, 1).await?,
+            peers.len(),
+            "every member receives the created Surface"
+        );
+        // The author advances without reaching the members: they are now behind and may ask.
         let delta = super::own_tests::append(&source.client, &create, 2)?;
         send(&mut source, &delta).await?;
-        Ok(Self { source, peers, config, directory, create, _root: root })
+        // Let the account settle its own group maintenance (device-set hint, state fan-out) so
+        // only the replies are measured below.
+        let mut settled = false;
+        for _ in 0..4 {
+            if crate::bus::sync_driver::run(&mut source).await? == 0 {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "group maintenance must settle within a few rounds");
+        let baseline = peers[2].client.direct_messages("thread")?.len();
+        Ok(Self { source, peers, config, directory, create, baseline, _root: root })
     }
     fn peer_config(&self, index: usize) -> TestResult<GatewaySessionConfig> {
-        let branch =
-            self.peers[index].client.device_branch.clone().ok_or(SdkError::IdentityRootMissing)?;
-        let mut config = self.config.clone();
-        config.principal_id = branch.principal_id.clone();
-        config.device_id = branch.device_id.clone();
-        config.target_delivery_id = branch.principal_id.clone();
-        config = config.with_account_identity(&self.peers[index].client)?;
-        Ok(config)
+        Ok(crate::client::native_test_support::bus::config_for(
+            &self.peers[index].client,
+            &self.config,
+        )?)
     }
     async fn request(&mut self, index: usize) -> TestResult<ramflux_protocol::Envelope> {
         let config = self.peer_config(index)?;
@@ -200,7 +156,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         let config = group.peer_config(index)?;
         let envelope = frames
             .iter()
-            .find(|e| e.target_delivery_id == config.principal_id)
+            .find(|e| e.target_delivery_id == config.target_delivery_id)
             .ok_or("targeted reply")?
             .clone();
         let mut engine = GatewaySessionEngine::with_test_transport(
@@ -218,7 +174,11 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 2);
     }
     assert_eq!(group.source.client.direct_messages("thread")?.len(), before);
-    assert_eq!(group.peers[2].client.direct_messages("thread")?.len(), 1);
+    assert_eq!(
+        group.peers[2].client.direct_messages("thread")?.len(),
+        group.baseline,
+        "a reply addressed to two requesters must not write rows for other members"
+    );
     assert_eq!(group.peers[2].client.surface_get("surface", 0, None)?["version"], 1);
     assert_eq!(
         group.source.client.account_db()?.actor_state_usage("surface/resync_answered/")?.0,

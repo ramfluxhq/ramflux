@@ -477,13 +477,14 @@ fn fresh_device_pre_bundle_restore_never_derives_authority_from_backup_key() -> 
 }
 
 #[test]
-fn existing_empty_account_file_still_gets_independent_random_subkeys() -> TestResult {
+fn existing_generation_one_empty_file_gets_independent_random_subkeys() -> TestResult {
     let root = crate::tests::temp_root("mac-empty-existing-file");
     let index = AccountIndex::open(&root)?;
     index.create_account("acct", "principal")?;
     let path = root.join(index.account("acct")?.db_relative_path);
     let key = AccountDbKey::from_bytes([0x42; 32]);
     // Reproduce a first open that created the encrypted file but installed no account key.
+    crate::schema_generation::creation::initialize_if_absent(&path, Some(&key))?;
     let connection = crate::database::Connection::open(&path)?;
     crate::encryption::apply_key(&connection, &key)?;
     drop(connection);

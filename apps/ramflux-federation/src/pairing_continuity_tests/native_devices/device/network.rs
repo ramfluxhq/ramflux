@@ -60,17 +60,16 @@ impl Device {
                 runtime: tokio::runtime::Handle::current(),
             }),
         });
+        let mut history = None;
+        let mut peer_root = None;
         if primary {
             let reference = identity.local_ref.device_id.clone();
             client.initialize_born_v3_branch(&reference, local.vault.clone()).await?;
-            seed_history(&client)?;
+            let seeding = session_config(&local, profile, stack, &identity.local_ref)?;
+            let (peer, dm) = seed_history(&mut client, &seeding).await?;
+            peer_root = Some(peer);
+            history = Some(dm);
             participant.take_client(&mut client)?;
-            let slot = participant.db.lock().map_err(|_| "test: source history writer")?;
-            slot.as_ref().ok_or("test: source history writer missing")?.store_message_content(
-                "paired-history-thread",
-                "paired-history-before-enrollment",
-                super::super::history::BODY,
-            )?;
         }
         let mut actor = PairingActor::new(
             identity,
@@ -79,7 +78,10 @@ impl Device {
             config.clone(),
         );
         actor.set_participant(participant.clone());
-        Ok((actor, Self { client, participant, credential, phrase, local }))
+        Ok((
+            actor,
+            Self { client, participant, credential, phrase, history, _peer: peer_root, local },
+        ))
     }
     pub(in super::super) async fn connect_network(
         &mut self,
@@ -159,17 +161,18 @@ fn session_config(
     config.device_epoch = reference.device_epoch;
     Ok(config)
 }
-fn seed_history(client: &RamfluxClient) -> TestResult {
-    let mut session =
-        client.init_dm_initiator_session(random_32()?, random_32()?, random_32()?, random_32()?)?;
-    let encrypted = session.encrypt(super::super::history::BODY, b"paired-history-thread")?;
-    client.send_direct_message(
-        "paired-history-thread",
-        "paired-history-before-enrollment",
-        "phone-primary",
-        &ramflux_protocol::canonical_json_bytes(&encrypted)?,
-    )?;
-    Ok(())
+/// A real independent peer account delivers a generation-1 DM that the primary receives
+/// first-hand, so its signed origin evidence is retained for the history carrier.
+async fn seed_history(
+    client: &mut RamfluxClient,
+    config: &GatewaySessionConfig,
+) -> TestResult<(tempfile::TempDir, (String, String))> {
+    let peer_root = tempfile::tempdir()?;
+    let peer = ramflux_sdk::NativeCallAccount::new(peer_root.path(), "history-peer").await?;
+    let text = std::str::from_utf8(super::super::history::BODY)?;
+    let message = ramflux_protocol::message::Message { text: text.into(), ..Default::default() };
+    let delivered = peer.deliver_message_to_client(client, config, &message).await?;
+    Ok((peer_root, delivered))
 }
 
 fn network_now() -> Result<u64, SdkError> {

@@ -13,7 +13,9 @@ struct Intent {
     conversation_id: String,
     text: String,
     #[serde(default)]
-    attachments: Vec<LocalBusMessageAttachmentInput>,
+    attachments: Vec<Value>,
+    #[serde(default)]
+    media: Vec<ramflux_protocol::message::MediaRef>,
 }
 impl Drop for Intent {
     fn drop(&mut self) {
@@ -33,7 +35,7 @@ pub(super) async fn send(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account_mut(state, request_account_id(request)?)?;
-    send_account(request, account).await
+    Box::pin(send_account(request, account)).await
 }
 
 pub(in crate::bus) async fn send_account(
@@ -41,9 +43,14 @@ pub(in crate::bus) async fn send_account(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let intent: Intent = serde_json::from_value(request.body.clone())?;
-    if intent.text.len() > 64 * 1024 || (intent.text.is_empty() && intent.attachments.is_empty()) {
-        return Err(invalid("conversation text must contain 1 to 65536 bytes or attachments"));
+    if !intent.attachments.is_empty() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired conversation attachment input; use media with r4 large_manifest"
+                .into(),
+        });
     }
+    RamfluxClient::attachment_message_content(&intent.text, &intent.media)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
@@ -62,27 +69,30 @@ pub(in crate::bus) async fn send_account(
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = local.principal_id.clone();
     let sender = local.device_id.clone();
-    let message_id = if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-        account.client.qualify_outgoing_group_message(group, &message_id)?.0
-    } else {
-        message_id
-    };
-    if thread.get("group_id").and_then(Value::as_str).is_some() && !intent.attachments.is_empty() {
-        return Err(invalid("group attachments are unsupported"));
-    }
     reserve_intent(&account.client, operation, &request.body)?;
     let deliveries = if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
         send_group(account, &intent, &message_id, &sender, group).await?
     } else {
-        send_direct(account, &intent, &message_id, &principal, &sender, &thread).await?
+        Box::pin(send_direct(account, &intent, &message_id, &principal, &sender, &thread)).await?
     };
     let submitted =
         deliveries.iter().all(|delivery| delivery.get("state") == Some(&json!("submitted")));
     if submitted {
         complete_intent(&account.client, operation)?;
     }
-    Ok(local_bus_ok(json!({"message_id":message_id,"conversation_id":intent.conversation_id,
-        "delivery_state":if submitted {"submitted"} else {"failed"},"deliveries":deliveries})))
+    let event_id =
+        deliveries.iter().find_map(|delivery| delivery.get("message_id").and_then(Value::as_str));
+    if deliveries
+        .iter()
+        .filter_map(|delivery| delivery.get("message_id").and_then(Value::as_str))
+        .any(|id| Some(id) != event_id)
+    {
+        return Err(SdkError::ReplayMismatch);
+    }
+    Ok(local_bus_ok(
+        json!({"message_id":event_id,"client_message_id":message_id,"conversation_id":intent.conversation_id,
+        "delivery_state":if submitted {"submitted"} else {"failed"},"deliveries":deliveries}),
+    ))
 }
 
 async fn send_group(
@@ -98,7 +108,7 @@ async fn send_group(
         "group",
         "group.send",
         json!({"group_id":group,"conversation_id":intent.conversation_id,"message_id":message,
-            "sender_id":sender,"plaintext_body_base64":ramflux_protocol::encode_base64url(intent.text.as_bytes()),
+            "sender_id":sender,"content":RamfluxClient::attachment_message_content(&intent.text, &intent.media)?,
             "encrypted_body_base64":""}),
     );
     let outcome = super::group::dispatch_group_send_request(&request, account).await;
@@ -166,10 +176,10 @@ async fn send_direct(
             "conversation_id":intent.conversation_id,"message_id":message,"envelope_id":envelope,
             "source_principal_id":principal,"sender_id":sender,"recipient_device_id":device.device_id,
             "recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,
-            "plaintext_body_base64":ramflux_protocol::encode_base64url(intent.text.as_bytes()),
+            "content":RamfluxClient::attachment_message_content(&intent.text, &intent.media)?,
             "encrypted_body_base64":"","created_at":now_unix_timestamp(),
-            "ttl":account.client.content_ttl()?,"attachments":intent.attachments}))?;
-        let outcome = super::message::submit_conversation_message(account, body).await;
+            "ttl":account.client.content_ttl()?}))?;
+        let outcome = Box::pin(super::message::submit_conversation_message(account, body)).await;
         deliveries.push(delivery(&device.device_id, outcome));
     }
     Ok(deliveries)
@@ -177,7 +187,9 @@ async fn send_direct(
 
 fn delivery(target: &str, result: Result<LocalBusDispatchResult, SdkError>) -> Value {
     match result {
-        Ok(_) => json!({"target":target,"state":"submitted"}),
+        Ok(result) => {
+            json!({"target":target,"state":"submitted","message_id":result.response_body.get("message_id")})
+        }
         Err(error) => {
             json!({"target":target,"state":"failed", "error_code":super::super::io::local_bus_error_code(&error)})
         }
@@ -368,3 +380,7 @@ mod retention_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "conversation_send_native_tests.rs"]
+mod native_tests;

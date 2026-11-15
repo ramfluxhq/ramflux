@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Unified message read model consumed by `rf` and `rf-tui`.
+//! Unified message read model consumed by `rf`, `rf-tui`, and agent-host.
 //!
 //! Every view is rebuilt from the durable account store. No RAM-only delivery page is consulted,
 //! so a restart or a long unread backlog cannot hide a committed message from a reader.
@@ -51,6 +51,16 @@ pub struct ReactionView {
     pub count: u32,
 }
 
+/// A device sequence rendered as a zero-padded 20-digit decimal string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaddedSequence(pub u64);
+
+impl Serialize for PaddedSequence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{:020}", self.0))
+    }
+}
+
 /// One message as a client renders it.
 #[derive(Clone, Debug, Serialize)]
 pub struct MessageView {
@@ -58,8 +68,13 @@ pub struct MessageView {
     pub id: String,
     pub conversation_id: String,
     pub author: Option<AuthorView>,
-    pub device_sequence: u64,
-    pub hlc: u64,
+    /// Zero-padded 20-digit decimal: lexicographic order equals numeric order and the value
+    /// stays I-JSON safe even with bit 63 set (own-device sequences).
+    pub device_sequence: PaddedSequence,
+    /// Wall-clock milliseconds of the hybrid logical clock; always below 2^53.
+    pub hlc_ms: u64,
+    /// 16-bit logical counter of the hybrid logical clock.
+    pub hlc_logical: u64,
     pub group_id: Option<String>,
     /// Durable sequence of this row's last change; the change cursor.
     pub journal_sequence: u64,
@@ -426,8 +441,9 @@ impl RamfluxClient {
                 device_id: author.device_id,
                 device_epoch: author.device_epoch,
             }),
-            device_sequence: identity.device_sequence,
-            hlc: identity.hlc,
+            device_sequence: PaddedSequence(identity.device_sequence),
+            hlc_ms: identity.hlc >> 16,
+            hlc_logical: identity.hlc & 0xffff,
             group_id: identity.group_id,
             journal_sequence: update.journal_sequence,
             is_own: message.is_own,

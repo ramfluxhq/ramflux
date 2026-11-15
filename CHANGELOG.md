@@ -1,5 +1,14 @@
 # Changelog
 
+## Message schema v1 activation
+
+- Activate storage generation 1 and the compact envelope profile with exact protobuf Inner bytes.
+- Ordinary DM/group sends allocate one retained event identity and private revision before fan-out.
+- The durable message read model is the CLI reader; receive responses identify its snapshot cursor.
+- Existing development stores require reset; generation-0 wire/application codecs are retired.
+- Retire opaque group JSON encryption; generated group sends use the typed native primitive.
+- Group history uses the generated public read model and never returns private revision bytes.
+
 - Activate negotiated ephemeral delivery with volatile same-node routing, bounded queues,
   exclusive signed deadlines and no durable fallback, client journal writes or offline wakes.
   Add real-process CLI push/restart coverage and retry partially applied capability reassertions.

@@ -22,7 +22,7 @@ async fn slow_contact(park: bool) -> TestResult {
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
-    let (sibling, config, receiver, directory, peer) =
+    let (mut sibling, config, receiver, directory, peer) =
         sibling_fixture_with_peer(&root, &mut source, false).await?;
     let peer_identity = peer.client.owned_device_identity()?;
     let manifest: crate::prekey::SdkDeviceManifestResponse = source
@@ -34,11 +34,6 @@ async fn slow_contact(park: bool) -> TestResult {
     let key = format!("identity/manifest-root/{peer_root}");
     source.client.account_db()?.remove_actor_state(&key)?;
     sibling.client.account_db()?.remove_actor_state(&key)?;
-    source.client.establish_friend_link(
-        "slow-contact",
-        source.client.owned_device_identity()?.root_commitment(),
-        peer_root,
-    )?;
     let now = now_unix_timestamp();
     source.client.account_db()?.persist_actor_state("own-contact/last-refresh", &now)?;
     let (slow_config, server) = crate::bus::own_contact_backfill::tests::slow_directory(
@@ -98,8 +93,15 @@ async fn slow_contact(park: bool) -> TestResult {
         .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
     assert_eq!(crate::bus::own_device_copy::flush(&mut source).await?, 1);
     let packet = own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    assert!(sibling.client.receive_own_device_message(&receiver, &entry(packet, 1)).await?);
-    assert_eq!(sibling.client.account_db()?.friend_link("slow-contact")?.state, "accepted");
+    assert!(
+        crate::client::native_test_support::bus::receive_copy(
+            &mut sibling.client,
+            &receiver,
+            &entry(packet, 1)
+        )
+        .await?
+    );
+    assert_eq!(sibling.client.account_db()?.friend_link("surface-peer")?.state, "accepted");
     assert!(sibling.client.account_db()?.actor_state_exists(&key)?);
     directory.abort();
     drop((source, sibling, peer));

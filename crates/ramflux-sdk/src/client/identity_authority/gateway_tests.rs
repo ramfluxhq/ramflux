@@ -3,7 +3,6 @@
 
 //! Malicious framed gateway response through the production TLS manifest-fetch path.
 use super::*;
-use crate::client::identity_authority::HeadUse;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[tokio::test]
@@ -96,72 +95,4 @@ pub(super) async fn manifest_server(
         prekey_http_url: None,
     });
     Ok((gateway, server))
-}
-
-#[tokio::test]
-async fn own_device_import_rejects_a_revoked_siblings_replayed_manifest_before_history_fetch()
--> TestResult {
-    let source = Actor::new("alice", "one", 81, 82, 1)?;
-    let target = Actor::new("alice", "two", 81, 83, 1)?;
-    let mut old = source.manifest()?;
-    old.devices.extend(target.manifest()?.devices);
-    sign_set(&source, &mut old, 1)?;
-    observe(&target.client, &old)?;
-    let mut current = old.clone();
-    let mut entries = old.signed_device_set.as_ref().ok_or("set")?.devices.clone();
-    let revoked = entries.iter_mut().find(|entry| entry.device_id == "one").ok_or("source")?;
-    revoked.status = DeviceSetStatus::Revoked;
-    revoked.revoked_at = Some(now_unix_timestamp());
-    current.signed_device_set = Some(ramflux_crypto::sign_device_set(
-        source.client.identity_root.as_ref().ok_or("root")?,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: PrincipalKind::Human,
-            device_set_epoch: 2,
-            devices: entries,
-        },
-    )?);
-    current.devices.retain(|device| device.device_id != "one");
-    observe(&target.client, &current)?;
-    let mut envelope = crate::client::own_device_sync::tests::envelope("one", "two");
-    envelope.principal_commitment = old.principal_commitment.clone();
-    envelope.created_at = now_unix_timestamp();
-    envelope.expires_at = envelope.created_at + 3600;
-    envelope.history_ref.key_slot.conversation_id =
-        crate::own_device_sync::own_device_sync_slot_conversation_id(
-            &envelope.snapshot_id,
-            &envelope.history_ref.object_id,
-            &envelope.target_device_id,
-        );
-    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
-        source.client.device_branch.as_ref().ok_or("branch")?,
-        &crate::own_device_sync::own_device_sync_signing_body(&envelope),
-    )?;
-    let before = target.client.observed_device_set(&old.principal_commitment)?;
-    let (gateway, server) = manifest_server(&target.path, old.clone()).await?;
-    let error = target
-        .client
-        .verify_own_device_sync_envelope(&gateway, &old.principal_commitment, &envelope)
-        .await
-        .err()
-        .ok_or("revoked source with old manifest was accepted")?;
-    server.await??;
-    assert!(error.to_string().contains("epoch"), "{error}");
-    assert_eq!(target.client.observed_device_set(&old.principal_commitment)?, before);
-    assert!(
-        target
-            .client
-            .device_identity(&ramflux_protocol::qualified_device_id(
-                &old.principal_commitment,
-                "one"
-            )?)
-            .and_then(|identity| target
-                .client
-                .require_cached_root_authority(HeadUse::NewAuthorization, &identity))
-            .is_err()
-    );
-    assert_eq!(
-        target.client.account_db()?.client_directory_ids("object", "", 100)?,
-        Vec::<String>::new()
-    );
-    Ok(())
 }

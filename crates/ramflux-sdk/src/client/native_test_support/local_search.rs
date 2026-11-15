@@ -21,7 +21,7 @@ impl Fixture {
             id,
             "primary",
             vault.as_ref(),
-            crate::custody::network_now()?,
+            crate::custody::network_now()?.saturating_sub(2),
         )?;
         let anchor = account.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
@@ -93,8 +93,11 @@ async fn local_search_live_versions_and_scope() -> TestResult {
         std::time::Duration::from_secs(30),
         Box::pin(async {
             let directory = ramflux_test_support::TestPath::new()?;
-            let source = Fixture::search_fixture(&directory, "source").await?;
+            let mut source = Fixture::search_fixture(&directory, "source").await?;
             let mut target = Fixture::search_fixture(&directory, "target").await?;
+            // Real media needs an endorsed layer-4 publication on both native devices.
+            super::activation_send::tests::publish_layer_four(&mut source).await?;
+            super::activation_send::tests::publish_layer_four(&mut target).await?;
             let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             source.client.persist_fetched_identity_directory(&target.manifest)?;
             target.client.persist_fetched_identity_directory(&source.manifest)?;
@@ -482,18 +485,22 @@ async fn attachment_scope(
         false,
     )?;
     let message = ramflux_protocol::encode_base64url(&identity.id);
-    let manifest = ramflux_protocol::encode_base64url([7; 32]);
-    let media =
-        [("search-wire", "/private/parent/reportcanary.pdf"), ("other-wire", "survivorcanary.pdf")]
-            .into_iter()
-            .map(|(wire, name)| g::MediaRef {
-                object_id: wire.into(),
-                manifest_digest: vec![7; 32],
-                mime_type: "application/octet-stream".into(),
-                file_name: Some(name.into()),
-                ..Default::default()
-            })
-            .collect();
+    let prototype = super::activation_send::tests::prepared_media(target)?;
+    let manifest = ramflux_protocol::encode_base64url(&prototype.manifest_digest);
+    let search_wire = ramflux_protocol::encode_base64url([5; 32]);
+    let other_wire = ramflux_protocol::encode_base64url([6; 32]);
+    let media = [
+        (search_wire.as_str(), "/private/parent/reportcanary.pdf"),
+        (other_wire.as_str(), "survivorcanary.pdf"),
+    ]
+    .into_iter()
+    .map(|(wire, name)| {
+        let mut media = prototype.clone();
+        media.object_id = wire.into();
+        media.file_name = Some(name.into());
+        media
+    })
+    .collect();
     let body = RamfluxClient::encode_generated_inner(
         identity,
         &g::Content {
@@ -508,11 +515,11 @@ async fn attachment_scope(
         request
     };
     for (wire, reference) in
-        [("other-wire", "other-reference"), ("search-wire", "search-reference")]
+        [(other_wire.as_str(), "other-reference"), (search_wire.as_str(), "search-reference")]
     {
         admit_attachment_reference(target, &message, wire, &manifest, reference)?;
         rebuild(runtime, &target.client).await?;
-        if wire == "other-wire" {
+        if wire == other_wire {
             assert!(
                 runtime
                     .query(&target.client, 1, &query("reportcanary.pdf"))
@@ -536,7 +543,7 @@ async fn attachment_scope(
         runtime.query(&target.client, 1, &scoped).await?.take()?.items.is_empty(),
         "attachment scope must be checked against its owning message"
     );
-    target.client.account_db()?.set_object_tombstoned("search-wire")?;
+    target.client.account_db()?.set_object_tombstoned(&search_wire)?;
     assert!(
         runtime
             .query(&target.client, 1, &query("reportcanary.pdf"))

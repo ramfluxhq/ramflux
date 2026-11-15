@@ -6,7 +6,7 @@ use crate::typing::{TypingOutcome, TypingReceiver};
 use std::time::Instant;
 
 async fn prepared_pair() -> Result<(Fixture, Fixture), SdkError> {
-    let (mut a, mut b) = pair(227, 229)?;
+    let (mut a, mut b) = pair(227, 229).await?;
     friend(&mut a, &b)?;
     let bootstrap = seal(&a, &b, message("bootstrap", "c"), b"bootstrap")?;
     apply(&mut b, &bootstrap).await?;
@@ -67,7 +67,8 @@ fn typing_envelope_at(
     draft.ttl = ttl;
     draft.recipient_device_id = Some(b.id.clone());
     draft.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
-    draft.target_delivery_id.clone_from(&b.id);
+    draft.source_principal_id = a.config()?.principal_id;
+    draft.target_delivery_id = b.config()?.target_delivery_id;
     a.client.prepare_typing_delivery(&mut engine, &draft, active)
 }
 
@@ -160,7 +161,7 @@ async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<()
 #[tokio::test(flavor = "current_thread")]
 async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (mut a, mut b) = pair(181, 183)?;
+    let (mut a, mut b) = pair(181, 183).await?;
     friend(&mut a, &b)?;
     let error = typing_envelope(&a, &b, "no-session", 5)
         .err()
@@ -207,7 +208,10 @@ async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Resul
         let reply = seal(&b, &a, reply_message, b"peer reply")?;
         apply(&mut a, &reply).await?;
         a.client.active_account_db = None;
-        a.client.unlock_account("alice", b"routed-test")?;
+        a.client.unlock_account("alice", b"native fixture data passphrase")?;
+        let vault =
+            a.native.as_ref().ok_or_else(|| invalid("native typing fixture"))?.vault.clone();
+        a.client.initialize_born_v3_branch(&a.id, vault).await?;
         assert_eq!(
             a.client.account_db()?.load_actor_state::<u16>(&budget_key)?,
             Some((batch + 1) * 64)

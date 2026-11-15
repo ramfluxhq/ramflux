@@ -1660,7 +1660,7 @@ pub(crate) mod tests {
             S: serde::Serializer,
         {
             use serde::ser::SerializeMap;
-            let mut map = serializer.serialize_map(Some(19))?;
+            let mut map = serializer.serialize_map(Some(20))?;
             map.serialize_entry("schema", "ramflux.envelope.v1")?;
             map.serialize_entry("version", &1)?;
             map.serialize_entry("domain", "ramflux.envelope.v1")?;
@@ -1673,12 +1673,13 @@ pub(crate) mod tests {
             map.serialize_entry("source_device_id", "phone")?;
             map.serialize_entry("target_delivery_id", "peer")?;
             map.serialize_entry("routing_set_id", &Option::<String>::None)?;
-            map.serialize_entry("delivery_class", "opaque_event")?;
+            map.serialize_entry("delivery_class", "message")?;
             map.serialize_entry("priority", "normal")?;
             map.serialize_entry("ttl", &3600)?;
             map.serialize_entry("created_at", &self.created_at)?;
             map.serialize_entry("encrypted_payload", "opaque")?;
             map.serialize_entry("payload_hash", "hash")?;
+            map.serialize_entry("delivery_mode", "durable")?;
             map.end()
         }
     }

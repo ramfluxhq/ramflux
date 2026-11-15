@@ -82,6 +82,7 @@ fn carrier(
 ) -> Result<Carrier, SdkError> {
     let device = sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let mut signed = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -150,6 +151,14 @@ fn project(
     carrier: &Carrier,
     projection: &str,
 ) -> Result<Outcome, SdkError> {
+    project_bytes(client, carrier, projection, &carrier.bytes()?)
+}
+fn project_bytes(
+    client: &RamfluxClient,
+    carrier: &Carrier,
+    projection: &str,
+    bytes: &[u8],
+) -> Result<Outcome, SdkError> {
     client
         .project_surface_message(
             "thread",
@@ -161,11 +170,12 @@ fn project(
                 expires_at: None,
                 group_epoch: None,
             },
-            &carrier.bytes()?,
+            bytes,
             false,
         )?
         .ok_or_else(|| super::invalid("not a surface"))
 }
+
 fn create(f: &Fixture) -> Result<(), SdkError> {
     let wire = event(1, C::CreateSurface(snapshot()))?;
     let signed = carrier(&f.author, PayloadKind::Event, "create", &wire)?;
@@ -320,7 +330,7 @@ fn surface_transaction_rolls_back_state_history_receipts_and_outbox() -> TestRes
     Ok(())
 }
 #[test]
-fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestResult {
+fn exact_typed_carrier_and_current_projection_survive_account_reopen() -> TestResult {
     let mut f = Fixture::new()?;
     let wire=b"{ \"schema\":\"ramflux.a2ui.conversation.v2\",\"conversationId\":\"thread\",\"version\":1,\"command\":{\"command\":\"createSurface\",\"surfaceId\":\"s\",\"surfaceType\":\"status_panel\",\"catalog\":\"basic\",\"catalogVersion\":\"1\",\"fallbackText\":\"Original bytes\"}}";
     let signed = carrier(&f.author, PayloadKind::Event, "raw", wire)?;
@@ -331,12 +341,9 @@ fn exact_protocol_bytes_and_current_projection_survive_account_reopen() -> TestR
         "",
         100,
     )?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(
-            history[0]["carrier"]["wire_base64"].as_str().ok_or("wire")?
-        )?,
-        wire
-    );
+    let retained: Carrier = serde_json::from_value(history[0]["carrier"].clone())?;
+    assert_eq!(retained.bytes()?, signed.bytes()?, "history retains exact typed carrier");
+    assert_eq!(retained.to_generated()?, signed.to_generated()?, "history retains typed fields");
     f.human = RamfluxClient::new();
     f.human.open_account_index(f.root.join("human"))?;
     f.human.unlock_account("human", b"surface-test-secret")?;
@@ -426,7 +433,10 @@ fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResu
         br#"{"schema":"ramflux.a2ui.conversation.v2","version":1,"version":2}"#,
     );
     assert!(signed.payload().is_err());
-    assert!(!project(&f.human, &signed, "invalid")?.accepted);
+    assert!(
+        project(&f.human, &signed, "invalid").is_err(),
+        "duplicate JSON is refused before typed encoding"
+    );
     assert!(f.human.surface_get("s", 0, None)?.is_null());
     assert!(f.human.surface_state("s")?.is_none());
     Ok(())
@@ -435,11 +445,19 @@ fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> TestResu
 #[test]
 fn carrier_metadata_has_a_budget_before_renderer_error_projection() -> TestResult {
     let f = Fixture::new()?;
-    let mut signed =
+    let signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    signed.surface_id = "x".repeat(257);
-    assert!(Carrier::decode(&signed.bytes()?).is_err());
-    assert!(!project(&f.human, &signed, "oversized")?.accepted);
+    let mut typed = signed.to_generated()?;
+    typed.surface_id = "x".repeat(257);
+    let bytes = prost::Message::encode_to_vec(&typed);
+    assert!(
+        !Carrier::decode(&bytes).is_ok_and(|value| value.is_some()),
+        "typed metadata bound must precede renderer projection"
+    );
+    assert!(
+        project_bytes(&f.human, &signed, "oversized", &bytes).is_err(),
+        "oversized typed metadata must not create a surface"
+    );
     assert_eq!(f.human.surface_list("thread", "", 100)?["surfaces"], json!([]));
     Ok(())
 }

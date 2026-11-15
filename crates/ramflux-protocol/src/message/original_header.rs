@@ -100,9 +100,7 @@ fn group_bytes(
 /// Refuses any header that cannot be an original durable Message.
 pub fn transcript(header: &Header<'_>) -> Result<Vec<u8>, EvidenceError> {
     let bad = EvidenceError::OriginCommitmentMismatch;
-    if header.layer == 0
-        || (crate::schema_profile::ACTIVE_STORAGE_GENERATION >= 1
-            && header.layer < registry::PROFILE_FLOOR)
+    if header.layer < registry::PROFILE_FLOOR
         || header.kind != 1
         || header.expires_at <= header.issued_at
     {

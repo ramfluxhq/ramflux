@@ -239,8 +239,6 @@ impl RamfluxClient {
                 conversation_id,
                 message_id,
             );
-            #[cfg(test)]
-            super::super::routed::observe_legacy_registration(&result);
             match result {
                 Ok(()) => admitted.push(attachment.clone()),
                 Err(SdkError::ObjectErased) if consume_erased => {}
@@ -261,8 +259,6 @@ impl RamfluxClient {
         let mut attachments = Vec::new();
         if options.auto_fetch_attachments {
             for attachment in attachment_refs {
-                #[cfg(test)]
-                crate::client::routed::observe_legacy_import(self, attachment)?;
                 match self
                     .import_dm_attachment_from_relay_via_gateway(
                         engine,

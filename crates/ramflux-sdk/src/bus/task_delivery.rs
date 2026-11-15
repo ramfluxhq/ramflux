@@ -6,8 +6,7 @@ use crate::prelude::*;
 pub(super) const SUBMIT_ALLOWANCE: Duration = Duration::from_secs(15);
 pub(super) struct Destination {
     pub route: LocalBusFederationRoute,
-    pub conversation_id: String,
-    pub message_id: String,
+
     pub device_id: String,
     pub recipient_root: String,
 }
@@ -101,25 +100,17 @@ fn federated_envelope(
     destination: &Destination,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let envelope = &delivery.envelope;
-    let encrypted_body = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
-        .map_err(|_| SdkError::LocalBus("invalid retained task ciphertext".into()))?;
-    gateway_direct_message_envelope(
-        config,
-        &GatewayDirectMessage {
-            conversation_id: destination.conversation_id.clone(),
-            message_id: destination.message_id.clone(),
-            envelope_id: envelope.envelope_id.clone(),
-            source_principal_id: envelope.source_principal_id.clone(),
-            sender_id: envelope.source_device_id.clone(),
-            recipient_device_id: Some(destination.device_id.clone()),
-            recipient_principal_commitment: Some(destination.recipient_root.clone()),
-            target_delivery_id: envelope.target_delivery_id.clone(),
-            encrypted_body,
-            created_at: envelope.created_at,
-            ttl: envelope.ttl,
-        },
-        None,
-    )
+    if envelope.source_device_id != config.device_id
+        || destination.recipient_root.is_empty()
+        || destination.device_id.is_empty()
+    {
+        return Err(SdkError::InboundRejected(
+            "retained Task destination or signer mismatch".into(),
+        ));
+    }
+    ramflux_protocol::message::outer::refuse_live_bridge(envelope)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    Ok(envelope.clone())
 }
 
 #[cfg(test)]
@@ -199,16 +190,15 @@ mod tests {
             let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
             Ok(())
         });
-        let root = super::super::runtime_tests::root("federated-submit-deadline");
-        let mut account = super::super::runtime_tests::account(
-            &root,
+        let mut account = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+            "federated-submit-deadline",
+            "device-sender",
             "sender",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let live = account.session_client().await?;
+        ))
+        .await?
+        .into_bus();
         account.install_test_session(GatewaySessionEngine::with_test_transport(
-            live.config.clone(),
+            account.gateway_config.clone(),
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
         ));
         let message = GatewayDirectMessage {
@@ -224,7 +214,9 @@ mod tests {
             created_at: now_unix_timestamp(),
             ttl: 600,
         };
-        let envelope = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
+        let envelope = crate::bus::delivery_receipts::background::retained_receipt_fixture(
+            &account, &message,
+        )?;
         let destination = Destination {
             route: LocalBusFederationRoute {
                 federation_url: url,
@@ -234,8 +226,7 @@ mod tests {
                 admin_token: None,
                 recipient_prekey_url: None,
             },
-            conversation_id: message.conversation_id,
-            message_id: message.message_id,
+
             device_id: "remote-device".into(),
             recipient_root: "remote-root".into(),
         };
@@ -316,8 +307,7 @@ mod tests {
                 admin_token: None,
                 recipient_prekey_url: None,
             },
-            conversation_id: "task".into(),
-            message_id: "message".into(),
+
             device_id: "remote".into(),
             recipient_root: "remote-root".into(),
         };

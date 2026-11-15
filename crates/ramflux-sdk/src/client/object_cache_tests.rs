@@ -145,9 +145,19 @@ async fn attachment_last_owner_erasure_invalidates_cached_keys_and_reopen_reads(
     };
     fixture.client.verify_persist_dm_attachment(&reference, &download, key)?;
     assert_eq!(fixture.client.decrypt_object(&object.object_id)?, b"attachment-private-body");
-    fixture.client.delete_direct_message("thread", "first", "local", "first-delete")?;
+    fixture.client.delete_direct_message(
+        "thread",
+        "first",
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"first-delete"),
+    )?;
     assert_eq!(fixture.client.decrypt_object(&object.object_id)?, b"attachment-private-body");
-    fixture.client.delete_direct_message("thread", "last", "local", "last-delete")?;
+    fixture.client.delete_direct_message(
+        "thread",
+        "last",
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"last-delete"),
+    )?;
     assert!(fixture.client.object_store.cached_object(&object.object_id).is_none());
     assert!(matches!(
         fixture.client.object_store.object_key(&object.object_id),
@@ -258,7 +268,12 @@ async fn attachment_history_container_erasure_covers_both_dependency_orders_and_
             key,
         )?;
         if parent_first {
-            fixture.client.delete_direct_message("thread", "second", "local", "delete-second")?;
+            fixture.client.delete_direct_message(
+                "thread",
+                "second",
+                "local",
+                &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"delete-second"),
+            )?;
             assert!(matches!(
                 fixture.client.decrypt_object(&parent.object_id),
                 Err(SdkError::ObjectErased)
@@ -266,7 +281,12 @@ async fn attachment_history_container_erasure_covers_both_dependency_orders_and_
             assert_eq!(fixture.client.decrypt_object(&child.object_id)?, child_body);
             assert!(!fixture.client.account_db()?.actor_state_exists(key)?);
         }
-        fixture.client.delete_direct_message("thread", "first", "local", "delete-first")?;
+        fixture.client.delete_direct_message(
+            "thread",
+            "first",
+            "local",
+            &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"delete-first"),
+        )?;
         assert!(matches!(
             fixture.client.decrypt_object(&child.object_id),
             Err(SdkError::ObjectErased)

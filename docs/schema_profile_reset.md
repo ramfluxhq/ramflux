@@ -1,10 +1,9 @@
 # Storage profile generation and development reset
 
-The active application profile remains generation **0**. Message schema v1
-reserves generation **1**; this foundation does not activate it or advertise a
-new wire profile. The approved design is imported verbatim from `61d96751` in
-`docs/design/message_schema_v1.md`. Its activation rules apply to the later
-coordinated reset.
+The active application profile is generation **1** (message schema v1). Development
+account, index, backup and gateway stores require the coordinated reset. Generation-0
+stores are refused with `schema_reset_required`; there is no compatibility reader or
+down-migration. The protocol design is `docs/design/message_schema_v1.md`.
 
 SQLite `PRAGMA user_version` is the durable application-profile marker, separate
 from SQL migration checksums and versions. Existing unmarked databases read as
@@ -12,9 +11,10 @@ zero. All account/index opens, query-only readers and private archive/restore
 opens check it after applying the encryption key and before application-table
 access or migrations. This check performs no writes and installs no migration.
 SQLite snapshots and re-encrypted copies retain the marker. New profile creation
-must set its generation before writing application records; activation must
-change the shared active constant and write the marker in every new database.
-Do not alter the active constant or reinterpret an existing store in PR1.
+publishes a private, fully written generation-1 database header atomically before
+application schema access. It never initializes or replaces an existing database,
+including an empty generation-0 file. Account headers use the account encryption
+key. Concurrent creation cannot overwrite the winning database.
 
 Backup streams additionally carry `schema_generation` in their authenticated
 context totals. Absence means generation zero for existing archives. The SDK

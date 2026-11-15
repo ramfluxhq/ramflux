@@ -12,6 +12,7 @@ use crate::client::recovery::{
 };
 use crate::client::routed::{Kind, Opened};
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
 use ramflux_crypto::RootQualifiedDeviceRef;
 use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
@@ -34,9 +35,9 @@ struct PendingGuardianInvite {
 }
 
 fn invite_fingerprint(invite: &SdkGuardianInviteMessage) -> Result<String, SdkError> {
-    Ok(ramflux_protocol::encode_base64url(
-        blake3::hash(&ramflux_protocol::canonical_json_bytes(invite)?).as_bytes(),
-    ))
+    let bytes = invite_to_generated(invite)?.encode_to_vec();
+    let transcript = crate::client::task::generated::typed_transcript("GuardianInvite", &bytes)?;
+    Ok(ramflux_protocol::encode_base64url(blake3::hash(&transcript).as_bytes()))
 }
 
 fn id_key(prefix: &str, id: &str) -> String {
@@ -165,6 +166,25 @@ pub(super) fn accept_to_generated(accept: &SdkGuardianAcceptMessage) -> g::Guard
     }
 }
 
+pub(in crate::client) fn invite_transcript(
+    invite: &SdkGuardianInviteMessage,
+) -> Result<Vec<u8>, SdkError> {
+    let mut value = invite_to_generated(invite)?;
+    if let Some(signed) = &mut value.signed {
+        signed.signature.clear();
+    }
+    crate::client::task::generated::typed_transcript("GuardianInvite", &value.encode_to_vec())
+}
+pub(in crate::client) fn accept_transcript(
+    accept: &SdkGuardianAcceptMessage,
+) -> Result<Vec<u8>, SdkError> {
+    let mut value = accept_to_generated(accept);
+    if let Some(signed) = &mut value.signed {
+        signed.signature.clear();
+    }
+    crate::client::task::generated::typed_transcript("GuardianAccept", &value.encode_to_vec())
+}
+
 /// A verified recovery control in its native form.
 pub(in crate::client::routed) enum VerifiedRecovery {
     Invite(Box<SdkGuardianInviteMessage>),
@@ -225,8 +245,12 @@ impl RamfluxClient {
                 if share.len() != 32 {
                     return Err(content("guardian share length"));
                 }
-                ramflux_protocol::verify_signed_fields(&native, &native.signed, &key)
-                    .map_err(|_| authority("guardian invite signature invalid"))?;
+                ramflux_crypto::verify_canonical_signature(
+                    &invite_transcript(&native)?,
+                    &native.signed.signature,
+                    &key,
+                )
+                .map_err(|_| authority("guardian invite signature invalid"))?;
                 Ok(VerifiedRecovery::Invite(Box::new(native)))
             }
             Some(g::recovery_control::Payload::Accept(accept)) => {
@@ -252,8 +276,12 @@ impl RamfluxClient {
                 {
                     return Err(authority("guardian accept differs from the issued invite"));
                 }
-                ramflux_protocol::verify_signed_fields(&native, &native.signed, &key)
-                    .map_err(|_| authority("guardian accept signature invalid"))?;
+                ramflux_crypto::verify_canonical_signature(
+                    &accept_transcript(&native)?,
+                    &native.signed.signature,
+                    &key,
+                )
+                .map_err(|_| authority("guardian accept signature invalid"))?;
                 Ok(VerifiedRecovery::Accept(Box::new(native)))
             }
             None => Err(content("recovery control requires Invite or Accept")),
@@ -310,7 +338,6 @@ impl RamfluxClient {
     /// # Errors
     /// Refuses an inactive profile, or returns a storage error when the database cannot be accessed.
     pub fn pending_guardian_invites(&self) -> Result<Vec<SdkPendingGuardianInvite>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         let mut invites = Vec::new();
@@ -344,7 +371,6 @@ impl RamfluxClient {
         handle: &SdkGuardianInviteHandle,
         accept: bool,
     ) -> Result<Option<SdkGuardianAcceptMessage>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             let key = pending_storage_key(&handle.source, &handle.invite_id);
@@ -389,8 +415,12 @@ impl RamfluxClient {
         {
             return Err(authority("pending guardian authority expired or changed"));
         }
-        ramflux_protocol::verify_signed_fields(invite, &invite.signed, &signing_key)
-            .map_err(|_| authority("pending guardian signature invalid"))?;
+        ramflux_crypto::verify_canonical_signature(
+            &invite_transcript(invite)?,
+            &invite.signed.signature,
+            &signing_key,
+        )
+        .map_err(|_| authority("pending guardian signature invalid"))?;
         Ok(())
     }
 }

@@ -15,7 +15,6 @@ use ramflux_protocol::ephemeral::{
 };
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 pub(super) const NOW_MS: u64 = 1_000_000;
@@ -84,13 +83,11 @@ impl EphemeralEnqueue for EnqueueRecorder {
 }
 
 pub(super) fn valid_envelope() -> Envelope {
-    let mut extensions = BTreeMap::new();
-    extensions.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
     Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.message".to_owned(),
-        ext: Ext { ext: extensions },
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        ext: Ext::default(),
         signed: SignedFields {
             signing_key_id: "key".to_owned(),
             signature_alg: SignatureAlg::Ed25519,
@@ -101,15 +98,18 @@ pub(super) fn valid_envelope() -> Envelope {
         source_device_id: "device".to_owned(),
         target_delivery_id: "target".to_owned(),
         routing_set_id: None,
-        delivery_class: DeliveryClass::OpaqueEvent,
+        delivery_class: DeliveryClass::Message,
         priority: Priority::Low,
         ttl: MAX_EPHEMERAL_TTL_SECONDS,
         created_at: 1_000,
-        encrypted_payload: "payload".to_owned(),
-        payload_hash: "hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+        payload_hash: ramflux_crypto::blake3_256_base64url(
+            ramflux_protocol::domain::ENVELOPE,
+            b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+        ),
+        delivery_mode: Some("ephemeral".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     }
 }
 

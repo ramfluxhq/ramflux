@@ -46,6 +46,7 @@ impl AccountIndex {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
         fs::create_dir_all(root.as_ref())?;
         let path = root.as_ref().join(ACCOUNT_INDEX_FILE);
+        crate::schema_generation::creation::initialize_if_absent(&path, None)?;
         let connection = Connection::open(path)?;
         crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch(

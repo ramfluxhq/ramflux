@@ -39,30 +39,12 @@ pub(crate) async fn snapshot(bus: &mut impl AgentBus, method: &str, field: &str)
     Ok(())
 }
 async fn direct_peer(bus: &mut impl AgentBus, message: &Value) -> Result<Value> {
-    let sender = field(message, "sender_id")?;
-    let mut peer = if let Some(peer) =
-        directory_find(bus, "identity.directory", "identities", |peer| {
-            peer["principal_id"] == sender
-        })
-        .await?
-    {
-        peer
-    } else {
-        let by_device = directory_find(bus, "identity.directory", "identities", |peer| {
-            contains(&peer["devices"], "device_id", sender)
-        })
-        .await?;
-        if let Some(peer) = by_device {
-            peer
-        } else {
-            let commitment = field(message, "sender_root_commitment")?;
-            directory_find(bus, "identity.directory", "identities", |peer| {
-                peer["contact_identity_commitment"] == commitment
-            })
-            .await?
-            .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?
-        }
-    };
+    let commitment = field(&message["author"], "account_anchor")?;
+    let mut peer = directory_find(bus, "identity.directory", "identities", |peer| {
+        peer["contact_identity_commitment"] == commitment
+    })
+    .await?
+    .ok_or(Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::NotFound))?;
     if peer["devices"].as_array().is_some_and(Vec::is_empty) {
         // One bounded verified manifest fetch and store for an existing contact.
         let commitment = field(&peer, "contact_identity_commitment")?.to_owned();
@@ -219,12 +201,9 @@ pub(crate) async fn sender_display_name(
     bus: &mut impl AgentBus,
     message: &Value,
 ) -> Result<String> {
-    let sender = field(message, "sender_id")?;
+    let root = field(&message["author"], "account_anchor")?;
     let identity = directory_find(bus, "identity.directory", "identities", |row| {
-        row["principal_id"] == sender
-            || row["devices"]
-                .as_array()
-                .is_some_and(|devices| devices.iter().any(|device| device["device_id"] == sender))
+        row["contact_identity_commitment"] == root
     })
     .await?;
     Ok(identity
@@ -238,6 +217,34 @@ pub(crate) async fn sender_display_name(
         .collect())
 }
 
+pub(crate) async fn mentions_self(
+    bus: &mut impl AgentBus,
+    state: &Checkpoint,
+    message: &Value,
+) -> Result<bool> {
+    let Some(entities) = message.pointer("/content/message/entities") else { return Ok(false) };
+    let rows = entities.as_array().ok_or(Error::MalformedField("entities"))?;
+    if rows.len() > 1024 {
+        return Err(Error::Limit);
+    }
+    let own = directory_find(bus, "identity.directory", "identities", |row| {
+        row["is_self"] == true && row["principal_id"] == state.principal_id
+    })
+    .await?
+    .ok_or(Error::IdentityLost)?;
+    let root = field(&own, "contact_identity_commitment")?;
+    for entity in rows {
+        let entity: ramflux_protocol::message::Entity =
+            serde_json::from_value(entity.clone()).map_err(|_| Error::MalformedField("entity"))?;
+        if entity.kind == ramflux_protocol::message::EntityKind::EntityMention as i32
+            && entity.value.as_deref() == Some(root)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn reply_outputs(
     bus: &mut impl AgentBus,
     state: &Checkpoint,
@@ -247,7 +254,7 @@ pub(crate) async fn reply_outputs(
     index: usize,
 ) -> Result<Vec<crate::checkpoint::Output>> {
     let conversation_id = field(conversation, "id")?;
-    let input_id = field(message, "message_id")?;
+    let input_id = field(message, "id")?;
     let operation = ramflux_protocol::hash_base64url(
         "ramflux.agent.reply.v1",
         &ramflux_protocol::canonical_json_bytes(&(

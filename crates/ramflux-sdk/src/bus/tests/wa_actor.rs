@@ -10,6 +10,7 @@
 )]
 //! Actor-path WA flush and routed early-return cover (S6b P24b2b r3).
 
+use super::fixture::seal_message as seal;
 use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
     PUSH_E, account_of, acked, open_account, push_engine, runtime_for, stage,
@@ -18,11 +19,12 @@ use crate::bus::connection_manager::{
     NetworkingState, ReceiveTrigger, receive::test_catch_up, receive::test_pass,
     receive::test_pass_anchored,
 };
-use crate::bus::dispatch::task_transport::{Target, seal};
+use crate::bus::dispatch::task_transport::Target;
 use crate::bus::push_receiver::executor::{ExecutorOwner, LedgerExecutor};
 use crate::bus::push_receiver::sweep::SweepSetting;
 use crate::gateway::access::CountingGateway;
 use crate::prelude::*;
+use ramflux_protocol::message as g;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +78,15 @@ async fn start_runtime(
     fixture: &mut Fixture,
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
     let mut runtime = start_runtime_live(fixture)?;
-    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    let peer = fixture.peer.client.owned_device_identity()?;
+    let account = account_of(&runtime)?;
+    Box::pin(account.client.cache_verified_device_manifest(
+        &account.gateway_config,
+        peer.root_commitment(),
+        "wa-actor-live-directory",
+    ))
+    .await?;
+    let handle = account.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await?;
     wait_connected_receive(&mut runtime, &handle).await?;
     Ok(runtime)
@@ -224,7 +234,7 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: fixture.source.target_delivery_id.clone(),
         federation: None,
         own: false,
     };
@@ -244,7 +254,7 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
         entries.push(GatewayInboxEntry {
             forwarded: false,
             inbox_seq: seq,
-            target_delivery_id: "sender".into(),
+            target_delivery_id: fixture.source.target_delivery_id.clone(),
             envelope: dm.envelope,
         });
     }
@@ -559,9 +569,10 @@ async fn wait_connected_receive(
     .await?;
     if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
         return Err(format!(
-            "Connected receive did not finish: {:?}; trace={:?}",
+            "Connected receive did not finish: {:?}; trace={:?}; networking={:?}",
             handle.test_receive_last_error(),
-            handle.test_receive_trace()
+            handle.test_receive_trace(),
+            handle.snapshot()
         )
         .into());
     }
@@ -663,7 +674,7 @@ async fn connected_and_sweep_real() -> Case {
     // std-thread oneshot, and while the 900s sweep is jumped on a live TCP
     // session. Dropping the hold lets paused-clock auto-advance fire connect
     // timeouts instead of polling the loopback socket.
-    let (release_hold, hold) = std::sync::mpsc::channel::<()>();
+    let (release_hold, hold) = std::sync::mpsc::sync_channel::<()>(1);
     let inhibit = tokio::task::spawn_blocking(move || {
         let _ = hold.recv();
     });
@@ -830,28 +841,22 @@ async fn routed_contact_request_covers_and_acks() -> Case {
 
 async fn contact_request_case() -> Case {
     let mut fixture = Box::pin(Fixture::new("h1-contact")).await?;
-    let root = fixture.source.client.owned_device_identity()?.root_commitment().to_owned();
-    let mut source_manifest: crate::prekey::SdkDeviceManifestResponse = serde_json::from_value(
-        fixture
-            .gateway
-            .lock()
-            .map_err(|_| "gateway")?
-            .manifests
-            .get(&root)
-            .cloned()
-            .ok_or("manifest")?,
-    )?;
-    source_manifest.devices.retain(|device| device.device_id == "device-sender");
-    let sender_delivery = source_manifest.devices[0].target_delivery_id.clone();
+    let source_manifest = fixture
+        .source
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("source native manifest")?
+        .manifest
+        .clone();
     {
-        let config = super::fixture::bind_scripted_device(
-            fixture.source.gateway_config.clone(),
+        fixture.peer.gateway_config = crate::client::native_test_support::bus::config_for(
             &fixture.peer.client,
+            &fixture.source.gateway_config,
         )?;
-        fixture.peer.gateway_config = config;
         fixture.peer.engine = None;
         fixture.peer.client.stage_contact_request(&source_manifest, "h1-link", None)?;
-        crate::client::contact_requests::flush(&mut fixture.peer).await?;
+        crate::client::contact_requests::native_tests::deliver_pending(&mut fixture.peer).await?;
     }
     let envelope = {
         let served = fixture.gateway.lock().map_err(|_| "gateway")?;
@@ -859,22 +864,17 @@ async fn contact_request_case() -> Case {
             .attempts
             .iter()
             .rev()
-            .find(|envelope| envelope.target_delivery_id == sender_delivery)
+            .find(|envelope| envelope.target_delivery_id == fixture.source.target_delivery_id)
             .cloned()
             .ok_or("contact request submit")?
     };
-    fixture.source.gateway_config.target_delivery_id.clone_from(&sender_delivery);
-    fixture.source.target_delivery_id.clone_from(&sender_delivery);
-    if let Some(engine) = fixture.source.engine.as_mut() {
-        engine.config.target_delivery_id.clone_from(&sender_delivery);
-    }
     {
         let mut served = fixture.gateway.lock().map_err(|_| "gateway")?;
-        served.ack_target.clone_from(&sender_delivery);
+        served.ack_target = fixture.source.target_delivery_id.clone();
         served.inbox = vec![GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: sender_delivery,
+            target_delivery_id: fixture.source.target_delivery_id.clone(),
             envelope,
         }];
     }
@@ -1075,10 +1075,12 @@ async fn routed_committed_covers_and_acks_case() -> Case {
             },
         )?;
     }
-    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::IdentityRootMissing);
+    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::InboundPending(
+        "identity authority: current head not cached".into(),
+    ));
     drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     drive_flush(&mut runtime, true).await?;
-    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via IdentityRootMissing");
+    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via identity-authority absence");
     assert_eq!(acked(&gateway)?, 2);
     runtime.stop_connection().await;
     drop(runtime);
@@ -1359,8 +1361,9 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
             .map_err(|error| SdkError::LocalBus(error.to_string()))?,
     );
     store.bootstrap_router(&router).map_err(|error| SdkError::LocalBus(error.to_string()))?;
-    let incarnation =
-        store.initialize_inbox("sender").map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let incarnation = store
+        .initialize_inbox(&fixture.source.target_delivery_id)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
     {
         let mut gateway = gateway.lock().map_err(|_| "gateway")?;
         for account in [&fixture.source, &fixture.peer, &fixture.sibling] {
@@ -1371,7 +1374,12 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         gateway.router = Some((Arc::clone(&router), Arc::clone(&store)));
     }
 
-    let mut runtime = start_runtime_default_on(&mut fixture).await?;
+    let mut runtime = start_runtime_default_on(&mut fixture).await.map_err(|error| {
+        format!(
+            "initial connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(
         account_of(&runtime)?.client.account_db()?.receive_activation()?,
         ramflux_storage::ReceiveActivation::Activated
@@ -1386,11 +1394,21 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         "fresh default-on Push binds the gateway incarnation"
     );
     router
-        .prepare_publication_target(&store, "sender")
+        .prepare_publication_target(&store, &fixture.source.target_delivery_id)
         .map_err(|error| SdkError::LocalBus(error.to_string()))?;
-    let first_ids = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
-    drive_flush(&mut runtime, true).await?;
+    let (first_ids, mut ack_ids) = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_flush(&mut runtime, true).await.map_err(|error| {
+        format!(
+            "restart ACK: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(snap(&runtime)?.cursor, 2, "first catch-up applies both live messages");
     assert_eq!(acked(&gateway)?, 2, "WA ACKs both live sequences");
     assert_eq!(
@@ -1418,7 +1436,8 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     runtime.stop_connection().await;
     drop(runtime);
 
-    let pending_ids = submit_peer_through_gateway(&mut fixture, 3, 2).await?;
+    let (pending_ids, pending_acks) = submit_peer_through_gateway(&mut fixture, 3, 2).await?;
+    ack_ids.extend(pending_acks);
     let mut expected = first_ids.clone();
     expected.extend(pending_ids);
 
@@ -1437,9 +1456,24 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     runtime.start_connection()?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await?;
-    wait_connected_receive(&mut runtime, &handle).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
-    drive_flush(&mut runtime, true).await?;
+    wait_connected_receive(&mut runtime, &handle).await.map_err(|error| {
+        format!(
+            "restart connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_flush(&mut runtime, true).await.map_err(|error| {
+        format!(
+            "restart ACK: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(snap(&runtime)?.cursor, 4, "restart catch-up applies pending messages");
     assert!(snap(&runtime)?.intents.is_empty(), "restart has no leftover ACK intent");
     let applied = applied_message_ids(&runtime)?;
@@ -1451,7 +1485,7 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     assert_eq!(applied.len(), 4, "restart application is duplicate-free");
     assert_eq!(acked(&gateway)?, 4, "node ACKs all four sequences on the wire");
     let acked_ids = gateway.lock().map_err(|_| "gateway")?.acked.clone();
-    for id in &expected {
+    for id in &ack_ids {
         assert!(acked_ids.contains(id), "node settled {id}");
     }
     drop(runtime);
@@ -1464,40 +1498,47 @@ async fn submit_peer_through_gateway(
     fixture: &mut Fixture,
     start: u64,
     n: u64,
-) -> Case<Vec<String>> {
+) -> Case<(Vec<String>, Vec<String>)> {
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: fixture.source.target_delivery_id.clone(),
         federation: None,
         own: false,
     };
     let source = fixture.peer.client.owned_device_identity()?;
     let mut engine = fixture.peer.session_client().await?;
     let mut envelopes = Vec::new();
+    let mut ids = Vec::new();
     for offset in 0..n {
         let seq = start.saturating_add(offset);
-        let dm = seal(
+        let (delivery, id) = super::fixture::seal_content_with_identity(
             &fixture.peer,
             &mut engine,
             &target,
-            "healthy",
-            format!("wa-{seq}").as_bytes(),
-            crate::client::routed::Route::direct(),
+            g::Content {
+                value: Some(g::content::Value::Message(g::Message {
+                    text: format!("wa-{seq}"),
+                    ..Default::default()
+                })),
+            },
+            None,
+            None,
         )
         .await?;
-        envelopes.push(dm.envelope);
+        envelopes.push(delivery.envelope);
+        ids.push(id);
     }
     fixture.peer.install_test_session(engine);
     let router = {
         let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
-        gateway.ack_target = "sender".into();
+        gateway.ack_target = fixture.source.target_delivery_id.clone();
         gateway.router.clone().ok_or("router bound to gateway")?
     };
-    let mut ids = Vec::new();
+    let mut transport = Vec::new();
     let mut queued_entries = Vec::new();
     for envelope in envelopes {
-        ids.push(envelope.envelope_id.clone());
+        transport.push(envelope.envelope_id.clone());
         let queued =
             super::fixture::publish_router_envelope(&router.0, &router.1, &source, envelope)
                 .await?;
@@ -1512,7 +1553,7 @@ async fn submit_peer_through_gateway(
             envelope: queued.envelope.clone(),
         });
     }
-    Ok(ids)
+    Ok((ids, transport))
 }
 
 fn applied_message_ids(
@@ -1521,7 +1562,7 @@ fn applied_message_ids(
     let account = account_of(runtime)?;
     Ok(account
         .client
-        .direct_messages("healthy")?
+        .direct_messages(&super::fixture::direct_conversation(&account.client)?)?
         .into_iter()
         .map(|message| message.message_id)
         .collect())
@@ -1540,7 +1581,7 @@ async fn resume_fixture_isolates_target_watermarks() -> Case {
         gateway.inbox.push(other);
     }
     let request = serde_json::json!({ "incarnation_id": PUSH_E,
-        "resume": { "target_delivery_id": "sender", "after_inbox_seq": 2, "limit": 64 } });
+        "resume": { "target_delivery_id": fixture.source.target_delivery_id, "after_inbox_seq": 2, "limit": 64 } });
     let page = super::fixture::resume_page_response(&fixture.gateway, &request)?;
     assert_eq!(page["issued_inbox_seq"], 4);
     assert_eq!(page["covered_through_seq"], 4);
@@ -1549,7 +1590,7 @@ async fn resume_fixture_isolates_target_watermarks() -> Case {
             .as_array()
             .ok_or("entries")?
             .iter()
-            .all(|row| row["entry"]["target_delivery_id"] == "sender")
+            .all(|row| row["entry"]["target_delivery_id"] == fixture.source.target_delivery_id)
     );
     drop(fixture);
     Ok(())

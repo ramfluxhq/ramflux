@@ -163,68 +163,15 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    pub(crate) fn import_surface_context(
-        &self,
-        context: &OwnContext,
-        source_device: &str,
-    ) -> Result<(), SdkError> {
-        self.account_db()?
-            .write_transaction(|| self.import_surface_context_inner(context, source_device))
+    pub(crate) fn import_surface_context(&self, context: &OwnContext) -> Result<(), SdkError> {
+        self.account_db()?.write_transaction(|| self.import_surface_context_inner(context))
     }
-    fn import_surface_context_inner(
-        &self,
-        context: &OwnContext,
-        source_device: &str,
-    ) -> Result<(), SdkError> {
+    fn import_surface_context_inner(&self, context: &OwnContext) -> Result<(), SdkError> {
         self.validate_own_context_namespace(context)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
         if let Some(group) = &context.group {
-            if group.members.len() > 4096
-                || !group
-                    .members
-                    .iter()
-                    .any(|m| m.member_id == source_device || m.member_id == local.principal_id)
-            {
-                return Err(invalid("own surface group context is not source-owned"));
-            }
-            let old = self.group_state(&group.group_id).ok();
-            if old.as_ref().is_none_or(|s| s.group_epoch < group.group_epoch) {
-                db.upsert_group_local_membership_snapshot(
-                    &group.group_id,
-                    group.group_epoch,
-                    group.max_members,
-                    &group.new_member_history,
-                    &local.device_id,
-                    &group.local_role,
-                    group.local_joined_epoch,
-                )?;
-                for member in &group.members {
-                    db.upsert_group_member_snapshot(
-                        &group.group_id,
-                        &member.member_id,
-                        &member.role,
-                        member.joined_epoch,
-                    )?;
-                }
-                for route in &group.routes {
-                    self.persist_group_member_route(&group.group_id, route)?;
-                }
-            }
-            if let Some(old) = db.client_record("conversation", &context.conversation_id)?
-                && (old["kind"] != "group" || old["group_id"] != group.group_id)
-            {
-                return Err(invalid("own surface group conversation conflict"));
-            }
-            db.upsert_group_member_snapshot(
-                &group.group_id,
-                &local.device_id,
-                &group.local_role,
-                group.local_joined_epoch,
-            )?;
-            if db.client_record("conversation", &context.conversation_id)?.is_none() {
-                db.persist_client_record("conversation",&context.conversation_id,&json!({"id":context.conversation_id,"kind":"group","group_id":group.group_id,"title":null}))?;
-            }
+            self.import_surface_group_context(context, group)?;
         } else {
             self.import_surface_friend(context)?;
             if context.participants.len() != 2
@@ -300,5 +247,40 @@ impl RamfluxClient {
             }
         }
         Ok(())
+    }
+}
+
+impl RamfluxClient {
+    fn import_surface_group_context(
+        &self,
+        context: &OwnContext,
+        group: &crate::own_device_sync::SdkOwnDeviceGroupSnapshot,
+    ) -> Result<(), SdkError> {
+        let snapshot = group
+            .shared_state
+            .as_ref()
+            .ok_or_else(|| invalid("own Surface requires signed native group state"))?;
+        let state = ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?;
+        if state.view().conversation_id != context.conversation_id {
+            return Err(invalid("own Surface signed group conversation mismatch"));
+        }
+        self.restore_own_shared_group(group, snapshot)?;
+        let current = self
+            .account_db()?
+            .shared_group_state(&group.group_id)?
+            .ok_or_else(|| invalid("own Surface signed group state missing"))?;
+        if !self.local_is_group_member(&group.group_id)?
+            || current.view().conversation_id != context.conversation_id
+        {
+            return Err(invalid("own Surface group does not admit this device"));
+        }
+        self.ensure_shared_group_device(&current, &self.owned_device_identity()?)?;
+        if let Some(old) =
+            self.account_db()?.client_record("conversation", &context.conversation_id)?
+            && (old["kind"] != "group" || old["group_id"] != group.group_id)
+        {
+            return Err(invalid("own Surface group conversation conflict"));
+        }
+        self.merge_routed_group_link(&group.group_id, &context.conversation_id)
     }
 }

@@ -47,7 +47,7 @@ impl Origin {
             relay_server_name: "relay.test".into(),
             prekey_http_url: url.clone(),
             signaling_turn_addr: "127.0.0.1:3478".into(),
-            protocol_versions: vec!["v1".into()],
+            protocol_versions: vec!["message-schema.v1".into()],
             client_capabilities: vec!["prekey".into()],
             updated_at: now,
             expires_at: now + 3600,

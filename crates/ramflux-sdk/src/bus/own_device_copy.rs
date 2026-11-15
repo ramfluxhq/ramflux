@@ -13,6 +13,7 @@ const MAX_PENDING: u32 = 256;
 const MAX_PENDING_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 struct Intent {
+    payload_kind: crate::client::own_device_copy::OwnPayloadKind,
     copy_id: String,
     #[serde(default)]
     sequence: u64,
@@ -23,6 +24,8 @@ struct Intent {
     created_at: i64,
     expires_at: i64,
     owner_record: Option<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    surface_reference: Option<String>,
 }
 impl Intent {
     fn expiry(&self) -> i64 {
@@ -32,7 +35,9 @@ impl Intent {
 #[derive(Clone, Serialize, Deserialize)]
 struct Work {
     intent: Intent,
-    packet: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audience: Option<ramflux_protocol::message::QualifiedDevice>,
+
     attempts: u32,
     next_at: i64,
     #[serde(default)]
@@ -74,21 +79,56 @@ pub(crate) fn stage(
     input: OwnMessageInput<'_>,
     owner_record: Option<(&str, &str)>,
 ) -> Result<(), SdkError> {
-    stage_inner(client, input, owner_record, false)
+    stage_inner(client, input, owner_record, false, None)
 }
+pub(crate) fn stage_to(
+    client: &RamfluxClient,
+    input: OwnMessageInput<'_>,
+    target: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<(), SdkError> {
+    if target.root_commitment() != client.own_account_anchor()? {
+        return Err(SdkError::InboundRejected("own history target root differs".into()));
+    }
+    client.require_native_operation(
+        target,
+        crate::client::identity_authority::NativeOperation::Sync,
+    )?;
+    let epoch = client
+        .account_db()?
+        .client_device_record(target)?
+        .and_then(|record| record["device_epoch"].as_u64())
+        .filter(|epoch| *epoch != 0)
+        .ok_or_else(|| {
+            SdkError::InboundRejected("own history target incarnation missing".into())
+        })?;
+    stage_inner(
+        client,
+        input,
+        None,
+        false,
+        Some(ramflux_protocol::message::QualifiedDevice {
+            account_anchor: target.root_commitment().into(),
+            device_id: target.device_id().into(),
+            device_epoch: epoch,
+        }),
+    )
+}
+#[cfg(test)]
 pub(crate) fn stage_held(
     client: &RamfluxClient,
     input: OwnMessageInput<'_>,
     message: &str,
 ) -> Result<(), SdkError> {
-    stage_inner(client, input, Some(("message", message)), true)
+    stage_inner(client, input, Some(("message", message)), true, None)
 }
 fn stage_inner(
     client: &RamfluxClient,
     input: OwnMessageInput<'_>,
     owner_record: Option<(&str, &str)>,
     held: bool,
+    audience: Option<ramflux_protocol::message::QualifiedDevice>,
 ) -> Result<(), SdkError> {
+    client.require_backup_outbound_ready()?;
     let id = copy_id(client, input.id)?;
     let key = format!("{PREFIX}{id}");
     let db = client.account_db()?;
@@ -98,7 +138,9 @@ fn stage_inner(
         return Ok(());
     }
     let mut work = Work {
+        audience,
         intent: Intent {
+            payload_kind: input.payload_kind,
             copy_id: id.clone(),
             sequence: 0,
             id: input.id.into(),
@@ -108,12 +150,13 @@ fn stage_inner(
             created_at: input.created_at,
             expires_at: input.created_at.saturating_add(i64::from(client.content_ttl()?)),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
+            surface_reference: surface_reference(input)?,
         },
-        packet: None,
+
         attempts: 0,
         next_at: input.created_at,
         held,
-        local_manifest: held,
+        local_manifest: true,
         targets: Vec::new(),
         context_delivery: None,
         generated: None,
@@ -232,23 +275,54 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         now_unix_timestamp(),
         crate::client::own_device_copy::MAX_DELIVERY_ROWS,
     )?;
-    if let Some((directory, record)) = &work.intent.owner_record
-        && matches!(directory.as_str(), "surface" | "message")
-        && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {
-            (directory == "message")
-                .then(|| json!({"id":record,"conversation_id":work.intent.conversation}))
-        })
-        && (latest || row["own_copy_message_id"].as_str() == Some(id.as_str()))
+    for (directory, record) in work
+        .intent
+        .owner_record
+        .iter()
+        .map(|(directory, record)| (directory.as_str(), record.as_str()))
+        .chain(
+            work.intent.surface_reference.iter().map(|reference| ("surface", reference.as_str())),
+        )
     {
-        row["own_copy_message_id"] = json!(id);
-        row["own_device_copy_state"] = json!(value);
-        db.persist_client_record(directory, record, &row)?;
+        if matches!(directory, "surface" | "message")
+            && let Some(mut row) = db.client_record(directory, record)?.or_else(|| {
+                (directory == "message")
+                    .then(|| json!({"id":record,"conversation_id":work.intent.conversation}))
+            })
+            && (latest || row["own_copy_message_id"].as_str() == Some(id.as_str()))
+        {
+            row["own_copy_message_id"] = json!(id);
+            row["own_device_copy_state"] = json!(value);
+            db.persist_client_record(directory, record, &row)?;
+        }
     }
     Ok(())
 }
 
+fn surface_reference(input: OwnMessageInput<'_>) -> Result<Option<String>, SdkError> {
+    if !matches!(input.payload_kind, crate::client::own_device_copy::OwnPayloadKind::Surface) {
+        return Ok(None);
+    }
+    let Some(control) = crate::client::surface::SurfaceControl::decode(input.body)? else {
+        // A Surface history page carries checkpoints and controls of many Surfaces, so it is
+        // bound to no single Surface reference; any other Surface payload must be a control.
+        use prost::Message as _;
+        return match ramflux_protocol::message::Surface::decode(input.body) {
+            Ok(ramflux_protocol::message::Surface {
+                payload: Some(ramflux_protocol::message::surface::Payload::OwnHistory(_)),
+            }) => Ok(None),
+            _ => Err(SdkError::InboundRejected("own Surface control missing".into())),
+        };
+    };
+    let bytes = ramflux_protocol::decode_base64url(&control.carrier_base64)
+        .map_err(|_| SdkError::InboundRejected("own Surface carrier encoding".into()))?;
+    let carrier = crate::client::surface::Carrier::decode(&bytes)?
+        .ok_or_else(|| SdkError::InboundRejected("own Surface carrier missing".into()))?;
+    carrier.surface_reference().map(Some)
+}
+
 fn sealed(work: &Work) -> bool {
-    work.packet.is_some() || work.generated.is_some()
+    work.generated.is_some()
 }
 
 fn message_owner(work: &Work) -> Option<&str> {
@@ -264,6 +338,7 @@ fn work_bytes(work: &Work) -> Result<u64, SdkError> {
 }
 
 /// Release only a held plain-message copy; legacy/surface retries keep their existing lifecycle.
+#[cfg(test)]
 pub(crate) fn finish_held(
     client: &RamfluxClient,
     envelope: &str,
@@ -292,21 +367,35 @@ mod background;
 pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_background};
 
 #[cfg(test)]
-pub(crate) use background::drive_once;
-
-#[cfg(test)]
-mod retention_tests {
+mod retention_compatibility_tests {
     use super::*;
     #[test]
-    fn own_copy_intent_requires_expiry() -> Result<(), SdkError> {
-        let missing = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
-            "group":null,"body":"","created_at":100,"owner_record":null});
-        assert!(serde_json::from_value::<Intent>(missing).is_err());
-        let stored = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
+    fn own_copy_intent_without_payload_kind_is_refused() -> Result<(), SdkError> {
+        let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
             "group":null,"body":"","created_at":100,"expires_at":900,"owner_record":null});
+        let error = serde_json::from_value::<Intent>(old).err().ok_or_else(|| {
+            SdkError::LocalBus("old intent row without payload_kind parsed".into())
+        })?;
+        assert!(
+            error.to_string().contains("payload_kind"),
+            "old intent row must be refused by name for payload_kind, got: {error}"
+        );
+        Ok(())
+    }
+    #[test]
+    fn own_copy_intent_requires_expiry() -> Result<(), SdkError> {
+        let missing = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
+            "conversation":"thread","group":null,"body":"","created_at":100,"owner_record":null});
+        assert!(
+            serde_json::from_value::<Intent>(missing).is_err(),
+            "an intent row without expires_at must be refused"
+        );
+        let stored = json!({"payload_kind":"RawInner","copy_id":"copy","sequence":1,"id":"message",
+            "conversation":"thread","group":null,"body":"","created_at":100,"expires_at":900,
+            "owner_record":null});
         let intent: Intent = serde_json::from_value(stored.clone())?;
-        assert_eq!(intent.expiry(), 900);
-        assert_eq!(serde_json::to_value(intent)?, stored);
+        assert_eq!(intent.expiry(), 900, "the stored expiry is the only lifetime");
+        assert_eq!(serde_json::to_value(intent)?, stored, "the intent must round trip unchanged");
         Ok(())
     }
 }

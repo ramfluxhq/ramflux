@@ -27,12 +27,12 @@ pub(crate) async fn dispatch_device_bus_request(
         "device.sync.export" => {
             let body: LocalBusDeviceSyncExportRequest =
                 serde_json::from_value(request.body.clone())?;
-            Box::pin(dispatch_device_sync_export(request, state, body)).await
+            dispatch_device_sync_export(request, state, &body)
         }
         "device.sync.import" => {
             let body: LocalBusDeviceSyncImportRequest =
                 serde_json::from_value(request.body.clone())?;
-            Box::pin(dispatch_device_sync_import(request, state, body)).await
+            dispatch_device_sync_import(request, state, body)
         }
         "device.pair.begin"
         | "device.pair.join"
@@ -360,57 +360,30 @@ async fn dispatch_device_revoke(
     Box::pin(native_revoke::dispatch(account, &body.device_id)).await
 }
 
-async fn dispatch_device_sync_export(
+fn dispatch_device_sync_export(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
-    body: LocalBusDeviceSyncExportRequest,
+    body: &LocalBusDeviceSyncExportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
-    let account_id = request_account_id(request)?.to_owned();
-    let account = local_bus_account_mut(state, &account_id)?;
-    let commitment = account.principal_commitment.clone();
-    let mut engine = account.session_client().await?;
-    let pool = account.relay_quic_pool()?;
-    let response = account
-        .client
-        .export_own_device_sync(
-            &mut engine,
-            &pool,
-            &commitment,
-            &body.target_device_id,
-            &body.relay_endpoint,
-            body.relay_service_key_base64,
-            body.chunk_size.unwrap_or(64 * 1024),
-        )
-        .await;
-    account.apply_session_metadata(engine);
-    Ok(local_bus_ok(serde_json::to_value(response?)?))
+    let account = local_bus_account_mut(state, request_account_id(request)?)?;
+    let root = account.client.own_account_anchor()?;
+    account.client.require_native_publication_settled(&root)?;
+    let staged = account.client.start_generated_history_transfer(&body.target_device_id)?;
+    Ok(local_bus_ok(serde_json::json!({"target_device_id":body.target_device_id,"staged":staged})))
 }
 
-async fn dispatch_device_sync_import(
+fn dispatch_device_sync_import(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
     body: LocalBusDeviceSyncImportRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    crate::object::reject_retired_relay_service_key(body.relay_service_key_base64.is_some())?;
-    let account_id = request_account_id(request)?.to_owned();
-    let account = local_bus_account_mut(state, &account_id)?;
-    let commitment = account.principal_commitment.clone();
-    let envelope: SdkOwnDeviceSyncEnvelope = serde_json::from_value(body.envelope)?;
-    let mut engine = account.session_client().await?;
-    let pool = account.relay_quic_pool()?;
-    let response = account
-        .client
-        .import_own_device_sync(
-            &mut engine,
-            &pool,
-            &commitment,
-            &envelope,
-            body.relay_service_key_base64,
-        )
-        .await;
-    account.apply_session_metadata(engine);
-    Ok(local_bus_ok(serde_json::to_value(response?)?))
+    let _ = (request, state, body);
+    Err(SdkError::GeneratedRefused {
+        code: crate::GeneratedRefusalCode::Content,
+        reason: "retired object history carrier; receive authenticated generated history pages"
+            .into(),
+    })
 }
 
 fn append_device_branch_authorized_event(

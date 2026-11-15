@@ -3,19 +3,56 @@
 
 //! Actual native tail admission forwards opaque bytes; endpoint AEAD gates data application.
 use super::*;
+
+/// Real wall-clock bound for a scenario that runs on paused tokio time. Tokio timers are
+/// virtual here, so a watchdog thread measures real time with `std` and cancels the scenario
+/// through a oneshot. The scenario future is dropped, which drops its fixtures and their
+/// temporary directories, before the test returns and long before the runner's kill window.
+async fn wall_bounded<T>(
+    seconds: u64,
+    scenario: impl std::future::Future<Output = Result<T, Box<dyn std::error::Error>>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let (expired, expiry) = tokio::sync::oneshot::channel::<()>();
+    let (finished, watch) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if matches!(
+            watch.recv_timeout(std::time::Duration::from_secs(seconds)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
+    let outcome = tokio::select! {
+        result = scenario => Some(result),
+        _ = expiry => None,
+    };
+    drop(finished);
+    watchdog.join().map_err(|_| "wall-clock watchdog panicked")?;
+    outcome.ok_or_else(|| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("scenario exceeded its {seconds} s wall-clock deadline"),
+        )) as Box<dyn std::error::Error>
+    })?
+}
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_relay_admission_is_data_only_endpoints_enforce() -> TestResult {
     let hold = ClockHold::new();
-    crate::bus::credentials::contract_tests::deadline(Box::pin(run())).await?;
+    let result =
+        wall_bounded(150, crate::bus::credentials::contract_tests::deadline(Box::pin(run()))).await;
     hold.finish().await?;
+    result?;
     Ok(())
 }
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_signed_parent_is_refused() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
-        super::hostile_context::run(super::hostile_context::Fault::Parent),
-    ))
+    let result = wall_bounded(
+        50,
+        crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
+            super::hostile_context::Fault::Parent,
+        ))),
+    )
     .await;
     hold.finish().await?;
     result
@@ -23,9 +60,12 @@ async fn pairing_full_tail_signed_parent_is_refused() -> TestResult {
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_signed_transfer_is_refused() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
-        super::hostile_context::run(super::hostile_context::Fault::Transfer),
-    ))
+    let result = wall_bounded(
+        50,
+        crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
+            super::hostile_context::Fault::Transfer,
+        ))),
+    )
     .await;
     hold.finish().await?;
     result
@@ -33,9 +73,12 @@ async fn pairing_full_tail_signed_transfer_is_refused() -> TestResult {
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_signed_delta_after_j6_is_refused() -> TestResult {
     let hold = ClockHold::new();
-    let result = crate::bus::credentials::contract_tests::deadline(Box::pin(
-        super::hostile_context::run(super::hostile_context::Fault::DeltaAfterJ6),
-    ))
+    let result = wall_bounded(
+        50,
+        crate::bus::credentials::contract_tests::deadline(Box::pin(super::hostile_context::run(
+            super::hostile_context::Fault::DeltaAfterJ6,
+        ))),
+    )
     .await;
     hold.finish().await?;
     result
@@ -153,4 +196,14 @@ async fn reopen(
     let service = fresh.bind_frontend_writer(client.account_db()?)?;
     *actor = fresh;
     Ok(service)
+}
+#[tokio::test(start_paused = true)]
+async fn the_wall_clock_bound_cancels_a_scenario_that_never_finishes_on_paused_time() {
+    let started = std::time::Instant::now();
+    let outcome = wall_bounded::<()>(1, std::future::pending()).await;
+    let error = outcome.expect_err("a stuck scenario is cancelled");
+    let io = error.downcast_ref::<std::io::Error>().expect("the deadline stays a typed io error");
+    assert_eq!(io.kind(), std::io::ErrorKind::TimedOut, "the deadline is a TimedOut error");
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1), "real time elapsed");
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "cancelled promptly");
 }

@@ -24,6 +24,24 @@ fn request(
         connection_id: driver.connection.clone(),
     })
 }
+fn changed_envelope(
+    envelope: &ramflux_protocol::Envelope,
+) -> std::result::Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let mut changed = envelope.clone();
+    changed.encrypted_payload = ramflux_protocol::encode_base64url(
+        ramflux_protocol::message::outer::encode_compact_cryptobox(&[8; 16], &[])?,
+    );
+    changed.payload_hash = ramflux_protocol::hash_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        changed.encrypted_payload.as_bytes(),
+    );
+    changed.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&changed)?,
+        [12; 32],
+    );
+    Ok(changed)
+}
+
 #[test]
 fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
     for mode in 0..3 {
@@ -36,7 +54,7 @@ fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
             let target = session.target_delivery_id.clone();
             store.initialize_inbox(&target)?;
             router.prepare_publication_target(&store, &target)?;
-            let mut envelope = envelope("native-retry", &target, DeliveryClass::OpaqueEvent);
+            let mut envelope = envelope("native-retry", &target, DeliveryClass::Message);
             envelope.source_principal_id = "alice".into();
             envelope.source_device_id = "primary".into();
             envelope.created_at = i64::try_from(NOW)?;
@@ -56,12 +74,7 @@ fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
                 held.arrived.recv_timeout(Duration::from_secs(30))?;
                 let second = scope.spawn(|| service.mesh(&router, &store, retry, PEER, NOW));
                 held.attachment.recv_timeout(Duration::from_secs(30))?;
-                let mut changed = envelope.clone();
-                changed.encrypted_payload.push('x');
-                changed.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-                    &ramflux_protocol::envelope_sender_signed_bytes(&changed)?,
-                    [12; 32],
-                );
+                let changed = changed_envelope(&envelope)?;
                 let conflict = service.mesh(
                     &router,
                     &store,
@@ -179,7 +192,6 @@ fn sender_signature_requires_ciphertext_hash_on_custody_delivery() -> Result {
     signed.delivery_mode = Some("durable".into());
     signed.collapse_tag = Some(ramflux_protocol::encode_base64url([2; 32]));
     signed.report_commitment = Some(ramflux_protocol::encode_base64url([3; 32]));
-    signed.encrypted_payload = ramflux_protocol::encode_base64url(b"ciphertext");
     signed.payload_hash = ramflux_protocol::hash_base64url(
         ramflux_protocol::domain::ENVELOPE,
         signed.encrypted_payload.as_bytes(),
