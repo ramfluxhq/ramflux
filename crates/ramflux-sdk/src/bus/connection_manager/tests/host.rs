@@ -334,7 +334,7 @@ async fn ephemeral_session_client_generation_owns_exchange_and_consumer() -> Cas
         envelope.created_at = crate::time::now_unix_timestamp();
         envelope.ttl = 5;
         envelope.priority = ramflux_protocol::Priority::Low;
-        envelope.ext.ext.insert("delivery_mode".into(), serde_json::json!("ephemeral"));
+        envelope.delivery_mode = Some("ephemeral".into());
         let call = tokio::spawn(async move { client.submit_ephemeral(envelope).await });
         let submitted = io.output.recv().await.ok_or("submit missing")?;
         assert!(matches!(submitted, GatewayClientFrame::Submit { submit } if submit.envelope.envelope_id == "host-ephemeral"));

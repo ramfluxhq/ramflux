@@ -69,6 +69,10 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    /// True when this account holds the root's current native certified device set.
+    fn has_certified_device_set(&self, root: &str) -> Result<bool, SdkError> {
+        Ok(self.current_custody_authority(root, crate::custody::network_now()?)?.is_some())
+    }
     fn transfer_target_selected(
         &self,
         group: &str,
@@ -79,7 +83,7 @@ impl RamfluxClient {
             return Ok(false);
         }
         // Missing cached authority is not proof that an implicit sibling was deselected.
-        if self.observed_device_set(&target.root)?.is_none() {
+        if !self.has_certified_device_set(&target.root)? {
             return Ok(true);
         }
         Ok(self
@@ -118,7 +122,7 @@ impl RamfluxClient {
             let has_authority = if let Some(value) = known.get(&target.root) {
                 *value
             } else {
-                let value = self.observed_device_set(&target.root)?.is_some();
+                let value = self.has_certified_device_set(&target.root)?;
                 known.insert(target.root.clone(), value);
                 value
             };

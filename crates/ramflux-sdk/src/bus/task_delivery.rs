@@ -190,16 +190,15 @@ mod tests {
             let _ = socket.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n");
             Ok(())
         });
-        let root = super::super::runtime_tests::root("federated-submit-deadline");
-        let mut account = super::super::runtime_tests::account(
-            &root,
+        let mut account = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+            "federated-submit-deadline",
+            "device-sender",
             "sender",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let live = account.session_client().await?;
+        ))
+        .await?
+        .into_bus();
         account.install_test_session(GatewaySessionEngine::with_test_transport(
-            live.config.clone(),
+            account.gateway_config.clone(),
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
         ));
         let message = GatewayDirectMessage {
@@ -215,7 +214,9 @@ mod tests {
             created_at: now_unix_timestamp(),
             ttl: 600,
         };
-        let envelope = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
+        let envelope = crate::bus::delivery_receipts::background::retained_receipt_fixture(
+            &account, &message,
+        )?;
         let destination = Destination {
             route: LocalBusFederationRoute {
                 federation_url: url,

@@ -447,18 +447,10 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
                 && row.contains_key("id")
                 && row.contains_key("reason"))));
             assert!(gateway.lock().map_err(|_| "gateway")?.sent.len() >= 3);
-            let account = actor.state.accounts.remove("sender").ok_or("account")?;
-            let config = account.gateway_config.clone();
-            let commitment = account.principal_commitment.clone();
-            drop(account);
-            // Close and reload the database, then reenter the real serve loop.
-            let mut reopened = crate::bus::runtime_tests::account(
-                &root.join("source"),
-                "sender",
-                None,
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )?;
-            reopened.principal_commitment = commitment;
+            let mut reopened = actor.state.accounts.remove("sender").ok_or("account")?;
+            let config = reopened.gateway_config.clone();
+            // Close and reload the database from disk with the retained native vault.
+            crate::client::native_test_support::bus::reopen_account(&mut reopened, "sender")?;
             reopened.engine = None;
             reopened.install_test_session(GatewaySessionEngine::connect(config).await?);
             let (mut restarted, sender, stop, mut events) = runtime(reopened, &root.join("source"));
@@ -483,8 +475,9 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
 }
 
 fn approval_request(account: &LocalBusAccountState) -> Case<Box<approval::Request>> {
+    let conversation = fixture::direct_conversation(&account.client)?;
     let binding = account.client.task_approval_binding(
-        "healthy",
+        &conversation,
         "healthy-task",
         "step",
         &NeedsMe::Approval { grant_id: "grant".into() },

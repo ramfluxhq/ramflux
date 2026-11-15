@@ -119,7 +119,15 @@ fn serve(
     stream.flush()?;
     Ok(())
 }
+/// The canonical root-pair conversation id of the account and the seeded peer.
+pub(super) fn conversation(
+    client: &RamfluxClient,
+    peer: &crate::client::native_test_support::Fixture,
+) -> Case<String> {
+    Ok(client.generated_direct_conversation_id(&peer.client.owned_device_identity()?)?)
+}
 pub(super) fn contact(
+    conversation: &str,
     own: &crate::prekey::SdkDeviceManifestResponse,
     peer: &crate::client::native_test_support::Fixture,
     forward: &Forwarder,
@@ -129,7 +137,7 @@ pub(super) fn contact(
         link_id: "keyed-contact-link".into(),
         requester_id: own.principal_commitment.clone(),
         target_id: target.root_commitment().into(),
-        conversation_id: "keyed-contact-thread".into(),
+        conversation_id: conversation.into(),
         message_id: "keyed-contact-message".into(),
         envelope_id: "keyed-contact-envelope".into(),
         source_principal_id: own.principal_id.clone(),
@@ -191,7 +199,7 @@ async fn case() -> Case {
         });
     }
     let forward = forwarder(None)?;
-    let request = contact(&own, &peer, &forward)?;
+    let request = contact(&conversation(&client, &peer)?, &own, &peer, &forward)?;
     let fingerprint = ramflux_crypto::blake3_256_base64url(
         "ramflux.operation.v1",
         &ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?,
@@ -250,7 +258,8 @@ pub(super) async fn seed_peer(
         dm_device_id_hash(local.device_id()),
         dm_device_id_hash(remote.device_id()),
         [3; 32],
-    )?;
+    )?
+    .with_collapse_key_from_x3dh_sk(&[17; 32], &[4; 32])?;
     client.persist_pair(&local, &remote, &[4; 32], &pair)?;
     Ok(peer)
 }
@@ -281,7 +290,7 @@ async fn held_forward_case() -> Case {
     });
     let held = Arc::new(ForwardHold::default());
     let forward = forwarder(Some(Arc::clone(&held)))?;
-    let request = contact(&own, &peer, &forward)?;
+    let request = contact(&conversation(&client, &peer)?, &own, &peer, &forward)?;
     let fingerprint = ramflux_crypto::blake3_256_base64url(
         "ramflux.operation.v1",
         &ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?,

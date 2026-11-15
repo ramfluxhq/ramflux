@@ -298,7 +298,7 @@ async fn first_peer_device_failure_does_not_hide_delivery_to_the_second_device()
     let fixture = super::dm_tests::peer_fixture(&root, &mut source).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(captured.clone());
-    gateway.fail_target = Some("device-peer-one".into());
+    gateway.fail_target = Some(fixture.peers[0].target_delivery_id.clone());
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         fixture.config,
         Box::new(gateway),
@@ -329,6 +329,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
     let fixture = super::dm_tests::peer_fixture(&root, &mut source).await?;
     let mut peers = fixture.peers;
     let peer = &mut peers[0];
+    let first_target = peer.target_delivery_id.clone();
     let peer_config = peer_receiver(peer, &source.client, &fixture.config)?;
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
@@ -395,7 +396,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .find(|e| e.target_delivery_id == "device-peer-one")
+        .find(|e| e.target_delivery_id == first_target)
         .cloned()
         .ok_or("resync answer")?;
     let incoming = GatewayInboxEntry {
