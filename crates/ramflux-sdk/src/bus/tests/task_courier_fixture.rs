@@ -182,6 +182,7 @@ pub(super) struct Gateway {
 impl Gateway {
     /// Envelopes the task courier submitted, without the own-device copies the same account
     /// sends through this gateway.
+    #[cfg(feature = "durability-test-hooks")]
     pub fn task_attempts(&self) -> usize {
         self.attempts.iter().filter(|e| !self.own_copies.contains(&e.envelope_id)).count()
     }
