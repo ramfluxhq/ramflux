@@ -7,6 +7,7 @@ use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture, TestResult};
 #[path = "device_revocation_support.rs"]
 mod support;
+use super::native_pair_tests::{entry, text};
 use support::*;
 
 #[tokio::test]
@@ -59,9 +60,28 @@ async fn revoking_the_current_device_clears_all_pairs_and_fences_pair_traffic() 
         // A different primary issues this denial. Native primaries cannot revoke themselves.
         let mut alice = Fixture::with_device("owner", "alice").await?;
         let mut bob = alice.enroll_sibling("sibling", "bob").await?;
-        seed_pair(&bob, &alice)?;
-        let incoming = packet(&alice, &bob, "revoked-local-incoming")?;
-        let outgoing = outgoing(&bob, &alice, "revoked-local-outgoing");
+        // Pair traffic runs between different roots: siblings share a root and have no DM scope.
+        let carol = Fixture::new("revoke-local-peer").await?;
+        bob.accept_peer(&carol)?;
+        carol.accept_peer(&bob)?;
+        let first = entry(&carol, &bob, &text(&carol, &bob, "established before revocation")?)?;
+        bob.receive(first.envelope, 1).await?;
+        let incoming = entry(&carol, &bob, &text(&carol, &bob, "revoked-local-incoming")?)?;
+        assert!(
+            bob.client.open_routed(&incoming, &bob.config.device_id).is_ok(),
+            "test: the pending packet was invalid before revocation"
+        );
+        let own = bob.client.owned_device_identity()?;
+        let remote = carol.client.owned_device_identity()?;
+        assert!(
+            bob.client.begin_pair_recovery(&own, &remote, now_unix_timestamp())?,
+            "test: reset work was never created"
+        );
+        let mut outgoing = outgoing(&bob, &carol, "revoked-local-outgoing");
+        outgoing.conversation_id = ramflux_protocol::message::dm_scope::derive(
+            own.root_commitment(),
+            remote.root_commitment(),
+        )?;
         let (mut engine, sent) = engine(&bob);
         revoke(&mut alice, "bob").await?;
         let account = alice.client.born_v3_account.as_ref().ok_or("test: native publisher")?;

@@ -141,37 +141,6 @@ pub(super) fn outgoing(source: &Fixture, target: &Fixture, id: &str) -> GatewayD
     }
 }
 
-pub(super) fn packet(
-    source: &Fixture,
-    target: &Fixture,
-    id: &str,
-) -> TestResult<GatewayInboxEntry> {
-    let mut message = outgoing(source, target, id);
-    let remote = target.client.owned_device_identity()?;
-    let bundle = target.client.load_x3dh_private_state(&remote)?.bundle;
-    let (mut session, header, bundle) =
-        source.client.new_send_pair(&source.client.owned_device_identity()?, &message, bundle)?;
-    let encrypted = source.client.seal_routed_with_route(
-        &message,
-        b"old traffic",
-        Route::direct(),
-        SealPair {
-            local: &source.config.device_id,
-            remote: remote.storage_key(),
-            session: &mut session,
-            header,
-            bundle,
-        },
-    )?;
-    message.encrypted_body = serde_json::to_vec(&encrypted)?;
-    Ok(GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: target.config.target_delivery_id.clone(),
-        envelope: gateway_direct_message_envelope(&source.config, &message, None)?,
-    })
-}
-
 pub(super) fn seed_pair(local: &Fixture, remote: &Fixture) -> TestResult {
     let local_ref = local.client.owned_device_identity()?;
     let remote_ref = remote.client.owned_device_identity()?;

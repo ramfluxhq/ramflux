@@ -251,7 +251,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/routed/device_revocation_tests.rs"
         )),
-        [1, 0, 0, 0],
+        [2, 0, 0, 0],
     ),
     (
         "client/routed/discovery_tests.rs",
