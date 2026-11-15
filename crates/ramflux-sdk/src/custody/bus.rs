@@ -169,6 +169,7 @@ fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
         "CustodyExpired" => SdkError::CustodyExpired,
         "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
         "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
+        "CustodyPublicationFailed" => SdkError::CustodyPublicationFailed,
         "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
         "NetworkingPending" => SdkError::NetworkingPending,
         _ => SdkError::CustodySetupInvalid,

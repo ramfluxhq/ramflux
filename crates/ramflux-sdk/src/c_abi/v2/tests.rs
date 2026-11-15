@@ -392,6 +392,7 @@ fn shared_error_classes_keep_the_binding_numeric_contract() {
         (crate::SdkError::DataRootInUse, 18),
         (crate::SdkError::NoNodeSelected, 9),
         (crate::SdkError::Transport(ramflux_transport::TransportError::NotAuthenticated), 5),
+        (crate::SdkError::CustodyPublicationFailed, 1),
     ] {
         let name = crate::bus::io::local_bus_error_code(&error);
         assert_eq!(

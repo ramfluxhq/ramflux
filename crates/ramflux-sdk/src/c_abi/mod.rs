@@ -975,6 +975,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
         | SdkError::CustodyAccountConflict
+        | SdkError::CustodyPublicationFailed
         | SdkError::SurfaceRefused { .. }
         | SdkError::GroupRefused { .. }
         | SdkError::TaskRefused { .. }

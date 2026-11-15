@@ -157,6 +157,8 @@ pub enum SdkError {
     CustodyAccountConflict,
     #[error("recovery confirmation failed; setup cancelled")]
     CustodyConfirmationFailed,
+    #[error("custody authority publication failed")]
+    CustodyPublicationFailed,
     #[error("non-synchronizing primary vault unavailable; no file fallback")]
     CustodyVaultUnavailable,
     #[error("{0}")]

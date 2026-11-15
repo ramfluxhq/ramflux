@@ -579,6 +579,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "InvalidRequest"
         | "ValidationFailed"
         | "CustodySetupInvalid"
+        | "CustodyPublicationFailed"
         | "invalid_argument"
         | "invalid_json"
         | "payload_too_large"

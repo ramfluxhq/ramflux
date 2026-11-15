@@ -148,6 +148,24 @@ impl AccountIndex {
         )? == 1)
     }
 
+    /// Deletes an unpublished reservation, including one that already stored a wrapped data key.
+    ///
+    /// The caller must already have proven that this account has no `authority.json`. A matching
+    /// anchor is required so a replaced row is left untouched.
+    /// # Errors
+    /// Returns storage errors without deleting a row whose anchor does not match.
+    pub fn release_unpublished_reservation(
+        &self,
+        local_account_id: &str,
+        principal_commitment: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "DELETE FROM local_account
+              WHERE local_account_id=?1 AND principal_commitment=?2",
+            params![local_account_id, principal_commitment],
+        )? == 1)
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn account(&self, local_account_id: &str) -> Result<LocalAccountRecord, StorageError> {

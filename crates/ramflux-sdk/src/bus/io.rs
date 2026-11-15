@@ -119,6 +119,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
             SdkError::ContactInput(reason) => Some(reason.to_string()),
             SdkError::CustodyVault(reason) => Some(reason.as_str().into()),
+            SdkError::CustodyPublicationFailed => Some("authority_publication".into()),
             SdkError::ContactConfirmationRequired(_) => {
                 Some("root_replacement_confirmation_required".into())
             }
@@ -204,7 +205,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
         return "NetworkingPending";
     }
-
     if let SdkError::LifecycleShared(source) = error {
         return local_bus_error_code(source);
     }
@@ -215,6 +215,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         return operation.error_code();
     }
     if let Some(code) = crate::error_policy::security_code(error) {
+        return code;
+    }
+    if let Some(code) = custody_unit_code(error) {
         return code;
     }
     match error {
@@ -243,14 +246,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::RestoreSetupRequired => "restore_setup_required",
         SdkError::Storage(StorageError::AuthorizationRejected) => "authorization_rejected",
         SdkError::NoNodeSelected => "NoNodeSelected",
-        SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
-        SdkError::CustodySetupInvalid => "CustodySetupInvalid",
-        SdkError::CustodyExpired => "CustodyExpired",
-        SdkError::CustodyAccountConflict => "CustodyAccountConflict",
-        SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
-        SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
         SdkError::CustodyVault(reason) => reason.wire_code(),
-        SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",
         SdkError::AccountRestorePending(_) => "AccountRestorePending",
@@ -299,6 +295,20 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         }
         _ => "ValidationFailed",
     }
+}
+
+fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
+    Some(match error {
+        SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
+        SdkError::CustodySetupInvalid => "CustodySetupInvalid",
+        SdkError::CustodyExpired => "CustodyExpired",
+        SdkError::CustodyAccountConflict => "CustodyAccountConflict",
+        SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
+        SdkError::CustodyPublicationFailed => "CustodyPublicationFailed",
+        SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
+        SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
+        _ => return None,
+    })
 }
 
 fn storage_error_code(error: &StorageError) -> &'static str {

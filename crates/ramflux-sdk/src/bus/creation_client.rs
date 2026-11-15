@@ -318,6 +318,7 @@ fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
     }
     match code {
         "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
+        "CustodyPublicationFailed" => SdkError::CustodyPublicationFailed,
         "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
         "CustodyExpired" => SdkError::CustodyExpired,
         "CustodyAccountConflict" => SdkError::CustodyAccountConflict,

@@ -840,18 +840,26 @@ pub(super) fn persist(
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
     pins.discard_retained_records();
-    let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
-    let reference =
-        custody_vault_reference(root, &input.local_account_id, &record.body.account_anchor)?;
+    let account_id = input.local_account_id.clone();
+    let anchor = record.body.account_anchor.clone();
+    let dir = genesis::reserve_account(root, &account_id, &anchor)?;
+    let reference = match custody_vault_reference(root, &account_id, &anchor) {
+        Ok(reference) => reference,
+        Err(error) => {
+            genesis::discard_unpublished(root, &account_id, &anchor)?;
+            return Err(error);
+        }
+    };
     let branch_reference = format!("branch:{reference}");
     let agent_provisioning_reference = (input.principal_kind
         == ramflux_protocol::PrincipalKind::HeadlessAi)
         .then(|| format!("agent-provisioning:{reference}"));
-    // On failure retain the reservation; no caller may retry through legacy account.create.
-    vault.store_new(&reference, key)?;
+    let mut primary_written = false;
     let mut branch_written = false;
     let mut provisioning_written = false;
     let result = (|| {
+        vault.store_new(&reference, key)?;
+        primary_written = true;
         vault.store_branch(&branch_reference, branch)?;
         branch_written = true;
         if let Some(agent_reference) = &agent_provisioning_reference {
@@ -868,28 +876,18 @@ pub(super) fn persist(
                 secret,
             )?;
         }
-        let stored = StoredAuthority {
-            schema: "ramflux.local.custody_account.v1".into(),
-            local_account_id: input.local_account_id.clone(),
-            local_device_id: input.device_id.clone(),
-            state: CreationState::NetworkingPending,
-            networking_reason: None,
-            networking_node: None,
-            capacity_retry_at: None,
-            pending_branch: false,
-            custody_v3_observed: true,
-            pairing_adoption_required: false,
-            primary_vault_ref: reference.clone(),
-            branch_vault_ref: branch_reference.clone(),
-            vault_class: vault.vault_class().into(),
+        let stored = networking_pending(
+            input,
+            &PendingRefs {
+                primary: &reference,
+                branch: &branch_reference,
+                vault_class: vault.vault_class(),
+                provisioning: &agent_provisioning_reference,
+            },
             record,
-            compacted_ids: None,
-            custodian_publication: None,
             pins,
             message_layer_sequences,
-            custodian_account_id: input.custodian_account_id.clone(),
-            agent_provisioning_vault_ref: agent_provisioning_reference.clone(),
-        };
+        );
         #[cfg(test)]
         race_hooks::run(race_hooks::Stage::BeforeAuthorityPublish, root, &input.local_account_id)?;
         genesis::require_owned_reservation(
@@ -908,20 +906,92 @@ pub(super) fn persist(
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
-        // Attempt both deletions even if one provider operation fails. The reservation remains
-        // latched, so a partial setup cannot fall back to another identity scheme.
-        let branch_cleanup = if branch_written { vault.delete(&branch_reference) } else { Ok(()) };
-        let provisioning_cleanup = if provisioning_written {
-            vault.delete(agent_provisioning_reference.as_deref().ok_or_else(invalid)?)
-        } else {
-            Ok(())
-        };
-        let primary_cleanup = vault.delete(&reference);
-        branch_cleanup?;
-        provisioning_cleanup?;
-        primary_cleanup?;
+        rollback_unpublished(
+            root,
+            &account_id,
+            &anchor,
+            vault,
+            &UnpublishedVaultWrites {
+                primary_reference: &reference,
+                primary_written,
+                branch_reference: &branch_reference,
+                branch_written,
+                provisioning_reference: &agent_provisioning_reference,
+                provisioning_written,
+            },
+        )?;
     }
     result
+}
+
+struct PendingRefs<'a> {
+    primary: &'a str,
+    branch: &'a str,
+    vault_class: &'a str,
+    provisioning: &'a Option<String>,
+}
+
+fn networking_pending(
+    input: &super::CreateInput,
+    refs: &PendingRefs<'_>,
+    record: Envelope<DeviceSet>,
+    pins: AuthorityPins,
+    message_layer_sequences: std::collections::BTreeMap<String, u64>,
+) -> StoredAuthority {
+    StoredAuthority {
+        schema: "ramflux.local.custody_account.v1".into(),
+        local_account_id: input.local_account_id.clone(),
+        local_device_id: input.device_id.clone(),
+        state: CreationState::NetworkingPending,
+        networking_reason: None,
+        networking_node: None,
+        capacity_retry_at: None,
+        pending_branch: false,
+        custody_v3_observed: true,
+        pairing_adoption_required: false,
+        primary_vault_ref: refs.primary.into(),
+        branch_vault_ref: refs.branch.into(),
+        vault_class: refs.vault_class.into(),
+        record,
+        compacted_ids: None,
+        custodian_publication: None,
+        pins,
+        message_layer_sequences,
+        custodian_account_id: input.custodian_account_id.clone(),
+        agent_provisioning_vault_ref: refs.provisioning.clone(),
+    }
+}
+
+struct UnpublishedVaultWrites<'a> {
+    primary_reference: &'a str,
+    primary_written: bool,
+    branch_reference: &'a str,
+    branch_written: bool,
+    provisioning_reference: &'a Option<String>,
+    provisioning_written: bool,
+}
+
+fn rollback_unpublished(
+    root: &Path,
+    account_id: &str,
+    anchor: &str,
+    vault: &dyn PrimaryVault,
+    writes: &UnpublishedVaultWrites<'_>,
+) -> Result<(), SdkError> {
+    let branch_cleanup =
+        if writes.branch_written { vault.delete(writes.branch_reference) } else { Ok(()) };
+    let provisioning_cleanup = if writes.provisioning_written {
+        vault.delete(writes.provisioning_reference.as_deref().ok_or_else(invalid)?)
+    } else {
+        Ok(())
+    };
+    let primary_cleanup =
+        if writes.primary_written { vault.delete(writes.primary_reference) } else { Ok(()) };
+    let discarded = genesis::discard_unpublished(root, account_id, anchor);
+    branch_cleanup?;
+    provisioning_cleanup?;
+    primary_cleanup?;
+    discarded
 }
 
 /// Export the one-use agent data credential for its live native human custodian.

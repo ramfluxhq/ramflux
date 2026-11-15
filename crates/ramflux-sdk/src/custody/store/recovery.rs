@@ -470,12 +470,13 @@ pub(crate) fn pending_restore(
         custodian_account_id: None,
         agent_provisioning_vault_ref: None,
     };
+    let anchor = authority.publication.record.body.account_anchor.clone();
     vault.store_branch(&branch_ref, &seeds)?;
     let result = (|| {
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
         client.seal_new_account_data(id, &stored.record.body.account_anchor, passphrase)?;
-        genesis::require_owned_reservation(root, id, &stored.record.body.account_anchor, &dir)?;
+        genesis::require_owned_reservation(root, id, &anchor, &dir)?;
         genesis::write_public(
             &dir.join("authority.json"),
             &ramflux_protocol::canonical_json_bytes(&stored)?,
@@ -483,7 +484,10 @@ pub(crate) fn pending_restore(
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
-        vault.delete(&branch_ref)?;
+        let deleted = vault.delete(&branch_ref);
+        let discarded = genesis::discard_unpublished(root, id, &anchor);
+        deleted?;
+        discarded?;
     }
     result
 }

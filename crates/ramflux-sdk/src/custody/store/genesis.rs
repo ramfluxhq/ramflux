@@ -64,6 +64,42 @@ pub(super) fn require_owned_reservation(
     Ok(())
 }
 
+/// Removes an account that never published `authority.json`, including its wrapped data key.
+///
+/// # Errors
+/// Returns filesystem or index errors. A directory that already contains `authority.json` is left
+/// in place.
+pub(super) fn discard_unpublished(root: &Path, id: &str, anchor: &str) -> Result<(), SdkError> {
+    let dir = directory(root, id)?;
+    if dir.join("authority.json").try_exists()? {
+        return Ok(());
+    }
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    if !index.release_unpublished_reservation(id, anchor)? {
+        match index.account(id) {
+            Err(ramflux_storage::StorageError::AccountNotFound(_)) => {}
+            Ok(_) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let account_dir = root.join("accounts").join(id);
+    if account_dir.try_exists()? {
+        fs::remove_dir_all(&account_dir)?;
+    }
+    if dir.try_exists()? && !dir.join("authority.json").try_exists()? {
+        fs::remove_dir_all(&dir)?;
+    }
+    let accounts = root.join("accounts");
+    if accounts.try_exists()? {
+        crate::platform::fs::sync_path(&accounts)?;
+    }
+    let parent = root.join("custody_accounts");
+    if parent.try_exists()? {
+        crate::platform::fs::sync_path(&parent)?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     let parent = path.parent().ok_or_else(super::super::invalid)?;
     let temporary = parent.join(format!(
@@ -78,13 +114,26 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     file.sync_all()?;
     #[cfg(test)]
     checkpoints::run(checkpoints::Stage::TemporarySynced)?;
-    // Linking a fully synced inode publishes all bytes atomically and refuses any existing name.
-    fs::hard_link(&temporary, path)?;
-    // Publication is irreversible here. Cleanup failures must not delete live vault credentials.
-    if let Err(error) = remove_publication_temporary(&temporary) {
-        tracing::warn!(%error, "published custody authority temporary cleanup failed");
-    } else {
-        cleanup.0 = None;
+    #[cfg(test)]
+    if let Err(error) = checkpoints::run(checkpoints::Stage::Publish) {
+        return Err(match error {
+            SdkError::Io(cause) => publication_failure(&cause),
+            other => other,
+        });
+    }
+    // A same-directory rename publishes the synced inode. Android app storage rejects a
+    // hard link in this directory. An existing name stays Io(AlreadyExists) and is not replaced.
+    match crate::platform::fs::rename_no_replace(&temporary, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(SdkError::Io(error));
+        }
+        Err(error) => return Err(publication_failure(&error)),
+    }
+    cleanup.0 = None;
+    #[cfg(test)]
+    if let Err(error) = checkpoints::run(checkpoints::Stage::Published) {
+        tracing::warn!(%error, "custody publication observer failed");
     }
     if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
         tracing::warn!(%error, "published custody authority directory sync failed");
@@ -92,11 +141,10 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     Ok(())
 }
 
-fn remove_publication_temporary(path: &Path) -> Result<(), SdkError> {
-    #[cfg(test)]
-    checkpoints::run(checkpoints::Stage::Linked)?;
-    fs::remove_file(path)?;
-    Ok(())
+fn publication_failure(error: &std::io::Error) -> SdkError {
+    // The OS error can carry the account path. Keep only the kind.
+    tracing::warn!(kind = ?error.kind(), "custody authority publication failed");
+    SdkError::CustodyPublicationFailed
 }
 
 struct TemporaryPublication(Option<PathBuf>);
@@ -117,7 +165,8 @@ mod checkpoints {
     pub(super) enum Stage {
         TemporaryCreated,
         TemporarySynced,
-        Linked,
+        Publish,
+        Published,
     }
     type Hook = Box<dyn FnMut(Stage) -> Result<(), SdkError>>;
     thread_local! { static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
