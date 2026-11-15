@@ -201,6 +201,19 @@ impl std::fmt::Debug for A2uiSurfaceAction {
     }
 }
 
+/// Typed local intent for [`encode_a2ui_surface_action`]. Schema and `argsHash` are not caller fields.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct A2uiSurfaceActionInput {
+    pub surface_id: String,
+    pub version: u64,
+    pub surface_hash: String,
+    pub action_id: String,
+    pub values: Value,
+    #[serde(default)]
+    pub task_binding: Option<SurfaceTaskBinding>,
+}
+
 /// Extends updateComponents with ordinal insertion and action replacement, available only in v2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -314,6 +327,162 @@ pub fn encode_a2ui_conversation_event(
     crate::canonical_json_bytes(&event)
 }
 
+/// Encodes a locally authored surface action. This is an egress builder: never use it to
+/// re-encode remote JSON. Remote actions still enter via [`A2uiSurfaceAction::from_wire_bytes`].
+/// The argument hash is computed here, so a caller cannot supply bytes or a hash.
+/// # Errors
+/// Rejects empty identifiers, values that are not bounded I-JSON, and bytes that do not
+/// round-trip through action ingress.
+pub fn encode_a2ui_surface_action(
+    conversation_id: &str,
+    input: &A2uiSurfaceActionInput,
+) -> Result<Vec<u8>, ProtocolError> {
+    action_identifier(conversation_id)?;
+    action_identifier(&input.surface_id)?;
+    action_identifier(&input.surface_hash)?;
+    action_identifier(&input.action_id)?;
+    if let Some(binding) = &input.task_binding {
+        action_identifier(&binding.task_id)?;
+        action_identifier(&binding.step_id)?;
+    }
+    let args_hash = super::surface_args_hash(&input.values).map_err(action_refused)?;
+    let action = ActionFields {
+        schema: A2uiActionSchema::V2,
+        conversation_id: conversation_id.into(),
+        surface_id: input.surface_id.clone(),
+        version: input.version,
+        surface_hash: input.surface_hash.clone(),
+        action_id: input.action_id.clone(),
+        values: input.values.clone(),
+        args_hash,
+        task_binding: input.task_binding.clone(),
+    };
+    let bytes = crate::canonical_json_bytes(&action)?;
+    let parsed = A2uiSurfaceAction::from_wire_bytes(&bytes)?;
+    if parsed.fields() != &action {
+        return Err(action_refused(SurfaceReject::Encoding));
+    }
+    Ok(bytes)
+}
+
+fn action_identifier(value: &str) -> Result<(), ProtocolError> {
+    super::limits::identifier(value).map_err(action_refused)?;
+    crate::validate_i_json_value(&Value::String(value.to_owned()))
+}
+
+fn action_refused(error: SurfaceReject) -> ProtocolError {
+    ProtocolError::IJson(serde::de::Error::custom(error))
+}
+
 fn web_ingress_error(error: SurfaceReject) -> ProtocolError {
     ProtocolError::IJson(serde::de::Error::custom(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        A2uiSurfaceAction, A2uiSurfaceActionInput, SurfaceTaskBinding, encode_a2ui_surface_action,
+    };
+    use crate::{parse_i_json, surface_args_hash};
+    use serde_json::{Value, json};
+
+    const OVER_DEPTH: usize = 70;
+
+    fn input(task: bool) -> A2uiSurfaceActionInput {
+        A2uiSurfaceActionInput {
+            surface_id: "surface".into(),
+            version: 2,
+            surface_hash: "hash".into(),
+            action_id: "choose".into(),
+            values: json!({"choice": "yes"}),
+            task_binding: task
+                .then(|| SurfaceTaskBinding { task_id: "task".into(), step_id: "step".into() }),
+        }
+    }
+
+    #[test]
+    fn surface_action_round_trips_with_and_without_a_task_binding() {
+        for task in [false, true] {
+            let intent = input(task);
+            let first = encode_a2ui_surface_action("conversation", &intent)
+                .expect("test: typed action encodes");
+            let second = encode_a2ui_surface_action("conversation", &intent)
+                .expect("test: typed action encodes again");
+            assert_eq!(first, second, "egress encoding must be stable");
+            let parsed = A2uiSurfaceAction::from_wire_bytes(&first)
+                .expect("test: encoded action is ingress");
+            assert_eq!(parsed.conversation_id(), "conversation", "conversation id");
+            assert_eq!(parsed.surface_id(), intent.surface_id, "surface id");
+            assert_eq!(parsed.version(), intent.version, "version");
+            assert_eq!(parsed.surface_hash(), intent.surface_hash, "surface hash");
+            assert_eq!(parsed.action_id(), intent.action_id, "action id");
+            assert_eq!(parsed.values(), &intent.values, "values");
+            assert_eq!(parsed.task_binding(), intent.task_binding.as_ref(), "task binding");
+            let hash = surface_args_hash(&intent.values).expect("test: args hash");
+            assert_eq!(parsed.args_hash(), hash, "encoder owns the argument hash");
+        }
+    }
+
+    #[test]
+    fn surface_action_refuses_empty_identifiers() {
+        let intent = input(false);
+        assert!(
+            encode_a2ui_surface_action("", &intent).is_err(),
+            "empty conversation id must be refused"
+        );
+        for (label, broken) in [
+            ("surface", A2uiSurfaceActionInput { surface_id: String::new(), ..intent.clone() }),
+            ("hash", A2uiSurfaceActionInput { surface_hash: String::new(), ..intent.clone() }),
+            ("action", A2uiSurfaceActionInput { action_id: String::new(), ..intent.clone() }),
+        ] {
+            assert!(
+                encode_a2ui_surface_action("conversation", &broken).is_err(),
+                "empty {label} must be refused"
+            );
+        }
+        let bound = A2uiSurfaceActionInput {
+            task_binding: Some(SurfaceTaskBinding {
+                task_id: String::new(),
+                step_id: "step".into(),
+            }),
+            ..intent
+        };
+        assert!(
+            encode_a2ui_surface_action("conversation", &bound).is_err(),
+            "empty task id must be refused"
+        );
+    }
+
+    #[test]
+    fn surface_action_refuses_values_outside_i_json_and_depth_limits() {
+        let mut intent = input(false);
+        intent.values = json!({"text": "\u{fffe}"});
+        assert!(
+            encode_a2ui_surface_action("conversation", &intent).is_err(),
+            "a noncharacter in values must be refused"
+        );
+        let mut nested = Value::Object(serde_json::Map::new());
+        for _ in 0..OVER_DEPTH {
+            nested = json!({"n": nested});
+        }
+        intent.values = nested;
+        assert!(
+            encode_a2ui_surface_action("conversation", &intent).is_err(),
+            "values nested past the surface depth limit must be refused"
+        );
+    }
+
+    #[test]
+    fn surface_action_refuses_hand_built_wire_fields() {
+        let duplicate = br#"{"surfaceId":"s","version":1,"surfaceHash":"h","actionId":"a","values":{},"surfaceId":"other"}"#;
+        assert!(
+            parse_i_json::<A2uiSurfaceActionInput>(duplicate).is_err(),
+            "duplicate action fields must be refused"
+        );
+        let supplied_hash = br#"{"surfaceId":"s","version":1,"surfaceHash":"h","actionId":"a","values":{},"argsHash":"caller"}"#;
+        assert!(
+            parse_i_json::<A2uiSurfaceActionInput>(supplied_hash).is_err(),
+            "a caller-supplied argsHash must be refused"
+        );
+    }
 }

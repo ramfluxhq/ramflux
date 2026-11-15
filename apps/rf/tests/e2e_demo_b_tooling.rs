@@ -134,10 +134,43 @@ fn surface_round_trip(
         &alice_d.socket,
         &["surface", "get", "--account", &alice.id, "--surface-id", &surface_id],
     )?;
-    if author_view.to_string().contains(&fallback) {
+    if !author_view.to_string().contains(&fallback) {
+        return Err(format!("author surface get lacks the created fallback: {author_view}").into());
+    }
+    let hash = author_view
+        .get("surface_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("author surface view has no surface_hash: {author_view}"))?;
+    let version = author_view.get("version").and_then(Value::as_u64).unwrap_or(1);
+    let action = scratch.join("surface-action.json");
+    std::fs::write(
+        &action,
+        serde_json::to_vec(&json!({
+            "surfaceId": surface_id,
+            "version": version,
+            "surfaceHash": hash,
+            "actionId": "choose",
+            "values": {"choice": "yes"},
+        }))?,
+    )?;
+    let action_path = action.to_string_lossy().into_owned();
+    let acted = rf_json(
+        &alice_d.socket,
+        &[
+            "surface",
+            "send",
+            "--account",
+            &alice.id,
+            "--conversation",
+            conversation,
+            "--action",
+            &action_path,
+        ],
+    )?;
+    if acted.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(())
     } else {
-        Err(format!("author surface get lacks the created fallback: {author_view}").into())
+        Err(format!("surface send --action was refused: {acted}").into())
     }
 }
 
