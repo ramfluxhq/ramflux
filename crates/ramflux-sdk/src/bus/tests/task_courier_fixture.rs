@@ -118,12 +118,20 @@ impl Hold {
     }
 }
 
+/// Whether an envelope id is carried by an own-device copy row.
+pub(super) type OwnCopyProbe = Box<dyn Fn(&str) -> bool + Send>;
+
 #[derive(Default)]
 pub(super) struct Gateway {
     pub sessions: BTreeMap<String, usize>,
     pub sent: Vec<ramflux_protocol::Envelope>,
     /// Every submitted envelope, whatever the gateway answered.
     pub attempts: Vec<ramflux_protocol::Envelope>,
+    /// Recognises an envelope id carried by an own-device copy row of the submitting account.
+    /// Checked at submit time, when that row necessarily exists.
+    pub own_copy_probe: Option<OwnCopyProbe>,
+    /// Submitted envelopes the probe recognised: own-device copies, not task courier attempts.
+    pub own_copies: BTreeSet<String>,
     /// Nacks every submit with this exact reason.
     pub nack_submit: Option<String>,
     /// The first this-many submits are answered normally before `nack_submit` applies.
@@ -172,6 +180,12 @@ pub(super) struct Gateway {
 }
 
 impl Gateway {
+    /// Envelopes the task courier submitted, without the own-device copies the same account
+    /// sends through this gateway.
+    pub fn task_attempts(&self) -> usize {
+        self.attempts.iter().filter(|e| !self.own_copies.contains(&e.envelope_id)).count()
+    }
+
     fn manifest_response(&mut self, path: &str) -> Value {
         let commitment = path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
         self.manifest_requests.push(commitment.into());
@@ -690,6 +704,10 @@ async fn serve(
                     let (stall, refused) = {
                         let mut gateway = shared.lock().map_err(|_| "gateway")?;
                         gateway.attempts.push(submit.envelope.clone());
+                        let id = submit.envelope.envelope_id.as_str();
+                        if gateway.own_copy_probe.as_ref().is_some_and(|probe| probe(id)) {
+                            gateway.own_copies.insert(id.to_owned());
+                        }
                         let later = gateway.attempts.len() > gateway.nack_after;
                         (gateway.stall_submit, gateway.nack_submit.clone().filter(|_| later))
                     };

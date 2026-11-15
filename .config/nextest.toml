@@ -48,6 +48,14 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 filter = 'package(ramflux-sdk) & test(=bus::dispatch::surface_transport::own_tests::streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_object_uploads)'
 slow-timeout = { period = "60s", terminate-after = 4 }
 
+# The sender refusal policy task row runs the whole typed-refusal lifecycle matrix (conflict,
+# decision approve and deny with reopen and retry, envelope, deferral, stale revision and task
+# delivery rows) through real accounts and a live actor. The test enforces its own 200 s
+# deadline, before nextest's 240 s kill window.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(=bus::account_runtime::tests::refusal::sender_refusal_policy_task)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 # CLI e2e boots four node processes plus rf daemons; ignored by default, CI-only.
 # The unified backlog row commits 70 authenticated messages through the serial writer;
 # it uses the same bounded process-fixture budget as the other CLI binaries.
