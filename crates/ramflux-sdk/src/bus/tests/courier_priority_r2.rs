@@ -82,6 +82,7 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
                     sender: peer.storage_key().into(),
                     root: Some(peer.root_commitment().into()),
                     at: now_unix_timestamp(),
+                    retry_from: now_unix_timestamp(),
                     attempts: 0,
                     next_at: 0,
                     packet: None,

@@ -35,7 +35,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
     for key in keys {
         if let Some(work) = db.load_actor_state::<Work>(&key)?
             && (work.next_at <= now
-                || work.at.saturating_add(LIFETIME) <= now
+                || work.retry_from.saturating_add(LIFETIME) <= now
                 || work.attempts >= ATTEMPTS)
         {
             due.push((key, work));
@@ -53,7 +53,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
             continue;
         }
         let attempt_at = now_unix_timestamp();
-        if work.at.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
+        if work.retry_from.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
             continue;
         }

@@ -18,7 +18,11 @@ pub(crate) struct Work {
     pub receiver: String,
     pub sender: String,
     pub root: Option<String>,
+    /// Identity time of the receipt: `created_at`, `event_seq` and `delivered_at` derive from it
+    /// and the cached sealed packet is bound to it, so it never changes across retries.
     pub at: i64,
+    /// Start of the current retry window; the lifetime budget counts from here, not from `at`.
+    pub retry_from: i64,
     pub attempts: u32,
     pub next_at: i64,
     pub packet: Option<ramflux_protocol::Envelope>,
@@ -125,6 +129,7 @@ impl RamfluxClient {
             sender: source.storage_key().into(),
             root: root.clone(),
             at,
+            retry_from: at,
             attempts: 0,
             next_at: at,
             packet: None,
@@ -182,6 +187,10 @@ impl RamfluxClient {
                 ) else {
                     return Ok(None);
                 };
+                // The status keeps the receipt's identity time; a retry must not mint a new one.
+                let Some(delivered_at) = status["delivered_at"].as_i64() else {
+                    return Ok(None);
+                };
                 let source = self.device_identity_for_root(root, sender)?;
                 Work {
                     status_id: status_id.clone(),
@@ -191,7 +200,8 @@ impl RamfluxClient {
                     receiver: local.storage_key().into(),
                     sender: source.storage_key().into(),
                     root: Some(root.into()),
-                    at: 0,
+                    at: delivered_at,
+                    retry_from: delivered_at,
                     attempts: 0,
                     next_at: 0,
                     packet: None,
@@ -205,15 +215,18 @@ impl RamfluxClient {
             {
                 return Err(SdkError::InboundRejected("receipt retry binding differs".into()));
             }
-            work.at = now_unix_timestamp();
-            work.next_at = work.at;
+            // The receipt keeps its identity (`at`) so the cached seal is retransmitted; only the
+            // retry window and the next attempt time move.
+            let now = now_unix_timestamp();
+            work.retry_from = now;
+            work.next_at = now;
             work.attempts = 0;
             work.packet = None;
             db.persist_actor_state(&format!("{PREFIX}{status_id}"), &work)?;
             db.persist_receipt_state(
                 &status_key,
                 &json!({"state":"pending","delivered_at":work.at}),
-                work.at,
+                now,
             )?;
             Ok(Some(work.at))
         })

@@ -72,6 +72,7 @@ fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
                 sender: a.identity()?.storage_key().into(),
                 root: root.clone(),
                 at: now_unix_timestamp(),
+                retry_from: now_unix_timestamp(),
                 attempts: 1,
                 next_at: now_unix_timestamp() + 60,
                 packet: None,
@@ -186,6 +187,7 @@ async fn expired_revoked_or_rebound_receipts_are_retired_without_reusing_a_prepa
         let mut work = ready(&p)?;
         if reason == "expired" {
             work.at = now_unix_timestamp() - 601;
+            work.retry_from = work.at;
             p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
         } else if reason == "revoked" {
             p.receiver.client.account_db()?.persist_actor_state(
@@ -563,6 +565,51 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
         drop(state);
         std::fs::remove_dir_all(p.root)?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_explicit_retry_across_a_second_boundary_resends_the_cached_receipt_packet() -> TestResult
+{
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-boundary")).await?;
+    let mut work = ready(&p)?;
+    assert_eq!(work.at, start, "the receipt identity is the time of its first seal");
+    work.attempts = 8;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?, "work retired as failed");
+    let first_seal = p
+        .mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the first attempt reached the gateway and was refused")?;
+    // The retry lands in a later second than the first seal.
+    crate::time::FixedClock::advance_to(start + 5);
+    p.mail.lock().map_err(|_| "mailbox")?.reject_id = None;
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start), "the restaged receipt keeps its original identity time");
+    let retry = p.receiver.client.account_db()?.load_actor_state::<Work>(&p.key)?.ok_or("work")?;
+    assert_eq!((retry.at, retry.retry_from, retry.attempts), (start, start + 5, 0));
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the retry sends instead of ReplayMismatch");
+    let sent = p
+        .mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the retry reached the gateway")?;
+    assert_eq!(sent, first_seal, "the exact cached packet is retransmitted");
+    drop(p.receiver);
     Ok(())
 }
 

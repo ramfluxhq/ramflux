@@ -200,7 +200,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     for key in keys {
         if let Some(work) = db.load_actor_state::<Work>(&key)?
             && (work.next_at <= now
-                || work.at.saturating_add(LIFETIME) <= now
+                || work.retry_from.saturating_add(LIFETIME) <= now
                 || work.attempts >= ATTEMPTS)
         {
             rows.push((key, work));
@@ -211,7 +211,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     for (key, work) in rows {
         if db.message_is_deleted(&work.message)? {
             discard(&account.client, &key, &work)?;
-        } else if work.at.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
+        } else if work.retry_from.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
         } else {
             match receipt_message(account, &account.gateway_config, &work) {
@@ -269,7 +269,7 @@ fn seal(
         return Ok(None);
     }
     let now = now_unix_timestamp();
-    if plan.work.at.saturating_add(LIFETIME) <= now || plan.work.attempts >= ATTEMPTS {
+    if plan.work.retry_from.saturating_add(LIFETIME) <= now || plan.work.attempts >= ATTEMPTS {
         finish(&account.client, &plan.key, &plan.work, "failed")?;
         return Ok(None);
     }
@@ -480,6 +480,7 @@ pub(crate) async fn test_fetch_material(
         sender: "receipt-peer".into(),
         root: None,
         at: 0,
+        retry_from: 0,
         attempts: 0,
         next_at: 0,
         packet: None,
