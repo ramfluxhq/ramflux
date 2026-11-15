@@ -5,6 +5,7 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+mod pairing;
 impl RamfluxClient {
     pub(crate) fn own_device_group_snapshots(
         &self,

@@ -23,6 +23,7 @@ blake3 = "1.8.5"
 hkdf = { workspace = true }
 hmac = { workspace = true, features = ["zeroize"] }
 sha2 = { workspace = true, features = ["zeroize"] }
+subtle = { workspace = true }
 chacha20poly1305 = "0.10.1"
 rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint", "hooks"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -43,6 +44,7 @@ insecure-test-sqlite = ["rusqlite/bundled"]
 workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "process", "io-util", "time"] }
 ramflux-test-support.workspace = true
 tempfile.workspace = true
 ed25519-dalek.workspace = true

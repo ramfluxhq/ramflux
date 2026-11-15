@@ -1,0 +1,682 @@
+{
+  "census_hash": "bzmx3UIbXnjeDHJ8ZOtM5Z1Esz2-qDnw8fuhLIs1ckk",
+  "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
+  "rule_hashes": [
+    {
+      "hash": "cnYJn-acIjp7Vb-NLW7ugybcPDsPcZE2a_B5OF6FgwQ",
+      "id": "actor/group-message/upgrade-start"
+    },
+    {
+      "hash": "q6HM8YAKXD0r02_CO96C1bkTJjlyApKGgD7kgILy0TY",
+      "id": "actor/identity/safety-verification-migration/v1"
+    },
+    {
+      "hash": "RXDkB0iWmVQ6afN3ijbjqzdpogqcpDSvBWBJ5jf01u0",
+      "id": "sql/a2ui_surface_cache"
+    },
+    {
+      "hash": "Zi8dDX8HeqXb9bdO10OoePIL8TftxDWl6SBpy-UzDUA",
+      "id": "sql/account_erasure_generation"
+    },
+    {
+      "hash": "9-97GV4ymGI1Pn77mA6kLRf5D_7s8IDrz3p-StJVYzk",
+      "id": "sql/account_key_check"
+    },
+    {
+      "hash": "-0FfVdofP_Mvl3am9plbc2WQuEX0sMwW-wDeKSNXEKc",
+      "id": "sql/account_mac_bundle/local"
+    },
+    {
+      "hash": "D6r2tXtes1g3S7h4zIEUg_jCrwCy2II5KhL8PeD3_sk",
+      "id": "sql/account_mac_bundle/portable"
+    },
+    {
+      "hash": "S_PzmN7UhwhAXucLHs-xF81WNdExLawNCV6bzD1AAtU",
+      "id": "sql/ack_state"
+    },
+    {
+      "hash": "TxyDt82KvnJ5EhMU2hoBVDvd-2AAvgH1Y9nPxx2p-jU",
+      "id": "sql/audit_log"
+    },
+    {
+      "hash": "YTeZ8-8voW5hDOzKf3BpbbXUEK9fWYQVI7d2aKPQQRk",
+      "id": "sql/bot_install_grant"
+    },
+    {
+      "hash": "zTlZfRwogt2cxmEfy2QrjcYDB9JG_LtPy9jc9vZ3tIw",
+      "id": "sql/bot_manifest_cache"
+    },
+    {
+      "hash": "VrkfxmxT13kskWVje4HOwW0YCFTmJO4C7VeUdQ3VVxE",
+      "id": "sql/bot_trust_pin"
+    },
+    {
+      "hash": "Age-yuHNcUlrTfXJlzr7tIBXHkt9v9SC_h36PkLOB_E",
+      "id": "sql/contact_link_decision"
+    },
+    {
+      "hash": "MgJm-gJDk1Cjs47H8MoIDM5PwIQ6xFD8LgAPsPpohPU",
+      "id": "sql/contact_message_fence_retention"
+    },
+    {
+      "hash": "7XecmqBMxQJgqL3QtspRlsozgrqc1m0Np2B70Hta2Yc",
+      "id": "sql/contact_message_request"
+    },
+    {
+      "hash": "lG9YBJoilkMDF7jExIyYoRQavqyk09PMfubputV52TQ",
+      "id": "sql/contact_message_request_fence"
+    },
+    {
+      "hash": "OmEGU-wk3o9YEyYCfS7yd69m-Yjrg-65ELDFAdnjn-8",
+      "id": "sql/contact_request_authority_floor"
+    },
+    {
+      "hash": "SnDgBtYuP3LwKjE8SnjvnwksLbEBKL6WN99D_iMbT44",
+      "id": "sql/contact_request_decision"
+    },
+    {
+      "hash": "AOjylVX9XEVw51jjApeZTRKMo2mxIRTr3Beu5hZp4zY",
+      "id": "sql/contact_request_delivery"
+    },
+    {
+      "hash": "ACSK9Ofx5Ml4HJoHcYwjQcb6-zwJJKpldJVMXbYp2pY",
+      "id": "sql/contact_request_fence"
+    },
+    {
+      "hash": "kXM2TlyjluViTKzrOIxXie9_r8_sGGAnleMBQNZF_10",
+      "id": "sql/contact_request_projection"
+    },
+    {
+      "hash": "dVjxXzaSdhN_nayjIsmiPgLz1jHOJiPRnnB9jGGreuA",
+      "id": "sql/contact_request_rate"
+    },
+    {
+      "hash": "dH-eXh5yQ4DreQhAJYbByPlU6bicFpZ3mCBQtrum1rA",
+      "id": "sql/contact_request_retirement"
+    },
+    {
+      "hash": "azYofn8_rCZBlzyEubiGdE_hyQfB9y7pdbXJdam3tug",
+      "id": "sql/contact_verification_projection"
+    },
+    {
+      "hash": "Uz_aUYobfSYixU7fiQhrihqpPrk3Vq98ZxMyZ937gS4",
+      "id": "sql/conversation_delivery_state"
+    },
+    {
+      "hash": "AjasEk7S65bQc67q5OrJinkgDfZ7wZlLJnIbLg8t7QQ",
+      "id": "sql/conversation_disappearing_policy"
+    },
+    {
+      "hash": "iA5uGwzgfYwtrV2Bl25__-H03S_mnRPlV51c2CR3p2k",
+      "id": "sql/conversation_list_state"
+    },
+    {
+      "hash": "WeckN9WZ-dfY86Rbeg6bYXzainLNHFo-CEmqgp7n9oQ",
+      "id": "sql/conversation_projection"
+    },
+    {
+      "hash": "IkRUNUvinzuIUeL1AphDwV0qfsXvv-RbuvLcSSdsGtU",
+      "id": "sql/conversation_read_state"
+    },
+    {
+      "hash": "Ms8DWYZQgY-JSV1ePU73nF2_j9tgJmElpKEXARemWlk",
+      "id": "sql/conversation_tombstone"
+    },
+    {
+      "hash": "LwULLzGeFhhcoBFc-3v-Kf5UOIhzjqog18xAHU1xUAg",
+      "id": "sql/conversation_unread_marker"
+    },
+    {
+      "hash": "DnzSpEC5YO7kghKiET5_yIVma25P9-HgW4xo6d8AR50",
+      "id": "sql/cursor_checkpoint"
+    },
+    {
+      "hash": "luG8fdE0XNIqgthgApCIrIqkJ1b3FhOQnB8EEzMh-rE",
+      "id": "sql/device_directory"
+    },
+    {
+      "hash": "f8JQVk5vk440iMRTj10g_h5FXQIUNKzUWXp1L70rSVE",
+      "id": "sql/device_identity"
+    },
+    {
+      "hash": "Zet4OiaNudi6j7pglEfWZtUfpxFzyKzf-E3GKHAVNos",
+      "id": "sql/device_inbox_cursor"
+    },
+    {
+      "hash": "0Xltg4Lq2ZtM648x8NX4J2c3j61lDphQoVp8LbVuD5o",
+      "id": "sql/device_namespace_upgrade"
+    },
+    {
+      "hash": "5ELbrf8SYyPErLmt6UvLjhjVMG0ZDy4fvbOOXeRLXrY",
+      "id": "sql/direct_message_projection"
+    },
+    {
+      "hash": "DE5H7RAHJra6OeJsF3rO6qalz-HldbRSz2-0I_WqBNA",
+      "id": "sql/event_causal_dependency"
+    },
+    {
+      "hash": "65tDrtOKC_MWAvBOXw_Gb_1xoSMHLFk4kcP4DKf-Yr4",
+      "id": "sql/event_tombstone"
+    },
+    {
+      "hash": "9iF8IrEVUS4xTmP6HRG_AO4htYYM02gRtH4deZQfuog",
+      "id": "sql/friend_link_projection"
+    },
+    {
+      "hash": "h3utYsd5NXs-hrjPNbWx4zsRZdv-aHqM6-Avm3ab7CA",
+      "id": "sql/friend_projection"
+    },
+    {
+      "hash": "ezixSXeCB9XhUBgWY7vGHpldkVvA5dEja6VRY0o90TY",
+      "id": "sql/full_imported_mac_bundle"
+    },
+    {
+      "hash": "FicoBUdSzUTlTiYzIbVrGQJd2SDpkDe5ZlkKRm4xybM",
+      "id": "sql/group_ban_projection"
+    },
+    {
+      "hash": "YcU56xfMGyf_WwQexhu09Oy8zQJHEdbgluJjS_mN18w",
+      "id": "sql/group_control_event_seen"
+    },
+    {
+      "hash": "_-EVwALwwUXedqKnenVHvYr8dobHIWl7OsVUzzATxGw",
+      "id": "sql/group_invite_projection"
+    },
+    {
+      "hash": "Mtkm8F9HqtfOq1FLqz4rxyUK5w-HBY2MAAcAwvWwaB0",
+      "id": "sql/group_member_device_key"
+    },
+    {
+      "hash": "3ciFR7M_2XzFsBd9pGnJpgj-kptI2_tm9bgSyjV_2bk",
+      "id": "sql/group_member_projection"
+    },
+    {
+      "hash": "xBIspLkLGQEkk6jNZHc9jYOOI6VbPetk6ylXNp7t0v4",
+      "id": "sql/group_message_tombstone_projection"
+    },
+    {
+      "hash": "EG2gFww8s16UtDv5N0B-oZBr-vU1mkuurNCPzP61KKI",
+      "id": "sql/group_pending_undecrypted"
+    },
+    {
+      "hash": "i4qdqcXPNAmEfy_8ILUipt6xCjOU25xvg_qbUVGxcXs",
+      "id": "sql/group_projection"
+    },
+    {
+      "hash": "5sUgV47KcDbkLneGTRbbFjQXcxtYMTHhi5QYIiCdOC0",
+      "id": "sql/group_sender_identity_upgrade"
+    },
+    {
+      "hash": "rzF6jSiuZ6iHQGSdt7aDZAku-RGC5M_e04ep8HJFLpc",
+      "id": "sql/group_sender_key_counter_seen"
+    },
+    {
+      "hash": "sigCWEzbdYYkOn1nzK0gJOjRZrS7hGk8mnrFUFYUKbg",
+      "id": "sql/guardian_recovery_share_projection/local"
+    },
+    {
+      "hash": "HYXm17MpKgeKo8KJqKiSptd2gMF06tilUgkMXyfMioI",
+      "id": "sql/guardian_recovery_share_projection/portable"
+    },
+    {
+      "hash": "herIwnao0JH3CaIkgXpnL-gOOVbpDaxkwHan09EgAEU",
+      "id": "sql/home_node_binding"
+    },
+    {
+      "hash": "iOexrDX2-7VM2cQFO3aEJ81AbGSo032R5gXbHWAO-yQ",
+      "id": "sql/identity_lifecycle_projection"
+    },
+    {
+      "hash": "zqBE8gBCnomKU4Y1hGtqkZZNT4TNPIT8GFpBPJN0p7s",
+      "id": "sql/legacy_conversation_delivery_state"
+    },
+    {
+      "hash": "afdLoYk7csld8cT3lU7iEZFiy1S3XdJMtDtWTFwjnjI",
+      "id": "sql/legacy_conversation_read_state"
+    },
+    {
+      "hash": "w8C2NV1_l8Lt4TWwA34kjedhZvLVn4MFOq-IWtMqva4",
+      "id": "sql/legacy_conversation_unread_marker"
+    },
+    {
+      "hash": "BQYqx0tlxlKGj6L6UNIZ97I8QOfPY7TutRiKStOxPK4",
+      "id": "sql/legacy_group_member_device_key"
+    },
+    {
+      "hash": "5JP8IGZL48V1u72exts8ejbP12eVGC122lUlu_uABvo",
+      "id": "sql/legacy_group_sender_key_counter_seen"
+    },
+    {
+      "hash": "GLT1ik6-_4xKATHmwyMv9cjGVLI52MC3QPfz-Z9BbO4",
+      "id": "sql/legacy_receipt_projection"
+    },
+    {
+      "hash": "rQY-eVMgVC21xF8sH7qjfKZJJRXbVRDzlMWZo8KGkiY",
+      "id": "sql/lineage_checkpoint"
+    },
+    {
+      "hash": "rGPCzulElTxvPfi-w4iCMeZY2D7tn9rGGQOPbCCXC_o",
+      "id": "sql/local_event_counter"
+    },
+    {
+      "hash": "RpEiuRsFnKy7kYaULPurm1Fl5kEK7lcMNoJbu_KQqFA",
+      "id": "sql/local_event_log"
+    },
+    {
+      "hash": "O0MYgVlm73k87choYKcJIO2ix-CaS2DOdsx1xxSROmA",
+      "id": "sql/mcp_grant"
+    },
+    {
+      "hash": "1RaWQm0FaAUzK83_2v2TN6CgfwH1lnnvyg8A_kyZV20",
+      "id": "sql/mcp_server_registry"
+    },
+    {
+      "hash": "hiiNDaZ199Oic-TXAuAuVTusAAfFs6vKRm6a4lzk5dA",
+      "id": "sql/mcp_standing_approval"
+    },
+    {
+      "hash": "fhC38F5Ro5153NVoC7J3xA9B-x_rx36xm4dwym_sAkQ",
+      "id": "sql/mcp_tool_manifest"
+    },
+    {
+      "hash": "GzWnsJSYwkf7-AbT5s-NjXNkn2HgLFraQ2wjX7BcmVY",
+      "id": "sql/message_copy_binding"
+    },
+    {
+      "hash": "gSRm98crQR9uUTGIEaza2KkxSf-vww3KWgmOMSoGMuE",
+      "id": "sql/message_footprint"
+    },
+    {
+      "hash": "ZY_sLA8GsI7KpW0ubLKvFal_HFznTyqIFck3gwBJEnc",
+      "id": "sql/message_footprint_actor_stage"
+    },
+    {
+      "hash": "CK9tgKRwDQva-ggn8IUTIBDKzmoSjxak_ovg87XKlM8",
+      "id": "sql/message_footprint_journal_stage"
+    },
+    {
+      "hash": "loTnFnj8vohEKKVKw78FijrGQrNBvttnPwQbEidMA2g",
+      "id": "sql/message_footprint_migration"
+    },
+    {
+      "hash": "fiBkYyiXZY97UmovyZsrfQjonpfrBlxpIcLMLA9L5UE",
+      "id": "sql/message_footprint_outbox_stage"
+    },
+    {
+      "hash": "yLpHe81WQ9bteJK29m5XG5m7o5glkCKOKdcics_lXuE",
+      "id": "sql/message_projection"
+    },
+    {
+      "hash": "fPvdoO-j03_a4ygs0tMlojAkMlRsSobTVckOLvtpwmw",
+      "id": "sql/message_tombstone_projection"
+    },
+    {
+      "hash": "_Tu6yVbUf1iHv3Hkq7hu1rcTDDZs41q6Ac-OX40Cb_E",
+      "id": "sql/nack_state"
+    },
+    {
+      "hash": "5AxQkz-RX-NFHoXb04VzWUcP-fyJ2zdV3mD9WKyERUo",
+      "id": "sql/object_chunk/local"
+    },
+    {
+      "hash": "YKlvP9THNvawXt-RySR4ZFwsHNnX6m6a0d9F0DLQ2dw",
+      "id": "sql/object_chunk/portable"
+    },
+    {
+      "hash": "jGD6b-TvuWDW3mDJqdRcnmXlDAiKL-g_6AX6-3CRaO0",
+      "id": "sql/object_erasure_fence"
+    },
+    {
+      "hash": "D3VsjieIaKiVCKgmebVPDTJ2IUgKPYuKJnjTygYnTyQ",
+      "id": "sql/object_erasure_lookup"
+    },
+    {
+      "hash": "sNjniSQgSowO2IXd604qvZLgc93RUCH1zs3QMmOiRqg",
+      "id": "sql/object_erasure_work"
+    },
+    {
+      "hash": "KkE_BbeyEnD4N0rfcXJgh1-zGW7iRz3WPYm8yzHu3v8",
+      "id": "sql/object_identity_replacement"
+    },
+    {
+      "hash": "hsEJi1hcQK58oqm_clqTlb7tMDNmduueeZ2sX6OCqrw",
+      "id": "sql/object_index/local"
+    },
+    {
+      "hash": "cZEHal5vJn5r3y4Vyyjn4uPI81PhfUVtWKfMHRXFcLg",
+      "id": "sql/object_index/portable"
+    },
+    {
+      "hash": "Lf0XoDEy1vOJf1B5gkKdYnC-1-r4dOc2A8mpDcl4ZPI",
+      "id": "sql/object_key_slot"
+    },
+    {
+      "hash": "uGCIjUdKQ7D7CPcLeDdobfp6zKDxahiHR-m5EK7EvK0",
+      "id": "sql/object_legacy_reference_context"
+    },
+    {
+      "hash": "WN3Yu9Ywe8tzpwAR8k_3urGi2qVz12afk91XG1lFjyM",
+      "id": "sql/object_manifest"
+    },
+    {
+      "hash": "lXymFUY5-iXsB_RB9vlrLa6ur57U30JzHSdkIHHIrM4",
+      "id": "sql/object_message_reference"
+    },
+    {
+      "hash": "0qr86eUf9EOZMx0LRI8KH5M057CxBJ6UA4cjXBdvwls",
+      "id": "sql/object_operation"
+    },
+    {
+      "hash": "gQaarzgVKHXBcleSHyuJ3R0hbHJA2Re9kEkUetkW-Tc",
+      "id": "sql/object_payload_actor"
+    },
+    {
+      "hash": "8hghPH1VPN2nTqxHfDlS60bkshmvP6-7a00u_tyNtIY",
+      "id": "sql/object_payload_dependency"
+    },
+    {
+      "hash": "UIr9C8GZ5chEUGHmrfNmLS_3_5XzgH30C8EeMWbJv3I",
+      "id": "sql/object_projection_erasure_work"
+    },
+    {
+      "hash": "4shTd3WIuttt_ATGvPp6PtNAnrMxFZYkyyezbjOzrOI",
+      "id": "sql/object_reference_actor"
+    },
+    {
+      "hash": "KmSZ2ykP2-41bzbCP6d0W3KRP9hX0rmIiujQzZhvPN8",
+      "id": "sql/object_reference_erasure_work"
+    },
+    {
+      "hash": "FN_fJkOyyn9wBiWHzPzCwmY9QyJMoHMBaelPUxR7QYU",
+      "id": "sql/object_retention_payload"
+    },
+    {
+      "hash": "GxGnnJwLHPPJPlVCRB33UP8oJ3xm5uV8VF7kuFce82w",
+      "id": "sql/object_retention_reference"
+    },
+    {
+      "hash": "dEAGZiZ2e34_4adDaPf_wXncsQNKilC_MmnRDxhHyD8",
+      "id": "sql/object_retention_upgrade"
+    },
+    {
+      "hash": "pHMDvJSReWcR0c6ZYAXauVW2zPc__PWt291AYR1X6hw",
+      "id": "sql/object_runtime_response"
+    },
+    {
+      "hash": "5yw7K552zBg_zvp15LADyWjpr5H6EnbMv8bltMrHF1Q",
+      "id": "sql/object_segment_file"
+    },
+    {
+      "hash": "B9rex6wS7BtDkxy1B8GR3AESCZnCGjG3_Fy65fCmEkg",
+      "id": "sql/object_segment_floor"
+    },
+    {
+      "hash": "Fte8CDGLBTA8_EOhE-y52fWJzGwagCo4MzTdb7elCxY",
+      "id": "sql/object_segment_reference_veto"
+    },
+    {
+      "hash": "zNJpuq-1UdSxKzS7D9IvlUWmMfKXUxozCIAneUSk134",
+      "id": "sql/object_segment_resource"
+    },
+    {
+      "hash": "5QBPGf8N7sXqbClXvbq77H7VDq-yLjGkr7X7fsJED1A",
+      "id": "sql/object_share_grant_projection"
+    },
+    {
+      "hash": "bF4UK-cfVh7XOE3nUDHq-_Z0fXP0cxwlvMvs9tupybU",
+      "id": "sql/object_tombstone"
+    },
+    {
+      "hash": "OyIWFpyDBvEAG_EJCbGULJLu5_-mRuGLXKAeBqXmcPA",
+      "id": "sql/object_transfer_state"
+    },
+    {
+      "hash": "Uhyg_D0AxghOIT7T0Y-EA9jDl_bCoq9ugsiJJN6qHeE",
+      "id": "sql/object_transport_actor"
+    },
+    {
+      "hash": "NZgOSv_V8L2GXGweYiBfGs6wpcC5YCUjuaYN-P06qS0",
+      "id": "sql/outbox_queue"
+    },
+    {
+      "hash": "ltDYkU7V2UPrU5EvmJ-6GRo4kd18sZYBPCkcaZhTmt8",
+      "id": "sql/pairing_adoption"
+    },
+    {
+      "hash": "t7YyDxEh-oOAjV2e2olRRJSf7fEXmIn_bwGS3qQvse4",
+      "id": "sql/pairing_floor"
+    },
+    {
+      "hash": "MT7wLIEO-msV9fatw2hDKKju8qwc3k8TRoLQ8Tp8sGs",
+      "id": "sql/pairing_full_completion"
+    },
+    {
+      "hash": "5qS63-9_6V6q6IG7NLpRruZqIkti-6tcD45Kd07szxI",
+      "id": "sql/pairing_full_tail"
+    },
+    {
+      "hash": "CWq6IAs_iDrJ0UJORdAdhy1ONfkD-AnNA_WGK2HrNiY",
+      "id": "sql/pairing_full_tail_apply"
+    },
+    {
+      "hash": "hI6DTyAW9fN9sCpZlFwSnff7MblgEzCYiqlVvFrDnt8",
+      "id": "sql/pairing_full_tail_dependency"
+    },
+    {
+      "hash": "DWTii5HN0EclU4ymQnjUXnoWNU4bkvAj2qNL1rDXUJk",
+      "id": "sql/pairing_head"
+    },
+    {
+      "hash": "gUI-DBTwZ7WNCS0IHz4wppnasnpyefR7PDyOu4i5o7o",
+      "id": "sql/pairing_live"
+    },
+    {
+      "hash": "nasLAuA2cgmPE-v5nyaggbiWRYeeN6tbTkGz9iE9wKo",
+      "id": "sql/pairing_own_sync"
+    },
+    {
+      "hash": "GZPtLueoDHnVl-Yc4mFFv0hsCD8LcaQfnf8eBacx8x4",
+      "id": "sql/pairing_source_cleanup"
+    },
+    {
+      "hash": "_kacZG1SHFl1DrP1HwGojgRoL8Fy53VebpYWUlkwI8Q",
+      "id": "sql/pairing_terminal"
+    },
+    {
+      "hash": "Aq9i-sJCX0XqCXuCr0IZHy5-TTP6UMFT9yxbmue_NoI",
+      "id": "sql/pending_recovery_approval_projection"
+    },
+    {
+      "hash": "CJ7tpPp4a6nSlZCvPk1DTGWEas52axtaW2AVxo4e9T8",
+      "id": "sql/pending_recovery_projection"
+    },
+    {
+      "hash": "CrlxDWOtlp3a3QJkZ9EH55UR2bB-I5L1glWqLaqolbg",
+      "id": "sql/projection_checkpoint"
+    },
+    {
+      "hash": "0jNLhnOQFAaiDWtOgfeOT9NJQ9vQH6YTGsbcPaWEjJs",
+      "id": "sql/raw_envelope_log"
+    },
+    {
+      "hash": "0EoojcRjKgJntiFx83NYdQPqXOz4AzOo-KGJymz5KV8",
+      "id": "sql/raw_inner_copy"
+    },
+    {
+      "hash": "2wObxBQeqor3LuazJfsCKwxu9qqrB-06hjm-t6JBvzo",
+      "id": "sql/raw_inner_evidence"
+    },
+    {
+      "hash": "K-VKKMRo0eT2Ud3o2AmMy8twe29hJef9HmFT8kL4qJ4",
+      "id": "sql/raw_inner_owner"
+    },
+    {
+      "hash": "_U4jq7C8dOpNkV01xUOE3ClZ0DbJoc9DDne3L_7CKKE",
+      "id": "sql/receipt_identity_upgrade"
+    },
+    {
+      "hash": "CKzYY5bubBZo2a1Z0-l6POQm35ETioj8sMOVKnWyQek",
+      "id": "sql/receipt_projection"
+    },
+    {
+      "hash": "5SGDB4WvY5LmHg_yn_i535aQcF0bYhz94eVvfg2ooxY",
+      "id": "sql/receive_erased_input"
+    },
+    {
+      "hash": "UUqw3fVlGM4pnvjflh3JwI-RQ1XiSGn8L0D9Jv8ioqo",
+      "id": "sql/rejected_inbox_projection"
+    },
+    {
+      "hash": "CJ4q6zhKFbw-uzurNjGIYDGj8VAwWOeOiSWQf_Dvee0",
+      "id": "sql/root_group_control_event_seen"
+    },
+    {
+      "hash": "sprFChoDpeBQspGKvWaEKK9GMaPrin01w6NpaU87rBA",
+      "id": "sql/root_group_invite_identity"
+    },
+    {
+      "hash": "-EJZKtV4gfxYrxk_jT4q3P2HzvVyBdBdJDmeTY2kmdE",
+      "id": "sql/root_group_sender_key_counter_seen"
+    },
+    {
+      "hash": "UXNHmbvcjVF4aVR7s4cvNkTpFvpDTP82uCy-5Okx_Tc",
+      "id": "sql/root_identity_key_upgrade"
+    },
+    {
+      "hash": "zZZik-pf8iQ_ws-_r_9TefKOITF9aXPQlO2pC91_PFI",
+      "id": "sql/runtime_account_identity"
+    },
+    {
+      "hash": "kZLnkekshE00fLpOcCPdU9RVAHQbRcvw_bQU6XXG5nk",
+      "id": "sql/runtime_ack"
+    },
+    {
+      "hash": "nDBucivX0RYKfaZP7tC22r7caeLbnp1NTcb_ISgLOkA",
+      "id": "sql/runtime_actor_state"
+    },
+    {
+      "hash": "bZM4xsBIx0WcTF7XpWqIo5gs_WJ49dxTw9vMZxe9iLk",
+      "id": "sql/runtime_attachment_budget"
+    },
+    {
+      "hash": "BVWie-seh8Vh0fi7unV9cXQ-rqNJgToc7y8rfXwa0tg",
+      "id": "sql/runtime_attachment_expiry"
+    },
+    {
+      "hash": "o2TncqMhytyogHjzn3rWEryuOII7JGGr2olWXsh7gsw",
+      "id": "sql/runtime_attachment_grant"
+    },
+    {
+      "hash": "7BfJarrYCASEEFzNZmhEPPfzxv5Cq7Q1eOnCwhRPpwE",
+      "id": "sql/runtime_attachment_reference"
+    },
+    {
+      "hash": "R376cCcFzbbJUVxGXoU5uOr1vbPbpKU77mHlyL0zG-0",
+      "id": "sql/runtime_attachment_retirement"
+    },
+    {
+      "hash": "9ZjTr4UH32UhcIyVFells9f0RWKFHofcKHcM8bscDM4",
+      "id": "sql/runtime_home_migration_job"
+    },
+    {
+      "hash": "uInRLyoT47cMJ0Wtd2kvm5gI6ENl8gvMZY2XVhNXefc",
+      "id": "sql/runtime_home_migration_transition"
+    },
+    {
+      "hash": "XY2FdVkBmVA160RwM1qX0g8TPEqIHzioePBQ2nkqJTs",
+      "id": "sql/runtime_inbox_changes"
+    },
+    {
+      "hash": "wILyRaR0kz9ctWFi-HJDIvqXdGAEjL88ei7GCccA9iY",
+      "id": "sql/runtime_inbox_dead_letter"
+    },
+    {
+      "hash": "ZvMmJZ654fJhVHkkewYFOXg7OeuOQ1p6w90E8UUhsrI",
+      "id": "sql/runtime_inbox_policy"
+    },
+    {
+      "hash": "gUpy3Fl8qjaNRySN7Qy3sz20-Wl7DaQ1olhw6aMfn88",
+      "id": "sql/runtime_inbox_recovery"
+    },
+    {
+      "hash": "SNZItgVKdUhKVVvnhJSulhr8ss8rTTTWfLJE5kEuos0",
+      "id": "sql/runtime_inbox_retry"
+    },
+    {
+      "hash": "amPE42SCG5uh6KxYW9aDyf7NCnwI9jzW_A8qtZ55pyU",
+      "id": "sql/runtime_journal"
+    },
+    {
+      "hash": "QTHufveyAiJiKAozm_YPejixsmCDMzH2LQ12eTPfoDA",
+      "id": "sql/runtime_journal_bounds"
+    },
+    {
+      "hash": "T3XhGDRvZP-L5_5e6GxgxtB-xE-ICws7Q-Fh0E12eVA",
+      "id": "sql/runtime_message_content"
+    },
+    {
+      "hash": "seugUiz70ErWy0XTbQ44fOrZxwGmSYe6TXfDZV9sbXE",
+      "id": "sql/runtime_message_sequence"
+    },
+    {
+      "hash": "yzYOt5UhnfqxggwCN4ASOW9Zn1viAzcabGF34-bvsM8",
+      "id": "sql/runtime_operation"
+    },
+    {
+      "hash": "HupGXCqbscEQvsKMLJg-hwLV5Qe2FDD7EJo-bhmz1D8",
+      "id": "sql/runtime_outbox"
+    },
+    {
+      "hash": "1pMxGxdW75JR7JEn9GlL6Safl-7JKKBzVZ_HPKo8SFY",
+      "id": "sql/runtime_own_copy_state"
+    },
+    {
+      "hash": "jiO73lr5TspUnjUiiNnu0s9sdeO2e8RSnXqooUzRDGU",
+      "id": "sql/runtime_own_copy_usage"
+    },
+    {
+      "hash": "j_Z1OZKimxcS1bU9Tl-SVOUy8eKGdPkVDjZigjWuszA",
+      "id": "sql/runtime_privacy_maintenance"
+    },
+    {
+      "hash": "E-F6qCXX31YhAOIgI5z6zHsMl7vGFlPVsA7TPKJuZ8s",
+      "id": "sql/runtime_receipt_retention"
+    },
+    {
+      "hash": "AAovb_zRaeaBv46WTyTm5mmOcUXY7DVvpLE40wZWdmc",
+      "id": "sql/runtime_scoped_ack"
+    },
+    {
+      "hash": "Gb0cmuYEfX7JEL4xgOAwtUKhRCsyHwBajt-SRxmRDwk",
+      "id": "sql/runtime_unrouted"
+    },
+    {
+      "hash": "MnVa0OT23XotHgQaOS7dmVAmc8fYiLJXga_SqqZS9ww",
+      "id": "sql/schema_migration"
+    },
+    {
+      "hash": "GfqDpBP1ZcVaKBFXn9Bb2ZA64TC_1O09r_2UHf2d5Xk",
+      "id": "sql/self_device_control_log"
+    },
+    {
+      "hash": "j03guetB5IMhriqfufl7pxlEeVCWcQM9pf3f2jjPql4",
+      "id": "sql/session_capability_cache"
+    },
+    {
+      "hash": "5DX0CLogofzBpszUBJO2u0HPCxyMuh9Bgv8G5rBUwz0",
+      "id": "sql/shared_group_floor_generation"
+    },
+    {
+      "hash": "8UAP4U1J_JAYTD5wthQHdSK0vuFPnyj3CZ7-OG0k3qQ",
+      "id": "sql/shared_group_member_projection"
+    },
+    {
+      "hash": "cx_hwGTlNvSa_zGdeW2pnpGYqLPK5vbtlsMzmDj9mTI",
+      "id": "sql/shared_group_removal_floor"
+    },
+    {
+      "hash": "AicyUcMdjPFIPvklJNaWT_ycVA-rkyBzw6uS27XL8go",
+      "id": "sql/sync_checkpoint"
+    }
+  ]
+}

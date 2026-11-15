@@ -59,6 +59,132 @@ struct LossyPersist {
     fail_once: AtomicBool,
 }
 
+#[tokio::test]
+async fn pairing_async_submission_retains_exact_head_before_network_and_on_retry() -> TestResult {
+    let harness = Harness::open("async-head-submission").await?;
+    let now = Harness::now()?;
+    enroll_sibling(&harness, now)?;
+    let before = object_hash(harness.account(now)?.record())?;
+    let write = revoke_write(&harness, "sibling", now + 1)?;
+    let prepared = super::prepare_head_submission(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+    )?;
+    let durable = held_head(&harness)?;
+    assert_eq!(durable.state, "submitted", "cancellation cannot precede the submit fence");
+    assert_eq!(durable.candidate_hash, object_hash(&prepared.record)?);
+    assert_eq!(object_hash(harness.account(now + 1)?.record())?, before);
+    let node_before = harness
+        .persist
+        .router
+        .custody_record(&prepared.record.body.account_anchor, now + 1)?
+        .ok_or("node record")?;
+    assert_eq!(object_hash(&node_before.record)?, before, "preparation is not publication");
+    assert!(harness.db.try_lock().is_ok(), "no DB lock crosses the native send");
+    let lock = crate::custody::pairing::activate::authority_lock(harness.root(), &harness.id)?;
+    drop(lock);
+    // The asynchronous frontend may disappear here. Re-entry uses exactly the submitted row.
+    let retry = super::prepare_head_submission(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+    )?;
+    assert_eq!(object_hash(&retry.record)?, durable.candidate_hash);
+    assert_busy(&harness, &profile_write(&harness, "Cannot replace submitted revoke", now + 1)?)?;
+    let acknowledged = publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+        harness.persist.as_ref(),
+    )?;
+    assert_eq!(acknowledged.record_hash, durable.candidate_hash);
+    assert!(harness.db.lock().map_err(|_| "db")?.pairing_head()?.is_none());
+    let node_after = harness
+        .persist
+        .router
+        .custody_record(&prepared.record.body.account_anchor, now + 1)?
+        .ok_or("published record")?;
+    assert_eq!(object_hash(&node_after.record)?, durable.candidate_hash);
+    assert_eq!(
+        node_after
+            .record
+            .body
+            .devices
+            .iter()
+            .find(|d| d.device_id == "sibling")
+            .ok_or("sibling")?
+            .status,
+        ramflux_protocol::DeviceSetStatus::Revoked
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_head_update_is_durable_before_network_and_reconciles_same_hash() -> TestResult {
+    struct InspectingPersist<'a> {
+        db: &'a Mutex<AccountDb>,
+        root: &'a Path,
+        account_id: &'a str,
+        inner: &'a RouterPersist,
+        lose_reply: AtomicBool,
+    }
+    impl NodeHeadPersist for InspectingPersist<'_> {
+        fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError> {
+            let head = self
+                .db
+                .lock()
+                .map_err(|_| SdkError::PairingCode("Busy"))?
+                .pairing_head()?
+                .ok_or(SdkError::PairingField("state"))?;
+            assert_eq!(head.kind, "head_update");
+            assert_eq!(head.state, "submitted");
+            assert_eq!(head.candidate_hash, object_hash(&publication.record)?);
+            // This is the real production callback: no authority lock may span network work.
+            let lock =
+                crate::custody::pairing::activate::authority_lock(self.root, self.account_id)?;
+            drop(lock);
+            let hash = self.inner.persist_head(publication, now)?;
+            if self.lose_reply.swap(false, Ordering::SeqCst) {
+                return Err(SdkError::PairingCode("PublicationPending"));
+            }
+            Ok(hash)
+        }
+    }
+    let harness = Harness::open("head-update-fence").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let write = profile_write(&harness, "Journaled profile", now + 1)?;
+    let persist = InspectingPersist {
+        db: &harness.db,
+        root: harness.root(),
+        account_id: &harness.id,
+        inner: harness.persist.as_ref(),
+        lose_reply: AtomicBool::new(true),
+    };
+    assert!(matches!(
+        publish_head(&harness.db, harness.root(), harness.fixture.vault.as_ref(), &write, &persist),
+        Err(SdkError::PairingCode("PublicationPending"))
+    ));
+    let uncertain = held_head(&harness)?;
+    let other = profile_write(&harness, "Cannot bypass uncertain head", now + 1)?;
+    assert_busy(&harness, &other)?;
+    let published = publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+        &persist,
+    )?;
+    assert_eq!(published.record_hash, uncertain.candidate_hash);
+    assert_eq!(harness.account(now + 1)?.record().body.profile.display_name, "Journaled profile");
+    assert!(harness.db.lock().map_err(|_| "db")?.pairing_head()?.is_none());
+    Ok(())
+}
+
 impl NodeHeadPersist for LossyPersist {
     fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError> {
         let hash = self.inner.persist_head(publication, now)?;
@@ -487,6 +613,35 @@ async fn pairing_non_primary_cannot_submit_stored_head() -> TestResult {
 }
 
 #[tokio::test]
+async fn pairing_non_primary_cannot_resume_submitted_head_before_persist() -> TestResult {
+    struct CountPersist(std::sync::atomic::AtomicUsize);
+    impl NodeHeadPersist for CountPersist {
+        fn persist_head(&self, _: &Publication, _: u64) -> Result<String, SdkError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(SdkError::PairingCode("PublicationPending"))
+        }
+    }
+    let harness = Harness::open("p18submitted").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let (mut write, recipient) = enroll_write(&harness, "stolen-submitted", now + 1)?;
+    seed_prepared(&harness, &write)?;
+    let mut head = held_head(&harness)?;
+    head.state = "submitted".into();
+    harness.db.lock().map_err(|_| "db")?.put_pairing_head(&head)?;
+    write.publisher_ref = recipient.clone();
+    write.local_ref = recipient;
+    let persist = CountPersist(std::sync::atomic::AtomicUsize::new(0));
+    assert!(matches!(
+        publish_head(&harness.db, harness.root(), harness.fixture.vault.as_ref(), &write, &persist),
+        Err(SdkError::PairingCode("PrimaryRequired"))
+    ));
+    assert_eq!(persist.0.load(Ordering::SeqCst), 0);
+    assert_eq!(held_head(&harness)?, head);
+    Ok(())
+}
+
+#[tokio::test]
 async fn pairing_resume_refuses_kind_mismatch() -> TestResult {
     let harness = Harness::open("p09kind").await?;
     let now = Harness::now()?;
@@ -496,6 +651,9 @@ async fn pairing_resume_refuses_kind_mismatch() -> TestResult {
     let mut profile = profile_write(&harness, "Renamed Human", now.saturating_add(1))?;
     profile.operation_id = seed.operation_id.clone();
     profile.invitation_id = seed.invitation_id.clone();
+    // A foreign writer kind must be rejected before touching primary credentials.
+    let reference = harness.account(now)?.primary_vault_ref().to_owned();
+    crate::custody::PrimaryVault::delete(harness.fixture.vault.as_ref(), &reference)?;
     assert_busy(&harness, &profile)?;
     Ok(())
 }

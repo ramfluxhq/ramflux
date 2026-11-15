@@ -8,6 +8,9 @@ use super::{
     decode_base64url, encode_base64url, header, integer, reference, require,
 };
 
+mod floors;
+pub use floors::{AttestingHead, RetainedFloor, RetainedFloorsRef};
+
 pub(super) fn error_code(v: &str) -> Result<()> {
     require(
         matches!(
@@ -24,6 +27,7 @@ pub(super) fn error_code(v: &str) -> Result<()> {
                 | "SasMismatch"
                 | "PublicationPending"
                 | "TransferCapacity"
+                | "TransferFloorsTooLarge"
                 | "UpdateRequired"
                 | "VaultUnavailable"
                 | "NotFound"
@@ -148,11 +152,13 @@ pub enum Payload {
     CandidateReady {
         transfer_id: String,
         record_hash: String,
+        #[serde(deserialize_with = "super::required_nullable")]
         compacted_ids_hash: Option<String>,
     },
     TransferReady {
         transfer_id: String,
         record_hash: String,
+        #[serde(deserialize_with = "super::required_nullable")]
         compacted_ids_hash: Option<String>,
         preservation: Envelope<PreservationBody>,
     },
@@ -193,6 +199,7 @@ impl Payload {
                 let max = match object_kind.as_str() {
                     "hpke" => 819_200,
                     "candidate" => 524_288,
+                    "retained_floors" => 1_048_576,
                     _ => return Err(WireError::Field("object_kind")),
                 };
                 require(*total_bytes > 0 && *total_bytes <= max, "total_bytes")?;
@@ -350,7 +357,7 @@ impl Channel {
             Payload::ArtifactChunk { object_kind, object_id, .. } => {
                 require(common.purpose == "primary_transfer", "channel_purpose")?;
                 require(
-                    if object_kind == "hpke" {
+                    if matches!(object_kind.as_str(), "hpke" | "retained_floors") {
                         common.transfer_id.as_ref() == Some(object_id) && c.sender == "initiator"
                     } else {
                         *object_id == self.invitation_id && c.sender == "responder"
@@ -397,6 +404,7 @@ impl Channel {
 pub struct PendingInvitation {
     pub invitation_id: String,
     pub expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub proposal_hash: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +413,7 @@ pub struct JournalEntry {
     pub operation_id: String,
     pub intent_hash: String,
     pub state: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub acknowledgement_hash: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +467,8 @@ pub struct TransferPayload {
     pub group_restriction_summary: Vec<GroupRestriction>,
     pub pending_erasure: Vec<DeviceRef>,
     pub optional_data_keys: Vec<DataKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_floors: Option<RetainedFloorsRef>,
 }
 impl std::fmt::Debug for TransferPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -538,6 +549,9 @@ impl PairingWire for TransferPayload {
             require(matches!(v.purpose.as_str(), "history" | "attachment"), "key.purpose")?;
             b32(&v.key, "key")?;
             budget(v, 1024)?;
+        }
+        if let Some(reference) = &self.retained_floors {
+            reference.validate()?;
         }
         budget(self, Self::LIMIT)
     }

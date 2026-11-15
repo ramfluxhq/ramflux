@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! P04 closed schema, decoder bounds, migration and backup classification.
+//! P04 closed schema, decoder bounds and backup classification.
 mod backup;
 mod codec;
 mod crash;
-mod helpers;
+mod full_reference;
+pub(in crate::account_db) mod helpers;
 mod schema;
 
 #[test]
@@ -34,7 +35,6 @@ fn pairing_journal_crash_fences_and_backup_exclusion() -> Result<(), Box<dyn std
 #[test]
 fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::error::Error>> {
     schema::tables_and_indexes()?;
-    schema::old_open_creates_tables()?;
     schema::caps_and_sql_bounds()?;
     codec::live_submitted_candidate_state()?;
     codec::row_field_and_size_bounds()?;
@@ -53,3 +53,5 @@ fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::er
     backup::floor_merge_binds_local_account()?;
     Ok(())
 }
+
+mod full_adoption;

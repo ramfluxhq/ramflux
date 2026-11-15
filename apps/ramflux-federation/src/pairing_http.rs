@@ -17,6 +17,7 @@ use crate::{RouterMeshClient, router_post_json};
 pub(crate) struct PairingHttpSurface {
     pub(crate) router: Arc<RouterMeshClient>,
     pub(crate) trusted_proxies: Vec<IpAddr>,
+    pub(crate) full_scratch: crate::pairing_scratch::FullListenerScratch,
 }
 
 impl PairingHttpSurface {
@@ -25,7 +26,11 @@ impl PairingHttpSurface {
     pub(crate) fn open(
         router: Arc<RouterMeshClient>,
     ) -> Result<Self, ramflux_node_core::NodeCoreError> {
-        Ok(Self { router, trusted_proxies: trusted_proxies_from_env()? })
+        Ok(Self {
+            router,
+            trusted_proxies: trusted_proxies_from_env()?,
+            full_scratch: crate::pairing_scratch::FullListenerScratch::global(),
+        })
     }
 
     /// Production assembly: capability gate then the node-forwarding surface.
@@ -45,7 +50,11 @@ impl PairingHttpSurface {
         router: Arc<RouterMeshClient>,
         trusted_proxies: Vec<IpAddr>,
     ) -> Self {
-        Self { router, trusted_proxies }
+        Self {
+            router,
+            trusted_proxies,
+            full_scratch: crate::pairing_scratch::FullListenerScratch::default(),
+        }
     }
 }
 
@@ -63,6 +72,7 @@ pub(crate) fn respond(
     peer: IpAddr,
     request: &NodeHttpRequest,
     listener_is_tls: bool,
+    deadline: std::time::Instant,
 ) -> HttpResponse {
     let forwarded_proto = request.forwarded_proto.as_deref();
     let forwarded_for = request.forwarded_for.as_deref();
@@ -73,6 +83,15 @@ pub(crate) fn respond(
         Ok(source) => source,
         Err(reason) => return HttpResponse::text("400 Bad Request", reason),
     };
+    if let Some(reply) = crate::pairing_full::claim(surface, source, request, deadline) {
+        return reply;
+    }
+    if crate::pairing_full::full_body_without_permit(&request.body) {
+        return crate::pairing_full::failure(
+            &ramflux_node_core::pairing_relay::PairingRelayError::WrongContext,
+        )
+        .full_pairing(None, deadline);
+    }
     let forward = PairingMeshForward {
         body: encode_pairing_mesh_body(&request.body),
         source: source.to_string(),

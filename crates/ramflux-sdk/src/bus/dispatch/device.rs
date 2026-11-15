@@ -39,7 +39,15 @@ pub(crate) async fn dispatch_device_bus_request(
         | "device.pair.confirm"
         | "device.pair.approve"
         | "device.pair.cancel"
-        | "device.pair.status" => dispatch_device_pair(request).await,
+        | "device.transfer.begin"
+        | "device.transfer.join"
+        | "device.transfer.confirm"
+        | "device.transfer.cancel"
+        | "device.transfer.tail_abandon"
+        | "device.transfer.prepare"
+        | "device.transfer.affirm"
+        | "device.transfer.status"
+        | "device.pair.status" => dispatch_device_pair(request, state).await,
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
@@ -180,11 +188,45 @@ async fn dispatch_push_route_set(
     })))
 }
 
-async fn dispatch_device_pair(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
+async fn dispatch_device_pair(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
-    match crate::custody::pairing::handle_bus(account_id, &request.method, request.body.clone())
-        .await
+    Box::pin(crate::bus::pairing::ensure_actor(state, account_id, request)).await?;
+    let result = {
+        let work = crate::custody::pairing::handle_bus(
+            &state.config.data_root,
+            account_id,
+            &request.method,
+            request.body.clone(),
+        );
+        tokio::pin!(work);
+        loop {
+            let signal = crate::custody::pairing::work_signal(&state.config.data_root, account_id);
+            tokio::select! {
+                result = &mut work => break result,
+                () = async {
+                    match signal {
+                        Some(signal) => signal.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(account) = state.accounts.get_mut(account_id) {
+                        crate::custody::pairing::service_frontend(
+                            &state.config.data_root, account_id, &mut account.client,
+                        )?;
+                    }
+                }
+            }
+        }
+    };
+    if result.is_ok()
+        && let Some(account) = state.accounts.get_mut(account_id)
     {
+        crate::bus::pairing::refresh_source_role(account)?;
+    }
+    match result {
         Ok(result) => Ok(local_bus_ok(serde_json::to_value(result)?)),
         Err(SdkError::PairingCode("NotFound")) => {
             Err(SdkError::LocalBus(format!("unsupported local bus method: {}", request.method)))
@@ -311,36 +353,11 @@ async fn dispatch_device_revoke(
     body: LocalBusDeviceRevokeRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?.to_owned();
-    let data_root = state.config.data_root.clone();
-    let manifest_path = local_bus_account_manifest_path(&data_root, &account_id);
-    let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
-    let root = ramflux_crypto::create_identity_root(&manifest.principal_id, manifest.root_seed);
-    let root_public_key =
-        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let derived_commitment = identity_root_public_key_commitment(&root_public_key)?;
-    if derived_commitment != manifest.principal_commitment {
-        return Err(SdkError::LocalBus("account manifest root commitment mismatch".to_owned()));
+    if account.client.born_v3_account.is_none() {
+        return Err(SdkError::PairingCode("UpdateRequired"));
     }
-    let revoked_at = now_unix_timestamp();
-    let mut gateway = GatewaySessionConfig::auto(manifest.gateway.clone());
-    if let Some(addr) = manifest.node_tcp_addr {
-        gateway = gateway.with_tcp_gateway_addr(addr);
-    }
-    let record = account.client.revoke_owned_device(&gateway, &body.device_id).await?;
-    manifest.devices.retain(|device| device.device_id != body.device_id);
-    write_local_bus_account_manifest(&data_root, &manifest)?;
-    account.client.append_event(
-        &format!("device.branch_revoked:{}", body.device_id),
-        "identity.device_branch.revoked",
-        &serde_json::to_vec(&serde_json::json!({
-            "device_id": body.device_id,
-            "revoked_at": revoked_at,
-        }))?,
-    )?;
-    Ok(local_bus_ok(
-        serde_json::json!({"device_id":body.device_id,"revoked":true,"publication_state":"submitted","device_set_epoch":record.device_set_epoch}),
-    ))
+    Box::pin(native_revoke::dispatch(account, &body.device_id)).await
 }
 
 fn dispatch_device_sync_export(
@@ -537,3 +554,5 @@ fn merge_manifest_device(
 #[cfg(test)]
 #[path = "tests/native_device.rs"]
 mod native_tests;
+
+mod native_revoke;

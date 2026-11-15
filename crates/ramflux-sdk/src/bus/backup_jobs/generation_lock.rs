@@ -5,15 +5,38 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
 #[derive(Clone, Default)]
-pub(super) struct GenerationLocks(Arc<Mutex<BTreeMap<String, Weak<AtomicBool>>>>);
-pub(super) struct GenerationLease(Arc<AtomicBool>);
+pub(crate) struct GenerationLocks(Arc<Mutex<BTreeMap<String, Weak<AtomicBool>>>>);
+pub(crate) struct GenerationLease {
+    slot: Arc<AtomicBool>,
+    // A live lease must keep the canonical-root registry owner alive even when
+    // its short-lived creator/service has gone away.
+    _owner: GenerationLocks,
+}
 impl GenerationLocks {
-    pub(super) fn try_acquire(
+    /// Share one generation owner across backup services and pairing at the same root.
+    pub(crate) fn for_root(root: &std::path::Path) -> Result<Self, crate::SdkError> {
+        type Slots = Mutex<BTreeMap<String, Weak<AtomicBool>>>;
+        type Roots = Mutex<BTreeMap<std::path::PathBuf, Weak<Slots>>>;
+        static ROOTS: OnceLock<Roots> = OnceLock::new();
+        let root = std::fs::canonicalize(root)?;
+        let mut roots = ROOTS
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .map_err(|_| super::service::refused("interrupted"))?;
+        roots.retain(|_, owner| owner.strong_count() > 0);
+        let owner = roots.get(&root).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let owner = Arc::new(Mutex::new(BTreeMap::new()));
+            roots.insert(root, Arc::downgrade(&owner));
+            owner
+        });
+        Ok(Self(owner))
+    }
+    pub(crate) fn try_acquire(
         &self,
         account: &str,
     ) -> Result<Option<GenerationLease>, crate::SdkError> {
@@ -27,12 +50,12 @@ impl GenerationLocks {
         Ok(slot
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| GenerationLease(slot)))
+            .map(|_| GenerationLease { slot, _owner: self.clone() }))
     }
 }
 impl Drop for GenerationLease {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.slot.store(false, Ordering::Release);
     }
 }
 
@@ -57,6 +80,29 @@ mod tests {
         super::super::recovery::recover_generations(&root, &index, &locks)?;
         assert!(!generation.exists());
         drop(index);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+    #[test]
+    fn pairing_and_backup_generation_owners_share_canonical_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("pairing-shared-generation-owner");
+        std::fs::create_dir_all(&root)?;
+        let backup = GenerationLocks::for_root(&root)?;
+        let pairing = GenerationLocks::for_root(&root.join("."))?;
+        let lease = backup.try_acquire("acct")?.ok_or("first generation owner")?;
+        assert!(
+            pairing.try_acquire("acct")?.is_none(),
+            "independent service bypassed the generation owner"
+        );
+        assert!(pairing.try_acquire("other")?.is_some());
+        drop(lease);
+        assert!(pairing.try_acquire("acct")?.is_some());
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

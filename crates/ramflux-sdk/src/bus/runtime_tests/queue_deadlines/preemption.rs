@@ -15,8 +15,9 @@ impl Drop for ChildDrop {
 async fn lock_preempts_a_held_live_rpc_and_drops_its_late_reply() -> Case {
     LocalSet::new()
         .run_until(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
-            let Fixture { actor, connection, mut io, root, reader, router } =
+            let Fixture { actor, connection, mut io, temp, reader, router } =
                 fixture(Duration::from_secs(600)).await?;
+            let root = temp.path().to_path_buf();
             let (supervisor, caller) = supervised_actor(&actor, &root)?;
             let (started, entered) = oneshot::channel();
             let started = Arc::new(std::sync::Mutex::new(Some(started)));
@@ -99,7 +100,7 @@ async fn lock_preempts_a_held_live_rpc_and_drops_its_late_reply() -> Case {
             drop(connection);
             drop(reader);
             router.await?;
-            std::fs::remove_dir_all(root)?;
+            temp.close()?;
             Ok(())
         })))
         .await
@@ -109,8 +110,9 @@ async fn lock_preempts_a_held_live_rpc_and_drops_its_late_reply() -> Case {
 async fn account_switch_answers_while_a_network_command_is_stalled() -> Case {
     LocalSet::new()
         .run_until(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
-            let Fixture { actor, connection, mut io, root, reader, router } =
+            let Fixture { actor, connection, mut io, temp, reader, router } =
                 fixture(Duration::from_secs(600)).await?;
+            let root = temp.path().to_path_buf();
             let config = LocalBusConfig::new(root.join("bus.sock"), &root);
             let bob = crate::bus::runtime_tests::actor_account(
                 &root,
@@ -164,7 +166,7 @@ async fn account_switch_answers_while_a_network_command_is_stalled() -> Case {
             drop(connection);
             drop(reader);
             router.await?;
-            std::fs::remove_dir_all(root)?;
+            temp.close()?;
             Ok(())
         })))
         .await

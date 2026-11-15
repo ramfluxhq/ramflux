@@ -12,6 +12,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
 pub(crate) mod local_first;
+mod private_unlock;
 mod session_events;
 
 #[tokio::test]

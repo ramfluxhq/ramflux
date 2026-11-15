@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
+pub(crate) const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
 const NODE_ID: &str = "localhost";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
@@ -76,6 +76,7 @@ impl ChildGuard {
 pub struct Stack {
     pub discovery_url: String,
     pub gateway_public: String,
+    pub gateway_quic: String,
     pub router_mesh: String,
     pub node_id: String,
     pub admin_url: String,
@@ -159,7 +160,18 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
         || text.contains("addrinuse")
 }
 
+/// Boot ordinary product services with explicit test-owned operator settings.
+/// # Errors
+/// Returns configuration, child-process or readiness failures.
+pub fn boot_pairing_stack(extra: &[(&str, &str)]) -> Result<Stack> {
+    boot_stack_once_with_env(NODE_ID, true, extra)
+}
+
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
+    boot_stack_once_with_env(node_id, wal, &[])
+}
+
+fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) -> Result<Stack> {
     // The owning directory is already unique. Keep socket paths short under CI TMPDIR.
     let root = ramflux_test_support::TestPath::new()?.child("s");
     let mut guard = RootGuard { path: root.clone(), keep: false };
@@ -228,7 +240,8 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR")
             .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
             .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
-            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
+            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
+            .envs(extra.iter().copied());
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -251,6 +264,7 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
         root,
         discovery_url,
         gateway_public: gateway_tcp,
+        gateway_quic,
         router_mesh,
         node_id,
         admin_url,
@@ -1285,8 +1299,20 @@ pub fn rf_json(socket: &Path, args: &[&str]) -> Result<Value> {
     rf_json_env(socket, args, &[])
 }
 
+/// Same JSON CLI call as [`rf_json`], with the caller's deadline.
+/// The wait lives in the shared process-group runner.
+pub fn rf_json_timeout(socket: &Path, args: &[&str], timeout: Duration) -> Result<Value> {
+    let output = rf_output_env_timeout(socket, args, &[], timeout)
+        .map_err(|error| format!("rf {args:?} failed to spawn: {error}"))?;
+    finish_rf_json(args, output)
+}
+
 fn rf_json_env(socket: &Path, args: &[&str], extra: &[(&str, &str)]) -> Result<Value> {
     let output = rf_output_env(socket, args, extra)?;
+    finish_rf_json(args, output)
+}
+
+fn finish_rf_json(args: &[&str], output: std::process::Output) -> Result<Value> {
     if !output.status.success() {
         return Err(format!(
             "rf {args:?} failed ({}): stdout={} stderr={}",
@@ -1668,7 +1694,12 @@ fn shell_join(args: &[&str]) -> String {
 }
 
 fn rf_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rf"))
+    if let Some(root) = std::env::var_os("RAMFLUX_PAIRING_BIN_DIR") {
+        return PathBuf::from(root).join("rf");
+    }
+    option_env!("CARGO_BIN_EXE_rf")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/debug/rf"))
 }
 
 fn sibling_bin(name: &str) -> Result<PathBuf> {
@@ -1781,7 +1812,7 @@ fn create_ca(root: &Path) -> Result<()> {
     ])
 }
 
-fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
+pub fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
     let certs = root.join("certs");
     let key = certs.join(format!("{service}.key"));
     let csr = certs.join(format!("{service}.csr"));
@@ -1837,6 +1868,10 @@ fn write_service_toml(
     node_id: &str,
 ) -> Result<()> {
     let certs = root.join("certs");
+    let service_seed = ramflux_protocol::encode_base64url(ramflux_crypto::blake3_256(
+        "ramflux.cli.e2e.node.v1",
+        node_id.as_bytes(),
+    ));
     let database = root.join("state").join(service).join(format!("{service}.redb"));
     if let Some(parent) = database.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1851,7 +1886,7 @@ fn write_service_toml(
             r#"node_id = "{node_id}"
 service_id = "{service}"
 redb_path = "{}"
-node_service_signing_seed_b64url = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio"
+node_service_signing_seed_b64url = "{service_seed}"
 
 [mesh]
 listen_addr = "{listen}"

@@ -15,6 +15,7 @@ use ramflux_protocol::{
 };
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 const PHASES: [&str; 14] = [
     "invited",
@@ -206,6 +207,8 @@ pub struct AdoptionRow {
     pub branch_vault_ref: String,
     pub data_vault_ref: String,
     pub primary_vault_ref: Option<String>,
+    pub full_generation_nonce: Option<String>,
+    pub full_initial_union_root: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,7 +238,26 @@ impl LiveRow {
         require(envelope.body.invitation_id == self.invitation_id, "invitation_id")?;
         require(envelope.body.issuer_seq == self.issuer_seq, "issuer_seq")?;
         if let Some(bytes) = &self.context {
-            decode_context(bytes)?;
+            if let Some(reference) = super::full_reference::decode_reference(bytes)? {
+                require(
+                    envelope.body.purpose == "primary_transfer"
+                        && envelope.body.data_selection.is_empty()
+                        && envelope.body.transfer_id.as_deref()
+                            == Some(reference.stage_id.as_str())
+                        && reference.lease_expires_at.0 == self.expires_at
+                        && !matches!(
+                            self.phase.as_str(),
+                            "invited" | "commitments" | "revealed" | "sas_pending"
+                        ),
+                    "full_stage_ref",
+                )?;
+            } else {
+                decode_context(
+                    bytes,
+                    &envelope.body,
+                    self.transcript_hash.as_deref().ok_or(field("transcript_hash"))?,
+                )?;
+            }
         }
         if let Some(bytes) = &self.result {
             decode_failure(bytes)?;
@@ -353,7 +375,10 @@ impl HeadRow {
         optional_b32(self.invitation_id.as_deref(), "invitation_id")?;
         integer(self.generation, "generation")?;
         require(self.generation >= 1, "generation")?;
-        require(matches!(self.kind.as_str(), "enroll" | "transfer" | "revoke"), "kind")?;
+        require(
+            matches!(self.kind.as_str(), "enroll" | "transfer" | "revoke" | "head_update"),
+            "kind",
+        )?;
         b32(&self.base_record_hash, "base_record_hash")?;
         integer(self.base_epoch, "base_epoch")?;
         decode_ref(&self.publisher_ref, "publisher_ref")?;
@@ -377,6 +402,11 @@ impl HeadRow {
                     self.recipient_ref.as_ref().ok_or(field("recipient_ref"))?,
                     "recipient_ref",
                 )?;
+            }
+            "head_update" => {
+                require(self.invitation_id.is_none(), "invitation_id")?;
+                require(self.recipient_ref.is_none(), "recipient_ref")?;
+                require(self.revoked_ref.is_none(), "revoked_ref")?;
             }
             "revoke" => {
                 require(self.invitation_id.is_none(), "invitation_id")?;
@@ -463,11 +493,19 @@ impl AdoptionRow {
             + self.local_role.len()
             + self.branch_vault_ref.len()
             + self.data_vault_ref.len()
-            + self.primary_vault_ref.as_ref().map_or(0, String::len);
+            + self.primary_vault_ref.as_ref().map_or(0, String::len)
+            + self.full_generation_nonce.as_ref().map_or(0, String::len)
+            + self.full_initial_union_root.as_ref().map_or(0, String::len);
         require(n <= ADOPTION_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.operation_id, "operation_id")?;
         b32(&self.record_hash, "record_hash")?;
+        optional_b32(self.full_generation_nonce.as_deref(), "full_generation_nonce")?;
+        optional_b32(self.full_initial_union_root.as_deref(), "full_initial_union_root")?;
+        require(
+            self.full_generation_nonce.is_some() == self.full_initial_union_root.is_some(),
+            "full_generation",
+        )?;
         decode_ref(&self.local_ref, "local_ref")?;
         require(matches!(self.local_role.as_str(), "primary" | "secondary"), "local_role")?;
         ident(&self.branch_vault_ref, "branch_vault_ref")?;
@@ -524,8 +562,66 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Envelope<Invitation>, StorageError>
     Ok(envelope)
 }
 
-fn decode_context(bytes: &[u8]) -> Result<LiveContext, StorageError> {
+fn decode_context(
+    bytes: &[u8],
+    invitation: &Invitation,
+    expected_th: &str,
+) -> Result<(), StorageError> {
+    #[derive(Deserialize)]
+    struct RoleHeader {
+        schema: String,
+    }
+    #[derive(Deserialize)]
+    struct Header {
+        initiator: RoleHeader,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FullContext {
+        initiator: ramflux_protocol::custody::pairing::context_v3::RoleContextV3,
+        responder: ramflux_protocol::custody::pairing::context_v3::RoleContextV3,
+    }
     bounded(bytes, 57_344, "context")?;
+    let header: Header = parse_i_json(bytes).map_err(|_| field("context"))?;
+    if header.initiator.schema == "ramflux.pairing.RoleContext.v3" {
+        let context: FullContext = parse_i_json(bytes).map_err(|_| field("context"))?;
+        let canonical = canonical_json_bytes(&context).map_err(|_| field("json"))?;
+        let transcript = ramflux_protocol::custody::pairing::context_v3::TranscriptV3 {
+            schema: "ramflux.pairing.Transcript.v3".into(),
+            version: 3,
+            initiator: context.initiator,
+            responder: context.responder,
+        };
+        transcript.validate().map_err(|error| map_wire(&error))?;
+        let common = &transcript.initiator.common;
+        require(
+            invitation.purpose == "primary_transfer"
+                && invitation.data_selection.is_empty()
+                && common.invitation_id == invitation.invitation_id
+                && common.issuer_seq == invitation.issuer_seq
+                && common.account_anchor == invitation.account_anchor
+                && common.record_hash == invitation.base_record_hash
+                && common.device_set_epoch == invitation.base_epoch
+                && common.recipient_mode == invitation.recipient_mode
+                && common.destination_ref == invitation.destination_ref
+                && common.capabilities == invitation.capabilities
+                && common.lease_not_before == invitation.lease_not_before
+                && common.lease_expires_at == invitation.lease_expires_at
+                && common.expires_at == invitation.expires_at
+                && common.transfer_id == invitation.transfer_id
+                && transcript.initiator.device_ref == invitation.primary_ref,
+            "context",
+        )?;
+        let preimage =
+            ramflux_protocol::custody::pairing::context_v3::transcript_preimage(&transcript)
+                .map_err(|error| map_wire(&error))?;
+        require(
+            encode_base64url(sha2::Sha256::digest(&preimage)) == expected_th,
+            "transcript_hash",
+        )?;
+        require(canonical == bytes, "noncanonical")?;
+        return Ok(());
+    }
     let context: LiveContext = parse_i_json(bytes).map_err(|_| field("context"))?;
     context.initiator.validate().map_err(|error| map_wire(&error))?;
     context.responder.validate().map_err(|error| map_wire(&error))?;
@@ -534,7 +630,7 @@ fn decode_context(bytes: &[u8]) -> Result<LiveContext, StorageError> {
     if canonical_json_bytes(&context).map_err(|_| field("json"))? != bytes {
         return Err(field("noncanonical"));
     }
-    Ok(context)
+    Ok(())
 }
 
 fn decode_failure(bytes: &[u8]) -> Result<Failure, StorageError> {
@@ -785,16 +881,22 @@ impl AccountDb {
     pub fn put_pairing_adoption(&self, row: &AdoptionRow) -> Result<(), StorageError> {
         decode_adoption(row)?;
         self.require_account(&row.account_id)?;
-        self.connection.execute(
+        let changed = self.connection.execute(
             "INSERT INTO pairing_adoption(
               account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,
-              data_vault_ref,primary_vault_ref)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+              data_vault_ref,primary_vault_ref,full_generation_nonce,full_initial_union_root)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(account_id) DO UPDATE SET
               operation_id=excluded.operation_id,record_hash=excluded.record_hash,
               local_ref=excluded.local_ref,local_role=excluded.local_role,
               branch_vault_ref=excluded.branch_vault_ref,data_vault_ref=excluded.data_vault_ref,
-              primary_vault_ref=excluded.primary_vault_ref",
+              primary_vault_ref=excluded.primary_vault_ref,
+              full_generation_nonce=COALESCE(excluded.full_generation_nonce,pairing_adoption.full_generation_nonce),
+              full_initial_union_root=COALESCE(excluded.full_initial_union_root,pairing_adoption.full_initial_union_root)
+             WHERE pairing_adoption.full_generation_nonce IS NULL
+                OR excluded.full_generation_nonce IS NULL
+                OR (pairing_adoption.full_generation_nonce=excluded.full_generation_nonce
+                    AND pairing_adoption.full_initial_union_root=excluded.full_initial_union_root)",
             params![
                 row.account_id,
                 row.operation_id,
@@ -804,8 +906,11 @@ impl AccountDb {
                 row.branch_vault_ref,
                 row.data_vault_ref,
                 row.primary_vault_ref,
+                row.full_generation_nonce,
+                row.full_initial_union_root,
             ],
         )?;
+        require(changed == 1, "full_generation")?;
         Ok(())
     }
 
@@ -904,12 +1009,18 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite errors or a malformed stored row.
     pub fn pairing_adoption(&self) -> Result<Option<AdoptionRow>, StorageError> {
-        let row = self
-            .connection
+        read_adoption(&self.connection, &self.local_account_id)
+    }
+}
+pub(super) fn read_adoption(
+    connection: &crate::database::Connection,
+    account_id: &str,
+) -> Result<Option<AdoptionRow>, StorageError> {
+    let row = connection
             .query_row(
-                "SELECT account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref
+                "SELECT account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref,full_generation_nonce,full_initial_union_root
                  FROM pairing_adoption WHERE account_id=?1",
-                params![self.local_account_id],
+                params![account_id],
                 |r| {
                     Ok(AdoptionRow {
                         account_id: r.get(0)?,
@@ -920,13 +1031,14 @@ impl AccountDb {
                         branch_vault_ref: r.get(5)?,
                         data_vault_ref: r.get(6)?,
                         primary_vault_ref: r.get(7)?,
+                        full_generation_nonce: r.get(8)?,
+                        full_initial_union_root: r.get(9)?,
                     })
                 },
             )
             .optional()?;
-        if let Some(row) = &row {
-            row.validate()?;
-        }
-        Ok(row)
+    if let Some(row) = &row {
+        row.validate()?;
     }
+    Ok(row)
 }

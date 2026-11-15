@@ -12,6 +12,7 @@ pub(crate) mod admin;
 pub(crate) mod bot;
 pub(crate) mod call;
 pub(crate) mod contact;
+pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
 pub(crate) mod device;
 pub(crate) mod dm;
@@ -24,6 +25,11 @@ pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(unix)]
 mod node_custody;
+#[cfg(unix)]
+pub(crate) mod pairing;
+#[cfg(not(unix))]
+#[path = "pairing_unsupported.rs"]
+pub(crate) mod pairing;
 #[cfg(windows)]
 mod windows_console;
 #[cfg(not(unix))]

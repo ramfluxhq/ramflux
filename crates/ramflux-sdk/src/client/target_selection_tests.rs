@@ -289,12 +289,9 @@ fn shared_group(
     group_id: &str,
 ) -> TestResult {
     persist_declared(owner, owner_manifest)?;
-    let primary = owner
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native")?
-        .group_primary(owner.vault.as_ref())?;
+    let current =
+        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
+    let primary = current.group_primary(owner.vault.as_ref())?;
     owner.client.shared_group_create_with_primary(
         group_id,
         "thread",
@@ -436,12 +433,9 @@ async fn membership_change_rebuilds_unsubmitted_representation() -> TestResult {
     assert_eq!(unchanged.variant_counter_high_water, 1);
     assert_eq!(plan.representations[0].variant_counter, 1);
     assert_eq!(unchanged.representations[0].variant_counter, 1);
-    let primary = owner
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native")?
-        .group_primary(owner.vault.as_ref())?;
+    let current =
+        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
+    let primary = current.group_primary(owner.vault.as_ref())?;
     let bob_id = bob.client.owned_device_identity()?;
     let reads = Cell::new(0);
     let rebuilt = select_with_current_membership(|| {

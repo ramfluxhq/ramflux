@@ -13,15 +13,30 @@ pub(super) fn live_rows_are_stripped_floors_survive() -> TestResult {
     db.put_pairing_head(&head()?)?;
     db.put_pairing_terminal(&terminal())?;
     db.put_pairing_adoption(&adoption("secondary", None)?)?;
+    db.connection.execute(
+        "INSERT INTO pairing_full_tail VALUES('acct',?1,?2,?3,?4,'pending','pinned')",
+        rusqlite::params![h(1), h(2), h(3), h(4)],
+    )?;
     let archive = root.join("archive.db");
     let snapshot = db.write_backup_snapshot(&archive)?;
     let opened = rusqlite::Connection::open(&archive)?;
     opened.execute_batch(&format!("PRAGMA key = \"x'{}'\";", snapshot.key.sqlcipher_hex()))?;
-    for table in ["pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption"] {
+    for table in [
+        "pairing_live",
+        "pairing_head",
+        "pairing_terminal",
+        "pairing_adoption",
+        "pairing_full_tail",
+    ] {
         let n: i64 =
             opened.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
         assert_eq!(n, 0, "{table} restored");
     }
+    // A hostile or legacy backup must not import another endpoint's pending tail.
+    opened.execute(
+        "INSERT INTO pairing_full_tail VALUES('acct',?1,?2,?3,?4,'pending','pinned')",
+        rusqlite::params![h(1), h(2), h(3), h(4)],
+    )?;
     let issued: i64 = opened.query_row(
         "SELECT issued_seq FROM pairing_floor WHERE account_id='acct'",
         [],
@@ -36,7 +51,17 @@ pub(super) fn live_rows_are_stripped_floors_survive() -> TestResult {
     let target_path = fresh_root.join("target.db");
     let target_snap = fresh.write_backup_snapshot(&target_path)?;
     let mut restored = BackupDatabase::open(&target_path, &target_snap.key)?;
+    restored.db.execute(
+        "INSERT INTO pairing_full_tail VALUES('acct',?1,?2,?3,?4,'pending','durable')",
+        rusqlite::params![h(5), h(6), h(7), h(8)],
+    )?;
     restored.merge_backup(&archive, &snapshot.key, || Ok(()))?;
+    let tail: (String, String) = restored.db.query_row(
+        "SELECT snapshot_id,cut_state FROM pairing_full_tail WHERE account_id='acct'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(tail, (h(7), "durable".into()), "backup replaced local tail opportunity");
     let live: i64 =
         restored.db.query_row("SELECT count(*) FROM pairing_live", [], |row| row.get(0))?;
     let heads: i64 =
@@ -60,7 +85,7 @@ pub(super) fn live_rows_are_stripped_floors_survive() -> TestResult {
         old.execute_batch(
             "DROP TABLE IF EXISTS pairing_live; DROP TABLE IF EXISTS pairing_head;
              DROP TABLE IF EXISTS pairing_terminal; DROP TABLE IF EXISTS pairing_adoption;
-             DROP TABLE IF EXISTS pairing_floor;",
+             DROP TABLE IF EXISTS pairing_floor; DROP TABLE IF EXISTS pairing_full_tail;",
         )?;
     }
     restored.merge_backup(&old_path, &old_snap.key, || Ok(()))?;

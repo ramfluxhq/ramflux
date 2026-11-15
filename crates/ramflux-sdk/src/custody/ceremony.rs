@@ -244,13 +244,23 @@ impl CreationCeremony {
     pub(crate) fn guard_commit(&mut self, gate: std::sync::Arc<super::CommitGate>) {
         self.commit_gate = Some(gate);
     }
-    pub(crate) fn confirm_with_passphrase(
+    /// Complete attended creation and seal this device's data with its own local password.
+    /// The password is borrowed only for this call and never enters a pairing DTO or native publication.
+    /// # Errors
+    /// Rejects empty/non-UTF-8/overlong passwords, bad confirmation, expiry or vault/storage failure.
+    pub fn confirm_with_passphrase(
         self,
         words: &[Zeroizing<String>; 3],
         vault: &dyn PrimaryVault,
         now: u64,
         passphrase: &[u8],
     ) -> Result<BornAccount, SdkError> {
+        if passphrase.is_empty()
+            || passphrase.len() > 1024
+            || std::str::from_utf8(passphrase).is_err()
+        {
+            return Err(invalid());
+        }
         self.complete(words, vault, now, Some(passphrase))
     }
     fn complete(
@@ -348,6 +358,42 @@ fn positions() -> Result<[u8; 3], SdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custody_attended_sdk_creation_refuses_invalid_data_password_before_persistence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const OVERLONG_BYTES: usize = 1025;
+        for password in [Vec::new(), vec![b'x'; OVERLONG_BYTES], vec![255]] {
+            let root = tempfile::tempdir()?;
+            let vault = crate::custody::tests::TestVault::default();
+            let mut ceremony = CreationCeremony::begin(
+                root.path(),
+                crate::custody::tests::input("invalid-data-password"),
+                100,
+            )?;
+            let phrase = ceremony.show_once()?;
+            let positions = ceremony.hidden_challenge()?;
+            let answers = crate::custody::tests::words(&phrase, positions)?;
+            let reference = super::super::custody_vault_reference(
+                root.path(),
+                "invalid-data-password",
+                &ceremony.anchor,
+            )?;
+            assert!(
+                ceremony.confirm_with_passphrase(&answers, &vault, 100, &password).is_err(),
+                "test: attended SDK creation accepted an invalid original data password"
+            );
+            assert!(
+                super::super::load_account(root.path(), "invalid-data-password", 100).is_err(),
+                "test: invalid data password left durable native authority"
+            );
+            assert!(
+                vault.load_primary(&reference).is_err(),
+                "test: invalid data password created a management vault item"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn custody_expiration_destroys_pending_phrase() -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
