@@ -734,7 +734,7 @@ pub(crate) mod tests {
         Ok(keys)
     }
 
-    fn task_content(
+    pub(crate) fn task_content(
         source: &Fixture,
         target: &Fixture,
         conversation: &str,
