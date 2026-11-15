@@ -548,7 +548,7 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
             .ok_or("restaged work")?;
         assert_eq!(retry.attempts, 0);
         assert!(retry.packet.is_none());
-        assert_eq!(flush(receiver).await?, 1);
+        assert_eq!(flush(receiver).await?, 1, "legacy={legacy}: the restaged receipt is delivered");
         assert_eq!(
             receiver
                 .client

@@ -449,9 +449,10 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
                 && row.contains_key("reason"))));
             assert!(gateway.lock().map_err(|_| "gateway")?.sent.len() >= 3);
             let mut reopened = actor.state.accounts.remove("sender").ok_or("account")?;
-            let config = reopened.gateway_config.clone();
-            // Close and reload the database from disk with the retained native vault.
+            // Close and reload the database from disk with the retained native vault. The
+            // reopen rebinds the pairing admission to the new database, so read the config after it.
             crate::client::native_test_support::bus::reopen_account(&mut reopened, "sender")?;
+            let config = reopened.gateway_config.clone();
             reopened.engine = None;
             reopened.install_test_session(GatewaySessionEngine::connect(config).await?);
             let (mut restarted, sender, stop, mut events) = runtime(reopened, &root.join("source"));

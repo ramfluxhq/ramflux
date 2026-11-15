@@ -308,5 +308,9 @@ pub(crate) fn reopen_account(
             custody.vault.as_ref(),
         )?;
     }
+    // The old config still holds the admission reader of the database that was just closed;
+    // bind networking to the reopened database.
+    account.gateway_config.pairing_admission =
+        Some(std::sync::Arc::new(account.client.account_db()?.pairing_admission_reader()));
     Ok(())
 }
