@@ -526,7 +526,10 @@ pub(super) fn is_tombstone_packet(body: &[u8]) -> bool {
     tombstone::is_packet(body)
 }
 
-fn contact_peer<'a>(link: &'a ramflux_storage::FriendLinkRecord, own: &str) -> Option<&'a str> {
+pub(super) fn contact_peer<'a>(
+    link: &'a ramflux_storage::FriendLinkRecord,
+    own: &str,
+) -> Option<&'a str> {
     if link.requester_id == own {
         Some(&link.target_id)
     } else if link.target_id == own {

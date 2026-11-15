@@ -254,6 +254,7 @@ impl RamfluxClient {
 
             db.persist_client_record("identity", principal, &identity)?;
             self.stage_own_contact(&manifest, &link_id)?;
+            self.ensure_direct_conversation(&manifest.principal_commitment, principal)?;
             if send_request {
                 self.resolve_contact_consent(&manifest, &link_id, request_note)?;
             }

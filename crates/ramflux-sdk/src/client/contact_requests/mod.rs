@@ -166,6 +166,10 @@ impl RamfluxClient {
             }
             if old.request_id == body.request_id {
                 if old.state == "accepted" {
+                    self.ensure_direct_conversation(
+                        &old.contact_identity_commitment,
+                        &old.principal_id,
+                    )?;
                     self.stage_contact_response(&old, Decision::Accept)?;
                 }
                 return Ok(());
@@ -232,6 +236,12 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("contact response has no matching outbound request"))?;
         let state = if body.kind == Decision::Accept { "accepted" } else { "declined" };
         if request.state == state {
+            if state == "accepted" {
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
+                )?;
+            }
             return Ok(());
         }
         if request.expires_at <= now_unix_timestamp()
@@ -242,24 +252,34 @@ impl RamfluxClient {
         if self.friend_rejection_reason(&body.actor_root)?.is_some() {
             return Ok(());
         }
-        db.decide_contact_request(
-            &body.target_root,
-            "outbound",
-            &body.request_id,
-            state,
-            now_unix_timestamp(),
-        )?;
-        self.record_outbound_contact_state(&body.target_root, state, now_unix_timestamp())?;
-        if body.kind == Decision::Accept {
-            self.establish_friend_link(&request.link_id, &body.requester_root, &body.target_root)?;
-            self.replicate_contact_acceptance(&request)?;
-            self.promote_contact_request_cache(&request.contact_identity_commitment)?;
-            self.persist_native_accepted_contact_safety(
-                &request.principal_id,
-                &request.contact_identity_commitment,
+        db.write_transaction(|| -> Result<(), SdkError> {
+            db.decide_contact_request(
+                &body.target_root,
+                "outbound",
+                &body.request_id,
+                state,
+                now_unix_timestamp(),
             )?;
-        }
-        Ok(())
+            self.record_outbound_contact_state(&body.target_root, state, now_unix_timestamp())?;
+            if body.kind == Decision::Accept {
+                self.establish_friend_link(
+                    &request.link_id,
+                    &body.requester_root,
+                    &body.target_root,
+                )?;
+                self.replicate_contact_acceptance(&request)?;
+                self.promote_contact_request_cache(&request.contact_identity_commitment)?;
+                self.persist_native_accepted_contact_safety(
+                    &request.principal_id,
+                    &request.contact_identity_commitment,
+                )?;
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
+                )?;
+            }
+            Ok(())
+        })
     }
     pub(crate) fn decide_inbound_contact(
         &self,
@@ -276,6 +296,15 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         if request.state == state {
+            if state == "accepted" {
+                db.write_transaction(|| {
+                    self.ensure_direct_conversation(
+                        &request.contact_identity_commitment,
+                        &request.principal_id,
+                    )
+                    .map(drop)
+                })?;
+            }
             return Ok(());
         }
         db.write_transaction(|| -> Result<(), SdkError> {
@@ -327,6 +356,10 @@ impl RamfluxClient {
                 self.persist_native_accepted_contact_safety(
                     &request.principal_id,
                     &request.contact_identity_commitment,
+                )?;
+                self.ensure_direct_conversation(
+                    &request.contact_identity_commitment,
+                    &request.principal_id,
                 )?;
                 self.stage_contact_response(request, Decision::Accept)?;
                 self.release_contact_messages(

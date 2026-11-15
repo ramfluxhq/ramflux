@@ -192,6 +192,9 @@ impl RamfluxClient {
         *self.typing_receiver.borrow_mut() = super::typing::TypingReceiver::default();
         *self.typing_sender.borrow_mut() = super::typing::sender::TypingSender::default();
         self.bind_object_retirement()?;
+        if self.born_v3_account.is_some() {
+            self.backfill_direct_conversations()?;
+        }
         Ok(())
     }
 

@@ -41,6 +41,7 @@ fn conversation_actions_reply_edit_react_delete_and_typing() -> e2e::Result<()> 
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    settle_contact_requests(&alice_d, &alice, &bob_d, &bob)?;
     let conversation = ramflux_protocol::message::dm_scope::derive(
         &alice.principal_commitment,
         &bob.principal_commitment,
@@ -1094,4 +1095,79 @@ fn logs(world: &World<'_>) -> String {
     let bob = world.bob_d.as_ref();
     let daemons = bob.map_or_else(|| vec![world.alice_d], |daemon| vec![world.alice_d, daemon]);
     dump_logs(world.stack, &daemons)
+}
+
+/// A first message to a contact whose request is still in flight is refused until the request
+/// settles, so wait for both outbound requests to read accepted before the first send.
+fn settle_contact_requests(
+    first: &Daemon,
+    first_account: &Account,
+    second: &Daemon,
+    second_account: &Account,
+) -> e2e::Result<()> {
+    for (daemon, account) in [(first, first_account), (second, second_account)] {
+        wait_json(daemon, &["contact", "list", "--account", &account.id], |value| {
+            value.pointer("/contacts/0/request_state").and_then(Value::as_str) == Some("accepted")
+        })?;
+    }
+    Ok(())
+}
+
+fn first_send(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    text: &str,
+) -> e2e::Result<()> {
+    let op = unique("first-send-op");
+    let sent = wait_json(
+        daemon,
+        &[
+            "conversation",
+            "send",
+            "--account",
+            &account.id,
+            "--conversation",
+            conversation,
+            "--text",
+            text,
+            "--operation-id",
+            &op,
+        ],
+        send_settled,
+    )?;
+    if sent.pointer("/body/delivery_state").and_then(Value::as_str) != Some("submitted") {
+        return Err(format!("first conversation.send was not submitted: {sent}").into());
+    }
+    Ok(())
+}
+
+/// Becoming friends creates the canonical direct conversation on both sides: each side can send
+/// the very first message with no seed message, no sibling device and no Surface.
+#[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
+#[test]
+fn befriending_creates_the_direct_conversation_on_both_sides() -> e2e::Result<()> {
+    let stack = boot_stack()?;
+    let alice_d = start_daemon(&stack, "alice")?;
+    let bob_d = start_daemon(&stack, "bob")?;
+    configure_node(&alice_d, &stack.discovery_url)?;
+    configure_node(&bob_d, &stack.discovery_url)?;
+    let alice = create_account(&alice_d, "Alice")?;
+    let bob = create_account(&bob_d, "Bob")?;
+    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
+    settle_contact_requests(&alice_d, &alice, &bob_d, &bob)?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.principal_commitment,
+        &bob.principal_commitment,
+    )?;
+    let from_alice = unique("first-from-alice");
+    let from_bob = unique("first-from-bob");
+    let daemons = [&alice_d, &bob_d];
+    first_send(&alice_d, &alice, &conversation, &from_alice)
+        .and_then(|()| wait_dm_texts(&bob_d, &bob, &conversation, &[from_alice.as_str()]).map(drop))
+        .and_then(|()| first_send(&bob_d, &bob, &conversation, &from_bob))
+        .and_then(|()| {
+            wait_dm_texts(&alice_d, &alice, &conversation, &[from_bob.as_str()]).map(drop)
+        })
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &daemons)).into())
 }

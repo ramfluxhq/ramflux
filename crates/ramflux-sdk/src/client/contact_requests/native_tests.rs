@@ -500,6 +500,203 @@ async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity()
     Ok(())
 }
 
+async fn pending_pair(
+    label: &str,
+) -> TestResult<(Fixture, Fixture, ramflux_storage::ContactRequestRecord)> {
+    let sender = Box::pin(Fixture::new(&format!("{label}-sender"))).await?;
+    let target = Box::pin(Fixture::new(&format!("{label}-target"))).await?;
+    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    let bytes = approve_request(&sender, &target).await?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
+    let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
+    target.client.apply_contact_control(&control)?;
+    let request = target
+        .client
+        .account_db()?
+        .contact_request(&sender.manifest.principal_commitment, "inbound")?
+        .ok_or("test: pending request")?;
+    assert_eq!(request.state, "pending", "test: receiving a request never accepts it");
+    Ok((sender, target, request))
+}
+
+fn direct_id(a: &Fixture, b: &Fixture) -> TestResult<String> {
+    Ok(ramflux_protocol::message::dm_scope::derive(
+        &a.manifest.principal_commitment,
+        &b.manifest.principal_commitment,
+    )?)
+}
+
+fn directory_ids(fixture: &Fixture) -> TestResult<Vec<String>> {
+    let account = fixture.client.account_db()?.local_account_id.clone();
+    let listed = crate::bus::read_model::read(
+        &fixture.client,
+        &crate::LocalBusFrame::request(
+            "default-conversation-directory",
+            Some(account),
+            "conversation",
+            "conversation.directory",
+            serde_json::json!({}),
+        ),
+    )?;
+    Ok(listed["conversations"]
+        .as_array()
+        .ok_or("test: conversations array")?
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect())
+}
+
+#[tokio::test]
+async fn accepting_a_request_lists_an_empty_direct_conversation_with_bound_roots() -> TestResult {
+    let (sender, target, request) = pending_pair("default-accept").await?;
+    let id = direct_id(&sender, &target)?;
+    assert!(directory_ids(&target)?.is_empty(), "a pending request must create no row");
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?, vec![id.clone()], "accept lists exactly the direct row");
+    let row = target.client.account_db()?.client_record("conversation", &id)?.ok_or("row")?;
+    assert_eq!(row["kind"], "direct");
+    assert!(row["group_id"].is_null(), "direct rows carry no group");
+    assert_eq!(
+        row["participants"],
+        serde_json::json!([target.config.principal_id, sender.config.principal_id])
+    );
+    let roots = row["participant_roots"].as_array().ok_or("roots")?.len();
+    assert_eq!(roots, 2, "both roots are bound");
+    let messages = target.client.account_db()?.conversation_summaries()?;
+    assert!(
+        messages.iter().all(|summary| summary.message_count == 0),
+        "the default thread is empty presentation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepted_retry_keeps_the_existing_row_history_and_title() -> TestResult {
+    let (sender, target, request) = pending_pair("default-retry").await?;
+    let id = direct_id(&sender, &target)?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    let db = target.client.account_db()?;
+    let mut row = db.client_record("conversation", &id)?.ok_or("row")?;
+    row["title"] = serde_json::json!("kept title");
+    db.persist_client_record("conversation", &id, &row)?;
+    let accepted = db
+        .contact_request(&sender.manifest.principal_commitment, "inbound")?
+        .ok_or("accepted request")?;
+    assert_eq!(accepted.state, "accepted");
+    target.client.decide_inbound_contact(&accepted, "accepted")?;
+    let after = db.client_record("conversation", &id)?.ok_or("row after retry")?;
+    assert_eq!(after, row, "an accepted retry must not rewrite an existing row");
+    Ok(())
+}
+
+#[tokio::test]
+async fn backfill_on_open_projects_contacts_accepted_before_the_row_existed() -> TestResult {
+    let mut one = Box::pin(Fixture::new("default-backfill-one")).await?;
+    let two = Box::pin(Fixture::new("default-backfill-two")).await?;
+    one.client.persist_fetched_identity_directory(&two.manifest)?;
+    one.client.establish_friend_link(
+        "default-backfill-link",
+        &one.manifest.principal_commitment,
+        &two.manifest.principal_commitment,
+    )?;
+    let id = direct_id(&one, &two)?;
+    assert!(
+        one.client.account_db()?.client_record("conversation", &id)?.is_none(),
+        "test: an accepted contact without a row"
+    );
+    one.client.active_account_db = None;
+    one.client.unlock_account("default-backfill-one", b"native fixture data passphrase")?;
+    assert_eq!(directory_ids(&one)?, vec![id.clone()], "open backfills the accepted contact");
+    one.client.active_account_db = None;
+    one.client.unlock_account("default-backfill-one", b"native fixture data passphrase")?;
+    assert_eq!(directory_ids(&one)?, vec![id], "a restart keeps exactly one row");
+    Ok(())
+}
+
+#[tokio::test]
+async fn sibling_own_contact_sync_projects_the_same_row() -> TestResult {
+    let one = Box::pin(Fixture::new("default-sibling-one")).await?;
+    let two = Box::pin(Fixture::new("default-sibling-two")).await?;
+    one.accept_peer(&two)?;
+    assert_eq!(directory_ids(&one)?, vec![direct_id(&one, &two)?]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn conflicting_existing_row_is_refused_and_rolls_back_the_accept() -> TestResult {
+    let (sender, target, request) = pending_pair("default-conflict").await?;
+    let id = direct_id(&sender, &target)?;
+    let db = target.client.account_db()?;
+    db.persist_client_record(
+        "conversation",
+        &id,
+        &serde_json::json!({
+            "kind":"direct","group_id":null,"title":null,"direct_route":null,
+            "participants":["x","y"],"participant_roots":["root-x","root-y"],
+        }),
+    )?;
+    assert!(
+        target.client.decide_inbound_contact(&request, "accepted").is_err(),
+        "a row bound to other roots must refuse the accept"
+    );
+    assert_eq!(
+        db.contact_request(&sender.manifest.principal_commitment, "inbound")?
+            .ok_or("request")?
+            .state,
+        "pending",
+        "the refused accept rolls the whole decision back"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn principal_not_bound_to_the_contact_root_is_refused() -> TestResult {
+    let (sender, target, request) = pending_pair("default-unbound").await?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    let other = Box::pin(Fixture::new("default-conflict-other")).await?;
+    assert!(
+        target
+            .client
+            .ensure_direct_conversation(
+                &sender.manifest.principal_commitment,
+                &other.manifest.principal_id,
+            )
+            .is_err(),
+        "a principal not bound to the root must be refused"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_declined_and_blocked_contacts_get_no_row_and_no_grant() -> TestResult {
+    let (sender, target, request) = pending_pair("default-declined").await?;
+    let root = sender.manifest.principal_commitment.clone();
+    let principal = sender.manifest.principal_id.clone();
+    assert_eq!(target.client.ensure_direct_conversation(&root, &principal)?, None);
+    target.client.decide_inbound_contact(&request, "declined")?;
+    assert_eq!(target.client.ensure_direct_conversation(&root, &principal)?, None);
+    assert!(directory_ids(&target)?.is_empty(), "declined creates no row");
+
+    let (sender, target, request) = pending_pair("default-blocked").await?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?.len(), 1);
+    let link = target
+        .client
+        .account_db()?
+        .friend_link_for_peer(&sender.manifest.principal_commitment)?
+        .ok_or("link")?;
+    target.client.block_friend_link(&link.link_id)?;
+    assert_eq!(
+        target.client.ensure_direct_conversation(
+            &sender.manifest.principal_commitment,
+            &sender.manifest.principal_id
+        )?,
+        None,
+        "a blocked contact is never projected or revived"
+    );
+    Ok(())
+}
+
 /// Exercise the actual native producer while surfacing a deferred fixture error to its caller.
 pub(crate) async fn deliver_pending(
     account: &mut crate::bus::state::LocalBusAccountState,
