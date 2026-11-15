@@ -82,7 +82,8 @@ durable reader (`"durable_reader": "message.read"`) and the journal head
   "conversation_id": "…",
   "author": {"account_anchor": "…", "device_id": "…", "device_epoch": 1},
   "device_sequence": 7,
-  "hlc": 1731434000000,
+  "hlc_ms": 1731434000000,
+  "hlc_logical": 0,
   "group_id": null,
   "journal_sequence": 42,
   "is_own": false,
@@ -103,7 +104,7 @@ durable reader (`"durable_reader": "message.read"`) and the journal head
 | Field | Meaning |
 |---|---|
 | `id` | Identifier of the original immutable event. Stable across edits and deletion. |
-| `author`, `device_sequence`, `hlc`, `group_id` | Original event identity. `hlc` orders display. |
+| `author`, `device_sequence`, `hlc_ms`, `hlc_logical`, `group_id` | Original event identity. The pair (`hlc_ms`, `hlc_logical`) orders display; `hlc_ms` stays below 2^53 and `hlc_logical` is the 16-bit counter. |
 | `journal_sequence` | Durable sequence of the row's last change. This is the change cursor. |
 | `is_own` | True when the local account authored the message. |
 | `state` | `content`, `unsupported` or `tombstone`. |

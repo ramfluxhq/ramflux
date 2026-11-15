@@ -59,7 +59,10 @@ pub struct MessageView {
     pub conversation_id: String,
     pub author: Option<AuthorView>,
     pub device_sequence: u64,
-    pub hlc: u64,
+    /// Wall-clock milliseconds of the hybrid logical clock; always below 2^53.
+    pub hlc_ms: u64,
+    /// 16-bit logical counter of the hybrid logical clock.
+    pub hlc_logical: u64,
     pub group_id: Option<String>,
     /// Durable sequence of this row's last change; the change cursor.
     pub journal_sequence: u64,
@@ -427,7 +430,8 @@ impl RamfluxClient {
                 device_epoch: author.device_epoch,
             }),
             device_sequence: identity.device_sequence,
-            hlc: identity.hlc,
+            hlc_ms: identity.hlc >> 16,
+            hlc_logical: identity.hlc & 0xffff,
             group_id: identity.group_id,
             journal_sequence: update.journal_sequence,
             is_own: message.is_own,

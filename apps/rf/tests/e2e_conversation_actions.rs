@@ -163,6 +163,21 @@ fn refuse_mutations(world: &World<'_>) -> e2e::Result<()> {
     expect_code(&peer, "conversation.delete", REFUSAL)
 }
 
+/// Typed content JSON carries event ids as padded standard base64; the view `id` is unpadded
+/// base64url. Compare the normalized spelling of the same 32 bytes.
+fn same_event_id(typed: &str, view_id: &str) -> bool {
+    let normalized: String = typed
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            other => other,
+        })
+        .collect();
+    normalized == view_id
+}
+
 fn live(world: &mut World<'_>) -> e2e::Result<()> {
     let sent = require_submitted(world, "live conversation body")?;
     let message = required_str(&sent, "/body/message_id")?.to_owned();
@@ -173,35 +188,30 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
     expect_submitted(&reply, "conversation.reply")?;
     let reply_id = required_str(&reply, "/body/message_id")?.to_owned();
     let reply_view = wait_view(world, false, &reply_id, |view| {
-        view.pointer("/content/message/replyTo/id").and_then(Value::as_str)
-            == Some(message.as_str())
+        view.pointer("/content/message/replyTo/id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| same_event_id(id, &message))
             && view["text"] == "live reply"
     })?;
     expect_kind(&reply_view, "message")?;
     let edited = mutate(world, "edit", &message, &["--text", "live edit"])?;
     expect_submitted(&edited, "conversation.edit")?;
     let edited_view = wait_view(world, false, &message, |view| {
-        view.pointer("/content/edit/replacement/text").and_then(Value::as_str) == Some("live edit")
+        view.pointer("/content/message/text").and_then(Value::as_str) == Some("live edit")
             && view["revision"] == 1
             && view["edited"] == true
     })?;
-    if !edited_view["text"].is_null() || edited_view["kind"].as_str() != Some("edit") {
+    if edited_view["text"] != "live edit" || edited_view["kind"].as_str() != Some("message") {
         return Err(format!("recipient edit view: {edited_view}").into());
     }
+    expect_submitted(&mutate(world, "react", &message, &["--token", "👍"])?, "conversation.react")?;
+    wait_view(world, false, &message, |view| reaction_tokens(view).contains(&"👍"))?;
     expect_submitted(
-        &mutate(world, "react", &message, &["--token", "thumb"])?,
+        &mutate(world, "react", &message, &["--token", "👍", "--remove"])?,
         "conversation.react",
     )?;
-    wait_view(world, false, &message, |view| reaction_tokens(view).contains(&"thumb"))?;
-    expect_submitted(
-        &mutate(world, "react", &message, &["--token", "thumb", "--remove"])?,
-        "conversation.react",
-    )?;
-    let cleared =
-        wait_view(world, false, &message, |view| !reaction_tokens(view).contains(&"thumb"))?;
-    if cleared.pointer("/content/edit/replacement/text").and_then(Value::as_str)
-        != Some("live edit")
-    {
+    let cleared = wait_view(world, false, &message, |view| !reaction_tokens(view).contains(&"👍"))?;
+    if cleared.pointer("/content/message/text").and_then(Value::as_str) != Some("live edit") {
         return Err(format!("reaction removal changed the edit: {cleared}").into());
     }
     let peer = mutate_as_bob(world, &message)?;
@@ -441,7 +451,11 @@ fn watch_ready(
             Ok(stopped) if stopped.get("ok").and_then(Value::as_bool) == Some(true) => {}
             Ok(stopped) => {
                 let watched = join_watch(worker)?;
-                return Err(format!("typing stop: {stopped}; watch={watched}").into());
+                return Err(format!(
+                    "typing stop: {stopped}; start={started}; watch={watched}; logs={}",
+                    logs(world)
+                )
+                .into());
             }
             Err(error) => {
                 let _ = join_watch(worker);
@@ -1113,6 +1127,25 @@ fn settle_contact_requests(
     Ok(())
 }
 
+/// The packed HLC is about 1.2e17, above 2^53. A read through the CLI and the I-JSON ingress
+/// guard must carry the split pair and never the packed field.
+fn expect_split_hlc(read: &Value) -> e2e::Result<()> {
+    let rows = read.get("messages").and_then(Value::as_array).ok_or("read has no messages")?;
+    if rows.is_empty() {
+        return Err("read returned no message rows".into());
+    }
+    for row in rows {
+        let ms = row.get("hlc_ms").and_then(Value::as_u64).ok_or("row has no hlc_ms")?;
+        if ms == 0 || ms >= 1 << 53 || row.get("hlc_logical").and_then(Value::as_u64).is_none() {
+            return Err(format!("row carries a bad HLC pair: {row}").into());
+        }
+        if row.get("hlc").is_some() {
+            return Err(format!("row still carries the packed hlc: {row}").into());
+        }
+    }
+    Ok(())
+}
+
 fn first_send(
     daemon: &Daemon,
     account: &Account,
@@ -1164,7 +1197,10 @@ fn befriending_creates_the_direct_conversation_on_both_sides() -> e2e::Result<()
     let from_bob = unique("first-from-bob");
     let daemons = [&alice_d, &bob_d];
     first_send(&alice_d, &alice, &conversation, &from_alice)
-        .and_then(|()| wait_dm_texts(&bob_d, &bob, &conversation, &[from_alice.as_str()]).map(drop))
+        .and_then(|()| {
+            wait_dm_texts(&bob_d, &bob, &conversation, &[from_alice.as_str()])
+                .and_then(|read| expect_split_hlc(&read))
+        })
         .and_then(|()| first_send(&bob_d, &bob, &conversation, &from_bob))
         .and_then(|()| {
             wait_dm_texts(&alice_d, &alice, &conversation, &[from_bob.as_str()]).map(drop)

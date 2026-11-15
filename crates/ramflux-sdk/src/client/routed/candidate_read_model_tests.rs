@@ -230,3 +230,28 @@ fn assert_cursor_bounds(client: &RamfluxClient, sequence: u64) -> Result<(), Sdk
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn read_model_splits_the_hlc_so_both_parts_stay_inside_the_ingress_guard()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(221, 223).await?;
+    commit_content(&a, &mut b, "target", text("hlc body")).await?;
+    let identity = generated_identity(&a, "target")?;
+    let target_id = ramflux_protocol::encode_base64url(&identity.id);
+    let detail = b.client.generated_message_detail("c", &target_id)?;
+    let json = serde_json::to_vec(&detail)?;
+    let value: serde_json::Value = serde_json::from_slice(&json)?;
+    let message = &value["message"];
+    assert!(message.get("hlc").is_none(), "the packed hlc field must not be emitted");
+    assert_eq!(message["hlc_ms"], identity.hlc >> 16);
+    assert_eq!(message["hlc_logical"], identity.hlc & 0xffff);
+    ramflux_protocol::validate_i_json_value(
+        &serde_json::json!({"hlc_ms": message["hlc_ms"], "hlc_logical": message["hlc_logical"]}),
+    )?;
+    assert!(
+        message["hlc_ms"].as_u64().is_some_and(|ms| ms < 1 << 53),
+        "the millisecond part must stay inside the I-JSON safe range"
+    );
+    Ok(())
+}
