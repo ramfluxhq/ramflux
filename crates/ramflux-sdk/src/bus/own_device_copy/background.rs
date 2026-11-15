@@ -552,13 +552,17 @@ mod budget_tests {
     use super::*;
     #[test]
     fn own_copy_prepare_does_not_double_charge_target_budget() -> Result<(), SdkError> {
-        let root = crate::bus::runtime_tests::root("own-copy-single-charge");
-        let account = crate::bus::runtime_tests::account(
-            &root,
-            "sender",
-            None,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )?;
+        use crate::client::native_test_support::{Fixture as Native, bus as native_bus};
+        // A native account with one enrolled sibling: the own copy has a real target.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let (account, sibling) = runtime
+            .block_on(async {
+                let mut account = Native::with_device("sender", "phone").await?.into_bus();
+                let sibling =
+                    Box::pin(native_bus::sibling(&mut account, "sender-laptop", "laptop")).await?;
+                Ok::<_, Box<dyn std::error::Error>>((account, sibling))
+            })
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
         super::super::stage(
             &account.client,
             OwnMessageInput {
@@ -596,6 +600,7 @@ mod budget_tests {
         }
         assert!(prepare(&account)?.is_none());
         assert!(!account.client.account_db()?.actor_state_exists(&key)?);
+        drop(sibling);
         drop(account);
         Ok(())
     }

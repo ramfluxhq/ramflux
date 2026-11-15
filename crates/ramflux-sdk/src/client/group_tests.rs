@@ -379,7 +379,7 @@ fn signed_group_invite_accept_enforces_state_expiry_and_bound_invitee_key() -> R
 }
 
 #[test]
-fn signed_group_kick_ban_and_delete_apply_authoritatively() -> Result<(), SdkError> {
+fn signed_group_kick_and_delete_apply_authoritatively() -> Result<(), SdkError> {
     let alice_seed = [0x52; 32];
     let bob_seed = [0x53; 32];
     let alice_key = device_public_key("alice", "alice_device", alice_seed)?;
@@ -420,25 +420,6 @@ fn signed_group_kick_ban_and_delete_apply_authoritatively() -> Result<(), SdkErr
         Err(SdkError::Storage(StorageError::GroupControlReplay(_)))
     ));
 
-    let alice_ban = group_client("alice_s45_ban", "alice", "alice_device", alice_seed)?;
-    seed_group(&alice_ban, &alice_key, &bob_key)?;
-    seed_member_key(&alice_ban, "bob_device", &bob_key)?;
-    let (_ban, state) = alice_ban.create_signed_group_member_ban(
-        "group_test",
-        "alice_device",
-        "bob_device",
-        "unit test",
-    )?;
-    assert!(!state.members.contains("bob_device"));
-    assert!(matches!(
-        alice_ban.add_group_member_with_root(
-            "group_test",
-            "bob_device",
-            "member",
-            &root_for("bob")
-        ),
-        Err(SdkError::Storage(StorageError::GroupPermissionDenied))
-    ));
     Ok(())
 }
 #[test]

@@ -18,12 +18,17 @@ pub(in crate::bus) fn stage(account: &LocalBusAccountState) -> Result<usize, Sdk
     let db = client.account_db()?;
     db.prune_shared_group_boundaries(now_unix_timestamp())?;
     let own = client.owned_device_identity()?;
-    let Some(set) = client.observed_device_set(own.root_commitment())? else {
+    // The authenticated device-set epoch is the native custody authority's; the legacy
+    // observed record is never written for a native account.
+    let Some(authority) =
+        client.current_custody_authority(own.root_commitment(), crate::custody::network_now()?)?
+    else {
         return Ok(0);
     };
+    let device_set_epoch = authority.envelope().body.device_set_epoch;
     let mut progress = db.load_actor_state::<Progress>(PROGRESS)?.unwrap_or_default();
-    if progress.device_set_epoch != set.device_set_epoch {
-        progress = Progress { device_set_epoch: set.device_set_epoch, ..Progress::default() };
+    if progress.device_set_epoch != device_set_epoch {
+        progress = Progress { device_set_epoch, ..Progress::default() };
     }
     if progress.complete {
         return Ok(0);
@@ -48,7 +53,7 @@ pub(in crate::bus) fn stage(account: &LocalBusAccountState) -> Result<usize, Sdk
                 client.stage_group_device_beacon(
                     group,
                     &account.gateway_config.target_delivery_id,
-                    set.device_set_epoch,
+                    device_set_epoch,
                 )?;
                 staged += 1;
             }

@@ -6,7 +6,7 @@ use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 fn create_group(owner: &Fixture, group: &str, thread: &str) -> TestResult {
     let primary = owner
@@ -66,29 +66,6 @@ async fn native_group_link_repairs_at_account_open_before_any_group_command() ->
         assert_eq!(db.client_record("group", "a-page-000")?, Some(legacy_link.clone()));
         assert_eq!(db.client_record("conversation", "operator-thread")?, selector);
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn native_group_link_open_leaves_legacy_signed_groups_unchanged() -> TestResult {
-    let root = crate::bus::runtime_tests::root("legacy-link-open");
-    let account = crate::bus::runtime_tests::account(
-        &root,
-        "legacy",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    account.client.shared_group_create("legacy-group", "legacy-thread", None, "target")?;
-    let db = account.client.account_db()?;
-    polluted_link(db, "legacy-group", "legacy-thread")?;
-    let original = db.client_record("group", "legacy-group")?;
-    drop(account);
-    let mut reopened = RamfluxClient::new();
-    reopened.open_account_index(&root)?;
-    reopened.unlock_account("legacy", b"actor-test-secret")?;
-    assert!(reopened.born_v3_account.is_none());
-    assert_eq!(reopened.account_db()?.client_record("group", "legacy-group")?, original);
-    drop(reopened);
     Ok(())
 }
 

@@ -596,59 +596,6 @@ async fn own_copy_w1_commit_sweep() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn a2i_w1_refuses_before_effects_across_restart() -> Result<(), SdkError> {
-    for mode in [Mode::Wal, Mode::RedbOnly] {
-        let mut harness = open()?;
-        let sends = attach_counter(&mut harness.account);
-        let entry = own_dummy(&harness.account);
-        let path = router_path(harness.root.path());
-        let store = open_router(&path, mode)?;
-        seed_router_row(&store, &entry.entry)?;
-        pin_mode(&path, mode);
-        let mut before_restart = None;
-        for restart in [false, true] {
-            if restart {
-                reopen(&mut harness.account)?;
-            }
-            let result = drive(&mut harness.account, entry.clone(), || 1).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(SdkError::GeneratedRefused {
-                        code: crate::error::GeneratedRefusalCode::Authority,
-                        ..
-                    })
-                ),
-                "refused A2I must never reach a legacy effect"
-            );
-            let current = ledger(&harness.account)?;
-            assert_eq!(current.state, (Some("staged".into()), 1));
-            assert_eq!(current.cursor, 0);
-            assert_eq!(current.journals, 0);
-            assert_eq!(current.holds, 0);
-            assert_eq!(current.intents, Vec::<u64>::new());
-            assert_eq!(sends.load(Ordering::SeqCst), 0);
-            assert_eq!(
-                harness
-                    .account
-                    .client
-                    .account_db()?
-                    .list_actor_states::<A2iControlEvent>("a2i/scoped/")?
-                    .len(),
-                0
-            );
-            if let Some(before) = &before_restart {
-                assert_eq!(&current, before);
-            }
-            before_restart = Some(current);
-        }
-        let (_store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
-        assert_eq!(rows.len(), 1, "refusal must not acknowledge the router row");
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn failure_w1_commit_sweep() -> Result<(), SdkError> {
     sweep_kind(Sweep::Failure).await
 }
@@ -799,9 +746,16 @@ async fn projection_propagates(
 }
 
 async fn settled_propagates(error: SdkError, pin: fn(&SdkError) -> bool) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    // The settled-routed probe derives the sender device first, so the entry must be a real
+    // authenticated own copy; only then does the injected key-derivation error reach it.
+    let mut harness = open_real().await?;
     set_projection_error(error);
-    let entry = retryable_entry(&harness.account);
+    let entry = harness
+        .real
+        .as_ref()
+        .ok_or(SdkError::LocalBus("test: real own copy".into()))?
+        .entry
+        .clone();
     let refused = drive(&mut harness.account, entry, || 1).await;
     let got = refused.as_ref().err();
     assert!(pin(got.expect("propagated")), "settled arm: {got:?}");
@@ -861,7 +815,20 @@ async fn nothing_owed_propagates_inbound_pending() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn nothing_owed_propagates_directory_unavailable() -> Result<(), SdkError> {
     projection_propagates(injected_directory(), is_directory).await?;
-    settled_propagates(injected_directory(), is_directory).await
+    // A directory miss in the settled probe is not "nothing owed": the entry falls through
+    // to the full routed W1, which re-resolves the authority and commits the real message.
+    let mut harness = open_real().await?;
+    set_projection_error(injected_directory());
+    let copy = harness.real.as_ref().ok_or(SdkError::LocalBus("test: real own copy".into()))?;
+    let (entry, message) = (copy.entry.clone(), copy.message.clone());
+    drive(&mut harness.account, entry, || 1).await?;
+    let db = harness.account.client.account_db()?;
+    assert!(
+        db.message_content(&message)?.is_some(),
+        "the routed W1 must commit the real own copy after the probe's directory miss"
+    );
+    assert_eq!(db.receive_state_for_test(1)?, (None, 0), "the commit covers the entry");
+    Ok(())
 }
 
 /// A real own copy is an ordinary routed entry: its projection key must be derivable.

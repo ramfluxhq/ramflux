@@ -345,10 +345,27 @@ async fn apply_page_refuses_stale_generation_after_await() -> Result<(), SdkErro
     Ok(())
 }
 
+/// A real native own copy whose application bytes are replaced by a retired carrier: the
+/// production classifier must refuse it, not any fixture hook.
+fn retired_carrier_entry(harness: &Harness) -> Result<ReceiveEntry, SdkError> {
+    let mut entry = real_entry(harness)?;
+    let payload = encode_base64url(b"legacy-a2i-dummy");
+    entry.entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        payload.as_bytes(),
+    );
+    entry.entry.envelope.encrypted_payload = payload;
+    assert!(
+        crate::client::routed::decode(&entry.entry.envelope).is_err(),
+        "the fixture entry must be a retired carrier"
+    );
+    Ok(entry)
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn retired_a2i_bytes_settle_without_binding_retry() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let entry = own_dummy(&harness.account);
+    let mut harness = open_real().await?;
+    let entry = retired_carrier_entry(&harness)?;
     let result = drive(&mut harness.account, entry, || 1).await;
     result?;
     let db = harness.account.client.account_db()?;
@@ -610,8 +627,8 @@ async fn held_entries_cover_cursor_in_one_pass() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_a2i_refusal_does_not_manufacture_a_hold_or_receipt() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let entry = own_dummy(&harness.account);
+    let mut harness = open_real().await?;
+    let entry = retired_carrier_entry(&harness)?;
     drive(&mut harness.account, entry, || 1).await?;
     let db = harness.account.client.account_db()?;
     assert_eq!(

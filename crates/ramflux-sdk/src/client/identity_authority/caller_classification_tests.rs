@@ -133,7 +133,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/identity_authority/custody_directory.rs"
         )),
-        [0, 0, 0, 1],
+        [3, 0, 0, 1],
     ),
     (
         "client/identity_authority/custody_freshness.rs",

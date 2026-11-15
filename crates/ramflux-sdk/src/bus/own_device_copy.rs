@@ -305,8 +305,17 @@ fn surface_reference(input: OwnMessageInput<'_>) -> Result<Option<String>, SdkEr
     if !matches!(input.payload_kind, crate::client::own_device_copy::OwnPayloadKind::Surface) {
         return Ok(None);
     }
-    let control = crate::client::surface::SurfaceControl::decode(input.body)?
-        .ok_or_else(|| SdkError::InboundRejected("own Surface control missing".into()))?;
+    let Some(control) = crate::client::surface::SurfaceControl::decode(input.body)? else {
+        // A Surface history page carries checkpoints and controls of many Surfaces, so it is
+        // bound to no single Surface reference; any other Surface payload must be a control.
+        use prost::Message as _;
+        return match ramflux_protocol::message::Surface::decode(input.body) {
+            Ok(ramflux_protocol::message::Surface {
+                payload: Some(ramflux_protocol::message::surface::Payload::OwnHistory(_)),
+            }) => Ok(None),
+            _ => Err(SdkError::InboundRejected("own Surface control missing".into())),
+        };
+    };
     let bytes = ramflux_protocol::decode_base64url(&control.carrier_base64)
         .map_err(|_| SdkError::InboundRejected("own Surface carrier encoding".into()))?;
     let carrier = crate::client::surface::Carrier::decode(&bytes)?
