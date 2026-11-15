@@ -403,6 +403,39 @@ fn shared_error_classes_keep_the_binding_numeric_contract() {
 }
 
 #[test]
+fn edit_conflict_crosses_the_c_abi_with_generated_code_and_revisions() {
+    let wrapped = crate::SdkError::from(crate::bindings::AdapterError::from_sdk(
+        &crate::SdkError::EditConflict { target: "m".into(), expected: 2, received: 1 },
+    ));
+    let request = LocalBusFrame::request(
+        "7",
+        Some("alice".into()),
+        "conversation",
+        "conversation.edit",
+        json!({}),
+    );
+    let frame = crate::bus::io::local_bus_error(&request, &wrapped);
+    let name = frame.error.as_ref().expect("test: bus error").code.clone();
+    let mut completion = json!({
+        "code": error_code(&name),
+        "response": serde_json::to_value(&frame).expect("test: frame"),
+    });
+    super::native_error::completion(&mut completion);
+    assert_eq!(
+        completion["response"]["body"]["code"], 7,
+        "the C completion keeps generated code 7"
+    );
+    assert_eq!(completion["response"]["body"]["name"], "edit_conflict");
+    assert_eq!(completion["response"]["error"]["details"]["target"], "m");
+    assert_eq!(completion["response"]["error"]["details"]["expected"], 2);
+    assert_eq!(completion["response"]["error"]["details"]["received"], 1);
+    assert!(
+        completion["response"]["error"].get("message").is_none(),
+        "conflict diagnostics stay inside the daemon"
+    );
+}
+
+#[test]
 fn every_operation_has_explicit_policy_and_generated_manifest_matches() {
     let policies = super::method_policy::METHOD_POLICIES;
     let classified =

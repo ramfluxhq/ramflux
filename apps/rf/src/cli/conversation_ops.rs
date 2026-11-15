@@ -15,7 +15,7 @@ pub(crate) struct ConversationCommand {
 pub(crate) enum ConversationAction {
     Send(ConversationSend),
     Reply(ConversationText),
-    Edit(ConversationText),
+    Edit(ConversationEdit),
     React(ConversationReact),
     Delete(ConversationDelete),
     Typing(TypingCommand),
@@ -45,6 +45,23 @@ pub(crate) struct ConversationText {
     pub(crate) text: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationEdit {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) text: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+    /// Base revision the caller observed. A mismatch returns `edit_conflict`.
+    #[arg(long)]
+    pub(crate) expected_revision: Option<u64>,
 }
 
 #[derive(Args)]
@@ -190,6 +207,10 @@ mod tests {
             panic!("expected edit");
         };
         assert_eq!(edit.message, "m1", "test: edit keeps the target message");
+        assert_eq!(
+            edit.expected_revision, None,
+            "test: an omitted base revision stays unconstrained"
+        );
 
         let ConversationAction::React(react) = parse(&[
             "rf",
@@ -234,6 +255,55 @@ mod tests {
             "test: delete --scope everyone parses"
         );
         assert_eq!(delete.scope.as_wire(), "everyone", "test: everyone scope uses the wire name");
+    }
+
+    #[test]
+    fn edit_expected_revision_parses_only_on_edit() {
+        let ConversationAction::Edit(stale) = parse(&[
+            "rf",
+            "conversation",
+            "edit",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--text",
+            "revised",
+            "--operation-id",
+            "op-edit",
+            "--expected-revision",
+            "0",
+        ]) else {
+            panic!("expected edit");
+        };
+        assert_eq!(
+            stale.expected_revision,
+            Some(0),
+            "test: expected-revision 0 is the caller's observed base"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "conversation",
+                "reply",
+                "--account",
+                "alice",
+                "--conversation",
+                "thread",
+                "--message",
+                "m1",
+                "--text",
+                "hello",
+                "--operation-id",
+                "op-reply",
+                "--expected-revision",
+                "0",
+            ])
+            .is_err(),
+            "test: expected-revision belongs only to conversation edit"
+        );
     }
 
     #[test]

@@ -114,23 +114,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         current = source.source();
     }
     LocalBusErrorBody {
-        details: match error {
-            SdkError::CustodyForkFenced => Some(Box::new(serde_json::json!({"retryable": false}))),
-            SdkError::CustodyAdmission { retry, .. } => {
-                Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
-            }
-            SdkError::NetworkingPendingContext { networking, .. } => {
-                Some(Box::new(serde_json::json!({"networking":networking})))
-            }
-            SdkError::CustodyCapacity { capacity } => {
-                Some(Box::new(serde_json::json!({"capacity": capacity})))
-            }
-            SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
-            SdkError::ContactConfirmationRequired(change) => {
-                Some(Box::new(serde_json::json!(change)))
-            }
-            _ => None,
-        },
+        details: bus_error_details(error),
         reason_code: match error {
             SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
             SdkError::ContactInput(reason) => Some(reason.to_string()),
@@ -170,6 +154,27 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             _ => None,
         },
         cause,
+    }
+}
+
+fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
+    match error {
+        SdkError::CustodyForkFenced => Some(Box::new(serde_json::json!({"retryable": false}))),
+        SdkError::CustodyAdmission { retry, .. } => {
+            Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
+        }
+        SdkError::NetworkingPendingContext { networking, .. } => {
+            Some(Box::new(serde_json::json!({"networking":networking})))
+        }
+        SdkError::CustodyCapacity { capacity } => {
+            Some(Box::new(serde_json::json!({"capacity": capacity})))
+        }
+        SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
+        SdkError::ContactConfirmationRequired(change) => Some(Box::new(serde_json::json!(change))),
+        SdkError::EditConflict { target, expected, received } => Some(Box::new(
+            serde_json::json!({"target": target, "expected": expected, "received": received}),
+        )),
+        _ => None,
     }
 }
 
@@ -215,7 +220,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     match error {
         SdkError::GeneratedApi(error) => error.name,
         SdkError::Search(error) => error.code(),
-        SdkError::EditConflict { .. } => "EditConflict",
+        SdkError::EditConflict { .. } => "edit_conflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
         SdkError::DataRootInUse => "DataRootInUse",
         SdkError::CustodyForkFenced => "CustodyForkFenced",

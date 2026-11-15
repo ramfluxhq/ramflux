@@ -19,6 +19,9 @@ struct Intent {
     #[serde(default)]
     remove: bool,
     scope: Option<String>,
+    /// Revision the caller believes is current. A mismatch is `edit_conflict`.
+    #[serde(default)]
+    expected_revision: Option<u64>,
 }
 impl Drop for Intent {
     fn drop(&mut self) {
@@ -275,6 +278,7 @@ fn validate_intent(method: &str, intent: &Intent) -> Result<(), SdkError> {
         || intent.conversation_id.len() > 256
         || intent.message_id.is_empty()
         || intent.message_id.len() > 256
+        || (method != "conversation.edit" && intent.expected_revision.is_some())
     {
         return Err(refused(Code::InvalidArgument, "invalid conversation mutation intent"));
     }
@@ -368,6 +372,7 @@ fn content(
         "conversation.edit" => {
             RamfluxClient::authorize_generated_edit(own.root_commitment(), &state)
                 .map_err(|_| refused(Code::NotAuthorized, "edit requires original author"))?;
+            refuse_stale_expected(intent, revision)?;
             let revision = revision
                 .checked_add(1)
                 .ok_or_else(|| refused(Code::InvalidArgument, "edit revision exhausted"))?;
@@ -429,6 +434,25 @@ fn content(
         _ => return Err(refused(Code::InvalidArgument, "unsupported conversation operation")),
     };
     Ok(g::Content { value: Some(value) })
+}
+
+/// `expected_revision` is the base the caller observed. The acceptable write is
+/// one past the stored revision; anything else is a typed conflict and is not sent.
+fn refuse_stale_expected(intent: &Intent, stored: u64) -> Result<(), SdkError> {
+    let Some(expected) = intent.expected_revision else {
+        return Ok(());
+    };
+    if expected == stored {
+        return Ok(());
+    }
+    let received = expected
+        .checked_add(1)
+        .ok_or_else(|| refused(Code::InvalidArgument, "edit revision exhausted"))?;
+    Err(SdkError::EditConflict {
+        target: intent.message_id.clone(),
+        expected: stored.saturating_add(1),
+        received,
+    })
 }
 
 #[cfg(test)]

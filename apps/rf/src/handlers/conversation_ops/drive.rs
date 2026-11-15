@@ -7,8 +7,8 @@ use super::super::{LocalBusClient, RfError, print_json};
 use super::output;
 use super::typing;
 use crate::cli::{
-    ConversationAction, ConversationCommand, ConversationDelete, ConversationReact,
-    ConversationSend, ConversationText,
+    ConversationAction, ConversationCommand, ConversationDelete, ConversationEdit,
+    ConversationReact, ConversationSend, ConversationText,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -23,7 +23,7 @@ pub(crate) async fn handle(socket: PathBuf, command: ConversationCommand) -> Res
     match command.action {
         ConversationAction::Send(send) => send_text(&mut bus, send).await,
         ConversationAction::Reply(text) => mutate(&mut bus, "conversation.reply", text).await,
-        ConversationAction::Edit(text) => mutate(&mut bus, "conversation.edit", text).await,
+        ConversationAction::Edit(edit) => edit_text(&mut bus, edit).await,
         ConversationAction::React(react) => react_to(&mut bus, react).await,
         ConversationAction::Delete(delete) => delete_message(&mut bus, delete).await,
         ConversationAction::Typing(command) => typing::handle(&mut bus, command).await,
@@ -46,6 +46,20 @@ async fn send_text(bus: &mut LocalBusClient, send: ConversationSend) -> Result<(
         json!({"conversation_id": send.conversation, "text": send.text}),
     )
     .await?;
+    print_json(&value)
+}
+
+async fn edit_text(bus: &mut LocalBusClient, edit: ConversationEdit) -> Result<(), RfError> {
+    let mut body = json!({
+        "conversation_id": edit.conversation,
+        "message_id": edit.message,
+        "text": edit.text,
+    });
+    if let Some(expected) = edit.expected_revision {
+        body["expected_revision"] = json!(expected);
+    }
+    let value =
+        call(bus, &edit.account, "conversation.edit", Some(edit.operation_id), body).await?;
     print_json(&value)
 }
 

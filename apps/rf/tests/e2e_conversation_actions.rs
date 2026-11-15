@@ -204,6 +204,7 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
     if edited_view["text"] != "live edit" || edited_view["kind"].as_str() != Some("message") {
         return Err(format!("recipient edit view: {edited_view}").into());
     }
+    expect_stale_edit_conflict(world, &message)?;
     expect_submitted(&mutate(world, "react", &message, &["--token", "👍"])?, "conversation.react")?;
     wait_view(world, false, &message, |view| reaction_tokens(view).contains(&"👍"))?;
     expect_submitted(
@@ -989,6 +990,27 @@ fn mutate_as_bob(world: &World<'_>, message: &str) -> e2e::Result<Value> {
             &op,
         ],
     )
+}
+
+fn expect_stale_edit_conflict(world: &World<'_>, message: &str) -> e2e::Result<()> {
+    let conflict =
+        mutate(world, "edit", message, &["--text", "stale edit", "--expected-revision", "0"])?;
+    expect_code(&conflict, "conversation.edit", "edit_conflict")?;
+    if conflict.pointer("/body/code").and_then(Value::as_i64) != Some(7)
+        || conflict.pointer("/error/details/target").and_then(Value::as_str) != Some(message)
+        || conflict.pointer("/error/details/expected").and_then(Value::as_u64) != Some(2)
+        || conflict.pointer("/error/details/received").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(format!("edit_conflict details: {conflict}").into());
+    }
+    let kept = wait_view(world, false, message, |view| {
+        view.pointer("/content/message/text").and_then(Value::as_str) == Some("live edit")
+            && view["revision"] == 1
+    })?;
+    if kept["text"] != "live edit" {
+        return Err(format!("recipient lost the winning revision: {kept}").into());
+    }
+    Ok(())
 }
 
 fn expect_submitted(value: &Value, method: &str) -> e2e::Result<()> {

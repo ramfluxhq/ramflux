@@ -130,6 +130,56 @@ async fn native_mutation_intents_derive_references_revisions_and_exact_retry_pay
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn stale_expected_revision_is_edit_conflict_and_keeps_the_stored_bytes() -> TestResult {
+    let source = Fixture::new("intent-conflict").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let id = seed(&source.client)?;
+    let before = source.client.account_db()?.message_content(&id)?;
+    let stale = request("conversation.edit", &id, json!({"text":"stale","expected_revision":4}));
+    match prepare(&source.client, &stale) {
+        Err(SdkError::EditConflict { target, expected, received }) => {
+            assert_eq!(target, id, "the conflict names the message the caller tried to edit");
+            assert_eq!(expected, 1, "stored revision 0 accepts only the next revision");
+            assert_eq!(received, 5, "base 4 would have written revision 5");
+        }
+        Err(other) => {
+            return Err(format!("stale edit must be edit_conflict, got {other}").into());
+        }
+        Ok(_) => return Err("stale edit must be edit_conflict, got a prepared edit".into()),
+    }
+    assert_eq!(
+        source.client.account_db()?.message_content(&id)?,
+        before,
+        "a refused edit must not replace the stored bytes"
+    );
+    let current = request("conversation.edit", &id, json!({"text":"fresh","expected_revision":0}));
+    let prepared = prepare(&source.client, &current)?;
+    let (_, content) = RamfluxClient::decode_generated_inner(&prepared.exact)?;
+    let g::content::Value::Edit(edit) = content.value.ok_or("edit")? else {
+        return Err("matching base did not build an edit".into());
+    };
+    assert_eq!(edit.revision, 1, "a matching base writes the next revision");
+    let wrapped =
+        SdkError::from(crate::bindings::AdapterError::from_sdk(&SdkError::EditConflict {
+            target: id.clone(),
+            expected: 1,
+            received: 5,
+        }));
+    let frame = crate::bus::io::local_bus_error(&stale, &wrapped);
+    assert_eq!(frame.body["code"], 7, "the bus body carries generated code 7");
+    assert_eq!(frame.body["name"], "edit_conflict", "the bus body names edit_conflict");
+    assert_eq!(frame.body["details"]["target"], id);
+    assert_eq!(frame.body["details"]["expected"], 1);
+    assert_eq!(frame.body["details"]["received"], 5);
+    let error = frame.error.as_ref().ok_or("bus error body")?;
+    assert_eq!(error.code, "edit_conflict", "the bus error code is edit_conflict");
+    assert_eq!(error.details.as_ref().ok_or("details")?["expected"], 1);
+    let reply = request("conversation.reply", &id, json!({"text":"reply","expected_revision":0}));
+    code(prepare(&source.client, &reply), Code::InvalidArgument);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn mutation_intents_refuse_forged_routing_cross_thread_and_deleted_targets() -> TestResult {
     let source = Fixture::new("intent-refusals").await?;
     let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
