@@ -7,7 +7,7 @@
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
     self, after_w1_cut, apply_page, binding_attempts, covered_below, force_covered_below,
-    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_policy_kind, queue_projection,
+    force_need_point, queue_manifest_wait, queue_policy_kind, queue_projection,
     queue_terminal_reply, set_after_classify, set_after_w1_cut, set_before_commit, set_cross_await,
     set_manifest_await, set_projection_key,
 };
@@ -584,11 +584,14 @@ async fn erasure_late_stage_and_process() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn held_entries_cover_cursor_in_one_pass() -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
     let start = turn(&harness.account, 1)?;
     let mut progress = 0_u32;
     for seq in [1_u64, 3, 4] {
-        let entry = own_dummy_at(&harness.account, seq);
+        hold_retry();
+        let mut entry = own_dummy_at(&harness.account, seq);
+        entry.entry.envelope.created_at = now_unix_timestamp();
+        entry.entry.envelope.ttl = 86_400;
+        entry.entry.envelope.signed.signature = encode_base64url([7u8; 64]);
         drive_with_turn(&mut harness.account, &start, entry, || 1).await?;
         progress += 1;
     }
@@ -602,7 +605,6 @@ async fn held_entries_cover_cursor_in_one_pass() -> Result<(), SdkError> {
         .filter(|(_, disposition)| disposition == "held")
         .count();
     assert_eq!(held, 3, "three held receipts");
-    assert_eq!(unrouted_journals(db)?, 3, "one unrouted journal per hold");
     Ok(())
 }
 
@@ -621,6 +623,35 @@ async fn retired_a2i_refusal_does_not_manufacture_a_hold_or_receipt() -> Result<
     assert_eq!(db.unrouted_count()?, 0, "no retired application bytes remain held");
     assert_eq!(cursor(&harness.account)?, 1, "refusal advances the committed receive cursor");
     assert_eq!(db.actor_state_usage("legacy/a2i/")?.0, 0, "no legacy receipt is manufactured");
+    Ok(())
+}
+
+/// Generation 1 has no unrouted hold: an entry whose bytes name no route is refused by the
+/// production classifier and writes neither a `message.unrouted` journal nor a hold row.
+#[tokio::test(flavor = "current_thread")]
+async fn unrouted_entry_has_no_hold_journal_in_generation_one() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let mut entry = real_entry(&harness)?;
+    let payload = encode_base64url(b"carrier without a route");
+    entry.entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        payload.as_bytes(),
+    );
+    entry.entry.envelope.encrypted_payload = payload;
+    assert!(
+        crate::client::routed::decode(&entry.entry.envelope).is_err(),
+        "the fixture entry must name no route"
+    );
+    let outcome = drive(&mut harness.account, entry, || 1).await;
+    let db = harness.account.client.account_db()?;
+    assert_eq!(unrouted_journals(db)?, 0, "no message.unrouted journal in generation 1");
+    assert_eq!(db.unrouted_count()?, 0, "no unrouted hold row in generation 1");
+    assert_ne!(
+        db.receive_state_for_test(1)?.0.as_deref(),
+        Some("held"),
+        "an entry with no route is never held: {:?}",
+        outcome.as_ref().err()
+    );
     Ok(())
 }
 
@@ -647,25 +678,6 @@ async fn retry_keeps_prepare_turn_after_erasure() -> Result<(), SdkError> {
         "erasure after prepare writes nothing on the retry"
     );
     assert_eq!(sends.load(Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn already_covered_sequence_skips_w1() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    let entry = own_dummy(&harness.account);
-    drive(&mut harness.account, entry.clone(), || 1).await?;
-    assert_eq!(cursor(&harness.account)?, 1);
-    let journals = unrouted_journals(harness.account.client.account_db()?)?;
-    let again = drive(&mut harness.account, entry, || 1).await?;
-    assert!(again.0.is_none());
-    assert_eq!(cursor(&harness.account)?, 1);
-    assert_eq!(
-        harness.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("held".into()), 1)
-    );
-    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, journals);
     Ok(())
 }
 
@@ -884,9 +896,9 @@ async fn manifest_wait_refuses_stale_generation() -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn w1_before_commit_sweep_keeps_w0() -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    hold_retry();
     set_after_classify(arm_w1_cut);
-    let entry = own_dummy(&harness.account);
+    let entry = retryable_entry(&harness.account);
     let cut = drive(&mut harness.account, entry, || 1).await;
     let error = cut.as_ref().err();
     assert!(
@@ -902,7 +914,7 @@ async fn w1_before_commit_sweep_keeps_w0() -> Result<(), SdkError> {
         (Some("staged".into()), 1)
     );
     reopen(&mut harness.account)?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    hold_retry();
     let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(recovered.0.is_none());
     assert_eq!(
@@ -910,7 +922,6 @@ async fn w1_before_commit_sweep_keeps_w0() -> Result<(), SdkError> {
         (Some("held".into()), 1)
     );
     assert_eq!(cursor(&harness.account)?, 1);
-    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 1);
     Ok(())
 }
 

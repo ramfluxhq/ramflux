@@ -10,6 +10,8 @@ mod ack_batch_tests;
 pub(crate) mod apply;
 pub(crate) mod authority;
 pub(crate) mod executor;
+#[cfg(test)]
+mod fence_tests;
 pub(crate) mod hooks;
 pub(crate) mod inventory;
 pub(crate) mod managed_ack;

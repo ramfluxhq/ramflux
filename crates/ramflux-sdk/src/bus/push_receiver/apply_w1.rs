@@ -11,10 +11,8 @@ use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
 use crate::bus::sync_driver::source::failure::SourceFailure;
-use crate::bus::sync_driver::source::hold::{HoldDisposition, SourceHold};
 use crate::client::application_outbox::{Admit, AdmitRequest, ApplicationOutbox};
 use crate::client::inbox_failure::{deterministic, verified_failure_policy, wire_signature_error};
-use crate::client::legacy_w1::LegacyW1;
 use crate::client::reply_outbox::{MARKER, ReplyOutbox};
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
@@ -194,10 +192,6 @@ async fn apply_once(
                 backpressure,
             ))
             .await
-        }
-        Kind::LegacyHold => {
-            hold_unrouted(account, turn, handle_generation, entry, sequence)?;
-            Ok(None)
         }
         Kind::PolicyFailure(kind, code) => {
             let key = account.client.inbox_admission_key(entry)?;
@@ -651,39 +645,8 @@ fn admit_failure(
     Ok(())
 }
 
-fn hold_unrouted(
-    account: &LocalBusAccountState,
-    turn: &ReceiveTurn,
-    handle_generation: &dyn Fn() -> u64,
-    entry: &GatewayInboxEntry,
-    sequence: u64,
-) -> Result<(), SdkError> {
-    let computed = account.client.inbox_admission_key(entry)?;
-    let at = now_unix_timestamp();
-    run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
-        let generation = handle_generation();
-        let key = match tx.work_admission_key(sequence)? {
-            Some(existing) => existing,
-            None => computed.clone(),
-        };
-        let gate = LegacyW1 { expected, generation };
-        let hold = SourceHold { expected, generation };
-        match gate.effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at, false))? {
-            HoldDisposition::HeldLocal { .. } => {
-                // SourceHold.admit_hold settle(Held) already covers C+1 in this
-                // transaction (P07). A second Held cover refuses "outside page"
-                // and rolls the hold, journal and cover back together.
-                Ok(true)
-            }
-            HoldDisposition::Paused => Ok(false),
-        }
-    })?;
-    Ok(())
-}
-
 enum Kind {
     Routed,
-    LegacyHold,
     PolicyFailure(ReceiveFailureKind, &'static str),
     Projection,
     TerminalReply,
@@ -711,10 +674,6 @@ fn classify(
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
         return Ok(Kind::Routed);
-    }
-    #[cfg(test)]
-    if take_legacy_hold() {
-        return Ok(Kind::LegacyHold);
     }
     Err(SdkError::GeneratedRefused {
         code: crate::GeneratedRefusalCode::Content,
@@ -1269,7 +1228,6 @@ thread_local! {
     static CROSS_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     static AFTER_CLASSIFY: std::cell::Cell<Option<fn(&AccountDb)>> = const { std::cell::Cell::new(None) };
     static BINDING_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    static LEGACY_HOLD: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     static FORCE_COVERED_BELOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_NEED_POINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static POINT_REPLY: std::cell::RefCell<Option<crate::gateway::push_point::PointReply>> =
@@ -1289,23 +1247,6 @@ thread_local! {
     static BEFORE_COMMIT_HOOK: std::cell::Cell<Option<fn(&AccountDb)>> =
         const { std::cell::Cell::new(None) };
     static AFTER_W1_CUT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-fn take_legacy_hold() -> bool {
-    LEGACY_HOLD.with(|queue| {
-        let mut queue = queue.borrow_mut();
-        if queue.is_empty() { false } else { queue.remove(0) }
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn queue_legacy_hold(answers: impl IntoIterator<Item = bool>) {
-    LEGACY_HOLD.with(|queue| {
-        let mut queue = queue.borrow_mut();
-        queue.clear();
-        queue.extend(answers);
-    });
 }
 
 #[cfg(test)]

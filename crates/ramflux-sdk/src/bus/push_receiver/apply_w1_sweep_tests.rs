@@ -6,9 +6,8 @@
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
-    self, apply_page, queue_legacy_hold, queue_policy_kind, queue_projection, set_after_classify,
-    set_before_commit, set_before_commit_hook, set_manifest_await, set_projection_error,
-    set_projection_key,
+    self, apply_page, queue_policy_kind, queue_projection, set_after_classify, set_before_commit,
+    set_before_commit_hook, set_manifest_await, set_projection_error, set_projection_key,
 };
 use super::apply_w1_real_own_copy as real;
 use super::erase_support::erase_through_retention;
@@ -419,7 +418,6 @@ fn receive_from_inbox(row: &InboxEntry) -> ReceiveEntry {
 #[derive(Clone, Copy, Debug)]
 enum Sweep {
     OwnCopy,
-    LegacyHold,
     Failure,
     Projection,
 }
@@ -430,7 +428,6 @@ fn arm_sweep(
     entry: &ReceiveEntry,
 ) -> Result<(), SdkError> {
     match sweep {
-        Sweep::LegacyHold => queue_legacy_hold(std::iter::repeat_n(true, 8)),
         Sweep::Failure => queue_policy_kind(ReceiveFailureKind::Deterministic),
         Sweep::Projection => {
             persist_projection_receipt(account, &entry.entry, "authenticated-projection-key")?;
@@ -454,7 +451,6 @@ fn sweep_entry(sweep: Sweep, harness: &Harness) -> Result<ReceiveEntry, SdkError
             .clone()),
         Sweep::Failure => Ok(retryable_entry(account)),
         Sweep::Projection => Ok(live_dummy(account)),
-        Sweep::LegacyHold => Ok(own_dummy(account)),
     }
 }
 
@@ -486,14 +482,6 @@ fn expected_ledger(sweep: Sweep) -> Ledger {
         Sweep::OwnCopy | Sweep::Projection | Sweep::Failure => {
             Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
         }
-        Sweep::LegacyHold => Ledger {
-            state: (Some("held".into()), 1),
-            cursor: 1,
-            journals: 1,
-            holds: 1,
-            work: 1,
-            intents: Vec::new(),
-        },
     }
 }
 
@@ -605,11 +593,6 @@ async fn sweep_kind(sweep: Sweep) -> Result<(), SdkError> {
 #[tokio::test(flavor = "current_thread")]
 async fn own_copy_w1_commit_sweep() -> Result<(), SdkError> {
     sweep_kind(Sweep::OwnCopy).await
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn legacy_hold_w1_commit_sweep() -> Result<(), SdkError> {
-    sweep_kind(Sweep::LegacyHold).await
 }
 
 #[tokio::test(flavor = "current_thread")]
