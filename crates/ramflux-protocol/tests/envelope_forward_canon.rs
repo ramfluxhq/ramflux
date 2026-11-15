@@ -23,6 +23,12 @@ fn envelope() -> TestResult<Envelope> {
     }))?)
 }
 
+fn with_field(envelope: &Envelope, field: &str, value: serde_json::Value) -> TestResult<Envelope> {
+    let mut changed = serde_json::to_value(envelope.clone())?;
+    *changed.pointer_mut(field).ok_or("named sender field missing")? = value;
+    Ok(serde_json::from_value(changed)?)
+}
+
 #[test]
 fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult {
     let mut envelope = envelope()?;
@@ -35,12 +41,39 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
         }
         key.verifying_key().verify_strict(&envelope_sender_signed_bytes(&envelope)?, &signature)?;
     }
-    // This list names sender fields independently of the canon's output keys.
-    // Every case changes the actual Envelope and invokes the production canon again.
+    // Profile fields are refused before any signing bytes exist.
     for (field, value) in [
         ("/schema", json!("changed.schema")),
         ("/version", json!(3)),
         ("/domain", json!("changed.domain")),
+    ] {
+        let changed = with_field(&envelope, field, value)?;
+        assert!(
+            matches!(
+                envelope_sender_signed_bytes(&changed),
+                Err(ramflux_protocol::ProtocolError::SenderTranscriptProfile)
+            ),
+            "profile field {field} must be refused with SenderTranscriptProfile"
+        );
+    }
+    // The payload hash is bound to the ciphertext under v2: a tampered hash or a changed
+    // ciphertext is a typed PayloadHashMismatch, never signing bytes.
+    for (field, value) in [
+        ("/payload_hash", json!(ramflux_protocol::encode_base64url([9_u8; 32]))),
+        ("/encrypted_payload", json!("Y2hhbmdlZA")),
+    ] {
+        let changed = with_field(&envelope, field, value)?;
+        assert!(
+            matches!(
+                envelope_sender_signed_bytes(&changed),
+                Err(ramflux_protocol::ProtocolError::PayloadHashMismatch)
+            ),
+            "{field} must be refused with PayloadHashMismatch"
+        );
+    }
+    // This list names sender fields independently of the canon's output keys. Every case
+    // changes the actual Envelope, must canonicalize, and must not verify the old signature.
+    for (field, value) in [
         ("/envelope_id", json!("changed-message")),
         ("/source_principal_id", json!("changed-sender")),
         ("/source_device_id", json!("changed-device")),
@@ -51,7 +84,6 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
         ("/priority", json!("high")),
         ("/ttl", json!(601)),
         ("/created_at", json!(124)),
-        ("/encrypted_payload", json!("changed-cipher")),
         ("/collapse_tag", json!(ramflux_protocol::encode_base64url([8_u8; 32]))),
         ("/report_commitment", json!(ramflux_protocol::encode_base64url([7_u8; 32]))),
         ("/delivery_mode", json!("ephemeral")),
@@ -59,17 +91,13 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
         ("/ext/source_root_commitment", json!("changed-root")),
         ("/ext/franking/sender_tag", json!("changed-tag")),
     ] {
-        let mut changed = serde_json::to_value(envelope.clone())?;
-        *changed.pointer_mut(field).ok_or("named sender field missing")? = value;
-        let changed: Envelope = serde_json::from_value(changed)?;
-        // A changed profile field (schema, version, domain) is refused before any signing bytes
-        // exist; every other change must produce bytes the original signature does not verify.
-        if let Ok(bytes) = envelope_sender_signed_bytes(&changed) {
-            assert!(
-                key.verifying_key().verify_strict(&bytes, &signature).is_err(),
-                "unbound sender field {field}"
-            );
-        }
+        let changed = with_field(&envelope, field, value)?;
+        let bytes = envelope_sender_signed_bytes(&changed)
+            .map_err(|error| format!("{field} must canonicalize: {error}"))?;
+        assert!(
+            key.verifying_key().verify_strict(&bytes, &signature).is_err(),
+            "unbound sender field {field}"
+        );
     }
     Ok(())
 }
