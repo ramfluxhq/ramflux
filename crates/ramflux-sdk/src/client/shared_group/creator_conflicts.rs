@@ -31,7 +31,7 @@ struct PendingCreatorRepair {
     incoming: GroupStateSnapshot,
     recorded_at: i64,
 }
-fn repair_key(group: &str) -> String {
+fn fork_marker_key(group: &str) -> String {
     format!("{REPAIR_PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }
 /// Outcome of reconciling an incoming creator state with the durable local state.
@@ -258,7 +258,7 @@ impl RamfluxClient {
         target: &str,
     ) -> Result<(), SdkError> {
         let group = incoming.view().group_id.clone();
-        let marker_key = repair_key(&group);
+        let marker_key = fork_marker_key(&group);
         if let Some(held) =
             self.account_db()?.load_actor_state::<PendingCreatorRepair>(&marker_key)?
         {
@@ -306,7 +306,7 @@ impl RamfluxClient {
             let committed =
                 self.account_db()?.write_transaction(|| -> Result<bool, SdkError> {
                     // Re-read inside the writer: a repair that landed meanwhile has cleared the marker.
-                    let marker_key = repair_key(&held.group_id);
+                    let marker_key = fork_marker_key(&held.group_id);
                     let Some(current) =
                         self.account_db()?.load_actor_state::<PendingCreatorRepair>(&marker_key)?
                     else {
