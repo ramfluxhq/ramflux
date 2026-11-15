@@ -174,31 +174,51 @@ impl RamfluxClient {
             if verified.member_storage_key(&actor.identity)?.is_none() && previous.is_none() {
                 return Err(invalid("first group snapshot does not grant local membership"));
             }
-            let Some(reconciled) = self.reconcile_group_state(verified, local_target)? else {
-                return Ok(false);
-            };
-            let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
-            self.observe_native_task_roster(&reconciled)?;
-            self.finish_group_transfer_head_change(&reconciled)?;
-            for record in self.group_change_records()?.into_iter().filter(|record| {
-                !record.incoming && record.request.group_id == reconciled.view().group_id
-            }) {
-                if let (GroupStateChange::Add { member, .. }, Some(federation)) =
-                    (&record.request.change, record.federation)
-                    && reconciled.view().members.iter().any(|current| current.identity == *member)
-                {
-                    self.persist_shared_group_federation_route(
-                        &reconciled.view().group_id,
-                        &member.root_commitment,
-                        &federation,
-                    )?;
+            match self.reconcile_group_state(verified, local_target, None)? {
+                creator_conflicts::Reconciled::Adopt(reconciled) => self
+                    .commit_reconciled_group_state(
+                        &reconciled,
+                        verified,
+                        previous.as_ref(),
+                        &actor,
+                    ),
+                // Skipped states change nothing; a deferred creator repair is held by its marker
+                // and committed once `redrive_creator_repairs` runs with the account primary.
+                creator_conflicts::Reconciled::Skip | creator_conflicts::Reconciled::Deferred => {
+                    Ok(false)
                 }
             }
-            if reconciled.snapshot().state_hash != verified.snapshot().state_hash {
-                crate::bus::enqueue_shared_group(self, &reconciled, previous.as_ref())?;
-            }
-            Ok(changed)
         })
+    }
+    /// Commit a reconciled state; republish it only when it differs from the received one.
+    pub(super) fn commit_reconciled_group_state(
+        &self,
+        reconciled: &VerifiedGroupState,
+        received: &VerifiedGroupState,
+        previous: Option<&VerifiedGroupState>,
+        actor: &GroupStateActor,
+    ) -> Result<bool, SdkError> {
+        let changed = self.account_db()?.commit_shared_group_state(reconciled, actor)?;
+        self.observe_native_task_roster(reconciled)?;
+        self.finish_group_transfer_head_change(reconciled)?;
+        for record in self.group_change_records()?.into_iter().filter(|record| {
+            !record.incoming && record.request.group_id == reconciled.view().group_id
+        }) {
+            if let (GroupStateChange::Add { member, .. }, Some(federation)) =
+                (&record.request.change, record.federation)
+                && reconciled.view().members.iter().any(|current| current.identity == *member)
+            {
+                self.persist_shared_group_federation_route(
+                    &reconciled.view().group_id,
+                    &member.root_commitment,
+                    &federation,
+                )?;
+            }
+        }
+        if reconciled.snapshot().state_hash != received.snapshot().state_hash {
+            crate::bus::enqueue_shared_group(self, reconciled, previous)?;
+        }
+        Ok(changed)
     }
     pub(crate) async fn verify_shared_group_source(
         &self,

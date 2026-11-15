@@ -106,6 +106,8 @@ async fn shared_group_implicit_sibling_can_send_and_own_history_keeps_signed_nam
 #[path = "head_scope_tests.rs"]
 mod head_scope_tests;
 
+#[path = "creator_repair_tests.rs"]
+mod creator_repair_tests;
 #[path = "fork_tests.rs"]
 mod fork_tests;
 
@@ -462,6 +464,7 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
         },
     )?;
     let owner_target = native_target(&owner.client)?;
+    let owner_primary = owner.client.fixture_primary()?;
     for index in 0..65 {
         let request = ramflux_crypto::sign_group_change_request(
             admin.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
@@ -480,7 +483,11 @@ fn r5_signed_capacity_results_are_bounded_and_cannot_spend_another_groups_pool()
         }
         result?;
         if index >= 8 {
-            let response = owner.client.process_group_request(&request, &owner_target)?;
+            let response = owner.client.process_group_request_with_primary(
+                &request,
+                &owner_target,
+                owner_primary.as_ref(),
+            )?;
             assert_eq!(response.status, ramflux_protocol::GroupChangeStatus::Capacity);
             ramflux_crypto::verify_group_change_result(
                 &response,

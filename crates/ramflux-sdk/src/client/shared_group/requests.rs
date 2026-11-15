@@ -21,7 +21,20 @@ pub(crate) struct RequestRecord {
     #[serde(default)]
     pub federation: Option<LocalBusFederationRoute>,
 }
+impl RequestRecord {
+    /// An incoming request that still needs the creator's native signature: either to be applied
+    /// or to receive the signed capacity refusal that `insert_group_request` could not sign.
+    pub(crate) fn awaits_creator(&self, now: i64) -> bool {
+        self.incoming
+            && self.result.is_none()
+            && matches!(self.local_status.as_str(), WAITING_FOR_OWNER | CAPACITY_UNSIGNED)
+            && self.request.expires_at > now
+    }
+}
 pub(crate) const REQUEST_PREFIX: &str = "group-change/request/";
+const WAITING_FOR_OWNER: &str = "waiting_for_owner";
+/// A request refused for capacity whose signed result waits for the account primary.
+const CAPACITY_UNSIGNED: &str = "capacity_unsigned";
 struct GroupResultSigningInput<'a> {
     actor: &'a ramflux_protocol::GroupStateActor,
     request: &'a GroupChangeRequest,
@@ -157,7 +170,7 @@ impl RamfluxClient {
                     row.incoming == incoming
                         && row.result.is_none()
                         && row.request.expires_at > now
-                        && row.local_status == "waiting_for_owner"
+                        && row.local_status == WAITING_FOR_OWNER
                 })
                 .collect();
             let full = pending.len() >= MAX_GROUP_PENDING_REQUESTS
@@ -172,13 +185,13 @@ impl RamfluxClient {
             if full && !incoming {
                 return Err(capacity());
             }
-            let result =
-                if full { Some(self.group_capacity_result(request, &state, now)?) } else { None };
+            // The accept path holds no vault key, so a full queue stores the refusal unsigned;
+            // the courier signs it natively with the primary, as it does for applied requests.
             self.persist_group_request(&RequestRecord {
                 request: request.clone(),
                 incoming,
-                result,
-                local_status: if full { "result_ready" } else { "waiting_for_owner" }.into(),
+                result: None,
+                local_status: if full { CAPACITY_UNSIGNED } else { WAITING_FOR_OWNER }.into(),
                 expires_at: request.expires_at.saturating_add(86400),
                 next_at: now,
                 delivered: BTreeSet::new(),
@@ -207,22 +220,6 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    fn group_capacity_result(
-        &self,
-        request: &GroupChangeRequest,
-        state: &ramflux_crypto::VerifiedGroupState,
-        now: i64,
-    ) -> Result<GroupChangeResult, SdkError> {
-        let actor = self.owned_group_actor(&self.shared_group_local_target(&request.group_id)?)?;
-        Ok(ramflux_crypto::sign_group_change_result(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            &actor,
-            request,
-            state,
-            GroupChangeStatus::Capacity,
-            now,
-        )?)
-    }
     fn prune_group_request_partitions(
         &self,
         mut rows: Vec<RequestRecord>,
@@ -230,7 +227,7 @@ impl RamfluxClient {
         // Repair pre-upgrade stores too: an old outsider flood must not keep
         // the account blocked until all of its former retention periods expire.
         rows.sort_by_key(|row| {
-            (row.local_status != "waiting_for_owner", std::cmp::Reverse(row.request.issued_at))
+            (row.local_status != WAITING_FOR_OWNER, std::cmp::Reverse(row.request.issued_at))
         });
         let mut states = BTreeMap::new();
         let mut groups = BTreeMap::new();
@@ -245,7 +242,7 @@ impl RamfluxClient {
             let authorized = !row.incoming
                 // Previously admitted pending intent must receive its typed
                 // result even if the requester was removed in the meantime.
-                || (row.result.is_none() && row.local_status == "waiting_for_owner")
+                || (row.result.is_none() && row.local_status == WAITING_FOR_OWNER)
                 || states.get(group).and_then(Option::as_ref).is_some_and(|state| {
                     state.view().effective_role(&actor.root_commitment, &actor.device_id).is_some()
                 });
@@ -261,14 +258,6 @@ impl RamfluxClient {
             }
         }
         Ok(kept)
-    }
-    #[cfg(test)]
-    pub(crate) fn process_group_request(
-        &self,
-        request: &GroupChangeRequest,
-        target: &str,
-    ) -> Result<GroupChangeResult, SdkError> {
-        self.process_group_request_with_primary(request, target, None)
     }
     pub(crate) fn process_group_request_with_primary(
         &self,
@@ -293,9 +282,14 @@ impl RamfluxClient {
             if actor.identity.root_commitment != previous.creator().identity.root_commitment {
                 return Err(StorageError::GroupPermissionDenied.into());
             }
-            let next = self.apply_authorized_group_request_with_primary(
-                &previous, request, &actor, now, primary,
-            );
+            let next = if record.local_status == CAPACITY_UNSIGNED {
+                // The request was refused when it arrived; only the signed refusal is missing.
+                Err(capacity())
+            } else {
+                self.apply_authorized_group_request_with_primary(
+                    &previous, request, &actor, now, primary,
+                )
+            };
             let (state, status) = match next {
                 Ok(state) => {
                     let changed = state.snapshot().state_hash != previous.snapshot().state_hash;
@@ -343,16 +337,7 @@ impl RamfluxClient {
             Ok(result)
         })
     }
-    pub(super) fn apply_authorized_group_request(
-        &self,
-        state: &ramflux_crypto::VerifiedGroupState,
-        request: &GroupChangeRequest,
-        actor: &ramflux_protocol::GroupStateActor,
-        now: i64,
-    ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
-        self.apply_authorized_group_request_with_primary(state, request, actor, now, None)
-    }
-    fn apply_authorized_group_request_with_primary(
+    pub(super) fn apply_authorized_group_request_with_primary(
         &self,
         state: &ramflux_crypto::VerifiedGroupState,
         request: &GroupChangeRequest,
@@ -361,26 +346,18 @@ impl RamfluxClient {
         primary: Option<&ramflux_crypto::custody::SelfSigningKey>,
     ) -> Result<ramflux_crypto::VerifiedGroupState, SdkError> {
         self.validate_group_requester(state, request)?;
-        let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
-        if self.born_v3_account.is_some() {
-            Ok(ramflux_crypto::apply_native_group_change_request(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                branch,
-                actor,
-                state,
-                request,
-                now,
-            )?)
-        } else {
-            Ok(ramflux_crypto::apply_group_change_request(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                branch,
-                actor,
-                state,
-                request,
-                now,
-            )?)
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodySetupInvalid);
         }
+        let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
+        Ok(ramflux_crypto::apply_native_group_change_request(
+            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+            branch,
+            actor,
+            state,
+            request,
+            now,
+        )?)
     }
     fn sign_group_change_result_with_primary(
         &self,
@@ -388,25 +365,17 @@ impl RamfluxClient {
         primary: Option<&ramflux_crypto::custody::SelfSigningKey>,
     ) -> Result<GroupChangeResult, SdkError> {
         let GroupResultSigningInput { actor, request, state, status, now } = input;
-        if self.born_v3_account.is_some() {
-            Ok(ramflux_crypto::sign_native_group_change_result(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                actor,
-                request,
-                state,
-                status,
-                now,
-            )?)
-        } else {
-            Ok(ramflux_crypto::sign_group_change_result(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                actor,
-                request,
-                state,
-                status,
-                now,
-            )?)
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodySetupInvalid);
         }
+        Ok(ramflux_crypto::sign_native_group_change_result(
+            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+            actor,
+            request,
+            state,
+            status,
+            now,
+        )?)
     }
     pub(super) fn validate_group_requester(
         &self,
@@ -436,17 +405,14 @@ impl RamfluxClient {
         state: &ramflux_crypto::VerifiedGroupState,
         actor: &ramflux_protocol::GroupStateActor,
         status: GroupChangeStatus,
+        primary: Option<&ramflux_crypto::custody::SelfSigningKey>,
     ) -> Result<(), SdkError> {
         let Some(mut record) = self.group_change_record(request, true)? else {
             return Ok(());
         };
-        record.result = Some(ramflux_crypto::sign_group_change_result(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            actor,
-            request,
-            state,
-            status,
-            now_unix_timestamp(),
+        record.result = Some(self.sign_group_change_result_with_primary(
+            GroupResultSigningInput { actor, request, state, status, now: now_unix_timestamp() },
+            primary,
         )?);
         record.local_status = "result_ready".into();
         record.delivered.clear();

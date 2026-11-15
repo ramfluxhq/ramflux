@@ -1077,10 +1077,12 @@ async fn routed_committed_covers_and_acks_case() -> Case {
             },
         )?;
     }
-    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::IdentityRootMissing);
+    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::InboundPending(
+        "identity authority: current head not cached".into(),
+    ));
     drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     drive_flush(&mut runtime, true).await?;
-    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via IdentityRootMissing");
+    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via identity-authority absence");
     assert_eq!(acked(&gateway)?, 2);
     runtime.stop_connection().await;
     drop(runtime);

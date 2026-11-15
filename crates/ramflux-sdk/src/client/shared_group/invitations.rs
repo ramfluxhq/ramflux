@@ -239,7 +239,9 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::shared_group::tests::{install_native_directories, native_person};
+    use crate::client::shared_group::tests::{
+        install_native_directories, native_person, native_target,
+    };
     #[test]
     fn stranger_group_is_held_declined_and_blocked_without_joined_projection()
     -> Result<(), SdkError> {
@@ -279,7 +281,7 @@ mod tests {
                 .expires_at,
             before
         );
-        peer.client.decide_group_invitation("group", false, "phone")?;
+        peer.client.decide_group_invitation("group", false, &native_target(&peer.client)?)?;
         peer.client.hold_group_invitation(&state, &body)?;
         assert_eq!(peer.client.group_invitations()?["invitations"], serde_json::json!([]));
         let root_id = owner.client.owned_device_identity()?.root_commitment().to_owned();
@@ -306,7 +308,7 @@ mod tests {
         )?;
         peer.client
             .hold_group_invitation(&state, &owner.client.shared_group_packet(&state, false)?)?;
-        peer.client.decide_group_invitation("group", true, "phone")?;
+        peer.client.decide_group_invitation("group", true, &native_target(&peer.client)?)?;
         assert_eq!(
             peer.client
                 .account_db()?

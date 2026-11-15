@@ -50,8 +50,42 @@ struct Incoming {
     target: String,
 }
 
+/// Sign held creator-fork repairs once the account primary can be loaded. A locked or missing
+/// vault leaves the markers pending for the next pass.
+async fn redrive_creator_repairs(writer: &Writer) -> Result<bool, SdkError> {
+    let snapshot = writer
+        .apply(|account| {
+            if account.client.has_pending_creator_repairs()? {
+                PrimarySnapshot::prepare(account)
+            } else {
+                Ok(None)
+            }
+        })
+        .await?;
+    let Some(snapshot) = snapshot else { return Ok(false) };
+    let primary = match snapshot.load().await {
+        Ok(primary) => primary,
+        Err(error) => {
+            tracing::debug!(%error, "creator repair redrive deferred");
+            return Ok(false);
+        }
+    };
+    writer
+        .apply(move |account| {
+            Ok(match account.client.redrive_creator_repairs(Some(&primary)) {
+                Ok(repaired) => repaired > 0,
+                Err(error) => {
+                    tracing::debug!(%error, "creator repair redrive deferred");
+                    false
+                }
+            })
+        })
+        .await
+}
+
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
-    let mut active = process_incoming(&context, &writer).await?;
+    let repaired = redrive_creator_repairs(&writer).await?;
+    let mut active = process_incoming(&context, &writer).await? || repaired;
     let Some(plan) = writer.apply(prepare).await? else { return Ok(active) };
     active = true;
     let captured = plan.clone();
@@ -500,12 +534,9 @@ fn incoming(account: &mut LocalBusAccountState) -> Result<Vec<Incoming>, SdkErro
         .load_actor_state::<String>("group-courier/process-cursor")?
         .unwrap_or_default();
     let mut waiting = Vec::new();
-    for record in client.group_change_records()?.into_iter().filter(|record| {
-        record.incoming
-            && record.result.is_none()
-            && record.local_status == "waiting_for_owner"
-            && record.request.expires_at > now
-    }) {
+    for record in
+        client.group_change_records()?.into_iter().filter(|record| record.awaits_creator(now))
+    {
         waiting.push((
             crate::client::shared_group::request_record_key(&record.request, true)?,
             record,

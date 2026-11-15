@@ -169,7 +169,14 @@ impl RamfluxClient {
         state: &ramflux_crypto::VerifiedGroupState,
         target: &str,
     ) -> Result<bool, crate::SdkError> {
-        self.accept_shared_group_state(state, &self.fixture_group_target(target)?)
+        let target = self.fixture_group_target(target)?;
+        let accepted = self.accept_shared_group_state(state, &target)?;
+        // A creator-fork repair is deferred until the primary is available; the fixture holds it.
+        if !self.has_pending_creator_repairs()? {
+            return Ok(accepted);
+        }
+        let primary = self.fixture_primary()?;
+        Ok(accepted || self.redrive_creator_repairs(primary.as_ref())? > 0)
     }
 
     pub(crate) fn fixture_primary(

@@ -314,7 +314,9 @@ mod tests {
     #[test]
     fn r8_local_decision_advances_past_a_future_account_decision_and_matches_reply()
     -> Result<(), SdkError> {
-        use crate::client::shared_group::tests::{install_native_directories, native_person};
+        use crate::client::shared_group::tests::{
+            install_native_directories, native_person, native_target,
+        };
         let phone = native_person("owner", "phone")?;
         let stranger = native_person("stranger", "stranger")?;
         install_native_directories(&[&phone, &stranger])?;
@@ -343,7 +345,11 @@ mod tests {
                     expires_at: future + 7 * 86400,
                 },
             )?;
-            let reply = phone.client.decide_group_invitation(group, accepted, "phone")?;
+            let reply = phone.client.decide_group_invitation(
+                group,
+                accepted,
+                &native_target(&phone.client)?,
+            )?;
             assert_eq!(reply["accepted"], accepted);
             let saved: Decision = phone
                 .client
@@ -380,7 +386,7 @@ mod tests {
             let own = client.owned_device_identity()?;
             let mut consent = Consent {
                 schema: DOMAIN.into(),
-                actor: client.owned_group_actor(&format!("target-{}", own.device_id()))?,
+                actor: client.owned_group_actor(own.storage_key())?,
                 snapshot: state.snapshot().clone(),
                 accepted,
                 issued_at: at,

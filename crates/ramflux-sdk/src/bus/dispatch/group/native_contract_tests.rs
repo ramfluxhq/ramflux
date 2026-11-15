@@ -169,20 +169,7 @@ async fn group_bus_generic_refusals_preserve_legacy_codes_and_type_only_native_a
         fixture.config,
         fixture.manifest.principal_commitment,
     );
-    let (_directory, legacy) = super::tests::account_state(
-        "legacy-refusal",
-        "legacy",
-        "legacy-owner",
-        "legacy-device",
-        [81; 32],
-    )?;
-    legacy.client.shared_group_create(
-        "group",
-        "thread",
-        None,
-        &legacy.gateway_config.target_delivery_id,
-    )?;
-    for (account, expected) in [(legacy, "ValidationFailed"), (native, "GroupRenameRefused")] {
+    for (account, expected) in [(native, "GroupRenameRefused")] {
         let mut state = daemon(account, &root);
         let error = Box::pin(request(
             &mut state,
