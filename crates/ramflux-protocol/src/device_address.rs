@@ -13,13 +13,29 @@ pub trait RootQualifiedDeviceIdentity {
     #[must_use]
     fn device_id(&self) -> &str;
 }
+/// Maximum byte length of a live device name. The native delivery address
+/// (`root~base64url(json([root, device]))`) must fit `MAX_IDENTIFIER_BYTES`.
+pub const MAX_DEVICE_NAME_BYTES: usize = 128;
+/// Length of a root commitment (43 base64url characters) inside a native delivery address.
+const ROOT_COMMITMENT_BYTES: usize = 43;
+/// Length of the native delivery address for a device name of `device_bytes` bytes that needs no
+/// JSON escaping: `root~` plus the base64url of `["<root>","<device>"]`.
+const fn native_delivery_id_bytes(device_bytes: usize) -> usize {
+    // `["<root>","<device>"]`: two brackets, four quotes, one comma.
+    let json = ROOT_COMMITMENT_BYTES + device_bytes + 7;
+    5 + (json * 4).div_ceil(3)
+}
+const _: () = assert!(
+    native_delivery_id_bytes(MAX_DEVICE_NAME_BYTES) <= crate::message::outer::MAX_IDENTIFIER_BYTES,
+    "a maximum-length device name must still yield a delivery id within MAX_IDENTIFIER_BYTES"
+);
 /// Reject address-shaped names at live device enrollment and group-control ingress.
 /// The address codec itself still preserves historical literal names without recursive decoding.
 /// # Errors
 /// Rejects empty, oversized, control/format-containing, blank or reserved-prefix device names.
 pub fn validate_device_name(name: &str) -> Result<(), ProtocolError> {
     if name.trim().is_empty()
-        || name.len() > 256
+        || name.len() > MAX_DEVICE_NAME_BYTES
         || !crate::text_safety::single_line_is_safe(name)
         || name.starts_with("root~")
         || name.starts_with("legacy~")
@@ -32,7 +48,11 @@ pub fn validate_device_name(name: &str) -> Result<(), ProtocolError> {
 /// # Errors
 /// Rejects empty/oversized identifiers or serialization errors.
 pub fn qualified_device_id(root: &str, device: &str) -> Result<String, ProtocolError> {
-    if root.is_empty() || root.len() > 256 || device.is_empty() || device.len() > 1024 {
+    if root.is_empty()
+        || root.len() > 256
+        || device.is_empty()
+        || device.len() > MAX_DEVICE_NAME_BYTES
+    {
         return Err(ProtocolError::InvalidIdentityRecord("invalid qualified device address"));
     }
     Ok(format!("root~{}", crate::encode_base64url(serde_json::to_vec(&(root, device))?)))
@@ -76,6 +96,32 @@ mod tests {
         for name in ["中文", "téléphone", "🦀", "phone 2"] {
             assert!(validate_device_name(name).is_ok(), "{name:?}");
         }
+    }
+    #[test]
+    fn device_names_are_capped_at_128_bytes_and_max_name_fits_the_delivery_id()
+    -> Result<(), ProtocolError> {
+        let max = "d".repeat(MAX_DEVICE_NAME_BYTES);
+        validate_device_name(&max)?;
+        let id = qualified_device_id(&"r".repeat(ROOT_COMMITMENT_BYTES), &max)?;
+        assert_eq!(id.len(), native_delivery_id_bytes(MAX_DEVICE_NAME_BYTES), "length model");
+        assert!(
+            id.len() <= crate::message::outer::MAX_IDENTIFIER_BYTES,
+            "delivery id {} exceeds the identifier cap",
+            id.len()
+        );
+        let over = "d".repeat(MAX_DEVICE_NAME_BYTES + 1);
+        assert!(
+            matches!(validate_device_name(&over), Err(ProtocolError::InvalidIdentityRecord(_))),
+            "129-byte device name must be refused with the typed validation error"
+        );
+        assert!(
+            matches!(
+                qualified_device_id(&"r".repeat(ROOT_COMMITMENT_BYTES), &over),
+                Err(ProtocolError::InvalidIdentityRecord(_))
+            ),
+            "129-byte device name must not form an address"
+        );
+        Ok(())
     }
     #[test]
     fn qualified_addresses_preserve_literal_address_shaped_names_and_decode_once()

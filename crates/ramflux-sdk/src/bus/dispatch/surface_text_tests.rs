@@ -452,10 +452,10 @@ async fn maximum_identifiers_full_state_and_all_finality_fit_resync_and_real_dm_
 -> Result<(), Box<dyn std::error::Error>> {
     let root = runtime_tests::root("surface-max-ids");
     let principal = "a".repeat(256);
-    let device = "d".repeat(256);
+    let device = "d".repeat(ramflux_protocol::MAX_DEVICE_NAME_BYTES);
     let conversation = "c".repeat(256);
     let surface = "s".repeat(256);
-    let remote = "r".repeat(256);
+    let remote = "r".repeat(ramflux_protocol::MAX_DEVICE_NAME_BYTES);
     let NativeGroup { mut source, peers, config, directory } = Box::pin(native_group_with(
         &root,
         1,
