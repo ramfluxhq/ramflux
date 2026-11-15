@@ -28,7 +28,12 @@ async fn wall_bounded<T>(
     };
     drop(finished);
     watchdog.join().map_err(|_| "wall-clock watchdog panicked")?;
-    outcome.ok_or_else(|| format!("scenario exceeded its {seconds} s wall-clock deadline"))?
+    outcome.ok_or_else(|| {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("scenario exceeded its {seconds} s wall-clock deadline"),
+        )) as Box<dyn std::error::Error>
+    })?
 }
 #[tokio::test(start_paused = true)]
 async fn pairing_full_tail_relay_admission_is_data_only_endpoints_enforce() -> TestResult {
@@ -196,10 +201,9 @@ async fn reopen(
 async fn the_wall_clock_bound_cancels_a_scenario_that_never_finishes_on_paused_time() {
     let started = std::time::Instant::now();
     let outcome = wall_bounded::<()>(1, std::future::pending()).await;
-    assert!(
-        outcome.is_err_and(|error| error.to_string().contains("wall-clock deadline")),
-        "a stuck scenario is cancelled with the deadline error"
-    );
+    let error = outcome.expect_err("a stuck scenario is cancelled");
+    let io = error.downcast_ref::<std::io::Error>().expect("the deadline stays a typed io error");
+    assert_eq!(io.kind(), std::io::ErrorKind::TimedOut, "the deadline is a TimedOut error");
     assert!(started.elapsed() >= std::time::Duration::from_secs(1), "real time elapsed");
     assert!(started.elapsed() < std::time::Duration::from_secs(30), "cancelled promptly");
 }
