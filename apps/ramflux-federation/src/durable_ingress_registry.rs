@@ -315,7 +315,7 @@ fn marked_forward(
             "delivery_class":"opaque_event", "required_capability":"opaque_delivery",
             "signing_key_id": discovery.node_id,"signature_alg":"ed25519","signature":"",
             "envelope": {
-                "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+                "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
                 "ext":{
                     "source_root_commitment": ramflux_crypto::identity_root_commitment(
                         &root.signing_key.verifying_key()
@@ -326,7 +326,7 @@ fn marked_forward(
                 "source_principal_id":"alice","source_device_id":"alice_phone",
                 "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
                 "priority":"low","ttl":5,"created_at": now,
-                "encrypted_payload":"opaque","payload_hash":"hash"
+                "encrypted_payload":"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA","payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA"),"delivery_mode":"durable","collapse_tag": ramflux_protocol::encode_base64url([0x22_u8; 32]),"report_commitment": ramflux_protocol::encode_base64url([0x33_u8; 32])
             }
         }),
     )?;

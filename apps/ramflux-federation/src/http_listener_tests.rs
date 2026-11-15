@@ -50,7 +50,7 @@ fn request(
 
 fn federation_forward_body(created_at: &str, ext_members: &str, admin_token: &str) -> String {
     format!(
-        r#"{{"admin_token":"{admin_token}","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash"}}}}"#
+        r#"{{"admin_token":"{admin_token}","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash","delivery_mode":"durable"}}}}"#
     )
 }
 
@@ -455,7 +455,7 @@ fn forward_envelope() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         "envelope": {"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{},
         "signing_key_id":"device","signature_alg":"ed25519","signature":"device-signature",
         "envelope_id":"forward-test","source_principal_id":"alice","source_device_id":"first","target_delivery_id":"peer",
-        "routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":crate::now_unix_seconds()?,"encrypted_payload":"opaque","payload_hash":"hash"}
+        "routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":crate::now_unix_seconds()?,"encrypted_payload":"opaque","payload_hash":"hash","delivery_mode":"durable"}
     }))?)?)
 }
 
