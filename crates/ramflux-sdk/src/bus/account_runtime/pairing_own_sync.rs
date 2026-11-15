@@ -3,7 +3,9 @@
 
 //! Enrollment completion schedules one ordinary history attempt, independent of pairing success.
 use super::AccountRuntime;
-use crate::{SdkError, bus::io::local_bus_error_code};
+use crate::{
+    SdkError, bus::io::local_bus_error_code, client::own_device_sync::PairingHistoryProgress,
+};
 impl AccountRuntime {
     pub(super) async fn service_pairing_own_sync(&mut self) -> Result<bool, SdkError> {
         let mut shutdown = self.shutdown.clone();
@@ -16,6 +18,9 @@ impl AccountRuntime {
         if account.client.node_relay_options.is_none() || account.client.born_v3_account.is_none() {
             return Ok(false);
         }
+        // This service runs one attempt at a time, so an attempt still marked as started here was
+        // interrupted by a crash or restart. The durable transfer makes running it again idempotent.
+        account.client.account_db()?.requeue_interrupted_pairing_own_sync()?;
         let Some(job) = account.client.account_db()?.next_pairing_own_sync()? else {
             return Ok(false);
         };
@@ -26,13 +31,18 @@ impl AccountRuntime {
         }
         let result = tokio::select! {
             biased;
-            _ = shutdown.changed() => Err(SdkError::PairingCode("Retired")),
-            _ = preempt.changed() => Err(SdkError::PairingCode("Retired")),
+            _ = shutdown.changed() => Ok(PairingHistoryProgress::Pending),
+            _ = preempt.changed() => Ok(PairingHistoryProgress::Pending),
             result = tokio::time::timeout(budget,Box::pin(account.client.export_pairing_history(&mut engine,&pool,&job))) => {
-                result.unwrap_or_else(|_| Err(SdkError::PairingCode("ResumeRequired")))
+                result.unwrap_or(Ok(PairingHistoryProgress::Pending))
             }
         };
         account.apply_session_metadata(engine);
+        if matches!(result, Ok(PairingHistoryProgress::Pending)) {
+            // The history courier continues the durable transfer; check again on a later pass.
+            account.client.account_db()?.requeue_pairing_own_sync(&job)?;
+            return Ok(true);
+        }
         let error = result.as_ref().err().map(local_bus_error_code);
         account.client.account_db()?.finish_pairing_own_sync(&job, error)?;
         if let Some(error) = error {

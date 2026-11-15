@@ -6,6 +6,7 @@
 use crate::prelude::*;
 
 mod pairing;
+pub(crate) use pairing::PairingHistoryProgress;
 impl RamfluxClient {
     pub(crate) fn own_device_group_snapshots(
         &self,

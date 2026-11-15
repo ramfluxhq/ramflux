@@ -7,7 +7,6 @@ use super::*;
 use ramflux_sdk::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 #[path = "history/objects.rs"]
 mod objects;
-const MEDIA: &[u8] = b"ordinary authorized media after independent pairing";
 pub(super) const BODY: &[u8] = b"existing DM authored on phone before enrollment";
 
 struct Network {
@@ -123,43 +122,45 @@ async fn run() -> TestResult {
         ramflux_storage::AccountIndex::open(b.root.path())?.load_wrapped_db_key(&b.id)?;
     let mut target = Box::pin(b.connect_network(&network.profile, &network.stack)).await?;
     let mut source = Box::pin(a.connect_network(&network.profile, &network.stack)).await?;
+    let (conversation, message) = a.history.clone().ok_or("test: seeded history id")?;
+    let text = std::str::from_utf8(BODY)?;
+    let source_sessions = source.pairing_pair_sessions()?;
+    assert!(!source_sessions.is_empty(), "test: the source holds no live pair secret to protect");
     assert!(
-        !target.has_pairing_history("paired-history-before-enrollment")?,
+        !target.has_pairing_history(&conversation, &message)?,
         "test: recipient already owned the pre-enrollment DM"
     );
     assert!(
         Box::pin(source.pairing_history_attempt()).await?,
         "test: enrollment history attempt was absent"
     );
-    Box::pin(target.wait_pairing_history("paired-history-before-enrollment", BODY)).await?;
     assert!(
-        network.objects.puts.load(Ordering::SeqCst) > 0,
-        "test: history bypassed authenticated object upload"
+        source.pairing_history_pending()?,
+        "test: the history job finished before any page was durably accepted"
     );
-    assert!(
-        network.objects.gets.load(Ordering::SeqCst) > 0,
-        "test: history bypassed authenticated object fetch"
+    Box::pin(target.wait_pairing_history(&mut source, &conversation, &message, text)).await?;
+    Box::pin(source.settle_pairing_history()).await?;
+    assert_eq!(
+        (network.objects.puts.load(Ordering::SeqCst), network.objects.gets.load(Ordering::SeqCst)),
+        (0, 0),
+        "test: generation-1 history must travel as own-device pages, never through the object relay"
     );
-    let before_media = network.objects.gets.load(Ordering::SeqCst);
-    let sibling = &original_branch.2.device_id;
-    Box::pin(source.send_pairing_media(sibling, BODY, MEDIA)).await?;
-    Box::pin(target.wait_pairing_history("paired-ordinary-media-message", BODY)).await?;
-    Box::pin(target.fetch_pairing_media(MEDIA)).await?;
+    let target_sessions = target.pairing_pair_sessions()?;
     assert!(
-        network.objects.gets.load(Ordering::SeqCst) > before_media,
-        "test: ordinary paired media bypassed authenticated remote ciphertext fetch"
+        target_sessions.iter().all(|session| !source_sessions.contains(session)),
+        "test: the enrolled device holds a pair session of the source's peer"
     );
     assert_eq!(a.vault.primary_entries()?, 1, "test: history delivery retired source primary");
     assert_eq!(b.vault.primary_entries()?, 0, "test: history delivery copied management key");
     assert_eq!(
         branch_identity(&b)?,
         original_branch,
-        "test: history or media import replaced B's own branch keys"
+        "test: history import replaced B's own branch keys"
     );
     assert_eq!(
         ramflux_storage::AccountIndex::open(b.root.path())?.load_wrapped_db_key(&b.id)?,
         wrapping,
-        "test: history or media import replaced B's original data-password wrapping"
+        "test: history import replaced B's original data-password wrapping"
     );
     source.stop().await;
     target.stop().await;

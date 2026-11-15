@@ -32,19 +32,23 @@ async fn pair() -> TestResult<(Fixture, Fixture, ramflux_crypto::VerifiedGroupSt
     let target = Fixture::with_device("group-convergence-peer", "phone").await?;
     source.accept_peer(&target)?;
     target.accept_peer(&source)?;
-    let primary = source
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("test: native owner")?
-        .group_primary(source.vault.as_ref())?;
-    source.client.shared_group_create_with_primary(
-        GROUP,
-        THREAD,
-        Some("Checklist".into()),
-        &source.config.target_delivery_id,
-        Some(&primary),
-    )?;
+    {
+        // The lease holds the account's primary-signing file lock; release it before `change`
+        // takes its own, or the second request waits out the lock deadline and fails Busy.
+        let primary = source
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("test: native owner")?
+            .group_primary(source.vault.as_ref())?;
+        source.client.shared_group_create_with_primary(
+            GROUP,
+            THREAD,
+            Some("Checklist".into()),
+            &source.config.target_delivery_id,
+            Some(&primary),
+        )?;
+    }
     let state = change(
         &source,
         GroupStateChange::Add {

@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Enrollment history authority checks; the generation-1 history carrier is P13 work.
+//! Enrollment history over the generation-1 own-device history path. The job is finished when the
+//! gateway has durably accepted every history page for the target's inbox (the transfer row is
+//! done); an explicit target acknowledgement is a post-Demo-B design follow-up.
 use crate::{GatewaySessionAccess, RamfluxClient, SdkError};
 use ramflux_storage::PairingOwnSyncJob;
+/// Whether the durable history transfer for an enrolled device has finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PairingHistoryProgress {
+    /// Pages remain; the transfer is durable and resumes after a restart.
+    Pending,
+    /// The gateway durably accepted every page for the target.
+    Complete,
+}
 impl RamfluxClient {
     pub(crate) async fn export_pairing_history(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         job: &PairingOwnSyncJob,
-    ) -> Result<(), SdkError> {
+    ) -> Result<PairingHistoryProgress, SdkError> {
         let root = &job.source_ref.account_anchor;
         if self.born_v3_account.is_none()
             || self.own_account_anchor()? != *root
@@ -42,10 +52,15 @@ impl RamfluxClient {
         {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
-        // P13 TODO (MU-ACTIVATION-01): the generation-1 carrier for enrollment history is not
-        // built yet. The retired own-device-sync exporter is intentionally not restored, so the
-        // job stays unfinished (it completes only on target acknowledgement) and is retried.
-        let _ = (pool, target.target_delivery_id);
-        Err(SdkError::PairingCode("TodoP13HistoryCarrier"))
+        let _ = pool;
+        let target = self.device_identity_for_root(root, &job.target_ref.device_id)?;
+        match self.generated_history_transfer_done(&target)? {
+            Some(true) => Ok(PairingHistoryProgress::Complete),
+            Some(false) => Ok(PairingHistoryProgress::Pending),
+            None => {
+                self.stage_generated_history_transfer(&target)?;
+                Ok(PairingHistoryProgress::Pending)
+            }
+        }
     }
 }

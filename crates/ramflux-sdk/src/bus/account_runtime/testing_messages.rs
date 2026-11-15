@@ -5,7 +5,10 @@
 use super::testing_calls::NativeCallAccount;
 use crate::bus::state::{LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState};
 use crate::client::routed::{Route, SendMaterial};
-use crate::{GatewayDirectMessage, LocalBusConfig, LocalBusFrame, LocalBusFrameKind, SdkError};
+use crate::{
+    GatewayDirectMessage, GatewaySessionConfig, LocalBusConfig, LocalBusFrame, LocalBusFrameKind,
+    RamfluxClient, SdkError,
+};
 use ramflux_protocol::message as g;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -30,17 +33,79 @@ impl NativeCallAccount {
     ) -> Result<(String, String), SdkError> {
         let manifest: crate::SdkDeviceManifestResponse =
             serde_json::from_value(target.manifest.clone())?;
+        Box::pin(self.deliver_into(&mut target.client, &target.config, manifest, content)).await
+    }
+
+    /// Send generated public content to an already initialized independent client through the
+    /// same real sealing and durable receive. The receiver keeps its own authority and prekeys.
+    /// # Errors
+    /// Propagates ordinary content validation, authority, crypto, and store failures.
+    pub async fn deliver_message_to_client(
+        &self,
+        target: &mut RamfluxClient,
+        config: &GatewaySessionConfig,
+        content: &g::Message,
+    ) -> Result<(String, String), SdkError> {
+        let account = target.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let identity = target.owned_device_identity()?;
+        let branch = target.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let manifest = crate::SdkDeviceManifestResponse::from_native(
+            ramflux_protocol::custody::CustodyManifest {
+                publication: account.publication(),
+                custodian_publication: account.custodian_publication(
+                    target.account_index()?.root(),
+                    crate::custody::network_now()?,
+                )?,
+                devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
+                    device_ref: ramflux_protocol::custody::DeviceRef {
+                        account_anchor: identity.root_commitment().into(),
+                        device_id: identity.device_id().into(),
+                        device_epoch: branch.device_epoch,
+                    },
+                    target_delivery_id: config.target_delivery_id.clone(),
+                    prekey_bundle: serde_json::to_value(
+                        target.load_x3dh_private_state(&identity)?.bundle,
+                    )?,
+                    message_layer: account
+                        .record()
+                        .body
+                        .devices
+                        .iter()
+                        .find(|row| row.device_id == identity.device_id())
+                        .and_then(|row| row.message_layer.clone()),
+                }],
+            },
+        )?;
+        // The receiver verifies the sender through its own directory and friend consent.
+        let sender: crate::SdkDeviceManifestResponse =
+            serde_json::from_value(self.manifest.clone())?;
+        target.persist_fetched_identity_directory(&manifest)?;
+        target.persist_fetched_identity_directory(&sender)?;
+        let own = target.own_account_anchor()?;
+        let peer = self.client.own_account_anchor()?;
+        target.establish_friend_link("history-sender-link", &own, &peer)?;
+        self.client.establish_friend_link("history-receiver-link", &peer, &own)?;
+        Box::pin(self.deliver_into(target, config, manifest, content)).await
+    }
+
+    async fn deliver_into(
+        &self,
+        target_client: &mut RamfluxClient,
+        target_config: &GatewaySessionConfig,
+        manifest: crate::SdkDeviceManifestResponse,
+        content: &g::Message,
+    ) -> Result<(String, String), SdkError> {
         self.client.persist_fetched_identity_directory(&manifest)?;
-        let reference = target.client.owned_device_identity()?;
+        let reference = target_client.owned_device_identity()?;
         let mut message = GatewayDirectMessage {
             conversation_id: self.client.generated_direct_conversation_id(&reference)?,
             message_id: "native-consumer-operation".into(),
             envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
             source_principal_id: self.config.principal_id.clone(),
             sender_id: self.config.device_id.clone(),
-            recipient_device_id: Some(target.config.device_id.clone()),
-            recipient_principal_commitment: Some(target.client.own_account_anchor()?),
-            target_delivery_id: target.config.target_delivery_id.clone(),
+            recipient_device_id: Some(target_config.device_id.clone()),
+            recipient_principal_commitment: Some(target_client.own_account_anchor()?),
+            target_delivery_id: target_config.target_delivery_id.clone(),
             encrypted_body: Vec::new(),
             created_at: crate::time::now_unix_timestamp(),
             ttl: self.client.content_ttl()?,
@@ -57,7 +122,7 @@ impl NativeCallAccount {
             Route::direct(),
             SendMaterial {
                 manifest: Some((reference.root_commitment().into(), manifest)),
-                bundle: Some(target.client.load_x3dh_private_state(&reference)?.bundle),
+                bundle: Some(target_client.load_x3dh_private_state(&reference)?.bundle),
             },
         )?;
         let envelope =
@@ -66,11 +131,11 @@ impl NativeCallAccount {
         let entry = crate::GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: target.config.target_delivery_id.clone(),
+            target_delivery_id: target_config.target_delivery_id.clone(),
             envelope,
         };
         let mut engine = crate::GatewaySessionEngine::with_test_transport(
-            target.config.clone(),
+            target_config.clone(),
             Box::new(NoNetwork),
         );
         let pool = ramflux_transport::RelayQuicPool::new(
@@ -78,7 +143,7 @@ impl NativeCallAccount {
                 SdkError::LocalBus(format!("native message fixture relay configuration: {error}"))
             })?,
         );
-        target.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        target_client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
         Ok((message.conversation_id, message.message_id))
     }
 

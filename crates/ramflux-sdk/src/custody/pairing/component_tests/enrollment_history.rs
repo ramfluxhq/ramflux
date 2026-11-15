@@ -11,12 +11,30 @@ async fn pairing_enrollment_restores_existing_history_with_a_fresh_group_sender(
     result
 }
 async fn run() -> TestResult {
+    use crate::client::native_test_support::{Fixture, pairing_history};
     let mut rig = Box::pin(Rig::open()).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
-    crate::client::native_test_support::pairing_history::seed(
-        &rig.source.client,
-        rig.participant_a.vault.as_ref(),
+    let source_native = crate::custody::load_account(
+        &rig.participant_a.root,
+        &rig.participant_a.account_id,
+        crate::custody::network_now()?,
     )?;
+    let source_device = source_native.local_device_id()?.to_owned();
+    rig.source
+        .client
+        .initialize_born_v3_branch(&source_device, rig.participant_a.vault.clone())
+        .await?;
+    let mut seeding = Fixture::adopt(
+        std::mem::take(&mut rig.source.client),
+        &rig.participant_a.account_id,
+        &source_device,
+        source_native.record().clone(),
+    )
+    .map_err(|error| format!("test: adopt source: {error}"))?;
+    let seeded = Box::pin(pairing_history::seed(&mut seeding, rig.source.vault.as_ref()))
+        .await
+        .map_err(|error| format!("test: seed: {error}"))?;
+    rig.source.client = seeding.into_client();
     rig.participant_a.take_client(&mut rig.source.client)?;
     Box::pin(super::enrollment::enroll(&mut rig)).await?;
     rig.participant_a.return_client(&mut rig.source.client)?;
@@ -38,7 +56,31 @@ async fn run() -> TestResult {
             "test: enrolled history participant remained fenced"
         );
     }
-    crate::client::native_test_support::pairing_history::verify(&rig.source.client, &target)?;
+    let mut fixtures = Vec::new();
+    for (client, participant) in
+        [(std::mem::take(&mut rig.source.client), &rig.participant_a), (target, &rig.participant_b)]
+    {
+        let native = crate::custody::load_account(
+            &participant.root,
+            &participant.account_id,
+            crate::custody::network_now()?,
+        )?;
+        fixtures.push(
+            Fixture::adopt(
+                client,
+                &participant.account_id,
+                native.local_device_id()?,
+                native.record().clone(),
+            )
+            .map_err(|error| format!("test: adopt after enrollment: {error}"))?,
+        );
+    }
+    let mut target = fixtures.pop().ok_or("test: target fixture")?;
+    let source = fixtures.pop().ok_or("test: source fixture")?;
+    Box::pin(pairing_history::verify(&source, &mut target, &seeded))
+        .await
+        .map_err(|error| format!("test: verify: {error}"))?;
+    rig.source.client = source.into_client();
     branch_traffic::participants(&rig, &[rig.participant_a.as_ref(), rig.participant_b.as_ref()])?;
     rig.primary.lock().await?;
     rig.secondary.lock().await?;

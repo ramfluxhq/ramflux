@@ -259,6 +259,19 @@ impl RamfluxClient {
         })
     }
 
+    /// `Some(done)` for the durable transfer row of this target, `None` when none exists.
+    /// # Errors
+    /// Returns storage errors.
+    pub(crate) fn generated_history_transfer_done(
+        &self,
+        target: &RootQualifiedDeviceRef,
+    ) -> Result<Option<bool>, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<Outgoing>(&transfer_key(target))?
+            .map(|row| row.done))
+    }
+
     /// Start the native history transfer to one named own device (the importing device).
     /// The account's history courier then delivers the pages; progress is durable.
     /// # Errors

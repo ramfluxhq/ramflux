@@ -50,6 +50,10 @@ impl Fixture {
             },
             now,
         )?;
+        // The accepted publication moved the on-disk head; reload this device's native account so
+        // later primary-signing steps (group changes) see the same head instead of HeadChanged.
+        let local_device = self.client.owned_device_identity()?.device_id().to_owned();
+        self.client.initialize_born_v3_branch(&local_device, self.vault.clone()).await?;
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {

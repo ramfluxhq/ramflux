@@ -11,6 +11,11 @@ use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, DeviceRe
 use std::sync::Arc;
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+/// Where a fixture's account index lives and which guard cleans it up.
+pub(crate) struct Home<'a> {
+    pub(crate) root: Root,
+    pub(crate) account_root: &'a std::path::Path,
+}
 pub(crate) struct Fixture {
     pub(crate) client: RamfluxClient,
     pub(crate) vault: Arc<TestVault>,
@@ -91,6 +96,27 @@ impl Fixture {
         device: &str,
         record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
     ) -> TestResult<Self> {
+        let account_root = root.0.to_path_buf();
+        Self::ready_in(
+            client,
+            Home { root, account_root: &account_root },
+            vault,
+            id,
+            device,
+            record,
+        )
+    }
+    /// `account_root` is the directory that holds the client's account index; `root` only owns
+    /// the fixture's cleanup.
+    pub(crate) fn ready_in(
+        client: RamfluxClient,
+        home: Home<'_>,
+        vault: Arc<TestVault>,
+        id: &str,
+        device: &str,
+        record: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>,
+    ) -> TestResult<Self> {
+        let Home { root, account_root } = home;
         let anchor = record.body.account_anchor.clone();
         let identity = client.owned_device_identity()?;
         let bundle = client.load_x3dh_private_state(&identity)?.bundle;
@@ -101,7 +127,7 @@ impl Fixture {
                     .born_v3_account
                     .as_ref()
                     .ok_or("test: native account")?
-                    .custodian_publication(&root.0, crate::custody::network_now()?)?,
+                    .custodian_publication(account_root, crate::custody::network_now()?)?,
                 devices: vec![CustodyManifestDevice {
                     device_ref: DeviceRef {
                         account_anchor: anchor,
@@ -118,7 +144,7 @@ impl Fixture {
             bind_addr: "127.0.0.1:0".parse()?,
             gateway_addr: "127.0.0.1:1".parse()?,
             server_name: "unused.example".into(),
-            ca_cert: root.0.join("unused.pem"),
+            ca_cert: account_root.join("unused.pem"),
             principal_id: manifest.principal_id.clone(),
             device_id: device.into(),
             target_delivery_id: identity.storage_key().into(),
@@ -126,7 +152,7 @@ impl Fixture {
         };
         let mut config = GatewaySessionConfig::auto(endpoint)
             .with_native_custody(GatewayCustodyConfig {
-                account_root: root.0.to_path_buf(),
+                account_root: account_root.to_path_buf(),
                 account_id: id.into(),
                 node_id: "fixture-node".into(),
                 node_public_key: ramflux_protocol::encode_base64url([7; 32]),
