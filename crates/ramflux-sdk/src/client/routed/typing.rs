@@ -159,13 +159,15 @@ impl RamfluxClient {
     > {
         use ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
 
-        if !engine.ephemeral_negotiated()
-            || !engine
+        // Session capabilities are advertised when the device proof is signed
+        // (`session_push_advertise`); the stored scope only lists them in fixtures.
+        let advertised = engine.config().session_push_advertise
+            || engine
                 .config()
                 .capability_scope
                 .iter()
-                .any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY)
-        {
+                .any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY);
+        if !engine.ephemeral_negotiated() || !advertised {
             return Err(typing_unavailable("typing requires negotiated ephemeral mode"));
         }
         if message.ttl != if active { 5 } else { 1 } {

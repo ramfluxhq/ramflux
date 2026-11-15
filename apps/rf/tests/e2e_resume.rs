@@ -132,6 +132,7 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
         "one Connected catch-up, no later poll: {receive}; logs={}",
         dump_logs(&stack, &[&alice_d, &bob_d])
     );
+    eprintln!("B7_EVIDENCE catch_up_passes = {}", receive["catch_up_passes"]);
     assert!(
         e2e::receive_counter(&receive, "last_acked_seq")?
             <= e2e::receive_counter(&receive, "committed_cursor")?,

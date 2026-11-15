@@ -257,6 +257,11 @@ const NODE_STORES: &[&str] =
     &["ramflux-router", "ramflux-federation", "ramflux-gateway", "ramflux-retention"];
 const RATCHET_PREFIXES: &[&str] =
     &["dm-pair/session/", "dm-pair/ephemeral-seals/", "dm-pair/active/", "dm-pair/local/"];
+/// Timer-driven maintenance and daemon-lifecycle rows (the offline step restarts a daemon).
+const TIMER_PREFIXES: &[&str] =
+    &["own-contact/last-refresh", "sync/", "account/networking", "inbox/recovery-revision"];
+/// Node tables that track sessions rather than conversation data.
+const SESSION_TABLE_MARKS: &[&str] = &["session", "incarnation", "resume", "replay"];
 const STORE_CAP: u64 = 32 * 1024 * 1024;
 
 type TableRows = BTreeMap<String, Vec<String>>;
@@ -276,7 +281,7 @@ struct Persistence {
 
 fn observe_typing(world: &mut World<'_>) -> e2e::Result<TypingObservation> {
     let before_ids = message_ids(world, false)?;
-    let before = capture_stores(world)?;
+    let before = settled_stores(world)?;
     let mut ids = explicit_stop(world)?;
     ids.push(unforced_expiry(world)?);
     ids.push(replay_while_live(world)?);
@@ -471,8 +476,11 @@ fn watch_ready(
 }
 
 fn typing_emit(world: &World<'_>, action: &str, operation: &str) -> e2e::Result<Value> {
-    rf_json(
-        &world.alice_d.socket,
+    // Active frames are admitted at most once per 4 s cadence per conversation and target. A
+    // frame inside that window reads `rate_limited`; the same operation id is retried until the
+    // cadence opens, inside the bounded poll budget.
+    wait_json(
+        world.alice_d,
         &[
             "conversation",
             "typing",
@@ -484,6 +492,7 @@ fn typing_emit(world: &World<'_>, action: &str, operation: &str) -> e2e::Result<
             "--operation-id",
             operation,
         ],
+        |value| value.pointer("/error/code").and_then(Value::as_str) != Some("rate_limited"),
     )
 }
 
@@ -617,6 +626,28 @@ fn value_rows<'a>(value: &'a Value, key: &str) -> Vec<&'a Value> {
     value.get(key).and_then(Value::as_array).map(|rows| rows.iter().collect()).unwrap_or_default()
 }
 
+/// Earlier sends and reads still produce asynchronous receipts and acknowledgements. Take the
+/// baseline only once consecutive captures agree, inside the bounded poll budget.
+fn settled_stores(world: &World<'_>) -> e2e::Result<Persistence> {
+    const AGREEING_CAPTURES: u32 = 4;
+    let last = std::cell::RefCell::new(None::<Persistence>);
+    let agreeing = std::cell::Cell::new(0_u32);
+    wait_json(world.alice_d, &["account", "status", "--account", &world.alice.id], |_| {
+        let Ok(now) = capture_stores(world) else {
+            agreeing.set(0);
+            return false;
+        };
+        let same = last
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| assert_same_stores(previous, &now).is_ok());
+        agreeing.set(if same { agreeing.get() + 1 } else { 0 });
+        *last.borrow_mut() = Some(now);
+        agreeing.get() >= AGREEING_CAPTURES
+    })?;
+    last.into_inner().ok_or_else(|| "no settled store capture".into())
+}
+
 fn capture_stores(world: &World<'_>) -> e2e::Result<Persistence> {
     let mut client = BTreeMap::new();
     let mut files = Vec::new();
@@ -716,19 +747,41 @@ fn comparable(snapshot: &Persistence) -> Persistence {
     }
     Persistence {
         client,
-        node: snapshot.node.clone(),
+        // Session, resume, incarnation and replay bookkeeping is written by every handshake,
+        // including the reconnects this row performs on purpose.
+        node: snapshot
+            .node
+            .iter()
+            .map(|(service, tables)| {
+                let kept = tables
+                    .iter()
+                    .filter(|(table, _)| {
+                        (service != "ramflux-gateway" || !table.starts_with("gateway_"))
+                            && !SESSION_TABLE_MARKS.iter().any(|mark| table.contains(mark))
+                    })
+                    .map(|(table, rows)| (table.clone(), rows.clone()))
+                    .collect();
+                (service.clone(), kept)
+            })
+            .collect(),
         wal: snapshot.wal.clone(),
         files: Vec::new(),
     }
 }
 
 fn exempt_client_row(table: &str, line: &str) -> bool {
+    if table == "runtime_outbox" && field(line, 0) == "device_directory" {
+        // Directory refreshes drain after a daemon restart; they carry no conversation data.
+        return true;
+    }
     let kind = match table {
         "runtime_actor_state" => field(line, 0),
         "runtime_outbox" => field(line, 2),
         _ => return false,
     };
-    RATCHET_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
+    // Timer-driven maintenance rows stamp wall-clock time; they carry no conversation data.
+    TIMER_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
+        || RATCHET_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
 }
 
 fn rows_of<'a>(tables: Option<&'a TableRows>, table: &str) -> &'a [String] {
@@ -1138,6 +1191,10 @@ fn expect_split_hlc(read: &Value) -> e2e::Result<()> {
         let ms = row.get("hlc_ms").and_then(Value::as_u64).ok_or("row has no hlc_ms")?;
         if ms == 0 || ms >= 1 << 53 || row.get("hlc_logical").and_then(Value::as_u64).is_none() {
             return Err(format!("row carries a bad HLC pair: {row}").into());
+        }
+        let sequence = row.get("device_sequence").and_then(Value::as_str).ok_or("no sequence")?;
+        if sequence.len() != 20 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("device_sequence is not a 20-digit decimal string: {row}").into());
         }
         if row.get("hlc").is_some() {
             return Err(format!("row still carries the packed hlc: {row}").into());
