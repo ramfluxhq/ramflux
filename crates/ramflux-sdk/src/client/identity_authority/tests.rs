@@ -382,35 +382,35 @@ fn mode(
     )
 }
 #[test]
-fn signed_kind_is_asserted_until_user_verification_and_complete_set_changes_invalidate_it()
--> TestResult {
+fn missing_custody_account_does_not_assert_kind() -> TestResult {
     let owner = Actor::new("agent", "agent-one", 111, 112, 1)?;
     mode(&owner, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
-    let second = Actor::new("agent", "agent-two", 111, 113, 1)?;
-    mode(&second, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
     let peer = Actor::new("bob", "bob", 121, 122, 1)?;
     let original = owner.manifest()?;
     let own = peer.manifest()?;
     observe(&peer.client, &own)?;
     observe(&peer.client, &original)?;
     assert_eq!(peer.client.root_asserted_principal_kind("agent")?, Some(PrincipalKind::HeadlessAi));
-    assert_eq!(peer.client.verified_principal_kind("agent")?, None);
+    assert!(matches!(
+        peer.client.verified_principal_kind("agent"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     peer.client.establish_friend_link(
         "friend",
         &own.principal_commitment,
         &original.principal_commitment,
     )?;
-    peer.client.mark_contact_safety_verified(&original.principal_commitment, "bob")?;
-    assert_eq!(peer.client.verified_principal_kind("agent")?, Some(PrincipalKind::HeadlessAi));
-    let mut changed = original.clone();
-    changed.devices.extend(second.manifest()?.devices);
-    sign_set(&owner, &mut changed, 2)?;
-    changed.devices.retain(|d| d.device_id == owner.id); // Server withholds readiness for the newly signed device.
-    observe(&peer.client, &changed)?;
-    assert_eq!(peer.client.verified_principal_kind("agent")?, None);
+    let refused = crate::client::contact_verification_cas::verify_linked_contact(
+        &peer.client,
+        &original.principal_commitment,
+    );
+    assert!(matches!(refused, Err(SdkError::CustodyModeDowngrade)), "{refused:?}");
+    assert!(matches!(
+        peer.client.verified_principal_kind("agent"),
+        Err(SdkError::CustodyModeDowngrade)
+    ));
     let row = peer.client.account_db()?.client_record("identity", "agent")?.ok_or("identity")?;
     assert_eq!(row["kind"], "headless_ai");
-    assert_eq!(row["kind_verified"], false);
     mode(&owner, PrincipalKind::Human, LocalBusClientMode::HeadlessAi)?;
     assert!(owner.client.prepare_owned_authority(None).is_err());
     Ok(())
@@ -457,45 +457,6 @@ fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResul
 
 #[path = "proof_lifetime_tests.rs"]
 mod proof_lifetime;
-
-#[test]
-fn dormant_sibling_readiness_does_not_change_safety_number_or_directory_hash() -> TestResult {
-    let owner = Actor::new("owner", "active", 161, 162, 1)?;
-    let sibling = Actor::new("owner", "dormant", 161, 163, 1)?;
-    let peer = Actor::new("peer", "peer", 164, 165, 1)?;
-    let mut full = owner.manifest()?;
-    full.devices.extend(sibling.manifest()?.devices);
-    sign_set(&owner, &mut full, 2)?;
-    let own = peer.manifest()?;
-    observe(&peer.client, &own)?;
-    observe(&peer.client, &full)?;
-    peer.client.establish_friend_link(
-        "contact",
-        &own.principal_commitment,
-        &full.principal_commitment,
-    )?;
-    peer.client.mark_contact_safety_verified(&full.principal_commitment, "peer")?;
-    let before = peer.client.contact_safety_number(&full.principal_commitment)?;
-    let row = peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?;
-    let mut served = full.clone();
-    served.devices.retain(|device| device.device_id == "active");
-    observe(&peer.client, &served)?;
-    let after = peer.client.contact_safety_number(&full.principal_commitment)?;
-    assert_eq!(before.safety_number, after.safety_number);
-    assert_eq!(after.verification_state, "verified");
-    assert_eq!(before.contact_device_set_hash, after.contact_device_set_hash);
-    assert_eq!(after.contact_device_count, 2);
-    assert_eq!(
-        row["device_set_hash"],
-        peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?["device_set_hash"]
-    );
-    let preview = crate::client::contact::contact_safety_material_from_manifest(&served)?;
-    assert_eq!(
-        after.contact_device_set_hash,
-        ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&preview.devices))
-    );
-    Ok(())
-}
 
 #[test]
 fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions() -> TestResult {

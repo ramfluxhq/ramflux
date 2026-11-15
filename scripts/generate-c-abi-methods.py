@@ -5,14 +5,52 @@ import argparse
 import json
 import pathlib
 import re
+import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/ramflux-sdk/src/c_abi/v2/method_policy.rs"
 OUTPUT = ROOT / "crates/ramflux-sdk/include/ramflux_sdk_methods.json"
 ROW = re.compile(
-    r'"([a-z][a-z0-9_.]*)"\s*=>\s*\(\s*"([a-z][a-z0-9_]*)"\s*,\s*'
+    r'"([a-z][a-z0-9_.]*)"\s*=>\s*\(\s*"([a-z][a-z0-9_.]*)"\s*,\s*'
     r'(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*,\s*(true|false)\s*\)', re.MULTILINE
 )
+CAS_CONST = re.compile(
+    r'const\s+(CONTACT_VERIFY_CAS_[A-Z0-9_]+)\s*:\s*&str\s*=\s*"([^"]*)"\s*;'
+)
+CAS_REQUIRED = (
+    "CONTACT_VERIFY_CAS_CAPABILITY",
+    "CONTACT_VERIFY_CAS_CONTRACT",
+    "CONTACT_VERIFY_CAS_REQUEST_TYPE",
+    "CONTACT_VERIFY_CAS_RESPONSE_TYPE",
+    "CONTACT_VERIFY_CAS_DESCRIPTOR",
+    "CONTACT_VERIFY_CAS_PRODUCT_PIN",
+)
+
+
+def require_implementation_pin(pin, descriptor):
+    if not re.fullmatch(r"[0-9a-f]{40}", pin):
+        raise SystemExit("contact.verify product pin must name a 40-character commit")
+    kind = subprocess.run(
+        ["git", "cat-file", "-t", pin], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    if kind.returncode != 0 or kind.stdout.strip() != "commit":
+        raise SystemExit("contact.verify product pin is not an immutable commit")
+    shown = subprocess.run(
+        ["git", "show", f"{pin}:crates/ramflux-sdk/src/c_abi/v2/method_policy.rs"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    policy = shown.stdout
+    if (
+        shown.returncode != 0
+        or "CONTACT-VERIFY-CAS-01" not in policy
+        or descriptor not in policy
+        or 'capability="contact.verify.cas"' not in policy
+        and 'CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas"' not in policy
+    ):
+        raise SystemExit("contact.verify product pin does not contain the CAS descriptor policy")
 
 
 def main():
@@ -27,9 +65,29 @@ def main():
     rows = ROW.findall(source)
     if not rows or len({row[0] for row in rows}) != len(rows):
         raise SystemExit("missing or duplicate SDK method policy rows")
-    methods = [dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
-                    secret_output=out == "true", show_once=once == "true", key_export=export == "true")
-               for name, capability, inp, out, once, export in rows]
+    consts = dict(CAS_CONST.findall(source))
+    if any(not consts.get(name) for name in CAS_REQUIRED):
+        raise SystemExit("contact.verify CAS metadata constants are incomplete")
+    require_implementation_pin(
+        consts["CONTACT_VERIFY_CAS_PRODUCT_PIN"],
+        consts["CONTACT_VERIFY_CAS_DESCRIPTOR"],
+    )
+    cas_fields = {
+        "contract": consts["CONTACT_VERIFY_CAS_CONTRACT"],
+        "request_type": consts["CONTACT_VERIFY_CAS_REQUEST_TYPE"],
+        "response_type": consts["CONTACT_VERIFY_CAS_RESPONSE_TYPE"],
+        "message_descriptor_blake3": consts["CONTACT_VERIFY_CAS_DESCRIPTOR"],
+        "product_pin": consts["CONTACT_VERIFY_CAS_PRODUCT_PIN"],
+    }
+    methods = []
+    for name, capability, inp, out, once, export in rows:
+        if name == "contact.verify" and capability != consts["CONTACT_VERIFY_CAS_CAPABILITY"]:
+            raise SystemExit("contact.verify capability does not match CONTACT_VERIFY_CAS_CAPABILITY")
+        row = dict(name=name, capability=capability, bridge_allowed=name not in denied and "itest" not in name, secret_input=inp == "true",
+                   secret_output=out == "true", show_once=once == "true", key_export=export == "true")
+        if name == "contact.verify":
+            row.update(cas_fields)
+        methods.append(row)
     data = dict(abi_major=2, policy_version=2, methods=methods)
     encoded = json.dumps(data, indent=2, sort_keys=True) + "\n"
     if args.check:

@@ -11,7 +11,7 @@ use crate::bus::{
 };
 use crate::prelude::*;
 use serde_json::json;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 
 pub(super) struct Started {
@@ -136,17 +136,23 @@ async fn launch(
         ActorOptions {
             timeouts: limits(),
             initial: Some(Box::new(move |_| {
-                let mut account = crate::bus::runtime_tests::account(
-                    &loaded_root,
-                    "sender",
-                    None,
-                    Arc::new(AtomicBool::new(false)),
-                )?;
-                account.principal_commitment = commitment;
-                account.gateway_config = config;
+                let mut client = RamfluxClient::new();
+                client.open_account_index(&loaded_root)?;
+                client.unlock_account("sender", b"native fixture data passphrase")?;
+                let branch = config
+                    .device_branch
+                    .as_ref()
+                    .ok_or(SdkError::CustodySetupInvalid)?
+                    .as_ref()
+                    .clone();
+                client.device_branch = Some(branch.clone());
+                client
+                    .active_account_db
+                    .as_mut()
+                    .ok_or(SdkError::AccountDbNotUnlocked)?
+                    .set_device_signer(branch);
+                let mut account = LocalBusAccountState::disconnected(client, config, commitment);
                 account.client.node_relay_options = relay_options;
-                account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
-                account.engine = None;
                 crate::bus::dispatch::object::hydrate_local_object_state(&mut account)?;
                 if let Some(engine) = engine {
                     account.install_test_session(engine);

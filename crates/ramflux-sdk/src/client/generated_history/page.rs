@@ -130,6 +130,11 @@ impl RamfluxClient {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         item: &g::HistoryItem,
     ) -> Result<(), SdkError> {
+        if crate::client::contact_verification_cas::history_item_carries_safety_grant(
+            &item.exact_inner,
+        ) {
+            return Ok(());
+        }
         let identity = if edited(item)? {
             self.verify_generated_edited_history_item(item)?
         } else {

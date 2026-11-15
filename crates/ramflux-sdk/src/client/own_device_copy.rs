@@ -490,8 +490,14 @@ impl RamfluxClient {
                     body,
                 },
             )?;
+        let safety = super::contact_verification_cas::accept_staged_safety_inner(
+            self,
+            source_identity,
+            body,
+        )?;
         if !consent
             && !sent
+            && !safety
             && !self.receive_own_contact(body)?
             && !self.receive_surface_control_from(
                 entry,

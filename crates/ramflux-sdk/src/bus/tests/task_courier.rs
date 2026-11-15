@@ -53,6 +53,10 @@ impl CourierEvent {
     }
 }
 
+fn delivery_id(account: &LocalBusAccountState) -> Case<String> {
+    Ok(account.client.owned_device_identity()?.storage_key().to_owned())
+}
+
 fn carrier(account: &LocalBusAccountState, conversation: &str, task: &str) -> Case<Carrier> {
     Ok(account.client.sign_task_event(
         TaskEvent::new(
@@ -358,13 +362,7 @@ async fn r6_dead_rows_are_quarantined_and_actor_delivers_dm_and_call_after_resta
             let commitment = account.principal_commitment.clone();
             drop(account);
             // Close and reload the database, then reenter the real serve loop.
-            let mut reopened = crate::bus::runtime_tests::account(
-                &root.join("source"),
-                "sender",
-                None,
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )?;
-            reopened.principal_commitment = commitment;
+            let mut reopened = lifecycle_fence::open_account(&root, &config, &commitment)?;
             reopened.engine = None;
             reopened.install_test_session(GatewaySessionEngine::connect(config).await?);
             let (mut restarted, sender, stop, mut events) = runtime(reopened, &root.join("source"));
@@ -463,6 +461,8 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
         ack(&fixture.source, "task/ack/100-healthy", &healthy)?;
         forward(&fixture.source, "task/forward/healthy", &healthy)?;
         let (stalled, mut entered) = stall(&fixture.source).await?;
+        let peer_delivery = delivery_id(&fixture.peer)?;
+        let sibling_delivery = delivery_id(&fixture.sibling)?;
         let root = fixture.root.clone();
         let gateway = fixture.gateway.clone();
         let (mut actor, _sender, stop, mut events) = runtime(fixture.source, &root.join("source"));
@@ -554,8 +554,8 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
         assert_eq!(failures[0].1["id"], "task/ack/000-stalled");
         assert!(failures[0].1["start"].as_i64().is_some_and(|at| slow.next_at >= at + 2));
         let sent = &gateway.lock().map_err(|_| "gateway")?.sent;
-        assert!(sent.iter().any(|e| e.target_delivery_id == "peer"));
-        assert!(sent.iter().any(|e| e.target_delivery_id == "sibling"));
+        assert!(sent.iter().any(|e| e.target_delivery_id == peer_delivery));
+        assert!(sent.iter().any(|e| e.target_delivery_id == sibling_delivery));
         drop(actor);
         drop(fixture.peer);
         drop(fixture.sibling);
@@ -612,6 +612,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
             for index in 0..20 {
                 forward(&fixture.source, &format!("task/forward/healthy-{index:02}"), &healthy)?;
             }
+            let sibling_delivery = delivery_id(&fixture.sibling)?;
             let call_id = fixture.inbound().await?;
             let (stalled, mut entered) = stall(&fixture.source).await?;
             let root = fixture.root.clone();
@@ -666,7 +667,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .any(|envelope| envelope.target_delivery_id == "sibling"),
+                    .any(|envelope| envelope.target_delivery_id == sibling_delivery),
                 "healthy forwarding did not progress during stalled courier passes"
             );
             assert_eq!(
@@ -688,6 +689,7 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
         .run_until(Box::pin(async {
             let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
             let fixture = Box::pin(Fixture::new("courier-backlog-r6")).await?;
+            let peer_delivery = delivery_id(&fixture.peer)?;
             let c = carrier(&fixture.source, "healthy", "backlog-task")?;
             for index in 0..100 {
                 ack(&fixture.source, &format!("task/ack/{index:03}"), &c)?;
@@ -731,7 +733,7 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                 // Requested -> at most two Items -> Finished bounds preparation work.
                 // Pending deliveries may be prepared again before their durable removal.
                 // Independent sends may still be queued: observe durable completion before stop.
-                await_ack_commits(&completion_reader, &gateway, 100).await?;
+                await_ack_commits(&completion_reader, &gateway, &peer_delivery, 100).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -752,7 +754,7 @@ async fn r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .filter(|e| e.target_delivery_id == "peer")
+                    .filter(|e| e.target_delivery_id == peer_delivery)
                     .count(),
                 100
             );
@@ -834,6 +836,7 @@ async fn r6_application_error_charges_one_forward_and_account_keeps_serving() ->
                 .client
                 .account_db()?
                 .persist_actor_state(&history, &json!({"events":false}))?;
+            let peer_delivery = delivery_id(&fixture.peer)?;
             let completion_reader = fixture.source.client.account_db()?.open_reader()?;
             let gateway = fixture.gateway.clone();
             let root = fixture.root.clone();
@@ -845,7 +848,7 @@ async fn r6_application_error_charges_one_forward_and_account_keeps_serving() ->
                 assert_eq!(rows.len(), 2);
                 command(&sender, "identity.directory", json!({"limit":16})).await?;
                 // Preparation completion does not stop its independent healthy delivery.
-                await_ack_commits(&completion_reader, &gateway, 1).await?;
+                await_ack_commits(&completion_reader, &gateway, &peer_delivery, 1).await?;
                 stop.send(true)?;
                 Ok::<_, Box<dyn std::error::Error>>(())
             };
@@ -922,6 +925,7 @@ mod priority_r2;
 async fn await_ack_commits(
     reader: &ramflux_storage::AccountDb,
     gateway: &Arc<Mutex<fixture::Gateway>>,
+    target: &str,
     expected: usize,
 ) -> Case {
     let mut remaining = reader.task_state_usage("task/ack/")?.0;
@@ -939,7 +943,7 @@ async fn await_ack_commits(
                     .map_err(|_| "gateway")?
                     .sent
                     .iter()
-                    .filter(|entry| entry.target_delivery_id == "peer")
+                    .filter(|entry| entry.target_delivery_id == target)
                     .count(),
                 expected
             );

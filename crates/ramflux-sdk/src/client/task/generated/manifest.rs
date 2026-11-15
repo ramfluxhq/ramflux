@@ -112,8 +112,12 @@ impl RamfluxClient {
             return Err(invalid("task manifest principal mismatch"));
         }
         let native = generated_manifest_fields(manifest)?;
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let commitment = if native.principal_id == local.principal_id {
+        let local_principal = if let Some(account) = &self.born_v3_account {
+            account.record().body.principal_id.clone()
+        } else {
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id.clone()
+        };
+        let commitment = if native.principal_id == local_principal {
             self.surface_local_root_commitment()?
         } else {
             self.account_db()?

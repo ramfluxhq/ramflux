@@ -71,7 +71,8 @@ async fn case() -> Case {
 pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
     let sibling = &fixture.sibling.client;
     let identity = sibling.owned_device_identity()?;
-    let mut config = fixture.source.gateway_config.clone().with_account_identity(sibling)?;
+    let mut config =
+        super::fixture::bind_scripted_device(fixture.source.gateway_config.clone(), sibling)?;
     config.device_id = identity.device_id().to_owned();
     let manifest = serde_json::from_value(
         fixture

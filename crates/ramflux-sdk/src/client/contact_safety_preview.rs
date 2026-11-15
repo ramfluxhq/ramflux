@@ -4,25 +4,22 @@
 //! Verified out-of-band safety material without changing an existing contact pin.
 use crate::ContactReason;
 use crate::prelude::*;
+
+/// Unconfirmed previews keep at most this many manifests until release or commit.
+pub(crate) const HELD_MANIFEST_CAP: usize = 32;
+
 impl RamfluxClient {
     pub(crate) fn resolve_contact_safety(
         &self,
         identity: &mut serde_json::Value,
-        own: &SdkDeviceManifestResponse,
+        _own: &SdkDeviceManifestResponse,
         peer: &SdkDeviceManifestResponse,
         verification: Option<&SdkContactSafetyNumber>,
         device: &str,
     ) -> Result<(), SdkError> {
-        let own_material = super::contact::contact_safety_material_from_manifest(own)?;
-        let peer_material = super::contact::contact_safety_material_from_manifest(peer)?;
-        self.capture_contact_safety(
-            identity,
-            &peer.principal_commitment,
-            &own_material,
-            &peer_material,
-        )?;
+        self.capture_contact_safety(identity, &peer.principal_commitment)?;
         if let Some(safety) = verification {
-            self.commit_contact_safety(safety, &own_material, &peer_material, device)?;
+            self.commit_contact_safety(safety, device)?;
             identity["root_source"] = serde_json::json!(crate::ContactRootSource::Verified);
         }
         Ok(())
@@ -32,51 +29,61 @@ impl RamfluxClient {
         &self,
         identity: &mut serde_json::Value,
         peer: &str,
-        own_material: &ramflux_crypto::ContactSafetyMaterial,
-        peer_material: &ramflux_crypto::ContactSafetyMaterial,
     ) -> Result<(), SdkError> {
-        let (number, version) = if self.born_v3_account.is_some() {
-            (self.native_safety_number(peer)?.safety_number, 2)
-        } else {
-            (ramflux_crypto::safety_number(own_material, peer_material), 1)
-        };
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
+        let number = self.native_safety_number(peer)?.safety_number;
         identity["safety_number"] = serde_json::json!(number);
-        identity["safety_number_algorithm_version"] = serde_json::json!(version);
+        identity["safety_number_algorithm_version"] = serde_json::json!(2);
         Ok(())
     }
     pub(crate) fn commit_contact_safety(
         &self,
         safety: &SdkContactSafetyNumber,
-        own: &ramflux_crypto::ContactSafetyMaterial,
-        peer: &ramflux_crypto::ContactSafetyMaterial,
         device: &str,
     ) -> Result<(), SdkError> {
-        if self.born_v3_account.is_some() {
-            let current = self.native_safety_number(&safety.contact_identity_commitment)?;
-            if safety.algorithm_version != 2
-                || safety.self_identity_commitment != current.self_identity_commitment
-                || safety.safety_number_hash != current.safety_number_hash
-                || safety.contact_device_set_hash != current.contact_device_set_hash
-            {
-                return Err(ContactReason::RootConflict.into());
-            }
-            self.record_contact_safety_verified(
-                &safety.contact_identity_commitment,
-                device,
-                &current,
-            )?;
-            return Ok(());
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
         }
-        let hash =
-            ramflux_protocol::encode_base64url(ramflux_crypto::safety_fingerprint(own, peer));
-        let device_set =
-            ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&peer.devices));
-        if hash != safety.safety_number_hash || device_set != safety.contact_device_set_hash {
+        let current = self.native_safety_number(&safety.contact_identity_commitment)?;
+        if safety.algorithm_version != 2
+            || safety.self_identity_commitment != current.self_identity_commitment
+            || safety.safety_number_hash != current.safety_number_hash
+            || safety.contact_device_set_hash != current.contact_device_set_hash
+        {
             return Err(ContactReason::RootConflict.into());
         }
-        // The shared writer records the confirmation and complete authority stamp atomically.
-        self.record_contact_safety_verified(&safety.contact_identity_commitment, device, safety)?;
+        Self::record_contact_safety_verified(
+            &safety.contact_identity_commitment,
+            device,
+            &current,
+        )?;
         Ok(())
+    }
+
+    pub(crate) fn hold_compared_manifests(
+        &self,
+        manifests: impl IntoIterator<Item = SdkDeviceManifestResponse>,
+    ) -> Result<(), SdkError> {
+        let incoming = manifests.into_iter().collect::<Vec<_>>();
+        let mut held = self.held_manifests.borrow_mut();
+        let extra = incoming
+            .iter()
+            .filter(|manifest| !held.contains_key(&manifest.principal_commitment))
+            .count();
+        if held.len().saturating_add(extra) > HELD_MANIFEST_CAP {
+            return Err(SdkError::InboundRejected("held manifest cap exceeded".into()));
+        }
+        for manifest in incoming {
+            held.insert(manifest.principal_commitment.clone(), manifest);
+        }
+        Ok(())
+    }
+
+    /// Drop every unconfirmed hold so a later preview can use the cap again.
+    pub(crate) fn release_held_manifests(&self) {
+        self.held_manifests.borrow_mut().clear();
     }
 
     pub(crate) async fn preview_contact_safety(
@@ -84,7 +91,10 @@ impl RamfluxClient {
         gateway: &GatewaySessionConfig,
         principal: &str,
         root: &str,
-    ) -> Result<SdkContactSafetyNumber, SdkError> {
+    ) -> Result<serde_json::Value, SdkError> {
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
+        }
         let old = self
             .account_db()?
             .client_record("identity", principal)?
@@ -110,40 +120,22 @@ impl RamfluxClient {
             return Err(ContactReason::RootConflict.into());
         }
         let own = fetch(own_root.clone()).await?;
-        if self.born_v3_account.is_some() {
-            let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
-                let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
-                Ok(ramflux_crypto::custody::verify_publication(
-                    &ramflux_protocol::custody::CustodyAuthority {
-                        publication: native.publication.clone(),
-                        custodian_publication: native.custodian_publication.clone(),
-                    },
-                    crate::custody::network_now()?,
-                )?)
-            };
-            return super::native_safety::safety_from_native(
-                &verify(&own)?,
-                &verify(&peer)?,
-                "unverified".into(),
-            );
-        }
-        let a = super::contact::contact_safety_material_from_manifest(&own)?;
-        let b = super::contact::contact_safety_material_from_manifest(&peer)?;
-        let fingerprint = ramflux_crypto::safety_fingerprint(&a, &b);
-        Ok(SdkContactSafetyNumber {
-            algorithm_version: 1,
-            contact_identity_commitment: root.into(),
-            self_identity_commitment: own_root,
-            safety_number: ramflux_crypto::safety_number(&a, &b),
-            fingerprint_hex: super::contact::bytes_to_hex(&fingerprint),
-            safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
-            self_device_count: a.devices.len(),
-            contact_device_count: b.devices.len(),
-            contact_device_set_hash: ramflux_protocol::encode_base64url(
-                ramflux_crypto::device_set_hash(&b.devices),
-            ),
-            contact_lineage_head: ramflux_protocol::encode_base64url(&b.lineage_head),
-            verification_state: "unverified".into(),
-        })
+        let verify = |manifest: &SdkDeviceManifestResponse| -> Result<_, SdkError> {
+            let native = manifest.custody.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+            ramflux_crypto::custody::verify_publication(
+                &ramflux_protocol::custody::CustodyAuthority {
+                    publication: native.publication.clone(),
+                    custodian_publication: native.custodian_publication.clone(),
+                },
+                crate::custody::network_now()?,
+            )
+            .map_err(SdkError::from)
+        };
+        let _ = verify(&own)?;
+        let _ = verify(&peer)?;
+        // Nothing is stored until compare-and-record commits. The expectation is computed
+        // from these held manifests.
+        self.hold_compared_manifests([own, peer])?;
+        super::contact_verification_cas::compared_safety_json(self, root)
     }
 }

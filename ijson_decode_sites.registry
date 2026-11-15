@@ -448,6 +448,7 @@ crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_bus_request | 7 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/contact.rs | dispatch_contact_verify | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact.rs | provisional_safety | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/contact_resolution.rs | parse_selector | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -539,7 +540,7 @@ crates/ramflux-sdk/src/bus/dispatch/object.rs | rehydrate_one_object_put_spool |
 crates/ramflux-sdk/src/bus/dispatch/object_status.rs | upload_status | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | dispatch_surface_inner | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | request_resync | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | directory | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
+crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | directory_live | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | own_response | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | send_frame | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/dispatch/surface_transport.rs | send_direct | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -928,7 +929,6 @@ crates/ramflux-storage/src/account_db/runtime/control.rs | load_actor_state | 1 
 crates/ramflux-storage/src/account_db/runtime/operations.rs | lookup_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/operations.rs | reserve_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/outbox.rs | pending_outbox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/safety_verification.rs | state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/shared_group_delivery.rs | next_shared_group_intent | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/shared_group_delivery.rs | prune_shared_group_boundaries | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/surface.rs | surface_export_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

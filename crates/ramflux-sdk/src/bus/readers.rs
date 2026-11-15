@@ -84,7 +84,6 @@ impl AccountReaders {
         device: Option<RootQualifiedDeviceRef>,
     ) -> Result<Self, SdkError> {
         super::sync_status::initialize_coordinates(db)?;
-        crate::client::contact_verification::migrate_legacy_contact_verifications(db)?;
         let identity = Arc::new(RwLock::new(device));
         let view = Arc::new(RwLock::new(Arc::new(local::AccountView::default())));
         let search = ramflux_storage::local_search::SearchActivation::configured()

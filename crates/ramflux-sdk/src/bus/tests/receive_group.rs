@@ -68,32 +68,53 @@ async fn case() -> Case {
 }
 
 pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
+    let source_delivery = fixture.source.client.owned_device_identity()?.storage_key().to_owned();
+    // Apply rebuilds the local actor from the session delivery id, which born
+    // authority requires to be the qualified storage key. The scripted Open
+    // already completed with the short name; only this mailbox changes.
+    if let Some(engine) = fixture.source.engine.as_mut() {
+        engine.config.target_delivery_id.clone_from(&source_delivery);
+    }
+    fixture.source.target_delivery_id.clone_from(&source_delivery);
+    fixture.source.gateway_config.target_delivery_id.clone_from(&source_delivery);
     let member = fixture
         .source
         .client
-        .owned_group_actor("sender")
+        .owned_group_actor(&source_delivery)
         .map_err(|error| format!("member actor: {error}"))?
         .identity;
+    let vault = fixture.peer.client.born_v3_vault.clone().ok_or("group vault")?;
+    let primary = fixture
+        .peer
+        .client
+        .born_v3_account
+        .as_ref()
+        .ok_or("group account")?
+        .group_primary(vault.as_ref())
+        .map_err(|error| format!("group primary: {error}"))?;
+    let peer_delivery = fixture.peer.client.owned_device_identity()?.storage_key().to_owned();
     fixture
         .peer
         .client
-        .shared_group_create(
+        .shared_group_create_with_primary(
             "receive-group",
             "receive-group-thread",
             Some("Received group".into()),
-            "peer",
+            &peer_delivery,
+            Some(&primary),
         )
         .map_err(|error| format!("group create: {error}"))?;
     let state = fixture
         .peer
         .client
-        .shared_group_change(
+        .shared_group_change_with_primary(
             "receive-group",
-            "peer",
+            &peer_delivery,
             ramflux_protocol::GroupStateChange::Add {
                 member,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
+            Some(&primary),
         )
         .map_err(|error| format!("group change: {error}"))?;
     let body = fixture
@@ -104,7 +125,7 @@ pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: source_delivery.clone(),
         federation: None,
         own: false,
     };
@@ -122,7 +143,7 @@ pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "sender".into(),
+        target_delivery_id: source_delivery,
         envelope: delivery.envelope,
     })
 }

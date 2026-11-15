@@ -445,7 +445,7 @@ impl RamfluxClient {
         } else if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref()
         {
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
-                self.receive_generated_own_contact(contact)
+                self.receive_generated_own_contact_with_origin(contact, identity, bytes)
             })?;
         } else if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
             control.payload.as_ref()

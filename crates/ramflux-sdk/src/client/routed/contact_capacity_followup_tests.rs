@@ -6,10 +6,7 @@ use super::*;
 #[tokio::test]
 async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_lifting_blocks()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let client = account(&state, "bob")?;
     let db = client.account_db()?;
@@ -63,10 +60,7 @@ async fn floor_capacity_is_typed_visible_and_explicitly_clearable_without_liftin
 #[tokio::test]
 async fn committed_redelivery_after_request_retirement_cannot_resurrect_identity_cache()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     let db = account(&state, "bob")?.account_db()?;
@@ -89,10 +83,7 @@ async fn committed_redelivery_after_request_retirement_cannot_resurrect_identity
 #[tokio::test]
 async fn overflow_roots_are_deduplicated_within_a_drain_without_changing_saved_format()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let mut entries = Vec::new();
     for seq in 1..=3 {
         let mut entry = r2::outbound(&mut state, &directory).await?;

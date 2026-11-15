@@ -113,7 +113,8 @@ pub(super) fn history_entry(
         sibling.device_branch.as_ref().ok_or("sibling branch")?,
         &crate::own_device_sync::own_device_sync_signing_body(&sync),
     )?;
-    let config = fixture.source.gateway_config.clone().with_account_identity(sibling)?;
+    let config =
+        super::fixture::bind_scripted_device(fixture.source.gateway_config.clone(), sibling)?;
     let mut message = GatewayDirectMessage {
         conversation_id: "history-control".into(),
         message_id: "incoming-history".into(),

@@ -245,6 +245,328 @@ fn account_with_setup(
     );
     Ok(LocalBusAccountState::new(client, engine, commitment))
 }
+
+fn scripted_engine(
+    config: GatewaySessionConfig,
+    blocked: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+) -> GatewaySessionEngine {
+    GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(Gateway {
+            last: None,
+            pending_cursor: None,
+            blocked: blocked.map(|entered| GatewayBlock {
+                entered,
+                submit_envelope: None,
+                relay_token: false,
+            }),
+            cancelled,
+            submits: Arc::new(AtomicUsize::new(0)),
+            cancelled_notice: None,
+        }),
+    )
+}
+
+pub(crate) struct BornAccount {
+    pub state: LocalBusAccountState,
+    pub vault: Arc<crate::custody::tests::TestVault>,
+    pub manifest: crate::prekey::SdkDeviceManifestResponse,
+}
+
+pub(crate) async fn born_account(
+    root: &Path,
+    account_id: &str,
+    principal_id: &str,
+    device_id: &str,
+    passphrase: &[u8],
+    target_delivery_id: &str,
+) -> Result<BornAccount, SdkError> {
+    std::fs::create_dir_all(root)?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let now = crate::custody::network_now()?;
+    let mut input = crate::custody::tests::input(account_id);
+    input.principal_id = principal_id.into();
+    input.device_id = device_id.into();
+    let mut ceremony = crate::custody::CreationCeremony::begin(root, input, now)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let created = ceremony.confirm(
+        &crate::custody::tests::words(&phrase, positions)
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+        vault.as_ref(),
+        now,
+    )?;
+    let anchor = created.record().body.account_anchor.clone();
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.seal_new_account_data(account_id, &anchor, passphrase)?;
+    client.unlock_account(account_id, passphrase)?;
+    client.initialize_born_v3_branch(device_id, vault.clone()).await?;
+    let manifest = native_manifest(&client, device_id)?;
+    client.persist_fetched_identity_directory(&manifest)?;
+    mark_account_live(&mut client, root, account_id)?;
+    let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    let identity = client.owned_device_identity()?;
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        gateway_addr: "127.0.0.1:1"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        server_name: "test-gateway".to_owned(),
+        ca_cert: root.join("ca.pem"),
+        principal_id: principal_id.to_owned(),
+        device_id: device_id.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        prekey_http_url: None,
+    };
+    let mut config = GatewaySessionConfig::quic(endpoint);
+    config.device_epoch = branch.device_epoch;
+    config.device_branch = Some(Arc::new(branch));
+    config.source_identity = Some(identity);
+    let engine = scripted_engine(config, None, Arc::new(AtomicBool::new(false)));
+    let state = LocalBusAccountState::new(client, engine, manifest.principal_commitment.clone());
+    Ok(BornAccount { state, vault, manifest })
+}
+
+fn mark_account_live(client: &mut RamfluxClient, root: &Path, id: &str) -> Result<(), SdkError> {
+    let now = crate::custody::network_now()?;
+    crate::custody::tests::mark_live(root, id, now)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.born_v3_account = Some(Box::new(crate::custody::load_account(root, id, now)?));
+    Ok(())
+}
+
+fn native_manifest(
+    client: &RamfluxClient,
+    device_id: &str,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let identity = client.owned_device_identity()?;
+    let bundle = client.load_x3dh_private_state(&identity)?.bundle;
+    let epoch = account
+        .record()
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .map(|device| device.device_epoch)
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    let anchor = account.record().body.account_anchor.clone();
+    crate::prekey::SdkDeviceManifestResponse::from_native(
+        ramflux_protocol::custody::CustodyManifest {
+            publication: account.publication(),
+            custodian_publication: account.custodian_publication(
+                client.account_index()?.root(),
+                crate::custody::network_now()?,
+            )?,
+            devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
+                device_ref: ramflux_protocol::custody::DeviceRef {
+                    account_anchor: anchor,
+                    device_id: device_id.into(),
+                    device_epoch: epoch,
+                },
+                target_delivery_id: identity.storage_key().into(),
+                prekey_bundle: serde_json::to_value(bundle)?,
+                message_layer: None,
+            }],
+        },
+    )
+}
+
+pub(crate) async fn enroll_born_sibling(
+    primary: &mut BornAccount,
+    root: &Path,
+    account_id: &str,
+    device_id: &str,
+    target_delivery_id: &str,
+) -> Result<BornAccount, SdkError> {
+    std::fs::create_dir_all(root)?;
+    let mut native =
+        primary.manifest.custody.as_ref().ok_or(SdkError::CustodySetupInvalid)?.as_ref().clone();
+    let now = crate::custody::network_now()?;
+    let seeds = enroll_sibling_branch(primary, &mut native, device_id, now)?;
+    let account_root = primary.state.client.account_index()?.root().to_path_buf();
+    let primary_id = primary.state.client.account_db()?.local_account_id.clone();
+    crate::custody::accept_publication(
+        &account_root,
+        &primary_id,
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication.clone(),
+            custodian_publication: None,
+        },
+        now,
+    )?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let passphrase = b"native sibling data passphrase";
+    crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
+        root,
+        id: account_id,
+        device: device_id,
+        record: native.publication.record.clone(),
+        branch: &seeds,
+        vault: vault.as_ref(),
+        passphrase,
+        now,
+    })?;
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.unlock_account(account_id, passphrase)?;
+    client.initialize_born_v3_branch(device_id, vault.clone()).await?;
+    let identity = client.owned_device_identity()?;
+    let bundle = client.load_x3dh_private_state(&identity)?.bundle;
+    let epoch = native
+        .publication
+        .record
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .map(|device| device.device_epoch)
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    native.devices.push(ramflux_protocol::custody::CustodyManifestDevice {
+        device_ref: ramflux_protocol::custody::DeviceRef {
+            account_anchor: native.publication.record.body.account_anchor.clone(),
+            device_id: device_id.into(),
+            device_epoch: epoch,
+        },
+        target_delivery_id: identity.storage_key().into(),
+        prekey_bundle: serde_json::to_value(bundle)?,
+        message_layer: None,
+    });
+    let full = crate::prekey::SdkDeviceManifestResponse::from_native(native)?;
+    primary.state.client.persist_fetched_identity_directory(&full)?;
+    client.persist_fetched_identity_directory(&full)?;
+    mark_account_live(&mut client, root, account_id)?;
+    primary.manifest = full.clone();
+    let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    let config = sibling_scripted_config(
+        root,
+        device_id,
+        target_delivery_id,
+        &full.principal_id,
+        branch,
+        identity,
+    )?;
+    let engine = scripted_engine(config, None, Arc::new(AtomicBool::new(false)));
+    let state = LocalBusAccountState::new(client, engine, full.principal_commitment.clone());
+    Ok(BornAccount { state, vault, manifest: full })
+}
+
+fn enroll_sibling_branch(
+    primary: &BornAccount,
+    native: &mut ramflux_protocol::custody::CustodyManifest,
+    device_id: &str,
+    now: u64,
+) -> Result<zeroize::Zeroizing<[u8; 64]>, SdkError> {
+    let current =
+        ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
+    let primary_key = primary.vault.primary_for_public_key(
+        &native.publication.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let mut seeds = zeroize::Zeroizing::new([0_u8; 64]);
+    getrandom::fill(&mut *seeds).map_err(|_| SdkError::CustodyRandomUnavailable)?;
+    let signing: [u8; 32] = seeds[..32].try_into().map_err(|_| SdkError::CustodySetupInvalid)?;
+    let agreement_seed: [u8; 32] =
+        seeds[32..].try_into().map_err(|_| SdkError::CustodySetupInvalid)?;
+    let branch =
+        ramflux_crypto::create_device_branch(&primary.manifest.principal_id, device_id, 1, signing);
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed(agreement_seed);
+    let mut certificate = native
+        .publication
+        .record
+        .body
+        .devices
+        .first()
+        .and_then(|device| device.branch_certificate.as_ref())
+        .ok_or(SdkError::CustodySetupInvalid)?
+        .body
+        .clone();
+    certificate.device_id = device_id.into();
+    certificate.branch_signing_public_key =
+        ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().as_bytes());
+    certificate.agreement_identity_public_key =
+        ramflux_protocol::encode_base64url(&agreement.public);
+    certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+    native.publication.record =
+        primary_key.enroll_device(&current, primary_key.certify_branch(certificate)?, now)?;
+    Ok(seeds)
+}
+
+fn sibling_scripted_config(
+    root: &std::path::Path,
+    device_id: &str,
+    target_delivery_id: &str,
+    principal_id: &str,
+    branch: ramflux_crypto::DeviceBranch,
+    identity: ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<GatewaySessionConfig, SdkError> {
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        gateway_addr: "127.0.0.1:1"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        server_name: "test-gateway".to_owned(),
+        ca_cert: root.join("ca.pem"),
+        principal_id: principal_id.to_owned(),
+        device_id: device_id.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        prekey_http_url: None,
+    };
+    let mut config = GatewaySessionConfig::quic(endpoint);
+    config.device_epoch = branch.device_epoch;
+    config.device_branch = Some(Arc::new(branch));
+    config.source_identity = Some(identity);
+    Ok(config)
+}
+
+pub(crate) fn born_directory_initializer(
+    id: String,
+    passphrase: &'static [u8],
+    branch: ramflux_crypto::DeviceBranch,
+    commitment: String,
+    blocked: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+) -> AccountInitializer {
+    let root_device = branch.device_id.clone();
+    Box::new(move |index| {
+        let mut client = RamfluxClient::new();
+        client.open_account_index(index.root())?;
+        client.unlock_account(&id, passphrase)?;
+        client.device_branch = Some(branch.clone());
+        client
+            .active_account_db
+            .as_mut()
+            .ok_or(SdkError::AccountDbNotUnlocked)?
+            .set_device_signer(branch.clone());
+        let identity = client.owned_device_identity()?;
+        let endpoint = GatewayQuicEndpointConfig {
+            bind_addr: "127.0.0.1:0"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+            gateway_addr: "127.0.0.1:1"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+            server_name: "test-gateway".to_owned(),
+            ca_cert: index.root().join("ca.pem"),
+            principal_id: id,
+            device_id: root_device,
+            target_delivery_id: "target".to_owned(),
+            prekey_http_url: None,
+        };
+        let mut config = GatewaySessionConfig::quic(endpoint);
+        config.device_epoch = branch.device_epoch;
+        config.device_branch = Some(Arc::new(branch));
+        config.source_identity = Some(identity);
+        let engine = scripted_engine(config, blocked, cancelled);
+        Ok(LocalBusAccountState::new(client, engine, commitment))
+    })
+}
+
 pub(super) fn actor_account(
     root: &Path,
     id: &str,
@@ -636,12 +958,10 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 .request_frame(request("read", "alice", "conversation.list", serde_json::json!({})))
                 .await?;
             let mut found = false;
-            let mut migration = false;
             let mut friend = false;
             let mut sequence = 0;
-            // Startup replays the migration marker as well as the friend and domain changes.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-            for _ in 0..3 {
+            for _ in 0..2 {
                 let event = tokio::time::timeout_at(
                     deadline.min(tokio::time::Instant::now() + Duration::from_secs(2)),
                     client.next_event(),
@@ -654,13 +974,6 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 assert!(next > sequence);
                 sequence = next;
                 match event.body["table_name"].as_str() {
-                    Some("runtime_actor_state") => {
-                        assert_eq!(
-                            event.body["keys"]["state_kind"],
-                            crate::client::contact_verification::MIGRATION_MARKER
-                        );
-                        migration = true;
-                    }
                     Some("friend_link_projection") => {
                         assert_eq!(event.body["keys"]["link_id"], "friend");
                         friend = true;
@@ -669,7 +982,7 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                     _ => return Err(failure("unexpected startup outbox change")),
                 }
             }
-            assert!(found && migration && friend);
+            assert!(found && friend);
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;
@@ -942,59 +1255,67 @@ async fn daemon_stop_works_through_the_public_embedded_entrypoint() -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), SdkError> {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("directories-progress");
-            let (entered, blocked) = oneshot::channel();
-            let initialize =
-                actor_account(&root, "alice", Some(entered), Arc::new(AtomicBool::new(false)));
-            let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
-            let (one, server) = client(Rc::clone(&supervisor), 1).await?;
-            let slow_client = one.clone();
-            let slow = tokio::task::spawn_local(async move {
-                slow_client
-                    .request_frame(request(
-                        "slow",
-                        "alice",
-                        "message.receive",
-                        serde_json::json!({"limit":1}),
-                    ))
-                    .await
-            });
-            tokio::time::timeout(Duration::from_secs(2), blocked)
+    Box::pin(LocalSet::new().run_until(async {
+        let root = root("directories-progress");
+        let (entered, blocked) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let born =
+            born_account(&root, "alice", "alice", "device-alice", b"actor-test-secret", "target")
+                .await?;
+        let branch =
+            born.state.client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let commitment = born.manifest.principal_commitment.clone();
+        drop(born);
+        let initialize = born_directory_initializer(
+            "alice".into(),
+            b"actor-test-secret",
+            branch,
+            commitment,
+            Some(entered),
+            cancelled,
+        );
+        let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
+        let (one, server) = client(Rc::clone(&supervisor), 1).await?;
+        let slow_client = one.clone();
+        let slow = tokio::task::spawn_local(async move {
+            slow_client
+                .request_frame(request(
+                    "slow",
+                    "alice",
+                    "message.receive",
+                    serde_json::json!({"limit":1}),
+                ))
                 .await
-                .map_err(|_| failure("gateway not entered"))?
-                .map_err(|_| failure("gateway dropped"))?;
-            for method in [
-                "conversation.directory",
-                "identity.directory",
-                "object.directory",
-                "group.list",
-                "mcp.server.list",
-                "mcp.approval.list",
-            ] {
-                let result = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    one.request_frame(request(
-                        method,
-                        "alice",
-                        method,
-                        serde_json::json!({"limit":5}),
-                    )),
-                )
-                .await
-                .map_err(|_| failure("directory blocked behind gateway"))??;
-                assert!(result.get("next_cursor").is_some());
-            }
-            slow.abort();
-            let _ = slow.await;
-            drop(one);
-            let _ = server.await;
-            supervisor.shutdown().await?;
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), blocked)
+            .await
+            .map_err(|_| failure("gateway not entered"))?
+            .map_err(|_| failure("gateway dropped"))?;
+        for method in [
+            "conversation.directory",
+            "identity.directory",
+            "object.directory",
+            "group.list",
+            "mcp.server.list",
+            "mcp.approval.list",
+        ] {
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                one.request_frame(request(method, "alice", method, serde_json::json!({"limit":5}))),
+            )
+            .await
+            .map_err(|_| failure("directory blocked behind gateway"))??;
+            assert!(result.get("next_cursor").is_some());
+        }
+        slow.abort();
+        let _ = slow.await;
+        drop(one);
+        let _ = server.await;
+        supervisor.shutdown().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }))
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]

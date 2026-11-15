@@ -84,6 +84,32 @@ impl RamfluxClient {
         }
         self.prepare_pair_control_draft(config, &remote, PairControlKind::Reset).map(Some)
     }
+    /// True when a new authorization is waiting on the process-local head clock.
+    /// Any other authority error still fails the caller.
+    fn reset_blocked_on_fresh_head(
+        &self,
+        local: &RootQualifiedDeviceRef,
+        remote: &RootQualifiedDeviceRef,
+    ) -> Result<bool, SdkError> {
+        if Self::authorization_awaits_head(
+            self.require_cached_root_authority(HeadUse::NewAuthorization, remote),
+        )? {
+            return Ok(true);
+        }
+        if self.born_v3_account.is_some() {
+            return Self::authorization_awaits_head(
+                self.require_current_device_authorization(local),
+            );
+        }
+        Ok(false)
+    }
+    fn authorization_awaits_head(result: Result<(), SdkError>) -> Result<bool, SdkError> {
+        match result {
+            Ok(()) => Ok(false),
+            Err(SdkError::FreshHeadRequired { .. }) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
     pub(crate) fn prepare_due_pair_reset(
         &self,
         config: &GatewaySessionConfig,
@@ -109,6 +135,12 @@ impl RamfluxClient {
                 continue;
             }
             if item.next_at <= at {
+                // Begin only once the heads can authorize the send. A cold clock
+                // must not consume the attempt budget while the directory fetch
+                // is still in flight.
+                if self.reset_blocked_on_fresh_head(&local, &remote)? {
+                    return Ok(None);
+                }
                 return if self.begin_pair_recovery(&local, &remote, at)? {
                     self.prepare_pair_control_draft(config, &remote, PairControlKind::Reset)
                         .map(Some)

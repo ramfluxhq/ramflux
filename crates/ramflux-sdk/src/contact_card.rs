@@ -64,6 +64,12 @@ pub enum ContactReason {
     /// An accepted contact already exists.
     #[error("already_contact")]
     AlreadyContact,
+    /// Verification was requested without a complete expected-safety object.
+    #[error("expected_safety_required")]
+    ExpectedSafetyRequired,
+    /// A presented safety field does not equal the authenticated material at commit.
+    #[error("safety_material_mismatch")]
+    SafetyMaterialMismatch,
 }
 
 /// A home-node locator authenticated by the card's root signature.

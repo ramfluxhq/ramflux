@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Admission flood, deferred retry, retained consent and isolated cleanup regressions.
+use super::super::{born_bus, born_member};
 use super::*;
 fn reset_maintenance(client: &RamfluxClient) -> Result<(), SdkError> {
     client.account_db()?.remove_actor_state("contact-request/maintenance-next")?;
@@ -29,10 +30,7 @@ async fn sync(state: &mut LocalBusDaemonState) -> Result<(), SdkError> {
 #[tokio::test]
 async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next_root_is_admitted()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (mut directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let valid = r2::outbound(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     for _ in 0..32 {
@@ -58,16 +56,7 @@ async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next
         before,
         "known exhausted sender must not fetch authority"
     );
-    let mut c = Fixture::new("carol", 51)?;
-    let mut d = Fixture::new("bob", 41)?;
-    directory
-        .records
-        .lock()
-        .map_err(|_| invalid("records"))?
-        .push(super::super::super::r9::manifest(&c)?);
-    let mut other = super::super::state(&mut c, &mut d, &directory)?;
-    let carol = other.accounts.remove("carol").ok_or_else(|| invalid("carol"))?;
-    state.accounts.insert("carol".into(), carol);
+    state.accounts.insert("carol".into(), born_member(&mut directory, "carol").await?);
     contact(&mut state, "carol", "contact.add", json!({"principal_id":"bob"})).await?;
     let mut genuine =
         frames(&directory)?.into_iter().next().ok_or_else(|| invalid("genuine request"))?;
@@ -80,10 +69,7 @@ async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next
 #[tokio::test]
 async fn contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_retry()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 71)?;
-    let mut b = Fixture::new("bob", 81)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let receiver = account(&state, "bob")?;
     for _ in 0..120 {
@@ -144,10 +130,7 @@ async fn contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_re
 #[tokio::test]
 async fn contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 91)?;
-    let mut b = Fixture::new("bob", 101)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let receiver = account(&state, "bob")?;
     for _ in 0..120 {
@@ -171,17 +154,15 @@ async fn contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor()
 #[tokio::test]
 async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     let target = r2::root(&state, "bob")?;
     let manifest = directory.records.lock().map_err(|_| invalid("records"))?[0].clone();
-    account(&state, "bob")?.persist_identity_directory(&manifest)?;
+    remember_fresh_head(account(&state, "bob")?, &manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
-    let control: contact_requests::Control = serde_json::from_slice(&opened.body)?;
+    let control =
+        account(&state, "bob")?.verify_contact_control(&entry, &opened.routing, &opened.body)?;
     deliver(&mut state, "bob", &entry).await?;
     let receiver = account(&state, "bob")?;
     receiver.account_db()?.fence_contact_request(
@@ -196,24 +177,16 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
     );
     assert!(receiver.contact_request_admission(&entry).is_err());
     receiver.account_db()?.fence_contact_request(&source, "declined", now_unix_timestamp() - 1)?;
-    let mut old = control.clone();
-    old.body.issued_at -= 172_800;
-    old.body.expires_at -= 172_800;
-    old.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::canonical_json_bytes(
-            &json!({"domain":"ramflux.contact_request.v1","body":old.body}),
-        )?,
-        account(&state, "alice")?
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .to_bytes(),
-    );
-    receiver.verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&old)?)?;
+    let mut old: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2> =
+        serde_json::from_slice(&opened.body)?;
+    old.body.issued_at = old.body.issued_at.saturating_sub(172_800);
+    old.body.expires_at = old.body.expires_at.saturating_sub(172_800);
+    old.signature = consent_signature(&state, "alice", &old.body)?;
     assert!(
-        receiver.apply_contact_control(&old).is_err(),
-        "old signed request replayed after cooldown"
+        receiver
+            .verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&old)?)
+            .is_err(),
+        "a backdated born consent is not current authority"
     );
     receiver.account_db()?.fence_contact_request(&source, "blocked", 0)?;
     assert!(receiver.apply_contact_control(&control).is_err(), "pruned block was bypassed");
@@ -236,10 +209,7 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
 #[tokio::test]
 async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_rows()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     let client = account(&state, "bob")?;
@@ -252,6 +222,9 @@ async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_r
     // Missing current manifest causes retirement's qualified device lookup to fail.
     db.remove_actor_state(&format!("identity/manifest-root/{source}"))?;
     db.remove_actor_state("identity/manifest/alice")?;
+    // A custody publication with no payload is the born form of a missing manifest:
+    // retirement must fail this row and still reach the healthy one.
+    client.retire_custody_directory_payload(&source)?;
     let mut healthy = bad.clone();
     healthy.direction = "outbound".into();
     healthy.contact_identity_commitment = "healthy-retirement".into();
@@ -284,10 +257,7 @@ async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_r
 
 #[tokio::test]
 async fn contact02_r3_expiry_is_enforced_between_janitor_intervals() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     let target = r2::root(&state, "bob")?;

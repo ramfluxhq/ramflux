@@ -47,12 +47,16 @@ async fn deliver(
     result
 }
 async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkError> {
+    let sender = account(state, "alice")?.owned_device_identity()?;
+    let recipient = account(state, "bob")?.owned_device_identity()?;
+    // Born contacts are selected by root. A bare device name is ambiguous.
     let request = request(
         "alice",
         "message.submit",
         json!({"conversation_id":"request-thread",
-        "message_id":text,"envelope_id":text,"source_principal_id":"alice","sender_id":"alice",
-        "recipient_device_id":"bob","target_delivery_id":"bob","encrypted_body_base64":"",
+        "message_id":text,"envelope_id":text,"source_principal_id":"alice","sender_id":sender.device_id(),
+        "recipient_device_id":recipient.device_id(),"recipient_principal_commitment":recipient.root_commitment(),
+        "target_delivery_id":recipient.storage_key(),"encrypted_body_base64":"",
         "plaintext_body_base64":ramflux_protocol::encode_base64url(text),"created_at":now_unix_timestamp().saturating_sub(120),"ttl":3600}),
     );
     let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
@@ -70,6 +74,75 @@ pub(super) fn account<'a>(
     who: &str,
 ) -> Result<&'a RamfluxClient, SdkError> {
     Ok(&state.accounts.get(who).ok_or_else(|| invalid("account"))?.client)
+}
+
+pub(super) fn consent_signature(
+    state: &LocalBusDaemonState,
+    who: &str,
+    body: &ramflux_protocol::custody::ContactConsentV2,
+) -> Result<String, SdkError> {
+    let account_state = state.accounts.get(who).ok_or_else(|| invalid("account"))?;
+    let born =
+        account_state.client.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let vault = account_state.gateway_config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
+    let primary = vault.vault.load_primary(born.primary_vault_ref())?;
+    Ok(ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::custody::signing_bytes(
+            ramflux_protocol::domain::CONTACT_REQUEST_V2,
+            body,
+        )?,
+        *primary.vault_seed(),
+    ))
+}
+
+pub(super) fn born_card(
+    client: &RamfluxClient,
+    vault: &dyn crate::custody::PrimaryVault,
+) -> Result<String, SdkError> {
+    let now = crate::custody::network_now()?;
+    let born = client.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let record = born.record();
+    let signed = born.sign_contact_card(
+        vault,
+        ramflux_protocol::custody::ContactCardV3 {
+            version: 3,
+            principal_id: record.body.principal_id.clone(),
+            account_anchor: record.body.account_anchor.clone(),
+            master_public_key: record.body.master_certificate.body.master_public_key.clone(),
+            master_certificate: record.body.master_certificate.clone(),
+            authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            devices: record.body.devices.clone(),
+            node_url: "https://node.example".into(),
+            node_key_fingerprint: crate::contact_node_fingerprint(
+                &ramflux_crypto::fixture_public_key_base64url(),
+            )?,
+            display_name: record.body.profile.display_name.clone(),
+            issued_at: now,
+            expires_at: now + 3600,
+        },
+        now,
+    )?;
+    Ok(crate::contact_card_native::encode(
+        &signed,
+        i64::try_from(now).map_err(|_| invalid("clock"))?,
+    )?
+    .0)
+}
+
+pub(super) fn remember_fresh_head(
+    client: &RamfluxClient,
+    manifest: &crate::prekey::SdkDeviceManifestResponse,
+) -> Result<(), SdkError> {
+    client.persist_fetched_identity_directory_at(manifest, std::time::Instant::now())
+}
+
+pub(super) fn card_from_account(
+    state: &LocalBusDaemonState,
+    who: &str,
+) -> Result<String, SdkError> {
+    let account_state = state.accounts.get(who).ok_or_else(|| invalid("account"))?;
+    let vault = account_state.gateway_config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
+    born_card(&account_state.client, vault.vault.as_ref())
 }
 async fn pending(
     state: &mut LocalBusDaemonState,
@@ -100,10 +173,7 @@ async fn pending(
 #[tokio::test]
 async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_receiver_boundary()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 51)?;
-    let mut bob = Fixture::new("bob", 61)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     contact(
         &mut state,
         "bob",
@@ -138,10 +208,7 @@ async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_recei
 #[tokio::test]
 async fn contact02_manual_request_holds_content_without_a_thread_then_accept_releases_it_once()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 71)?;
-    let mut bob = Fixture::new("bob", 81)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let original = pending(&mut state, &directory).await?;
     deliver(&mut state, "bob", &original).await?;
     message(&mut state, "held-before-consent").await?;
@@ -191,11 +258,8 @@ async fn contact02_manual_request_holds_content_without_a_thread_then_accept_rel
 #[tokio::test]
 async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_sender_frames()
 -> Result<(), SdkError> {
-    for (action, seeds) in [("contact.decline", (91, 101)), ("contact.block", (111, 121))] {
-        let mut alice = Fixture::new("alice", seeds.0)?;
-        let mut bob = Fixture::new("bob", seeds.1)?;
-        let directory = Directory::new(&alice, &bob).await?;
-        let mut state = state(&mut alice, &mut bob, &directory)?;
+    for action in ["contact.decline", "contact.block"] {
+        let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
         let original = pending(&mut state, &directory).await?;
         message(&mut state, "unaccepted-first-message").await?;
         for entry in frames(&directory)? {
@@ -228,10 +292,7 @@ async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_send
 #[tokio::test]
 async fn contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust_cache()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 131)?;
-    let mut bob = Fixture::new("bob", 141)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     contact(&mut state, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
     message(&mut state, "stranger-without-the-request").await?;
     let mut entry = frames(&directory)?
@@ -272,10 +333,7 @@ async fn contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust
 #[tokio::test]
 async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_send_ratchet()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 151)?;
-    let mut bob = Fixture::new("bob", 161)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     {
         let source = state.accounts.get_mut("alice").ok_or_else(|| invalid("source"))?;
         let mut engine = source.session_client().await?;
@@ -324,10 +382,7 @@ async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_
 async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
 -> Result<(), SdkError> {
     for action in ["contact.decline", "contact.block"] {
-        let mut alice = Fixture::new("alice", 171)?;
-        let mut bob = Fixture::new("bob", 181)?;
-        let directory = Directory::new(&alice, &bob).await?;
-        let mut state = state(&mut alice, &mut bob, &directory)?;
+        let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
         let original = pending(&mut state, &directory).await?;
         let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
         let old_id = list["requests"][0]["request_id"]
@@ -397,10 +452,7 @@ async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
 #[tokio::test]
 async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pending_messages()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 191)?;
-    let mut bob = Fixture::new("bob", 201)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     message(&mut state, "sibling-consent").await?;
     for entry in frames(&directory)? {
@@ -433,10 +485,7 @@ async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pend
 #[tokio::test]
 async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decision_codes()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 211)?;
-    let mut bob = Fixture::new("bob", 221)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let outgoing = contact(&mut state, "alice", "contact.requests.list", json!({})).await?;
     let row = &outgoing["requests"][0];
@@ -480,10 +529,7 @@ async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decis
 #[tokio::test]
 async fn contact02_note_character_limit_and_persistent_outbound_rate_refusal()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 31)?;
-    let mut bob = Fixture::new("bob", 41)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (_directory, mut state) = born_bus(&["alice", "bob"]).await?;
     for note in ["é".repeat(141), "unsafe\nnote".into()] {
         let error =
             contact(&mut state, "alice", "contact.add", json!({"principal_id":"bob","note":note}))
@@ -517,10 +563,7 @@ async fn contact02_note_character_limit_and_persistent_outbound_rate_refusal()
 #[tokio::test]
 async fn contact02_expired_request_can_recover_a_lost_acceptance_without_reopening_consent()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 231)?;
-    let mut bob = Fixture::new("bob", 241)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let incoming = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
     let id =
@@ -566,10 +609,7 @@ mod r4;
 #[tokio::test]
 async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_provenance()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 71)?;
-    let mut bob = Fixture::new("bob", 81)?;
-    let directory = Directory::new(&alice, &bob).await?;
-    let mut state = state(&mut alice, &mut bob, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     // The request reaches the cold receiver before it accepts by principal name.
     let entry = pending(&mut state, &directory).await?;
     let source = |state: &LocalBusDaemonState, who: &str, peer: &str| -> Result<Value, SdkError> {

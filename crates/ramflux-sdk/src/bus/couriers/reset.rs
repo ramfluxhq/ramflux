@@ -43,7 +43,14 @@ pub(crate) async fn pass(_: SessionContext, writer: Writer) -> Result<bool, SdkE
                 .prepare_due_pair_reset(&account.gateway_config, now_unix_timestamp())?;
             plan(account, draft)
         })
-        .await?;
+        .await;
+    // A cold head is not a courier failure. An error skips the wake for the
+    // whole network wait, so the directory refresh could not restart this pass.
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(SdkError::FreshHeadRequired { .. }) => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if let Some(prepared) = prepared {
         send(&writer, prepared).await?;
         Ok(true)

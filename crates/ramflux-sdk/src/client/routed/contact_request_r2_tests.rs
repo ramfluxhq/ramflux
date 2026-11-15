@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Adversarial contact admission, retention, selectors and consent races.
+use super::super::born_bus;
 use super::*;
 use crate::client::identity_authority::HeadUse;
 pub(super) fn root(state: &LocalBusDaemonState, who: &str) -> Result<String, SdkError> {
@@ -17,10 +18,7 @@ pub(super) async fn outbound(
 #[tokio::test]
 async fn contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let valid = outbound(&mut state, &directory).await?;
     let mut junk = valid.clone();
     junk.envelope.signed.signature = "invalid".into();
@@ -46,36 +44,24 @@ async fn contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget() ->
 #[tokio::test]
 async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_controls()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 51)?;
-    let mut b = Fixture::new("bob", 61)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = outbound(&mut state, &directory).await?;
     let manifest = directory.records.lock().map_err(|_| invalid("directory lock"))?[0].clone();
-    account(&state, "bob")?.persist_identity_directory(&manifest)?;
+    remember_fresh_head(account(&state, "bob")?, &manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
-    let original: contact_requests::Control = serde_json::from_slice(&opened.body)?;
+    let original: ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2> =
+        serde_json::from_slice(&opened.body)?;
     for short_lifetime in [true, false] {
-        let mut control = original.clone();
+        let mut consent = original.clone();
         if short_lifetime {
-            control.body.expires_at = control.body.issued_at + 60;
+            consent.body.expires_at = consent.body.issued_at.saturating_add(60);
         } else {
-            control.body.request_id = ramflux_protocol::encode_base64url([9; 32]);
+            consent.body.request_id = ramflux_protocol::encode_base64url([9; 32]);
         }
-        control.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-            &ramflux_protocol::canonical_json_bytes(
-                &json!({"domain":"ramflux.contact_request.v1","body":control.body}),
-            )?,
-            account(&state, "alice")?
-                .identity_root
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .to_bytes(),
-        );
+        consent.signature = consent_signature(&state, "alice", &consent.body)?;
         assert!(
             account(&state, "bob")?
-                .verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&control)?)
+                .verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&consent)?)
                 .is_err(),
             "a root signer cannot choose expiry or another selector as its request ID"
         );
@@ -85,10 +71,7 @@ async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_con
 #[tokio::test]
 async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_authority()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 71)?;
-    let mut b = Fixture::new("bob", 81)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let source = root(&state, "alice")?;
     account(&state, "bob")?.account_db()?.append_journal(
         "legacy-preview",
@@ -137,10 +120,7 @@ async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_aut
 #[tokio::test]
 async fn contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_receipt()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 91)?;
-    let mut b = Fixture::new("bob", 101)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let a_root = root(&state, "alice")?;
     let b_root = root(&state, "bob")?;
     let receiver = account(&state, "bob")?;
@@ -171,10 +151,7 @@ async fn contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_r
 }
 #[tokio::test]
 async fn contact02_r2_readding_a_pending_request_retries_delivery() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let first = outbound(&mut state, &directory).await?;
     let target = root(&state, "bob")?;
     let source = root(&state, "alice")?;
@@ -199,10 +176,7 @@ async fn contact02_r2_readding_a_pending_request_retries_delivery() -> Result<()
 }
 #[tokio::test]
 async fn contact02_r2_root_selector_cannot_match_an_attackers_request_id() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (_directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let victim = root(&state, "alice")?;
     let own = root(&state, "bob")?;
     let attacker = ramflux_protocol::encode_base64url([42; 32]);
@@ -228,10 +202,7 @@ async fn contact02_r2_root_selector_cannot_match_an_attackers_request_id() -> Re
 #[tokio::test]
 async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_content()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     message(&mut state, "expiry-race").await?;
     let entry = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("message"))?;
@@ -263,17 +234,14 @@ async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_con
 #[tokio::test]
 async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_without_blocking_dm()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 171)?;
-    let mut b = Fixture::new("bob", 181)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = outbound(&mut state, &directory).await?;
     let source = root(&state, "alice")?;
     let target = root(&state, "bob")?;
     {
         let receiver = account(&state, "bob")?;
         let manifest = directory.records.lock().map_err(|_| invalid("directory"))?[0].clone();
-        receiver.persist_identity_directory(&manifest)?;
+        remember_fresh_head(receiver, &manifest)?;
         receiver.establish_friend_link("known-root", &source, &target)?;
         for _ in 0..120 {
             assert!(receiver.account_db()?.charge_contact_request(
@@ -331,10 +299,7 @@ async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_
 #[tokio::test]
 async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_consent()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 191)?;
-    let mut b = Fixture::new("bob", 201)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let source = root(&state, "alice")?;
     let target = root(&state, "bob")?;
     let now = now_unix_timestamp();
@@ -406,14 +371,23 @@ async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_co
 #[tokio::test]
 async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 211)?;
-    let mut b = Fixture::new("bob", 221)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let receiver = account(&state, "bob")?;
     let source = root(&state, "alice")?;
-    let mut set = receiver.observed_device_set(&source)?.ok_or_else(|| invalid("authority"))?;
+    // Born acceptance does not store a signed device set. The floor is the live property.
+    let mut set = ramflux_protocol::SignedDeviceSetRecord {
+        schema: ramflux_protocol::domain::SIGNED_DEVICE_SET.into(),
+        version: 1,
+        domain: ramflux_protocol::domain::SIGNED_DEVICE_SET.into(),
+        principal_id: "alice".into(),
+        principal_commitment: source.clone(),
+        principal_kind: ramflux_protocol::PrincipalKind::Human,
+        device_set_epoch: 1,
+        devices: Vec::new(),
+        profile: None,
+        signature: String::new(),
+    };
     let now = now_unix_timestamp();
     let db = receiver.account_db()?;
     assert!(db.retain_contact_request_authority_floor(
@@ -463,10 +437,7 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
         A2uiConversationCommand as C, A2uiConversationEvent as E, CreateSurfaceCommand,
         StreamAppendCommand, SurfaceState, SurfaceType,
     };
-    let mut a = Fixture::new("alice", 231)?;
-    let mut b = Fixture::new("bob", 241)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let create = C::CreateSurface(CreateSurfaceCommand {
         surface_id: "held".into(),
@@ -517,10 +488,11 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
             author_device_id: "alice".into(),
         }),
     })?;
+    let recipient = account(&state, "bob")?.owned_device_identity()?;
     let request = request(
         "alice",
         "message.submit",
-        json!({"conversation_id":"request-thread","message_id":"held-surface","envelope_id":"held-surface","source_principal_id":"alice","sender_id":"alice","recipient_device_id":"bob","target_delivery_id":"bob","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(carrier.bytes()?),"created_at":now_unix_timestamp()-120,"ttl":3600}),
+        json!({"conversation_id":"request-thread","message_id":"held-surface","envelope_id":"held-surface","source_principal_id":"alice","sender_id":"alice","recipient_device_id":recipient.device_id(),"recipient_principal_commitment":recipient.root_commitment(),"target_delivery_id":recipient.storage_key(),"encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(carrier.bytes()?),"created_at":now_unix_timestamp()-120,"ttl":3600}),
     );
     let (outbound, _) = tokio::sync::mpsc::channel(8);
     let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
@@ -543,10 +515,7 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
 #[tokio::test]
 async fn contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_consent()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 23)?;
-    let mut b = Fixture::new("bob", 33)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     account(&state, "bob")?.account_db()?.establish_friend_link("legacy-name", "bob", "alice")?;
     pending(&mut state, &directory).await?;
     message(&mut state, "requires-root-consent").await?;

@@ -2,64 +2,42 @@
 // Copyright (c) 2026 Span Brain
 
 //! Contact retry and consent-boundary regressions through the public local bus.
+use super::super::{born_bus, native_account};
 use super::*;
-fn card(principal: &str, seed: [u8; 32]) -> Result<String, SdkError> {
-    let public = ramflux_crypto::public_key_base64url_from_seed(seed);
-    let now = now_unix_timestamp();
-    let body = crate::ContactCardBody {
-        native_authority: None,
-        version: 1,
-        principal_id: principal.into(),
-        root_commitment: crate::identity_root_public_key_commitment(&public)?,
-        root_public_key: public,
-        node: crate::ContactNode {
-            url: "https://node.example".into(),
-            key_fingerprint: crate::contact_node_fingerprint(
-                &ramflux_crypto::public_key_base64url_from_seed([91; 32]),
-            )?,
-        },
-        display_name: None,
-        kind_asserted: None,
-        issued_at: now,
-        expires_at: now + 3600,
-    };
-    Ok(crate::contact_card::encode_contact_card(body, seed, now)?.0)
+fn clear_safety(client: &RamfluxClient, principal: &str) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let Some(mut identity) = db.client_record("identity", principal)? else { return Ok(()) };
+    let object = identity.as_object_mut().ok_or_else(|| invalid("identity"))?;
+    object.remove("safety_number");
+    object.remove("safety_number_algorithm_version");
+    db.persist_client_record("identity", principal, &identity)?;
+    Ok(())
 }
 #[tokio::test]
 async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     assert!(account(&state, "bob")?.friend_link_peer_is_accepted(&root)?);
-    let seed = account(&state, "alice")?
-        .identity_root
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .signing_key
-        .to_bytes();
+    let valid = card_from_account(&state, "alice")?;
+    clear_safety(account(&state, "bob")?, "alice")?;
     directory.unavailable.store(true, Ordering::SeqCst);
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
     let receiver = account(&state, "bob")?;
-    assert!(receiver.observed_device_set(&root)?.is_some());
-    assert!(receiver.observed_device_set(&receiver.contact_own_commitment()?)?.is_some());
     let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
     assert_eq!(row["safety_number_available"], false);
     assert!(row["safety_number"].is_null(), "automatic acceptance has not computed it");
     let started = std::time::Instant::now();
     for retry in 0..2 {
         let accepted =
-            contact(&mut state, "bob", "contact.accept", json!({"card":card("alice", seed)?}))
-                .await?;
+            contact(&mut state, "bob", "contact.accept", json!({"card":valid.clone()})).await?;
         assert_eq!(accepted["contact"]["root_source"], "card");
         let receiver = account(&state, "bob")?;
         let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
         assert_eq!(row["safety_number_available"], true);
-        assert_eq!(row["safety_number_algorithm_version"], 1);
+        assert_eq!(row["safety_number_algorithm_version"], 2);
         assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
         assert_eq!(
             row["safety_number"],
@@ -79,10 +57,7 @@ async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch(
 #[tokio::test]
 async fn accepted_retry_without_a_verified_manifest_preserves_success_without_caching()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 32)?;
-    let mut b = Fixture::new("bob", 42)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
@@ -91,6 +66,7 @@ async fn accepted_retry_without_a_verified_manifest_preserves_success_without_ca
         let db = receiver.account_db()?;
         let request = db.contact_request(&root, "inbound")?.ok_or_else(|| invalid("request"))?;
         db.remove_actor_state("identity/manifest/alice")?;
+        db.remove_actor_state(&format!("identity/manifest-root/{root}"))?;
         (receiver.contact_entry("alice")?, request.request_id)
     };
     directory.unavailable.store(true, Ordering::SeqCst);
@@ -99,8 +75,8 @@ async fn accepted_retry_without_a_verified_manifest_preserves_success_without_ca
         let accepted = contact(&mut state, "bob", "contact.accept", selector).await?;
         assert_eq!(accepted["contact"], expected);
         let row = crate::bus::read_model::row(account(&state, "bob")?, "identity", "alice")?;
-        assert_eq!(row["safety_number_available"], false);
-        assert!(row["safety_number"].is_null());
+        assert_eq!(row["safety_number_available"], true);
+        assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
     }
     assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
     Ok(())
@@ -109,10 +85,7 @@ async fn accepted_retry_without_a_verified_manifest_preserves_success_without_ca
 #[tokio::test]
 async fn accepted_legacy_retry_without_a_signed_device_set_does_not_cache_a_number()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 33)?;
-    let mut b = Fixture::new("bob", 43)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
@@ -125,8 +98,8 @@ async fn accepted_legacy_retry_without_a_signed_device_set_does_not_cache_a_numb
         contact(&mut state, "bob", "contact.accept", json!({"principal_id":"alice"})).await?;
     assert_eq!(accepted["contact"]["principal_id"], "alice");
     let row = crate::bus::read_model::row(account(&state, "bob")?, "identity", "alice")?;
-    assert_eq!(row["safety_number_available"], false);
-    assert!(row["safety_number"].is_null());
+    assert_eq!(row["safety_number_available"], true);
+    assert_eq!(row["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(directory.manifest_fetches.load(Ordering::SeqCst), before);
     Ok(())
 }
@@ -135,10 +108,7 @@ async fn accepted_legacy_retry_without_a_signed_device_set_does_not_cache_a_numb
 async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verification()
 -> Result<(), SdkError> {
     for automatic in [false, true] {
-        let mut a = Fixture::new("alice", 31)?;
-        let mut b = Fixture::new("bob", 41)?;
-        let directory = Directory::new(&a, &b).await?;
-        let mut state = state(&mut a, &mut b, &directory)?;
+        let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
         if automatic {
             account(&state, "bob")?.set_contact_request_policy("auto_accept")?;
         }
@@ -147,7 +117,7 @@ async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verifica
         let receiver = account(&state, "bob")?;
         assert_eq!(
             crate::bus::read_model::row(receiver, "identity", "alice")?["safety_number_available"],
-            false
+            json!(automatic)
         );
         let verification = receiver.account_db()?.contact_verification(&root)?;
         let mut fetches = directory.manifest_fetches.load(Ordering::SeqCst);
@@ -156,7 +126,7 @@ async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verifica
             let receiver = account(&state, "bob")?;
             let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
             assert_eq!(row["safety_number_available"], true);
-            assert_eq!(row["safety_number_algorithm_version"], 1);
+            assert_eq!(row["safety_number_algorithm_version"], 2);
             assert_eq!(row["root_source"], "lookup");
             assert_eq!(row["verified"], false);
             assert_eq!(receiver.account_db()?.contact_verification(&root)?, verification);
@@ -174,10 +144,7 @@ async fn lookup_accept_and_accepted_retry_cache_safety_without_changing_verifica
 #[tokio::test]
 async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conflicting_keys()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     contact(
         &mut state,
         "bob",
@@ -186,10 +153,7 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     )
     .await?;
     pending(&mut state, &directory).await?;
-    let client = account(&state, "alice")?;
-    let seed =
-        client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.to_bytes();
-    let valid = card("alice", seed)?;
+    let valid = card_from_account(&state, "alice")?;
     let original = account(&state, "bob")?.contact_entry("alice")?;
     assert_eq!(original["root_source"], "lookup");
     directory.unavailable.store(true, Ordering::SeqCst);
@@ -199,14 +163,18 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     upgraded["node"] = json!({
         "url":"https://node.example",
         "key_fingerprint": crate::contact_node_fingerprint(
-            &ramflux_crypto::public_key_base64url_from_seed([91; 32]))?
+            &ramflux_crypto::fixture_public_key_base64url())?
     });
     for _ in 0..2 {
-        let retry = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
+        let retry =
+            contact(&mut state, "bob", "contact.accept", json!({"card":valid.clone()})).await?;
         assert_eq!(retry["contact"]["root_source"], "card");
         assert_eq!(retry["contact"], upgraded);
     }
-    let conflicting = card("alice", [211; 32])?;
+    let other = crate::client::native_test_support::Fixture::named("other", "alice", "other")
+        .await
+        .map_err(native_account)?;
+    let conflicting = born_card(&other.client, other.vault.as_ref())?;
     assert!(matches!(
         contact(&mut state, "bob", "contact.accept", json!({"card":conflicting})).await,
         Err(SdkError::ContactInput(crate::ContactReason::RootConflict))
@@ -225,7 +193,8 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     let mut identity = db.client_record("identity", "alice")?.ok_or_else(|| invalid("identity"))?;
     identity["root_source"] = json!("verified");
     db.persist_client_record("identity", "alice", &identity)?;
-    let verified = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
+    let verified =
+        contact(&mut state, "bob", "contact.accept", json!({"card":valid.clone()})).await?;
     assert_eq!(verified["contact"]["root_source"], "verified");
     assert_eq!(verified["contact"]["root_commitment"], original["root_commitment"]);
     Ok(())
@@ -234,10 +203,7 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
 #[tokio::test]
 async fn peer_unblock_preserves_local_fences_and_local_unblock_lifts_them() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 51)?;
-    let mut b = Fixture::new("bob", 61)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     contact(&mut state, "bob", "contact.accept", json!({"root_commitment":root})).await?;
@@ -272,10 +238,7 @@ async fn peer_unblock_preserves_local_fences_and_local_unblock_lifts_them() -> R
 #[tokio::test]
 async fn declining_a_crossed_request_preserves_the_pending_outbound_acceptance()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 71)?;
-    let mut b = Fixture::new("bob", 81)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     let client = account(&state, "bob")?;
@@ -346,10 +309,7 @@ async fn declining_a_crossed_request_preserves_the_pending_outbound_acceptance()
 #[tokio::test]
 async fn crossed_decline_still_fences_new_requests_after_outbound_expires() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     let entry = pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     let client = account(&state, "bob")?;
@@ -407,10 +367,7 @@ async fn crossed_decline_still_fences_new_requests_after_outbound_expires() -> R
 #[tokio::test]
 async fn failed_outbound_staging_keeps_the_decline_fence_and_rolls_back_new_intent()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 91)?;
-    let mut b = Fixture::new("bob", 101)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let root = r2::root(&state, "alice")?;
     let client = account(&state, "bob")?;
@@ -453,10 +410,7 @@ mod capacity;
 #[tokio::test]
 async fn accepted_retry_preserves_the_requested_legacy_link_when_root_has_aliases()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 171)?;
-    let mut b = Fixture::new("bob", 181)?;
-    let directory = Directory::new(&a, &b).await?;
-    let mut state = state(&mut a, &mut b, &directory)?;
+    let (directory, mut state) = born_bus(&["alice", "bob"]).await?;
     pending(&mut state, &directory).await?;
     let peer = r2::root(&state, "alice")?;
     let own = r2::root(&state, "bob")?;

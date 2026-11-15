@@ -21,7 +21,6 @@ use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{ReceiveExpectation, ReceiveMigrate, ReceiveStage};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -44,13 +43,19 @@ pub(super) fn open_account(
     config: &GatewaySessionConfig,
     commitment: &str,
 ) -> Result<LocalBusAccountState, SdkError> {
-    let mut account = crate::bus::runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    account.principal_commitment = commitment.to_owned();
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root.join("source"))?;
+    client.unlock_account("sender", b"native fixture data passphrase")?;
+    let branch =
+        config.device_branch.as_ref().ok_or(SdkError::CustodySetupInvalid)?.as_ref().clone();
+    client.device_branch = Some(branch.clone());
+    client
+        .active_account_db
+        .as_mut()
+        .ok_or(SdkError::AccountDbNotUnlocked)?
+        .set_device_signer(branch);
+    let mut account =
+        LocalBusAccountState::disconnected(client, config.clone(), commitment.to_owned());
     account.gateway_config = config.clone();
     account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
     account.engine = None;
@@ -307,8 +312,10 @@ async fn held() -> Case {
 
     // Real `account.unlock` loads the account from disk; rebind the loopback Push engine.
     let (unlock_reply, unlock_response) = oneshot::channel();
-    let mut unlock =
-        command("account.unlock", serde_json::json!({"passphrase":"actor-test-secret"}));
+    let mut unlock = command(
+        "account.unlock",
+        serde_json::json!({"passphrase":"native fixture data passphrase"}),
+    );
     unlock.reply = Some(unlock_reply);
     runtime.apply(unlock).await?;
     unlock_response.await??;
@@ -318,6 +325,17 @@ async fn held() -> Case {
         let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
         account.gateway_config = config.clone();
         account.target_delivery_id = config.target_delivery_id.clone();
+        // Unlock drops the branch. The scripted session still signs with the
+        // branch that opened the fixture, so put that signer back before connect.
+        let branch =
+            config.device_branch.as_ref().ok_or(SdkError::CustodySetupInvalid)?.as_ref().clone();
+        account.client.device_branch = Some(branch.clone());
+        account
+            .client
+            .active_account_db
+            .as_mut()
+            .ok_or(SdkError::AccountDbNotUnlocked)?
+            .set_device_signer(branch);
     }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);

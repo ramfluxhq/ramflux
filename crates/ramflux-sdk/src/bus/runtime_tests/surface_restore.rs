@@ -49,6 +49,55 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
     assert!(account.client.stage_surface_outgoing(&carrier, None)?.accepted);
     account.client.surface_get("surface", 0, None)
 }
+
+async fn persisted_born_surface(root: &Path) -> Result<Value, SdkError> {
+    let born = runtime_tests::born_account(
+        root,
+        "alice",
+        "alice",
+        "device-alice",
+        b"actor-test-secret",
+        "target",
+    )
+    .await?;
+    let create = crate::SurfaceSendRequest::event(
+        "thread",
+        1,
+        &A2uiConversationCommand::CreateSurface(CreateSurfaceCommand {
+            surface_id: "surface".into(),
+            surface_type: SurfaceType::StatusPanel,
+            catalog: "basic".into(),
+            catalog_version: "1".into(),
+            fallback_text: "Persisted".into(),
+            fallback_markdown: None,
+            components: vec![json!({"id":"result","text":"saved"})],
+            data_model: serde_json::Map::default(),
+            allowed_actions: Vec::new(),
+        }),
+    )?;
+    let mut carrier = Carrier {
+        schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
+        content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
+        payload_kind: PayloadKind::Event,
+        conversation_id: "thread".into(),
+        surface_id: "surface".into(),
+        message_id: create.message_id,
+        sender_principal_id: "alice".into(),
+        sender_device_id: "device-alice".into(),
+        author_principal_id: "alice".into(),
+        wire_base64: create.wire_base64,
+        signature: String::new(),
+        snapshot: None,
+    };
+    born.state.client.attach_surface_snapshot(&mut carrier)?;
+    let carrier = born.state.client.sign_surface_carrier(carrier)?;
+    assert!(born.state.client.stage_surface_outgoing(&carrier, None)?.accepted);
+    let expected = born.state.client.surface_get("surface", 0, None)?;
+    drop(born);
+    Ok(expected)
+}
 fn command(method: &str, body: Value, outbound: mpsc::Sender<LocalBusFrame>) -> AccountCommand {
     AccountCommand {
         admission: None,
@@ -75,7 +124,7 @@ fn enqueue(
 async fn surface_reads_queued_during_restart_restore_match_warm_reader_results()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = runtime_tests::root("surface-restore");
-    let expected = persisted_surface(&root)?;
+    let expected = persisted_born_surface(&root).await?;
     assert_eq!(expected["version"], 1);
     let index = AccountIndex::open(&root)?;
     let (events, mut batches) = mpsc::channel::<crate::bus::events::EventBatch>(64);

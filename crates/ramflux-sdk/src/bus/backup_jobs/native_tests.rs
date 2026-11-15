@@ -14,8 +14,8 @@ use crate::{
 use serde_json::json;
 use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const LOCAL_SECRET: &str = "independent local data passphrase";
-const ARCHIVE_SECRET: &str = "independent archive passphrase";
+pub(super) const LOCAL_SECRET: &str = "independent local data passphrase";
+pub(super) const ARCHIVE_SECRET: &str = "independent archive passphrase";
 
 pub(super) fn initialize(
     root: &Path,
@@ -40,7 +40,7 @@ pub(super) fn initialize(
     let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(native);
     Ok(LocalBusAccountState::disconnected(client, gateway, anchor))
 }
-fn supervisor(root: &Path) -> Result<Rc<Supervisor>, SdkError> {
+pub(super) fn supervisor(root: &Path) -> Result<Rc<Supervisor>, SdkError> {
     let config = LocalBusConfig::new(root.join("bus.sock"), root);
     let path = root.to_owned();
     let initializer: AccountInitializer = Box::new(move |index| initialize(&path, index));
@@ -50,7 +50,7 @@ fn supervisor(root: &Path) -> Result<Rc<Supervisor>, SdkError> {
         Some("account".into()),
     )
 }
-async fn make_archive(supervisor: &Supervisor, path: &Path) -> TestResult {
+pub(super) async fn make_archive(supervisor: &Supervisor, path: &Path) -> TestResult {
     let row = call(
         supervisor,
         "account.backup.create",
@@ -66,7 +66,7 @@ async fn make_archive(supervisor: &Supervisor, path: &Path) -> TestResult {
     .await?;
     Ok(())
 }
-async fn verify(supervisor: &Supervisor, path: &Path) -> TestResult<String> {
+pub(super) async fn verify(supervisor: &Supervisor, path: &Path) -> TestResult<String> {
     let row = call(
         supervisor,
         "account.restore.verify",

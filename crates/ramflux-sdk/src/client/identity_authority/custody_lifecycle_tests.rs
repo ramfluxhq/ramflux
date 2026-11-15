@@ -41,7 +41,10 @@ async fn native_revocation_retires_real_pairs_before_bad_prekeys_and_preserves_o
         &local.manifest.principal_commitment,
         &target.manifest.principal_commitment,
     )?;
-    local.client.mark_contact_safety_verified(&target.manifest.principal_commitment, "primary")?;
+    crate::client::contact_verification_cas::verify_linked_contact(
+        &local.client,
+        &target.manifest.principal_commitment,
+    )?;
     let affected = pair(&local, &target)?;
     let unaffected = pair(&local, &other)?;
     let db = local.client.account_db()?;

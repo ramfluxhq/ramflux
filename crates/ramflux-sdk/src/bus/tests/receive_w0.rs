@@ -17,7 +17,6 @@
 use super::fixture::{Case, Fixture};
 use crate::bus::connection_manager::{ReceiveTrigger, ReceiveTurn};
 use crate::bus::sync_driver::source::w0::{SourceW0, actor_turn, prepare_receive_turn};
-use crate::client::identity_authority::test_support::public_manifest;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{
@@ -27,6 +26,23 @@ use serde_json::json;
 use std::cell::Cell;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
+
+fn served_manifest(
+    fixture: &Fixture,
+    client: &RamfluxClient,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, Box<dyn std::error::Error>> {
+    let root = client.owned_device_identity()?.root_commitment().to_owned();
+    Ok(serde_json::from_value(
+        fixture
+            .gateway
+            .lock()
+            .map_err(|_| "gateway")?
+            .manifests
+            .get(&root)
+            .cloned()
+            .ok_or("manifest")?,
+    )?)
+}
 
 fn turn(db: &AccountDb, generation: u64, incarnation: &str) -> Result<ReceiveTurn, SdkError> {
     Ok(ReceiveTurn {
@@ -89,9 +105,21 @@ fn ledger(account: &LocalBusAccountState) -> Case {
 }
 
 /// A real reopen: the account DB handle is dropped and unlocked again from disk.
+/// Unlock drops the in-memory branch. This fence is the same device coming back,
+/// so the signer returns with the database.
 fn reopen(account: &mut LocalBusAccountState) -> Case {
+    let branch = account.client.device_branch.clone();
     account.client.active_account_db = None;
-    account.client.unlock_account("sender", b"actor-test-secret")?;
+    account.client.unlock_account("sender", b"native fixture data passphrase")?;
+    if let Some(branch) = branch {
+        account.client.device_branch = Some(branch.clone());
+        account
+            .client
+            .active_account_db
+            .as_mut()
+            .ok_or(SdkError::AccountDbNotUnlocked)?
+            .set_device_signer(branch);
+    }
     Ok(())
 }
 
@@ -210,7 +238,7 @@ async fn case() -> Case {
     ledger(&fixture.source)?;
     fixture.inbound().await?;
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = public_manifest(&fixture.peer.client)?;
+    let peer_manifest = served_manifest(&fixture, &fixture.peer.client)?;
 
     // Row 1: native.rs prepare, `prepare_inbound_device_manifest` then the committing
     // `apply_inbound_device_manifest` (source "inbound_signature").
@@ -278,7 +306,7 @@ async fn expiry() -> Case {
     ledger(&fixture.source)?;
     let _clock = crate::time::FixedClock::set(now_unix_timestamp());
     let peer = fixture.peer.client.owned_device_identity()?;
-    let peer_manifest = public_manifest(&fixture.peer.client)?;
+    let peer_manifest = served_manifest(&fixture, &fixture.peer.client)?;
     let root = peer_manifest.principal_commitment.clone();
     reset_prior(&fixture.source, &peer)?;
     let accept = |client: &RamfluxClient| {

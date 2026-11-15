@@ -14,7 +14,7 @@ pub(crate) mod contact_requests;
 pub(crate) mod contact_resolution;
 pub(crate) mod contact_roots;
 mod contact_safety_preview;
-pub(crate) mod contact_verification;
+pub(crate) mod contact_verification_cas;
 pub mod conversation;
 mod deferred_attachment;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
@@ -92,6 +92,8 @@ mod activation_guard_tests;
 
 use crate::prelude::*;
 
+type HeldManifests = std::cell::RefCell<BTreeMap<String, crate::SdkDeviceManifestResponse>>;
+
 pub struct RamfluxClient {
     pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
     pub(crate) typing_sender: std::cell::RefCell<typing::sender::TypingSender>,
@@ -101,6 +103,8 @@ pub struct RamfluxClient {
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
     pub(crate) born_v3_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault>>,
+    // Fetched compare material. Preview keeps it here; only a successful CAS commit stores it.
+    pub(crate) held_manifests: HeldManifests,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
     // One account-owned plan crosses the synchronous receive transaction's commit boundary.
     // It is never shared across accounts, held over an await, or serialized with media secrets.
@@ -132,6 +136,7 @@ impl Default for RamfluxClient {
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,
             born_v3_vault: None,
+            held_manifests: std::cell::RefCell::new(BTreeMap::new()),
             voice_calls: BTreeMap::new(),
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,

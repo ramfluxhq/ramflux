@@ -275,6 +275,10 @@ fn apply_verified(
     if ready {
         account.head_refresh.pending.remove(root);
         inbound::refreshed(account, root)?;
+        // A due pair reset waits here instead of treating a cold head as failure.
+        if let Some(connection) = &account.connection {
+            connection.wake_courier("pair-reset");
+        }
     }
     Ok(ready)
 }
