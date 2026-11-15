@@ -128,62 +128,33 @@ fn missing_peer_manifest_leaves_cursor_retryable_until_authority_arrives() -> Te
     drop((own, sibling, peer));
     Ok(())
 }
-#[test]
-fn heavy_account_history_pages_preserve_every_contact_and_manifest_within_admission_budgets()
--> TestResult {
-    let root = path()?;
-    let own = client(&root.join("own"), "bob", 1)?;
-    let peer = client(&root.join("peer"), "alice", 3)?;
-    let manifest = crate::client::identity_authority::test_support::public_manifest(&peer)?;
-    own.persist_identity_directory(&manifest)?;
-    for n in 0..513 {
-        own.establish_friend_link(
-            &format!("link-{n:04}"),
-            own.owned_device_identity()?.root_commitment(),
-            &manifest.principal_commitment,
+#[tokio::test(flavor = "current_thread")]
+async fn every_restricted_contact_is_restored_across_authenticated_authority_pages() -> TestResult {
+    use crate::client::native_test_support::Fixture;
+    const CONTACTS: u32 = 1100;
+    let mut source = Fixture::with_device("restricted-contacts-source", "source").await?;
+    let target = source.enroll_sibling("restricted-contacts-target", "target").await?;
+    let root = source.client.own_account_anchor()?;
+    for n in 0..CONTACTS {
+        let id = format!("link-{n:04}");
+        source.client.account_db()?.establish_friend_link(
+            &id,
+            &root,
+            &ramflux_protocol::hash_base64url("backup-peer", &n.to_be_bytes()),
         )?;
+        source.client.account_db()?.block_friend_link(&id, 1_800_000_000)?;
     }
-    let contacts = own.own_history_contacts()?;
-    assert_ne!(contacts.len(), 0);
-    assert_eq!(contacts.len(), 513);
-    let mut pins = Vec::new();
-    for n in 0..513 {
-        // Public manifest payload remains valid; distinct cache keys exercise root-list admission.
-        let name = format!("manifest-{n:04}");
-        own.account_db()?
-            .persist_actor_state(&format!("identity/manifest-root/{name}"), &manifest)?;
-        pins.push(crate::own_device_sync::SdkOwnDeviceGroupMemberPin {
-            group_id: "group".into(),
-            device_id: format!("member-{n}"),
-            signing_public_key: String::new(),
-            principal_id: None,
-            principal_commitment: Some(name),
-        });
+    let packets = source.client.own_history_contacts()?;
+    assert_eq!(packets.len(), usize::try_from(CONTACTS)?, "every restriction must be exported");
+    for packet in &packets {
+        let body = ramflux_protocol::decode_base64url(packet)?;
+        let outcome =
+            target.client.receive_own_contact_outcome(&body, OwnContactReceiveMode::Sibling)?;
+        assert!(matches!(outcome, OwnContactReceiveOutcome::TombstoneApplied), "{outcome:?}");
     }
-    let manifests = own.own_history_device_manifests(&pins)?;
-    assert_ne!(manifests.len(), 0);
-    assert_eq!(manifests.len(), 513);
-    assert!(RamfluxClient::check_own_history_authority_budget(&manifests, &contacts).is_err());
-    let history = serde_json::from_value::<crate::own_device_sync::SdkOwnDeviceHistoryBundle>(
-        serde_json::json!({
-            "schema":"ramflux.sdk.own_device_history_bundle.v1","version":1,
-            "principal_commitment":own.owned_device_identity()?.root_commitment(),"source_device_id":"source","target_device_id":"target","snapshot_id":"budget-pages",
-            "messages":[],"dm_sessions":[],"groups":[],"sender_key_distributions_base64":[],
-            "group_member_pins":pins,"device_manifests":manifests,"accepted_contacts":contacts
-        }),
-    )?;
-    let pages = crate::client::own_device_history_pages::pages(history)?;
-    assert_eq!(pages.iter().map(|p| p.accepted_contacts.len()).sum::<usize>(), 513);
-    assert_eq!(pages.iter().map(|p| p.device_manifests.len()).sum::<usize>(), 513);
-    for page in pages {
-        assert!(page.accepted_contacts.len() <= 512);
-        assert!(page.device_manifests.len() <= 512);
-        RamfluxClient::check_own_history_authority_budget(
-            &page.device_manifests,
-            &page.accepted_contacts,
-        )?;
-    }
-    drop((own, peer));
+    let links = target.client.account_db()?.friend_links()?;
+    assert_eq!(links.len(), usize::try_from(CONTACTS)?);
+    assert!(links.iter().all(|link| link.blocked));
     Ok(())
 }
 

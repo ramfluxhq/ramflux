@@ -87,12 +87,6 @@ pub(crate) use crate::object::{
     recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
 };
 
-#[cfg(test)]
-pub(crate) use crate::own_device_sync::{
-    SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceHistoryBundle, SdkOwnDeviceSyncEnvelope,
-    SdkOwnDeviceSyncImportResponse, group_message_epoch, own_device_sync_signing_body,
-    own_device_sync_slot_conversation_id,
-};
 pub(crate) use crate::own_device_sync::{
     SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
 };

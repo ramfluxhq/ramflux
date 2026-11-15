@@ -400,13 +400,13 @@ mod tests {
     use super::*;
     #[test]
     fn generated_page_reader_returns_bounds_and_shared_errors() -> Result<(), SdkError> {
-        let (_root, client) = crate::client::own_device_sync::tests::client_with_account(
+        let fixture = crate::client::native_test_support::account::blocking(
             "generated-page-reader",
-            "principal_sync",
             "local",
         )?;
+        let client = &fixture.client;
         let page =
-            generated_page(&client, &serde_json::json!({"conversation_id":"empty","limit":3}))?;
+            generated_page(client, &serde_json::json!({"conversation_id":"empty","limit":3}))?;
         assert_eq!(page["messages"], serde_json::json!([]));
         assert_eq!(page["snapshot_sequence"], client.account_db()?.journal_bounds()?.head_seq);
         assert!(page["next_before"].is_null());
@@ -415,11 +415,11 @@ mod tests {
             (serde_json::json!({"conversation_id":"empty","limit":101}), 1),
             (serde_json::json!({"conversation_id":"empty","raw":true}), 2),
         ] {
-            let error = generated_page(&client, &request).err().ok_or_else(closed)?;
+            let error = generated_page(client, &request).err().ok_or_else(closed)?;
             let SdkError::GeneratedApi(error) = error else { return Err(closed()) };
             assert_eq!(error.code, code);
         }
-        drop(client);
+        drop(fixture);
         Ok(())
     }
 
@@ -566,11 +566,9 @@ mod read_model_selector_tests {
     fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
     -> Result<(), Box<dyn std::error::Error>> {
         let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-        let (_root, client) = crate::client::own_device_sync::tests::client_with_account(
-            "reader-selectors",
-            "principal_sync",
-            "local",
-        )?;
+        let fixture =
+            crate::client::native_test_support::account::blocking("reader-selectors", "local")?;
+        let client = &fixture.client;
         for (body, code) in [
             (
                 json!({"conversation_id":"c","message_id":"x","after_sequence":1}),
@@ -590,27 +588,27 @@ mod read_model_selector_tests {
             ),
             (json!({"conversation_id":"c","unknown":1}), GeneratedErrorCode::InvalidJson),
         ] {
-            let error = generated_page(&client, &body).err().ok_or("request accepted")?;
+            let error = generated_page(client, &body).err().ok_or("request accepted")?;
             assert_eq!(AdapterError::from_sdk(&error).code, code as i32, "{body}");
         }
         let missing = ramflux_protocol::encode_base64url([3_u8; 32]);
-        let error = generated_page(&client, &json!({"conversation_id":"c","message_id":missing}))
+        let error = generated_page(client, &json!({"conversation_id":"c","message_id":missing}))
             .err()
             .ok_or("missing message served")?;
         assert_eq!(AdapterError::from_sdk(&error).code, GeneratedErrorCode::TargetNotFound as i32);
 
-        let changes = generated_page(&client, &json!({"conversation_id":"c","after_sequence":0}))?;
+        let changes = generated_page(client, &json!({"conversation_id":"c","after_sequence":0}))?;
         assert_eq!(changes["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
         assert_eq!(changes["changes"], json!([]));
         assert_eq!(changes["more"], false);
         assert_eq!(changes["next_after"], changes["snapshot_sequence"]);
-        let page = generated_page(&client, &json!({"conversation_id":"c","read_model":true}))?;
+        let page = generated_page(client, &json!({"conversation_id":"c","read_model":true}))?;
         assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
         assert_eq!(page["messages"], json!([]));
         assert!(page["next_before"].is_null());
-        let bare = generated_page(&client, &json!({"conversation_id":"c"}))?;
+        let bare = generated_page(client, &json!({"conversation_id":"c"}))?;
         assert!(bare.get("schema").is_none(), "bare generated page keeps its existing shape");
-        drop(client);
+        drop(fixture);
         Ok(())
     }
 }

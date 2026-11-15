@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Immutable group-member pins carried by authenticated same-root history snapshots.
-#[cfg(test)]
-use crate::own_device_sync::SdkOwnDeviceHistoryBundle;
 use crate::own_device_sync::{SdkOwnDeviceGroupMemberPin, SdkOwnDeviceGroupSnapshot};
 use crate::prelude::*;
 impl RamfluxClient {
@@ -32,106 +30,6 @@ impl RamfluxClient {
             }
         }
         Ok(pins)
-    }
-    /// Called after authenticated same-root context admission. Rejected pins remain inactive.
-    #[cfg(test)]
-    pub(super) fn restore_own_device_group_member_pins(
-        &self,
-        bundle: &SdkOwnDeviceHistoryBundle,
-        floors: &BTreeMap<String, u64>,
-    ) -> Result<BTreeSet<(String, String)>, SdkError> {
-        let db = self.account_db()?;
-        let local = &self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id;
-        let mut blocked = BTreeSet::new();
-        let mut unique = BTreeMap::new();
-        for pin in bundle.group_member_pins.iter().filter(|pin| {
-            pin.device_id != *local
-                && !bundle
-                    .groups
-                    .iter()
-                    .any(|g| g.group_id == pin.group_id && g.shared_state.is_some())
-        }) {
-            let id = (pin.group_id.clone(), pin.device_id.clone());
-            let encoded = serde_json::to_vec(pin)?;
-            if unique.insert(id.clone(), encoded.clone()).is_some_and(|old| old != encoded) {
-                blocked.insert(id);
-            }
-        }
-        let mut seen = BTreeSet::new();
-        for pin in bundle.group_member_pins.iter().filter(|pin| {
-            pin.device_id != *local
-                && !bundle
-                    .groups
-                    .iter()
-                    .any(|g| g.group_id == pin.group_id && g.shared_state.is_some())
-        }) {
-            let id = (pin.group_id.clone(), pin.device_id.clone());
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let accepted = !blocked.contains(&id)
-                && floors.contains_key(&pin.group_id)
-                && bundle
-                    .groups
-                    .iter()
-                    .filter(|g| g.group_id == pin.group_id)
-                    .max_by_key(|g| g.group_epoch)
-                    .is_some_and(|g| g.members.iter().any(|m| m.member_id == pin.device_id))
-                && db.group_member_role_metadata(&pin.group_id, &pin.device_id)?.is_some();
-            let result = if accepted {
-                db.write_transaction(|| self.restore_own_member_pin(pin))
-            } else {
-                Err(SdkError::InboundRejected("snapshot pin context rejected".into()))
-            };
-            match result {
-                Ok(()) => {}
-                Err(SdkError::Storage(error))
-                    if !matches!(error, StorageError::GroupPermissionDenied) =>
-                {
-                    return Err(SdkError::Storage(error));
-                }
-                Err(
-                    SdkError::InboundPending(_)
-                    | SdkError::SenderManifestRequired { .. }
-                    | SdkError::FreshHeadRequired { .. },
-                ) if accepted => {
-                    self.park_own_group_pin(pin)?;
-                    blocked.insert(id);
-                    db.record_own_device_restore_skip(
-                        &bundle.snapshot_id,
-                        &format!("{}:{}", pin.group_id, pin.device_id),
-                        "member_authority_deferred",
-                    )?;
-                }
-                Err(_) => {
-                    blocked.insert(id);
-                    db.record_own_device_restore_skip(
-                        &bundle.snapshot_id,
-                        &format!("{}:{}", pin.group_id, pin.device_id),
-                        "member_pin_rejected",
-                    )?;
-                }
-            }
-        }
-        for group in floors.keys() {
-            match db.write_transaction(|| self.pin_local_group_member(group)) {
-                Ok(()) => {}
-                Err(SdkError::Storage(error))
-                    if !matches!(error, StorageError::GroupPermissionDenied) =>
-                {
-                    return Err(SdkError::Storage(error));
-                }
-                Err(_) => {
-                    blocked.insert((group.clone(), String::new()));
-                    db.record_own_device_restore_skip(
-                        &bundle.snapshot_id,
-                        group,
-                        "local_member_pin_rejected",
-                    )?;
-                }
-            }
-        }
-        Ok(blocked)
     }
     pub(crate) fn restore_own_member_pin(
         &self,

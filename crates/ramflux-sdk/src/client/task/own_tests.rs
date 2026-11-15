@@ -189,17 +189,8 @@ fn own_device_snapshot_exports_task_packets_without_duplicate_transport_message_
         .ok_or("projection")?;
     assert!(outcome.accepted);
     f.agent.send_direct_message("thread", "ordinary-row", "human-device", b"ordinary")?;
-    let commitment = manifest(&f.agent)?.principal_commitment;
-    let bundle = f.agent.own_device_history_bundle(
-        &commitment,
-        "agent-device",
-        "agent2-device",
-        "snapshot",
-    )?;
-    assert_eq!(bundle.messages.len(), 1);
-    assert_eq!(bundle.messages[0].message_id, "ordinary-row");
-    assert_eq!(bundle.task_packets.len(), 1);
-    assert!(!bundle.contents.contains_key("transport-row"));
+    let packets = f.agent.own_task_packets("agent2-device")?;
+    assert_eq!(packets.len(), 1);
     Ok(())
 }
 
@@ -335,25 +326,18 @@ fn accounts_with_over_one_hundred_and_one_thousand_tasks_still_export_bounded_ne
         manifests(&f)?;
         seed_legacy_terminal_histories(&f, total)?;
         f.agent.send_direct_message("thread", "ordinary", "human-device", b"ordinary history")?;
-        let commitment = manifest(&f.agent)?.principal_commitment;
-        let bundle = f.agent.own_device_history_bundle(
-            &commitment,
-            "agent-device",
-            "agent2-device",
-            "snapshot",
-        )?;
-        assert_eq!(bundle.messages.len(), 1);
-        assert_eq!(bundle.messages[0].message_id, "ordinary");
-        assert!(!bundle.task_packets.is_empty());
-        assert!(bundle.task_packets.len() <= 100);
-        assert!(serde_json::to_vec(&bundle.task_packets)?.len() <= 4 * 1024 * 1024);
+        let packets = f.agent.own_task_packets("agent2-device")?;
+        let metadata = f.agent.generated_task_export_metadata("agent2-device")?;
+        assert!(!packets.is_empty());
+        assert!(packets.len() <= 100);
+        assert!(serde_json::to_vec(&packets)?.len() <= 4 * 1024 * 1024);
         let mut sibling = client(&f.root.join("agent2"), "agent", 71)?;
         sibling.create_device_branch("agent", "agent2-device", 1, [75; 32]);
-        sibling.import_own_task_packets(&bundle.task_packets)?;
+        sibling.import_own_task_packets(&packets)?;
         assert_ne!(sibling.account_db()?.task_state_usage("task/view/")?.0, 0);
         if total == 1001 {
-            assert!(bundle.task_export_metadata.truncated);
-            assert!(bundle.task_export_metadata.next_cursor.is_some());
+            assert!(metadata.truncated);
+            assert!(metadata.next_cursor.is_some());
         }
         drop(sibling);
     }

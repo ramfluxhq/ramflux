@@ -114,6 +114,7 @@ impl Fixture {
     }
 }
 
+pub(crate) mod account;
 mod history;
 mod sibling;
 

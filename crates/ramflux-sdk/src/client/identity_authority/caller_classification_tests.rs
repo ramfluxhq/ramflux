@@ -157,7 +157,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/identity_authority/gateway_tests.rs"
         )),
-        [0, 1, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/identity_authority/group_review_r3_tests.rs",
@@ -207,7 +207,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
         "client/own_device_sync.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/own_device_sync.rs")),
-        [0, 2, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/own_group_lazy_authority.rs",

@@ -187,3 +187,62 @@ async fn stale_own_group_context_preserves_current_signed_removal() -> TestResul
     })
     .await?
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn own_device_history_import_skips_group_message_below_joined_epoch() -> TestResult {
+    watchdog::within(async {
+        let mut source = Fixture::with_device("group-floor-owner", "phone").await?;
+        let target = source.enroll_sibling("group-floor-target", "laptop").await?;
+        let primary = source
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("native account")?
+            .group_primary(source.vault.as_ref())?;
+        source.client.shared_group_create_with_primary(
+            GROUP,
+            THREAD,
+            Some("Floor".into()),
+            &source.config.target_delivery_id,
+            Some(&primary),
+        )?;
+        // The message is authored at epoch one, before the laptop joins the group.
+        let identity = source.client.allocate_generated_identity(
+            THREAD,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )?;
+        let owner = ramflux_protocol::encode_base64url(&identity.id);
+        source.client.encrypt_generated_group_inner(
+            GROUP,
+            &source.config.device_id,
+            identity,
+            &g::Message { text: "message before the join".into(), ..Default::default() },
+        )?;
+        let joined = source.client.shared_group_change_with_primary(
+            GROUP,
+            &source.config.target_delivery_id,
+            GroupStateChange::Add {
+                member: target
+                    .client
+                    .owned_group_actor(&target.config.target_delivery_id)?
+                    .identity,
+                role: SharedGroupRole::Member,
+            },
+            Some(&primary),
+        )?;
+        target.client.accept_shared_group_state(&joined, &target.config.target_delivery_id)?;
+        let plan = source.client.prepare_authored_history(&source.config)?.ok_or("history plan")?;
+        let (_, packet) = source
+            .client
+            .seal_authored_history(&source.config, plan, source.material_for(&target)?)?
+            .ok_or("sealed history")?;
+        let mut target = target;
+        let refusal = target.receive(packet, 1).await;
+        assert!(refusal.is_err(), "a group message below the joined epoch must be refused");
+        assert!(target.client.account_db()?.message_content(&owner)?.is_none());
+        assert_eq!(target.client.direct_messages(THREAD)?.len(), 0);
+        Ok(())
+    })
+    .await?
+}

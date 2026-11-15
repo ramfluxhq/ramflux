@@ -172,3 +172,18 @@ pub(crate) async fn deliver(
 ) -> TestResult<ramflux_protocol::Envelope> {
     Box::pin(super::authored_edit_erasure::deliver_sent(source, target, sent)).await
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_history_tombstone_erases_a_live_own_copy_and_its_footprint() -> TestResult {
+    super::watchdog::within(Box::pin(exercise(false, 1))).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_history_tombstone_prevents_a_late_own_copy_from_reviving_content() -> TestResult {
+    super::watchdog::within(Box::pin(exercise(true, 1))).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_history_tombstone_erases_each_live_copy_of_the_same_original() -> TestResult {
+    super::watchdog::within(Box::pin(exercise(false, 2))).await?
+}

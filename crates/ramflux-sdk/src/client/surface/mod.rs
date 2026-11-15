@@ -16,8 +16,6 @@ mod own_checkpoint;
 mod own_history;
 pub(crate) use control::{ControlKind, OwnContext, SurfaceControl};
 pub(crate) use own_checkpoint::OwnedSurfaceCheckpoint;
-#[cfg(test)]
-pub(crate) use own_history::SurfaceExportMetadata;
 pub(crate) use own_history::SurfaceHistoryExport;
 mod delivery;
 mod fallback;

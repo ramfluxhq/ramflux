@@ -249,3 +249,13 @@ fn seal_live_copy(
     let (_, envelope) = copies.into_iter().next().ok_or("copy")?;
     Ok(envelope)
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn history_import_then_delete_then_live_copy_keeps_the_original_tombstone() -> TestResult {
+    super::watchdog::within(Box::pin(exercise_order(true, true))).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_live_copy_reuses_history_and_preserves_account_deletion() -> TestResult {
+    super::watchdog::within(Box::pin(exercise_order(false, true))).await?
+}

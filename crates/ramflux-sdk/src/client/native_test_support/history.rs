@@ -162,6 +162,39 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn own_device_history_import_preserves_direct_message_created_at() -> TestResult {
+    super::watchdog::within(Box::pin(history_preserves_created_at())).await?
+}
+
+async fn history_preserves_created_at() -> TestResult {
+    let mut source = Fixture::new("created-at-source").await?;
+    let mut sibling = source.enroll_sibling("created-at-sibling", "created-at-device").await?;
+    let peer = Fixture::new("created-at-peer").await?;
+    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (original, _, conversation) = Box::pin(receive_first_hand(&mut source, &peer)).await?;
+    let id = ramflux_protocol::encode_base64url(&original.id);
+    let authored_at = source.client.direct_message_by_id(&id)?.ok_or("source row")?.created_at;
+    source.client.start_generated_history_transfer(&sibling.config.device_id)?;
+    let prepared =
+        source.client.prepare_generated_history_delivery(&source.config)?.ok_or("history plan")?;
+    let (_, page) = source
+        .client
+        .seal_generated_history_delivery(&source.config, prepared, source.material_for(&sibling)?)?
+        .ok_or("history page")?;
+    sibling.receive(page, 1).await?;
+    let imported = sibling.client.direct_message_by_id(&id)?.ok_or("imported row")?;
+    assert_eq!(
+        imported.created_at, authored_at,
+        "an imported history row must keep the original envelope time, not the import time"
+    );
+    assert_eq!(
+        sibling.client.generated_message_view_page(&conversation, None, 10)?.messages.len(),
+        1
+    );
+    Ok(())
+}
+
 pub(super) async fn receive_first_hand(
     source: &mut Fixture,
     peer: &Fixture,

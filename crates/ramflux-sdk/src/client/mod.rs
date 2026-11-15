@@ -66,12 +66,8 @@ pub mod object;
 mod own_contact;
 pub(crate) mod own_device_copy;
 mod own_device_group_pins;
-#[cfg(test)]
-mod own_device_group_restore;
 mod own_device_group_state;
 pub mod own_device_sync;
-#[cfg(test)]
-mod own_device_sync_receipts;
 mod own_group_lazy_authority;
 mod own_sent_delivery;
 pub(crate) mod own_sent_message;
@@ -186,5 +182,3 @@ impl RamfluxClient {
 }
 
 mod own_device_history_authority;
-#[cfg(test)]
-mod own_device_history_pages;

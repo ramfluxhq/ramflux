@@ -3,7 +3,6 @@
 
 //! Real native ratchets retire under signed denials, even when optional prekeys are stale.
 use crate::client::native_test_support::{Fixture, TestResult};
-use prost::Message as _;
 
 fn pair(local: &Fixture, remote: &Fixture) -> TestResult<String> {
     let local_ref = local.client.owned_device_identity()?;
@@ -184,45 +183,24 @@ fn assert_stale_native_snapshot_is_inert(local: &Fixture, peer: &Fixture) -> Tes
     let anchor = &peer.manifest.principal_commitment;
     assert!(local.client.directory_snapshot_is_obsolete(&peer.manifest)?);
     let link = local.client.account_db()?.friend_link("native-retirement-link")?;
-    let contact = crate::client::generated_control::control_from_payload(
-        ramflux_protocol::message::control::Payload::OwnContactSync(
-            ramflux_protocol::message::OwnContactSync {
-                manifest: Some(ramflux_protocol::message::NativeDeviceManifest::try_from(
-                    &peer.manifest,
-                )?),
-                link: Some(ramflux_protocol::message::FriendLinkRecord {
-                    link_id: link.link_id,
-                    requester_id: link.requester_id,
-                    target_id: link.target_id,
-                    state: link.state,
-                    remove_scope: link.remove_scope,
-                    blocked: link.blocked,
-                    capability_revoked_at: link.capability_revoked_at,
-                }),
-            },
-        ),
-    )?
-    .encode_to_vec();
-    let peer_device = peer.manifest.devices.first().ok_or("native peer device")?;
-    let history = serde_json::from_value::<crate::own_device_sync::SdkOwnDeviceHistoryBundle>(
-        serde_json::json!({
-            "schema":"ramflux.own_device.history.v1", "version":1,
-            "principal_commitment":local.manifest.principal_commitment,
-            "source_device_id":"sibling", "target_device_id":"primary", "snapshot_id":"stale-native",
-            "messages":[], "dm_sessions":[], "groups":[], "sender_key_distributions_base64":[],
-            "group_member_pins":[{"group_id":"stale-group", "device_id":"primary",
-                "signing_public_key":peer_device.branch_public_key,
-                "principal_id":peer.manifest.principal_id, "principal_commitment":anchor}],
-            "device_manifests":[peer.manifest],
-            "accepted_contacts":[ramflux_protocol::encode_base64url(&contact)],
+    let contact = ramflux_protocol::message::OwnContactSync {
+        manifest: Some(ramflux_protocol::message::NativeDeviceManifest::try_from(&peer.manifest)?),
+        link: Some(ramflux_protocol::message::FriendLinkRecord {
+            link_id: link.link_id,
+            requester_id: link.requester_id,
+            target_id: link.target_id,
+            state: link.state,
+            remove_scope: link.remove_scope,
+            blocked: link.blocked,
+            capability_revoked_at: link.capability_revoked_at,
         }),
-    )?;
-    // The containing own-device envelope is authenticated by the caller. Its old but valid
+    };
+    // The containing own-device Control is authenticated by the caller. Its old but valid
     // public snapshot must never overwrite a newer denial, even after payload eviction.
-    local.client.restore_own_history_authority(&history)?;
+    local.client.receive_generated_own_contact(&contact)?;
     local.client.retire_custody_directory_payload(anchor)?;
     assert!(local.client.directory_snapshot_is_obsolete(&peer.manifest)?);
-    local.client.restore_own_history_authority(&history)?;
+    local.client.receive_generated_own_contact(&contact)?;
     let native = peer.manifest.custody.as_ref().ok_or("native")?;
     let old = ramflux_crypto::custody::verify_record(
         &native.publication.record,

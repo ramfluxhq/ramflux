@@ -332,21 +332,6 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    #[cfg(test)]
-    fn index_own_sent_original(
-        &self,
-        conversation: &str,
-        original: &str,
-        id: &str,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let prefix = original_index_prefix(db, conversation, original)?;
-        // Separate targets keep same-id copies from different devices independently erasable.
-        let key = format!("{prefix}{}", db.own_sent_index_digest("original-target", id)?);
-        db.persist_message_replay_reference(&key, Some(id), None, None)?;
-        Ok(())
-    }
-
     pub(super) fn own_sent_receipt_owner(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -361,96 +346,6 @@ impl RamfluxClient {
             .and_then(|reference| reference.message_id().map(str::to_owned)))
     }
 
-    #[cfg(test)]
-    pub(super) fn erase_own_sent_copies_of_original(
-        &self,
-        original: &DirectMessageRecord,
-    ) -> Result<(), SdkError> {
-        let db = self.account_db()?;
-        let prefix = original_index_prefix(db, &original.conversation_id, &original.message_id)?;
-        let mut after = String::new();
-        loop {
-            let keys = db.actor_state_key_page_after(&prefix, &after, 128)?;
-            if keys.is_empty() {
-                break;
-            }
-            for key in keys {
-                if let Some(reference) =
-                    db.load_actor_state::<ramflux_storage::MessageReplayReference>(&key)?
-                    && let Some(id) = reference.message_id()
-                    && let Some(row) = self.direct_message_by_id(id)?
-                    && row.conversation_id == original.conversation_id
-                {
-                    db.import_deleted_message_projection(
-                        &row.conversation_id,
-                        id,
-                        true,
-                        row.created_at,
-                    )?;
-                }
-                after = key;
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) fn index_imported_own_sent_ciphertext(
-        &self,
-        message: &DirectMessageRecord,
-    ) -> Result<(), SdkError> {
-        if message.encrypted_body.is_empty() {
-            return Ok(());
-        }
-        let db = self.account_db()?;
-        let key = imported_ciphertext_key(db, &own_sent_ciphertext_hash(&message.encrypted_body))?;
-        let scope = db.own_sent_index_digest("conversation", &message.conversation_id)?;
-        let old = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&key)?;
-        let ambiguous = old.as_ref().is_some_and(|row| {
-            row.message_id() != Some(message.message_id.as_str())
-                || row.scope() != Some(scope.as_str())
-        });
-        db.persist_message_replay_reference(
-            &key,
-            (!ambiguous).then_some(message.message_id.as_str()),
-            None,
-            (!ambiguous).then_some(scope.as_str()),
-        )?;
-        Ok(())
-    }
-    #[cfg(test)]
-    pub(crate) fn already_projected_own_sent_message(
-        &self,
-        message: &DirectMessageRecord,
-        content: Option<&[u8]>,
-    ) -> Result<bool, SdkError> {
-        let db = self.account_db()?;
-        let alias = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
-            db,
-            &message.message_id,
-        )?)?;
-        let digest = (!message.encrypted_body.is_empty())
-            .then(|| own_sent_ciphertext_hash(&message.encrypted_body));
-        let indexed = digest
-            .as_deref()
-            .map(|hash| {
-                db.load_actor_state::<ramflux_storage::MessageReplayReference>(
-                    &ciphertext_index_key(db, hash)?,
-                )
-            })
-            .transpose()?
-            .flatten();
-        let Some(id) =
-            alias.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id).or_else(
-                || indexed.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id),
-            )
-        else {
-            return Ok(false);
-        };
-        let Some(row) = self.direct_message_by_id(id)? else { return Ok(false) };
-        Ok(row.conversation_id == message.conversation_id
-            && (row.deleted || db.message_content(id)?.as_deref() == content))
-    }
     pub(crate) fn own_original_recipient(
         &self,
         message: &GatewayDirectMessage,
@@ -567,7 +462,6 @@ impl RamfluxClient {
                 })?;
             }
         }
-        self.index_own_sent_original(conversation, &packet.message_id, &id)?;
         if history.as_ref().is_some_and(|row| row.deleted) || alias_deleted {
             // Keep authenticated replay aliases without restoring deleted content or attribution.
             self.index_own_sent_projection(source, envelope, &id, ciphertext_hash)?;
@@ -617,20 +511,8 @@ impl RamfluxClient {
             )?)?
             .and_then(|reference| reference.message_id().map(str::to_owned));
         let hash = packet.ciphertext_hash.as_deref();
-        let scope = db.own_sent_index_digest("conversation", conversation)?;
-        let imported = hash
-            .map(|hash| {
-                db.load_actor_state::<ramflux_storage::MessageReplayReference>(
-                    &imported_ciphertext_key(db, hash)?,
-                )
-            })
-            .transpose()?
-            .flatten()
-            .filter(|record| record.scope() == Some(scope.as_str()));
-        let imported_id =
-            imported.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id);
-        let Some(row) = self
-            .direct_message_by_id(known.as_deref().or(imported_id).unwrap_or(&packet.message_id))?
+        let Some(row) =
+            self.direct_message_by_id(known.as_deref().unwrap_or(&packet.message_id))?
         else {
             return Ok(None);
         };
@@ -658,9 +540,8 @@ impl RamfluxClient {
                 claim.as_ref().is_none_or(|claim| {
                     claim.message_id() == Some(row.message_id.as_str())
                         && claim.binding() == Some(expected.as_str())
-                }) && (imported_id == Some(row.message_id.as_str())
-                    || (!row.encrypted_body.is_empty()
-                        && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())))
+                }) && !row.encrypted_body.is_empty()
+                    && hash == Some(own_sent_ciphertext_hash(&row.encrypted_body).as_str())
             };
         if source_matches
             && (row.deleted || db.message_content(&row.message_id)?.as_deref() == Some(body))
@@ -699,24 +580,6 @@ fn alias_key(
     message: &str,
 ) -> Result<String, ramflux_storage::StorageError> {
     Ok(format!("own-device/sent-alias/{}", db.own_sent_index_digest("alias", message)?))
-}
-
-#[cfg(test)]
-fn imported_ciphertext_key(
-    db: &ramflux_storage::AccountDb,
-    hash: &str,
-) -> Result<String, ramflux_storage::StorageError> {
-    Ok(format!("own-device/imported-ciphertext/{}", db.own_sent_index_digest("imported", hash)?))
-}
-
-#[cfg(test)]
-fn original_index_prefix(
-    db: &ramflux_storage::AccountDb,
-    conversation: &str,
-    original: &str,
-) -> Result<String, SdkError> {
-    let selector = serde_json::to_string(&(conversation, original))?;
-    Ok(format!("own-device/sent-original/{}/", db.own_sent_index_digest("original", &selector)?))
 }
 
 #[cfg(test)]

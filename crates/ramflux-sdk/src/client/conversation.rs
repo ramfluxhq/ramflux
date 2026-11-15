@@ -381,30 +381,13 @@ impl RamfluxClient {
 mod tests {
     use super::*;
 
-    fn temp_root(test_name: &str) -> ramflux_test_support::TestPath {
-        let nanos =
-            SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
-        ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(format!("ramflux-sdk-conversation-list-{test_name}-{nanos}"))
-    }
-
-    fn client_with_account(
-        test_name: &str,
-    ) -> Result<(ramflux_test_support::TestPath, RamfluxClient), SdkError> {
-        let root = temp_root(test_name);
-        let mut client = RamfluxClient::new();
-        client.create_identity_root("principal_conv", [0x71; 32]);
-        client.create_device_branch("principal_conv", "device_conv", 1, [0x72; 32]);
-        client.open_account_index(&root)?;
-        client.create_account("acct", "principal_conv")?;
-        client.unlock_account("acct", b"conversation-list-test")?;
-        Ok((root, client))
-    }
-
     #[test]
     fn conversation_list_returns_inserted_conversations() -> Result<(), SdkError> {
-        let (_root, client) = client_with_account("returns-inserted")?;
+        let fixture = crate::client::native_test_support::account::blocking(
+            "returns-inserted",
+            "device_conv",
+        )?;
+        let client = &fixture.client;
         let metadata = MessageMetadata::default();
         client.account_db()?.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "conv_one",

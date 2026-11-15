@@ -21,21 +21,6 @@ impl NativeOperation {
     }
 }
 impl RamfluxClient {
-    #[cfg(test)]
-    pub(crate) fn require_native_sync(
-        &self,
-        root: &str,
-        sender: &str,
-        receiver: &str,
-    ) -> Result<(), SdkError> {
-        for device in [sender, receiver] {
-            self.require_native_operation(
-                &self.device_identity_for_root(root, device)?,
-                NativeOperation::Sync,
-            )?;
-        }
-        Ok(())
-    }
     pub(crate) fn require_native_operation(
         &self,
         device: &RootQualifiedDeviceRef,

@@ -750,8 +750,6 @@ impl RamfluxClient {
                     },
                 )
                 .map_err(SdkError::from);
-            #[cfg(test)]
-            super::own_device_sync::historical_refusal_tests::registered(&registration);
             match registration {
                 Ok(()) => {}
                 Err(SdkError::ObjectErased) if CONSUME_ERASED => {
