@@ -11,6 +11,25 @@ use crate::session_push::tests::support::sink;
 use ramflux_protocol::SignedRequest;
 use serde_json::{Value, json};
 
+static SIGNING_SEEDS: std::sync::Mutex<std::collections::BTreeMap<String, [u8; 32]>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Fixtures whose session identity is a real native account sign with that account's branch
+/// key; every other runtime keeps the shared fixture seed.
+pub(crate) fn register_signing_seed(branch_public_key: &str, seed: [u8; 32]) {
+    if let Ok(mut seeds) = SIGNING_SEEDS.lock() {
+        seeds.insert(branch_public_key.to_owned(), seed);
+    }
+}
+
+pub(crate) fn signing_seed(runtime: &crate::GatewaySessionRuntime) -> [u8; 32] {
+    SIGNING_SEEDS
+        .lock()
+        .ok()
+        .and_then(|seeds| seeds.get(&runtime.branch_public_key).copied())
+        .unwrap_or([4; 32])
+}
+
 pub(super) fn unix_now() -> i64 {
     i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX)
 }
@@ -39,7 +58,7 @@ pub(crate) fn submit(
     change(&mut envelope);
     envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
         &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-        [4; 32],
+        signing_seed(runtime),
     );
     let signed_request = signed_request_for(runtime, &envelope, now)?;
     Ok(ramflux_node_core::GatewaySubmitFrame {
@@ -63,14 +82,18 @@ fn signed_request_for(
         ramflux_protocol::domain::ENVELOPE,
         &ramflux_protocol::canonical_json_bytes(envelope)?,
     );
-    resign(&mut request)?;
+    resign_with(&mut request, signing_seed(runtime))?;
     Ok(request)
 }
 
 fn resign(request: &mut SignedRequest) -> TestResult {
+    resign_with(request, [4; 32])
+}
+
+fn resign_with(request: &mut SignedRequest, seed: [u8; 32]) -> TestResult {
     request.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
         &ramflux_protocol::signed_bytes(request)?,
-        [4; 32],
+        seed,
     );
     Ok(())
 }

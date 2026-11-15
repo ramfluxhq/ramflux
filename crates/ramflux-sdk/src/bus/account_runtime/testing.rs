@@ -506,7 +506,11 @@ impl AccountSessionHarness {
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
         let message = crate::GatewayDirectMessage {
-            conversation_id: "transport-control".into(),
+            conversation_id: ramflux_protocol::message::dm_scope::derive(
+                &account.client.surface_local_root_commitment()?,
+                peer_root,
+            )
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?,
             message_id: "durable-control".into(),
             envelope_id: "account-durable-control".into(),
             source_principal_id: account.gateway_config.principal_id.clone(),

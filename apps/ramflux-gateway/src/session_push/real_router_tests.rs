@@ -18,6 +18,15 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
 async fn real_router_with_state(
     seed: Option<&ramflux_node_core::RouterCore>,
 ) -> anyhow::Result<(Child, GatewayQuicContext)> {
+    real_router_with_publications(seed, &[]).await
+}
+
+/// Start the real router with native custody publications already stored, as a node that
+/// accepted them before this process started.
+async fn real_router_with_publications(
+    seed: Option<&ramflux_node_core::RouterCore>,
+    publications: &[ramflux_node_core::CustodyPublication],
+) -> anyhow::Result<(Child, GatewayQuicContext)> {
     let root = temp_cert_root("p17-real-router").map_err(|e| anyhow::anyhow!("{e}"))?;
     let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -41,9 +50,21 @@ async fn real_router_with_state(
     )?;
     ramflux_node_core::load_config(&config, "ramflux-router")?;
     drop(udp);
-    if let Some(seed) = seed {
+    if seed.is_some() || !publications.is_empty() {
         let store = ramflux_node_core::RouterRedbStore::open(root.join("router.redb"))?;
-        store.save_router(seed)?;
+        let fresh;
+        let core = match seed {
+            Some(core) => core,
+            None => {
+                fresh = ramflux_node_core::RouterCore::new();
+                &fresh
+            }
+        };
+        store.save_router(core)?;
+        let now = ramflux_node_core::now_unix_seconds();
+        for publication in publications {
+            core.publish_custody_record(publication, now, &store)?;
+        }
     }
     let process = std::process::Command::new(
         std::env::var_os("RAMFLUX_P17_ROUTER_BINARY")
