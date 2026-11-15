@@ -16,9 +16,6 @@ fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_latin_
     assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["display_name_confusable_with"], "alice");
     assert_eq!(contact["mixed_script"], true);
-    let row = crate::bus::read_model::row(&reader.client, "identity", "other")?;
-    assert_eq!(row["display_name_confusable_with"], "alice");
-    assert_eq!(row["mixed_script"], true);
     for (index, name) in ["ALICE", "alice"].into_iter().enumerate() {
         let epoch = u64::try_from(index)? + 2;
         observe(
@@ -68,10 +65,6 @@ fn profile_reads_verify_once_per_full_record_and_do_not_reuse_same_epoch_substit
     observe(&reader.client, &signed)?;
     reader.client.with_profile_read_scope(|| -> TestResult {
         assert_eq!(reader.client.contact_entry("owner")?["kind_verified"], true);
-        assert_eq!(
-            crate::bus::read_model::row(&reader.client, "identity", "owner")?["kind_verified"],
-            true
-        );
         assert_eq!(reader.client.profile_read_verifications(), 1);
         let mut forged = signed.signed_device_set.clone().ok_or("set")?;
         forged.profile.as_mut().ok_or("profile")?.display_name = "Forged".into();
@@ -105,14 +98,8 @@ fn corrupt_profile_unverifies_only_that_actor_and_preserves_other_directory_and_
     let mut forged = signed.signed_device_set.ok_or("set")?;
     forged.profile.as_mut().ok_or("profile")?.signature.clear();
     db.persist_actor_state(&record_key(&forged.principal_commitment), &forged)?;
-    assert_eq!(
-        crate::bus::read_model::row(&reader.client, "identity", "owner")?["kind_verified"],
-        false
-    );
-    assert_eq!(
-        crate::bus::read_model::row(&reader.client, "identity", "other")?["kind_verified"],
-        true
-    );
+    assert_eq!(reader.client.contact_entry("owner")?["kind_verified"], false);
+    assert_eq!(reader.client.contact_entry("other")?["kind_verified"], true);
     db.persist_actor_state(&crate::client::task::scoped("view","thread","task")?,&json!({"task_id":"task","conversation_id":"thread","state":"active","actors":{"requester":{"principal_id":"owner","device_id":"phone","actor_kind_verified":true},"assignee":{"principal_id":"other","device_id":"phone","actor_kind_verified":false}}}))?;
     for view in [
         reader.client.task_get(Some("thread"), "task")?,

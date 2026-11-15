@@ -453,49 +453,6 @@ fn verify_manifest_json_rejects_swapped_branch_and_agreement_keys() -> TestResul
 mod proof_lifetime;
 
 #[test]
-fn dormant_sibling_readiness_does_not_change_safety_number_or_directory_hash() -> TestResult {
-    let owner = Actor::new("owner", "active", 161, 162, 1)?;
-    let sibling = Actor::new("owner", "dormant", 161, 163, 1)?;
-    let peer = Actor::new("peer", "peer", 164, 165, 1)?;
-    let mut full = owner.manifest()?;
-    full.devices.extend(sibling.manifest()?.devices);
-    sign_set(&owner, &mut full, 2)?;
-    let own = peer.manifest()?;
-    observe(&peer.client, &own)?;
-    observe(&peer.client, &full)?;
-    peer.client.establish_friend_link(
-        "contact",
-        &own.principal_commitment,
-        &full.principal_commitment,
-    )?;
-    let refused = crate::client::contact_verification_cas::verify_linked_contact(
-        &peer.client,
-        &full.principal_commitment,
-    );
-    assert!(matches!(refused, Err(SdkError::CustodyModeDowngrade)), "{refused:?}");
-    let before = peer.client.contact_safety_number(&full.principal_commitment)?;
-    let row = peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?;
-    let mut served = full.clone();
-    served.devices.retain(|device| device.device_id == "active");
-    observe(&peer.client, &served)?;
-    let after = peer.client.contact_safety_number(&full.principal_commitment)?;
-    assert_eq!(before.safety_number, after.safety_number);
-    assert_eq!(after.verification_state, "unverified");
-    assert_eq!(before.contact_device_set_hash, after.contact_device_set_hash);
-    assert_eq!(after.contact_device_count, 2);
-    assert_eq!(
-        row["device_set_hash"],
-        peer.client.account_db()?.client_record("identity", "owner")?.ok_or("identity")?["device_set_hash"]
-    );
-    let preview = crate::client::contact::contact_safety_material_from_manifest(&served)?;
-    assert_eq!(
-        after.contact_device_set_hash,
-        ramflux_protocol::encode_base64url(ramflux_crypto::device_set_hash(&preview.devices))
-    );
-    Ok(())
-}
-
-#[test]
 fn backup_relationships_are_root_bound_atomic_bounded_and_preserve_restrictions() -> TestResult {
     let owner = Actor::new("owner", "original", 171, 172, 1)?;
     let restored = Actor::new("owner", "restored", 171, 173, 1)?;

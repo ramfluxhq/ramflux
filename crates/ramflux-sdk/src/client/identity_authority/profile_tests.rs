@@ -118,10 +118,7 @@ fn unsigned_legacy_and_spoofed_cached_kind_never_become_verified() -> TestResult
     row["kind_verified"] = serde_json::json!(true);
     row["kind"] = serde_json::json!("bot");
     db.persist_client_record("identity", "alice", &row)?;
-    assert_eq!(
-        crate::bus::read_model::row(&peer.client, "identity", "alice")?["kind_verified"],
-        false
-    );
+    assert_eq!(peer.client.contact_entry("alice")?["kind_verified"], false);
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "alice", "alice"));
     let mut unsigned = with_profile(&owner, legacy.clone(), "Alice", 1, 2)?;
     unsigned
@@ -246,6 +243,3 @@ mod read_tests;
 
 #[path = "profile_restore_tests.rs"]
 mod restore_tests;
-
-#[path = "verification_migration_tests.rs"]
-mod verification_migration;

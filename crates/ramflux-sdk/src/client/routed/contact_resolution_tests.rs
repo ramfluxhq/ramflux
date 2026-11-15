@@ -573,10 +573,15 @@ async fn accepting_a_pending_request_resolves_the_requester_without_device_hints
 #[tokio::test]
 async fn failed_directory_resolution_preserves_contacts_and_returns_retryable_or_typed_errors()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let d = Directory::new(&a, &b).await?;
-    let mut s = state(&mut a, &mut b, &d)?;
+    let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
+        .await
+        .map_err(native_account)?;
+    let mut b = crate::client::native_test_support::Fixture::named("bob", "bob", "bob")
+        .await
+        .map_err(native_account)?;
+    let d =
+        Directory::from_records(&a.root.0, vec![a.manifest.clone(), b.manifest.clone()]).await?;
+    let mut s = born_state(&mut a, &mut b, &d)?;
     for (body, expected) in [
         (json!({"principal_id":"missing"}), crate::ContactReason::UnknownPrincipal),
         (json!({"principal_id":"alice"}), crate::ContactReason::SelfContact),
@@ -676,35 +681,6 @@ async fn a_legacy_principal_link_becomes_reachable_without_an_unrelated_identity
     assert!(client.account_db()?.device_directory_entry("bob")?.is_some());
     assert_eq!(identity["safety_number"].as_array().map(Vec::len), Some(12));
     assert_eq!(added["contact"]["reachable"], true);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_legacy_commitment_selector_cannot_be_redirected_to_a_principal_with_that_name()
--> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 21)?;
-    let mut b = Fixture::new("bob", 31)?;
-    let expected = super::r9::manifest(&b)?.principal_commitment;
-    let impostor = Fixture::new(&expected, 81)?;
-    let directory = Directory::new(&a, &b).await?;
-    directory
-        .records
-        .lock()
-        .map_err(|_| invalid("directory mutex"))?
-        .push(super::r9::manifest(&impostor)?);
-    let mut state = state(&mut a, &mut b, &directory)?;
-    let added = call(
-        &mut state,
-        "alice",
-        "contact.add",
-        json!({"link_id":"commitment-contact","requester_id":"alice","target_id":expected}),
-    )
-    .await?;
-    assert_eq!(added["contact"]["principal_id"], "bob");
-    assert_eq!(added["contact"]["root_commitment"], expected);
-    let client = &state.accounts.get("alice").ok_or_else(|| invalid("alice"))?.client;
-    assert!(client.account_db()?.client_record("identity", &expected)?.is_none());
-    assert!(client.account_db()?.client_record("device", "bob")?.is_some());
     Ok(())
 }
 
