@@ -11,7 +11,7 @@ fn copied_device_and_envelope_ids_have_independent_root_replay_buckets()
     let root = ramflux_crypto::create_identity_root("mallory", [0xa1; 32]);
     let branch = ramflux_crypto::create_device_branch("mallory", "bob", 1, [0xa2; 32]);
     let mallory = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-    let mut message = envelope("next-bob-envelope", "target", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("next-bob-envelope", "target", DeliveryClass::Message);
     message.source_device_id = "bob".into();
     let now = message.created_at;
     let mut guard = NodeReplayGuardState::new();
@@ -230,7 +230,7 @@ fn signed_request_capacity_is_root_scoped_and_survives_restore()
 #[test]
 fn router_envelopes_ignore_gateway_replay_capacity() -> Result<(), Box<dyn std::error::Error>> {
     let bob = replay_source("bob")?;
-    let mut message = envelope("router-beyond-gateway-cap", "target", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("router-beyond-gateway-cap", "target", DeliveryClass::Message);
     message.source_device_id = "bob".into();
     let mut guard = NodeReplayGuardState::new();
     // Exercise the exact r1 rejection boundary; these current request keys remain live.

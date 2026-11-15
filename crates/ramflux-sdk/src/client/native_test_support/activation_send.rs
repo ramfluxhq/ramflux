@@ -145,26 +145,6 @@ pub(crate) mod tests {
         }).await?
     }
 
-    #[test]
-    fn retired_group_json_refuses_before_account_or_key_access() {
-        let client = RamfluxClient::new();
-        for result in [
-            client.encrypt_group_message("missing-group", "missing-device", b"old payload"),
-            client.decrypt_group_message("missing-thread", "missing-message"),
-        ] {
-            assert!(
-                matches!(
-                    result,
-                    Err(SdkError::GeneratedRefused {
-                        code: crate::GeneratedRefusalCode::Content,
-                        ..
-                    })
-                ),
-                "retired group JSON APIs must refuse Content before touching an account or key"
-            );
-        }
-    }
-
     pub(crate) async fn media_pair() -> TestResult<(Fixture, Fixture, g::Message)> {
         // Publication requires a timestamp strictly after genesis. Establish that
         // precondition without a future-dated record or a wall-clock sleep.

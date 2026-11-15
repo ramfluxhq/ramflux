@@ -299,7 +299,6 @@ impl RamfluxClient {
         limit: usize,
         conversation_id: &str,
         auto_fetch_attachments: bool,
-        _relay_service_key_base64: Option<String>,
     ) -> Result<Vec<GatewayPlaintextDelivery>, SdkError> {
         self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;

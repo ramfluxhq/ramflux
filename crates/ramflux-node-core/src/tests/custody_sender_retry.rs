@@ -54,7 +54,7 @@ fn native_sender_retries_attach_and_reuse_durable_assignment() -> Result {
             let target = session.target_delivery_id.clone();
             store.initialize_inbox(&target)?;
             router.prepare_publication_target(&store, &target)?;
-            let mut envelope = envelope("native-retry", &target, DeliveryClass::OpaqueEvent);
+            let mut envelope = envelope("native-retry", &target, DeliveryClass::Message);
             envelope.source_principal_id = "alice".into();
             envelope.source_device_id = "primary".into();
             envelope.created_at = i64::try_from(NOW)?;

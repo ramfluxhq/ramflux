@@ -208,12 +208,15 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     }
     rows.sort_by_key(|(_, work)| work.at);
     let mut selected = None;
-    for (key, work) in rows {
+    for (key, mut work) in rows {
         if db.message_is_deleted(&work.message)? {
             discard(&account.client, &key, &work)?;
         } else if work.retry_from.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
         } else {
+            if work.refresh_expired_transport(now) {
+                db.persist_actor_state(&key, &work)?;
+            }
             match receipt_message(account, &account.gateway_config, &work) {
                 Ok(message) => {
                     selected = Some((key, work, message));
@@ -480,6 +483,7 @@ pub(crate) async fn test_fetch_material(
         sender: "receipt-peer".into(),
         root: None,
         at: 0,
+        sealed_at: 0,
         retry_from: 0,
         attempts: 0,
         next_at: 0,

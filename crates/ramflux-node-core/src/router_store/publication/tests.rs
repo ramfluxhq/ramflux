@@ -45,7 +45,7 @@ pub(crate) fn entry(seq: u64) -> InboxEntry {
         source_device_id: "device".into(),
         target_delivery_id: "target".into(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: ramflux_protocol::Priority::Normal,
         ttl: 3600,
         created_at: i64::try_from(crate::now_unix_seconds()).expect("time"),

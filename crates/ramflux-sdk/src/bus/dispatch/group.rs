@@ -132,8 +132,8 @@ async fn dispatch_group_bus_request_inner(
                 .map_err(|error| {
                     SdkError::LocalBus(format!("invalid sender key distribution: {error}"))
                 })?;
-            let (distribution, _pending) =
-                account.client.import_group_sender_key_distribution_inner(&distribution, true)?;
+            let distribution =
+                account.client.import_group_sender_key_distribution(&distribution)?;
             let mut value = serde_json::to_value(distribution)?;
             let imported_group_id = value["group_id"]
                 .as_str()

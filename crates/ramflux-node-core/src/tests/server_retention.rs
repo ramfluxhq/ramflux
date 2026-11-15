@@ -7,16 +7,16 @@ use super::*;
 fn server_retention_full_ack_window_dead_letters_the_stuck_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    let first = inbox.append(envelope("first", "target", DeliveryClass::OpaqueEvent));
+    let first = inbox.append(envelope("first", "target", DeliveryClass::Message));
     for index in 0..crate::inbox::ROUTER_ACK_WINDOW {
         let id = format!("next-{index}");
-        let entry = inbox.append(envelope(&id, "target", DeliveryClass::OpaqueEvent));
+        let entry = inbox.append(envelope(&id, "target", DeliveryClass::Message));
         let mut request = ack(&id);
         request.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
         inbox.apply_ack_for_target("target", &request)?;
     }
     assert_eq!(inbox.pull_after("target", 0, 10).len(), 1, "the gap is preserved");
-    let extra = inbox.append(envelope("extra", "target", DeliveryClass::OpaqueEvent));
+    let extra = inbox.append(envelope("extra", "target", DeliveryClass::Message));
     let mut extra_ack = ack("extra");
     extra_ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(extra.inbox_seq));
     // A full window dead-letters the stuck head instead of refusing the ACK.
@@ -38,8 +38,8 @@ fn server_retention_full_ack_window_dead_letters_the_stuck_head()
 fn server_retention_inbox_expiry_preserves_live_gaps_and_sequence_watermarks()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    let first = inbox.append(envelope("live", "target", DeliveryClass::OpaqueEvent));
-    let mut old = envelope("expired", "target", DeliveryClass::OpaqueEvent);
+    let first = inbox.append(envelope("live", "target", DeliveryClass::Message));
+    let mut old = envelope("expired", "target", DeliveryClass::Message);
     old.ttl = 1;
     let expired = inbox.append(old);
     assert_eq!(inbox.expire(1_760_000_002), 1);
@@ -84,7 +84,7 @@ fn server_retention_router_gc_is_dry_run_safe_and_survives_restart()
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
-    let mut message = envelope("retire", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("retire", "mailbox", DeliveryClass::Message);
     message.ttl = 1;
     let entry = inbox.append(message);
     store.record_submission_increment(
@@ -280,7 +280,7 @@ fn server_retention_router_wal_does_not_resurrect_expired_entries()
     let now = i64::try_from(now_unix_seconds())?;
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
     let mut inbox = OpaqueDeviceInbox::new();
-    let mut message = envelope("retire-wal", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("retire-wal", "mailbox", DeliveryClass::Message);
     message.created_at = now;
     message.ttl = 600;
     let entry = inbox.append(message);
@@ -360,7 +360,7 @@ fn server_retention_retired_notify_routes_are_refused_without_rewriting()
 fn server_retention_legacy_ack_receipts_are_bounded_without_forgetting_gaps()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    let entry = inbox.append(envelope("pending-gap", "target", DeliveryClass::OpaqueEvent));
+    let entry = inbox.append(envelope("pending-gap", "target", DeliveryClass::Message));
     let mut cursor = inbox.cursor_state("target").ok_or("cursor")?.clone();
     cursor.issued_inbox_seq = 3000;
     cursor.inbox_seq = 3000;

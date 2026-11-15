@@ -17,8 +17,6 @@ pub(super) struct Query {
     pub(super) message: Option<String>,
 }
 
-impl Query {}
-
 /// Request body of the durable reader. Exactly one of page, change batch or single message.
 pub(super) fn request_body(query: &Query) -> Result<serde_json::Value, RfError> {
     let mut body = serde_json::json!({ "conversation_id": query.conversation });

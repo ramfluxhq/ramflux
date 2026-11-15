@@ -68,7 +68,21 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
     Ok(())
 }
 
+/// Generation 1 carries exactly two envelope delivery classes. Every other class is refused
+/// here, once, for every ingress that checks the entry bound.
+fn require_generation_one_class(
+    envelope: &ramflux_protocol::Envelope,
+) -> Result<(), NodeCoreError> {
+    match envelope.delivery_class {
+        ramflux_protocol::DeliveryClass::Message | ramflux_protocol::DeliveryClass::CallWake => {
+            Ok(())
+        }
+        _ => Err(NodeCoreError::DeliveryClassRefused),
+    }
+}
+
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
+    require_generation_one_class(envelope)?;
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope)
         .map_err(map_outer_profile)?;

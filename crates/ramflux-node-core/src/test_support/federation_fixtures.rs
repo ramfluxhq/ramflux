@@ -218,7 +218,7 @@ pub fn federation_forward_request(
         target_node_id: "node_b.example".to_owned(),
         delivery_class: "opaque_event".to_owned(),
         required_capability: "opaque_delivery".to_owned(),
-        envelope: envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent),
+        envelope: envelope(envelope_id, target_delivery_id, DeliveryClass::Message),
     }
 }
 

@@ -324,7 +324,7 @@ fn marked_forward(
                 "signing_key_id":"device","signature_alg":"ed25519","signature":"sig",
                 "envelope_id": format!("fed_{ordinal}"),
                 "source_principal_id":"alice","source_device_id":"alice_phone",
-                "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
+                "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"message",
                 "priority":"low","ttl":5,"created_at": now,
                 "encrypted_payload":"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA","payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA"),"delivery_mode":"durable","collapse_tag": ramflux_protocol::encode_base64url([0x22_u8; 32]),"report_commitment": ramflux_protocol::encode_base64url([0x33_u8; 32])
             }

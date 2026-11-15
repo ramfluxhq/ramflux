@@ -136,6 +136,9 @@ async fn send(
     key: &str,
     work: &mut Work,
 ) -> Result<(), SdkError> {
+    if work.refresh_expired_transport(now_unix_timestamp()) {
+        account.client.account_db()?.persist_actor_state(key, work)?;
+    }
     let (mut message, body) = receipt_message(account, engine.config(), work)?;
     if work.packet.is_none() {
         let sealed = account
@@ -252,7 +255,7 @@ fn receipt_message(
         recipient_principal_commitment: Some(source.root_commitment().into()),
         target_delivery_id: target.into(),
         encrypted_body: Vec::new(),
-        created_at: work.at,
+        created_at: work.sealed_at,
         ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
     let prepared = account.client.prepare_generated_receipt(&mut message, &event)?;

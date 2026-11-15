@@ -134,6 +134,22 @@ enum PreparedSubmit {
     Waiting(ramflux_node_core::sender_retry::RetryWaiter),
 }
 
+/// The typed refusal for a submission that fails the generation-1 mode or class admission.
+fn entry_bound_refusal(
+    admission: &Result<(), ramflux_node_core::NodeCoreError>,
+    target_delivery_id: &str,
+) -> Option<ramflux_node_core::EnvelopeSubmitResponse> {
+    match admission {
+        Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused) => {
+            Some(crate::durable_mode::rejected_security_for_target(target_delivery_id))
+        }
+        Err(ramflux_node_core::NodeCoreError::DeliveryClassRefused) => {
+            Some(crate::durable_mode::rejected_class_for_target(target_delivery_id))
+        }
+        _ => None,
+    }
+}
+
 fn prepare_submission(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -142,11 +158,11 @@ fn prepare_submission(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<PreparedSubmit> {
-    if matches!(
-        ramflux_node_core::check_entry_bound(&envelope),
-        Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused)
+    if let Some(refusal) = entry_bound_refusal(
+        &ramflux_node_core::check_entry_bound(&envelope),
+        &envelope.target_delivery_id,
     ) {
-        return Ok(complete_response(crate::durable_mode::rejected_security(&envelope)));
+        return Ok(complete_response(refusal));
     }
     record_decoded(&envelope);
     let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
@@ -466,6 +482,7 @@ fn committed_forward_error_outcome(
             }
         }
         ramflux_node_core::NodeCoreError::DeliveryModeRefused
+        | ramflux_node_core::NodeCoreError::DeliveryClassRefused
         | ramflux_node_core::NodeCoreError::PayloadTooLarge
         | ramflux_node_core::NodeCoreError::InvalidConfiguration(_) => {
             ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {

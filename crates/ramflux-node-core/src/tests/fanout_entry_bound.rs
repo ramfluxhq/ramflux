@@ -20,8 +20,7 @@ fn entry_admission_all_origins_fanout() -> Result {
                 registration.session_id = format!("session_{device}");
                 router.mvp1_register_identity(&registration)?;
             }
-            let mut raw =
-                envelope("parent-entry-bound", "unused", DeliveryClass::SelfDeviceControl);
+            let mut raw = envelope("parent-entry-bound", "unused", DeliveryClass::Message);
             raw.created_at = i64::try_from(crate::now_unix_seconds())?;
             let envelope = signed_registered_envelope(raw, "fanout", "source", 601)?;
             let mut normalized = envelope.clone();
@@ -131,7 +130,7 @@ fn legacy_fanout_prepares_and_measures_each_child_once() -> Result {
                 registration.session_id = format!("session_{device}");
                 router.mvp1_register_identity(&registration)?;
             }
-            let mut raw = envelope("legacy-once", "unused", DeliveryClass::SelfDeviceControl);
+            let mut raw = envelope("legacy-once", "unused", DeliveryClass::Message);
             raw.created_at = i64::try_from(crate::now_unix_seconds())?;
             raw.encrypted_payload = ramflux_protocol::encode_base64url(
                 ramflux_protocol::message::outer::encode_compact_cryptobox(

@@ -391,10 +391,10 @@ crates/ramflux-protocol/src/message/original_header/edited.rs | check | 1 | A | 
 crates/ramflux-protocol/src/message/original_header/edited.rs | check | 2 | C | admission=crates/ramflux-protocol/src/message/original_header/edited.rs#check#1
 crates/ramflux-protocol/src/message/outer/compact.rs | compact_cryptobox_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/message/outer/mod.rs | cryptobox_from_sidecar | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 1 | E | excluded=dormant candidate outer; becomes class A at P24 activation
-crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 2 | E | excluded=dormant candidate outer; becomes class A at P24 activation
-crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_candidate_sidecar_in | 1 | E | excluded=dormant candidate sidecar; becomes class A at P24 activation
-crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_sidecar_value | 1 | E | excluded=dormant candidate sidecar; becomes class A at P24 activation
+crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 1 | A | strict=parse_i_json; admission=A ingress boundary
+crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 2 | E | excluded=from_value over the value already strictly parsed by parse_i_json at ordinal 1
+crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_candidate_sidecar_in | 1 | A | strict=parse_i_json; admission=A ingress boundary
+crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_sidecar_value | 1 | E | excluded=from_value over a sidecar value already strictly parsed by parse_i_json in decode_candidate_sidecar_in
 crates/ramflux-protocol/src/message/protojson.rs | from_protojson | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/message/scanner.rs | validate_string | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/tasks/event.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

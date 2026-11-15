@@ -100,31 +100,6 @@ async fn native_group_isolation() -> crate::client::native_test_support::TestRes
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn retired_group_codecs_refuse_before_any_account_write() -> Result<(), SdkError> {
-    let native =
-        Fixture::new("retired-group-codec").await.map_err(|error| fixture_error(error.as_ref()))?;
-    let before = codec_rows(&native.client)?;
-    for result in [
-        native.client.encrypt_group_message("group", "primary", b"retired plaintext"),
-        native.client.decrypt_group_message("thread", "message"),
-    ] {
-        assert!(
-            matches!(
-                result,
-                Err(SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Content, .. })
-            ),
-            "retired group producers and readers must return typed Content refusal"
-        );
-    }
-    assert_eq!(
-        codec_rows(&native.client)?,
-        before,
-        "codec refusal must precede identity, ratchet, and queue allocation"
-    );
-    Ok(())
-}
-
 /// A committed receive ledger forbids the old unrouted replay executor before decoding rows.
 pub(super) async fn activated_group_unrouted_replay_refused() -> Result<(), SdkError> {
     let native = Fixture::with_principal("activated-group-guard", "device-bob", "bob")
@@ -194,11 +169,4 @@ pub(super) async fn activated_group_unrouted_replay_refused() -> Result<(), SdkE
         "entry refusal must preserve the retained row"
     );
     Ok(())
-}
-
-fn codec_rows(client: &RamfluxClient) -> Result<Vec<(u64, u64)>, SdkError> {
-    ["routed/", "message-send/", "dm-pair/", "group-state/"]
-        .into_iter()
-        .map(|prefix| Ok(client.account_db()?.actor_state_usage(prefix)?))
-        .collect()
 }

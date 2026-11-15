@@ -2669,7 +2669,7 @@ mod tests {
             source_device_id: "device_router_wal".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
-            delivery_class: DeliveryClass::OpaqueEvent,
+            delivery_class: DeliveryClass::Message,
             priority: Priority::Normal,
             ttl: 300,
             created_at: 1_760_000_000,

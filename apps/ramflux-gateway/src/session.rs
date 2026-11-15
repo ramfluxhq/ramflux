@@ -2968,7 +2968,7 @@ pub(crate) mod tests {
             source_device_id: "alice-device".to_owned(),
             target_delivery_id: "target-bob".to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 3_600,
             created_at: 1_760_000_000,

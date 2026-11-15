@@ -121,7 +121,7 @@ mod tests {
             envelope: crate::test_support::federation_fixtures::envelope(
                 "row",
                 "target",
-                ramflux_protocol::DeliveryClass::OpaqueEvent,
+                ramflux_protocol::DeliveryClass::Message,
             ),
         };
         let db = redb::Database::open(&path)?;

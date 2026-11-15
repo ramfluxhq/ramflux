@@ -47,13 +47,13 @@ pub const PRECONDITIONS: [Precondition; 10] = [
     Precondition { name: SELF_SYNC_COMPLETE, met: true },
     Precondition { name: TYPED_RUNTIME_COMPLETE, met: true },
     Precondition { name: LEGACY_CODEC_REMOVED, met: true },
-    // Provisional until storage schema_generation and raw_inner schema tests on this exact head.
+    // Attested by the storage schema_generation and raw_inner schema tests.
     Precondition { name: RAW_WIRE_RESET_INSTALLED, met: true },
-    // Provisional until cli-e2e including e2e_unified_gate on this exact head.
+    // Attested by cli-e2e including e2e_unified_gate.
     Precondition { name: REAL_COMPONENT_GATE_GREEN, met: true },
-    // Provisional until tampered_committed_binding_is_refused_and_never_served and candidate_binding on this exact head.
+    // Attested by tampered_committed_binding_is_refused_and_never_served and candidate_binding.
     Precondition { name: TAMPERED_BINDING_GATE_GREEN, met: true },
-    // Provisional until QA lane-gates ALL_GATES_OK and PR CI on this exact head.
+    // Attested by QA lane-gates ALL_GATES_OK and PR CI.
     Precondition { name: LANE_GATES_GREEN, met: true },
 ];
 
@@ -83,7 +83,7 @@ pub fn is_met(name: &str) -> bool {
 
 const _: () = assert!(
     activation_allowed(ACTIVE_STORAGE_GENERATION, &PRECONDITIONS),
-    "ACTIVE_STORAGE_GENERATION is not zero while an activation precondition is unmet; \
+    "ACTIVE_STORAGE_GENERATION requires every activation precondition to be attested; \
      see schema_activation::PRECONDITIONS"
 );
 

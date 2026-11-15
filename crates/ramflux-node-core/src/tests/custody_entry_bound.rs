@@ -13,7 +13,7 @@ fn entry_admission_all_origins_native_custody() -> Result {
             store.bootstrap_router(&router)?;
             let (driver, service, session) = publication_session(&router, &store)?;
             let target = session.target_delivery_id.clone();
-            let mut envelope = envelope("native-entry-bound", &target, DeliveryClass::OpaqueEvent);
+            let mut envelope = envelope("native-entry-bound", &target, DeliveryClass::Message);
             envelope.source_principal_id = "alice".into();
             envelope.source_device_id = "primary".into();
             envelope.created_at = i64::try_from(NOW)?;

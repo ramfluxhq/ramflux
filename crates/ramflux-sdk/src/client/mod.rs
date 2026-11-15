@@ -46,7 +46,6 @@ mod group_distribution_auth;
 mod group_identity;
 mod group_key_safety;
 #[cfg(test)]
-mod group_pending;
 #[cfg(test)]
 pub(crate) mod group_quarantine;
 pub mod group_session;

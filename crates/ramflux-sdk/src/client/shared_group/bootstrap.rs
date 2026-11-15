@@ -282,7 +282,7 @@ impl RamfluxClient {
                     issuer,
                 )?;
                 if distribution.version == 4 {
-                    self.import_group_key_for_identity(bytes, &source, false)?;
+                    self.import_group_key_for_identity(bytes, &source)?;
                     return Ok(changed);
                 }
                 let checkpoint = crate::group::group_key_checkpoint(
@@ -312,7 +312,7 @@ impl RamfluxClient {
                 }
                 // Repeated snapshots must never reset an already advanced receiver ratchet.
                 if self.projection_checkpoint(&checkpoint)?.is_none() {
-                    self.import_group_key_for_identity(bytes, &source, false)?;
+                    self.import_group_key_for_identity(bytes, &source)?;
                 }
                 self.account_db()?.persist_actor_state(&marker, &fingerprint)?;
             }

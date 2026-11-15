@@ -57,7 +57,7 @@ pub(super) fn envelope(
     let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
         id,
         target,
-        DeliveryClass::OpaqueEvent,
+        DeliveryClass::Message,
     );
     envelope.source_device_id = "sender".into();
     envelope.created_at = i64::try_from(ramflux_node_core::now_unix_seconds())?;

@@ -17,6 +17,10 @@ pub(super) struct Mailbox {
     pub lose_ack: bool,
     pub stall_receipts: bool,
     pub reject_id: Option<String>,
+    /// The real gateway replay guard (TTL, future-skew and replay checks) when installed.
+    pub guard: Option<ramflux_node_core::NodeReplayGuardState>,
+    /// Known senders the guard binds an envelope to.
+    pub guard_sources: Vec<ramflux_crypto::RootQualifiedDeviceRef>,
     prekeys: BTreeMap<String, crate::prekey::SdkPrekeyResponse>,
 }
 #[derive(Clone)]
@@ -741,6 +745,22 @@ impl Gateway {
         mail.submissions.push(envelope.clone());
         if mail.reject_id.as_deref() == Some(envelope.envelope_id.as_str()) {
             return Err(TransportError::Quic("injected receipt refusal".into()));
+        }
+        if mail.guard.is_some() {
+            let source = mail
+                .guard_sources
+                .iter()
+                .find(|s| {
+                    s.device_id() == envelope.source_device_id
+                        || s.storage_key() == envelope.source_device_id
+                })
+                .cloned()
+                .ok_or_else(|| TransportError::Quic("test: unknown guard source".into()))?;
+            if let Some(guard) = mail.guard.as_mut() {
+                guard
+                    .accept_envelope_once(&source, &envelope, now_unix_timestamp())
+                    .map_err(|error| TransportError::Quic(format!("gateway guard: {error}")))?;
+            }
         }
         let entry = if let Some(existing) = mail.messages.iter().find(|e| {
             e.envelope.source_device_id == envelope.source_device_id

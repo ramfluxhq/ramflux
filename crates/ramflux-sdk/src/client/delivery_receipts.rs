@@ -21,11 +21,28 @@ pub(crate) struct Work {
     /// Identity time of the receipt: `created_at`, `event_seq` and `delivered_at` derive from it
     /// and the cached sealed packet is bound to it, so it never changes across retries.
     pub at: i64,
+    /// `created_at` of the transport envelope that carries the receipt. It starts at `at` and is
+    /// moved forward only when the cached envelope is past its TTL, so the receipt identity
+    /// (receipt id, `event_seq`, `delivered_at`) is unchanged while the gateway accepts the packet.
+    pub sealed_at: i64,
     /// Start of the current retry window; the lifetime budget counts from here, not from `at`.
     pub retry_from: i64,
     pub attempts: u32,
     pub next_at: i64,
     pub packet: Option<ramflux_protocol::Envelope>,
+}
+impl Work {
+    /// Re-seals only the transport once the cached envelope is past `created_at + ttl`: the
+    /// logical receipt identity stays, so the recipient deduplicates it. Returns whether it moved.
+    pub(crate) fn refresh_expired_transport(&mut self, now: i64) -> bool {
+        let ttl = i64::from(crate::offline_retention::RECEIPT_TTL_SECS);
+        if now <= self.sealed_at.saturating_add(ttl) {
+            return false;
+        }
+        self.sealed_at = now;
+        self.packet = None;
+        true
+    }
 }
 pub(crate) fn id(
     conversation: &str,
@@ -129,6 +146,7 @@ impl RamfluxClient {
             sender: source.storage_key().into(),
             root: root.clone(),
             at,
+            sealed_at: at,
             retry_from: at,
             attempts: 0,
             next_at: at,
@@ -201,6 +219,7 @@ impl RamfluxClient {
                     sender: source.storage_key().into(),
                     root: Some(root.into()),
                     at: delivered_at,
+                    sealed_at: delivered_at,
                     retry_from: delivered_at,
                     attempts: 0,
                     next_at: 0,
@@ -215,13 +234,14 @@ impl RamfluxClient {
             {
                 return Err(SdkError::InboundRejected("receipt retry binding differs".into()));
             }
-            // The receipt keeps its identity (`at`) so the cached seal is retransmitted; only the
-            // retry window and the next attempt time move.
+            // The receipt keeps its identity (`at`). Within the envelope TTL the cached sealed
+            // packet is resent unchanged; past it the transport is re-sealed with a new
+            // `created_at` and the same receipt identity.
             let now = now_unix_timestamp();
             work.retry_from = now;
             work.next_at = now;
             work.attempts = 0;
-            work.packet = None;
+            work.refresh_expired_transport(now);
             db.persist_actor_state(&format!("{PREFIX}{status_id}"), &work)?;
             db.persist_receipt_state(
                 &status_key,

@@ -24,7 +24,7 @@ pub(super) fn entry(target: &str) -> crate::InboxEntry {
             source_device_id: "device".into(),
             target_delivery_id: target.into(),
             routing_set_id: None,
-            delivery_class: DeliveryClass::OpaqueEvent,
+            delivery_class: DeliveryClass::Message,
             priority: Priority::Normal,
             ttl: 3600,
             created_at: 1_700_000_100,

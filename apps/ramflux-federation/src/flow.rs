@@ -814,7 +814,7 @@ mod tests {
                     "ext":{"source_device_authority":{"epoch":1}},
                     "signing_key_id":"device","signature_alg":"ed25519","signature":"retained-device-signature",
                     "envelope_id":"retained","source_principal_id":"alice","source_device_id":"first",
-                    "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
+                    "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"message",
                     "priority":"normal","ttl":600,"created_at":1_760_000_000,"encrypted_payload":"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA","payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA"),"delivery_mode":"durable","collapse_tag": ramflux_protocol::encode_base64url([0x22_u8; 32]),"report_commitment": ramflux_protocol::encode_base64url([0x33_u8; 32])
                 }
             }),
@@ -985,7 +985,7 @@ mod tests {
                 source_device_id: "alice_device".to_owned(),
                 target_delivery_id: "target_b".to_owned(),
                 routing_set_id: None,
-                delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+                delivery_class: ramflux_protocol::DeliveryClass::Message,
                 priority: ramflux_protocol::Priority::Normal,
                 ttl: 3_600,
                 created_at: 1_760_000_000,

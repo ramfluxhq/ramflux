@@ -748,7 +748,7 @@ fn durable_view_publication() -> Result {
         let core = store.publication_core()?;
         let id = store.inbox_status(&target)?.0.ok_or("identity")?;
         let first = core.reserve(&target, &id, &[])?;
-        let mut envelope = envelope("native-held-publication", &target, DeliveryClass::OpaqueEvent);
+        let mut envelope = envelope("native-held-publication", &target, DeliveryClass::Message);
         envelope.source_principal_id = "alice".into();
         envelope.source_device_id = "primary".into();
         envelope.created_at = i64::try_from(NOW)?;

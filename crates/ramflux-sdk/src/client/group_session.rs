@@ -279,34 +279,22 @@ impl RamfluxClient {
         &self,
         distribution_bytes: &[u8],
     ) -> Result<SdkGroupSenderKeyDistribution, SdkError> {
-        let (distribution, _pending) =
-            self.import_group_sender_key_distribution_inner(distribution_bytes, true)?;
-        Ok(distribution)
-    }
-
-    pub(crate) fn import_group_sender_key_distribution_inner(
-        &self,
-        distribution_bytes: &[u8],
-        retry_pending: bool,
-    ) -> Result<(SdkGroupSenderKeyDistribution, Vec<GroupKeyDependencyApplied>), SdkError> {
-        self.import_group_key_with_source(distribution_bytes, retry_pending, None)
+        self.import_group_key_with_source(distribution_bytes, None)
     }
 
     pub(crate) fn import_group_key_for_identity(
         &self,
         distribution_bytes: &[u8],
         source: &ramflux_crypto::RootQualifiedDeviceRef,
-        retry_pending: bool,
-    ) -> Result<(SdkGroupSenderKeyDistribution, Vec<GroupKeyDependencyApplied>), SdkError> {
-        self.import_group_key_with_source(distribution_bytes, retry_pending, Some(source))
+    ) -> Result<SdkGroupSenderKeyDistribution, SdkError> {
+        self.import_group_key_with_source(distribution_bytes, Some(source))
     }
 
     fn import_group_key_with_source(
         &self,
         distribution_bytes: &[u8],
-        retry_pending: bool,
         identity: Option<&ramflux_crypto::RootQualifiedDeviceRef>,
-    ) -> Result<(SdkGroupSenderKeyDistribution, Vec<GroupKeyDependencyApplied>), SdkError> {
+    ) -> Result<SdkGroupSenderKeyDistribution, SdkError> {
         let distribution: SdkGroupSenderKeyDistribution =
             serde_json::from_slice(distribution_bytes)?;
         if !matches!(
@@ -357,8 +345,8 @@ impl RamfluxClient {
             distribution.group_key_epoch,
             distribution.group_state_hash.as_deref(),
         )?;
-        if let Some(pending) = self.reuse_shared_group_key(&distribution, &source, retry_pending)? {
-            return Ok((distribution, pending));
+        if self.reuse_shared_group_key(&distribution, &source)? {
+            return Ok(distribution);
         }
         let state = SdkGroupSenderKeyState {
             chain_version: distribution.version,
@@ -394,14 +382,7 @@ impl RamfluxClient {
         if !known {
             self.persist_group_sender_key_state(&state, &source, "recv", "import")?;
         }
-        #[cfg(test)]
-        let pending = self.retry_group_key_dependency(&distribution, retry_pending)?;
-        #[cfg(not(test))]
-        let pending = {
-            let _ = retry_pending;
-            Vec::new()
-        };
-        Ok((distribution, pending))
+        Ok(distribution)
     }
 
     fn knows_identical_group_chain(
@@ -448,10 +429,9 @@ impl RamfluxClient {
         &self,
         distribution: &SdkGroupSenderKeyDistribution,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
-        retry_pending: bool,
-    ) -> Result<Option<Vec<GroupKeyDependencyApplied>>, SdkError> {
+    ) -> Result<bool, SdkError> {
         if distribution.group_state_hash.is_none() || distribution.version == 4 {
-            return Ok(None);
+            return Ok(false);
         }
         let checkpoint = crate::group::group_key_checkpoint(
             &distribution.group_id,
@@ -473,16 +453,9 @@ impl RamfluxClient {
                     "shared group key changed at an existing head".into(),
                 ));
             }
-            #[cfg(test)]
-            let pending = self.retry_group_key_dependency(distribution, retry_pending)?;
-            #[cfg(not(test))]
-            let pending = {
-                let _ = retry_pending;
-                Vec::new()
-            };
-            return Ok(Some(pending));
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 
     fn assert_group_sender_key_epoch_allowed(
@@ -502,125 +475,6 @@ impl RamfluxClient {
             )));
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    fn retry_group_key_dependency(
-        &self,
-        distribution: &SdkGroupSenderKeyDistribution,
-        retry: bool,
-    ) -> Result<Vec<GroupKeyDependencyApplied>, SdkError> {
-        #[cfg(test)]
-        if retry {
-            return self.retry_pending_group_messages(
-                &distribution.group_id,
-                distribution.group_key_epoch,
-            );
-        }
-        // Generation 1 retries the exact committed Inner through the durable receive executor.
-        // It never parses an old private pending-group body.
-        let _ = (distribution, retry);
-        Ok(Vec::new())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retry_pending_group_messages(
-        &self,
-        group_id: &str,
-        group_key_epoch: u64,
-    ) -> Result<Vec<GroupKeyDependencyApplied>, SdkError> {
-        let pending = self.account_db()?.group_pending_undecrypted(group_id, group_key_epoch)?;
-        let mut decrypted = Vec::new();
-        for record in pending {
-            if self
-                .direct_messages(&record.conversation_id)?
-                .iter()
-                .any(|message| message.message_id == record.message_id)
-            {
-                self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
-                continue;
-            }
-            let (entry, encrypted_body) = super::group_pending::decode(&record.envelope_json)?;
-            if let Err(error) = self
-                .authenticated_device_identity(HeadUse::NewAuthorization, &entry)
-                .and_then(|source| {
-                    self.require_group_sender_pin(
-                        group_id,
-                        &entry.envelope.source_principal_id,
-                        &source,
-                    )
-                })
-            {
-                if matches!(
-                    error,
-                    SdkError::InboundPending(_)
-                        | SdkError::SenderManifestRequired { .. }
-                        | SdkError::FreshHeadRequired { .. }
-                        | SdkError::InboundRejected(_)
-                ) {
-                    continue;
-                }
-                return Err(error);
-            }
-            let envelope: SdkGroupEncryptedEnvelope = serde_json::from_slice(&encrypted_body)?;
-            if envelope.group_id != group_id || envelope.group_key_epoch != group_key_epoch {
-                continue;
-            }
-            if let Err(error) =
-                self.require_group_payload_sender(group_id, &envelope.sender_id, &entry)
-            {
-                if matches!(
-                    error,
-                    SdkError::InboundPending(_)
-                        | SdkError::SenderManifestRequired { .. }
-                        | SdkError::FreshHeadRequired { .. }
-                        | SdkError::InboundRejected(_)
-                ) {
-                    continue;
-                }
-                return Err(error);
-            }
-            if self.group_sender_key_counter_seen(
-                &envelope,
-                &self.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?,
-            )? {
-                self.account_db()?.remove_group_pending_undecrypted(&record.message_id)?;
-                continue;
-            }
-            match self.append_or_pending_group_message(
-                &record.conversation_id,
-                &record.message_id,
-                &entry,
-                &encrypted_body,
-                &envelope,
-            ) {
-                Ok(_) => {
-                    if self.direct_message_by_id(&record.message_id)?.is_none() {
-                        continue;
-                    }
-                    decrypted.push(GroupKeyDependencyApplied);
-                }
-                Err(error) if is_missing_group_sender_key_error(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(decrypted)
-    }
-
-    /// # Errors
-    /// This retired JSON producer returns a typed Content refusal before account access.
-    /// Use generated group content through the authored send path.
-    pub fn encrypt_group_message(
-        &self,
-        group_id: &str,
-        sender_id: &str,
-        plaintext: &[u8],
-    ) -> Result<Vec<u8>, SdkError> {
-        let _ = (group_id, sender_id, plaintext);
-        Err(SdkError::GeneratedRefused {
-            code: crate::GeneratedRefusalCode::Content,
-            reason: "retired group JSON producer; use generated group content".into(),
-        })
     }
 
     pub(super) fn encrypt_prepared_group_message(
@@ -688,21 +542,6 @@ impl RamfluxClient {
             group_key_epoch: group.group_epoch,
             group_state_hash: state.group_state_hash.clone(),
             ciphertext,
-        })
-    }
-
-    /// # Errors
-    /// Returns an error when the sender key is missing, the message is malformed, or decryption
-    /// fails.
-    pub fn decrypt_group_message(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-    ) -> Result<Vec<u8>, SdkError> {
-        let _ = (conversation_id, message_id);
-        Err(SdkError::GeneratedRefused {
-            code: crate::GeneratedRefusalCode::Content,
-            reason: "retired group JSON reader; use generated_message_detail".into(),
         })
     }
 

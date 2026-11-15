@@ -30,7 +30,13 @@ struct PendingCreatorRepair {
     target: String,
     incoming: GroupStateSnapshot,
     recorded_at: i64,
+    /// Redrives of this marker that failed; the marker stays pending after each one.
+    failures: u32,
+    /// Display of the last failure (a typed error text, never key material).
+    last_error: Option<String>,
 }
+/// Longest failure text kept on a marker.
+const MAX_REPAIR_ERROR_CHARS: usize = 200;
 fn fork_marker_key(group: &str) -> String {
     format!("{REPAIR_PREFIX}{}", ramflux_protocol::encode_base64url(group))
 }
@@ -279,6 +285,8 @@ impl RamfluxClient {
                 target: target.to_owned(),
                 incoming: incoming.snapshot().clone(),
                 recorded_at: now_unix_timestamp(),
+                failures: 0,
+                last_error: None,
             },
         )?;
         Ok(())
@@ -303,34 +311,55 @@ impl RamfluxClient {
         }
         let mut repaired = 0;
         for held in markers {
-            let committed =
-                self.account_db()?.write_transaction(|| -> Result<bool, SdkError> {
-                    // Re-read inside the writer: a repair that landed meanwhile has cleared the marker.
-                    let marker_key = fork_marker_key(&held.group_id);
-                    let Some(current) =
-                        self.account_db()?.load_actor_state::<PendingCreatorRepair>(&marker_key)?
-                    else {
-                        return Ok(false);
+            // One marker that cannot be repaired never blocks the other groups.
+            let outcome = self.account_db()?.write_transaction(|| -> Result<bool, SdkError> {
+                // Re-read inside the writer: a repair that landed meanwhile has cleared the marker.
+                let marker_key = fork_marker_key(&held.group_id);
+                let Some(current) =
+                    self.account_db()?.load_actor_state::<PendingCreatorRepair>(&marker_key)?
+                else {
+                    return Ok(false);
+                };
+                let incoming = ramflux_crypto::verify_group_state_snapshot(current.incoming)?;
+                let previous = self.account_db()?.shared_group_state(&current.group_id)?;
+                let actor = self.owned_group_actor(&current.target)?;
+                let committed =
+                    match self.reconcile_group_state(&incoming, &current.target, primary)? {
+                        Reconciled::Adopt(state) => self.commit_reconciled_group_state(
+                            &state,
+                            &incoming,
+                            previous.as_ref(),
+                            &actor,
+                        )?,
+                        Reconciled::Skip | Reconciled::Deferred => false,
                     };
-                    let incoming = ramflux_crypto::verify_group_state_snapshot(current.incoming)?;
-                    let previous = self.account_db()?.shared_group_state(&current.group_id)?;
-                    let actor = self.owned_group_actor(&current.target)?;
-                    let committed =
-                        match self.reconcile_group_state(&incoming, &current.target, primary)? {
-                            Reconciled::Adopt(state) => self.commit_reconciled_group_state(
-                                &state,
-                                &incoming,
-                                previous.as_ref(),
-                                &actor,
-                            )?,
-                            Reconciled::Skip | Reconciled::Deferred => false,
-                        };
-                    self.account_db()?.remove_actor_state(&marker_key)?;
-                    Ok(committed)
-                })?;
-            repaired += usize::from(committed);
+                self.account_db()?.remove_actor_state(&marker_key)?;
+                Ok(committed)
+            });
+            match outcome {
+                Ok(committed) => repaired += usize::from(committed),
+                Err(error) => self.record_repair_failure(&held.group_id, &error)?,
+            }
         }
         Ok(repaired)
+    }
+    /// Keep the marker pending, remember why the last redrive failed and warn without secrets.
+    fn record_repair_failure(&self, group: &str, error: &SdkError) -> Result<(), SdkError> {
+        let reason: String = error.to_string().chars().take(MAX_REPAIR_ERROR_CHARS).collect();
+        let marker_key = fork_marker_key(group);
+        let failures = self.account_db()?.write_transaction(|| -> Result<u32, SdkError> {
+            let Some(mut marker) =
+                self.account_db()?.load_actor_state::<PendingCreatorRepair>(&marker_key)?
+            else {
+                return Ok(0);
+            };
+            marker.failures = marker.failures.saturating_add(1);
+            marker.last_error = Some(reason.clone());
+            self.account_db()?.persist_actor_state(&marker_key, &marker)?;
+            Ok(marker.failures)
+        })?;
+        tracing::warn!(failures, error = %reason, "creator repair redrive failed; marker stays pending");
+        Ok(())
     }
     fn group_conflict_event(
         &self,

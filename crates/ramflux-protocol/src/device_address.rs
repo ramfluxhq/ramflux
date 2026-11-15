@@ -66,7 +66,12 @@ pub fn qualified_device_id(root: &str, device: &str) -> Result<String, ProtocolE
     {
         return Err(ProtocolError::InvalidIdentityRecord("invalid qualified device address"));
     }
-    Ok(format!("root~{}", crate::encode_base64url(serde_json::to_vec(&(root, device))?)))
+    let id = format!("root~{}", crate::encode_base64url(serde_json::to_vec(&(root, device))?));
+    let limit = crate::message::outer::MAX_IDENTIFIER_BYTES;
+    if id.len() > limit {
+        return Err(ProtocolError::DeviceDeliveryIdTooLong { actual: id.len(), limit });
+    }
+    Ok(id)
 }
 /// Decode an address; a bare legacy identifier returns None. Decode only once: device names
 /// inside an address are literal names, never another address to interpret recursively.
@@ -163,6 +168,18 @@ mod tests {
             "129-byte device name must not form an address"
         );
         Ok(())
+    }
+    #[test]
+    fn the_encoder_refuses_a_root_that_pushes_the_delivery_id_past_the_identifier_cap() {
+        let long_root = "r".repeat(256);
+        let device = "d".repeat(MAX_DEVICE_NAME_BYTES);
+        assert!(
+            matches!(
+                qualified_device_id(&long_root, &device),
+                Err(ProtocolError::DeviceDeliveryIdTooLong { actual, limit }) if actual > limit
+            ),
+            "a non-standard 256-byte root must not form an over-long delivery id"
+        );
     }
     #[test]
     fn qualified_addresses_preserve_literal_address_shaped_names_and_decode_once()

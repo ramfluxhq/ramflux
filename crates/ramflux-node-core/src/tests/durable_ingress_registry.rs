@@ -261,7 +261,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
                 let mut marked = envelope(
                     &format!("registry_{with_wal}_{ordinal}"),
                     "registry_target",
-                    DeliveryClass::OpaqueEvent,
+                    DeliveryClass::Message,
                 );
                 marked.source_device_id = "foreign_registry".into();
                 marked.priority = Priority::Low;
@@ -417,7 +417,7 @@ fn exercise_custody_ingress(
     let mut valid = super::envelope(
         &format!("custody_registry_{ordinal}"),
         "registry_target",
-        DeliveryClass::OpaqueEvent,
+        DeliveryClass::Message,
     );
     valid.source_principal_id = "durable_ingress_registry".into();
     valid.source_device_id = "primary".into();
@@ -1173,7 +1173,7 @@ fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
                 let mut marked = envelope(
                     &format!("e1_{wrapper}_{with_wal}_{index}"),
                     "foreign_target",
-                    DeliveryClass::OpaqueEvent,
+                    DeliveryClass::Message,
                 );
                 marked.source_device_id = format!("foreign_device_{with_wal}_{index}");
                 marked.priority = Priority::Low;

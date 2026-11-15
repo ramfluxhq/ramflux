@@ -160,3 +160,40 @@ fn a_repeated_accept_around_the_redrive_repairs_exactly_once() -> Result<(), Sdk
     assert_eq!(after.view().epoch, fork.incoming.view().epoch + 1, "exactly one repair advance");
     Ok(())
 }
+
+#[test]
+fn a_failing_repair_marker_does_not_block_the_next_group() -> Result<(), SdkError> {
+    let fork = fork()?;
+    let target = native_target(&fork.phone.client)?;
+    assert!(!fork.phone.client.accept_shared_group_state(&fork.incoming, &target)?);
+    // A marker that sorts before the good one and can never be repaired: its held snapshot fails
+    // verification. base64url("a-poison") sorts before base64url("group").
+    let mut snapshot = serde_json::to_value(fork.incoming.snapshot())?;
+    snapshot["state_hash"] = serde_json::json!(ramflux_protocol::encode_base64url([7_u8; 32]));
+    let poison_key = format!("{MARKER_PREFIX}{}", ramflux_protocol::encode_base64url("a-poison"));
+    fork.phone.client.account_db()?.persist_actor_state(
+        &poison_key,
+        &serde_json::json!({
+            "group_id": "a-poison", "target": target, "incoming": snapshot,
+            "recorded_at": 1, "failures": 0, "last_error": null,
+        }),
+    )?;
+    assert_eq!(markers(&fork.phone)?, 2, "one poisoned and one good marker are pending");
+    let primary = fork.phone.client.fixture_primary()?;
+    assert_eq!(
+        fork.phone.client.redrive_creator_repairs(primary.as_ref())?,
+        1,
+        "the good group is repaired although the poisoned marker fails"
+    );
+    assert_natively_repaired(&fork, &stored(&fork.phone)?);
+    assert_eq!(markers(&fork.phone)?, 1, "only the failing marker stays pending");
+    let poisoned = fork
+        .phone
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&poison_key)?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(poisoned["failures"], 1, "the failure is recorded on the marker");
+    assert!(poisoned["last_error"].as_str().is_some_and(|text| !text.is_empty()));
+    Ok(())
+}

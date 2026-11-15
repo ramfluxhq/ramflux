@@ -270,6 +270,7 @@ impl RamfluxClient {
                     return Err(SdkError::ReplayMismatch);
                 }
                 message.message_id.clone_from(&id);
+                self.refresh_expired_receipt_transport(message, &mut prepared, content, &id)?;
                 message.created_at = prepared.created_at;
                 self.reuse_authored_transport(message, &mut prepared, &transport, content)?;
                 message.ttl = prepared.ttl;
@@ -334,6 +335,29 @@ impl RamfluxClient {
             db.persist_actor_state(&operation, &id)?;
             Ok(prepared)
         })
+    }
+
+    /// A receipt keeps its logical identity (content, id, envelope id) across retries. Only its
+    /// transport envelope time moves, and only once the cached envelope is past its own TTL, so
+    /// the recipient deduplicates the re-sealed copy.
+    fn refresh_expired_receipt_transport(
+        &self,
+        message: &GatewayDirectMessage,
+        prepared: &mut PreparedMessage,
+        content: &g::Content,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        if matches!(content.value, Some(g::content::Value::Receipt(_)))
+            && message.created_at > prepared.created_at.saturating_add(i64::from(prepared.ttl))
+        {
+            prepared.created_at = message.created_at;
+            self.account_db()?.persist_message_actor_state(
+                &Self::prepared_message_owner(content, id),
+                &format!("message-send/prepared/{id}"),
+                prepared,
+            )?;
+        }
+        Ok(())
     }
 
     fn reuse_authored_transport(

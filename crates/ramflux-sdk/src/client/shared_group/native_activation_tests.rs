@@ -229,7 +229,6 @@ pub(super) async fn three_devices() -> TestResult {
                 receiver.client.import_group_key_for_identity(
                     &distribution,
                     &sender.client.owned_device_identity()?,
-                    false,
                 )?;
             }
         }
@@ -390,11 +389,9 @@ pub(super) async fn fork_ciphertext() -> TestResult {
     let distribution =
         left.client.export_group_sender_key_distribution(GROUP, &left.config.device_id)?;
     refuse_unknown_head(&left, &receiver_left, &distribution)?;
-    receiver_left.client.import_group_key_for_identity(
-        &distribution,
-        &left.client.owned_device_identity()?,
-        false,
-    )?;
+    receiver_left
+        .client
+        .import_group_key_for_identity(&distribution, &left.client.owned_device_identity()?)?;
     let mut reused: crate::SdkGroupSenderKeyDistribution =
         ramflux_protocol::parse_i_json(&distribution)?;
     reused.group_state_hash = Some(second.snapshot().state_hash.clone());
@@ -402,7 +399,6 @@ pub(super) async fn fork_ciphertext() -> TestResult {
     receiver_right.client.import_group_key_for_identity(
         &serde_json::to_vec(&reused)?,
         &left.client.owned_device_identity()?,
-        false,
     )?;
     let source = left.client.owned_device_identity()?;
     let (id, exact) = group_message(&left, "first branch message")?;
@@ -460,7 +456,7 @@ fn refuse_unknown_head(source: &Fixture, target: &Fixture, distribution: &[u8]) 
     source.client.sign_group_distribution(&mut unknown)?;
     assert!(
         matches!(target.client.import_group_key_for_identity(
-        &serde_json::to_vec(&unknown)?, &source.client.owned_device_identity()?, false), Err(crate::SdkError::InboundPending(reason))
+        &serde_json::to_vec(&unknown)?, &source.client.owned_device_identity()?), Err(crate::SdkError::InboundPending(reason))
         if reason == "shared group state head is not verified locally"),
         "a signed key for an unverified group head was installed"
     );

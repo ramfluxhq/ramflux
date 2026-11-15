@@ -72,6 +72,7 @@ fn backlog(client: &RamfluxClient, a: &Spec, b: &Spec) -> Result<(), SdkError> {
                 sender: a.identity()?.storage_key().into(),
                 root: root.clone(),
                 at: now_unix_timestamp(),
+                sealed_at: now_unix_timestamp(),
                 retry_from: now_unix_timestamp(),
                 attempts: 1,
                 next_at: now_unix_timestamp() + 60,
@@ -549,7 +550,7 @@ async fn an_explicit_receipt_request_restages_failed_work_and_the_courier_delive
             .load_actor_state::<Work>(&p.key)?
             .ok_or("restaged work")?;
         assert_eq!(retry.attempts, 0);
-        assert!(retry.packet.is_none());
+        assert_eq!(retry.sealed_at, retry.at, "a restage inside the TTL keeps the envelope time");
         assert_eq!(flush(receiver).await?, 1, "legacy={legacy}: the restaged receipt is delivered");
         assert_eq!(
             receiver
@@ -609,6 +610,109 @@ async fn an_explicit_retry_across_a_second_boundary_resends_the_cached_receipt_p
         .cloned()
         .ok_or("the retry reached the gateway")?;
     assert_eq!(sent, first_seal, "the exact cached packet is retransmitted");
+    drop(p.receiver);
+    Ok(())
+}
+
+fn install_gateway_guard(p: &Pending) -> TestResult {
+    let mut mail = p.mail.lock().map_err(|_| "mailbox")?;
+    mail.guard = Some(ramflux_node_core::NodeReplayGuardState::new());
+    mail.guard_sources = vec![p.a.identity()?, p.b.identity()?];
+    mail.reject_id = None;
+    Ok(())
+}
+
+/// Exhausts the attempts of the first receipt so it ends `failed`, and returns its first seal.
+async fn fail_first_receipt(
+    p: &mut Pending,
+    start: i64,
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let mut work = ready(p)?;
+    assert_eq!(work.at, start, "the receipt identity is the time of its first seal");
+    assert_eq!(work.sealed_at, start, "the first envelope is created at the identity time");
+    work.attempts = 8;
+    p.receiver.client.account_db()?.persist_actor_state(&p.key, &work)?;
+    assert_eq!(flush(&mut p.receiver).await?, 0);
+    assert!(!p.receiver.client.account_db()?.actor_state_exists(&p.key)?, "work retired as failed");
+    Ok(p.mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .submissions
+        .last()
+        .cloned()
+        .ok_or("the first attempt reached the gateway and was refused")?)
+}
+
+#[tokio::test]
+async fn a_receipt_retry_within_the_envelope_ttl_sends_identical_bytes_through_the_real_gateway_guard()
+-> TestResult {
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-within-ttl")).await?;
+    let first_seal = fail_first_receipt(&mut p, start).await?;
+    install_gateway_guard(&p)?;
+    crate::time::FixedClock::advance_to(start + 300);
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start));
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the real gateway guard accepts the retry");
+    let sent = p.mail.lock().map_err(|_| "mailbox")?.submissions.last().cloned().ok_or("sent")?;
+    assert_eq!(sent, first_seal, "within the TTL the cached sealed bytes are resent unchanged");
+    drop(p.receiver);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_receipt_retry_after_the_envelope_ttl_is_resealed_with_the_same_identity_and_recorded_once()
+-> TestResult {
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let mut p = Box::pin(pending("receipt-retry-after-ttl")).await?;
+    let first_seal = fail_first_receipt(&mut p, start).await?;
+    install_gateway_guard(&p)?;
+    let later = start + 601;
+    crate::time::FixedClock::advance_to(later);
+    // The real guard refuses the stale envelope, which is exactly why a retry must re-seal.
+    let mut stale = ramflux_node_core::NodeReplayGuardState::new();
+    let stale_refusal =
+        stale.accept_envelope_once(&p.b.identity()?, &first_seal, later).err().ok_or("stale")?;
+    assert!(
+        matches!(stale_refusal, ramflux_node_core::NodeCoreError::TtlExpired { .. }),
+        "the cached envelope is past created_at + ttl: {stale_refusal}"
+    );
+    let restaged = p.receiver.client.restage_failed_delivery_receipt(
+        &p.a.conversation(&p.b)?,
+        &p.a.event("first")?,
+        &p.b.identity()?,
+    )?;
+    assert_eq!(restaged, Some(start), "the logical receipt identity is unchanged");
+    assert_eq!(flush(&mut p.receiver).await?, 1, "the real gateway guard accepts the fresh seal");
+    let sent = p.mail.lock().map_err(|_| "mailbox")?.submissions.last().cloned().ok_or("sent")?;
+    assert_ne!(sent, first_seal, "the expired envelope is re-sealed");
+    assert_eq!(sent.created_at, later, "the transport carries a fresh created_at");
+    assert_eq!(sent.envelope_id, first_seal.envelope_id, "the receipt envelope id is stable");
+    assert_eq!(
+        p.receiver
+            .client
+            .delivery_receipt_status(
+                &p.a.conversation(&p.b)?,
+                &p.a.event("first")?,
+                &p.b.identity()?
+            )?
+            .ok_or("status")?["delivered_at"],
+        start,
+        "delivered_at keeps the identity time"
+    );
+    // The recipient deduplicates by the logical identity: exactly one delivered receipt.
+    let mut alice = p.a.account(None, p.mail.clone())?;
+    crate::bus::sync_driver::run(&mut alice).await?;
+    let row = alice.client.direct_message_by_id(&p.a.event("first")?)?.ok_or("alice row")?;
+    assert_eq!(row.receipts.len(), 1, "the recipient records exactly one receipt");
+    assert_eq!(row.receipts[0].state, "delivered");
+    drop(alice);
     drop(p.receiver);
     Ok(())
 }

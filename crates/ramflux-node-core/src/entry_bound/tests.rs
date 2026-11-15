@@ -198,6 +198,33 @@ fn active_decode_refuses_retired_json_wrapper_with_unknown_field()
 }
 
 #[test]
+fn generation_one_admits_only_message_and_call_wake_delivery_classes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::DeliveryClass;
+    for class in [DeliveryClass::Message, DeliveryClass::CallWake] {
+        let mut envelope = compact_sdk_envelope(&[7_u8; 32])?;
+        envelope.delivery_class = class.clone();
+        check_entry_bound(&envelope).map_err(|error| format!("{class:?} is admitted: {error}"))?;
+    }
+    for class in [
+        DeliveryClass::OpaqueEvent,
+        DeliveryClass::NotificationWake,
+        DeliveryClass::SelfDeviceControl,
+        DeliveryClass::ObjectManifest,
+        DeliveryClass::ObjectChunk,
+        DeliveryClass::FederationControl,
+    ] {
+        let mut envelope = compact_sdk_envelope(&[7_u8; 32])?;
+        envelope.delivery_class = class.clone();
+        match check_entry_bound(&envelope) {
+            Err(NodeCoreError::DeliveryClassRefused) => {}
+            other => return Err(format!("{class:?} must be refused, got {other:?}").into()),
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn admitted_candidate_envelope_is_fetchable() -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let envelope = compact_sdk_envelope(&vec![7_u8; 522_808])?;

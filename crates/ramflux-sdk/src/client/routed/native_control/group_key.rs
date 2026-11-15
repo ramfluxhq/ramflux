@@ -125,7 +125,7 @@ impl RamfluxClient {
         }
         let bytes = native_bytes(distribution(body)?)?;
         self.apply_generated_peer_control_once(entry, identity, exact_inner, 5, |source| {
-            self.import_group_key_for_identity(&bytes, source, false).map(|_| ())
+            self.import_group_key_for_identity(&bytes, source).map(|_| ())
         })
     }
 }

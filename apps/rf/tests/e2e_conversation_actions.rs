@@ -255,13 +255,65 @@ fn live(world: &mut World<'_>) -> e2e::Result<()> {
 
 const NODE_STORES: &[&str] =
     &["ramflux-router", "ramflux-federation", "ramflux-gateway", "ramflux-retention"];
-const RATCHET_PREFIXES: &[&str] =
-    &["dm-pair/session/", "dm-pair/ephemeral-seals/", "dm-pair/active/", "dm-pair/local/"];
-/// Timer-driven maintenance and daemon-lifecycle rows (the offline step restarts a daemon).
-const TIMER_PREFIXES: &[&str] =
-    &["own-contact/last-refresh", "sync/", "account/networking", "inbox/recovery-revision"];
-/// Node tables that track sessions rather than conversation data.
-const SESSION_TABLE_MARKS: &[&str] = &["session", "incarnation", "resume", "replay"];
+/// One client row key that the typing at-rest comparison skips, and why typing cannot live there.
+enum ClientKey {
+    /// The whole key.
+    Exact(&'static str),
+    /// `prefix` followed by exactly one non-empty segment without a further `/`.
+    Scoped(&'static str),
+}
+
+/// Exact client `runtime_actor_state` keys (and the `runtime_outbox` rows that publish them).
+const CLIENT_EXEMPT: &[(ClientKey, &str)] = &[
+    (
+        ClientKey::Exact("own-contact/last-refresh"),
+        "wall-clock stamp of the contact backfill timer",
+    ),
+    (ClientKey::Exact("sync/tick"), "monotonic tick counter of the sync status timer"),
+    (ClientKey::Exact("sync/status"), "published sync status snapshot, no message data"),
+    (ClientKey::Exact("sync/health"), "published node health snapshot, no message data"),
+    (ClientKey::Exact("sync/status/event"), "sequence and time of the last status event"),
+    (ClientKey::Exact("sync/health/event"), "sequence and time of the last health event"),
+    (ClientKey::Exact("account/networking"), "connectivity state flipped by the offline step"),
+    (ClientKey::Exact("inbox/recovery-revision"), "revision stamped on every reconnect"),
+    (ClientKey::Scoped("dm-pair/session/"), "message ratchet state, advanced by durable traffic"),
+    (ClientKey::Scoped("dm-pair/ephemeral-seals/"), "seal counter, advanced by any sealed frame"),
+    (ClientKey::Scoped("dm-pair/active/"), "active pair index written with the ratchet"),
+    (ClientKey::Scoped("dm-pair/local/"), "local pair marker written with the ratchet"),
+];
+
+/// Exact `runtime_outbox` row kinds (first column) that the comparison skips.
+const CLIENT_OUTBOX_KINDS: &[(&str, &str)] = &[(
+    "device_directory",
+    "directory refreshes drain after a daemon restart; no conversation data",
+)];
+
+/// Exact node store tables whose rows change on every handshake or replay-guard admission.
+/// Anything not listed here must be identical before and after the typing phase.
+const NODE_EXEMPT: &[(&str, &str, &str)] = &[
+    ("ramflux-gateway", "gateway_sessions_v2", "one row per session; every reconnect writes it"),
+    ("ramflux-gateway", "gateway_session_expiry_v2", "expiry index of gateway_sessions_v2"),
+    ("ramflux-gateway", "gateway_resume_tokens_v2", "resume token issued by every handshake"),
+    ("ramflux-gateway", "gateway_resume_expiry_v2", "expiry index of gateway_resume_tokens_v2"),
+    ("ramflux-gateway", "gateway_replay_entries_v3", "replay-guard tuples of admitted envelopes"),
+    ("ramflux-gateway", "gateway_replay_expiry_v3", "expiry index of the replay tuples"),
+    ("ramflux-gateway", "gateway_replay_metadata_v3", "replay-guard counters"),
+    (
+        "ramflux-gateway",
+        "gateway_replay_owner_expiry_v3",
+        "owner expiry index of the replay tuples",
+    ),
+    ("ramflux-gateway", "gateway_replay_root_expiry_v3", "root expiry index of the replay tuples"),
+    ("ramflux-gateway", "gateway_replay_roots_v3", "per-root replay-guard budget rows"),
+    (
+        "ramflux-gateway",
+        "gateway_state_v1",
+        "pre-auth admission counters bumped by every connection",
+    ),
+    ("ramflux-router", "router_session_entry_v1", "router session binding written on reconnect"),
+    ("ramflux-router", "router_replay_tuple_v1", "router replay-guard tuples of admitted frames"),
+    ("ramflux-router", "router_replay_expiry_v1", "expiry index of the router replay tuples"),
+];
 const STORE_CAP: u64 = 32 * 1024 * 1024;
 
 type TableRows = BTreeMap<String, Vec<String>>;
@@ -747,18 +799,14 @@ fn comparable(snapshot: &Persistence) -> Persistence {
     }
     Persistence {
         client,
-        // Session, resume, incarnation and replay bookkeeping is written by every handshake,
-        // including the reconnects this row performs on purpose.
+        // Only the exact handshake and replay-guard tables listed in NODE_EXEMPT are skipped.
         node: snapshot
             .node
             .iter()
             .map(|(service, tables)| {
                 let kept = tables
                     .iter()
-                    .filter(|(table, _)| {
-                        (service != "ramflux-gateway" || !table.starts_with("gateway_"))
-                            && !SESSION_TABLE_MARKS.iter().any(|mark| table.contains(mark))
-                    })
+                    .filter(|(table, _)| !exempt_node_table(service, table))
                     .map(|(table, rows)| (table.clone(), rows.clone()))
                     .collect();
                 (service.clone(), kept)
@@ -769,19 +817,27 @@ fn comparable(snapshot: &Persistence) -> Persistence {
     }
 }
 
+fn exempt_node_table(service: &str, table: &str) -> bool {
+    NODE_EXEMPT.iter().any(|(svc, name, _)| *svc == service && *name == table)
+}
+
 fn exempt_client_row(table: &str, line: &str) -> bool {
-    if table == "runtime_outbox" && field(line, 0) == "device_directory" {
-        // Directory refreshes drain after a daemon restart; they carry no conversation data.
-        return true;
-    }
-    let kind = match table {
+    let key = match table {
         "runtime_actor_state" => field(line, 0),
-        "runtime_outbox" => field(line, 2),
+        "runtime_outbox" => {
+            if CLIENT_OUTBOX_KINDS.iter().any(|(kind, _)| *kind == field(line, 0)) {
+                return true;
+            }
+            field(line, 2)
+        }
         _ => return false,
     };
-    // Timer-driven maintenance rows stamp wall-clock time; they carry no conversation data.
-    TIMER_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
-        || RATCHET_PREFIXES.iter().any(|prefix| kind.starts_with(prefix))
+    CLIENT_EXEMPT.iter().any(|(entry, _)| match entry {
+        ClientKey::Exact(exact) => key == *exact,
+        ClientKey::Scoped(prefix) => {
+            key.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        }
+    })
 }
 
 fn rows_of<'a>(tables: Option<&'a TableRows>, table: &str) -> &'a [String] {
@@ -1116,46 +1172,80 @@ fn unforced_expiry_requires_an_observed_clear() {
 }
 
 #[test]
-fn ratchet_and_seal_rows_are_the_only_client_exemption() {
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/session/abc\t01"),
-        "test: a session ratchet row is exempt"
-    );
-    assert!(
-        exempt_client_row(
-            "runtime_outbox",
-            "runtime_actor_state\tupdate\tdm-pair/ephemeral-seals/1\t{}"
-        ),
-        "test: an outbox row that only publishes a seal counter is exempt"
-    );
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/active/pair\t01"),
-        "test: the active pair index written with the ratchet is exempt"
-    );
-    assert!(
-        exempt_client_row("runtime_actor_state", "dm-pair/local/session\t01"),
-        "test: local pair metadata written with the ratchet is exempt"
-    );
-    assert!(
-        !exempt_client_row("runtime_actor_state", "dm-pair/retired/abc\t01"),
-        "test: a retired pair is not a ratchet exemption"
-    );
-    assert!(
-        !exempt_client_row("message_projection", "dm-pair/session/abc"),
-        "test: a message row is never exempt"
-    );
-    assert!(
-        !exempt_client_row("outbox_queue", "id\tenv\tclass\tstate\tcipher"),
-        "test: the delivery outbox is never exempt"
-    );
-    assert!(
-        !exempt_client_row("local_event_log", "event\ttype\tok\tok\tbody"),
-        "test: an event row is never exempt"
-    );
-    assert!(
-        !exempt_client_row("receipt_projection", "receipt\tconv\tmsg\tread\tdevice"),
-        "test: a receipt row is never exempt"
-    );
+fn only_listed_client_rows_are_exempt() {
+    for (table, row) in [
+        ("runtime_actor_state", "dm-pair/session/abc\t01"),
+        ("runtime_outbox", "runtime_actor_state\tupdate\tdm-pair/ephemeral-seals/1\t{}"),
+        ("runtime_actor_state", "dm-pair/active/pair\t01"),
+        ("runtime_actor_state", "dm-pair/local/session\t01"),
+        ("runtime_actor_state", "sync/tick\t7"),
+        ("runtime_actor_state", "sync/status/event\t{}"),
+        ("runtime_actor_state", "own-contact/last-refresh\t1"),
+        ("runtime_actor_state", "account/networking\t{}"),
+        ("runtime_actor_state", "inbox/recovery-revision\t3"),
+        ("runtime_outbox", "device_directory\tupdate\tx\t{}"),
+    ] {
+        assert!(exempt_client_row(table, row), "test: {table} row `{row}` is listed as exempt");
+    }
+    for (table, row) in [
+        ("runtime_actor_state", "dm-pair/retired/abc\t01"),
+        ("runtime_actor_state", "dm-pair/session/abc/extra\t01"),
+        ("runtime_actor_state", "dm-pair/session/\t01"),
+        ("runtime_actor_state", "sync/attachment/a\t01"),
+        ("runtime_actor_state", "sync/tickets\t01"),
+        ("runtime_actor_state", "own-contact/last-refresh-extra\t1"),
+        ("runtime_outbox", "runtime_actor_state\tupdate\tsync/attachment/a\t{}"),
+        ("runtime_outbox", "device_directory_x\tupdate\tx\t{}"),
+        ("message_projection", "dm-pair/session/abc"),
+        ("outbox_queue", "id\tenv\tclass\tstate\tcipher"),
+        ("local_event_log", "event\ttype\tok\tok\tbody"),
+        ("receipt_projection", "receipt\tconv\tmsg\tread\tdevice"),
+    ] {
+        assert!(!exempt_client_row(table, row), "test: {table} row `{row}` must be compared");
+    }
+}
+
+fn node_snapshot(service: &str, table: &str, rows: &[&str]) -> Persistence {
+    let tables = BTreeMap::from([(
+        table.to_owned(),
+        rows.iter().map(|row| (*row).to_owned()).collect::<Vec<_>>(),
+    )]);
+    Persistence {
+        client: BTreeMap::new(),
+        node: BTreeMap::from([(service.to_owned(), tables)]),
+        wal: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+#[test]
+fn a_new_unlisted_node_table_that_changes_during_typing_fails_the_comparison() {
+    for (service, table) in NODE_EXEMPT.iter().map(|(service, table, _)| (*service, *table)) {
+        let result = assert_same_stores(
+            &node_snapshot(service, table, &["a"]),
+            &node_snapshot(service, table, &["a", "b"]),
+        );
+        assert!(result.is_ok(), "test: listed table {service}.{table} may change: {result:?}");
+    }
+    for (service, table) in [
+        ("ramflux-gateway", "gateway_typing_cache_v1"),
+        ("ramflux-gateway", "gateway_frames_v2"),
+        ("ramflux-gateway", "gateway_call_intent_v1"),
+        ("ramflux-gateway", "gateway_sessions_v2_shadow"),
+        ("ramflux-router", "router_inbox_v1"),
+        ("ramflux-router", "gateway_sessions_v2"),
+        ("ramflux-federation", "federation_session_log_v1"),
+        ("ramflux-retention", "retention_replay_notes_v1"),
+    ] {
+        let result = assert_same_stores(
+            &node_snapshot(service, table, &["a"]),
+            &node_snapshot(service, table, &["a", "b"]),
+        );
+        assert!(
+            result.is_err(),
+            "test: unlisted table {service}.{table} must fail when it changes"
+        );
+    }
 }
 
 fn logs(world: &World<'_>) -> String {

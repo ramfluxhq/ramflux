@@ -98,7 +98,7 @@ pub(super) fn valid_envelope() -> Envelope {
         source_device_id: "device".to_owned(),
         target_delivery_id: "target".to_owned(),
         routing_set_id: None,
-        delivery_class: DeliveryClass::OpaqueEvent,
+        delivery_class: DeliveryClass::Message,
         priority: Priority::Low,
         ttl: MAX_EPHEMERAL_TTL_SECONDS,
         created_at: 1_000,

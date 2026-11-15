@@ -59,8 +59,6 @@ pub(crate) struct SdkGroupEncryptedEnvelope {
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
 }
 
-pub(crate) struct GroupKeyDependencyApplied;
-
 pub(crate) fn group_sender_key_checkpoint_name(
     group: &str,
     sender: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -229,12 +227,6 @@ pub(crate) fn group_member_joined_event_id(
     new_group_epoch: u64,
 ) -> String {
     format!("group.member_joined:{group_id}:{actor_device_id}:{joined_identity}:{new_group_epoch}")
-}
-
-#[cfg(test)]
-pub(crate) fn is_missing_group_sender_key_error(error: &SdkError) -> bool {
-    let message = error.to_string();
-    message.contains("missing group sender key")
 }
 
 pub(crate) fn group_associated_data(group_id: &str, sender_id: &str, epoch: u64) -> Vec<u8> {

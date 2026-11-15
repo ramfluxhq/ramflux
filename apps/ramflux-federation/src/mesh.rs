@@ -1673,7 +1673,7 @@ pub(crate) mod tests {
             map.serialize_entry("source_device_id", "phone")?;
             map.serialize_entry("target_delivery_id", "peer")?;
             map.serialize_entry("routing_set_id", &Option::<String>::None)?;
-            map.serialize_entry("delivery_class", "opaque_event")?;
+            map.serialize_entry("delivery_class", "message")?;
             map.serialize_entry("priority", "normal")?;
             map.serialize_entry("ttl", &3600)?;
             map.serialize_entry("created_at", &self.created_at)?;

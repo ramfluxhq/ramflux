@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 struct CachedSeal {
     digest: String,
     recipient_epoch: u64,
+    /// Envelope time and TTL the cached packet was sealed with.
+    created_at: i64,
+    lifetime: u32,
     packet: super::SdkDmEncryptedEnvelope,
     committed_a0: Option<Vec<u8>>,
     metadata_commitment: Option<String>,
@@ -19,6 +22,9 @@ pub(super) struct Binding {
     owner: String,
     key: String,
     digest: String,
+    is_receipt: bool,
+    created_at: i64,
+    lifetime: u32,
 }
 impl Binding {
     pub(super) fn new(
@@ -77,7 +83,19 @@ impl Binding {
                 body,
             ))?,
         );
-        Ok(Some(Self { recipient_epoch, owner, key, digest }))
+        let is_receipt = matches!(
+            content.value.as_ref(),
+            Some(ramflux_protocol::message::content::Value::Receipt(_))
+        );
+        Ok(Some(Self {
+            recipient_epoch,
+            owner,
+            key,
+            digest,
+            is_receipt,
+            created_at: message.created_at,
+            lifetime: message.ttl,
+        }))
     }
     pub(super) fn load(&self, client: &RamfluxClient) -> Result<Option<SealedRouted>, SdkError> {
         let db = client.account_db()?;
@@ -92,6 +110,13 @@ impl Binding {
             });
         }
         if cached.digest != self.digest {
+            // A receipt keeps its logical identity but its transport envelope is re-sealed with a
+            // new `created_at` once the cached envelope is past its own TTL.
+            if self.is_receipt
+                && self.created_at > cached.created_at.saturating_add(i64::from(cached.lifetime))
+            {
+                return Ok(None);
+            }
             return Err(SdkError::ReplayMismatch);
         }
         Ok(Some(SealedRouted {
@@ -111,6 +136,8 @@ impl Binding {
             &CachedSeal {
                 digest: self.digest.clone(),
                 recipient_epoch: self.recipient_epoch,
+                created_at: self.created_at,
+                lifetime: self.lifetime,
                 packet: sealed.packet.clone(),
                 committed_a0: sealed.committed_a0.clone(),
                 metadata_commitment: sealed.metadata_commitment.clone(),

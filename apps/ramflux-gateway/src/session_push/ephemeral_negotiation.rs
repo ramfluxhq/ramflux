@@ -503,7 +503,7 @@ fn restart_envelope(target: &str) -> ramflux_protocol::Envelope {
         source_device_id: "device-p11".to_owned(),
         target_delivery_id: target.to_owned(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: ramflux_protocol::Priority::Low,
         ttl: 5,
         created_at: 1_760_000_000,

@@ -240,7 +240,7 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
     );
     let plaintext = fixture
         .client
-        .receive_gateway_plaintext_deliveries(&mut engine, &pool, 8, "conv", false, None)
+        .receive_gateway_plaintext_deliveries(&mut engine, &pool, 8, "conv", false)
         .await;
     assert_activated(plaintext.as_ref().expect_err("legacy plaintext pull"));
 

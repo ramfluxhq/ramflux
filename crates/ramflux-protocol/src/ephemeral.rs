@@ -14,7 +14,7 @@ pub const MIN_EPHEMERAL_TTL_SECONDS: u32 = 1;
 pub const MAX_EPHEMERAL_TTL_SECONDS: u32 = 5;
 /// Permitted sender-clock lead over the node clock, in milliseconds.
 pub const EPHEMERAL_FUTURE_TOLERANCE_MS: u64 = 2_000;
-/// Capability identifier for gateway ephemeral delivery; defined here but not advertised by P01.
+/// Capability identifier for gateway ephemeral delivery, negotiated per session.
 pub const GATEWAY_EPHEMERAL_CAPABILITY: &str = "gateway.ephemeral.v1";
 
 /// Classification of the required named delivery mode.

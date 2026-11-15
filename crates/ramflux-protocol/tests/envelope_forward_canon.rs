@@ -9,11 +9,15 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn envelope() -> TestResult<Envelope> {
     Ok(serde_json::from_value(json!({
-        "schema":"ramflux.envelope.v1", "version":1, "domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2", "version":2, "domain":"ramflux.envelope.v2",
         "signing_key_id":"device", "signature_alg":"ed25519", "signature":"",
         "envelope_id":"message", "source_principal_id":"sender", "source_device_id":"device",
-        "target_delivery_id":"target", "routing_set_id":"routing", "delivery_class":"opaque_event", "priority":"normal",
-        "ttl":600, "created_at":123, "encrypted_payload":"cipher", "payload_hash":"hash",
+        "target_delivery_id":"target", "routing_set_id":"routing", "delivery_class":"message", "priority":"normal",
+        "ttl":600, "created_at":123, "encrypted_payload":"Y2lwaGVy",
+        "payload_hash": ramflux_protocol::hash_base64url(ramflux_protocol::domain::ENVELOPE, b"Y2lwaGVy"),
+        "delivery_mode":"durable",
+        "collapse_tag": ramflux_protocol::encode_base64url([2_u8; 32]),
+        "report_commitment": ramflux_protocol::encode_base64url([3_u8; 32]),
         "ext": {"sender_label":"signed", "source_root_commitment":"signed-root",
             "franking":{"sender_tag":"signed-tag", "franking_tag":"node-tag", "node_id":"node", "accepted_at":124}}
     }))?)
@@ -35,7 +39,7 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
     // Every case changes the actual Envelope and invokes the production canon again.
     for (field, value) in [
         ("/schema", json!("changed.schema")),
-        ("/version", json!(2)),
+        ("/version", json!(3)),
         ("/domain", json!("changed.domain")),
         ("/envelope_id", json!("changed-message")),
         ("/source_principal_id", json!("changed-sender")),
@@ -48,7 +52,9 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
         ("/ttl", json!(601)),
         ("/created_at", json!(124)),
         ("/encrypted_payload", json!("changed-cipher")),
-        ("/payload_hash", json!("changed-hash")),
+        ("/collapse_tag", json!(ramflux_protocol::encode_base64url([8_u8; 32]))),
+        ("/report_commitment", json!(ramflux_protocol::encode_base64url([7_u8; 32]))),
+        ("/delivery_mode", json!("ephemeral")),
         ("/ext/sender_label", json!("changed-label")),
         ("/ext/source_root_commitment", json!("changed-root")),
         ("/ext/franking/sender_tag", json!("changed-tag")),
@@ -56,12 +62,14 @@ fn hop_marker_is_excluded_but_every_sender_canon_field_is_bound() -> TestResult 
         let mut changed = serde_json::to_value(envelope.clone())?;
         *changed.pointer_mut(field).ok_or("named sender field missing")? = value;
         let changed: Envelope = serde_json::from_value(changed)?;
-        assert!(
-            key.verifying_key()
-                .verify_strict(&envelope_sender_signed_bytes(&changed)?, &signature)
-                .is_err(),
-            "unbound sender field {field}"
-        );
+        // A changed profile field (schema, version, domain) is refused before any signing bytes
+        // exist; every other change must produce bytes the original signature does not verify.
+        if let Ok(bytes) = envelope_sender_signed_bytes(&changed) {
+            assert!(
+                key.verifying_key().verify_strict(&bytes, &signature).is_err(),
+                "unbound sender field {field}"
+            );
+        }
     }
     Ok(())
 }

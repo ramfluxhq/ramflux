@@ -789,7 +789,7 @@ mod tests {
             source_device_id: "device_gateway_forward".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
             created_at: 1_760_000_000,

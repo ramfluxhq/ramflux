@@ -169,6 +169,7 @@ pub(super) async fn seeded(
         sender: remote.storage_key().into(),
         root: Some(remote.root_commitment().into()),
         at: now_unix_timestamp(),
+        sealed_at: now_unix_timestamp(),
         retry_from: now_unix_timestamp(),
         attempts: 0,
         next_at: 0,

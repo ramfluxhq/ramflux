@@ -1449,7 +1449,7 @@ pub(crate) mod tests {
         envelope_id: &str,
         target_delivery_id: &str,
     ) -> anyhow::Result<ramflux_protocol::Envelope> {
-        let mut envelope = envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent);
+        let mut envelope = envelope(envelope_id, target_delivery_id, DeliveryClass::Message);
         envelope.created_at =
             i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
         let root = ramflux_crypto::create_identity_root(
@@ -1507,7 +1507,7 @@ pub(crate) mod tests {
                 updated_at: 1,
                 expires_at: 2,
             },
-            envelope: envelope("env_forward", "target-b", DeliveryClass::OpaqueEvent),
+            envelope: envelope("env_forward", "target-b", DeliveryClass::Message),
             forward_count: 1,
         }
     }

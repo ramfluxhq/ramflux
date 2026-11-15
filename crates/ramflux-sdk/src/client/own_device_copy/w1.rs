@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT W1 adapter for own-copy receive (S6b P14). No production caller reaches it: the
-//! live `apply_own_receive` path is unchanged. The expectation values come from the caller;
-//! P20 (the actor contract) supplies them.
+//! W1 adapter for own-copy receive. `bind_received_own_copy_in` is live; the other entry
+//! points are reached only from the receive transaction and tests. The expectation values
+//! come from the caller.
 //!
 //! Contract: W0 (`stage`) precedes the own-copy effect; replay marker, control, pair slot,
 //! receipt, erased/backup-safe (T,E,s) locator and late bind run inside one generation,
