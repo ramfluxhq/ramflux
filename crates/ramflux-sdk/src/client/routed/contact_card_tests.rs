@@ -79,33 +79,6 @@ impl Origin {
         });
         Ok(Self { url, record, requests, task })
     }
-    pub(super) fn configure(&self, s: &mut LocalBusDaemonState, id: &str) -> Result<(), SdkError> {
-        let mut profile = crate::node::NodeProfile::from_record(
-            self.record.clone(),
-            now_unix_timestamp().unsigned_abs(),
-        );
-        profile.discovery_url = self.url.clone();
-        s.nodes.profiles.insert(profile.node_id.clone(), profile);
-        let account = s.accounts.get(id).ok_or_else(|| invalid("account"))?;
-        let root = account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        // The directory fixture starts with an already enrolled, authenticated account.
-        account.client.record_owned_proof_published(now_unix_timestamp())?;
-        let gateway = GatewayQuicEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("addr"))?,
-            gateway_addr: account.gateway_config.gateway_addr,
-            server_name: account.gateway_config.server_name.clone(),
-            ca_cert: account.gateway_config.ca_cert.clone(),
-            principal_id: id.into(),
-            device_id: id.into(),
-            target_delivery_id: id.into(),
-            prekey_http_url: None,
-        };
-        let manifest: crate::bus::protocol::LocalBusPersistedAccount = serde_json::from_value(
-            json!({"node_id":self.record.node_id,"schema":"ramflux.local_bus.account.v1","local_account_id":id,"principal_id":id,"principal_commitment":account.principal_commitment,"device_id":id,"target_delivery_id":id,"account_secret":"contact-test-secret","root_seed":root.signing_key.to_bytes(),"device_seed":account.client.device_branch.as_ref().ok_or_else(|| invalid("device"))?.signing_key.to_bytes(),"client_mode":"attended_cli","gateway":gateway}),
-        )?;
-        crate::bus::daemon::write_local_bus_account_manifest(&s.config.data_root, &manifest)?;
-        Ok(())
-    }
 }
 pub(super) fn install_native_home(
     origin: &Origin,

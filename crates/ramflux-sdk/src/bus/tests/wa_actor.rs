@@ -842,13 +842,24 @@ async fn routed_contact_request_covers_and_acks() -> Case {
 
 async fn contact_request_case() -> Case {
     let mut fixture = Box::pin(Fixture::new("h1-contact")).await?;
-    let mut source_manifest =
-        crate::client::identity_authority::test_support::public_manifest(&fixture.source.client)?;
+    let root = fixture.source.client.owned_device_identity()?.root_commitment().to_owned();
+    let mut source_manifest: crate::prekey::SdkDeviceManifestResponse = serde_json::from_value(
+        fixture
+            .gateway
+            .lock()
+            .map_err(|_| "gateway")?
+            .manifests
+            .get(&root)
+            .cloned()
+            .ok_or("manifest")?,
+    )?;
     source_manifest.devices.retain(|device| device.device_id == "device-sender");
-    source_manifest.devices[0].target_delivery_id = "sender".into();
+    let sender_delivery = source_manifest.devices[0].target_delivery_id.clone();
     {
-        let config =
-            fixture.source.gateway_config.clone().with_account_identity(&fixture.peer.client)?;
+        let config = super::fixture::bind_scripted_device(
+            fixture.source.gateway_config.clone(),
+            &fixture.peer.client,
+        )?;
         fixture.peer.gateway_config = config;
         fixture.peer.engine = None;
         fixture.peer.client.stage_contact_request(&source_manifest, "h1-link", None)?;
@@ -860,17 +871,22 @@ async fn contact_request_case() -> Case {
             .attempts
             .iter()
             .rev()
-            .find(|envelope| envelope.target_delivery_id == "sender")
+            .find(|envelope| envelope.target_delivery_id == sender_delivery)
             .cloned()
             .ok_or("contact request submit")?
     };
+    fixture.source.gateway_config.target_delivery_id.clone_from(&sender_delivery);
+    fixture.source.target_delivery_id.clone_from(&sender_delivery);
+    if let Some(engine) = fixture.source.engine.as_mut() {
+        engine.config.target_delivery_id.clone_from(&sender_delivery);
+    }
     {
         let mut served = fixture.gateway.lock().map_err(|_| "gateway")?;
-        served.ack_target = fixture.source.target_delivery_id.clone();
+        served.ack_target.clone_from(&sender_delivery);
         served.inbox = vec![GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: "sender".into(),
+            target_delivery_id: sender_delivery,
             envelope,
         }];
     }

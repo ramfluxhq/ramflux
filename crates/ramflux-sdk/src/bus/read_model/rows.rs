@@ -171,20 +171,27 @@ fn identity(client: &RamfluxClient, id: &str, mut saved: Value) -> Result<Value,
         saved["kind"] = json!(kind);
     }
     // Gateway-fetched safety material is persisted by the verified contact path.
-    let contact = client.contact_entry(id)?;
-    for field in [
-        "reachable",
-        "verified",
-        "kind_asserted",
-        "kind_verified",
-        "display_name",
-        "display_name_confusable_with",
-        "mixed_script",
-        "root_commitment",
-        "root_source",
-        "node",
-    ] {
-        saved[field] = contact[field].clone();
+    // Authority that is still loading is state A: leave the stored row and do not
+    // present it as unverified. A missing born account stays CustodyModeDowngrade.
+    match client.contact_entry(id) {
+        Ok(contact) => {
+            for field in [
+                "reachable",
+                "verified",
+                "kind_asserted",
+                "kind_verified",
+                "display_name",
+                "display_name_confusable_with",
+                "mixed_script",
+                "root_commitment",
+                "root_source",
+                "node",
+            ] {
+                saved[field] = contact[field].clone();
+            }
+        }
+        Err(SdkError::NetworkingPending) => {}
+        Err(error) => return Err(error),
     }
     saved["pair_recovery"] = json!(client.pair_recovery_metadata(id)?);
     saved["safety_number_available"] =

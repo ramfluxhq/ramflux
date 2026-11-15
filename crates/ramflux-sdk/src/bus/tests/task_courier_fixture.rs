@@ -4,10 +4,9 @@
 //! Loopback TLS gateway that counts real session opens and serves verified manifests.
 
 use crate::bus::runtime_tests;
-use crate::client::identity_authority::test_support::{public_manifest, sign_manifest};
 use crate::prelude::*;
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub(super) type Case<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -105,8 +104,21 @@ pub(super) struct Fixture {
     pub root: ramflux_test_support::TestPath,
 }
 
-fn account(root: &Path, id: &str) -> Result<LocalBusAccountState, SdkError> {
-    runtime_tests::account(root, id, None, Arc::new(AtomicBool::new(false)))
+pub(super) fn bind_scripted_device(
+    mut config: GatewaySessionConfig,
+    client: &RamfluxClient,
+) -> Result<GatewaySessionConfig, SdkError> {
+    let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    // The scripted gateway speaks the ordinary session frames. Born authority stays on
+    // the account; putting custody on this config would switch the handshake.
+    config.custody = None;
+    config.custody_networking_pending = false;
+    config.principal_id.clone_from(&branch.principal_id);
+    config.device_id.clone_from(&branch.device_id);
+    config.device_epoch = branch.device_epoch;
+    config.source_identity = Some(client.owned_device_identity()?);
+    config.device_branch = Some(Arc::new(branch));
+    Ok(config)
 }
 
 pub(super) fn seed_pair(a: &RamfluxClient, b: &RamfluxClient) -> Result<(), SdkError> {
@@ -142,53 +154,82 @@ impl Fixture {
         frame_timeout: Option<Duration>,
     ) -> Case<Self> {
         let root = runtime_tests::root(label);
-        let mut source = account(&root.join("source"), "sender")?;
-        let peer = account(&root.join("peer"), "peer")?;
-        let mut sibling = account(&root.join("sibling"), "sender")?;
-        sibling.client.create_device_branch("sender", "device-sibling", 1, [77; 32]);
-        let mut own = public_manifest(&source.client)?;
-        let mut sibling_manifest = public_manifest(&sibling.client)?;
-        sibling_manifest.devices[0].target_delivery_id = "sibling".into();
-        own.devices.extend(sibling_manifest.devices);
-        sign_manifest(source.client.identity_root.as_ref().ok_or("root")?, &mut own, 2)?;
-        let mut remote = public_manifest(&peer.client)?;
-        let mut peer2 =
-            if second_peer { Some(account(&root.join("peer2"), "peer")?) } else { None };
-        if let Some(second) = &mut peer2 {
-            second.client.create_device_branch("peer", "device-peer2", 1, [78; 32]);
-            let mut manifest = public_manifest(&second.client)?;
-            manifest.devices[0].target_delivery_id = "peer2".into();
-            remote.devices.extend(manifest.devices);
-            sign_manifest(peer.client.identity_root.as_ref().ok_or("root")?, &mut remote, 2)?;
+        let passphrase = b"native fixture data passphrase";
+        let mut source = runtime_tests::born_account(
+            &root.join("source"),
+            "sender",
+            "sender",
+            "device-sender",
+            passphrase,
+            "sender",
+        )
+        .await?;
+        let mut peer = runtime_tests::born_account(
+            &root.join("peer"),
+            "peer",
+            "peer",
+            "device-peer",
+            passphrase,
+            "peer",
+        )
+        .await?;
+        let sibling = runtime_tests::enroll_born_sibling(
+            &mut source,
+            &root.join("sibling"),
+            "sender",
+            "device-sibling",
+            "sibling",
+        )
+        .await?;
+        let peer2 = if second_peer {
+            Some(
+                runtime_tests::enroll_born_sibling(
+                    &mut peer,
+                    &root.join("peer2"),
+                    "peer",
+                    "device-peer2",
+                    "peer2",
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let own = source.manifest.clone();
+        let remote = peer.manifest.clone();
+        let mut readers = vec![&source.state.client, &peer.state.client, &sibling.state.client];
+        if let Some(second) = &peer2 {
+            readers.push(&second.state.client);
         }
-        source.principal_commitment = own.principal_commitment.clone();
-        for local in
-            [Some(&source), Some(&peer), Some(&sibling), peer2.as_ref()].into_iter().flatten()
-        {
-            local.client.persist_identity_directory(&own)?;
-            local.client.persist_identity_directory(&remote)?;
-            local.client.account_db()?.establish_friend_link(
+        for local in readers {
+            local.persist_fetched_identity_directory(&own)?;
+            local.persist_fetched_identity_directory(&remote)?;
+            local.account_db()?.establish_friend_link(
                 "test-friend",
                 &own.principal_commitment,
                 &remote.principal_commitment,
             )?;
             for conversation in ["healthy", "stalled"] {
-                local.client.account_db()?.persist_client_record(
+                local.account_db()?.persist_client_record(
                     "conversation",
                     conversation,
                     &json!({"kind":"direct","participants":["sender","peer"]}),
                 )?;
             }
         }
-        seed_pair(&source.client, &peer.client)?;
-        seed_pair(&source.client, &sibling.client)?;
+        seed_pair(&source.state.client, &peer.state.client)?;
+        seed_pair(&source.state.client, &sibling.state.client)?;
         if let Some(second) = &peer2 {
-            seed_pair(&source.client, &second.client)?;
+            seed_pair(&source.state.client, &second.state.client)?;
         }
+        let mut source = source.state;
+        let peer = peer.state;
+        let sibling = sibling.state;
+        let peer2 = peer2.map(|born| born.state);
         let gateway = Arc::new(Mutex::new(Gateway {
             manifests: BTreeMap::from([
-                (own.principal_commitment.clone(), serde_json::to_value(own)?),
-                (remote.principal_commitment.clone(), serde_json::to_value(remote)?),
+                (own.principal_commitment.clone(), serde_json::to_value(&own)?),
+                (remote.principal_commitment.clone(), serde_json::to_value(&remote)?),
             ]),
             ..Gateway::default()
         }));
@@ -226,17 +267,19 @@ impl Fixture {
                 });
             }
         });
-        let mut config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse()?,
-            gateway_addr: address,
-            server_name: "test-gateway".into(),
-            ca_cert: root.join("ca.pem"),
-            principal_id: "sender".into(),
-            device_id: "device-sender".into(),
-            target_delivery_id: "sender".into(),
-            prekey_http_url: None,
-        })
-        .with_account_identity(&source.client)?;
+        let mut config = bind_scripted_device(
+            GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
+                bind_addr: "127.0.0.1:0".parse()?,
+                gateway_addr: address,
+                server_name: "test-gateway".into(),
+                ca_cert: root.join("ca.pem"),
+                principal_id: "sender".into(),
+                device_id: "device-sender".into(),
+                target_delivery_id: "sender".into(),
+                prekey_http_url: None,
+            }),
+            &source.client,
+        )?;
         let session_hold = frame_timeout.unwrap_or(Duration::from_secs(600));
         config.timeout = session_hold;
         config.quic_fallback_timeout = session_hold;

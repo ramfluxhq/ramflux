@@ -106,8 +106,19 @@ fn ledger(account: &LocalBusAccountState, target: &str) -> Case {
 }
 
 fn reopen(account: &mut LocalBusAccountState) -> Case {
+    // Unlock drops the in-memory branch. The same device is coming back.
+    let branch = account.client.device_branch.clone();
     account.client.active_account_db = None;
-    account.client.unlock_account("sender", b"actor-test-secret")?;
+    account.client.unlock_account("sender", b"native fixture data passphrase")?;
+    if let Some(branch) = branch {
+        account.client.device_branch = Some(branch.clone());
+        account
+            .client
+            .active_account_db
+            .as_mut()
+            .ok_or(SdkError::AccountDbNotUnlocked)?
+            .set_device_signer(branch);
+    }
     Ok(())
 }
 
