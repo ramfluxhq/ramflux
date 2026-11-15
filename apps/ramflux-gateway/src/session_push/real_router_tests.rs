@@ -52,14 +52,8 @@ async fn real_router_with_publications(
     drop(udp);
     if seed.is_some() || !publications.is_empty() {
         let store = ramflux_node_core::RouterRedbStore::open(root.join("router.redb"))?;
-        let fresh;
-        let core = match seed {
-            Some(core) => core,
-            None => {
-                fresh = ramflux_node_core::RouterCore::new();
-                &fresh
-            }
-        };
+        let fresh = ramflux_node_core::RouterCore::new();
+        let core = seed.unwrap_or(&fresh);
         store.save_router(core)?;
         let now = ramflux_node_core::now_unix_seconds();
         for publication in publications {

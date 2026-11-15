@@ -432,7 +432,7 @@ async fn account_live_and_offline(
     );
     assert_eq!(
         live["envelope"]["encrypted_payload"],
-        super::activation_account::presealed_ciphertext()?,
+        super::activation_account::presealed_ciphertext(),
         "known presealed ciphertext must survive handoff unchanged"
     );
     consumer.complete();
@@ -712,6 +712,7 @@ struct AccountBaseline {
     wakes: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn capture_account_baseline(
     child: &mut Child,
     client_root: &Path,
@@ -823,6 +824,7 @@ async fn stop_account_pair(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_activation(measure_persistence: bool) -> TestResult {
     let Some(ActivationSetup {
         mut child,
@@ -833,21 +835,21 @@ async fn run_activation(measure_persistence: bool) -> TestResult {
         sender,
         receiver,
         native_root,
-    }) = account_activation_setup().await?
+    }) = Box::pin(account_activation_setup()).await?
     else {
         return Ok(());
     };
     let client_root = native_root.to_path_buf();
     let sender_root = client_root.join("sender");
     let receiver_root = client_root.join("receiver");
-    let mut accounts = attach_account_pair(
+    let mut accounts = Box::pin(attach_account_pair(
         &context,
         &runtime,
         &source_incarnation,
         &incarnation,
         sender,
         receiver,
-    )
+    ))
     .await?;
     calibrate_account_transport(
         &mut accounts.sender,
@@ -936,13 +938,13 @@ async fn run_activation(measure_persistence: bool) -> TestResult {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a separately built same-tree router binary on QA"]
 async fn ephemeral_activation_end_to_end() -> TestResult {
-    run_activation(false).await
+    Box::pin(run_activation(false)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a separately built same-tree router binary on QA"]
 async fn ephemeral_persistence_absence() -> TestResult {
-    run_activation(true).await
+    Box::pin(run_activation(true)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1246,8 +1248,11 @@ async fn cross_gateway_full(
             |envelope| {
                 // A valid compact cryptobox whose base64url form is 30 000 characters.
                 envelope.encrypted_payload = ramflux_protocol::encode_base64url(
-                    ramflux_protocol::message::outer::encode_compact_cryptobox(&[7; 22_491], b"")
-                        .expect("test: compact cryptobox fits u32"),
+                    ramflux_protocol::message::outer::encode_compact_cryptobox(
+                        &std::iter::repeat_n(7_u8, 22_491).collect::<Vec<u8>>(),
+                        b"",
+                    )
+                    .expect("test: compact cryptobox fits u32"),
                 );
                 envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
                     ramflux_protocol::domain::ENVELOPE,

@@ -122,7 +122,7 @@ impl Account {
         id: &str,
         change: impl FnOnce(&mut ramflux_protocol::Envelope),
     ) -> anyhow::Result<EphemeralSendOutcome> {
-        let ciphertext = presealed_ciphertext()?;
+        let ciphertext = presealed_ciphertext();
         let payload_hash = ramflux_crypto::blake3_256_base64url(
             ramflux_protocol::domain::ENVELOPE,
             ciphertext.as_bytes(),
@@ -158,7 +158,7 @@ impl Account {
             envelope.target_delivery_id = target().into();
         })?
         .envelope;
-        envelope.encrypted_payload = presealed_ciphertext()?;
+        envelope.encrypted_payload = presealed_ciphertext();
         envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
             ramflux_protocol::domain::ENVELOPE,
             envelope.encrypted_payload.as_bytes(),
@@ -266,6 +266,6 @@ pub(super) fn recipient_runtime(
 
 /// A valid compact generation-1 cryptobox, built outside the measured SDK transport: endpoint
 /// ratchet state is not part of this oracle.
-pub(super) fn presealed_ciphertext() -> anyhow::Result<String> {
-    Ok("UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".to_owned())
+pub(super) fn presealed_ciphertext() -> String {
+    "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".to_owned()
 }
