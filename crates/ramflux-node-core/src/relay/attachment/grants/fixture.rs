@@ -128,6 +128,7 @@ impl RetirementFixture {
     pub fn lease_mutex_held(&self) -> bool {
         self.registry.leases_held()
     }
+
     /// Holds the ledger's single write lock until the returned guard is dropped.
     /// # Panics
     /// Panics on storage failure.
@@ -253,6 +254,36 @@ impl RetirementFixture {
     pub fn source_signer(&self) -> SigningKey {
         self.signer.clone()
     }
+}
+
+/// Registers one prepared grant with the owner session the registry already authenticates.
+/// # Errors
+/// Returns the ledger error when the session, grant, or committed payload is refused.
+pub fn register_prepared(
+    registry: &ScopedGrantRegistry,
+    upload_id: &[u8; 32],
+    native: &VerifiedContentManifest,
+    grant: &VerifiedScopedGrant,
+    authority_signer: &SigningKey,
+    now: u64,
+) -> Result<super::RegisteredAttachmentGrant, AttachmentLedgerError> {
+    let hash = grant.grant().hash().map_err(|_| AttachmentLedgerError::Invalid)?;
+    let session = super::test_support::auth_for_device_at(
+        native,
+        now,
+        ObjectRelayCapability::Put,
+        hex(&hash),
+        &native.manifest().owner,
+        super::test_support::owner_seed(),
+        "node-a",
+    );
+    registry.register(upload_id, native, grant, &session.context(), authority_signer)
+}
+
+/// Signing seed the registry's owner session accepts. Production code cannot call this.
+#[must_use]
+pub fn owner_signing_seed() -> [u8; 32] {
+    super::test_support::owner_seed()
 }
 
 fn aud(

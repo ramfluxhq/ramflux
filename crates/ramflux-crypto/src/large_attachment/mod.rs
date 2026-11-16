@@ -12,7 +12,9 @@ use ramflux_protocol::large_attachment::{
 };
 use zeroize::Zeroizing;
 
+mod account_seal;
 mod key_slot;
+pub use account_seal::{open_prepare_record, seal_prepare_record};
 pub use key_slot::{
     DeviceTarget, KeySlotBinding, KeySlotError, KeySlotParties, open_file_key, wrap_file_key,
 };

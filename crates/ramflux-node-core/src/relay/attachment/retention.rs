@@ -90,16 +90,10 @@ impl AttachmentLedger {
         owner: &AttachmentOwner,
         id: &[u8; 32],
     ) -> Result<AttachmentReservation, AttachmentLedgerError> {
-        self.change(owner, id, |record, _| {
-            match record.state {
-                AttachmentReservationState::Pending => {
-                    record.state = AttachmentReservationState::DebtPending;
-                }
-                AttachmentReservationState::DebtPending | AttachmentReservationState::Released => {}
-                _ => return Err(AttachmentLedgerError::State),
-            }
-            Ok(())
-        })
+        let tx = self.db.begin_write().map_err(store)?;
+        let record = Self::abandon_on(&tx, owner, id)?;
+        tx.commit().map_err(store)?;
+        Ok(record)
     }
     /// Returns at most 64 indexed expiry jobs; no backend I/O or charge release.
     /// Expiry fences serving before cleanup. Unfinished cleanup remains durable debt.

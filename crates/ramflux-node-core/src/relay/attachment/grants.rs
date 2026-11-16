@@ -11,7 +11,9 @@ mod wire;
 pub use renewal::{
     ChallengeMint, HomeVerdict, RenewalAdmission, RenewalChallenge, RenewalPolicy, RenewalRefusal,
 };
-pub use replay::{AttachmentReplayError, AttachmentReplayProof};
+pub use replay::{
+    AttachmentReplayError, AttachmentReplayProof, OwnerAdmission, OwnerAdmissionError,
+};
 pub use wire::{ChallengeEnvelope, ForwardedRenewal, RequesterWire};
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;

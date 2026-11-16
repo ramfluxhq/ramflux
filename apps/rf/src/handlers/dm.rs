@@ -11,8 +11,20 @@ pub(crate) mod unified;
 mod wait;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
+    if let DmAction::Send(send) = &command.action {
+        super::attachment::refuse_retired(
+            send.relay_url.is_some(),
+            send.attachment_chunk_size.is_some(),
+        )?;
+        if !send.attach.is_empty() && !send.media_ref.is_empty() {
+            return Err(RfError::Message("content".into()));
+        }
+    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
+        DmAction::Send(send) if !send.attach.is_empty() => {
+            super::attachment::send_dm(&mut bus, send).await
+        }
         DmAction::Send(send) => {
             let federation = rf_federation_route(&send)?;
             let content = crate::utils::media_content(&send.body, &send.media_ref)?;
@@ -267,55 +279,25 @@ pub(crate) fn rf_federation_route(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
 
     #[test]
     fn retired_dm_flags_are_unknown_arguments() -> Result<(), Box<dyn std::error::Error>> {
-        for retired in [
-            ["--attach", "absent-attachment"],
-            ["--relay-url", "invalid-relay"],
-            ["--tombstone", "old-id"],
-        ] {
-            let mut args = vec![
-                "rf",
-                "dm",
-                "send",
-                "--account",
-                "account",
-                "--conversation",
-                "conversation",
-                "--message",
-                "operation",
-                "--envelope",
-                "envelope",
-                "--source-principal",
-                "source",
-                "--sender",
-                "device",
-                "--target",
-                "target",
-                "--body",
-                "caption",
-            ];
-            if retired[0] == "--tombstone" {
-                args = vec![
-                    "rf",
-                    "dm",
-                    "delete",
-                    "--account",
-                    "account",
-                    "--conversation",
-                    "conversation",
-                    "--message",
-                    "operation",
-                ];
-            }
-            args.extend(retired);
-            let error =
-                crate::cli::Cli::try_parse_from(args).err().ok_or("retired flag accepted")?;
-            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        }
+        let args = [
+            "rf",
+            "dm",
+            "delete",
+            "--account",
+            "account",
+            "--conversation",
+            "conversation",
+            "--message",
+            "operation",
+            "--tombstone",
+            "old-id",
+        ];
+        let error = crate::cli::Cli::try_parse_from(args).err().ok_or("retired flag accepted")?;
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         Ok(())
     }
 }

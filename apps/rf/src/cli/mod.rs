@@ -10,6 +10,7 @@ pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 mod a2i_a2ui;
 mod account;
 mod admin;
+mod attachment;
 mod call_bot;
 mod contact;
 mod conversation_ops;
@@ -34,6 +35,7 @@ pub(crate) use task::*;
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
 pub(crate) use admin::*;
+pub(crate) use attachment::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;
 pub(crate) use conversation_ops::*;
@@ -94,6 +96,7 @@ pub(crate) enum Command {
     Admin(AdminCommand),
     /// Plaintext residue diagnostics.
     Diag(DiagCommand),
+    Attachment(AttachmentCommand),
 }
 
 #[cfg(test)]

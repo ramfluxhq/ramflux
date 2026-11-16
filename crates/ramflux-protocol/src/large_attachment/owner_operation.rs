@@ -194,6 +194,13 @@ impl OwnerAttachmentOperation {
         Ok(out)
     }
 
+    /// Domain-separated operation hash. An owner proof binds this value.
+    /// # Errors
+    /// Refuses a transcript this operation cannot encode.
+    pub fn hash(&self) -> Result<[u8; 32], FormatError> {
+        super::digest("ramflux.attachment.operation.v1", &self.canonical_bytes()?)
+    }
+
     /// # Errors
     /// Refuses a reader operation, a non-zero grant, or bytes that are not this transcript.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {

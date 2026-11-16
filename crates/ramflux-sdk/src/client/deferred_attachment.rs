@@ -250,6 +250,12 @@ impl RamfluxClient {
         object_id: &str,
         operation_id: &str,
     ) -> Result<Value, SdkError> {
+        if self.account_db()?.client_record("attachment-object", object_id)?.is_some() {
+            return Err(crate::attachment_send::Refusal::new(
+                crate::attachment_send::CODE_LAYOUT_INVALID,
+            )
+            .into());
+        }
         self.fetch_received_with(
             object_id,
             operation_id,
