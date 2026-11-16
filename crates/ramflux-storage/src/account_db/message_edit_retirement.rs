@@ -174,10 +174,9 @@ fn retire_copy(
         "retry" | "dead_letter" | "unrouted" => retire_inbox_copy(db, kind, locator)?,
         "archived_actor" => delete_row(db, "backup_archived_actor_state", locator)?,
         "archived_event" => delete_row(db, "backup_archived_local_event", locator)?,
-        "runtime_message_content"
-        | "message_projection"
-        | "group_pending_undecrypted"
-        | "contact_message_request" => delete_row(db, kind, locator)?,
+        "runtime_message_content" | "message_projection" | "contact_message_request" => {
+            delete_row(db, kind, locator)?;
+        }
         "raw_envelope_log:envelope_id" => delete_row(db, "raw_envelope_log", locator)?,
         "outbox_queue:envelope_id" => delete_row(db, "outbox_queue", locator)?,
         "outbox" => {

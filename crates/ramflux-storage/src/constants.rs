@@ -13,12 +13,6 @@ pub(crate) const DEFAULT_TYPING_TTL_SECONDS: i64 = 10;
 pub(crate) const MAX_TYPING_TTL_SECONDS: i64 = 30;
 pub(crate) const DEFAULT_CONTACT_PRESENCE_TTL_SECONDS: i64 = 10;
 pub(crate) const MAX_CONTACT_PRESENCE_TTL_SECONDS: i64 = 30;
-/// Signal-style `MAX_SKIP` guard for undecryptable group messages awaiting sender keys.
-pub const GROUP_PENDING_UNDECRYPTED_PER_GROUP_LIMIT: usize = 256;
-/// Global cap for undecryptable group messages to keep malicious groups from exhausting storage.
-pub const GROUP_PENDING_UNDECRYPTED_GLOBAL_LIMIT: usize = 1024;
-/// Best-effort TTL for pending UTD rows; key arrival after this must use normal resync.
-pub const GROUP_PENDING_UNDECRYPTED_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 #[must_use]
 pub const fn crate_name() -> &'static str {

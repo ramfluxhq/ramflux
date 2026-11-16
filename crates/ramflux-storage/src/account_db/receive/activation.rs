@@ -104,7 +104,7 @@ impl AccountDb {
         self.activate_receive_ledger(input).map(Some)
     }
 
-    /// First activation into a proofless Compat namespace. The verification bit shares
+    /// First activation into a proofless direct namespace. The verification bit shares
     /// the activation commit; an existing epoch is never relabeled.
     ///
     /// # Errors

@@ -52,7 +52,7 @@ pub(crate) struct SourceKind {
 
 /// Every footprint kind classified Source. A kind that appears in neither this list nor
 /// `NON_SOURCE_KINDS` is unclassified, which the inventory guard rejects.
-pub(crate) const SOURCE_KINDS: [SourceKind; 11] = [
+pub(crate) const SOURCE_KINDS: [SourceKind; 10] = [
     SourceKind {
         kind: "actor",
         table: "runtime_actor_state",
@@ -100,12 +100,6 @@ pub(crate) const SOURCE_KINDS: [SourceKind; 11] = [
         table: "runtime_journal",
         locator: "CAST(t.seq AS TEXT)",
         column: "body_json",
-    },
-    SourceKind {
-        kind: "group_pending_undecrypted",
-        table: "group_pending_undecrypted",
-        locator: "CAST(t.rowid AS TEXT)",
-        column: "envelope_json",
     },
     SourceKind {
         kind: "contact_message_request",

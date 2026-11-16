@@ -334,10 +334,8 @@ pub(crate) fn decode_server_frame(
 /// How a session was negotiated. Frozen at establishment; a reconnect negotiates again.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionMode {
-    /// The capability was not advertised and nothing was echoed.
-    Legacy,
-    /// The capability was advertised but the gateway did not echo it.
-    Compat,
+    /// Push was not advertised. This is the current non-push session.
+    Direct,
     /// Advertised, echoed and accompanied by a valid inbox incarnation.
     Push { incarnation: IncarnationId },
 }
@@ -352,17 +350,16 @@ impl SessionMode {
     pub(crate) const fn receive_label(&self) -> &'static str {
         match self {
             Self::Push { .. } => "push",
-            Self::Compat => "compat",
-            Self::Legacy => "legacy",
+            Self::Direct => "direct",
         }
     }
 
-    /// Verified node incarnation from a Push handshake. Compat/Legacy bind a local epoch.
+    /// Verified node incarnation from a Push handshake. A direct session binds a local epoch.
     #[must_use]
     pub(crate) fn push_incarnation(&self) -> Option<&str> {
         match self {
             Self::Push { incarnation } => Some(incarnation.as_str()),
-            Self::Legacy | Self::Compat => None,
+            Self::Direct => None,
         }
     }
 }
@@ -432,7 +429,13 @@ pub(crate) fn negotiate(
     }
     match (capabilities.is_empty(), &echo.inbox_incarnation_id) {
         (true, Some(_)) => Err(refused("incarnation without an echoed capability")),
-        (true, None) => Ok(if advertised { SessionMode::Compat } else { SessionMode::Legacy }),
+        (true, None) => {
+            if advertised {
+                Err(refused("advertised push was not echoed"))
+            } else {
+                Ok(SessionMode::Direct)
+            }
+        }
         (false, None) => Err(refused("echo without an inbox incarnation")),
         (false, Some(id)) => IncarnationId::try_from(id.clone())
             .map(|incarnation| SessionMode::Push { incarnation })
@@ -443,7 +446,7 @@ pub(crate) fn negotiate(
 /// Where the raw bytes of one frame go.
 #[derive(Debug)]
 pub(crate) enum Routed {
-    Legacy(Box<GatewayServerFrame>),
+    Direct(Box<GatewayServerFrame>),
     Capable(Box<CapableServerFrame>),
 }
 
@@ -453,10 +456,10 @@ pub(crate) enum Routed {
 pub(crate) enum RouteError {
     /// The frame is not allowed in this mode; the text names the arm.
     Retire(&'static str),
-    /// A capable frame failed its strict decode. It is never re-read as legacy.
+    /// A capable frame failed its strict decode. It is never re-read as a direct frame.
     Capable(ramflux_protocol::ProtocolError),
-    /// A legacy frame failed its strict decode.
-    Legacy(ramflux_protocol::ProtocolError),
+    /// A direct frame failed its strict decode.
+    Direct(ramflux_protocol::ProtocolError),
 }
 
 /// Frames only a negotiated gateway sends; each always carries `incarnation_id`.
@@ -472,11 +475,11 @@ const CAPABLE_ONLY: [&str; 7] = [
 /// Tags shared by both protocols; the `incarnation_id` key selects the shape.
 const SHARED: [&str; 4] = ["deliver", "ack", "cursor", "nack"];
 
-fn legacy(bytes: &[u8]) -> Result<Routed, RouteError> {
-    ramflux_protocol::validate_call_resolution_frame(bytes).map_err(RouteError::Legacy)?;
+fn direct_frame(bytes: &[u8]) -> Result<Routed, RouteError> {
+    ramflux_protocol::validate_call_resolution_frame(bytes).map_err(RouteError::Direct)?;
     ramflux_protocol::parse_i_json::<GatewayServerFrame>(bytes)
-        .map(|frame| Routed::Legacy(Box::new(frame)))
-        .map_err(RouteError::Legacy)
+        .map(|frame| Routed::Direct(Box::new(frame)))
+        .map_err(RouteError::Direct)
 }
 
 fn capable(bytes: &[u8]) -> Result<Routed, RouteError> {
@@ -497,7 +500,7 @@ pub(crate) fn route(bytes: &[u8], mode: &SessionMode) -> Result<Routed, RouteErr
             .map(|tag| (tag.to_owned(), map.contains_key("incarnation_id"))),
         _ => None,
     };
-    let Some((tag, keyed)) = peek else { return legacy(bytes) };
+    let Some((tag, keyed)) = peek else { return direct_frame(bytes) };
     let capable_only = CAPABLE_ONLY.contains(&tag.as_str());
     let shared = SHARED.contains(&tag.as_str());
     if matches!(mode, SessionMode::Push { .. }) {
@@ -506,15 +509,15 @@ pub(crate) fn route(bytes: &[u8], mode: &SessionMode) -> Result<Routed, RouteErr
             ("deliver" | "ack", false) => {
                 Err(RouteError::Retire("keyless shape in a push session"))
             }
-            ("resume", _) => Err(RouteError::Retire("legacy resume in a push session")),
-            // Keyless `nack`/`cursor` (submit refusals, legacy cursor) and every other tag.
-            _ => legacy(bytes),
+            ("resume", _) => Err(RouteError::Retire("direct resume in a push session")),
+            // Keyless `nack`/`cursor` (submit refusals, direct cursor) and every other tag.
+            _ => direct_frame(bytes),
         };
     }
     if capable_only || (shared && keyed) {
         return Err(RouteError::Retire("capable frame on an unnegotiated session"));
     }
-    legacy(bytes)
+    direct_frame(bytes)
 }
 
 /// What a push delivery carries beyond the legacy entry.

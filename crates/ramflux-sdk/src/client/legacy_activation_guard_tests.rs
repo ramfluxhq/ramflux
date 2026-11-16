@@ -57,7 +57,7 @@ fn push_engine(config: crate::GatewaySessionConfig) -> GatewaySessionEngine {
 
 fn legacy_engine(config: crate::GatewaySessionConfig) -> GatewaySessionEngine {
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
-    engine.mode = SessionMode::Legacy;
+    engine.mode = SessionMode::Direct;
     engine
 }
 
@@ -379,9 +379,14 @@ async fn default_activation_both_modes() -> TestResult {
         .ok_or("first-activation writes an epoch")?;
     assert_eq!(epoch, INCARNATION, "direct migration binds the verified node incarnation");
 
-    let compat =
-        connect_scripted(&account.client, advertised.clone(), legacy_established()).await?;
-    assert_eq!(compat.mode, SessionMode::Compat);
+    let missing_echo =
+        connect_scripted(&account.client, advertised.clone(), legacy_established()).await;
+    match missing_echo {
+        Err(SdkError::GatewaySessionRejected(text))
+            if text.contains("advertised push was not echoed") => {}
+        Err(error) => panic!("advertised push without an echo must be refused: {error}"),
+        Ok(_) => panic!("advertised push without an echo must be refused"),
+    }
     account.install_test_session(legacy_engine(advertised.clone()));
     let turn = actor_turn(&account, 1)?;
     assert!(
@@ -575,82 +580,94 @@ async fn standalone_receive_refuses_while_actor_bound() -> TestResult {
     Ok(())
 }
 
-/// Compat cursor/work/intents survive a Push bind through the fenced reset rules.
+/// A direct session's cursor, work and intents survive a later Push bind.
 #[tokio::test]
-async fn compat_then_push_keeps_receive_live() -> TestResult {
-    use ramflux_storage::ReceiveExpectation;
-    let fixture = Fixture::new("compat-then-push").await?;
-    let target = fixture.config.target_delivery_id.clone();
-    let mut account = LocalBusAccountState::disconnected(
-        fixture.client,
-        fixture.config.clone(),
-        fixture.manifest.principal_commitment.clone(),
-    );
-    let compat =
-        connect_scripted(&account.client, account.connection_config()?, legacy_established())
-            .await?;
-    // Explicit activation also exercises this row on the default-off predecessor.
-    if account.client.account_db()?.receive_activation()? == ReceiveActivation::Inactive {
-        let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
-            target: &target,
-            incarnation: "local-compat",
-        })?;
-    }
-    account.install_test_session(compat);
-    let old = account.client.account_db()?.receive_epoch(&target)?.ok_or("old epoch")?;
-    let db = account.client.account_db()?;
-    let erasure = db.privacy_erasure_generation()?;
-    seed_compat_pending(&account, &target, &old)?;
-    let push = connect_scripted_settled(
-        &account.client,
-        account.connection_config()?,
-        push_established(),
-        2,
-    )
-    .await?;
-    assert_eq!(account.client.account_db()?.receive_epoch(&target)?.as_deref(), Some(INCARNATION));
-    assert_eq!(
-        account.client.gateway_receive_cursor(&target)?,
-        2,
-        "first-page settled prefix owns C"
-    );
-    account.install_test_session(push);
-    let db = account.client.account_db()?;
-    let snap = db.receive_ledger_snap_for_test(&target)?;
-    assert!(snap.intents.is_empty(), "old ACK intents cannot cross epochs");
-    assert_eq!(snap.work, 1, "held old work remains available for local recovery");
-    assert_eq!(db.receive_state_for_test(1)?.0, None, "terminal Compat work is released");
-    let mut next = entry(&target);
-    next.inbox_seq = 3;
-    next.envelope.envelope_id = "next-env".into();
-    let _ = crate::bus::push_receiver::intake::stage_on_actor(
-        &account,
-        1,
-        &next,
-        INCARNATION,
-        1_700_000_000,
-    )?;
-    assert!(
-        crate::bus::push_receiver::intake::stage_on_actor(&account, 1, &next, &old, 1_700_000_000)
-            .is_err(),
-        "old E cannot accept new intake"
-    );
-    assert!(
-        db.receive_transaction(
-            ReceiveExpectation {
+async fn direct_then_push_keeps_receive_live() -> TestResult {
+    Box::pin(tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use ramflux_storage::ReceiveExpectation;
+        let fixture = Fixture::new("direct-then-push").await?;
+        let target = fixture.config.target_delivery_id.clone();
+        let mut account = LocalBusAccountState::disconnected(
+            fixture.client,
+            fixture.config.clone(),
+            fixture.manifest.principal_commitment.clone(),
+        );
+        // A fresh account advertises push, so a no-echo establishment is refused.
+        // The direct epoch is the local one first-activation binds.
+        account.client.first_activate_receive_ledger(&target, None)?;
+        if account.client.account_db()?.receive_activation()? == ReceiveActivation::Inactive {
+            let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
                 target: &target,
-                incarnation: &old,
-                cursor: 2,
-                generation: 1,
-                erasure_generation: erasure
-            },
-            1,
-            |tx| tx.require_open_input(2)
+                incarnation: "local-direct",
+            })?;
+        }
+        account.install_test_session(legacy_engine(account.connection_config()?));
+        let old = account.client.account_db()?.receive_epoch(&target)?.ok_or("old epoch")?;
+        let db = account.client.account_db()?;
+        let erasure = db.privacy_erasure_generation()?;
+        seed_compat_pending(&account, &target, &old)?;
+        let push = connect_scripted_settled(
+            &account.client,
+            account.connection_config()?,
+            push_established(),
+            2,
         )
-        .is_ok(),
-        "retired E permits local recovery"
-    );
-    Ok(())
+        .await?;
+        assert_eq!(
+            account.client.account_db()?.receive_epoch(&target)?.as_deref(),
+            Some(INCARNATION)
+        );
+        assert_eq!(
+            account.client.gateway_receive_cursor(&target)?,
+            2,
+            "first-page settled prefix owns C"
+        );
+        account.install_test_session(push);
+        let db = account.client.account_db()?;
+        let snap = db.receive_ledger_snap_for_test(&target)?;
+        assert!(snap.intents.is_empty(), "old ACK intents cannot cross epochs");
+        assert_eq!(snap.work, 1, "held old work remains available for local recovery");
+        assert_eq!(db.receive_state_for_test(1)?.0, None, "terminal Compat work is released");
+        let mut next = entry(&target);
+        next.inbox_seq = 3;
+        next.envelope.envelope_id = "next-env".into();
+        let _ = crate::bus::push_receiver::intake::stage_on_actor(
+            &account,
+            1,
+            &next,
+            INCARNATION,
+            1_700_000_000,
+        )?;
+        assert!(
+            crate::bus::push_receiver::intake::stage_on_actor(
+                &account,
+                1,
+                &next,
+                &old,
+                1_700_000_000
+            )
+            .is_err(),
+            "old E cannot accept new intake"
+        );
+        assert!(
+            db.receive_transaction(
+                ReceiveExpectation {
+                    target: &target,
+                    incarnation: &old,
+                    cursor: 2,
+                    generation: 1,
+                    erasure_generation: erasure
+                },
+                1,
+                |tx| tx.require_open_input(2)
+            )
+            .is_ok(),
+            "retired E permits local recovery"
+        );
+        Ok(())
+    }))
+    .await
+    .expect("scenario deadline")
 }
 
 fn seed_compat_pending(account: &LocalBusAccountState, target: &str, old: &str) -> TestResult {

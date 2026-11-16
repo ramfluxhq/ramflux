@@ -170,7 +170,7 @@ async fn capable_reply_event_split() {
     let legacy = json!({"frame_type":"deliver","entry":{
         "inbox_seq":71,"target_delivery_id":"target-route","envelope":envelope()}});
     let clock = crate::time::FixedClock::set(1_700_000_000);
-    let (mut engine, sent) = scripted(SessionMode::Legacy, vec![legacy]);
+    let (mut engine, sent) = scripted(SessionMode::Direct, vec![legacy]);
     let entry = engine.submit_envelope(submitted("target-route")).await.unwrap();
     drop(clock);
     assert_eq!((entry.forwarded, entry.inbox_seq), (false, 71));
@@ -428,7 +428,7 @@ pub(super) fn legacy_unexpected_kinds() -> Vec<(&'static str, Value, String)> {
         (
             "resume",
             json!({"frame_type":"resume","entries":[]}),
-            keyless("legacy resume in a push session"),
+            keyless("direct resume in a push session"),
         ),
         ("heartbeat", heartbeat(), reply("Heartbeat")),
     ]

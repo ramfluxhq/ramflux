@@ -1375,16 +1375,20 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
 
 #[tokio::test]
 async fn gateway_live_without_native_root_is_identity_root_missing() -> Result<(), SdkError> {
-    let root = root("proof-refresh-status");
-    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let error = account
-        .ensure_gateway_live()
-        .await
-        .err()
-        .ok_or_else(|| SdkError::LocalBus("expected a missing identity root".into()))?;
-    assert!(matches!(error, SdkError::IdentityRootMissing));
-    drop(account);
-    Ok(())
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let root = root("proof-refresh-status");
+        let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+        let error = account
+            .ensure_gateway_live()
+            .await
+            .err()
+            .ok_or_else(|| SdkError::LocalBus("expected a missing identity root".into()))?;
+        assert!(matches!(error, SdkError::IdentityRootMissing));
+        drop(account);
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
 }
 mod contact_state;
 mod group_generation;

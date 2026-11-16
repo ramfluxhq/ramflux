@@ -956,33 +956,6 @@ fn deterministic_event_replay_is_idempotent_but_rejects_changed_body() -> Result
 }
 
 #[test]
-fn group_pending_undecrypted_is_bounded_per_group() -> Result<(), StorageError> {
-    let (_root, db) = test_db("pending-bounded")?;
-    let inserted =
-        u64::try_from(GROUP_PENDING_UNDECRYPTED_PER_GROUP_LIMIT + 10).unwrap_or(u64::MAX);
-    for index in 0..inserted {
-        db.upsert_group_pending_undecrypted(&GroupPendingUndecryptedRecord {
-            group_id: "group_a".to_owned(),
-            conversation_id: "conv_a".to_owned(),
-            group_key_epoch: 1,
-            message_id: format!("msg_{index:04}"),
-            sender_id: "alice".to_owned(),
-            inbox_seq: index,
-            envelope_json: b"{}".to_vec(),
-            created_at: 1_760_000_000 + i64::try_from(index).unwrap_or(i64::MAX),
-        })?;
-    }
-
-    assert_eq!(
-        db.group_pending_undecrypted_count("group_a")?,
-        GROUP_PENDING_UNDECRYPTED_PER_GROUP_LIMIT
-    );
-    let pending = db.group_pending_undecrypted("group_a", 1)?;
-    assert!(!pending.iter().any(|record| record.message_id == "msg_0000"));
-    Ok(())
-}
-
-#[test]
 fn group_sender_key_counter_seen_rejects_replay() -> Result<(), StorageError> {
     let (_root, db) = test_db("sender-counter")?;
     let actor = receipt_actor("alice")?;

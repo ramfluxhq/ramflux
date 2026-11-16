@@ -356,6 +356,7 @@ pub(crate) struct LocalBusPersistedAccount {
     pub(crate) devices: Vec<LocalBusDeviceRecord>,
 }
 
+#[cfg(test)]
 pub(crate) fn default_device_capability_scope() -> Vec<String> {
     vec!["device.delivery.bind".to_owned(), "own_device.sync".to_owned()]
 }

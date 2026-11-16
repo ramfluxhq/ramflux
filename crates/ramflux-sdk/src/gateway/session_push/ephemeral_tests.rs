@@ -111,7 +111,7 @@ async fn ephemeral_session_host_carries_raw_events_during_correlated_reply() -> 
 async fn ephemeral_session_host_refuses_foreign_result_and_unsupported_without_write() -> TestResult
 {
     let now = i64::try_from(wall_ms() / 1_000)?;
-    let mut engine = scripted(SessionMode::Legacy, Vec::new());
+    let mut engine = scripted(SessionMode::Direct, Vec::new());
     assert_eq!(
         engine.submit_ephemeral(envelope(now, "sent")?).await?,
         EphemeralSendOutcome::Unsupported

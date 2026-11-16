@@ -254,50 +254,62 @@ fn reply_to(alice: &str) -> GatewayDirectMessage {
 
 #[tokio::test(flavor = "current_thread")]
 async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
-    let (a, mut b) = pair(141, 142).await?;
-    let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
-    let tag = ramflux_protocol::decode_base64url(
-        entry.envelope.collapse_tag.as_deref().ok_or_else(|| invalid("collapse_tag"))?,
-    )
-    .map_err(|_| invalid("collapse_tag"))?;
-    let commitment = ramflux_protocol::decode_base64url(
-        entry.envelope.report_commitment.as_deref().ok_or_else(|| invalid("report_commitment"))?,
-    )
-    .map_err(|_| invalid("report_commitment"))?;
-    assert_eq!(tag.len(), 32);
-    assert_eq!(commitment.len(), 32);
-    assert_eq!(entry.envelope.delivery_mode.as_deref(), Some("durable"));
-    let opened = apply(&mut b, &entry).await?;
-    assert!(opened.plaintext.is_some());
-    assert_eq!(projected(&b, "c")?, 1);
-    Ok(())
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (a, mut b) = pair(141, 142).await?;
+        let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
+        let tag = ramflux_protocol::decode_base64url(
+            entry.envelope.collapse_tag.as_deref().ok_or_else(|| invalid("collapse_tag"))?,
+        )
+        .map_err(|_| invalid("collapse_tag"))?;
+        let commitment = ramflux_protocol::decode_base64url(
+            entry
+                .envelope
+                .report_commitment
+                .as_deref()
+                .ok_or_else(|| invalid("report_commitment"))?,
+        )
+        .map_err(|_| invalid("report_commitment"))?;
+        assert_eq!(tag.len(), 32);
+        assert_eq!(commitment.len(), 32);
+        assert_eq!(entry.envelope.delivery_mode.as_deref(), Some("durable"));
+        let opened = apply(&mut b, &entry).await?;
+        assert!(opened.plaintext.is_some());
+        assert_eq!(projected(&b, "c")?, 1);
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkError> {
-    let (a, mut b) = pair(143, 144).await?;
-    let first = seal(&a, &b, message("report-bootstrap", "c"), b"first-body")?;
-    apply(&mut b, &first).await?;
-    let second = seal(&a, &b, message("report-tamper", "c"), b"tamper-body")?;
-    let mut tampered = second.clone();
-    tampered.inbox_seq = 2;
-    tampered.envelope.created_at = tampered.envelope.created_at.saturating_add(1);
-    resign(&a, &mut tampered.envelope)?;
-    crypto(apply(&mut b, &tampered).await, "report opening commitment mismatch")?;
-    assert_eq!(projected(&b, "c")?, 1);
-    let mut next = seal(&a, &b, message("report-next", "c"), b"next-body")?;
-    next.inbox_seq = 3;
-    Box::pin(settle_through(&mut b, vec![tampered, next])).await?;
-    assert_eq!(projected(&b, "c")?, 2);
-    assert_eq!(b.client.gateway_receive_cursor(&b.config()?.target_delivery_id)?, 3);
-    assert!(
-        b.client
-            .account_db()?
-            .journal_after(0, 100)?
-            .iter()
-            .any(|event| event.topic == "message.undeliverable")
-    );
-    Ok(())
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (a, mut b) = pair(143, 144).await?;
+        let first = seal(&a, &b, message("report-bootstrap", "c"), b"first-body")?;
+        apply(&mut b, &first).await?;
+        let second = seal(&a, &b, message("report-tamper", "c"), b"tamper-body")?;
+        let mut tampered = second.clone();
+        tampered.inbox_seq = 2;
+        tampered.envelope.created_at = tampered.envelope.created_at.saturating_add(1);
+        resign(&a, &mut tampered.envelope)?;
+        crypto(apply(&mut b, &tampered).await, "report opening commitment mismatch")?;
+        assert_eq!(projected(&b, "c")?, 1);
+        let mut next = seal(&a, &b, message("report-next", "c"), b"next-body")?;
+        next.inbox_seq = 3;
+        Box::pin(settle_through(&mut b, vec![tampered, next])).await?;
+        assert_eq!(projected(&b, "c")?, 2);
+        assert_eq!(b.client.gateway_receive_cursor(&b.config()?.target_delivery_id)?, 3);
+        assert!(
+            b.client
+                .account_db()?
+                .journal_after(0, 100)?
+                .iter()
+                .any(|event| event.topic == "message.undeliverable")
+        );
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -754,6 +754,7 @@ pub(crate) fn fetch_verified_device_manifest_from_url_bounded(
 /// # Errors
 /// Returns an error when the device manifest is missing, fails verification, or does not contain
 /// the expected active device.
+#[cfg(test)]
 pub(crate) async fn assert_manifest_active_device(
     gateway: &GatewaySessionConfig,
     principal_commitment: &str,

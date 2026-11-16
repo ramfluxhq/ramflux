@@ -8,9 +8,9 @@
 mod e2e;
 
 use e2e::{
-    Account, Daemon, Stack, boot_stack, configure_node, crash_daemon, create_account, dm_send,
-    dump_logs, exchange_contacts, message_texts, rf_json, rf_json_timeout, start_daemon,
-    start_daemon_at, unique, unlock_account, wait_dm_texts, wait_json,
+    Account, Daemon, Stack, boot_stack, configure_node, crash_daemon, create_account, dump_logs,
+    exchange_contacts, rf_json, rf_json_timeout, start_daemon, start_daemon_at, unique,
+    unlock_account, wait_dm_texts, wait_json,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -933,14 +933,6 @@ fn expect_empty_watch(value: &Value) -> e2e::Result<()> {
     Ok(())
 }
 
-fn texts(world: &World<'_>) -> e2e::Result<Vec<String>> {
-    let read = rf_json(
-        &world.bob_daemon()?.socket,
-        &["dm", "read", "--account", &world.bob.id, "--conversation", world.conversation],
-    )?;
-    Ok(message_texts(&read))
-}
-
 fn watch(world: &World<'_>, secs: u64) -> e2e::Result<Value> {
     watch_at(&world.bob_daemon()?.socket, &world.bob.id, world.conversation, secs, None)
 }
@@ -1006,10 +998,6 @@ fn required_str<'a>(value: &'a Value, pointer: &str) -> e2e::Result<&'a str> {
 impl World<'_> {
     fn bob_daemon(&self) -> e2e::Result<&Daemon> {
         self.bob_d.as_ref().ok_or("bob daemon missing".into())
-    }
-
-    fn alice_args(&self, args: &[&str]) -> e2e::Result<Value> {
-        rf_json(&self.alice_d.socket, args)
     }
 }
 

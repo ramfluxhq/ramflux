@@ -73,7 +73,7 @@ fn nack_bytes(reason: &str) -> Vec<u8> {
 }
 
 fn modes() -> [(&'static str, SessionMode); 2] {
-    [("legacy", SessionMode::Legacy), ("push", push())]
+    [("direct", SessionMode::Direct), ("push", push())]
 }
 
 async fn classified(
@@ -96,7 +96,7 @@ fn rejected(result: Result<Result<crate::GatewayInboxEntry, SubmitRefusal>, SdkE
 
 #[tokio::test(start_paused = true)]
 async fn sender_outcome_classification() {
-    // (p1)-(p3) Legacy mode, (p4)-(p6) Push mode: each exact reason is its typed refusal and
+    // Direct mode and Push mode: each exact reason is its typed refusal and
     // the session stays alive.
     let typed = [
         ("aborted_retry_safe", SubmitRefusal::RetrySafe),

@@ -1106,7 +1106,7 @@ async fn compat_intent_transition() -> Result<(), SdkError> {
         harness.account.gateway_config.clone(),
         Box::new(CountSends { sends: Arc::new(AtomicUsize::new(0)) }),
     );
-    engine.mode = crate::gateway::session_push::SessionMode::Legacy;
+    engine.mode = crate::gateway::session_push::SessionMode::Direct;
     harness.account.engine = Some(engine);
     let entry = live_dummy(&harness.account);
     let key = "authenticated-projection-key".to_owned();

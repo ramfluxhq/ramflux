@@ -6,38 +6,81 @@ use super::*;
 
 #[tokio::test]
 async fn confirmed_background_deregistration_clears_the_persisted_marker() -> Result<(), SdkError> {
-    let root = root("push-clear-confirmed");
-    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
-    account.client.set_projection_checkpoint(checkpoint, "{\"deregister_pending\":true}")?;
-    account.gateway_config.push_routes.clear();
-    account.gateway_config.push_route_clears.clear();
-    account.gateway_config.push_route_clear_pending = true;
-    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
-    // The engine's background retry was confirmed by the node.
-    engine.config.push_routes.clear();
-    engine.config.push_route_clears.clear();
-    engine.config.push_route_clear_pending = false;
-    account.install_test_session(engine);
-    assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
-    drop(account);
-    Ok(())
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let root = root("push-clear-confirmed");
+        let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+        let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
+        account.client.set_projection_checkpoint(
+            checkpoint,
+            r#"{"routes":{},"clears":[],"clear_all":true}"#,
+        )?;
+        account.gateway_config.push_routes.clear();
+        account.gateway_config.push_route_clears.clear();
+        account.gateway_config.push_route_clear_pending = true;
+        let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+        // The engine's background retry was confirmed by the node.
+        engine.config.push_routes.clear();
+        engine.config.push_route_clears.clear();
+        engine.config.push_route_clear_pending = false;
+        account.install_test_session(engine);
+        assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
+        drop(account);
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
 }
 
 #[tokio::test]
 async fn the_push_route_sequence_is_persisted_and_never_reused() -> Result<(), SdkError> {
-    let root = root("push-seq-persisted");
-    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
-    // A control was signed while the device clock was far ahead.
-    let ahead = 4_000_000_000_000_u64;
-    engine.config.push_route_last_seq = ahead;
-    account.install_test_session(engine);
-    let saved = account
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let root = root("push-seq-persisted");
+        let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+        let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+        // A control was signed while the device clock was far ahead.
+        let ahead = 4_000_000_000_000_u64;
+        engine.config.push_route_last_seq = ahead;
+        account.install_test_session(engine);
+        let saved = account
+            .client
+            .projection_checkpoint(crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT)?;
+        assert_eq!(saved.as_deref(), Some("4000000000000"));
+        assert_eq!(crate::bus::dispatch::device::stored_push_route_seq(&account.client)?, ahead);
+        drop(account);
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
+}
+
+#[test]
+fn stored_push_route_accepts_only_the_book() -> Result<(), SdkError> {
+    let root = root("push-book-shape");
+    let account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
+    let stored = crate::bus::dispatch::device::stored_push_route(&account.client)?;
+    assert_eq!(stored.routes.len(), 0);
+    assert!(!stored.clear_pending);
+    account
         .client
-        .projection_checkpoint(crate::bus::dispatch::device::PUSH_ROUTE_SEQ_CHECKPOINT)?;
-    assert_eq!(saved.as_deref(), Some("4000000000000"));
-    assert_eq!(crate::bus::dispatch::device::stored_push_route_seq(&account.client)?, ahead);
+        .set_projection_checkpoint(checkpoint, r#"{"routes":{},"clears":[],"clear_all":true}"#)?;
+    let stored = crate::bus::dispatch::device::stored_push_route(&account.client)?;
+    assert_eq!(stored.routes.len(), 0);
+    assert_eq!(stored.clears.len(), 0);
+    assert!(stored.clear_pending);
+    for rejected in [
+        r#"{"deregister_pending":true}"#,
+        r#"{"provider":"apns","token":"x"}"#,
+        r#"{"unexpected":true}"#,
+        r#"{"routes":{}}"#,
+        r#"{"routes":{},"clears":[],"clear_all":true,"deregister_pending":true}"#,
+    ] {
+        account.client.set_projection_checkpoint(checkpoint, rejected)?;
+        assert!(
+            crate::bus::dispatch::device::stored_push_route(&account.client).is_err(),
+            "{rejected}"
+        );
+    }
     drop(account);
     Ok(())
 }

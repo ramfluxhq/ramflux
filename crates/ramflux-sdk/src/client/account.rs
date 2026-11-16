@@ -430,7 +430,7 @@ impl RamfluxClient {
     }
 
     /// Bind schema, import and the discriminator to the first verified node incarnation
-    /// (Push handshake) or a retained local epoch (Compat/Legacy) before ledger phases.
+    /// (Push handshake) or a retained local epoch (Direct) before ledger phases.
     /// Already-activated accounts are left unchanged. No-op while first-activation is off.
     ///
     /// # Errors

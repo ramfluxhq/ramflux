@@ -164,7 +164,7 @@ fn new_shared(
         timeouts: timeouts.clone(),
         ephemeral_inbox: std::sync::Mutex::new(crate::ephemeral::session::SessionInbox::new()),
         session_push_advertise: config.session_push_advertise,
-        session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Legacy),
+        session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Direct),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
         catch_ups_total: AtomicU64::new(0),
         receive_observations: receive_observations::Counters::default(),

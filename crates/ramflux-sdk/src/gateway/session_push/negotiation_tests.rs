@@ -224,27 +224,34 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
         assert!(!engine.ephemeral_negotiated, "missing ephemeral echo stays local unsupported");
     }
 
-    // (p6) reconnect after Push, the gateway sending no echo, renegotiates to Compat.
+    // Reconnect after Push when the gateway sends no echo is refused.
     let mut engine = engine;
     let sent: Sent = Arc::default();
     let opener: Arc<dyn TransportOpener> =
         Arc::new(Opener { script: Mutex::new(VecDeque::from([bytes(&legacy_frame())])), sent });
-    TEST_CONNECT_OPENER.scope(opener, engine.reconnect(0)).await.unwrap();
-    assert_eq!(engine.mode, SessionMode::Compat);
+    let reconnect = TEST_CONNECT_OPENER.scope(opener, engine.reconnect(0)).await;
+    assert!(
+        matches!(
+            reconnect,
+            Err(SdkError::GatewaySessionRejected(ref message))
+                if message == "session push negotiation refused: advertised push was not echoed"
+        ),
+        "reconnect without an echo must be refused: {reconnect:?}"
+    );
 
-    // (p2) on + no `capabilities` key gives Compat. (p3) on + `capabilities: []` gives Compat.
+    // Advertised push with no capabilities key, and with an empty list, is refused.
     let (result, _, _) =
         connect(config(true, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Compat);
+    refusal(result, "advertised push was not echoed");
     let mut empty = legacy_frame();
     empty["session"]["capabilities"] = json!([]);
     let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&empty)]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Compat);
+    refusal(result, "advertised push was not echoed");
 
-    // (p4) off: the signed scope lacks the capability and the mode is Legacy.
+    // Unadvertised: the signed scope lacks the capability and the mode is Direct.
     let (result, sent, _) =
         connect(config(false, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Legacy);
+    assert_eq!(result.unwrap().mode, SessionMode::Direct);
     let signed = proof(&sent);
     assert_eq!(count(&signed.capability_scope, PUSH), 0);
     assert!(verifies(&signed));
@@ -307,18 +314,18 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
     assert!(verifies(&tampered));
     tampered.capability_scope.push("gateway.ephemeral.v1".into());
     assert!(!verifies(&tampered));
-    // Default-off is pinned: an unmodified constructor does not advertise, negotiates Legacy
+    // Default-off is pinned: an unmodified constructor does not advertise, negotiates Direct
     // and keeps the capability out of the signed scope.
     let unmodified = default_config();
     assert!(!unmodified.session_push_advertise);
     let (result, sent, _) = connect(unmodified, vec![bytes(&legacy_frame())]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Legacy);
+    assert_eq!(result.unwrap().mode, SessionMode::Direct);
     let signed = proof(&sent);
     assert_eq!(count(&signed.capability_scope, PUSH), 0);
     assert!(verifies(&signed));
 
     // The establishment in node-core struct order (producer order i), not only the sorted
-    // `Value` order: Push when advertised, Compat for the legacy typed frame.
+    // `Value` order: Push when advertised, refused when the typed frame carries no echo.
     let typed_push = serde_json::to_vec(&n::SessionPushServerFrame::SessionEstablished {
         session: n::SessionPushEstablishedFrame {
             session: session(),
@@ -334,7 +341,7 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
         serde_json::to_vec(&n::GatewayServerFrame::SessionEstablished { session: session() })
             .unwrap();
     let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_legacy]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Compat);
+    refusal(result, "advertised push was not echoed");
 
     // Malformed echo, one wrong JSON type per row: the capability container, a capability
     // element and the incarnation. Each is the same exact refusal.
