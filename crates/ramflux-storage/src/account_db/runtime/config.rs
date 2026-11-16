@@ -105,7 +105,9 @@ impl AccountDb {
         })
     }
 
-    fn open_query_only_connection(&self) -> Result<Connection, StorageError> {
+    pub(in crate::account_db) fn open_query_only_connection(
+        &self,
+    ) -> Result<Connection, StorageError> {
         let connection = Connection::open_account_reader(&self.path)?;
         apply_key(&connection, &self.current_key)?;
         crate::schema_generation::validate_worker(&connection)?;

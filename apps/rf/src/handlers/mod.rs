@@ -15,6 +15,7 @@ pub(crate) mod contact;
 pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
 pub(crate) mod device;
+pub(crate) mod diag;
 pub(crate) mod dm;
 pub(crate) mod grant;
 pub(crate) mod group;

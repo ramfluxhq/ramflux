@@ -80,6 +80,8 @@ pub mod read_model;
 pub(crate) mod receive;
 pub mod recovery;
 mod replay_markers;
+mod residue;
+pub use residue::{ResidueHit, ResidueScan, ResidueTable, residue_needles};
 pub mod restore_floor;
 pub mod runtime;
 pub(crate) mod safety_verification;

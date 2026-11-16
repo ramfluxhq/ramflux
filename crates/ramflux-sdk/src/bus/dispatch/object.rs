@@ -825,7 +825,7 @@ fn read_object_put_journal(path: &Path) -> Result<Vec<u8>, SdkError> {
 
 /// The per-account subdirectory that routes an account's upload spools without a cross-account scan.
 /// `account_hash` = base64url BLAKE3 of a stable domain + `account_id` (filename-safe, no leak).
-fn object_put_account_dir(data_root: &Path, account_id: &str) -> PathBuf {
+pub(crate) fn object_put_account_dir(data_root: &Path, account_id: &str) -> PathBuf {
     let account_hash = ramflux_crypto::blake3_256_base64url(
         "ramflux.object_put_spool.account.v1",
         account_id.as_bytes(),
