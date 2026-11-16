@@ -63,12 +63,12 @@ const CASE_WALL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Real-time flag. A paused Tokio clock does not advance while the yield witness runs,
 /// so this deadline sleeps on a std thread.
-fn arm_wall(limit: std::time::Duration) -> tokio::sync::watch::Receiver<bool> {
+fn arm_wall() -> tokio::sync::watch::Receiver<bool> {
     let (sender, receiver) = tokio::sync::watch::channel(false);
     let thread = std::thread::Builder::new()
         .name("typing-case-wall".into())
         .spawn(move || {
-            std::thread::sleep(limit);
+            std::thread::sleep(CASE_WALL);
             let _ = sender.send(true);
         })
         .expect("test: typing case wall thread");
@@ -141,7 +141,7 @@ async fn stop_yield_witness(
 async fn native_typing_host_consumer_projects_without_durable_intake_and_clears_on_stop()
 -> TestResult {
     let (stop, witness) = spawn_yield_witness();
-    let wall = arm_wall(CASE_WALL);
+    let wall = arm_wall();
     let mut outer = wall.clone();
     let local = tokio::task::LocalSet::new();
     let run = local.run_until(Box::pin(case(false, wall)));
@@ -173,7 +173,7 @@ fn full_router_keeps_the_typing_frame_until_a_slot_is_free() {
             };
             let result = runtime.block_on(async {
                 let (stop, witness) = spawn_yield_witness();
-                let wall = arm_wall(CASE_WALL);
+                let wall = arm_wall();
                 let mut outer = wall.clone();
                 let local = tokio::task::LocalSet::new();
                 let run = local.run_until(Box::pin(case(true, wall)));
