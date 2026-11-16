@@ -59,6 +59,19 @@ impl RamfluxClient {
         )
     }
 
+    /// Applies a queued network result. The result must carry the instant its fetch began; a
+    /// manifest without that provenance is persisted as evidence only and never renews the
+    /// send-authorization clock (fail closed, never a fresh observation at Apply time).
+    pub(crate) fn persist_queued_fetched_identity_directory(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        match manifest.fetched_after.0 {
+            Some(began) => self.persist_fetched_identity_directory_at(manifest, began),
+            None => self.persist_identity_directory(manifest),
+        }
+    }
+
     /// A prepared network result retains its conservative fetch-time lower bound while queued.
     /// Caller-supplied, cached or archived manifests must not use this freshness-bearing helper.
     pub(crate) fn persist_fetched_identity_directory_at(

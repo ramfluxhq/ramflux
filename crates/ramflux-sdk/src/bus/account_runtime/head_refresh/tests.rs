@@ -306,3 +306,56 @@ async fn a_queued_fetch_result_keeps_the_instant_its_fetch_began() -> TestResult
     .await
     .map_err(|_| "test: deadline exceeded")?
 }
+
+#[tokio::test]
+async fn a_native_projection_keeps_the_fetch_start_through_ready_manifest() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let peer = Fixture::new("projected-peer").await?;
+        let holder = Fixture::new("projected-holder").await?;
+        let account = LocalBusAccountState::disconnected(
+            holder.client,
+            holder.config,
+            holder.manifest.principal_commitment.clone(),
+        );
+        let request = crate::LocalBusFrame::request(
+            "dm-send",
+            Some("sender".into()),
+            "message",
+            "message.submit",
+            json!({"recipient_principal_commitment": peer.manifest.principal_commitment}),
+        );
+        let root = peer.manifest.principal_commitment.clone();
+        let admitted = std::time::Instant::now();
+        let project = |began: Option<std::time::Instant>| {
+            let mut fetched = peer.manifest.clone();
+            fetched.fetched_after = crate::prekey::FetchStamp(began);
+            let ready = crate::client::identity_authority::ready_manifest(
+                fetched,
+                crate::prelude::now_unix_timestamp(),
+            );
+            (ready.custody.is_some(), ready.fetched_after.0 == began, ready)
+        };
+        // A fetch that began before admission, projected and applied only now, is refused.
+        let (native, kept, early) = project(admitted.checked_sub(Duration::from_secs(5)));
+        assert!(native && kept, "native projection must keep the fetch start (native={native})");
+        account.client.persist_queued_fetched_identity_directory(&early)?;
+        let stale = stale_roots_since(&account, &request, Some(admitted))?;
+        assert!(stale.contains(&root), "a projected pre-admission fetch must not authorize: {stale:?}");
+        // Missing provenance never becomes a new observation at Apply.
+        let (_, _, unstamped) = project(None);
+        account.client.persist_queued_fetched_identity_directory(&unstamped)?;
+        let stale = stale_roots_since(&account, &request, Some(admitted))?;
+        assert!(stale.contains(&root), "an unstamped result must fail closed: {stale:?}");
+        // A fetch that began after admission is accepted.
+        let (native, kept, late) = project(Some(std::time::Instant::now()));
+        assert!(native && kept, "native projection must keep a post-admission start");
+        account.client.persist_queued_fetched_identity_directory(&late)?;
+        assert!(
+            stale_roots_since(&account, &request, Some(admitted))?.is_empty(),
+            "a projected post-admission fetch must authorize"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
+}

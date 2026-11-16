@@ -372,7 +372,7 @@ fn retry(
         return Ok(None);
     }
     let valid = if let Ok(manifest) = manifest {
-        account.client.persist_fetched_identity_directory(&manifest)?;
+        account.client.persist_queued_fetched_identity_directory(&manifest)?;
         manifest.devices.iter().any(|device| {
             device.device_id == attempt.device
                 && device.target_delivery_id == attempt.envelope.target_delivery_id
@@ -401,7 +401,7 @@ fn target(
         return Ok(None);
     }
     let Ok(manifest) = manifest else { return Ok(None) };
-    account.client.persist_fetched_identity_directory(&manifest)?;
+    account.client.persist_queued_fetched_identity_directory(&manifest)?;
     account.client.persist_identity_directory(&manifest)?;
     let mut selected = None;
     for device in manifest.devices {
@@ -510,7 +510,7 @@ async fn process_incoming(context: &SessionContext, writer: &Writer) -> Result<b
                 {
                     return Ok(());
                 }
-                client.persist_fetched_identity_directory(&manifest)?;
+                client.persist_queued_fetched_identity_directory(&manifest)?;
                 client.persist_identity_directory(&manifest)?;
                 if let Err(error) = client.process_group_request_with_primary(
                     &item.record.request,
