@@ -258,10 +258,18 @@ fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> 
     assert_ne!(positions[1], positions[2]);
     let mut answers = words(&phrase, positions)?;
     answers[1] = Zeroizing::new("not-a-word".into());
-    assert!(matches!(
-        ceremony.confirm(&answers, &vault, 100),
-        Err(SdkError::CustodyConfirmationFailed)
-    ));
+    let error =
+        ceremony.confirm(&answers, &vault, 100).expect_err("a mismatched word must be rejected");
+    assert!(
+        matches!(
+            error,
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::WordMismatch {
+                position
+            }) if position == positions[1]
+        ),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("not-a-word"), "{error}");
     assert!(!root.0.join("custody_accounts").exists());
     Ok(())
 }
