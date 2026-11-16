@@ -17,10 +17,10 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const NOW: u64 = 1_760_000_100;
 const NODE: &str = "node-a";
 
-const ABSENT_JSON: &str = r#"{"schema":"ramflux.well_known_server.v1","node_id":"node-a","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_endpoint":"https://a.example","protocol_versions":["v1"],"transport_backends":["quic_quinn"],"node_capabilities":["opaque_delivery"],"node_policy_hash":"policy","updated_at":1760000100,"expires_at":1760086500,"signature":"SXIa2dC8GKKeVePvrsHzo8y48aG0NwMnyJGU7zYvCeGLOphWHFQlZC4uJGuVQEzrauctVbGVHPafivWoJr80DQ"}"#;
-const ABSENT_SIGNED: &str = r#"{"expires_at":1760086500,"node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_capabilities":["opaque_delivery"],"node_endpoint":"https://a.example","node_id":"node-a","node_policy_hash":"policy","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","protocol_versions":["v1"],"schema":"ramflux.well_known_server.v1","transport_backends":["quic_quinn"],"updated_at":1760000100}"#;
-const PRESENT_JSON: &str = r#"{"schema":"ramflux.well_known_server.v1","node_id":"node-a","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_endpoint":"https://a.example","protocol_versions":["v1"],"transport_backends":["quic_quinn"],"node_capabilities":["opaque_delivery"],"node_policy_hash":"policy","updated_at":1760000100,"expires_at":1760086500,"attachment_authority":{"generation":4,"signing_public_key":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"},"signature":"IiHhS4zPJw9O4ciz0oM3AQViZNq-m9pJku2NPah9dt4uAYzu-01M0d_NQtdP74S7qXDACpRa72ZrXy48YMlHDQ"}"#;
-const PRESENT_SIGNED: &str = r#"{"attachment_authority":{"generation":4,"signing_public_key":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"},"expires_at":1760086500,"node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_capabilities":["opaque_delivery"],"node_endpoint":"https://a.example","node_id":"node-a","node_policy_hash":"policy","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","protocol_versions":["v1"],"schema":"ramflux.well_known_server.v1","transport_backends":["quic_quinn"],"updated_at":1760000100}"#;
+const ABSENT_JSON: &str = r#"{"schema":"ramflux.well_known_server.v1","node_id":"node-a","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_endpoint":"https://a.example","protocol_versions":["v1"],"transport_backends":["quic_quinn"],"node_capabilities":["opaque_delivery"],"node_policy_hash":"policy","updated_at":1760000100,"expires_at":1760086500,"version":"0.2.0 (abcdef123456)","signature":"_1WzfZAO_NlTnV4TVRJX270W_SUPI2rZUIFfXtnc1iM6x0rb2IoZKmXlLZh_Bpc79G7j_ff9zYx215zFjl7JDw"}"#;
+const ABSENT_SIGNED: &str = r#"{"expires_at":1760086500,"node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_capabilities":["opaque_delivery"],"node_endpoint":"https://a.example","node_id":"node-a","node_policy_hash":"policy","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","protocol_versions":["v1"],"schema":"ramflux.well_known_server.v1","transport_backends":["quic_quinn"],"updated_at":1760000100,"version":"0.2.0 (abcdef123456)"}"#;
+const PRESENT_JSON: &str = r#"{"schema":"ramflux.well_known_server.v1","node_id":"node-a","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_endpoint":"https://a.example","protocol_versions":["v1"],"transport_backends":["quic_quinn"],"node_capabilities":["opaque_delivery"],"node_policy_hash":"policy","updated_at":1760000100,"expires_at":1760086500,"version":"0.2.0 (abcdef123456)","attachment_authority":{"generation":4,"signing_public_key":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"},"signature":"AoQBdOi95Ab20ZsYV0kJdQZjuDx_B1L80mKdWFQtZCgcOGhd5PW-4u7jUpIHFZ9B6mkcHQnXQ0dZK_oyL8ftAg"}"#;
+const PRESENT_SIGNED: &str = r#"{"attachment_authority":{"generation":4,"signing_public_key":"BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ"},"expires_at":1760086500,"node_ca_cert_pem":"-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----","node_capabilities":["opaque_delivery"],"node_endpoint":"https://a.example","node_id":"node-a","node_policy_hash":"policy","node_public_key":"6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw","protocol_versions":["v1"],"schema":"ramflux.well_known_server.v1","transport_backends":["quic_quinn"],"updated_at":1760000100,"version":"0.2.0 (abcdef123456)"}"#;
 
 fn key(n: u8) -> String {
     ramflux_protocol::encode_base64url([n; 32])
@@ -48,6 +48,7 @@ fn record(authority: Option<FederationAttachmentAuthority>) -> FederationServerR
         transport_backends: vec!["quic_quinn".into()],
         node_capabilities: vec!["opaque_delivery".into()],
         node_policy_hash: "policy".into(),
+        version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: NOW,
         expires_at: NOW + 86_400,
         attachment_authority: authority,
@@ -380,7 +381,7 @@ fn open_fails_closed_with_the_exact_error_when_counter_and_rows_disagree() -> Te
 
 #[test]
 fn absent_and_present_records_match_the_full_frozen_bytes() -> TestResult {
-    // Absent field: the exact pre-change JSON and canonical signed bytes, no `null`.
+    // Absent field: the exact JSON and canonical signed bytes, no `null`.
     let r = signed(None)?;
     assert_eq!(serde_json::to_string(&r)?, ABSENT_JSON);
     assert_eq!(String::from_utf8(ramflux_protocol::signed_bytes(&r)?)?, ABSENT_SIGNED);
@@ -514,5 +515,20 @@ fn a_fresh_record_that_withdraws_the_advertisement_clears_the_pin_despite_an_old
     );
     assert_eq!(book.answer(&store, &live, NODE, NOW + 4), PinAnswer::Unavailable);
     assert_eq!(store.attachment_authority_history(NODE)?.map(|h| h.max_generation), Some(4));
+    Ok(())
+}
+
+#[test]
+fn record_without_a_node_version_is_refused() -> TestResult {
+    let mut value = serde_json::to_value(signed(None)?)?;
+    value.as_object_mut().ok_or("record object")?.remove("version");
+    assert!(serde_json::from_value::<FederationServerRecord>(value).is_err());
+    let mut r = record(None);
+    r.version = String::new();
+    sign_federation_server_record_with_seed(&mut r, [7; 32])?;
+    assert!(matches!(
+        crate::verify_federation_server_record(&r, NOW),
+        Err(crate::NodeCoreError::MissingNodeVersion)
+    ));
     Ok(())
 }

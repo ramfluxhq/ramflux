@@ -57,6 +57,8 @@ pub enum ProtocolError {
     SignatureVerificationFailed,
     #[error("unsupported signature algorithm")]
     UnsupportedSignatureAlgorithm,
+    #[error("discovery record is missing the node version")]
+    MissingNodeVersion,
     #[error("signed request expired")]
     SignedRequestExpired,
     #[error("signed request created too far in the future")]

@@ -148,7 +148,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if checkpoint_only || discard_stale {
         anyhow::bail!("identity registry maintenance commands require --config");
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(
+        service,
+        version = ramflux_node_core::version::VERSION_SHA,
+        "service initialized"
+    );
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }

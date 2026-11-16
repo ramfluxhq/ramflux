@@ -27,6 +27,9 @@ pub struct WellKnownClientRecord {
     pub signaling_turn_addr: String,
     pub protocol_versions: Vec<String>,
     pub client_capabilities: Vec<String>,
+    /// Node software version and build commit, for example `0.2.0 (abcdef123456)`.
+    /// Required and signed; a record without it is refused.
+    pub version: String,
     pub updated_at: u64,
     pub expires_at: u64,
     pub signature: String,
@@ -130,6 +133,9 @@ pub fn verify_client_discovery_record(
             actual: record.schema.clone(),
         });
     }
+    if record.version.trim().is_empty() {
+        return Err(ProtocolError::MissingNodeVersion);
+    }
     verify_discovery_freshness(record.updated_at, record.expires_at, now)?;
     verify_canonical_signature(
         &client_discovery_signing_bytes(record)?,
@@ -166,6 +172,7 @@ mod tests {
             signaling_turn_addr: "node.example.com:3478".to_owned(),
             protocol_versions: vec!["v1".to_owned()],
             client_capabilities: vec!["prekey".to_owned()],
+            version: "0.2.0 (abcdef123456)".to_owned(),
             updated_at: 1000,
             expires_at: 2000,
             signature: String::new(),
@@ -190,6 +197,60 @@ mod tests {
         );
         assert_eq!(discovery_cache_ttl(2000, 1500, 100), 100);
         assert_eq!(discovery_cache_ttl(2000, 2001, 100), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn node_version_is_signed_and_tampering_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let mut record = WellKnownClientRecord {
+            schema: WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
+            node_id: "node.example.com".to_owned(),
+            node_public_key: crate::encode_base64url(key.verifying_key().to_bytes()),
+            node_ca_cert_pem: "test CA".to_owned(),
+            gateway_quic_addr: "node.example.com:443".to_owned(),
+            gateway_tcp_addr: "node.example.com:443".to_owned(),
+            gateway_server_name: "ramflux-gateway".to_owned(),
+            relay_quic_addr: "node.example.com:17447".to_owned(),
+            relay_server_name: "ramflux-relay".to_owned(),
+            prekey_http_url: "https://node.example.com".to_owned(),
+            signaling_turn_addr: "node.example.com:3478".to_owned(),
+            protocol_versions: vec!["v1".to_owned()],
+            client_capabilities: vec!["prekey".to_owned()],
+            version: "0.2.0 (abcdef123456)".to_owned(),
+            updated_at: 1000,
+            expires_at: 2000,
+            signature: String::new(),
+        };
+        record.signature =
+            crate::encode_base64url(key.sign(&client_discovery_signing_bytes(&record)?).to_bytes());
+        let decoded =
+            serde_json::from_slice::<WellKnownClientRecord>(&canonical_json_bytes(&record)?)?;
+        assert_eq!(decoded.version, "0.2.0 (abcdef123456)");
+        verify_client_discovery_record(&decoded, 1500)?;
+        record.version = "9.9.9 (000000000000)".to_owned();
+        assert!(verify_client_discovery_record(&record, 1500).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn record_without_a_node_version_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let fixture =
+            include_str!("../../../deploy/scripts/tests/fixtures/rust-signed-discovery.json");
+        let mut value: serde_json::Value = serde_json::from_str(fixture)?;
+        value.as_object_mut().ok_or("record object")?.remove("version");
+        assert!(serde_json::from_value::<WellKnownClientRecord>(value).is_err());
+
+        let mut record: WellKnownClientRecord = serde_json::from_str(fixture)?;
+        record.version = String::new();
+        record.signature =
+            crate::encode_base64url(key.sign(&client_discovery_signing_bytes(&record)?).to_bytes());
+        assert!(matches!(
+            verify_client_discovery_record(&record, 1500),
+            Err(ProtocolError::MissingNodeVersion)
+        ));
         Ok(())
     }
 

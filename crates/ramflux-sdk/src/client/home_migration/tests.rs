@@ -119,6 +119,7 @@ impl Fixture {
             signaling_turn_addr: "destination.example:3478".into(),
             protocol_versions: vec!["v3".into()],
             client_capabilities: vec!["home_migration".into()],
+            version: "0.2.0 (abcdef123456)".to_owned(),
             updated_at: NOW,
             expires_at: NOW + 3600,
             signature: String::new(),

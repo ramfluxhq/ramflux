@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0] - 2026-11-16
+
+First version under the shared product version line (all Ramflux repos move together).
+Changes since 0.1.0, at a high level:
+
+- Generation-1 messaging is active: one message format, one delivery path, and a read model the CLI and apps share.
+- Contact safety numbers can be verified and the result is recorded safely, so two devices cannot silently overwrite each other.
+- Editing a message now detects conflicting edits instead of losing one of them.
+- Groundwork for pairing a new device and moving the primary device.
+- A terminal client (TUI) and the tooling used to run Demo B end to end.
+- A pre-v1 sweep removed old account, storage and wire formats; development stores must be reset.
+- `rf --version`, the daemon and every node service now report `ramflux <version> (<commit>)`; node discovery and `rf node probe` include the node version.
+
 ## Message schema v1 activation
 
 - Activate storage generation 1 and the compact envelope profile with exact protobuf Inner bytes.

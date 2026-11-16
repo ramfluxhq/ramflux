@@ -341,6 +341,7 @@ fn unsigned_discovery_record() -> WellKnownClientRecord {
         signaling_turn_addr: "node.example.com:3478".to_owned(),
         protocol_versions: vec!["v1".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()],
         client_capabilities: vec!["prekey".to_owned()],
+        version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: 1000,
         expires_at: 2000,
         signature: String::new(),

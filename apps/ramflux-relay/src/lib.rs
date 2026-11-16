@@ -111,7 +111,12 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
 
         #[cfg(feature = "itest-media-udp")]
         serve_media_relay_udp(service_key.clone())?;
-        tracing::info!(service, node_id = config.node_id, "relay cache initialized");
+        tracing::info!(
+            service,
+            version = ramflux_node_core::version::VERSION_SHA,
+            node_id = config.node_id,
+            "relay cache initialized"
+        );
         #[cfg(feature = "itest-http")]
         if ramflux_node_core::environment::var("RAMFLUX_ITEST_HTTP").as_deref() == Ok("1") {
             ramflux_node_core::spawn_service_worker("ramflux-relay-itest-http", move |_| {

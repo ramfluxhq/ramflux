@@ -49,6 +49,9 @@ pub struct FederationServerRecord {
     pub node_policy_hash: String,
     pub updated_at: u64,
     pub expires_at: u64,
+    /// Node software version and build commit, for example `0.2.0 (abcdef123456)`.
+    /// Required and signed; a record without it is refused.
+    pub version: String,
     /// Present only when the attachment authority is configured. Absent keeps the
     /// pre-existing canonical bytes: the key is omitted, never emitted as `null`.
     #[serde(

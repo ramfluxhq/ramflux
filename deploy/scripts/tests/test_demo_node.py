@@ -1412,6 +1412,7 @@ else:
             "signaling_turn_addr": "demo.example.org:59478",
             "protocol_versions": ["v1"],
             "client_capabilities": ["prekey"],
+            "version": "0.2.0 (abcdef123456)",
             "updated_at": 1,
             "expires_at": 9999999999,
             "signature": signature,

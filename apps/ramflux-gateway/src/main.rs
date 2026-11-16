@@ -51,6 +51,7 @@ mod voice;
 #[cfg(test)]
 mod wake_acceptance;
 
+use ramflux_node_core::version::VERSION_SHA;
 use std::sync::{Arc, Mutex};
 
 pub(crate) use clients::{
@@ -173,7 +174,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             })
             .map_err(Into::into);
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(service, version = VERSION_SHA, "service initialized");
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
