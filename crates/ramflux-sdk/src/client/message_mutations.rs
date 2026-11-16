@@ -55,6 +55,15 @@ pub(crate) struct EditContext<'a> {
     pub source: &'a ramflux_crypto::RootQualifiedDeviceRef,
     pub imported: Option<&'a ramflux_protocol::message::HistoryItem>,
     pub own_sent: bool,
+    /// The author's `conversation.edit` submission. A stale or forked revision
+    /// is a typed refusal and is not journalled. Prepare reserves the observed
+    /// base in the same local transaction before `submit_envelope`, so a second
+    /// local edit of that base never reaches the wire. This check is defence in
+    /// depth for a revision that moves after the reservation: the envelope is
+    /// already submitted, the author is refused, and the recipient keeps the
+    /// fork tie-break. Receive and history import leave this false and journal
+    /// the fork.
+    pub author_submit: bool,
 }
 
 impl RamfluxClient {
@@ -243,7 +252,13 @@ impl RamfluxClient {
             entry,
         )?;
         self.apply_generated_edit_authorized(
-            EditContext { entry, source: &source, imported: None, own_sent: false },
+            EditContext {
+                entry,
+                source: &source,
+                imported: None,
+                own_sent: false,
+                author_submit: false,
+            },
             conversation,
             exact_inner,
             metadata,
@@ -364,6 +379,13 @@ impl RamfluxClient {
             let old_revision = applied.as_ref().map_or(0, |state| state.revision);
             let fork = (old_revision == edit.revision && old_pair != Some(incoming))
                 || (!historical && edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest);
+            let duplicate = old_pair == Some(incoming);
+            let authored_conflict = authorization.author_submit
+                && !duplicate
+                && (fork || old_pair.is_some_and(|pair| incoming < pair));
+            if authored_conflict {
+                return Err(edit_conflict(&target_id, old_revision, edit.revision));
+            }
             if fork && source.root_commitment() == self.own_account_anchor()? {
                 let losing = if old_pair.is_some_and(|pair| pair < incoming) {
                     applied.as_ref().map_or_else(|| identity.id.clone(), |state| state.event_id.clone())
@@ -452,12 +474,21 @@ pub fn authorize_edit(actor_root: &str, target: &StoredTarget) -> Result<(), Sdk
 
 /// Apply a new Edit revision. Conflicting or stale revisions are not last-write-wins.
 /// # Errors
-/// Refuses `incoming <= stored`.
-pub fn apply_edit_revision(stored: u64, incoming: u64) -> Result<u64, SdkError> {
+/// Returns [`SdkError::EditConflict`] when `incoming <= stored`. `expected` is the
+/// only acceptable next revision. `received` is `incoming`.
+pub fn apply_edit_revision(target: &str, stored: u64, incoming: u64) -> Result<u64, SdkError> {
     if incoming <= stored {
-        return Err(refused("stale edit revision"));
+        return Err(edit_conflict(target, stored, incoming));
     }
     Ok(incoming)
+}
+
+fn edit_conflict(target: &str, stored: u64, received: u64) -> SdkError {
+    SdkError::EditConflict {
+        target: target.to_owned(),
+        expected: stored.saturating_add(1),
+        received,
+    }
 }
 
 /// Delete LOCAL is always a local-account choice. EVERYONE is author or group moderator.
@@ -587,9 +618,13 @@ impl RamfluxClient {
 
     /// Apply a new Edit revision.
     /// # Errors
-    /// Refuses a stale or equal revision.
-    pub fn apply_generated_edit_revision(stored: u64, incoming: u64) -> Result<u64, SdkError> {
-        apply_edit_revision(stored, incoming)
+    /// Returns [`SdkError::EditConflict`] for a stale or equal revision.
+    pub fn apply_generated_edit_revision(
+        target: &str,
+        stored: u64,
+        incoming: u64,
+    ) -> Result<u64, SdkError> {
+        apply_edit_revision(target, stored, incoming)
     }
 
     /// Admit an erasure-relevant field against a proposed floor.

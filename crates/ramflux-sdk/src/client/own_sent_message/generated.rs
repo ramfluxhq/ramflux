@@ -187,6 +187,7 @@ impl RamfluxClient {
                             source: &original,
                             imported: None,
                             own_sent: true,
+                            author_submit: false,
                         },
                         conversation,
                         &sent.exact_inner,

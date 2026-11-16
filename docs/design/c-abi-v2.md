@@ -318,7 +318,7 @@ with `conversation_id` and the existing `message_id`:
 
 | Operation | Additional body fields |
 | --- | --- |
-| `conversation.edit` | `text` (1..65536 UTF-8 bytes), a complete text replacement |
+| `conversation.edit` | `text` (1..65536 UTF-8 bytes), a complete text replacement; `expected_revision` (u64), the base revision the caller observed. Required. A missing field is `invalid_argument`. A mismatch, or a base another local edit has already reserved, is `edit_conflict` (body code 7, details `{target, expected, received}`) and is not sent. |
 | `conversation.react` | `token` (SDK-validated reaction), optional `remove` boolean |
 | `conversation.reply` | `text` (1..65536 UTF-8 bytes) |
 | `conversation.delete` | `scope`: `local` or `everyone` |
@@ -328,8 +328,9 @@ reference, edit revision and exact previous-content digest. It applies the share
 author/moderator rules, allocates one durable source-qualified event identity and
 private revision entropy, and uses SDK routing/sealing and ordinary group or
 verified peer-device fanout. Hosts cannot supply a sender, device, envelope,
-revision, digest or tombstone. Unknown fields are refused. An edit replaces the
-whole Message content; old reply, media and forward fields are omitted.
+written revision, digest or tombstone. `expected_revision` is the observed base,
+not the revision the edit will write. Unknown fields are refused. An edit replaces
+the whole Message content; old reply, media and forward fields are omitted.
 
 Retries with the same operation id retain the exact prepared Inner and identity;
 changing the intent under that id is refused. Private prepared content is owned

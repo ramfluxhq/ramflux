@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::RamfluxClient;
+use crate::SdkError;
 use crate::client::generated_content::GeneratedEventStream;
 use crate::client::target_selection::{Encoding, FanoutScope};
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR};
@@ -76,9 +77,21 @@ fn edit_reaction_delete_authorization() -> TestResult {
     let dm = stored(ConversationKind::Direct, false);
     authorize_edit("root-a", &dm)?;
     assert!(authorize_edit("root-b", &dm).is_err());
-    apply_edit_revision(2, 3)?;
-    assert!(apply_edit_revision(2, 2).is_err());
-    assert!(apply_edit_revision(2, 1).is_err());
+    apply_edit_revision("m", 2, 3)?;
+    match apply_edit_revision("m", 2, 2) {
+        Err(SdkError::EditConflict { target, expected, received }) => {
+            assert_eq!(target, "m", "conflict names the edited target");
+            assert_eq!(expected, 3, "the only acceptable revision is stored + 1");
+            assert_eq!(received, 2, "an equal revision is the one that arrived");
+        }
+        other => panic!("test: equal revision must be edit_conflict, got {other:?}"),
+    }
+    match apply_edit_revision("m", 2, 1) {
+        Err(SdkError::EditConflict { expected, received, .. }) => {
+            assert_eq!((expected, received), (3, 1), "a lower revision is edit_conflict");
+        }
+        other => panic!("test: stale revision must be edit_conflict, got {other:?}"),
+    }
     authorize_delete("root-a", MutationActor::Author, &dm, DeleteScope::Everyone)?;
     assert!(
         authorize_delete("root-b", MutationActor::Recipient, &dm, DeleteScope::Everyone).is_err(),

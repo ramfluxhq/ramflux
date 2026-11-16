@@ -32,6 +32,7 @@ pub(crate) fn prune(client: &RamfluxClient, now: i64) -> Result<(), SdkError> {
     client.account_db()?.expire_actor_states(PREFIX, now)?;
     client.account_db()?.expire_actor_states("conversation-send/", now)?;
     client.account_db()?.expire_actor_states("conversation-intent/", now)?;
+    client.account_db()?.expire_actor_states("conversation-edit-reservation/", now)?;
     Ok(())
 }
 pub(crate) fn capacity(client: &RamfluxClient, prefix: &str) -> Result<(), SdkError> {

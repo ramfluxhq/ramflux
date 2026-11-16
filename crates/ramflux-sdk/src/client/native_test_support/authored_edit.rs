@@ -112,7 +112,8 @@ fn prepare_current_edit(
             entry: &entry,
             source: &source.client.owned_device_identity()?,
             imported: None,
-            own_sent: false
+            own_sent: false,
+            author_submit: false,
         },
         &conversation,
         &exact,

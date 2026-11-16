@@ -332,6 +332,7 @@ impl RamfluxClient {
                     source: &edit_author.device,
                     imported: Some(item),
                     own_sent: false,
+                    author_submit: false,
                 },
                 &original.conversation_id,
                 &item.exact_inner,

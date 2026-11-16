@@ -48,12 +48,14 @@ pub(super) async fn send(
         } else {
             submit(account, prepared, &event, &recipients, route).await
         };
-        deliveries.push(match outcome {
+        let delivery = match outcome {
             Ok(()) => json!({"target":target,"state":"submitted"}),
+            Err(error @ SdkError::EditConflict { .. }) => return Err(error),
             Err(error) => {
                 json!({"target":target,"state":"failed","error":AdapterError::from_sdk(&error)})
             }
-        });
+        };
+        deliveries.push(delivery);
     }
     let submitted = deliveries.iter().all(|delivery| delivery["state"] == "submitted");
     Ok(local_bus_ok(
