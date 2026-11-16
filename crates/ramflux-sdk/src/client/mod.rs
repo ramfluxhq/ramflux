@@ -108,8 +108,9 @@ pub struct RamfluxClient {
     pub(crate) manifest_demand: manifest_demand::ManifestDemand,
     /// Test scaffolding only, true by default in tests: fixtures that build a peer's input by
     /// sealing do not run the sender's per-send authority fetch. Tests of send authorization set
-    /// it false first. Never compiled outside tests.
-    #[cfg(test)]
+    /// it false first. Compiled only for tests and the `test-support` feature, which production
+    /// and release builds refuse.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) scaffold_seal_without_fetch: std::cell::Cell<bool>,
     pub(crate) verified_authority_cache:
         std::cell::RefCell<identity_authority::VerifiedAuthorityCache>,
@@ -152,7 +153,7 @@ impl Default for RamfluxClient {
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             manifest_demand: manifest_demand::ManifestDemand::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             scaffold_seal_without_fetch: std::cell::Cell::new(true),
             verified_authority_cache: std::cell::RefCell::default(),
             verified_durable_authority: std::cell::RefCell::default(),

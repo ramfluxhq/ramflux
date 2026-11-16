@@ -340,7 +340,10 @@ async fn a_native_projection_keeps_the_fetch_start_through_ready_manifest() -> T
         assert!(native && kept, "native projection must keep the fetch start (native={native})");
         account.client.persist_queued_fetched_identity_directory(&early)?;
         let stale = stale_roots_since(&account, &request, Some(admitted))?;
-        assert!(stale.contains(&root), "a projected pre-admission fetch must not authorize: {stale:?}");
+        assert!(
+            stale.contains(&root),
+            "a projected pre-admission fetch must not authorize: {stale:?}"
+        );
         // Missing provenance never becomes a new observation at Apply.
         let (_, _, unstamped) = project(None);
         account.client.persist_queued_fetched_identity_directory(&unstamped)?;

@@ -20,13 +20,14 @@ pub(crate) async fn manifest(
             SdkError::LocalBus("federated group route requires recipient_prekey_url".into())
         })?;
         let started = std::time::Instant::now();
-        let mut manifest = crate::prekey::http_async::get::<Option<crate::SdkDeviceManifestResponse>>(
-            base,
-            &format!("/mvp1/device-manifest/{root}"),
-            context.network_wait(),
-        )
-        .await?
-        .ok_or_else(|| SdkError::InboundPending("group manifest unavailable".into()))?;
+        let mut manifest =
+            crate::prekey::http_async::get::<Option<crate::SdkDeviceManifestResponse>>(
+                base,
+                &format!("/mvp1/device-manifest/{root}"),
+                context.network_wait(),
+            )
+            .await?
+            .ok_or_else(|| SdkError::InboundPending("group manifest unavailable".into()))?;
         manifest.fetched_after = crate::prekey::FetchStamp(Some(started));
         crate::client::contact::verify_device_manifest(&manifest, root)?;
         Ok(crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp()))

@@ -189,7 +189,7 @@ impl RamfluxClient {
         // Every new send authorization fetches the current authority, including the
         // explicit-root path and a send that already holds a cached pair: the roster, not the
         // pair, decides whether this device may receive a key for this message.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let fresh_authority = fresh_authority && !self.scaffold_seal_without_fetch.get();
         if fresh_authority {
             self.resolve_target_principal_commitment(
