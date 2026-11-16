@@ -174,6 +174,43 @@ fn pairing_cli_outcome_exit_codes_preserve_retry_and_refusal_categories() {
     }
 }
 
+#[test]
+fn pairing_failure_class_is_allow_listed_and_never_echoes_received_text() {
+    use ramflux_sdk::SdkError;
+    let refused = |code: &str, message: &str| {
+        RfError::Sdk(SdkError::LocalBusRefused {
+            code: code.into(),
+            message: message.into(),
+            body: Box::new(serde_json::Value::Null),
+        })
+    };
+    for (error, expected) in [
+        (RfError::Sdk(SdkError::PairingCode("Busy")), "Busy"),
+        (RfError::Sdk(SdkError::PairingCode("SomethingNew")), "unknown"),
+        (RfError::Sdk(SdkError::GatewayWriterBusy), "GatewayWriterBusy"),
+        (refused("local_bus_error", "x"), "local_bus_error"),
+        (refused("SECRET-TOKEN", "x"), "unknown"),
+        (
+            refused("local_bus_error", "local bus error: pairing HTTPS status 400 Bad Request"),
+            "HTTP 400",
+        ),
+        (refused("local_bus_error", "pairing HTTPS status 400 SECRET TOKEN"), "HTTP 400"),
+        (refused("x", "pairing HTTPS status 4000"), "unknown"),
+        (refused("x", "pairing HTTPS status 99 low"), "unknown"),
+        (refused("x", "pairing HTTPS status 600"), "unknown"),
+        (refused("x", "pairing HTTPS status 40a"), "unknown"),
+        (refused("x", "pairing HTTPS status SECRET-TOKEN"), "unknown"),
+        (RfError::Sdk(SdkError::LocalBus("pairing HTTPS status 502".into())), "HTTP 502"),
+        (RfError::Sdk(SdkError::LocalBus("SECRET-TOKEN".into())), "unknown"),
+        (RfError::Message("never display this input SECRET-TOKEN".into()), "unknown"),
+    ] {
+        let class = output::class(&error);
+        assert_eq!(class, expected, "test: failure class for {error:?}");
+        assert!(!class.contains("SECRET"), "test: received text leaked into the class");
+        assert!(!class.contains("never display"), "test: received text leaked into the class");
+    }
+}
+
 #[tokio::test]
 async fn pairing_registry_fresh_process_helper() -> TestResult {
     deadline(async {

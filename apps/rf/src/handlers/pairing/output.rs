@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Closed CLI outcome categories; diagnostic text and identifiers never reach stderr.
+//! Closed CLI outcome categories. A failure prints one typed class line (an allow-listed code or
+//! an HTTP status); free-form diagnostic text, tokens and identifiers never reach stderr.
 use super::{LocalResult, Outcome, RfError};
 pub(super) fn code(value: Option<&str>) -> i32 {
     match value {
@@ -24,7 +25,78 @@ pub(super) fn outcome(result: &LocalResult) -> i32 {
         Outcome::Error { error } => code(Some(&error.code)),
     }
 }
+/// Error codes the CLI may name. Anything else prints the fixed category `unknown`.
+const KNOWN_CODES: &[&str] = &[
+    "Busy",
+    "Expired",
+    "Retired",
+    "WrongRole",
+    "WrongContext",
+    "Replay",
+    "HeadChanged",
+    "PrimaryRequired",
+    "SasMismatch",
+    "PublicationPending",
+    "TransferFloorsTooLarge",
+    "TransferCapacity",
+    "UpdateRequired",
+    "VaultUnavailable",
+    "NotFound",
+    "InvalidInput",
+    "LeaseExpired",
+    "ChunkMismatch",
+    "SchemaMismatch",
+    "ManifestMismatch",
+    "local_bus_error",
+    "NetworkingPending",
+    "NoNodeSelected",
+    "AccountNotOpen",
+    "CustodyVaultUnavailable",
+    "CustodyExpired",
+    "CustodySetupInvalid",
+    "CustodyAccountConflict",
+    "DataRootInUse",
+    "GatewayWriterBusy",
+];
+/// The fixed category for a code outside the allowlist.
+const UNKNOWN: &str = "unknown";
+
+fn known(code: &str) -> &'static str {
+    KNOWN_CODES.iter().find(|candidate| **candidate == code).copied().unwrap_or(UNKNOWN)
+}
+
+/// A short typed class for a failed pairing command, safe to print: an allow-listed code name,
+/// or `HTTP <status>` for a pairing HTTPS refusal, else `unknown`. No received text is echoed.
+pub(super) fn class(error: &RfError) -> String {
+    use ramflux_sdk::SdkError;
+    match error {
+        RfError::Sdk(SdkError::PairingCode(code)) => known(code).to_owned(),
+        RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
+        RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => http_status(message)
+            .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),
+        RfError::Sdk(SdkError::LocalBus(message)) => http_status(message)
+            .map_or_else(|| UNKNOWN.to_owned(), |status| format!("HTTP {status}")),
+        _ => UNKNOWN.to_owned(),
+    }
+}
+/// `"... pairing HTTPS status 400 <anything>"` yields 400. Exactly three digits, then end of
+/// text or a space, in 100..=599; the suffix is dropped.
+fn http_status(message: &str) -> Option<u16> {
+    let rest = message.split("pairing HTTPS status ").nth(1)?;
+    let digits: String = rest.chars().take(3).collect();
+    let after = rest.chars().nth(3);
+    if digits.len() != 3 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !matches!(after, None | Some(' ')) {
+        return None;
+    }
+    digits.parse::<u16>().ok().filter(|status| (100..=599).contains(status))
+}
 pub(super) fn failure(error: RfError) -> RfError {
+    if !matches!(error, RfError::PairingExit { .. }) {
+        eprintln!("Pairing error: {}", class(&error));
+    }
     let exit = match error {
         RfError::PairingExit { .. } => return error,
         RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy) => 3,
