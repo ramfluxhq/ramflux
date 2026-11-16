@@ -187,6 +187,10 @@ fn full_router_keeps_the_typing_frame_until_a_slot_is_free() {
                 stop_yield_witness(stop, witness).await;
                 result
             });
+            // Tear the runtime down (bounded) before reporting, so the parent's
+            // join after a result never waits on an unbounded runtime drop. A stalled
+            // teardown leaves the result unsent and the parent's recv_timeout fires.
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
             let _ = tx.send(result.map_err(|error| error.to_string()));
         })
         .expect("test: typing router worker");
