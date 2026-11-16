@@ -215,7 +215,7 @@ async fn post_revocation_card_refuses_an_older_same_certificate_manifest() -> Te
 
 #[tokio::test]
 async fn stale_card_with_the_current_roster_never_selects_a_revoked_device() -> TestResult {
-    within(async {
+    within(Box::pin(async {
         let peer = Fixture::new("card-pin-stale").await?;
         let holder = Fixture::new("card-pin-stale-holder").await?;
         let now = crate::custody::network_now()?;
@@ -231,19 +231,11 @@ async fn stale_card_with_the_current_roster_never_selects_a_revoked_device() -> 
         let current = manifest_at(&peer, &revoked)?;
         verify_native_card_head(Some(&card), &current)?;
         holder.client.persist_fetched_identity_directory(&current)?;
-        let request = |device: &str| crate::GatewayDirectMessage {
-            conversation_id: "dm".into(),
-            message_id: format!("stale-{device}"),
-            envelope_id: format!("stale-{device}"),
-            source_principal_id: holder.manifest.principal_id.clone(),
-            sender_id: holder.config.device_id.clone(),
-            recipient_device_id: Some(device.into()),
-            recipient_principal_commitment: Some(peer.manifest.principal_commitment.clone()),
-            target_delivery_id: peer.config.target_delivery_id.clone(),
-            encrypted_body: Vec::new(),
-            created_at: crate::time::now_unix_timestamp(),
-            ttl: 0,
-        };
+        holder.client.establish_friend_link(
+            "stale-link",
+            &holder.manifest.principal_commitment,
+            &peer.manifest.principal_commitment,
+        )?;
         // Recipient authority comes only from the verified current roster, never from the card.
         let root = peer.manifest.principal_commitment.clone();
         let phone = holder.client.device_identity_for_root(&root, "phone")?;
@@ -253,9 +245,68 @@ async fn stale_card_with_the_current_roster_never_selects_a_revoked_device() -> 
         );
         let active = holder.client.device_identity_for_root(&root, &peer.config.device_id)?;
         holder.client.trusted_device(HeadUse::NewAuthorization, &active)?;
-        let _ = request;
+        // A real send: seal for the revoked device and for the active device, then inspect what
+        // actually reached the gateway.
+        holder.client.scaffold_seal_without_fetch.set(false);
+        let (recorder, sealed) = crate::bus::test_gateway::Recorder::new(Some((
+            root.clone(),
+            peer.client.load_x3dh_private_state(&peer.client.owned_device_identity()?)?.bundle,
+        )));
+        let anchor = holder.manifest.principal_commitment.clone();
+        let sender_principal = holder.manifest.principal_id.clone();
+        let (address, directory) = crate::bus::dispatch::surface_transport::fixture::directory(
+            &holder.root.0,
+            std::collections::BTreeMap::from([(root.clone(), serde_json::to_value(&current)?)]),
+        )
+        .await?;
+        let mut config = holder.config.clone();
+        config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+        config.gateway_addr = address;
+        config.tcp_gateway_addr = Some(address);
+        config.server_name = "test-gateway".into();
+        config.ca_cert = holder.root.0.join("ca.pem");
+        let engine = crate::GatewaySessionEngine::with_test_transport(config, Box::new(recorder));
+        let mut account = crate::bus::state::LocalBusAccountState::new(holder.client, engine, anchor.clone());
+        let conversation = ramflux_protocol::message::dm_scope::derive(&anchor, &root)?;
+        let submit = |device: &str, target: String, id: &str| -> TestResult<crate::LocalBusMessageSubmitRequest> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "conversation_id": conversation, "message_id": format!("m-{id}"),
+                "envelope_id": format!("e-{id}"), "source_principal_id": sender_principal,
+                "sender_id": "primary", "recipient_principal_commitment": root,
+                "recipient_device_id": device, "target_delivery_id": target,
+                "encrypted_body_base64": "", "plaintext_body_base64": ramflux_protocol::encode_base64url(id.as_bytes()),
+                "created_at": crate::time::now_unix_timestamp(), "ttl": 60
+            }))?)
+        };
+        let to_phone = submit("phone", ramflux_protocol::qualified_device_id(&root, "phone")?, "phone")?;
+        let refused = Box::pin(crate::bus::dispatch::message::submit_conversation_message(
+            &mut account,
+            to_phone,
+        ))
+        .await;
+        assert!(
+            refused.is_err(),
+            "a send to the revoked device must be refused, but it was accepted"
+        );
+        assert!(
+            sealed.lock().map_err(|_| "test: recorder poisoned")?.is_empty(),
+            "no copy may be sealed for a revoked device"
+        );
+        let to_primary = submit(&peer.config.device_id, peer.config.target_delivery_id.clone(), "primary")?;
+        Box::pin(crate::bus::dispatch::message::submit_conversation_message(
+            &mut account,
+            to_primary,
+        ))
+        .await?;
+        let sealed = sealed.lock().map_err(|_| "test: recorder poisoned")?;
+        assert_eq!(sealed.len(), 1, "exactly one recipient copy must be sealed: {sealed:?}");
+        assert_eq!(
+            sealed[0].target_delivery_id, peer.config.target_delivery_id,
+            "the only sealed slot must address the active device"
+        );
+        directory.abort();
         Ok(())
-    })
+    }))
     .await
 }
 
@@ -272,7 +323,11 @@ fn pins_refuse_rollback_fork_resurrection_and_key_rollback() -> TestResult {
         let revoked = signer.revoke_device(&verified(&enrolled)?, "phone", now + 2)?;
         let mut pins = AuthorityPins::default();
         for record in [&base, &enrolled, &revoked] {
-            assert_eq!(pins.observe(&verified(record)?)?, PinOutcome::Advanced);
+            assert_eq!(
+                pins.observe(&verified(record)?)?,
+                PinOutcome::Advanced,
+                "each successive head of the chain must advance the pin"
+            );
         }
         // Epoch rollback.
         assert!(pins.observe(&verified(&enrolled)?).is_err(), "epoch rollback must be refused");

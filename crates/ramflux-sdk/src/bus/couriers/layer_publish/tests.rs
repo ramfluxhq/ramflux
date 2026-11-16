@@ -139,8 +139,14 @@ async fn prepare_uses_one_leased_scope_and_resumes_the_same_candidate() -> TestR
             .find(|device| device.device_id == "primary")
             .and_then(|device| device.message_layer.as_ref())
             .ok_or("test: candidate declaration")?;
-        assert_eq!(declaration.declaration.max_layer, MAX_MESSAGE_LAYER);
-        assert_eq!(declaration.declaration.declaration_sequence, 1);
+        assert_eq!(
+            declaration.declaration.max_layer, MAX_MESSAGE_LAYER,
+            "the candidate must declare the compiled layer"
+        );
+        assert_eq!(
+            declaration.declaration.declaration_sequence, 1,
+            "the first declaration of a fresh device must use sequence 1"
+        );
         // The signing barrier was released: a second lease is available at once.
         let born = account.client.born_v3_account.as_deref().ok_or("test: native account")?;
         let config = account.gateway_config.custody.clone().ok_or("test: custody config")?;
@@ -162,7 +168,10 @@ async fn apply_installs_retires_and_renews_at_half_the_signed_validity() -> Test
         apply(&mut account, &plan, acknowledged)?;
         assert_eq!(head_state(&account)?, None, "the journal row must be retired");
         let first = local_declaration(&account).ok_or("test: installed declaration")?;
-        assert_eq!(first.declaration.max_layer, MAX_MESSAGE_LAYER);
+        assert_eq!(
+            first.declaration.max_layer, MAX_MESSAGE_LAYER,
+            "the installed declaration must be layer 4"
+        );
         let view = status_view(
             account.client.born_v3_account.as_deref().ok_or("test: native account")?,
             custody::network_now()?,
@@ -223,7 +232,11 @@ async fn prepared_is_discarded_atomically_and_submitted_is_never_discarded() -> 
     within(async {
         let (mut account, _keep) = live_primary("layer-discard").await?;
         let prepared = stage_prepared(&mut account)?;
-        assert_eq!(head_state(&account)?, Some(("layer_update".into(), "prepared".into())));
+        assert_eq!(
+            head_state(&account)?,
+            Some(("layer_update".into(), "prepared".into())),
+            "the staged candidate must be durable as prepared and untouched by a refused discard"
+        );
         // A stale hash or operation never matches the atomic recheck.
         assert!(
             !account
@@ -237,7 +250,11 @@ async fn prepared_is_discarded_atomically_and_submitted_is_never_discarded() -> 
         // A submitted head may exist at the node: another writer must not discard it.
         let _plan = prepare(&mut account)?.ok_or("test: plan after discard")?;
         settle_for_other_writer(&mut account)?;
-        assert_eq!(head_state(&account)?, Some(("layer_update".into(), "submitted".into())));
+        assert_eq!(
+            head_state(&account)?,
+            Some(("layer_update".into(), "submitted".into())),
+            "a submitted layer row must survive another writer's settle"
+        );
         Ok(())
     })
     .await
@@ -299,7 +316,11 @@ async fn held_publish_leaves_the_actor_free_and_cancel_loses_nothing() -> TestRe
         let state = writer
             .apply(|account| head_state(account).map_err(|_| SdkError::NetworkingPending))
             .await?;
-        assert_eq!(state, Some(("layer_update".into(), "submitted".into())));
+        assert_eq!(
+            state,
+            Some(("layer_update".into(), "submitted".into())),
+            "the candidate must be submitted while Publish is held"
+        );
         // No signing lease or lock is held across the await.
         writer
             .apply(|account| {
@@ -408,7 +429,11 @@ async fn discard_waits_for_the_publication_lock_and_never_removes_a_submitted_ro
             matches!(blocked, Err(SdkError::PairingCode("Busy"))),
             "a competing lock holder must serialize the discard: {blocked:?}"
         );
-        assert_eq!(head_state(&account)?, Some(("layer_update".into(), "prepared".into())));
+        assert_eq!(
+            head_state(&account)?,
+            Some(("layer_update".into(), "prepared".into())),
+            "the staged candidate must be durable as prepared and untouched by a refused discard"
+        );
         drop(holder);
         assert!(
             custody::pairing::publication::discard_prepared_layer(

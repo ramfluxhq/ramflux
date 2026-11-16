@@ -106,6 +106,11 @@ pub struct RamfluxClient {
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) manifest_demand: manifest_demand::ManifestDemand,
+    /// Test scaffolding only, true by default in tests: fixtures that build a peer's input by
+    /// sealing do not run the sender's per-send authority fetch. Tests of send authorization set
+    /// it false first. Never compiled outside tests.
+    #[cfg(test)]
+    pub(crate) scaffold_seal_without_fetch: std::cell::Cell<bool>,
     pub(crate) verified_authority_cache:
         std::cell::RefCell<identity_authority::VerifiedAuthorityCache>,
     pub(crate) verified_durable_authority: std::cell::RefCell<crate::custody::PublicAuthorityCache>,
@@ -147,6 +152,8 @@ impl Default for RamfluxClient {
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             manifest_demand: manifest_demand::ManifestDemand::default(),
+            #[cfg(test)]
+            scaffold_seal_without_fetch: std::cell::Cell::new(true),
             verified_authority_cache: std::cell::RefCell::default(),
             verified_durable_authority: std::cell::RefCell::default(),
             born_v3_account: None,

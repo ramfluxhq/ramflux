@@ -47,7 +47,22 @@ pub fn activate_recipient(
     install_exact(local, install, acknowledged_hash, &authority)
 }
 
+/// Signalled whenever a local head installation ends (success or failure), so readers that met
+/// the in-flight marker can wait for completion instead of polling.
+pub(crate) static INSTALL_SETTLED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub(crate) fn install_exact(
+    local: &Installation<'_>,
+    install: &Install,
+    acknowledged_hash: &str,
+    authority: &CustodyAuthority,
+) -> Result<(), SdkError> {
+    let outcome = install_exact_inner(local, install, acknowledged_hash, authority);
+    INSTALL_SETTLED.notify_waiters();
+    outcome
+}
+
+fn install_exact_inner(
     local: &Installation<'_>,
     install: &Install,
     acknowledged_hash: &str,

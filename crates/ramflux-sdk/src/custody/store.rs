@@ -750,26 +750,31 @@ pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, true, None)
 }
-/// Like [`load_account`], but waits a bounded moment for an in-flight local head installation
-/// (the account's own layer renewal) to finish instead of reporting it as pending. A crashed
-/// installation never clears by waiting: it stays `PublicationPending` and unlock repairs it.
-pub(crate) fn load_account_settled(
+/// Like [`load_account`], but when a local head installation is in flight it awaits that
+/// installation's completion notification (bounded by a timeout) instead of reporting it as
+/// pending. A crashed installation never signals: the timeout elapses and the typed
+/// `PublicationPending` is returned, to be repaired at unlock.
+pub(crate) async fn load_account_after_install(
     root: &Path,
     id: &str,
     now: u64,
 ) -> Result<BornAccount, SdkError> {
-    const ATTEMPTS: u32 = 40;
-    const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
-    let mut attempt = 0;
-    loop {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+    for _ in 0..2 {
+        // Arm before reading so a completion between the read and the wait is not lost.
+        let settled = super::pairing::activate::INSTALL_SETTLED.notified();
+        tokio::pin!(settled);
+        settled.as_mut().enable();
         match load_account(root, id, now) {
-            Err(SdkError::PairingCode("PublicationPending")) if attempt < ATTEMPTS => {
-                attempt += 1;
-                std::thread::sleep(PAUSE);
+            Err(SdkError::PairingCode("PublicationPending")) => {
+                if tokio::time::timeout(WAIT, settled).await.is_err() {
+                    break;
+                }
             }
             other => return other,
         }
     }
+    load_account(root, id, now)
 }
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.

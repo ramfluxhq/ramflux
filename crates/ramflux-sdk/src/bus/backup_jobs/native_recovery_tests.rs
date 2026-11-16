@@ -588,3 +588,58 @@ fn persist_generated_fixture_exact(
     })?;
     Ok(id)
 }
+
+/// Real backup create -> verify -> install into a NEW root: archived peer authority is historical
+/// evidence only. Neither its pins nor any network observation become live state in the new root.
+#[tokio::test(flavor = "current_thread")]
+async fn native_restore_into_a_new_root_imports_no_peer_authority_and_no_freshness() -> TestResult {
+    crate::client::native_test_support::watchdog::within(LocalSet::new().run_until(Box::pin(
+        async {
+            let source_root = Root::new()?;
+            let target_root = Root::new()?;
+            let vault = Arc::new(TestVault::default());
+            let (_account, _phrase) = source_with_history(&source_root.0, vault.as_ref())?;
+            let peer = crate::client::native_test_support::Fixture::new("restore-pin-peer").await?;
+            let root = peer.manifest.principal_commitment.clone();
+            let record = peer
+                .manifest
+                .custody
+                .as_ref()
+                .ok_or("test: native peer")?
+                .publication
+                .record
+                .clone();
+            {
+                let mut holder = RamfluxClient::new();
+                holder.open_account_index(&source_root.0)?;
+                holder.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+                holder.persist_fetched_identity_directory(&peer.manifest)?;
+                assert!(
+                    holder.account_db()?.actor_state_exists(&format!("identity/custody/{root}"))?,
+                    "test: the source must hold a retained peer authority to archive"
+                );
+            }
+            let restored_id = install_archive(&source_root.0, &target_root.0, vault).await?;
+            let mut restored = RamfluxClient::new();
+            restored.open_account_index(&target_root.0)?;
+            restored.unlock_account(&restored_id, LOCAL_SECRET.as_bytes())?;
+            assert!(
+                !restored.account_db()?.actor_state_exists(&format!("identity/custody/{root}"))?,
+                "archived peer authority must not be installed as live state in the new root"
+            );
+            assert!(
+                restored
+                    .require_fresh_custody_head(
+                        crate::client::identity_authority::HeadUse::NewAuthorization,
+                        &root,
+                        &record,
+                    )
+                    .is_err(),
+                "a restore must not carry a network observation into the new root"
+            );
+            Ok(())
+        },
+    )))
+    .await
+    .map_err(|_| "test: deadline exceeded")?
+}

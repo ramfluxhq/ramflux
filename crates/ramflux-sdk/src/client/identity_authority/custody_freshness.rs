@@ -51,7 +51,12 @@ impl RamfluxClient {
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
-        self.persist_fetched_identity_directory_at(manifest, Instant::now())
+        // A queued result keeps the instant its fetch began, so applying it later never makes
+        // an older observation look newer than the authorization it is applied to.
+        self.persist_fetched_identity_directory_at(
+            manifest,
+            manifest.fetched_after.0.unwrap_or_else(Instant::now),
+        )
     }
 
     /// A prepared network result retains its conservative fetch-time lower bound while queued.

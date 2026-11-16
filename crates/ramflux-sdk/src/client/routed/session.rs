@@ -166,31 +166,59 @@ impl RamfluxClient {
         };
         self.load_pair(local, remote, &id)
     }
+    /// A content send: always authorizes against a freshly fetched authority.
     pub(super) async fn send_pair_session(
         &self,
         engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]), SdkError> {
+        self.send_pair_session_for(engine, message, true).await
+    }
+    /// `fresh_authority` is false only for protocol maintenance sends (pair reset, own-device
+    /// control) that re-use an existing authorization under the cached-authority gate.
+    pub(super) async fn send_pair_session_for(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        fresh_authority: bool,
+    ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>, [u8; 32]), SdkError> {
         let local = self.local_device_identity(&engine.config().device_id)?;
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;
         let recipient = recipient.as_str();
+        // Every new send authorization fetches the current authority, including the
+        // explicit-root path and a send that already holds a cached pair: the roster, not the
+        // pair, decides whether this device may receive a key for this message.
+        #[cfg(test)]
+        let fresh_authority = fresh_authority && !self.scaffold_seal_without_fetch.get();
+        if fresh_authority {
+            self.resolve_target_principal_commitment(
+                engine.config(),
+                message.recipient_principal_commitment.as_deref(),
+                message
+                    .recipient_device_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("recipient absent"))?,
+            )
+            .await?;
+        }
         if let Ok(remote) = self.device_identity(recipient)
             && let Some(pair) = self.sendable_pair(&local, &remote)?
         {
             return Ok(pair);
         }
-        if self
-            .account_db()?
-            .client_record("device", recipient)?
-            .as_ref()
-            .is_none_or(|record| record.get("x25519_identity_public").is_none())
-            || self
-                .device_identity(recipient)
-                .and_then(|identity| {
-                    self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
-                })
-                .is_err()
+        if !fresh_authority
+            && (self
+                .account_db()?
+                .client_record("device", recipient)?
+                .as_ref()
+                .is_none_or(|record| record.get("x25519_identity_public").is_none())
+                || self
+                    .device_identity(recipient)
+                    .and_then(|identity| {
+                        self.require_cached_root_authority(HeadUse::NewAuthorization, &identity)
+                    })
+                    .is_err())
         {
             self.resolve_target_principal_commitment(
                 engine.config(),

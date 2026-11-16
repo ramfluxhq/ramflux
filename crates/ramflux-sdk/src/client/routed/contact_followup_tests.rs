@@ -80,7 +80,10 @@ async fn auto_accepted_card_retry_exposes_safety_number_without_a_network_fetch_
     let started = std::time::Instant::now();
     for retry in 0..2 {
         let accepted = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
-        assert_eq!(accepted["contact"]["root_source"], "card");
+        assert_eq!(
+            accepted["contact"]["root_source"], "lookup",
+            "a card retry without a fetch must not change provenance (lookup -> card needs the full authority checks)"
+        );
         let receiver = account(&state, "bob")?;
         let row = crate::bus::read_model::row(receiver, "identity", "alice")?;
         assert_eq!(row["safety_number_available"], true);
@@ -257,17 +260,19 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     assert_eq!(original["root_source"], "lookup");
     directory.unavailable.store(true, Ordering::SeqCst);
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
-    let mut upgraded = original.clone();
-    upgraded["root_source"] = json!("card");
-    upgraded["node"] = json!({
-        "url":"https://node.example",
-        "key_fingerprint": crate::contact_node_fingerprint(
-            &ramflux_crypto::public_key_base64url_from_seed(&[91; 32]))?
-    });
+    // A retry carrying a card returns the existing state unchanged: provenance moves from
+    // lookup to card only through a resolution that fetched and checked the authority.
+    let upgraded = original.clone();
     for _ in 0..2 {
         let retry = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;
-        assert_eq!(retry["contact"]["root_source"], "card");
-        assert_eq!(retry["contact"], upgraded);
+        assert_eq!(
+            retry["contact"]["root_source"], "lookup",
+            "a card retry must not promote lookup provenance without the authority checks"
+        );
+        assert_eq!(
+            retry["contact"], upgraded,
+            "a card retry must return the existing contact unchanged"
+        );
     }
     let impostor = Box::pin(Fixture::native_named("alice", 211)).await?;
     let conflicting = card(&impostor)?;

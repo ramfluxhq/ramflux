@@ -200,7 +200,7 @@ async fn card_gateway(
     Ok(gateway)
 }
 
-pub(super) fn export(
+pub(super) async fn export(
     state: &LocalBusDaemonState,
     id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
@@ -208,7 +208,8 @@ pub(super) fn export(
     let profile = account_home(state, id)?;
     if let Some(native) = &account.client.born_v3_account {
         let now = crate::custody::network_now()?;
-        let current = crate::custody::load_account_settled(&state.config.data_root, id, now)?;
+        let current =
+            crate::custody::load_account_after_install(&state.config.data_root, id, now).await?;
         if current.record() != native.record() || current.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }

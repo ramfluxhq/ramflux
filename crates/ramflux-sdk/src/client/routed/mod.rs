@@ -23,6 +23,8 @@ pub(crate) mod generated_receive;
 #[cfg(test)]
 mod native_contact_tests;
 mod object_slot;
+#[cfg(test)]
+mod session_fresh_tests;
 
 mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
@@ -397,7 +399,8 @@ impl RamfluxClient {
             return Err(SdkError::InboundRejected("self sync: foreign recipient root".into()));
         }
         self.require_native_operation(&remote, NativeOperation::Sync)?;
-        let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
+        let (mut session, header, bundle) =
+            self.send_pair_session_for(engine, message, false).await?;
         self.account_db()?.write_transaction(|| {
             self.authorize_self_sync(&local, &message.conversation_id)?;
             g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
@@ -443,7 +446,10 @@ impl RamfluxClient {
             Box::pin(self.ensure_contact_request_before_direct(engine, message)).await?;
         }
         let recipient = Self::qualified_recipient(message)?;
-        let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
+        // Only user content (a direct send) forces a fresh authority fetch; pair resets and
+        // other control sends keep the cached-authority gate of their existing authorization.
+        let (mut session, header, bundle) =
+            self.send_pair_session_for(engine, message, route.kind == Kind::Direct).await?;
         self.account_db()?.write_transaction(|| {
             if route.kind == Kind::Direct {
                 self.capture_own_authored_direct(message, body)?;

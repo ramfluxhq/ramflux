@@ -36,6 +36,17 @@ impl SdkDeviceManifestEntry {
         })
     }
 }
+/// When the fetch that produced a manifest began. It is evidence about the network observation,
+/// not part of the manifest: it never serializes and never takes part in equality.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FetchStamp(pub(crate) Option<std::time::Instant>);
+impl PartialEq for FetchStamp {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for FetchStamp {}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 /// Directory material returned by a gateway capability; callers must verify its authority.
 pub struct SdkDeviceManifestResponse {
@@ -47,6 +58,8 @@ pub struct SdkDeviceManifestResponse {
     pub(crate) principal_commitment: String,
     pub(crate) root_public_key: String,
     pub(crate) devices: Vec<SdkDeviceManifestEntry>,
+    #[serde(skip)]
+    pub(crate) fetched_after: FetchStamp,
 }
 #[derive(Deserialize)]
 struct Wire {
@@ -94,6 +107,7 @@ impl SdkDeviceManifestResponse {
             signed_device_set: None,
             custody: Some(Box::new(native)),
             devices,
+            fetched_after: FetchStamp::default(),
         })
     }
 }
@@ -131,6 +145,7 @@ impl<'de> Deserialize<'de> for SdkDeviceManifestResponse {
             principal_commitment: wire.principal_commitment,
             root_public_key: wire.root_public_key,
             devices: wire.devices,
+            fetched_after: FetchStamp::default(),
         })
     }
 }

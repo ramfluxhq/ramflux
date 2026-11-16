@@ -17,7 +17,7 @@ pub(crate) async fn dispatch_contact_bus_request(
         "contact.add" | "contact.card.import" => {
             Box::pin(super::contact_resolution::add(request, state, account_id)).await
         }
-        "contact.card.export" => super::contact_resolution::export(state, account_id),
+        "contact.card.export" => super::contact_resolution::export(state, account_id).await,
         "contact.accept" => {
             if let Ok(body) =
                 serde_json::from_value::<LocalBusContactFederatedRequest>(request.body.clone())

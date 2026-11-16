@@ -134,8 +134,9 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
     for (index, (source, selector)) in [
         ("lookup", json!({"principal_id":principal})),
-        ("card", json!({"card":card})),
-        ("card", json!({"principal_id":principal})),
+        // A card retry returns the existing state: no provenance change without the full checks.
+        ("lookup", json!({"card":card})),
+        ("lookup", json!({"principal_id":principal})),
         ("verified", json!({"card":card})),
     ]
     .into_iter()
@@ -149,7 +150,10 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
         let verification = receiver.account_db()?.contact_verification(&root)?;
         let started = std::time::Instant::now();
         let accepted = call(&mut state, "bob", "contact.accept", selector).await?;
-        assert_eq!(accepted["contact"]["root_source"], source);
+        assert_eq!(
+            accepted["contact"]["root_source"], source,
+            "retry {index}: provenance must stay what the earlier checks established"
+        );
         let receiver = requests::account(&state, "bob")?;
         let row = crate::bus::read_model::row(receiver, "identity", &principal)?;
         assert_eq!(row["safety_number_available"], true);

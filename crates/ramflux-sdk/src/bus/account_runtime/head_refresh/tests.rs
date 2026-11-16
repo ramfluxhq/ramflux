@@ -262,3 +262,47 @@ async fn new_dm_send_authorization_needs_a_fetch_made_after_the_command_began() 
     .await
     .map_err(|_| "test: deadline exceeded")?
 }
+
+#[tokio::test]
+async fn a_queued_fetch_result_keeps_the_instant_its_fetch_began() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let peer = Fixture::new("queued-peer").await?;
+        let holder = Fixture::new("queued-holder").await?;
+        let account = LocalBusAccountState::disconnected(
+            holder.client,
+            holder.config,
+            holder.manifest.principal_commitment.clone(),
+        );
+        let request = crate::LocalBusFrame::request(
+            "dm-send",
+            Some("sender".into()),
+            "message",
+            "message.submit",
+            json!({"recipient_principal_commitment": peer.manifest.principal_commitment}),
+        );
+        let root = peer.manifest.principal_commitment.clone();
+        let admitted = std::time::Instant::now();
+        // A fetch that began before the command was admitted, applied only now (a queued result).
+        let mut early = peer.manifest.clone();
+        early.fetched_after = crate::prekey::FetchStamp(
+            admitted.checked_sub(Duration::from_secs(5)),
+        );
+        account.client.persist_fetched_identity_directory(&early)?;
+        let stale = stale_roots_since(&account, &request, Some(admitted))?;
+        assert!(
+            stale.contains(&root),
+            "a result whose fetch predates admission must not authorize it, even applied later: {stale:?}"
+        );
+        // A fetch that began after admission does.
+        let mut late = peer.manifest.clone();
+        late.fetched_after = crate::prekey::FetchStamp(Some(std::time::Instant::now()));
+        account.client.persist_fetched_identity_directory(&late)?;
+        assert!(
+            stale_roots_since(&account, &request, Some(admitted))?.is_empty(),
+            "a fetch that began after admission must authorize it"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
+}
