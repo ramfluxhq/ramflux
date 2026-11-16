@@ -255,6 +255,7 @@ async fn deleted_attachment_receipt_survives_scheduler_deadline() -> Result<(), 
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "terminal")?;
     let engine = account.session_client().await?;
     let receipt = json!({"transfer_state":"failed",
         "last_error":crate::error::ATTACHMENT_DELETED,"retryable":false});
@@ -336,6 +337,7 @@ async fn scheduler_deadline_preserves_resume_before_retiring_the_borrowed_gatewa
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "deadline")?;
     let mut engine = account.session_client().await?;
     engine.test_update_resume("current-session", "current-resume").await?;
     let result = tokio::time::timeout(
@@ -373,6 +375,7 @@ async fn simultaneous_attachment_and_engine_deadlines_preserve_resume_and_retry(
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "race")?;
     let engine = account.session_client().await?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     let inner_expired = std::cell::Cell::new(false);

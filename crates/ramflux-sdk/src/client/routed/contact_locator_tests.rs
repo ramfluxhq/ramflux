@@ -193,6 +193,7 @@ async fn cf02_registration_rate_limit_keeps_its_typed_bus_reason_and_retry_hint(
         "test",
         &account.principal_commitment,
     )?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "alice")?;
     let mut engine = account.session_client().await?;
     let error = engine
         .register_identity(request)

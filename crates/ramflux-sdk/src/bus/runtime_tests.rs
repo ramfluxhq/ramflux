@@ -247,6 +247,64 @@ fn account_with_setup(
     Ok(LocalBusAccountState::new(client, engine, commitment))
 }
 
+/// Install a real native account beside the fixture's device branch.
+///
+/// `account` stays rootless so the missing-root pin still refuses. The ceremony uses its own
+/// directory because the fixture index already reserved this account id. Call this only after
+/// any step that must sign with that branch, and only on a fixture that opens a live gateway.
+pub(crate) fn graft_explicit_native_root(
+    client: &mut RamfluxClient,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    if client.born_v3_account.is_some() {
+        return Ok(());
+    }
+    let parent = client
+        .account_index
+        .as_ref()
+        .ok_or(SdkError::CustodySetupInvalid)?
+        .root()
+        .join("explicit-native-root");
+    std::fs::create_dir_all(&parent).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let device =
+        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
+    let now = crate::custody::network_now()?;
+    let account = crate::custody::tests::create_with_device(
+        &parent,
+        account_id,
+        &device,
+        &crate::custody::tests::TestVault::default(),
+        now,
+    )
+    .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.born_v3_account = Some(Box::new(account));
+    Ok(())
+}
+
+/// Make `account.status` able to read the grafted account from the fixture index.
+///
+/// Status reloads `custody_accounts/<id>` and checks the index anchor. The ceremony cannot
+/// reserve an id the fixture already owns, so this copies the live authority and points the
+/// existing row at that anchor.
+pub(crate) fn publish_grafted_authority_for_status(
+    client: &mut RamfluxClient,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    let index_root =
+        client.account_index.as_ref().ok_or(SdkError::CustodySetupInvalid)?.root().to_path_buf();
+    let side = index_root.join("explicit-native-root");
+    let account = client.born_v3_account.as_mut().ok_or(SdkError::IdentityRootMissing)?;
+    account.mark_live_for_test(&side).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let anchor = account.record().body.account_anchor.clone();
+    let source = side.join("custody_accounts").join(account_id).join("authority.json");
+    let destination = index_root.join("custody_accounts").join(account_id);
+    std::fs::create_dir_all(&destination).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    std::fs::copy(source, destination.join("authority.json"))
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.create_account(account_id, &anchor)?;
+    Ok(())
+}
+
 fn scripted_engine(
     config: GatewaySessionConfig,
     blocked: Option<oneshot::Sender<()>>,
@@ -616,6 +674,7 @@ fn actor_account_with_blocked_upload(
                 ..AccountSetup::default()
             },
         )?;
+        graft_explicit_native_root(&mut account.client, "alice")?;
         account.client.node_relay_options = Some(RelayTransferOptions {
             relay_endpoint: "https://relay.invalid".into(),
 
@@ -1297,8 +1356,8 @@ async fn group_send_lists_every_missing_member_before_writing_a_message() -> Res
     LocalSet::new().run_until(async {
         let root=root("group-routes");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
         let initialize:AccountInitializer=Box::new(move |index| {
-            let account=initialize(index)?;account.client.create_group("group","device-alice")?;
-            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;Ok(account)
+            let mut account=initialize(index)?;account.client.create_group("group","device-alice")?;
+            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;graft_explicit_native_root(&mut account.client,"alice")?;Ok(account)
         });
         let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;let (socket,server)=client(Rc::clone(&supervisor),1).await?;
         let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
@@ -1358,6 +1417,7 @@ mod stream;
 async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), SdkError> {
     let root = root("surface-outbound-isolation");
     let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    graft_explicit_native_root(&mut account.client, "alice")?;
     account.client.account_db()?.persist_actor_state(
         "surface/transport/00000000000000000001",
         &serde_json::json!({"corrupt":true}),

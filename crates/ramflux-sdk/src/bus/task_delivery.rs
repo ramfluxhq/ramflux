@@ -278,6 +278,7 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
         )?;
+        super::super::runtime_tests::graft_explicit_native_root(&mut account.client, "sender")?;
         let mut config = account.session_client().await?.config.clone();
         config.previous_session_id = Some("acquire-session".into());
         config.resume_token = Some("acquire-resume".into());
@@ -342,6 +343,7 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
         )?;
+        super::super::runtime_tests::graft_explicit_native_root(&mut account.client, "sender")?;
         let live = account.session_client().await?;
         let mut config = live.config.clone();
         config.previous_session_id = Some("resume-session-before-timeout".to_owned());

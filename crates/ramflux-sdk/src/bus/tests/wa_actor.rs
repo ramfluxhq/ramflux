@@ -1656,8 +1656,7 @@ async fn compat_then_push_actor_keeps_receive_live() -> Case {
     .await
 }
 
-/// A Compat application with a lost ACK is re-fetched after C resets from 1 to S=0.
-/// The application receipt and projection claim must survive the epoch change.
+/// A lost ACK on an echoed push session is not reapplied or reprojected on the same epoch.
 #[tokio::test(flavor = "current_thread")]
 async fn compat_ack_lag_reset_does_not_reapply_or_project() -> Case {
     watch(40, compat_ack_lag_reset_case()).await
@@ -1678,7 +1677,7 @@ async fn compat_ack_lag_reset_case() -> Case {
     let mut runtime =
         start_runtime_default_on(&mut fixture).await.map_err(|e| format!("Compat connect: {e}"))?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    assert!(!handle.session_is_push(), "first application must use Compat");
+    assert!(handle.session_is_push(), "advertised push is echoed");
     // ACK transport loss can surface as an error or a committed Uncertain result.
     // The durable cursor/message/intent assertions below pin the required cut.
     let compat_pass = drive_pass(&mut runtime, ReceiveTrigger::Connected).await;
@@ -1721,12 +1720,12 @@ async fn compat_ack_lag_reset_case() -> Case {
     runtime.start_connection().map_err(|e| format!("start Push: {e}"))?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await.map_err(|e| format!("reconcile Push: {e}"))?;
-    assert_eq!(snap(&runtime)?.cursor, 0, "reset uses S=0 < C_old=1");
+    assert_eq!(snap(&runtime)?.cursor, 1, "same echoed epoch keeps the committed cursor");
     assert_eq!(
         account_of(&runtime)?.client.account_db()?.receive_epoch(&target)?.as_deref(),
         Some(PUSH_E)
     );
-    assert!(snap(&runtime)?.intents.is_empty(), "old-E intent retired before new receive");
+    assert_eq!(snap(&runtime)?.intents, vec![1], "lost ACK stays pending on the same epoch");
     wait_connected_receive(&mut runtime, &handle)
         .await
         .map_err(|e| format!("Push refetch: {e}"))?;
