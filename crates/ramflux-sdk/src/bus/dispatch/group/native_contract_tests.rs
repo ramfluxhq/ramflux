@@ -357,7 +357,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
     let received = read_group(&mut state, "group.receive").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     assert_eq!(messages.len(), 1);
     assert_eq!(
         account
@@ -413,7 +413,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
         }
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
     assert_eq!(
         account
             .client
@@ -429,9 +429,18 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
     Ok(())
 }
 
-fn assert_retry_retained(account: &LocalBusAccountState, key: &str) -> TestResult {
+fn assert_retry_retained(
+    account: &LocalBusAccountState,
+    key: &str,
+    service: &[(String, Vec<u8>)],
+) -> TestResult {
     let db = account.client.account_db()?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 0);
+    assert_eq!(
+        account.client.service_projection_pin("thread")?,
+        service,
+        "a pending entry must not write a service row"
+    );
     assert_eq!(db.unrouted_count()?, 0);
     assert!(db.has_inbox_retry(key)?);
     assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
@@ -443,7 +452,7 @@ async fn assert_first_pass_admitted(
     key: &str,
     at: i64,
 ) -> TestResult {
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     assert_eq!(messages.len(), 1, "served peer manifest must admit on the first pass");
     assert_eq!(
         account
@@ -460,7 +469,7 @@ async fn assert_first_pass_admitted(
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
     crate::bus::sync_driver::run_at(account, at + 1).await?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
     Ok(())
 }
 
@@ -490,20 +499,12 @@ async fn assert_deferred_reason(
     Ok(())
 }
 
-async fn verify_refresh_redrive(
+fn refuse_unverified_refresh(
     account: &mut LocalBusAccountState,
-    manifests: (&crate::SdkDeviceManifestResponse, &crate::SdkDeviceManifestResponse),
-    flags: (bool, bool, bool),
-    key: &str,
-    delivery: (usize, i64),
-    unrelated: &GatewayInboxEntry,
+    dependency: &crate::SdkDeviceManifestResponse,
+    service: &[(String, Vec<u8>)],
 ) -> TestResult {
-    let (count, at) = delivery;
-    let (alice, bob) = manifests;
-    let (local_fresh, peer_fresh, serve_peer) = flags;
-    let handle = account.connection.as_ref().ok_or("connection")?.clone();
     let refresh = crate::bus::couriers::head_refresh::test_apply;
-    let dependency = if !peer_fresh && !serve_peer { bob } else { alice };
     let root = &dependency.principal_commitment;
     assert!(
         refresh(account, root, std::time::Instant::now(), Err(SdkError::NetworkingPending))
@@ -516,6 +517,34 @@ async fn verify_refresh_redrive(
     let mut invalid = dependency.clone();
     invalid.principal_id = "invalid-authority".into();
     assert!(refresh(account, root, std::time::Instant::now(), Ok(invalid)).is_err());
+    assert_eq!(
+        account.client.service_projection_pin("thread")?,
+        service,
+        "an invalid refresh must not write a service row"
+    );
+    assert!(
+        account.client.direct_chat_messages("thread")?.is_empty(),
+        "an invalid refresh must not apply the chat row"
+    );
+    Ok(())
+}
+
+async fn verify_refresh_redrive(
+    account: &mut LocalBusAccountState,
+    manifests: (&crate::SdkDeviceManifestResponse, &crate::SdkDeviceManifestResponse),
+    flags: (bool, bool, bool),
+    retained: (&str, &[(String, Vec<u8>)]),
+    delivery: (usize, i64),
+    unrelated: &GatewayInboxEntry,
+) -> TestResult {
+    let (count, at) = delivery;
+    let (key, service) = retained;
+    let (alice, bob) = manifests;
+    let (local_fresh, peer_fresh, serve_peer) = flags;
+    let handle = account.connection.as_ref().ok_or("connection")?.clone();
+    let refresh = crate::bus::couriers::head_refresh::test_apply;
+    let dependency = if !peer_fresh && !serve_peer { bob } else { alice };
+    refuse_unverified_refresh(account, dependency, service)?;
     assert!(!crate::bus::couriers::head_refresh::inbound::eligible(account, key));
     let unrelated_key = account.client.inbox_admission_key(unrelated)?;
     assert_eq!(
@@ -544,7 +573,7 @@ async fn verify_refresh_redrive(
                 !crate::bus::couriers::head_refresh::inbound::eligible(account, key),
                 "peer dependency remains"
             );
-            assert_retry_retained(account, key)?;
+            assert_retry_retained(account, key, service)?;
         }
     }
     if !peer_fresh && !serve_peer {
@@ -574,7 +603,12 @@ async fn verify_refresh_redrive(
         2,
         "refresh/redrive must not consume an unrelated attempt"
     );
-    assert_eq!(account.client.direct_messages("thread")?.len(), count);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), count);
+    assert_eq!(
+        account.client.service_projection_pin("thread")?,
+        service,
+        "admitting the chat must not add a service row"
+    );
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(
         account.pending_deliveries.iter().map(|entry| entry.inbox_seq).collect::<Vec<_>>(),
@@ -585,13 +619,51 @@ async fn verify_refresh_redrive(
     Ok(())
 }
 
-async fn assert_wait_scope(state: &mut LocalBusDaemonState, opaque: bool) -> TestResult {
+fn assert_verified_service_page(
+    messages: &serde_json::Value,
+    service: &[(String, Vec<u8>)],
+) -> TestResult {
+    let rows = messages.as_array().ok_or("messages")?;
+    let mut ids = Vec::new();
+    let mut chats = 0usize;
+    for row in rows {
+        if row["kind"] == "service" {
+            ids.push(row["id"].as_str().ok_or("service id")?.to_owned());
+        } else {
+            chats += 1;
+        }
+    }
+    ids.sort();
+    let mut expected: Vec<String> = service.iter().map(|(id, _)| id.clone()).collect();
+    expected.sort();
+    assert_eq!(ids, expected, "pending reads must keep the verified service ids");
+    assert_eq!(chats, 0, "opaque retry must not project a chat row");
+    Ok(())
+}
+
+fn chat_page(messages: &serde_json::Value) -> TestResult<Vec<&serde_json::Value>> {
+    let rows = messages.as_array().ok_or("messages")?;
+    Ok(rows.iter().filter(|row| row["kind"] != "service").collect())
+}
+
+async fn assert_wait_scope(
+    state: &mut LocalBusDaemonState,
+    opaque: bool,
+    service: &[(String, Vec<u8>)],
+) -> TestResult {
     for method in ["group.read", "group.receive"] {
         let result = read_group(state, method).await;
         if opaque {
             // A directory failure precedes private-route decoding. Opaque retries
             // remain background work and cannot hold an assumed group RPC.
-            assert_eq!(result?.response_body["messages"], json!([]));
+            let body = result?.response_body;
+            assert_verified_service_page(&body["messages"], service)?;
+            let account = state.accounts.get("owner").ok_or("Alice")?;
+            assert_eq!(
+                account.client.service_projection_pin("thread")?,
+                service,
+                "opaque retry must not write a service row"
+            );
         } else {
             let error = result.err().ok_or("known group dependency must remain pending")?;
             let wire = crate::bus::io::local_bus_error_body(&error);
@@ -651,6 +723,11 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
     if peer_fresh {
         account.client.persist_fetched_identity_directory(&bob.manifest)?;
     }
+    let service_pin = account.client.service_projection_pin("thread")?;
+    assert!(
+        service_pin.len() >= 2,
+        "the fixture's accepted add and rename are the service baseline"
+    );
     for (identity, fresh) in [
         (account.client.owned_device_identity()?, local_fresh),
         (bob.client.owned_device_identity()?, peer_fresh),
@@ -674,37 +751,50 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
     crate::bus::sync_driver::run_at(&mut account, at).await?;
     if serve_peer && local_fresh {
         assert_first_pass_admitted(&mut account, &key, at).await?;
+        assert_eq!(account.client.service_projection_pin("thread")?, service_pin);
         directory.abort();
         return Ok(());
     }
-    assert_retry_retained(&account, &key)?;
+    assert_retry_retained(&account, &key, &service_pin)?;
     assert_deferred_reason(&mut account, &entry, !peer_fresh && !serve_peer).await?;
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 1)?.len(), 0);
     assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), count);
     let mut state = daemon(account, &alice.root.0);
-    assert_wait_scope(&mut state, !peer_fresh && !serve_peer).await?;
+    assert_wait_scope(&mut state, !peer_fresh && !serve_peer, &service_pin).await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    assert_retry_retained(account, &key)?;
+    assert_retry_retained(account, &key, &service_pin)?;
     verify_refresh_redrive(
         account,
         (&alice.manifest, &bob.manifest),
         (local_fresh, peer_fresh, serve_peer),
-        &key,
+        (&key, &service_pin),
         (count, at),
         &unrelated,
     )
     .await?;
-    let received = read_group(&mut state, "group.receive").await?;
+    assert_admitted_chat(&mut state, count, duplicate_redelivery, entry, at, &key).await?;
+    directory.abort();
+    Ok(())
+}
+
+async fn assert_admitted_chat(
+    state: &mut LocalBusDaemonState,
+    count: usize,
+    duplicate_redelivery: bool,
+    entry: GatewayInboxEntry,
+    at: i64,
+    key: &str,
+) -> TestResult {
+    let received = read_group(state, "group.receive").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     assert_eq!(
-        state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
+        state.accounts.get("owner").ok_or("Alice")?.client.direct_chat_messages("thread")?.len(),
         count
     );
     if duplicate_redelivery {
         let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-        review::assert_duplicate_after_refresh(account, entry, count, at, &key).await?;
+        review::assert_duplicate_after_refresh(account, entry, count, at, key).await?;
     }
-    directory.abort();
     Ok(())
 }
 
@@ -792,10 +882,11 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
         crate::client::identity_authority::NativeHeadFreshness::default();
     account.client.persist_fetched_identity_directory(&alice.manifest)?;
     let key = account.client.inbox_admission_key(&entry)?;
+    let service_pin = account.client.service_projection_pin("thread")?;
     install_gateway(&mut account, vec![entry]);
     let at = now_unix_timestamp() + 60;
     crate::bus::sync_driver::run_at(&mut account, at).await?;
-    assert_retry_retained(&account, &key)?;
+    assert_retry_retained(&account, &key, &service_pin)?;
     let old = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(301))
         .ok_or("clock")?;
@@ -804,7 +895,7 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
     invalid.principal_id = "invalid-authority".into();
     assert!(account.client.persist_fetched_identity_directory(&invalid).is_err());
     crate::bus::sync_driver::run_at(&mut account, at + 2).await?;
-    assert_retry_retained(&account, &key)?;
+    assert_retry_retained(&account, &key, &service_pin)?;
     let handle = account.connection.as_ref().ok_or("connection")?.clone();
     crate::bus::couriers::head_refresh::test_apply(
         &mut account,
@@ -815,7 +906,8 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
     assert!(handle.resync_needed());
     crate::bus::sync_driver::run_at(&mut account, at + 3).await?;
 
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
+    assert_eq!(account.client.service_projection_pin("thread")?, service_pin);
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
     directory.abort();
     Ok(())
@@ -892,7 +984,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
     );
     for method in ["group.history", "group.read", "group.receive"] {
         let history = read_group(&mut state, method).await?.response_body;
-        let rows = history["messages"].as_array().ok_or("history rows")?;
+        let rows = chat_page(&history["messages"])?;
         let [row] = rows.as_slice() else {
             return Err("one admitted native history row".into());
         };
@@ -911,7 +1003,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
         );
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     let [message] = messages.as_slice() else {
         return Err("admitted message".into());
     };
@@ -923,7 +1015,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
     )?;
     for method in ["group.history", "group.read", "group.receive"] {
         let body = read_group(&mut state, method).await?.response_body;
-        let rows = body["messages"].as_array().ok_or("erased history rows")?;
+        let rows = chat_page(&body["messages"])?;
         let [row] = rows.as_slice() else {
             return Err("one content-free tombstone".into());
         };
@@ -987,7 +1079,7 @@ async fn unidentified_group_rows_never_gain_native_origin_or_displace_admitted_h
         body,
         "account reader and bus dispatch must use one generated history contract"
     );
-    let rows = body["messages"].as_array().ok_or("generated message rows")?;
+    let rows = chat_page(&body["messages"])?;
     let [row] = rows.as_slice() else {
         return Err("only the admitted generated row may be projected".into());
     };

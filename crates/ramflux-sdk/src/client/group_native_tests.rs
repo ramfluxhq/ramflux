@@ -66,22 +66,7 @@ async fn native_group_admission_message_replay_and_removal_use_real_authority() 
             Some(exact),
             "actual native group receive must retain the authenticated sealed Inner"
         );
-        let page = bob.client.generated_message_page("native-group-thread", None, 10)?;
-        assert_eq!(
-            page.messages.len(),
-            1,
-            "group replay must not duplicate the durable projection"
-        );
-        let Some(g::message_update::State::Content(content)) =
-            page.messages.first().and_then(|row| row.state.as_ref())
-        else {
-            return Err("test: decrypted group projection missing".into());
-        };
-        assert!(
-            matches!(content.value.as_ref(), Some(g::content::Value::Message(value))
-            if value.text == "native group message" && value.sealed_group.is_none()),
-            "the native group reader must project the actual decrypted plaintext"
-        );
+        assert_one_decrypted_group_message(&bob.client)?;
         assert_generated_history(&bob.client)?;
         let removed = alice.client.shared_group_change_with_primary(
             "native-group",
@@ -185,6 +170,34 @@ async fn native_shared_group_create_add_rename_and_remove_use_custody_authority(
     Ok(())
 }
 
+fn assert_one_decrypted_group_message(client: &crate::RamfluxClient) -> TestResult {
+    use ramflux_protocol::message as g;
+    let page = client.generated_message_page("native-group-thread", None, 10)?;
+    let chats: Vec<_> = page
+        .messages
+        .iter()
+        .filter(|row| {
+            !matches!(
+                row.state.as_ref(),
+                Some(g::message_update::State::Content(content))
+                    if matches!(content.value.as_ref(), Some(g::content::Value::Service(_)))
+            )
+        })
+        .collect();
+    assert_eq!(chats.len(), 1, "group replay must not duplicate the durable projection");
+    let Some(g::message_update::State::Content(content)) =
+        chats.first().and_then(|row| row.state.as_ref())
+    else {
+        return Err("test: decrypted group projection missing".into());
+    };
+    assert!(
+        matches!(content.value.as_ref(), Some(g::content::Value::Message(value))
+            if value.text == "native group message" && value.sealed_group.is_none()),
+        "the native group reader must project the actual decrypted plaintext"
+    );
+    Ok(())
+}
+
 fn assert_generated_history(client: &crate::RamfluxClient) -> TestResult {
     let frame = crate::LocalBusFrame::request(
         "history",
@@ -196,7 +209,8 @@ fn assert_generated_history(client: &crate::RamfluxClient) -> TestResult {
     let before = client.account_db()?.journal_bounds()?.head_seq;
     let body = crate::bus::dispatch::group::history::read(client, &frame)?;
     let rows = body["messages"].as_array().ok_or("native group history rows")?;
-    let [row] = rows.as_slice() else {
+    let chats: Vec<_> = rows.iter().filter(|row| row["kind"] != "service").collect();
+    let [row] = chats.as_slice() else {
         return Err("native group history must contain one received message".into());
     };
     assert_eq!(

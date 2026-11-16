@@ -85,7 +85,7 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     assert_eq!(view.members.len(), 4);
     assert!(view.members.contains(&new_member));
     assert!(
-        peer.client.direct_messages("group-thread")?.is_empty(),
+        peer.client.direct_chat_messages("group-thread")?.is_empty(),
         "beacon never projects chat content"
     );
     directory.abort();

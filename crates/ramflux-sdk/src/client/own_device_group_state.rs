@@ -27,8 +27,16 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::InboundPending("own group local target missing".into()))?;
         // The enclosing history is authenticated to this owned account root. A removal fence
         // may be restored without first granting this device the membership it removes.
-        db.commit_shared_group_state(&state, &self.owned_group_actor(&target)?)?;
-        self.observe_native_task_roster(&state)?;
+        let actor = self.owned_group_actor(&target)?;
+        db.write_transaction(|| -> Result<(), SdkError> {
+            let previous = self.account_db()?.shared_group_state(&group.group_id)?;
+            let changed = self.account_db()?.commit_shared_group_state(&state, &actor)?;
+            self.observe_native_task_roster(&state)?;
+            if changed {
+                self.project_accepted_group_service(previous.as_ref(), &state)?;
+            }
+            Ok(())
+        })?;
         if state.view().effective_role(local.root_commitment(), local.device_id()).is_none() {
             return Ok(None);
         }

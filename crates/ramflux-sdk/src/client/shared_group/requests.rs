@@ -294,7 +294,8 @@ impl RamfluxClient {
                 Ok(state) => {
                     let changed = state.snapshot().state_hash != previous.snapshot().state_hash;
                     if changed {
-                        self.account_db()?.commit_shared_group_state(&state, &actor)?;
+                        let committed =
+                            self.account_db()?.commit_shared_group_state(&state, &actor)?;
                         self.observe_native_task_roster(&state)?;
                         if let (GroupStateChange::Add { member, .. }, Some(federation)) =
                             (&request.change, &record.federation)
@@ -306,6 +307,9 @@ impl RamfluxClient {
                             )?;
                         }
                         self.record_group_request_write(&state, request)?;
+                        if committed {
+                            self.project_accepted_group_service(Some(&previous), &state)?;
+                        }
                         crate::bus::enqueue_shared_group(self, &state, Some(&previous))?;
                     }
                     (
@@ -350,13 +354,17 @@ impl RamfluxClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
-        Ok(ramflux_crypto::apply_native_group_change_request(
+        let order = self.service_order_for_change(state, &request.change, actor)?;
+        Ok(ramflux_crypto::apply_native_group_change_request_with_order(
             primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-            branch,
-            actor,
-            state,
-            request,
-            now,
+            ramflux_crypto::NativeGroupChangeApply {
+                branch,
+                actor,
+                state,
+                request,
+                now,
+                service_order: order,
+            },
         )?)
     }
     fn sign_group_change_result_with_primary(

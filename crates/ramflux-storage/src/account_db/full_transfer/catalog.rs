@@ -653,6 +653,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     groups::RULE_46,        // sql/group_projection
     groups::RULE_47,        // sql/group_sender_identity_upgrade
     groups::RULE_48,        // sql/group_sender_key_counter_seen
+    groups::RULE_160,       // sql/group_service_body_fence
     recovery::RULE_49,      // sql/guardian_recovery_share_projection/local
     recovery::RULE_50,      // sql/guardian_recovery_share_projection/portable
     routing::RULE_51,       // sql/home_node_binding

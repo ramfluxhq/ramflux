@@ -136,6 +136,7 @@ pub(super) fn forbidden(
 }
 
 pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str) -> TestResult {
+    let services = service_identities(db)?;
     let mut tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let tables = tables.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     let mut checked = 0;
@@ -177,14 +178,17 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                     )
                 });
             for (column, name) in names.iter().enumerate() {
-                let value = row.get_ref(column)?;
-                let (ValueRef::Text(bytes) | ValueRef::Blob(bytes)) = value else { continue };
-                let text = String::from_utf8_lossy(bytes);
+                let owned = {
+                    let value = row.get_ref(column)?;
+                    let (ValueRef::Text(bytes) | ValueRef::Blob(bytes)) = value else { continue };
+                    bytes.to_vec()
+                };
+                let text = String::from_utf8_lossy(&owned);
                 if retained_identity && name == "state_kind" {
                     continue;
                 }
                 if retained_identity && name == "state_json" {
-                    check_tombstone_identity(&serde_json::from_slice(bytes)?, message)?;
+                    check_tombstone_identity(&serde_json::from_slice(&owned)?, message)?;
                     checked += 1;
                     continue;
                 }
@@ -193,7 +197,7 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                     continue;
                 }
                 let rendered =
-                    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&owned) {
                         if table == "runtime_journal" && name == "body_json" {
                             strip_generated_tombstone(&mut value, message)?;
                         }
@@ -206,13 +210,16 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                     } else {
                         text.into_owned()
                     };
-                for secret in forbidden {
-                    assert!(
-                        !rendered.contains(secret),
-                        "residual in {table}.{name}: {secret}; row={:?}",
-                        row_context(row, names.len())
-                    );
-                }
+                let cell = ServiceCell {
+                    table: &table,
+                    column: name,
+                    names: &names,
+                    row,
+                    bytes: &owned,
+                    erased: message,
+                };
+                let rendered = designated_service_text(&cell, &rendered, &services)?;
+                reject_residual(&table, name, &rendered, forbidden, row, names.len())?;
                 checked += 1;
             }
         }
@@ -220,6 +227,206 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
     assert!(checked > 0);
     Ok(())
 }
+struct ServiceIdentity {
+    message_id: String,
+}
+
+struct ServiceCell<'a> {
+    table: &'a str,
+    column: &'a str,
+    names: &'a [String],
+    row: &'a rusqlite::Row<'a>,
+    bytes: &'a [u8],
+    erased: &'a str,
+}
+
+fn service_identities(db: &Connection) -> Result<Vec<ServiceIdentity>, Box<dyn std::error::Error>> {
+    if !sqlite_table(db, "direct_message_projection")? {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    let mut stmt =
+        db.prepare("SELECT message_id, sender_id, encrypted_body FROM direct_message_projection")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let message_id: String = row.get(0)?;
+        let body = row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default();
+        let Ok((_, content)) = crate::RamfluxClient::decode_generated_inner(&body) else {
+            continue;
+        };
+        if matches!(content.value, Some(crate::message::content::Value::Service(_))) {
+            found.push(ServiceIdentity { message_id });
+        }
+    }
+    Ok(found)
+}
+
+fn sqlite_table(db: &Connection, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get(0),
+    )?)
+}
+
+/// Exempt only designated author fields on the exact service row.
+///
+/// `sender_id`, `author.account_anchor`, and `author.device_id` are group history. A copied
+/// author in any other column or payload still fails. The erased id stays visible in the cell.
+fn designated_service_text(
+    cell: &ServiceCell<'_>,
+    rendered: &str,
+    services: &[ServiceIdentity],
+) -> Result<String, Box<dyn std::error::Error>> {
+    if services.is_empty() || rendered.contains(cell.erased) {
+        return Ok(rendered.to_owned());
+    }
+    if let Some(text) = redact_service_column(cell, rendered, services)? {
+        return Ok(text);
+    }
+    Ok(rendered.to_owned())
+}
+
+fn redact_service_column(
+    cell: &ServiceCell<'_>,
+    rendered: &str,
+    services: &[ServiceIdentity],
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let message_id = column_text(cell.row, cell.names, "message_id")?;
+    let exact = message_id.as_deref().is_some_and(|id| service_id(services, id));
+    Ok(match (cell.table, cell.column) {
+        ("direct_message_projection", "sender_id") if exact => Some(String::new()),
+        ("direct_message_projection", "encrypted_body") | ("runtime_message_content", "body")
+            if exact =>
+        {
+            message_id.as_deref().and_then(|id| redact_service_body(cell.bytes, id))
+        }
+        ("runtime_actor_state", "state_json") => {
+            let kind = column_text(cell.row, cell.names, "state_kind")?;
+            kind.as_deref().and_then(|kind| redact_identity_author(rendered, services, kind))
+        }
+        ("runtime_journal", "body_json") => redact_journal_author(rendered, services),
+        ("runtime_outbox", "keys_json")
+            if column_text(cell.row, cell.names, "table_name")?.as_deref()
+                == Some("direct_message_projection") =>
+        {
+            redact_outbox_sender(rendered, services)
+        }
+        _ => None,
+    })
+}
+
+fn reject_residual(
+    table: &str,
+    column: &str,
+    rendered: &str,
+    forbidden: &[String],
+    row: &rusqlite::Row<'_>,
+    width: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for secret in forbidden {
+        if rendered.contains(secret) {
+            return Err(format!(
+                "residual in {table}.{column}: {secret}; row={:?}",
+                row_context(row, width)
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn service_id(services: &[ServiceIdentity], message_id: &str) -> bool {
+    services.iter().any(|service| service.message_id == message_id)
+}
+
+fn column_text(
+    row: &rusqlite::Row<'_>,
+    names: &[String],
+    column: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(index) = names.iter().position(|name| name == column) else {
+        return Ok(None);
+    };
+    Ok(match row.get_ref(index)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
+        _ => None,
+    })
+}
+
+fn redact_service_body(bytes: &[u8], message_id: &str) -> Option<String> {
+    let (mut identity, content) = crate::RamfluxClient::decode_generated_inner(bytes).ok()?;
+    if ramflux_protocol::encode_base64url(&identity.id) != message_id {
+        return None;
+    }
+    if !matches!(content.value, Some(crate::message::content::Value::Service(_))) {
+        return None;
+    }
+    if let Some(author) = identity.author.as_mut() {
+        author.account_anchor.clear();
+        author.device_id.clear();
+    }
+    serde_json::to_string(&serde_json::json!({"identity": identity, "content": content})).ok()
+}
+
+fn redact_identity_author(
+    rendered: &str,
+    services: &[ServiceIdentity],
+    kind: &str,
+) -> Option<String> {
+    let id = kind.strip_prefix("routed/generated-identity/")?;
+    if !service_id(services, id) {
+        return None;
+    }
+    clear_author_object(rendered, &["author"])
+}
+
+fn redact_journal_author(rendered: &str, services: &[ServiceIdentity]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(rendered).ok()?;
+    let update: ramflux_protocol::message::MessageUpdate =
+        serde_json::from_value(value.get("update")?.clone()).ok()?;
+    let identity = update.identity.as_ref()?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let service = matches!(
+        update.state,
+        Some(ramflux_protocol::message::message_update::State::Content(ref content))
+            if matches!(content.value, Some(crate::message::content::Value::Service(_)))
+    );
+    if !service || !service_id(services, &id) {
+        return None;
+    }
+    clear_author_object(rendered, &["update", "identity", "author"])
+}
+
+fn redact_outbox_sender(rendered: &str, services: &[ServiceIdentity]) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(rendered).ok()?;
+    let message_id = value.get("message_id")?.as_str()?.to_owned();
+    if !service_id(services, &message_id) {
+        return None;
+    }
+    value.as_object_mut()?.remove("sender_id");
+    serde_json::to_string(&value).ok()
+}
+
+fn clear_author_object(rendered: &str, path: &[&str]) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(rendered).ok()?;
+    let mut cursor = &mut value;
+    for (index, key) in path.iter().enumerate() {
+        if index + 1 == path.len() {
+            let author = cursor.get_mut(*key)?.as_object_mut()?;
+            author.remove("accountAnchor");
+            author.remove("account_anchor");
+            author.remove("deviceId");
+            author.remove("device_id");
+            return serde_json::to_string(&value).ok();
+        }
+        cursor = cursor.get_mut(*key)?;
+    }
+    None
+}
+
 fn strip_deleted_id(value: &mut serde_json::Value, message: &str) {
     match value {
         serde_json::Value::Object(fields) => {
@@ -288,6 +495,15 @@ fn strip_generated_tombstone(value: &mut serde_json::Value, message: &str) -> Te
     }
     let update: ramflux_protocol::message::MessageUpdate =
         serde_json::from_value(value["update"].clone())?;
+    let journal_id = update
+        .identity
+        .as_ref()
+        .map(|identity| ramflux_protocol::encode_base64url(&identity.id))
+        .ok_or("journal identity")?;
+    // A service-event journal is group history. Only the erased chat message must be a tombstone.
+    if journal_id != message {
+        return Ok(());
+    }
     assert!(
         matches!(
             update.state,
@@ -359,5 +575,129 @@ fn inspection_filter(table: &str) -> String {
         " WHERE topic NOT IN ('safety.changed','account.state')".to_owned()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod exemption_tests {
+    use super::assert_erased;
+
+    struct Fixture {
+        db: rusqlite::Connection,
+        forbidden: Vec<String>,
+        leak: Vec<u8>,
+    }
+
+    #[test]
+    fn copied_author_outside_designated_fields_still_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = service_fixture()?;
+        assert_erased(&fixture.db, &fixture.forbidden, "erased-chat-id")?;
+        let column = service_fixture()?;
+        column.db.execute(
+            "UPDATE direct_message_projection SET metadata_json=?1",
+            [br#"{"note":"erased-root"}"#.as_slice()],
+        )?;
+        assert!(
+            assert_erased(&column.db, &column.forbidden, "erased-chat-id").is_err(),
+            "a service row's unrelated column must not inherit the author exemption"
+        );
+        fixture.db.execute(
+            "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('routed/unrelated-leak',?1)",
+            [&fixture.leak],
+        )?;
+        assert!(
+            assert_erased(&fixture.db, &fixture.forbidden, "erased-chat-id").is_err(),
+            "an unrelated payload that copies the service id and the author must fail"
+        );
+        Ok(())
+    }
+
+    fn service_fixture() -> Result<Fixture, Box<dyn std::error::Error>> {
+        use ramflux_protocol::message as g;
+        let author = g::QualifiedDevice {
+            account_anchor: "erased-root".into(),
+            device_id: "erased-device".into(),
+            device_epoch: 1,
+        };
+        let id = g::identity::derive(&author, "thread", 1)?;
+        let identity = g::EventIdentity {
+            id: id.to_vec(),
+            conversation_id: "thread".into(),
+            author: Some(author),
+            device_sequence: 1,
+            hlc: 1,
+            group_id: None,
+            group_epoch: None,
+        };
+        let content = g::Content {
+            value: Some(g::content::Value::Service(g::Service {
+                action: g::ServiceAction::ServiceNameChanged as i32,
+                subjects: Vec::new(),
+                text: Some("Renamed".into()),
+                target: None,
+                native_authority_proof: Vec::new(),
+            })),
+        };
+        let body = crate::RamfluxClient::encode_generated_inner(identity.clone(), &content)?;
+        let service_id = ramflux_protocol::encode_base64url(&identity.id);
+        let db = rusqlite::Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE direct_message_projection(message_id TEXT, sender_id TEXT, encrypted_body BLOB, metadata_json BLOB);
+             CREATE TABLE runtime_message_content(message_id TEXT, conversation_id TEXT, body BLOB);
+             CREATE TABLE runtime_actor_state(state_kind TEXT, state_json BLOB);
+             CREATE TABLE runtime_journal(topic TEXT, body_json BLOB);
+             CREATE TABLE local_event_log(event_type TEXT);
+             CREATE TABLE runtime_outbox(table_name TEXT, keys_json TEXT, row_id INTEGER);",
+        )?;
+        db.execute(
+            "INSERT INTO direct_message_projection(message_id,sender_id,encrypted_body,metadata_json) VALUES(?1,'erased-root',?2,x'7b7d')",
+            rusqlite::params![service_id, body],
+        )?;
+        db.execute(
+            "INSERT INTO runtime_message_content(message_id,conversation_id,body) VALUES(?1,'thread',?2)",
+            rusqlite::params![service_id, body],
+        )?;
+        db.execute(
+            "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+            rusqlite::params![
+                format!("routed/generated-identity/{service_id}"),
+                serde_json::to_vec(&identity)?
+            ],
+        )?;
+        let update = g::MessageUpdate {
+            account_id: "account".into(),
+            journal_sequence: 1,
+            identity: Some(identity),
+            state: Some(g::message_update::State::Content(content)),
+        };
+        let journal =
+            serde_json::to_vec(&serde_json::json!({"message_id": service_id, "update": update}))?;
+        db.execute(
+            "INSERT INTO runtime_journal(topic,body_json) VALUES('message.updated',?1)",
+            [journal],
+        )?;
+        let keys = serde_json::json!({
+            "conversation_id": "thread",
+            "message_id": service_id,
+            "sender_id": "erased-root"
+        });
+        db.execute(
+            "INSERT INTO runtime_outbox(table_name,keys_json) VALUES('direct_message_projection',?1)",
+            [keys.to_string()],
+        )?;
+        Ok(Fixture {
+            db,
+            forbidden: vec![
+                "erased-root".into(),
+                "erased-device".into(),
+                "erased-chat-id".into(),
+                "envelope-id".into(),
+            ],
+            leak: serde_json::to_vec(&serde_json::json!({
+                "service_ref": service_id,
+                "leaked_author": "erased-root"
+            }))?,
+        })
     }
 }

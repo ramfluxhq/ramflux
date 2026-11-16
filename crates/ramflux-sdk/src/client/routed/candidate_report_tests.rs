@@ -168,7 +168,7 @@ async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<Deli
 }
 
 fn projected(receiver: &Fixture, conversation: &str) -> Result<usize, SdkError> {
-    Ok(receiver.client.direct_messages(conversation)?.len())
+    Ok(receiver.client.direct_chat_messages(conversation)?.len())
 }
 
 fn opened_kind(delivery: &Delivery, want: &Kind) -> Result<(), SdkError> {

@@ -9,7 +9,9 @@ use super::{
     encode_base64url, invalid, root_matches, snapshot, transition, verify_group_state_actor,
     verify_group_state_actor_at,
 };
-use ramflux_protocol::group_state::{GroupChangeRequest, GroupChangeResult, GroupChangeStatus};
+use ramflux_protocol::group_state::{
+    GroupChangeRequest, GroupChangeResult, GroupChangeStatus, GroupServiceOrder,
+};
 fn request_body(request: &GroupChangeRequest) -> Result<Value, CryptoError> {
     let mut value = serde_json::to_value(request).map_err(|_| invalid("group JSON encoding"))?;
     value.as_object_mut().ok_or_else(|| invalid("request object"))?.remove("signature");
@@ -157,7 +159,12 @@ pub fn apply_group_change_request(
         branch,
         actor,
         state,
-        snapshot::Apply { requester: &request.actor, change: request.change.clone(), now },
+        snapshot::Apply::clock(
+            &request.actor,
+            request.change.clone(),
+            now,
+            state.snapshot().epoch,
+        )?,
     )
 }
 /// Apply an authorized request under the current born-v3 owner authority.
@@ -181,7 +188,48 @@ pub fn apply_native_group_change_request(
         branch,
         actor,
         state,
-        snapshot::Apply { requester: &request.actor, change: request.change.clone(), now },
+        snapshot::Apply::clock(
+            &request.actor,
+            request.change.clone(),
+            now,
+            state.snapshot().epoch,
+        )?,
+    )
+}
+
+/// Inputs for applying one authorized request with a caller-allocated timeline order.
+pub struct NativeGroupChangeApply<'a> {
+    pub branch: &'a DeviceBranch,
+    pub actor: &'a GroupStateActor,
+    pub state: &'a VerifiedGroupState,
+    pub request: &'a GroupChangeRequest,
+    pub now: i64,
+    pub service_order: GroupServiceOrder,
+}
+
+/// Apply an authorized request and stamp a caller-allocated message-timeline order.
+///
+/// # Errors
+/// Rejects an invalid requester, creator authority, stale state, or state transition.
+pub fn apply_native_group_change_request_with_order(
+    primary: &crate::custody::SelfSigningKey,
+    apply: NativeGroupChangeApply<'_>,
+) -> Result<VerifiedGroupState, CryptoError> {
+    validate_group_change_request(apply.state, apply.request, apply.now)?;
+    if change_already_applied(apply.state.view(), &apply.request.change) {
+        return Ok(apply.state.clone());
+    }
+    snapshot::advance_as_with_native_signer(
+        primary,
+        apply.branch,
+        apply.actor,
+        apply.state,
+        snapshot::Apply {
+            requester: &apply.request.actor,
+            change: apply.request.change.clone(),
+            now: apply.now,
+            service_order: apply.service_order,
+        },
     )
 }
 /// # Errors

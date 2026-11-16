@@ -469,7 +469,7 @@ pub(crate) mod tests {
                 &format!("routed/group-content/{}", first.message_id))?, Some(plaintext),
                 "decrypted group content must preserve every r4 field and the exact private revision");
             assert_eq!(
-                target.client.direct_messages("activation-media-thread")?.len(),
+                target.client.direct_chat_messages("activation-media-thread")?.len(),
                 1,
                 "group replay must not duplicate the media message"
             );

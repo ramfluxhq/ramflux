@@ -950,7 +950,7 @@ pub(crate) async fn test_redrive(
             let message = tokio::select! {
                 message = work.recv() => message.ok_or(SdkError::NetworkingPending)?,
                 () = completion.notified() => {
-                    assert_eq!(account.client.direct_messages(conversation)?.len(), expected,
+                    assert_eq!(account.client.direct_chat_messages(conversation)?.len(), expected,
                         "receive pass must not drop or duplicate parked entries");
                     break;
                 }

@@ -96,8 +96,15 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
     assert_result_did_not_replace_snapshot(&admin.client)?;
     admin.client.fixture_accept_group_state(&current, "device-peer-one")?;
     assert_eq!(admin.client.group_state("group")?.group_epoch, 3);
-    assert_eq!(owner.client.direct_messages("group-thread")?.len(), 0);
-    assert_eq!(admin.client.direct_messages("group-thread")?.len(), 0);
+    let (owner_service, owner_messages) = timeline_counts(&owner.client)?;
+    let (admin_service, admin_messages) = timeline_counts(&admin.client)?;
+    assert_eq!(owner_messages, 0, "a group state change is not an application message");
+    assert_eq!(admin_messages, 0, "a group state change is not an application message");
+    assert_eq!(owner_service, 2, "the owner records the member add and the rename");
+    assert_eq!(
+        admin_service, 2,
+        "the admin's first snapshot projects the add, and the rename adds the name row"
+    );
     Box::pin(reject_demoted_federated_add(
         &mut owner.client,
         &admin.client,
@@ -304,4 +311,11 @@ async fn send_admin_request(admin: &mut LocalBusAccountState, step_clock: bool) 
     }
 
     Ok(())
+}
+
+fn timeline_counts(client: &RamfluxClient) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let page = client.generated_message_view_page("group-thread", None, 100)?;
+    let service = page.messages.iter().filter(|row| row.kind == "service").count();
+    let messages = page.messages.iter().filter(|row| row.kind == "message").count();
+    Ok((service, messages))
 }
