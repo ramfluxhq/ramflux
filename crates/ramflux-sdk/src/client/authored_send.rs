@@ -484,6 +484,46 @@ impl RamfluxClient {
             )?;
             self.clear_self_sync_draft_after_send(&message.conversation_id)?;
             self.journal_generated_receive_updates(exact)
-        })
+        })?;
+        self.bind_local_media_owners(&message.message_id, exact)
+    }
+
+    /// Bind a locally stored object whose id matches a sent media reference.
+    /// A reference with no local object stays a remote attachment and is skipped.
+    fn bind_local_media_owners(&self, message_id: &str, exact: &[u8]) -> Result<(), SdkError> {
+        let (_, content) = Self::decode_generated_inner(exact)?;
+        let Some(g::content::Value::Message(body)) = content.value else {
+            return Ok(());
+        };
+        let db = self.account_db()?;
+        for media in &body.media {
+            if media.object_id.is_empty() {
+                continue;
+            }
+            let Some((stored, _)) =
+                db.load_object::<ramflux_sync::EncryptedObject>(&media.object_id)?
+            else {
+                continue;
+            };
+            let reference_hash = ramflux_crypto::blake3_256_base64url(
+                "ramflux.object.local_media_owner.v1",
+                &ramflux_protocol::canonical_json_bytes(&(message_id, &media.object_id))?,
+            );
+            let reference = serde_json::json!({});
+            let metadata = serde_json::json!({});
+            db.register_object_reference(
+                ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+                &ramflux_storage::ObjectReferenceOwner {
+                    reference_hash: &reference_hash,
+                    wire_id: &stored.object_id,
+                    manifest_hash: &stored.manifest_hash,
+                    selector: &stored.object_id,
+                    message_id,
+                    reference: &reference,
+                    metadata: &metadata,
+                },
+            )?;
+        }
+        Ok(())
     }
 }

@@ -387,6 +387,69 @@ async fn retired_a2i_bytes_settle_without_binding_retry() -> Result<(), SdkError
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn authority_stamp_conflict_applies_the_admitted_copy() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let original = retired_carrier_entry(&harness)?;
+    let bytes = serde_json::to_vec(&original.entry)?;
+    let staged_turn = turn(&harness.account, 1)?;
+    let now = now_unix_timestamp();
+    let staged = harness.account.client.account_db()?.receive_transaction(
+        staged_turn.expected(),
+        1,
+        |tx| {
+            tx.stage(ReceiveStage {
+                target: &staged_turn.target,
+                incarnation: &staged_turn.incarnation,
+                sequence: original.entry.inbox_seq,
+                entry_json: &bytes,
+                admission_key: "authenticated-key",
+                retain_until: now + 300,
+                first_seen: now,
+            })
+        },
+    )?;
+    assert!(matches!(staged, ReceiveStageResult::Staged), "admit the first copy: {staged:?}");
+    let mut stamped = original;
+    stamped
+        .entry
+        .envelope
+        .ext
+        .ext
+        .insert("source_device_authority".into(), json!({"branch_public_key": "stamp"}));
+    let stamped_bytes = serde_json::to_vec(&stamped.entry)?;
+    assert_ne!(bytes, stamped_bytes, "the authority stamp must change the staged bytes");
+    let conflict = harness.account.client.account_db()?.receive_transaction(
+        staged_turn.expected(),
+        1,
+        |tx| {
+            tx.stage(ReceiveStage {
+                target: &staged_turn.target,
+                incarnation: &staged_turn.incarnation,
+                sequence: stamped.entry.inbox_seq,
+                entry_json: &stamped_bytes,
+                admission_key: "authenticated-key",
+                retain_until: now + 300,
+                first_seen: now,
+            })
+        },
+    )?;
+    assert!(
+        matches!(conflict, ReceiveStageResult::Conflict { .. }),
+        "a second encoding stays a conflict: {conflict:?}"
+    );
+    drive(&mut harness.account, stamped, || 1).await?;
+    let db = harness.account.client.account_db()?;
+    assert_eq!(cursor(&harness.account)?, 1, "the admitted copy must settle");
+    assert_eq!(
+        db.receive_state_for_test(1)?,
+        (None, 0),
+        "settlement removes the admitted work row"
+    );
+    assert_eq!(db.unrouted_count()?, 0, "the stamped copy must not be applied as a new input");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn active_routed_requires_live_session() -> Result<(), SdkError> {
     let mut harness = open()?;
     let target = harness.account.target_delivery_id.clone();

@@ -35,12 +35,12 @@ pub(super) async fn print(
             }),
         )
         .await?;
-    let mut found = Vec::new();
-    collect(&body, "", &mut found)?;
+    let found = collect(&body)?;
     if let Some(path) = command.out.as_deref() {
         let [item] = found.as_slice() else {
-            return Err(RfError::Message(
-                "object thumbnail --out requires exactly one inline thumbnail".to_owned(),
+            return Err(refused(
+                "ThumbnailCount",
+                "object thumbnail --out requires exactly one inline thumbnail",
             ));
         };
         write_private(path, &item.bytes)?;
@@ -60,81 +60,58 @@ pub(super) async fn print(
     print_json(&serde_json::json!({ "thumbnails": thumbnails }))
 }
 
-fn collect(
-    value: &serde_json::Value,
-    object_id: &str,
-    found: &mut Vec<Thumbnail>,
-) -> Result<(), RfError> {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect(item, object_id, found)?;
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let object_id = map
-                .get("objectId")
-                .or_else(|| map.get("object_id"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(object_id);
-            if let Some(thumbnail) =
-                map.get("inlineThumbnail").or_else(|| map.get("inline_thumbnail"))
-            {
-                found.push(project(object_id, thumbnail)?);
-            }
-            for (key, child) in map {
-                if key == "inlineThumbnail" || key == "inline_thumbnail" {
-                    continue;
-                }
-                collect(child, object_id, found)?;
-            }
-        }
-        _ => {}
+fn refused(code: &'static str, message: impl Into<String>) -> RfError {
+    RfError::Refused { code, message: message.into() }
+}
+
+/// `message.read` renders one detail. Media is only at
+/// `message.content.message.media`, and pbjson emits camelCase.
+fn collect(body: &serde_json::Value) -> Result<Vec<Thumbnail>, RfError> {
+    let Some(media) = body
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.get("message"))
+        .and_then(|message| message.get("media"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for item in media {
+        let Some(thumbnail) = item.get("inlineThumbnail") else {
+            continue;
+        };
+        let object_id = item.get("objectId").and_then(serde_json::Value::as_str).unwrap_or("");
+        found.push(project(object_id, thumbnail)?);
     }
-    Ok(())
+    Ok(found)
 }
 
 fn project(object_id: &str, thumbnail: &serde_json::Value) -> Result<Thumbnail, RfError> {
     if object_id.is_empty() {
-        return Err(RfError::Message("thumbnail has no object id".to_owned()));
+        return Err(refused("ThumbnailInvalid", "thumbnail has no object id"));
     }
     let mime = thumbnail
         .get("mimeType")
-        .or_else(|| thumbnail.get("mime_type"))
-        .or_else(|| thumbnail.get("mime"))
         .and_then(serde_json::Value::as_str)
         .filter(|mime| !mime.is_empty())
-        .ok_or_else(|| RfError::Message("thumbnail mime is missing".to_owned()))?
+        .ok_or_else(|| refused("ThumbnailInvalid", "thumbnail mime is missing"))?
         .to_owned();
     let width = json_u64(thumbnail.get("width"), "width")?;
     let height = json_u64(thumbnail.get("height"), "height")?;
     let encoded = thumbnail
         .get("encodedImage")
-        .or_else(|| thumbnail.get("encoded_image"))
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| RfError::Message("thumbnail encoded image is missing".to_owned()))?;
+        .ok_or_else(|| refused("ThumbnailInvalid", "thumbnail encoded image is missing"))?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|_| {
-        RfError::Message("thumbnail encoded image is not standard base64".to_owned())
+        refused("ThumbnailInvalid", "thumbnail encoded image is not standard base64")
     })?;
     if bytes.is_empty() {
-        return Err(RfError::Message("thumbnail encoded image is empty".to_owned()));
+        return Err(refused("ThumbnailInvalid", "thumbnail encoded image is empty"));
     }
     let size = u64::try_from(bytes.len())
-        .map_err(|_| RfError::Message("thumbnail size exceeds u64".to_owned()))?;
+        .map_err(|_| refused("ThumbnailInvalid", "thumbnail size exceeds u64"))?;
     Ok(Thumbnail { object_id: object_id.to_owned(), mime, size, width, height, bytes })
-}
-
-fn json_u64(value: Option<&serde_json::Value>, name: &str) -> Result<u64, RfError> {
-    let Some(value) = value else {
-        return Err(RfError::Message(format!("thumbnail {name} is missing")));
-    };
-    if let Some(number) = value.as_u64() {
-        return Ok(number);
-    }
-    value
-        .as_i64()
-        .and_then(|number| u64::try_from(number).ok())
-        .ok_or_else(|| RfError::Message(format!("thumbnail {name} is not a number")))
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), RfError> {
@@ -161,4 +138,97 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), RfError> {
         }
     }
     Ok(())
+}
+
+fn json_u64(value: Option<&serde_json::Value>, name: &str) -> Result<u64, RfError> {
+    let Some(value) = value else {
+        return Err(refused("ThumbnailInvalid", format!("thumbnail {name} is missing")));
+    };
+    let number =
+        value.as_u64().or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()));
+    match number {
+        Some(number) if number > 0 => Ok(number),
+        Some(_) => Err(refused("ThumbnailInvalid", format!("thumbnail {name} is zero"))),
+        None => Err(refused("ThumbnailInvalid", format!("thumbnail {name} is not a number"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detail(media: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ramflux.message.read_model.v1",
+            "message": { "content": { "message": { "media": media } } },
+            "snapshot_sequence": 1
+        })
+    }
+
+    #[test]
+    fn reads_only_message_content_message_media() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"thumb-bytes");
+        let body = detail(&serde_json::json!([{
+            "objectId": "object-1",
+            "inlineThumbnail": {
+                "mimeType": "image/jpeg",
+                "width": 8,
+                "height": 4,
+                "encodedImage": encoded
+            }
+        }]));
+        let found = collect(&body).expect("thumbnail");
+        assert_eq!(found.len(), 1, "one inline thumbnail");
+        assert_eq!(found[0].object_id, "object-1", "object id");
+        assert_eq!(found[0].mime, "image/jpeg", "mime");
+        assert_eq!(found[0].size, b"thumb-bytes".len() as u64, "decoded byte length");
+        let snake = serde_json::json!({
+            "message": {
+                "media": [{
+                    "object_id": "object-1",
+                    "inline_thumbnail": {
+                        "mime_type": "image/jpeg",
+                        "width": 8,
+                        "height": 4,
+                        "encoded_image": encoded
+                    }
+                }],
+                "content": {
+                    "message": {
+                        "media": [{
+                            "object_id": "object-1",
+                            "inline_thumbnail": {
+                                "mime_type": "image/jpeg",
+                                "width": 8,
+                                "height": 4,
+                                "encoded_image": encoded
+                            }
+                        }]
+                    }
+                }
+            }
+        });
+        let ignored = collect(&snake).expect("other shapes are empty");
+        assert!(
+            ignored.is_empty(),
+            "snake_case and a short path must not match ({} items)",
+            ignored.len()
+        );
+        assert!(collect(&detail(&serde_json::json!([]))).expect("empty").is_empty(), "empty media");
+    }
+
+    #[test]
+    fn missing_thumbnail_fields_are_thumbnail_invalid() {
+        let body = detail(&serde_json::json!([{
+            "objectId": "object-1",
+            "inlineThumbnail": { "width": 1, "height": 1 }
+        }]));
+        let Err(error) = collect(&body) else {
+            panic!("missing mime and image");
+        };
+        assert!(
+            matches!(error, RfError::Refused { code: "ThumbnailInvalid", .. }),
+            "typed code, got {error}"
+        );
+    }
 }

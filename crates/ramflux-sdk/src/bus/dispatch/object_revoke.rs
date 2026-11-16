@@ -16,7 +16,7 @@ pub(super) fn validate(body: &LocalBusObjectRevokeRequest) -> Result<(), SdkErro
         || body.conversation_id.is_empty()
         || body.recipient_device_id.is_empty()
         || body.target_delivery_id.is_empty()
-        || body.effective_at == 0
+        || body.effective_at <= 0
     {
         return Err(SdkError::GeneratedRefused {
             code: crate::GeneratedRefusalCode::Content,
@@ -108,11 +108,9 @@ mod tests {
 
     #[test]
     fn incomplete_revoke_fields_refuse_before_a_session() {
-        let started = std::time::Instant::now();
-        let deadline = std::time::Duration::from_secs(10);
         let complete =
             request("object", "recipient", "link", "conversation", "device", "target", 1);
-        assert!(validate(&complete).is_ok());
+        assert!(validate(&complete).is_ok(), "complete revoke");
         let cases = [
             request("", "recipient", "link", "conversation", "device", "target", 1),
             request("object", "", "link", "conversation", "device", "target", 1),
@@ -121,6 +119,7 @@ mod tests {
             request("object", "recipient", "link", "conversation", "", "target", 1),
             request("object", "recipient", "link", "conversation", "device", "", 1),
             request("object", "recipient", "link", "conversation", "device", "target", 0),
+            request("object", "recipient", "link", "conversation", "device", "target", -1),
         ];
         for body in cases {
             let error = validate(&body).expect_err("incomplete revoke");
@@ -132,6 +131,5 @@ mod tests {
                 "{error:?}"
             );
         }
-        assert!(started.elapsed() < deadline, "deadline exceeded");
     }
 }

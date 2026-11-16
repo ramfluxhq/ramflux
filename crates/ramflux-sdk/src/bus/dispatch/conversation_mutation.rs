@@ -104,7 +104,10 @@ pub(crate) async fn execute(
     if let Some(g::content::Value::Delete(delete)) = content.value
         && delete.scope == g::DeleteScope::Local as i32
     {
-        let message_id = request.body["message_id"].as_str().unwrap_or("");
+        let message_id = request.body["message_id"]
+            .as_str()
+            .filter(|message_id| !message_id.is_empty())
+            .ok_or_else(|| refused(Code::InvalidArgument, "message_id required"))?;
         let preview = super::object_erasure::preview(account.client.account_db()?, message_id)?;
         let response = account.client.account_db()?.write_transaction(|| {
             account.client.apply_generated_delete_authorized(
