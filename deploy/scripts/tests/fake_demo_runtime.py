@@ -114,7 +114,11 @@ if normalized and normalized[0] == "compose":
         resources["demo-test_node-privacy"] = {
             "kind": "volume", "project": "demo-test", "owner": privacy_owner,
         }
-        resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token}
+        # Compose creates the network only when it is absent and never reconfigures an existing one.
+        if "id-demo-network" not in resources:
+            configured = override.get("networks", {}).get("default", {}).get("ipam", {}).get("config")
+            resources["id-demo-network"] = {"kind": "network", "project": "demo-test", "owner": token,
+                                            "ipam": configured[0] if configured else None}
         save_resources()
         if control.get("corrupt_env_after_up"):
             with (state / "runtime.env").open("a") as output:
@@ -162,10 +166,37 @@ if args[:3] == ["volume", "ls", "-q"]:
     kind = "volume"
 if args[:3] == ["network", "ls", "-q"]:
     kind = "network"
-if args == ["volume", "ls", "-q"] and control.get("unlabeled") == "volume":
-    print("demo-test_" + control.get("unlabeled_volume", "gateway-redb"))
-elif args == ["network", "ls", "--format", "{{.Name}}"] and control.get("unlabeled") == "network":
+if args[:2] == ["network", "inspect"] and "--format" not in args:
+    network = resources.get("id-demo-network")
+    ipam = control.get("network_ipam", network.get("ipam") if network else None)
+    if network is None or args[-1] != "demo-test_default":
+        sys.exit("no such network")
+    if provider == "docker":
+        config = [{"Subnet": ipam["subnet"], "Gateway": ipam["subnet"].split("/")[0][:-1] + "1",
+                   **({"IPRange": ipam["ip_range"]} if ipam.get("ip_range") else {})}] if ipam else []
+        print(json.dumps([{"Name": "demo-test_default", "IPAM": {"Config": config}}]))
+    else:
+        import ipaddress
+        subnets = []
+        if ipam:
+            subnets = [{"subnet": ipam["subnet"], "gateway": ipam["subnet"].split("/")[0][:-1] + "1"}]
+            if ipam.get("ip_range"):
+                dynamic = ipaddress.ip_network(ipam["ip_range"])
+                subnets[0]["lease_range"] = {"start_ip": str(dynamic[1]), "end_ip": str(dynamic[-1])}
+        print(json.dumps([{"name": "demo-test_default", "subnets": subnets}]))
+elif args == ["network", "ls", "--format", "{{.Name}}"] and control.get("network_ls_fails_after"):
+    # Earlier ownership listings succeed; every listing after that many calls fails.
+    counter = root / "network-ls-count"
+    calls = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(calls))
+    if calls > control["network_ls_fails_after"]:
+        sys.exit("network listing failed")
     print("demo-test_default")
+elif args == ["network", "ls", "--format", "{{.Name}}"] and (
+        control.get("unlabeled") == "network" or "id-demo-network" in resources):
+    print("demo-test_default")
+elif args == ["volume", "ls", "-q"] and control.get("unlabeled") == "volume":
+    print("demo-test_" + control.get("unlabeled_volume", "gateway-redb"))
 elif kind and control.get("foreign") == kind:
     print("foreign-resource")
 elif kind == "container" and deployed.exists():
@@ -194,6 +225,8 @@ elif args and (args[0] == "inspect" or (len(args) > 1 and args[1] == "inspect"))
             control.get("unlabeled") == "volume"
             and target == "demo-test_" + control.get("unlabeled_volume", "gateway-redb")
         ) or (control.get("unlabeled") == "network" and target == "demo-test_default")
+        target = "id-demo-network" if target == "demo-test_default" and target not in resources \
+            and not unlabeled_collision else target
         print(resources[target]["owner"] if target in resources and not unlabeled_collision
               else "foreign-owner")
     else:

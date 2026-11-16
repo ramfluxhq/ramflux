@@ -630,10 +630,18 @@ read-only into the router (`RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE`, rout
 group `RAMFLUX_SECRET_GID`). The router refuses to start when the key is missing, malformed or not
 the node identity key; there is no service-seed fallback and the key never enters env or logs.
 Pairing HTTP is accepted only as TLS asserted by the public reverse proxy, so the opt-in also
-requires `RAMFLUX_FEDERATION_TRUSTED_PROXIES` (1 to 4 exact IP addresses, no prefixes, no wildcard:
-the peer address the federation sees behind the proxy; measure it with `ss` inside the federation
-network namespace while sending a request) and an `https://` `DEMO_PUBLIC_ORIGIN`. Both are passed to
-the federation (the origin also to the router). A wrong address fails closed with `400 tls required`.
+requires an `https://` `DEMO_PUBLIC_ORIGIN` and `DEMO_FEDERATION_STATIC_IP`: one private IPv4 address
+inside the compose network (for example `10.89.1.110`). Rootless port publishing makes every connection
+to the federation HTTP port arrive from the federation container's own address, and an unpinned address
+changes on every recreate, so the generator pins the federation to that address (a compose
+`ipv4_address`, plus the /24 subnet of the project network whose dynamic `ip_range` is its upper half
+`.128/25`, so the address must be host `.2` to `.127` and no dynamically allocated container can take it; an
+occupant explicitly pinned to it by other means is not detected) and sets it as the federation's only trusted
+proxy (`RAMFLUX_FEDERATION_TRUSTED_PROXIES` is derived and refused whenever it is set, pairing on or off). The origin goes to the
+federation and the router. An existing `<project>_default` network keeps the IPAM it was created with, so `up` refuses it
+(`DEMO_NETWORK_IPAM_MISMATCH`, before any managed state is written) unless its subnet and dynamic range
+are exactly the generated /24 and `.128/25`; it is never modified or adopted. Stop the node, remove that
+network (`podman network rm <project>_default`) and run `up` again to recreate it. A wrong address fails closed with `400 tls required`.
 Because rootless port publishing makes every connection to the published federation HTTP port arrive
 from that same peer address, a configured `DEMO_PUBLIC_ORIGIN` (a reverse proxy on this host in front
 of the node) always publishes the federation HTTP port on `127.0.0.1` only; the generator refuses a

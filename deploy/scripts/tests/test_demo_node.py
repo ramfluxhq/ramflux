@@ -124,7 +124,7 @@ else:
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
 
-    def pairing_override(self, enabled, with_record=True, proxies="10.89.1.103",
+    def pairing_override(self, enabled, with_record=True, static_ip="10.89.1.110",
                          origin="https://demo.example.org", success=None):
         with self.env_file.open("a") as output:
             if with_record:
@@ -135,8 +135,8 @@ else:
                              "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n")
             if enabled:
                 output.write("RAMFLUX_DEVICE_PAIRING_ENABLED=1\n")
-                if proxies is not None:
-                    output.write(f'RAMFLUX_FEDERATION_TRUSTED_PROXIES="{proxies}"\n')
+                if static_ip is not None:
+                    output.write(f'DEMO_FEDERATION_STATIC_IP="{static_ip}"\n')
                 if origin is not None:
                     output.write(f"DEMO_PUBLIC_ORIGIN={origin}\n")
         if success is None:
@@ -172,25 +172,105 @@ else:
             self.assertNotIn("pairing/node-signing.key", json.dumps(services.get(other, {})))
         self.assertNotIn("BEGIN", text)
 
-    def test_pairing_sets_exact_trusted_proxy_and_public_origin_on_federation(self):
-        self.pairing_override(True, proxies="10.89.1.103, 10.89.1.103")
-        services = json.loads((self.state / "demo-override.json").read_text())["services"]
-        federation = services["ramflux-federation"]["environment"]
-        self.assertEqual(federation["RAMFLUX_FEDERATION_TRUSTED_PROXIES"], "10.89.1.103")
-        self.assertEqual(federation["RAMFLUX_FEDERATION_PUBLIC_ORIGIN"], "https://demo.example.org")
+    def test_pairing_pins_the_federation_ip_and_trusts_exactly_it(self):
+        self.pairing_override(True, static_ip="10.89.1.110")
+        override = json.loads((self.state / "demo-override.json").read_text())
+        services = override["services"]
+        federation = services["ramflux-federation"]
+        self.assertEqual(federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"], "10.89.1.110")
+        self.assertEqual(federation["networks"], {"default": {"ipv4_address": "10.89.1.110"}})
+        self.assertEqual(override["networks"]["default"]["ipam"], {"config": [{"subnet": "10.89.1.0/24", "ip_range": "10.89.1.128/25"}]})
+        self.assertEqual(federation["environment"]["RAMFLUX_FEDERATION_PUBLIC_ORIGIN"],
+                         "https://demo.example.org")
         self.assertEqual(
             services["ramflux-router"]["environment"]["RAMFLUX_FEDERATION_PUBLIC_ORIGIN"],
             "https://demo.example.org")
-        self.assertNotIn("TRUSTED_PROXIES", json.dumps(services["ramflux-router"]))
-        self.assertNotIn("TRUSTED_PROXIES", json.dumps(services["ramflux-gateway"]))
+        for other in ("ramflux-router", "ramflux-gateway", "ramflux-relay"):
+            self.assertNotIn("TRUSTED_PROXIES", json.dumps(services[other]))
+            self.assertNotIn("ipv4_address", json.dumps(services[other]))
 
-    def test_pairing_refuses_missing_or_unsafe_trusted_proxies(self):
-        for value in (None, "", "0.0.0.0", "::", "10.89.1.0/24", "0.0.0.0/0", "proxy.example",
-                      "224.0.0.1", "10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4,10.0.0.5"):
-            with self.subTest(proxies=value):
+    def test_pairing_refuses_missing_or_unsafe_federation_ip(self):
+        for value in (None, "", "0.0.0.0", "::1", "fe80::1%eth0", "10.89.1.0/24", "10.89.1.0",
+                      "10.89.1.1", "10.89.1.255", "10.89.1.128", "10.89.1.200", "8.8.8.8", "127.0.0.1", "169.254.1.5",
+                      "proxy.example", "10.89.1.110,10.89.1.111", " 10.89.1.110", "010.89.1.110x"):
+            with self.subTest(static_ip=value):
                 self.setUp()
-                result = self.pairing_override(True, proxies=value, success=False)
-                self.assertRegex(result.stdout + result.stderr, "DEMO_PAIRING_TRUSTED_PROXIES")
+                result = self.pairing_override(True, static_ip=value, success=False)
+                self.assertRegex(result.stdout + result.stderr, "DEMO_FEDERATION_STATIC_IP")
+
+    def test_pairing_refuses_the_obsolete_trusted_proxies_input(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_FEDERATION_TRUSTED_PROXIES=10.89.1.103\n")
+        result = self.pairing_override(True, success=False)
+        self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE", result.stdout + result.stderr)
+
+    def test_pairing_off_also_refuses_the_obsolete_trusted_proxies_input(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_FEDERATION_TRUSTED_PROXIES=10.89.1.103\n")
+        result = self.pairing_override(False, success=False)
+        self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE", result.stdout + result.stderr)
+
+    def test_dynamic_range_excludes_the_static_address(self):
+        import ipaddress
+        for value in ("10.89.1.2", "10.89.1.110", "10.89.1.127", "192.168.7.50"):
+            with self.subTest(static_ip=value):
+                self.setUp()
+                self.pairing_override(True, static_ip=value)
+                config = json.loads((self.state / "demo-override.json").read_text())["networks"]["default"]["ipam"]["config"][0]
+                subnet = ipaddress.ip_network(config["subnet"])
+                dynamic = ipaddress.ip_network(config["ip_range"])
+                address = ipaddress.ip_address(value)
+                self.assertIn(address, subnet)
+                self.assertTrue(dynamic.subnet_of(subnet))
+                self.assertNotIn(address, dynamic)
+
+    def resource_ipam(self):
+        resources = json.loads((self.root / "resources.json").read_text())
+        return resources["id-demo-network"]["ipam"]
+
+    def test_absent_network_is_created_with_the_reserving_ipam(self):
+        self.pairing_override(True)
+        self.assertEqual(self.resource_ipam(), {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.128/25"})
+
+    def test_existing_network_with_matching_ipam_is_accepted(self):
+        self.pairing_override(True)
+        result = self.pairing_override(True)
+        self.assertNotIn("DEMO_NETWORK_IPAM_MISMATCH", result.stdout + result.stderr)
+
+    def test_existing_network_with_other_ipam_is_refused_and_untouched(self):
+        self.pairing_override(True)
+        for bad in ({"subnet": "10.89.1.0/24"},
+                    {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.0/25"},
+                    {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.192/26"},
+                    {"subnet": "10.89.2.0/24", "ip_range": "10.89.2.128/25"},
+                    {"subnet": "10.89.0.0/16", "ip_range": "10.89.1.128/25"}):
+            with self.subTest(ipam=bad):
+                self.control.write_text(json.dumps({"network_ipam": bad}))
+                before = (self.root / "resources.json").read_text()
+                result = self.pairing_override(True, success=False)
+                self.assertIn("DEMO_NETWORK_IPAM_MISMATCH", result.stdout + result.stderr)
+                self.assertEqual((self.root / "resources.json").read_text(), before)
+        self.control.write_text("{}")
+
+    def test_failed_network_listing_is_refused_not_treated_as_absent(self):
+        self.pairing_override(True)
+        self.control.write_text(json.dumps({"network_ipam": {"subnet": "10.89.1.0/24"},
+                                            "network_ls_fails_after": 1}))
+        before = (self.root / "resources.json").read_text()
+        compose_before = len(self.compose_commands())
+        owner_before = (self.state / "owner.json").read_text()
+        result = self.pairing_override(True, success=False)
+        self.assertIn("DEMO_NETWORK_LIST_FAILED", result.stdout + result.stderr)
+        self.assertEqual((self.root / "resources.json").read_text(), before)
+        self.assertEqual(len(self.compose_commands()), compose_before)
+        self.assertEqual((self.state / "owner.json").read_text(), owner_before)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertFalse((self.state / "owner.json.pending").exists())
+
+    def test_existing_network_without_ipam_is_not_checked_when_pairing_is_off(self):
+        self.pairing_override(False)
+        self.control.write_text(json.dumps({"network_ipam": {"subnet": "10.5.0.0/16"}}))
+        self.run_script("up")
 
     def test_public_origin_publishes_federation_port_on_loopback_only(self):
         with self.env_file.open("a") as output:
@@ -217,30 +297,18 @@ else:
         self.assertRegex(result.stdout + result.stderr,
                          "DEMO_FEDERATION_BIND_REFUSED|DEMO_PAIRING_TRUSTED_PROXIES_NEED_LOOPBACK")
 
-    def test_pairing_trusted_proxy_rejects_what_the_backend_parser_rejects(self):
-        for value in ("fe80::1%eth0", "[::1]", "::1/128", "::1%1", "10.89.1.103:80", "010.1.1.1x"):
-            with self.subTest(proxies=value):
-                self.setUp()
-                result = self.pairing_override(True, proxies=value, success=False)
-                self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_INVALID", result.stdout + result.stderr)
-        for value in ("::1", "2001:db8::1", "10.89.1.103"):
-            with self.subTest(proxies=value):
-                self.setUp()
-                self.pairing_override(True, proxies=value)
-                services = json.loads((self.state / "demo-override.json").read_text())["services"]
-                self.assertEqual(
-                    services["ramflux-federation"]["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"],
-                    value)
-
     def test_pairing_requires_https_public_origin(self):
         result = self.pairing_override(True, origin=None, success=False)
         self.assertIn("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN", result.stdout + result.stderr)
 
-    def test_pairing_off_ignores_proxy_settings(self):
+    def test_pairing_off_ignores_the_static_ip_setting(self):
         with self.env_file.open("a") as output:
-            output.write("RAMFLUX_FEDERATION_TRUSTED_PROXIES=10.89.1.103\n")
+            output.write("DEMO_FEDERATION_STATIC_IP=10.89.1.110\n")
         self.pairing_override(False)
-        self.assertNotIn("TRUSTED_PROXIES", (self.state / "demo-override.json").read_text())
+        text = (self.state / "demo-override.json").read_text()
+        self.assertNotIn("TRUSTED_PROXIES", text)
+        self.assertNotIn("ipv4_address", text)
+        self.assertNotIn("ipam", text)
 
     def test_pairing_off_adds_no_key_mount(self):
         self.pairing_override(False)
