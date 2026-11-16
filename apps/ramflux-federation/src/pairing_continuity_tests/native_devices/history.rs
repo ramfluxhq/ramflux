@@ -19,7 +19,7 @@ struct Network {
     _env: PairingEnv,
 }
 impl Network {
-    fn open() -> TestResult<Self> {
+    fn open(custody_auth_timeout_ms: Option<&str>) -> TestResult<Self> {
         let env = enable_pairing_with_trusted_proxy("127.0.0.1");
         let front = TcpListener::bind("127.0.0.1:0")?;
         let origin = format!("https://localhost:{}", front.local_addr()?.port());
@@ -27,14 +27,20 @@ impl Network {
         let relay = socket.local_addr()?.to_string();
         let issuer = tempfile::tempdir()?;
         let (seed, certificate) = objects::issuer(issuer.path())?;
-        let stack = process_stack::boot_pairing_stack(&[
+        let mut settings = vec![
             ("RAMFLUX_DEVICE_PAIRING_ENABLED", "1"),
             ("RAMFLUX_FEDERATION_TRUSTED_PROXIES", "127.0.0.1"),
-            ("RAMFLUX_FEDERATION_PUBLIC_ORIGIN", &origin),
-            ("RAMFLUX_CLIENT_RELAY_QUIC_ADDR", &relay),
-            ("RAMFLUX_GATEWAY_V3_ISSUER_SEED", &seed),
-            ("RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE", &certificate),
-        ])?;
+            ("RAMFLUX_FEDERATION_PUBLIC_ORIGIN", origin.as_str()),
+            ("RAMFLUX_CLIENT_RELAY_QUIC_ADDR", relay.as_str()),
+            ("RAMFLUX_GATEWAY_V3_ISSUER_SEED", seed.as_str()),
+            ("RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE", certificate.as_str()),
+        ];
+        // A human-paced ceremony outlives the whole-exchange custody deadline of an
+        // unauthenticated connection; a short deadline makes that gap fit a test.
+        if let Some(ms) = custody_auth_timeout_ms {
+            settings.push(("RAMFLUX_CUSTODY_AUTH_TIMEOUT_MS", ms));
+        }
+        let stack = process_stack::boot_pairing_stack(&settings)?;
         let tls = rustls_server_config(
             &stack.root.join("certs/ramflux-federation.pem"),
             &stack.root.join("certs/ramflux-federation.key"),
@@ -94,10 +100,21 @@ fn bounded_ca(path: &std::path::Path) -> TestResult<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires prebuilt ordinary product service binaries; explicit module QA row"]
 async fn pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay() -> TestResult {
-    tokio::task::LocalSet::new().run_until(deadline(Box::pin(run()))).await
+    tokio::task::LocalSet::new().run_until(deadline(Box::pin(run(false)))).await
 }
-async fn run() -> TestResult {
-    let mut network = Network::open()?;
+
+const CUSTODY_AUTH_TIMEOUT_MS: &str = "3000";
+
+/// The sd001 shape: pairing on behind a trusted loopback proxy, with the primary approving
+/// after the gateway's whole-exchange deadline for the connection opened at begin has passed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires prebuilt ordinary product service binaries; explicit module QA row"]
+async fn pairing_tls_approve_after_custody_deadline_enrolls_and_delivers_to_both_devices()
+-> TestResult {
+    tokio::task::LocalSet::new().run_until(deadline(Box::pin(run(true)))).await
+}
+async fn run(late: bool) -> TestResult {
+    let mut network = Network::open(late.then_some(CUSTODY_AUTH_TIMEOUT_MS))?;
     let (mut primary, mut a) = Box::pin(device::Device::create_network(
         &network.profile,
         &network.stack,
@@ -116,7 +133,7 @@ async fn run() -> TestResult {
     .await?;
     assert_ne!(a.root.path(), b.root.path(), "test: history endpoints share account directory");
     assert!(!Arc::ptr_eq(&a.vault, &b.vault), "test: history endpoints share vault");
-    Box::pin(enroll(&mut primary, &mut recipient)).await?;
+    Box::pin(enroll(&mut primary, &mut recipient, late)).await?;
     let original_branch = branch_identity(&b)?;
     let wrapping =
         ramflux_storage::AccountIndex::open(b.root.path())?.load_wrapped_db_key(&b.id)?;
@@ -164,6 +181,14 @@ async fn run() -> TestResult {
     );
     source.stop().await;
     target.stop().await;
+    for device in [&a, &b] {
+        let record = custody::load_account(device.root.path(), &device.id, wall()?)?;
+        assert_eq!(
+            record.record().body.devices.len(),
+            2,
+            "test: a device does not list both enrolled devices"
+        );
+    }
     primary.lock().await?;
     recipient.lock().await?;
     network.objects.stop().await?;
@@ -181,7 +206,11 @@ async fn exchange(a: &mut PairingActor, b: &mut PairingActor) -> TestResult<(Str
     let b = update(b.sync_relay().await?)?.phase;
     Ok((a, b))
 }
-async fn enroll(a: &mut PairingActor, b: &mut PairingActor) -> TestResult {
+async fn enroll(
+    a: &mut PairingActor,
+    b: &mut PairingActor,
+    wait_past_custody_deadline: bool,
+) -> TestResult {
     let mut begin = begin_body()?;
     begin.capabilities = vec!["group".into(), "message".into(), "register".into(), "sync".into()];
     begin.lease_expires_at = begin.lease_not_before + 604_800;
@@ -211,6 +240,12 @@ async fn enroll(a: &mut PairingActor, b: &mut PairingActor) -> TestResult {
         exchange(a, b).await?;
         if a.displayed_proposal().is_ok() {
             break;
+        }
+    }
+    if wait_past_custody_deadline {
+        // Each turn waits the one-second SAS poll admission: four turns outlast the 3 s deadline.
+        for _ in 0..4 {
+            exchange(a, b).await?;
         }
     }
     a.approve(&approve_ok(a, &operation)?).await?;

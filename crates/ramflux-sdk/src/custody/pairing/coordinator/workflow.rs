@@ -4,8 +4,9 @@
 //! Confirmed-channel enrollment; all frontends call the parent coordinator.
 
 use super::{
-    Arc, Close, DeviceRef, PairingActor, PairingRole, PairingWire, RelayFrame, SasHold, SdkError,
-    Zeroize, decode_base64url, encode_base64url, verify_canonical_signature, wire,
+    ApprovalState, Arc, Close, DeviceRef, PairingActor, PairingRole, PairingWire, RelayFrame,
+    SasHold, SdkError, Zeroize, decode_base64url, encode_base64url, verify_canonical_signature,
+    wire,
 };
 use crate::custody::pairing::{LocalPairingParticipant, ParticipantContext};
 use ramflux_protocol::custody::object_hash;
@@ -306,12 +307,19 @@ impl PairingActor {
         let context = self.participant_context()?;
         let proposal = self
             .with_ceremony(|c| c.enrollment.clone().ok_or(SdkError::PairingCode("WrongContext")))?;
-        self.queue_channel(Payload::Approval {
-            proposal_hash: object_hash(&proposal)?,
-            base_record_hash: context.invitation.body.base_record_hash.clone(),
-            base_epoch: context.invitation.body.base_epoch,
-            approved: true,
-        })?;
+        // A retry after a failed publication resumes the journal; the peer sees one Approval.
+        if self.with_ceremony(|c| Ok(c.approval))? == ApprovalState::NotQueued {
+            self.queue_channel(Payload::Approval {
+                proposal_hash: object_hash(&proposal)?,
+                base_record_hash: context.invitation.body.base_record_hash.clone(),
+                base_epoch: context.invitation.body.base_epoch,
+                approved: true,
+            })?;
+            self.with_ceremony_mut(|c| {
+                c.approval = ApprovalState::Queued;
+                Ok(())
+            })?;
+        }
         self.flush_send().await?;
         let recipient_ref = context.transcript.responder.device_ref.clone();
         let published = if let Some(writer) = &self.local_writer {
