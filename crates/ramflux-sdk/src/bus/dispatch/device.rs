@@ -15,7 +15,6 @@ pub(crate) async fn dispatch_device_bus_request(
         "device.authorize" | "device.migrate" | "device.refresh" => {
             super::identity_authority::dispatch_identity_authority(request, state).await
         }
-        "device.activate" => Err(SdkError::CustodySetupInvalid),
         "device.revoke" => {
             let body: LocalBusDeviceRevokeRequest = serde_json::from_value(request.body.clone())?;
             dispatch_device_revoke(request, state, body).await
@@ -46,6 +45,9 @@ pub(crate) async fn dispatch_device_bus_request(
 
 /// Checkpoint holding this device's push route; restored into the gateway config at startup.
 pub(crate) const PUSH_ROUTE_CHECKPOINT: &str = "gateway.push_route.v1";
+
+/// Canonical empty book. A confirmed deregistration stores this shape; `""` is not a sentinel.
+pub(crate) const EMPTY_PUSH_ROUTE_BOOK: &str = r#"{"routes":{},"clears":[],"clear_all":false}"#;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,17 +81,17 @@ struct StoredPushBook {
     clear_all: bool,
 }
 
-/// Restores the persisted push-route book. A missing or empty checkpoint is no routes.
-/// Any other shape is invalid.
+/// Restores the persisted push-route book. A missing checkpoint is no routes.
+/// A present empty string, or any other non-book, is invalid.
 ///
 /// # Errors
-/// Returns an error when the checkpoint is not the book.
+/// Returns an error when the checkpoint is present and is not the book.
 pub(crate) fn stored_push_route(client: &RamfluxClient) -> Result<StoredPushRoute, SdkError> {
     let Some(value) = client.projection_checkpoint(PUSH_ROUTE_CHECKPOINT)? else {
         return Ok(empty_stored_push());
     };
     if value.is_empty() {
-        return Ok(empty_stored_push());
+        return Err(SdkError::LocalBus("invalid push route checkpoint".to_owned()));
     }
     let parsed: serde_json::Value = serde_json::from_str(&value)?;
     if parsed.get("routes").is_none() {
@@ -143,7 +145,7 @@ async fn dispatch_push_route_set(
     account.persist_push_route_seq();
     let expires_at = outcome?;
     if cleared {
-        account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, "")?;
+        account.client.set_projection_checkpoint(PUSH_ROUTE_CHECKPOINT, EMPTY_PUSH_ROUTE_BOOK)?;
     }
     Ok(local_bus_ok(serde_json::json!({
         "registered": expires_at.is_some(),

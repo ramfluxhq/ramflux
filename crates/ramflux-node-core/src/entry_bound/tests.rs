@@ -204,7 +204,6 @@ fn generation_one_admits_only_message_and_call_wake_delivery_classes()
     for class in [
         DeliveryClass::OpaqueEvent,
         DeliveryClass::NotificationWake,
-        DeliveryClass::SelfDeviceControl,
         DeliveryClass::ObjectManifest,
         DeliveryClass::ObjectChunk,
         DeliveryClass::FederationControl,

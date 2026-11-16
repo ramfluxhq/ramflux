@@ -189,7 +189,6 @@ methods! {
         "contact.request",
         "contact.request.accept",
         "contact.safety_number",
-        "device.activate",
         "device.authorize",
         "device.migrate",
         "device.push_route.set",

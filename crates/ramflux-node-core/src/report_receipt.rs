@@ -285,7 +285,7 @@ mod tests {
             Some(ClientDeliveryClass::Message)
         );
         assert_eq!(
-            client_class_from_delivery(&DeliveryClass::SelfDeviceControl).ok(),
+            client_class_from_delivery(&DeliveryClass::Message).ok(),
             Some(ClientDeliveryClass::Message)
         );
         assert_eq!(

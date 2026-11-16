@@ -104,7 +104,6 @@ policies! {
     "conversation.mute" => ("conversation", true, true, false, false),
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
-    "device.activate" => ("device", true, true, false, false),
     "device.authorize" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
     "device.migrate" => ("device", true, true, false, false),

@@ -362,7 +362,7 @@ impl LocalBusAccountState {
     /// Live session mode. `start_connection` moves the engine onto the worker, so the
     /// connection handle is the production source; a test carrier on `engine` still wins.
     pub(crate) fn session_delivery_mode(&self) -> Option<&'static str> {
-        self.bound_session_mode().map(|mode| if mode.is_push() { "push" } else { "compat" })
+        self.bound_session_mode().map(|mode| mode.receive_label())
     }
 
     pub(crate) fn bound_session_mode(&self) -> Option<crate::gateway::session_push::SessionMode> {
@@ -616,7 +616,10 @@ impl LocalBusAccountState {
             return;
         }
         let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
-        match self.client.set_projection_checkpoint(checkpoint, "") {
+        match self.client.set_projection_checkpoint(
+            checkpoint,
+            crate::bus::dispatch::device::EMPTY_PUSH_ROUTE_BOOK,
+        ) {
             Ok(()) => self.gateway_config.push_route_clear_pending = false,
             Err(error) => tracing::warn!(%error, "push route clear confirmation not persisted"),
         }

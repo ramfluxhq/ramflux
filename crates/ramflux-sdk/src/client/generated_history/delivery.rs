@@ -314,7 +314,7 @@ mod tests {
             source_device_id: "source-device".into(),
             target_delivery_id: row.target.clone(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 300,
             created_at: crate::time::now_unix_timestamp(),

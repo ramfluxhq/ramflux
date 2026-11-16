@@ -23,7 +23,10 @@ async fn confirmed_background_deregistration_clears_the_persisted_marker() -> Re
         engine.config.push_route_clears.clear();
         engine.config.push_route_clear_pending = false;
         account.install_test_session(engine);
-        assert_eq!(account.client.projection_checkpoint(checkpoint)?.as_deref(), Some(""));
+        assert_eq!(
+            account.client.projection_checkpoint(checkpoint)?.as_deref(),
+            Some(crate::bus::dispatch::device::EMPTY_PUSH_ROUTE_BOOK)
+        );
         drop(account);
         Ok(())
     })
@@ -69,6 +72,7 @@ fn stored_push_route_accepts_only_the_book() -> Result<(), SdkError> {
     assert_eq!(stored.clears.len(), 0);
     assert!(stored.clear_pending);
     for rejected in [
+        "",
         r#"{"deregister_pending":true}"#,
         r#"{"provider":"apns","token":"x"}"#,
         r#"{"unexpected":true}"#,

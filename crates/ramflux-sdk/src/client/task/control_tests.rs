@@ -19,7 +19,7 @@ fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
             source_device_id: device.into(),
             target_delivery_id: "target".into(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 600,
             created_at: crate::time::now_unix_timestamp(),

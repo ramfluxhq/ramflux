@@ -124,7 +124,6 @@ pub(crate) mod tests {
         for refused in [
             ramflux_protocol::DeliveryClass::OpaqueEvent,
             ramflux_protocol::DeliveryClass::NotificationWake,
-            ramflux_protocol::DeliveryClass::SelfDeviceControl,
         ] {
             let mut wrong_class = envelope.clone();
             wrong_class.delivery_class = refused.clone();

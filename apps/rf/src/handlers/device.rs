@@ -45,24 +45,6 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
             )
             .await?,
         ),
-        DeviceAction::Activate(activate) => {
-            let request = ramflux_sdk::LocalBusDeviceActivateRequest {
-                node_id: activate.node,
-                device_id: activate.device,
-                target_delivery_id: activate.target,
-                device_seed: resolve_seed(activate.device_seed_byte_hex.as_deref())?,
-                device_epoch: activate.device_epoch,
-            };
-            print_json(
-                &bus.request(
-                    Some(activate.account),
-                    "device",
-                    "device.activate",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
         DeviceAction::Revoke(revoke) => {
             let request = LocalBusDeviceRevokeRequest { device_id: revoke.device };
             print_json(

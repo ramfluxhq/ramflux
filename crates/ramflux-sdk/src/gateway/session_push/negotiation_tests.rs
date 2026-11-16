@@ -202,164 +202,177 @@ fn id(text: &str) -> IncarnationId {
 
 #[tokio::test]
 async fn capable_negotiation_requires_signed_advertisement_and_echo() {
-    let echo_ok = bytes(&push_frame(vec![PUSH.into(), "gateway.ephemeral.v1".into()], E));
+    Box::pin(tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let echo_ok = bytes(&push_frame(vec![PUSH.into(), "gateway.ephemeral.v1".into()], E));
 
-    // (p1) on + echo + valid E gives Push(E); the capability is in the signed scope, once, and
-    // the device proof verifies.
-    let (result, sent, _) =
-        connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
-    let engine = result.unwrap();
-    assert_eq!(engine.mode, SessionMode::Push { incarnation: id(E) });
-    assert!(engine.ephemeral_negotiated, "the runtime must record the ephemeral echo");
-    let signed = proof(&sent);
-    assert_eq!(signed.capability_scope, ["gateway.session", PUSH, "gateway.ephemeral.v1"]);
-    assert!(verifies(&signed));
-
-    let (push_only, _, _) =
-        connect(config(true, &["gateway.session"]), vec![bytes(&push_frame(vec![PUSH.into()], E))])
-            .await;
-    assert!(push_only.is_ok(), "an old gateway push-only echo must remain usable");
-    if let Ok(engine) = push_only {
+        // (p1) on + echo + valid E gives Push(E); the capability is in the signed scope, once, and
+        // the device proof verifies.
+        let (result, sent, _) =
+            connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
+        let engine = result.unwrap();
         assert_eq!(engine.mode, SessionMode::Push { incarnation: id(E) });
-        assert!(!engine.ephemeral_negotiated, "missing ephemeral echo stays local unsupported");
-    }
+        assert!(engine.ephemeral_negotiated, "the runtime must record the ephemeral echo");
+        let signed = proof(&sent);
+        assert_eq!(signed.capability_scope, ["gateway.session", PUSH, "gateway.ephemeral.v1"]);
+        assert!(verifies(&signed));
 
-    // Reconnect after Push when the gateway sends no echo is refused.
-    let mut engine = engine;
-    let sent: Sent = Arc::default();
-    let opener: Arc<dyn TransportOpener> =
-        Arc::new(Opener { script: Mutex::new(VecDeque::from([bytes(&legacy_frame())])), sent });
-    let reconnect = TEST_CONNECT_OPENER.scope(opener, engine.reconnect(0)).await;
-    assert!(
-        matches!(
-            reconnect,
-            Err(SdkError::GatewaySessionRejected(ref message))
-                if message == "session push negotiation refused: advertised push was not echoed"
-        ),
-        "reconnect without an echo must be refused: {reconnect:?}"
-    );
-
-    // Advertised push with no capabilities key, and with an empty list, is refused.
-    let (result, _, _) =
-        connect(config(true, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
-    refusal(result, "advertised push was not echoed");
-    let mut empty = legacy_frame();
-    empty["session"]["capabilities"] = json!([]);
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&empty)]).await;
-    refusal(result, "advertised push was not echoed");
-
-    // Unadvertised: the signed scope lacks the capability and the mode is Direct.
-    let (result, sent, _) =
-        connect(config(false, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Direct);
-    let signed = proof(&sent);
-    assert_eq!(count(&signed.capability_scope, PUSH), 0);
-    assert!(verifies(&signed));
-
-    // (p5) on + a caller scope that already holds it: it appears exactly once.
-    let (result, sent, _) = connect(
-        config(true, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
-        vec![echo_ok.clone()],
-    )
-    .await;
-    result.unwrap();
-    assert_eq!(count(&proof(&sent).capability_scope, PUSH), 1);
-    assert_eq!(count(&proof(&sent).capability_scope, "gateway.ephemeral.v1"), 1);
-
-    // (r1) off + a caller scope that holds it: it is stripped, asserted on the signed proof.
-    let (result, sent, _) = connect(
-        config(false, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
-        vec![bytes(&legacy_frame())],
-    )
-    .await;
-    result.unwrap();
-    let signed = proof(&sent);
-    assert_eq!(signed.capability_scope, ["gateway.session"]);
-    assert!(verifies(&signed));
-
-    // (r2) off + echo.
-    let (result, _, _) = connect(config(false, &["gateway.session"]), vec![echo_ok.clone()]).await;
-    refusal(result, "echo names a capability that was not advertised");
-
-    // (r3) on + echo + `inbox_incarnation_id` missing.
-    let mut missing = push_frame(vec![PUSH.into()], E);
-    missing["session"].as_object_mut().unwrap().remove("inbox_incarnation_id");
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&missing)]).await;
-    refusal(result, "echo without an inbox incarnation");
-
-    // (r4) 31-character E, (r5) uppercase E.
-    for (row, bad) in [("r4", &E[..31]), ("r5", "ABCDEF0123456789ABCDEF0123456789")] {
-        let frame = bytes(&push_frame(vec![PUSH.into()], bad));
-        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![frame]).await;
-        let _ = row;
-        refusal(result, "invalid inbox incarnation");
-    }
-
-    // (r6) no echo but `inbox_incarnation_id` present.
-    let mut orphan = legacy_frame();
-    orphan["session"]["inbox_incarnation_id"] = json!(E);
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&orphan)]).await;
-    refusal(result, "incarnation without an echoed capability");
-
-    // (r7) an echo naming a capability that was not advertised.
-    let frame = bytes(&push_frame(vec!["gateway.ephemeral.v1".into()], E));
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![frame]).await;
-    refusal(result, "echo names a capability that was not advertised");
-
-    // (r8) tampering the scope after signing makes the proof fail verification.
-    let (result, sent, _) =
-        connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
-    result.unwrap();
-    let mut tampered = proof(&sent);
-    assert!(verifies(&tampered));
-    tampered.capability_scope.push("gateway.ephemeral.v1".into());
-    assert!(!verifies(&tampered));
-    // Default-off is pinned: an unmodified constructor does not advertise, negotiates Direct
-    // and keeps the capability out of the signed scope.
-    let unmodified = default_config();
-    assert!(!unmodified.session_push_advertise);
-    let (result, sent, _) = connect(unmodified, vec![bytes(&legacy_frame())]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Direct);
-    let signed = proof(&sent);
-    assert_eq!(count(&signed.capability_scope, PUSH), 0);
-    assert!(verifies(&signed));
-
-    // The establishment in node-core struct order (producer order i), not only the sorted
-    // `Value` order: Push when advertised, refused when the typed frame carries no echo.
-    let typed_push = serde_json::to_vec(&n::SessionPushServerFrame::SessionEstablished {
-        session: n::SessionPushEstablishedFrame {
-            session: session(),
-            capabilities: vec![PUSH.into()],
-            inbox_incarnation_id: E.into(),
-        },
-    })
-    .unwrap();
-    assert_ne!(typed_push, echo_ok, "the two producer orders differ on the wire");
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_push]).await;
-    assert_eq!(result.unwrap().mode, SessionMode::Push { incarnation: id(E) });
-    let typed_legacy =
-        serde_json::to_vec(&n::GatewayServerFrame::SessionEstablished { session: session() })
-            .unwrap();
-    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_legacy]).await;
-    refusal(result, "advertised push was not echoed");
-
-    // Malformed echo, one wrong JSON type per row: the capability container, a capability
-    // element and the incarnation. Each is the same exact refusal.
-    let malformed: [(&str, MalformEcho); 3] = [
-        ("capabilities is a string", |v| v["session"]["capabilities"] = json!("x")),
-        ("a capability element is a number", |v| v["session"]["capabilities"] = json!([1])),
-        ("the incarnation is a number", |v| v["session"]["inbox_incarnation_id"] = json!(5)),
-    ];
-    for (row, mutate) in malformed {
-        let mut frame = push_frame(vec![PUSH.into()], E);
-        mutate(&mut frame);
-        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&frame)]).await;
-        match result {
-            Err(SdkError::GatewaySessionRejected(message)) => {
-                assert_eq!(message, "session push negotiation refused: echo is malformed", "{row}");
-            }
-            Err(other) => panic!("{row}: {other:?}"),
-            Ok(engine) => panic!("{row}: accepted as {:?}", engine.mode),
+        let (push_only, _, _) = connect(
+            config(true, &["gateway.session"]),
+            vec![bytes(&push_frame(vec![PUSH.into()], E))],
+        )
+        .await;
+        assert!(push_only.is_ok(), "an old gateway push-only echo must remain usable");
+        if let Ok(engine) = push_only {
+            assert_eq!(engine.mode, SessionMode::Push { incarnation: id(E) });
+            assert!(!engine.ephemeral_negotiated, "missing ephemeral echo stays local unsupported");
         }
-    }
+
+        // Reconnect after Push when the gateway sends no echo is refused.
+        let mut engine = engine;
+        let sent: Sent = Arc::default();
+        let opener: Arc<dyn TransportOpener> =
+            Arc::new(Opener { script: Mutex::new(VecDeque::from([bytes(&legacy_frame())])), sent });
+        let reconnect = TEST_CONNECT_OPENER.scope(opener, engine.reconnect(0)).await;
+        assert!(
+            matches!(
+                reconnect,
+                Err(SdkError::GatewaySessionRejected(ref message))
+                    if message == "session push negotiation refused: advertised push was not echoed"
+            ),
+            "reconnect without an echo must be refused: {reconnect:?}"
+        );
+
+        // Advertised push with no capabilities key, and with an empty list, is refused.
+        let (result, _, _) =
+            connect(config(true, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
+        refusal(result, "advertised push was not echoed");
+        let mut empty = legacy_frame();
+        empty["session"]["capabilities"] = json!([]);
+        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&empty)]).await;
+        refusal(result, "advertised push was not echoed");
+
+        // Unadvertised: the signed scope lacks the capability and the mode is Direct.
+        let (result, sent, _) =
+            connect(config(false, &["gateway.session"]), vec![bytes(&legacy_frame())]).await;
+        assert_eq!(result.unwrap().mode, SessionMode::Direct);
+        let signed = proof(&sent);
+        assert_eq!(count(&signed.capability_scope, PUSH), 0);
+        assert!(verifies(&signed));
+
+        // (p5) on + a caller scope that already holds it: it appears exactly once.
+        let (result, sent, _) = connect(
+            config(true, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
+            vec![echo_ok.clone()],
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(count(&proof(&sent).capability_scope, PUSH), 1);
+        assert_eq!(count(&proof(&sent).capability_scope, "gateway.ephemeral.v1"), 1);
+
+        // (r1) off + a caller scope that holds it: it is stripped, asserted on the signed proof.
+        let (result, sent, _) = connect(
+            config(false, &["gateway.session", PUSH, "gateway.ephemeral.v1"]),
+            vec![bytes(&legacy_frame())],
+        )
+        .await;
+        result.unwrap();
+        let signed = proof(&sent);
+        assert_eq!(signed.capability_scope, ["gateway.session"]);
+        assert!(verifies(&signed));
+
+        // (r2) off + echo.
+        let (result, _, _) =
+            connect(config(false, &["gateway.session"]), vec![echo_ok.clone()]).await;
+        refusal(result, "echo names a capability that was not advertised");
+
+        // (r3) on + echo + `inbox_incarnation_id` missing.
+        let mut missing = push_frame(vec![PUSH.into()], E);
+        missing["session"].as_object_mut().unwrap().remove("inbox_incarnation_id");
+        let (result, _, _) =
+            connect(config(true, &["gateway.session"]), vec![bytes(&missing)]).await;
+        refusal(result, "echo without an inbox incarnation");
+
+        // (r4) 31-character E, (r5) uppercase E.
+        for (row, bad) in [("r4", &E[..31]), ("r5", "ABCDEF0123456789ABCDEF0123456789")] {
+            let frame = bytes(&push_frame(vec![PUSH.into()], bad));
+            let (result, _, _) = connect(config(true, &["gateway.session"]), vec![frame]).await;
+            let _ = row;
+            refusal(result, "invalid inbox incarnation");
+        }
+
+        // (r6) no echo but `inbox_incarnation_id` present.
+        let mut orphan = legacy_frame();
+        orphan["session"]["inbox_incarnation_id"] = json!(E);
+        let (result, _, _) =
+            connect(config(true, &["gateway.session"]), vec![bytes(&orphan)]).await;
+        refusal(result, "incarnation without an echoed capability");
+
+        // (r7) an echo naming a capability that was not advertised.
+        let frame = bytes(&push_frame(vec!["gateway.ephemeral.v1".into()], E));
+        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![frame]).await;
+        refusal(result, "echo names a capability that was not advertised");
+
+        // (r8) tampering the scope after signing makes the proof fail verification.
+        let (result, sent, _) =
+            connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
+        result.unwrap();
+        let mut tampered = proof(&sent);
+        assert!(verifies(&tampered));
+        tampered.capability_scope.push("gateway.ephemeral.v1".into());
+        assert!(!verifies(&tampered));
+        // Default-off is pinned: an unmodified constructor does not advertise, negotiates Direct
+        // and keeps the capability out of the signed scope.
+        let unmodified = default_config();
+        assert!(!unmodified.session_push_advertise);
+        let (result, sent, _) = connect(unmodified, vec![bytes(&legacy_frame())]).await;
+        assert_eq!(result.unwrap().mode, SessionMode::Direct);
+        let signed = proof(&sent);
+        assert_eq!(count(&signed.capability_scope, PUSH), 0);
+        assert!(verifies(&signed));
+
+        // The establishment in node-core struct order (producer order i), not only the sorted
+        // `Value` order: Push when advertised, refused when the typed frame carries no echo.
+        let typed_push = serde_json::to_vec(&n::SessionPushServerFrame::SessionEstablished {
+            session: n::SessionPushEstablishedFrame {
+                session: session(),
+                capabilities: vec![PUSH.into()],
+                inbox_incarnation_id: E.into(),
+            },
+        })
+        .unwrap();
+        assert_ne!(typed_push, echo_ok, "the two producer orders differ on the wire");
+        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_push]).await;
+        assert_eq!(result.unwrap().mode, SessionMode::Push { incarnation: id(E) });
+        let typed_legacy =
+            serde_json::to_vec(&n::GatewayServerFrame::SessionEstablished { session: session() })
+                .unwrap();
+        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_legacy]).await;
+        refusal(result, "advertised push was not echoed");
+
+        // Malformed echo, one wrong JSON type per row: the capability container, a capability
+        // element and the incarnation. Each is the same exact refusal.
+        let malformed: [(&str, MalformEcho); 3] = [
+            ("capabilities is a string", |v| v["session"]["capabilities"] = json!("x")),
+            ("a capability element is a number", |v| v["session"]["capabilities"] = json!([1])),
+            ("the incarnation is a number", |v| v["session"]["inbox_incarnation_id"] = json!(5)),
+        ];
+        for (row, mutate) in malformed {
+            let mut frame = push_frame(vec![PUSH.into()], E);
+            mutate(&mut frame);
+            let (result, _, _) =
+                connect(config(true, &["gateway.session"]), vec![bytes(&frame)]).await;
+            match result {
+                Err(SdkError::GatewaySessionRejected(message)) => {
+                    assert_eq!(
+                        message, "session push negotiation refused: echo is malformed",
+                        "{row}"
+                    );
+                }
+                Err(other) => panic!("{row}: {other:?}"),
+                Ok(engine) => panic!("{row}: accepted as {:?}", engine.mode),
+            }
+        }
+    }))
+    .await
+    .expect("scenario deadline");
 }

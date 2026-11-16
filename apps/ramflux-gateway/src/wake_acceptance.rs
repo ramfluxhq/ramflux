@@ -148,7 +148,7 @@ fn call_intent_forged_missing_noncall_and_cancel_rows() -> Result<(), Box<dyn st
     assert!(
         crate::call_intent::verify_submission(&session, &call, &forged, 4, owner, now).is_err()
     );
-    let non_call = envelope("env-start", DeliveryClass::SelfDeviceControl, now, 86_400)?;
+    let non_call = envelope("env-start", DeliveryClass::OpaqueEvent, now, 86_400)?;
     assert!(
         crate::call_intent::verify_submission(&session, &non_call, &start, 4, owner, now).is_err()
     );

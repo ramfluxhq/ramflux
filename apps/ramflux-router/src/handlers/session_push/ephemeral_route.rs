@@ -358,7 +358,7 @@ fn row_not_local() -> TestResult {
     router.state().test_put_home_node_migration(
         identity.clone(),
         HomeNodeMigrationRecord {
-            format_version: 1,
+            format_version: 2,
             identity_commitment: identity,
             old_home_node: "node-a".into(),
             new_home_node: "node-b".into(),

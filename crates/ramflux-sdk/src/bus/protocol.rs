@@ -267,17 +267,6 @@ pub struct LocalBusDeviceListResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusDeviceActivateRequest {
-    #[serde(default)]
-    pub node_id: Option<String>,
-    pub device_id: String,
-    pub target_delivery_id: String,
-    pub device_seed: [u8; 32],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_epoch: Option<u64>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusDeviceRevokeRequest {
     pub device_id: String,
 }
@@ -290,19 +279,6 @@ pub struct LocalBusDeviceSyncExportRequest {
     pub relay_service_key_base64: Option<String>,
     #[serde(default)]
     pub chunk_size: Option<usize>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusDeviceActivateResponse {
-    pub local_account_id: String,
-    pub principal_id: String,
-    pub device_id: String,
-    pub device_epoch: u64,
-    pub target_delivery_id: String,
-    pub branch_authorized_event_id: String,
-    pub session_id: String,
-    pub active_transport_kind: String,
-    pub devices: Vec<LocalBusDeviceRecord>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

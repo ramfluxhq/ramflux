@@ -28,9 +28,7 @@ pub fn client_class_from_delivery(
     class: &DeliveryClass,
 ) -> Result<ClientDeliveryClass, ProtocolError> {
     match class {
-        DeliveryClass::Message | DeliveryClass::OpaqueEvent | DeliveryClass::SelfDeviceControl => {
-            Ok(ClientDeliveryClass::Message)
-        }
+        DeliveryClass::Message | DeliveryClass::OpaqueEvent => Ok(ClientDeliveryClass::Message),
         DeliveryClass::CallWake | DeliveryClass::NotificationWake => {
             Ok(ClientDeliveryClass::CallWake)
         }
@@ -75,8 +73,8 @@ mod tests {
     #[test]
     fn all_classes_producers_consumers_and_push_mapping() {
         let delivery = [
+            (DeliveryClass::Message, Ok(ClientDeliveryClass::Message)),
             (DeliveryClass::OpaqueEvent, Ok(ClientDeliveryClass::Message)),
-            (DeliveryClass::SelfDeviceControl, Ok(ClientDeliveryClass::Message)),
             (DeliveryClass::NotificationWake, Ok(ClientDeliveryClass::CallWake)),
             (DeliveryClass::ObjectManifest, Err(())),
             (DeliveryClass::ObjectChunk, Err(())),

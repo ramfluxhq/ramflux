@@ -896,7 +896,7 @@ fn own_copy_packet(
         &device,
         1,
     );
-    entry.entry.envelope.delivery_class = ramflux_protocol::DeliveryClass::SelfDeviceControl;
+    entry.entry.envelope.delivery_class = ramflux_protocol::DeliveryClass::Message;
     Ok(entry)
 }
 

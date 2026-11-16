@@ -246,8 +246,7 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         if view.native.is_none() {
             status["networking"] = json!(snapshot.state);
         }
-        status["session_delivery_mode"] =
-            json!(if connection.session_mode().is_push() { "push" } else { "compat" });
+        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);

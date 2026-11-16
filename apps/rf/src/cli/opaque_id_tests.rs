@@ -194,7 +194,7 @@ macro_rules! selector_group_test {
 }
 selector_group_test!(
     device_ids_accept_hyphens,
-    "device activate --account -abc --device -abc --target -abc --node -abc",
+    "device revoke --account -abc --device -abc",
     "device refresh --account -abc --principal-commitment -abc"
 );
 selector_group_test!(
