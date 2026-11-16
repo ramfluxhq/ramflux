@@ -80,6 +80,87 @@ impl std::fmt::Display for GeneratedRefusalCode {
     }
 }
 
+/// Which confirm check failed. Tokens are static and contain no secret bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CustodyConfirmReason {
+    PassphraseEmpty,
+    PassphraseTooLong,
+    PassphraseNotUtf8,
+    /// 1-based recovery-phrase position. The expected word is not part of the reason.
+    WordMismatch {
+        position: u8,
+    },
+    DisplayName,
+    OperationId,
+}
+
+impl CustodyConfirmReason {
+    /// Bus status family this check belongs to.
+    #[must_use]
+    pub const fn family(self) -> &'static str {
+        match self {
+            Self::WordMismatch { .. } => "CustodyConfirmationFailed",
+            Self::PassphraseEmpty
+            | Self::PassphraseTooLong
+            | Self::PassphraseNotUtf8
+            | Self::DisplayName
+            | Self::OperationId => "CustodySetupInvalid",
+        }
+    }
+
+    /// Stable `reason_code`. `word_N` is the 1-based position, never the word.
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::PassphraseEmpty => "passphrase_empty",
+            Self::PassphraseTooLong => "passphrase_too_long",
+            Self::PassphraseNotUtf8 => "passphrase_not_utf8",
+            Self::DisplayName => "display_name",
+            Self::OperationId => "operation_id",
+            Self::WordMismatch { position } => word_reason(position),
+        }
+    }
+
+    /// Inverse of [`Self::token`]. Unknown or mismatched text is refused.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        Some(match token {
+            "passphrase_empty" => Self::PassphraseEmpty,
+            "passphrase_too_long" => Self::PassphraseTooLong,
+            "passphrase_not_utf8" => Self::PassphraseNotUtf8,
+            "display_name" => Self::DisplayName,
+            "operation_id" => Self::OperationId,
+            _ => return word_from_token(token),
+        })
+    }
+
+    /// Restore the typed check when the status family matches the token.
+    #[must_use]
+    pub fn decode(code: &str, reason_code: Option<&str>) -> Option<SdkError> {
+        let reason = Self::from_token(reason_code?)?;
+        (reason.family() == code).then_some(SdkError::CustodyConfirmRejected(reason))
+    }
+}
+
+const WORD_REASONS: [&str; 24] = [
+    "word_1", "word_2", "word_3", "word_4", "word_5", "word_6", "word_7", "word_8", "word_9",
+    "word_10", "word_11", "word_12", "word_13", "word_14", "word_15", "word_16", "word_17",
+    "word_18", "word_19", "word_20", "word_21", "word_22", "word_23", "word_24",
+];
+
+fn word_reason(position: u8) -> &'static str {
+    match usize::from(position).checked_sub(1) {
+        Some(index) => WORD_REASONS.get(index).copied().unwrap_or("word_rejected"),
+        None => "word_rejected",
+    }
+}
+
+fn word_from_token(token: &str) -> Option<CustodyConfirmReason> {
+    let index = WORD_REASONS.iter().position(|candidate| *candidate == token)?;
+    let position = u8::try_from(index.checked_add(1)?).ok()?;
+    Some(CustodyConfirmReason::WordMismatch { position })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     #[error(transparent)]
@@ -151,12 +232,17 @@ pub enum SdkError {
     CustodyModeDowngrade,
     #[error("invalid custody setup")]
     CustodySetupInvalid,
+    /// A confirm check failed. The reason token names the check and never a secret.
+    #[error("custody confirm rejected")]
+    CustodyConfirmRejected(CustodyConfirmReason),
     #[error("custody setup expired")]
     CustodyExpired,
     #[error("account id was claimed by another creation flow")]
     CustodyAccountConflict,
     #[error("recovery confirmation failed; setup cancelled")]
     CustodyConfirmationFailed,
+    #[error("custody authority publication failed")]
+    CustodyPublicationFailed,
     #[error("non-synchronizing primary vault unavailable; no file fallback")]
     CustodyVaultUnavailable,
     #[error("{0}")]

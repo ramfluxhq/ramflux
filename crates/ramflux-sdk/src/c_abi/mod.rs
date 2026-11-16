@@ -900,8 +900,20 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
     }
 }
 
+fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
+    match reason {
+        crate::CustodyConfirmReason::WordMismatch { .. } => RamfluxErrorCode::AuthFailed,
+        crate::CustodyConfirmReason::PassphraseEmpty
+        | crate::CustodyConfirmReason::PassphraseTooLong
+        | crate::CustodyConfirmReason::PassphraseNotUtf8
+        | crate::CustodyConfirmReason::DisplayName
+        | crate::CustodyConfirmReason::OperationId => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
+        SdkError::CustodyConfirmRejected(reason) => confirm_abi_code(*reason),
         SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
@@ -975,6 +987,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
         | SdkError::CustodyAccountConflict
+        | SdkError::CustodyPublicationFailed
         | SdkError::SurfaceRefused { .. }
         | SdkError::GroupRefused { .. }
         | SdkError::TaskRefused { .. }

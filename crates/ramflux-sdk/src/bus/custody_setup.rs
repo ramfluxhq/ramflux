@@ -171,8 +171,11 @@ async fn apply(
     lease: Option<Arc<super::data_root_lock::DataRootLock>>,
 ) -> Result<ResultBody, SdkError> {
     super::requests::deadline(request)?;
-    if request.kind != crate::LocalBusFrameKind::Request || request.operation_id.is_some() {
+    if request.kind != crate::LocalBusFrameKind::Request {
         return Err(SdkError::CustodySetupInvalid);
+    }
+    if request.operation_id.is_some() {
+        return Err(SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::OperationId));
     }
     match request.method.as_str() {
         "account.create" | "account.create.begin" => {
@@ -267,7 +270,8 @@ async fn begin_native(
     if !valid {
         return Err(SdkError::CustodySetupInvalid);
     }
-    let display_name = ramflux_protocol::normalize_profile_display_name(&input.display_name)?;
+    let display_name = ramflux_protocol::normalize_profile_display_name(&input.display_name)
+        .map_err(|_| SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::DisplayName))?;
     let home_node_id = input
         .node_id
         .map(|node_id| {
@@ -529,6 +533,93 @@ mod tests {
             respond(&mut request, &config, &mut pending, None).await,
             Err(SdkError::CustodySetupInvalid)
         ));
+        assert!(pending.is_none());
+        assert!(!root.0.join("custody_accounts").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_display_name_names_the_check_and_starts_nothing() -> Result {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            empty_display_name_scenario(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("empty display name scenario exceeded its deadline".into()),
+        }
+    }
+
+    async fn empty_display_name_scenario() -> Result {
+        let root = crate::custody::tests::Root::new()?;
+        let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
+        config.custody_vault =
+            Some(std::sync::Arc::new(crate::custody::tests::TestVault::default()));
+        let mut pending = None;
+        let mut request = LocalBusFrame::request(
+            "begin",
+            None,
+            "account",
+            "account.create",
+            serde_json::json!({"display_name":"","principal_kind":"human"}),
+        );
+        let Err(error) = apply(&mut request, &config, &mut pending, None).await else {
+            return Err("empty display name was accepted".into());
+        };
+        assert!(
+            matches!(
+                error,
+                SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::DisplayName)
+            ),
+            "{error}"
+        );
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, "CustodySetupInvalid");
+        assert_eq!(body.reason_code.as_deref(), Some("display_name"));
+        assert!(pending.is_none());
+        assert!(!root.0.join("custody_accounts").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_id_on_create_names_the_check_and_starts_nothing() -> Result {
+        match tokio::time::timeout(std::time::Duration::from_secs(15), operation_id_scenario())
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("operation id scenario exceeded its deadline".into()),
+        }
+    }
+
+    async fn operation_id_scenario() -> Result {
+        let root = crate::custody::tests::Root::new()?;
+        let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
+        config.custody_vault =
+            Some(std::sync::Arc::new(crate::custody::tests::TestVault::default()));
+        let mut pending = None;
+        let mut request = LocalBusFrame::request(
+            "begin",
+            None,
+            "account",
+            "account.create",
+            serde_json::json!({"display_name":"Ordinary Human","principal_kind":"human"}),
+        );
+        request.operation_id = Some("operation-1".into());
+        let Err(error) = apply(&mut request, &config, &mut pending, None).await else {
+            return Err("operation id was accepted".into());
+        };
+        assert!(
+            matches!(
+                error,
+                SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::OperationId)
+            ),
+            "{error}"
+        );
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, "CustodySetupInvalid");
+        assert_eq!(body.reason_code.as_deref(), Some("operation_id"));
+        assert!(!body.message.contains("operation-1"), "reason reveals the operation id");
         assert!(pending.is_none());
         assert!(!root.0.join("custody_accounts").exists());
         Ok(())

@@ -529,12 +529,22 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         assert_eq!(networking.body["session"]["phase"], "backoff");
         ceremony.begin("Failed Human", ramflux_protocol::PrincipalKind::Human).await?;
         drop(ceremony.show_once().await?);
-        ceremony.hidden_challenge().await?;
+        let failed = ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
-        assert!(matches!(
-            ceremony.confirm(&wrong, &Zeroizing::new("discard secret".into())).await,
-            Err(crate::SdkError::CustodyConfirmationFailed)
-        ));
+        let error = ceremony
+            .confirm(&wrong, &Zeroizing::new("discard secret".into()))
+            .await
+            .expect_err("wrong words must be rejected");
+        assert!(
+            matches!(
+                error,
+                crate::SdkError::CustodyConfirmRejected(
+                    crate::CustodyConfirmReason::WordMismatch { position }
+                ) if position == failed[0]
+            ),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("invalid"), "{error}");
         ceremony.cancel().await?;
         ceremony.cancel().await?;
         let listed = ordinary.request(None, "account", "account.list", json!({})).await?;

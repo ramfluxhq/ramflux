@@ -579,6 +579,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "InvalidRequest"
         | "ValidationFailed"
         | "CustodySetupInvalid"
+        | "CustodyPublicationFailed"
         | "invalid_argument"
         | "invalid_json"
         | "payload_too_large"
@@ -589,9 +590,11 @@ pub(super) fn error_code(name: &str) -> i32 {
         "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
             E::UnsupportedVersion as i32
         }
-        "AuthFailed" | "AccountLocked" | "Unauthenticated" | "TransportSecurity" => {
-            E::AuthFailed as i32
-        }
+        "AuthFailed"
+        | "AccountLocked"
+        | "Unauthenticated"
+        | "TransportSecurity"
+        | "CustodyConfirmationFailed" => E::AuthFailed as i32,
         "CapabilityRejected" => E::CapabilityRejected as i32,
         "ReplayRejected" | "ReplayMismatch" => E::ReplayRejected as i32,
         "McpGrantRejected" => E::McpGrantRejected as i32,

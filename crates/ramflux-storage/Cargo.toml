@@ -31,6 +31,9 @@ serde_json = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [features]
 # Opt-in counters for integration-test complexity proofs; disabled in production.
 itest-work-budget = []

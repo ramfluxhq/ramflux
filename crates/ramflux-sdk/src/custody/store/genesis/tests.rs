@@ -32,7 +32,8 @@ async fn custody_authority_concurrent_reader_never_observes_partial_publication(
         write_public(&output, &bytes)
     });
     tokio::time::timeout(Duration::from_secs(10), async {
-        let stages = [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Linked];
+        let stages =
+            [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Publish, Stage::Published];
         let mut next_stage = 0;
         let mut held = None;
         // Read continuously, including while the worker fills and syncs the temporary file.
@@ -52,7 +53,7 @@ async fn custody_authority_concurrent_reader_never_observes_partial_publication(
             match fs::read(&path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if let Some((stage, _)) = held {
-                        assert_ne!(stage, Stage::Linked);
+                        assert_ne!(stage, Stage::Published);
                     }
                 }
                 Ok(bytes) => {
@@ -62,7 +63,11 @@ async fn custody_authority_concurrent_reader_never_observes_partial_publication(
                         bytes.len()
                     );
                     if let Some((stage, _)) = held {
-                        assert_eq!(stage, Stage::Linked, "authority became visible before linking");
+                        assert_eq!(
+                            stage,
+                            Stage::Published,
+                            "authority became visible before publication"
+                        );
                     }
                 }
                 Err(error) => return Err(error.into()),

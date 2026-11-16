@@ -387,11 +387,71 @@ fn compatibility_custody_envelopes_do_not_disconnect_the_bridge() {
 }
 
 #[test]
+fn confirm_reasons_survive_native_error_projection() {
+    use crate::{CustodyConfirmReason, SdkError};
+    let rows = [
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseEmpty),
+            "CustodySetupInvalid",
+            "passphrase_empty",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooLong),
+            "CustodySetupInvalid",
+            "passphrase_too_long",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseNotUtf8),
+            "CustodySetupInvalid",
+            "passphrase_not_utf8",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::DisplayName),
+            "CustodySetupInvalid",
+            "display_name",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::OperationId),
+            "CustodySetupInvalid",
+            "operation_id",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::WordMismatch { position: 8 }),
+            "CustodyConfirmationFailed",
+            "word_8",
+            5,
+        ),
+        (SdkError::CustodyExpired, "CustodyExpired", "deadline", 16),
+    ];
+    for (error, code, reason, number) in rows {
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, code, "{reason}");
+        assert_eq!(body.reason_code.as_deref(), Some(reason), "{reason}");
+        assert!(!body.message.contains(reason), "{reason} message echoes the token");
+        let mut value = json!({
+            "code": error_code(&body.code),
+            "response": {"kind":"error","error": body},
+        });
+        super::native_error::completion(&mut value);
+        assert_eq!(value["code"], number, "{reason}");
+        assert_eq!(value["response"]["error"]["code"], code, "{reason}");
+        assert_eq!(value["response"]["error"]["reason_code"], reason, "{reason}");
+        assert!(value["response"]["error"].get("message").is_none(), "{reason}");
+    }
+}
+
+#[test]
 fn shared_error_classes_keep_the_binding_numeric_contract() {
     for (error, expected) in [
         (crate::SdkError::DataRootInUse, 18),
         (crate::SdkError::NoNodeSelected, 9),
         (crate::SdkError::Transport(ramflux_transport::TransportError::NotAuthenticated), 5),
+        (crate::SdkError::CustodyPublicationFailed, 1),
     ] {
         let name = crate::bus::io::local_bus_error_code(&error);
         assert_eq!(

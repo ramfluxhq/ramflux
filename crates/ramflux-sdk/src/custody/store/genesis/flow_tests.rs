@@ -8,7 +8,7 @@ use super::{
 };
 use crate::custody::{
     CreationCeremony, PrimaryVault,
-    tests::{Root, TestVault, input, words},
+    tests::{Root, TestVault, create, input, words},
 };
 use ramflux_protocol::custody::CustodyAuthority;
 use ramflux_storage::{AccountIndex, WrappedAccountDbKey};
@@ -36,17 +36,18 @@ fn temporaries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 fn observe_publication(dir: &Path, stage: Stage) -> std::result::Result<(), SdkError> {
     let path = dir.join("authority.json");
-    assert_eq!(temporaries(dir)?.len(), 1, "publication temporary must exist at every checkpoint");
-    if stage == Stage::Linked {
+    if stage == Stage::Published {
+        assert_eq!(temporaries(dir)?.len(), 0, "rename must consume the publication temporary");
         let _: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         #[cfg(unix)]
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     } else {
-        assert!(!path.exists(), "authority is visible before the atomic link");
+        assert_eq!(temporaries(dir)?.len(), 1, "publication temporary must exist before rename");
+        assert!(!path.exists(), "authority is visible before the atomic rename");
     }
     Ok(())
 }
-fn confirm_publication(unlink_failure: bool) -> Result {
+fn confirm_publication() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
     let (ceremony, answers) = prepared(&root.0, "created")?;
@@ -57,18 +58,12 @@ fn confirm_publication(unlink_failure: bool) -> Result {
     let _hook = checkpoints::install(move |stage| {
         observe_publication(&observed_dir, stage)?;
         stages.borrow_mut().push(stage);
-        if unlink_failure && stage == Stage::Linked {
-            // Force a real unlink failure after publication without changing the published inode.
-            let temporary = temporaries(&observed_dir)?.remove(0);
-            fs::remove_file(&temporary)?;
-            fs::create_dir(&temporary)?;
-        }
         Ok(())
     });
     let account = ceremony.confirm(&answers, &vault, 100)?;
     assert_eq!(
         *observed.borrow(),
-        [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Linked]
+        [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Publish, Stage::Published]
     );
     assert_eq!(
         fs::read(dir.join("authority.json"))?,
@@ -82,16 +77,87 @@ fn confirm_publication(unlink_failure: bool) -> Result {
         account.record().body.master_certificate.body.self_signing_public_key
     );
     loaded.credentials(&vault, "primary", 100)?;
-    assert_eq!(temporaries(&dir)?.len(), usize::from(unlink_failure));
+    assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new());
     Ok(())
 }
 #[test]
 fn review_genesis_persist_publishes_through_the_no_replace_helper() -> Result {
-    confirm_publication(false)
+    confirm_publication()
 }
 #[test]
-fn custody_genesis_unlink_failure_preserves_published_credentials() -> Result {
-    confirm_publication(true)
+fn publication_permission_denied_names_the_check_and_removes_the_sealed_account() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (ceremony, answers) = prepared(&root.0, "publish-denied")?;
+    let _sealed = super::super::race_hooks::install(|stage, root, id| {
+        if stage == super::super::race_hooks::Stage::BeforeAuthorityPublish {
+            assert!(
+                AccountIndex::open(root)?.load_wrapped_db_key(id)?.is_some(),
+                "publication runs after the data key is stored"
+            );
+        }
+        Ok(())
+    });
+    let _deny = checkpoints::install(|stage| {
+        if stage == Stage::Publish {
+            Err(SdkError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "hard_link denied",
+            )))
+        } else {
+            Ok(())
+        }
+    });
+    let error = ceremony
+        .confirm_with_passphrase(&answers, &vault, 100, b"discarded passphrase")
+        .expect_err("permission denied while publishing authority");
+    assert!(matches!(error, SdkError::CustodyPublicationFailed), "{error}");
+    let rendered = error.to_string();
+    assert!(!rendered.contains("publish-denied"), "publication error includes the account id");
+    assert!(!rendered.contains('/'), "publication error includes a path");
+    let body = crate::bus::io::local_bus_error_body(&error);
+    assert_eq!(body.code, "CustodyPublicationFailed");
+    assert_eq!(body.reason_code.as_deref(), Some("authority_publication"));
+    assert!(body.cause.is_none(), "publication failure must not carry an OS path");
+    assert!(!body.message.contains("publish-denied"), "bus message includes the account id");
+    assert_eq!(vault.entry_count()?, 0, "unpublished vault entries remained");
+    assert!(!directory(&root.0, "publish-denied")?.exists(), "locked custody directory remained");
+    assert!(!root.0.join("accounts/publish-denied").exists(), "account database remained");
+    assert!(matches!(
+        AccountIndex::open(&root.0)?.account("publish-denied"),
+        Err(ramflux_storage::StorageError::AccountNotFound(_))
+    ));
+    assert!(
+        super::super::list_accounts(&root.0, 100)?.is_empty(),
+        "account list kept a locked row"
+    );
+    Ok(())
+}
+#[test]
+fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let _deny = checkpoints::install(|stage| {
+        if stage == Stage::Publish {
+            Err(SdkError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "hard_link denied",
+            )))
+        } else {
+            Ok(())
+        }
+    });
+    let error = create(&root.0, "final-failure", &vault, 100).expect_err("publication denied");
+    let sdk = error.downcast_ref::<SdkError>().expect("test: sdk error");
+    assert!(matches!(sdk, SdkError::CustodyPublicationFailed), "{sdk}");
+    assert_eq!(vault.entry_count()?, 0, "unpublished vault entries remained");
+    assert!(
+        !super::super::account_exists(&root.0, "final-failure")?,
+        "publication failure left a locked account"
+    );
+    assert!(super::super::load_account(&root.0, "final-failure", 100).is_err());
+    assert!(!root.0.join("local_bus_accounts/final-failure.json").exists());
+    Ok(())
 }
 fn source_authority() -> Result<(Root, CustodyAuthority)> {
     let source = Root::new()?;
@@ -146,17 +212,14 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
         if interrupt {
             assert!(matches!(restored, Err(SdkError::CustodySetupInvalid)));
             assert_eq!(*observed.borrow(), [Stage::TemporaryCreated, Stage::TemporarySynced]);
-            assert!(!dir.join("authority.json").exists());
+            assert!(!dir.exists(), "a failed restore must not leave a locked account");
             assert_eq!(vault.entry_count()?, 0);
-            assert_eq!(
-                super::super::failed_setup(&root.0, "restored")?,
-                Some("setup_failed_before_authority")
-            );
+            assert_eq!(super::super::failed_setup(&root.0, "restored")?, None);
         } else {
             let restored = restored?;
             assert_eq!(
                 *observed.borrow(),
-                [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Linked]
+                [Stage::TemporaryCreated, Stage::TemporarySynced, Stage::Publish, Stage::Published]
             );
             assert_eq!(
                 fs::read(dir.join("authority.json"))?,
@@ -176,11 +239,79 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
                 "restored",
                 b"restore data secret",
             )?;
+            assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new());
         }
-        assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new());
     }
     Ok(())
 }
+/// The link seam exists only in the Unix `fs` module. Windows selects `fs_windows`.
+#[cfg(unix)]
+fn deny_hard_link(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::from_raw_os_error(1))
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_link_eperm_at_the_syscall_still_publishes_by_rename() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (ceremony, answers) = prepared(&root.0, "link-eperm")?;
+    let dir = directory(&root.0, "link-eperm")?;
+    let calls = Rc::new(std::cell::Cell::new(0_u8));
+    let seen = Rc::clone(&calls);
+    let observed = dir.clone();
+    let _link = crate::platform::fs::install_hard_link(deny_hard_link);
+    let _hook = checkpoints::install(move |stage| {
+        if stage != Stage::Publish {
+            return Ok(());
+        }
+        let temps = temporaries(&observed)?;
+        assert_eq!(temps.len(), 1, "the publication temporary must exist at the link boundary");
+        let destination = observed.join("authority.json");
+        let error = crate::platform::fs::hard_link(&temps[0], &destination)
+            .expect_err("hard link must fail");
+        assert_eq!(error.raw_os_error(), Some(1), "the link syscall must return EPERM");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!destination.exists(), "a refused hard link must not publish authority");
+        seen.set(seen.get() + 1);
+        Ok(())
+    });
+    let account = ceremony.confirm(&answers, &vault, 100)?;
+    assert_eq!(calls.get(), 1, "publication must reach the hard-link syscall once");
+    assert_eq!(
+        fs::read(dir.join("authority.json"))?,
+        ramflux_protocol::canonical_json_bytes(&account.stored)?
+    );
+    assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new(), "rename must consume the temporary");
+    Ok(())
+}
+
+#[test]
+fn restore_branch_store_failure_leaves_no_account_or_directory() -> Result {
+    let (_source, authority) = source_authority()?;
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    vault.fail_branch.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = super::super::recovery::pending_restore(
+        &root.0,
+        "restored",
+        &authority,
+        &vault,
+        b"restore data secret",
+        100,
+    )
+    .expect_err("branch store refused");
+    assert!(matches!(error, SdkError::CustodyVaultUnavailable), "{error}");
+    assert_eq!(AccountIndex::open(&root.0)?.known_account_ids()?.len(), 0);
+    for parent in ["custody_accounts", "accounts"] {
+        let path = root.0.join(parent);
+        let leftover = if path.is_dir() { fs::read_dir(&path)?.count() } else { 0 };
+        assert_eq!(leftover, 0, "{parent}");
+    }
+    assert_eq!(vault.entry_count()?, 0);
+    Ok(())
+}
+
 #[test]
 fn custody_restore_reservation_preserves_existing_index_row_and_wrapped_key() -> Result {
     let (_source, authority) = source_authority()?;
