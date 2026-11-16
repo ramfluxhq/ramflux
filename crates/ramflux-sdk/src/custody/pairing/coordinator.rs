@@ -157,6 +157,14 @@ struct Ceremony {
     record_hash: Option<String>,
     record_epoch: Option<u64>,
     channels: VecDeque<(u64, String)>,
+    approval: ApprovalState,
+}
+
+/// Whether the primary's single Approval frame is already queued for the peer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovalState {
+    NotQueued,
+    Queued,
 }
 
 enum SasHold {
@@ -805,6 +813,7 @@ impl PairingActor {
             record_hash: None,
             record_epoch: None,
             channels: VecDeque::new(),
+            approval: ApprovalState::NotQueued,
         }
     }
 

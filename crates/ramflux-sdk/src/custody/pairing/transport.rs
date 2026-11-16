@@ -140,6 +140,45 @@ impl FreshPairingNative {
     }
 }
 
+type ProofConnection<S> = Arc<tokio::sync::Mutex<CustodyConnection<S>>>;
+
+/// A transport failure of the approving device's own publication leaves the journaled head
+/// unsent or unacknowledged: a typed, retryable publication state, never an untyped error.
+fn publication_unavailable(error: SdkError) -> SdkError {
+    match error {
+        SdkError::Io(_) | SdkError::Transport(_) => SdkError::PairingCode("PublicationPending"),
+        other => other,
+    }
+}
+
+impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static>
+    FreshPairingNative<S>
+{
+    /// The gateway ends an unauthenticated custody connection after its whole-exchange deadline,
+    /// so the connection opened by Issue/Create cannot serve a human-paced ceremony. A proof that
+    /// follows the SAS opens its own connection while the ceremony is still live.
+    fn fresh_proof_connection(
+        &self,
+    ) -> Result<BoxFut<Result<ProofConnection<S>, SdkError>>, SdkError> {
+        let state = self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.connection.is_none() {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        let generation = state.generation;
+        drop(state);
+        let open = Arc::clone(&self.open);
+        let slot = Arc::clone(&self.connection);
+        Ok(Box::pin(async move {
+            let connection = open().await.map_err(publication_unavailable)?;
+            let state = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.generation != generation || state.connection.is_none() {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            Ok(Arc::new(tokio::sync::Mutex::new(connection)))
+        }))
+    }
+}
+
 impl<S> FreshPairingNative<S> {
     /// Factory seam for real transport fixtures. One call for each Issue, never gateway handoff.
     #[must_use]
@@ -170,36 +209,21 @@ impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static
         })
     }
     fn data_lease(&self, request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
-        let connection = self
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .connection
-            .clone();
+        let fresh = self.fresh_proof_connection();
         Box::pin(async move {
-            ProofPairingNative::from_connection(
-                connection.ok_or(SdkError::PairingCode("WrongContext"))?,
-            )
-            .data_lease(request)
-            .await
+            ProofPairingNative::from_connection(fresh?.await?).data_lease(request).await
         })
     }
     fn publish(
         &self,
         publication: ramflux_protocol::custody::Publication,
     ) -> BoxFut<Result<String, SdkError>> {
-        let connection = self
-            .connection
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .connection
-            .clone();
+        let fresh = self.fresh_proof_connection();
         Box::pin(async move {
-            ProofPairingNative::from_connection(
-                connection.ok_or(SdkError::PairingCode("WrongContext"))?,
-            )
-            .publish(publication)
-            .await
+            ProofPairingNative::from_connection(fresh?.await?)
+                .publish(publication)
+                .await
+                .map_err(publication_unavailable)
         })
     }
     fn close(&self) {
@@ -739,5 +763,30 @@ mod config_tests {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod publication_state_tests {
+    use super::*;
+    #[test]
+    fn a_lost_publication_connection_is_the_typed_retryable_publication_state() {
+        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert!(
+            matches!(
+                publication_unavailable(SdkError::Io(broken)),
+                SdkError::PairingCode("PublicationPending")
+            ),
+            "a lost publication connection must classify as the typed retryable PublicationPending"
+        );
+        assert!(
+            matches!(
+                publication_unavailable(SdkError::CustodyNetwork(
+                    ramflux_protocol::custody::CustodyRefusal::BindingRefused
+                )),
+                SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::BindingRefused)
+            ),
+            "a typed custody refusal must be preserved, not rewritten to PublicationPending"
+        );
     }
 }
