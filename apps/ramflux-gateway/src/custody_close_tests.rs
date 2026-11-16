@@ -94,6 +94,7 @@ fn context() -> Result<(ramflux_test_support::TestPath, crate::GatewayQuicContex
         service_id: "ramflux-gateway".to_owned(),
         redb_path: "gateway.redb".to_owned(),
         node_service_signing_seed_b64url: None,
+        gateway_client_capabilities: None,
         mesh: ramflux_node_core::MeshConfig {
             listen_addr: "127.0.0.1:0".to_owned(),
             ca_cert: "ca.pem".to_owned(),
