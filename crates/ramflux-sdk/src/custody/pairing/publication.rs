@@ -594,6 +594,11 @@ fn kind_label(kind: HeadKind) -> &'static str {
     }
 }
 
+/// The journal's stored candidate, through the one registered decode site.
+pub(crate) fn decode_head_candidate(bytes: &[u8]) -> Result<Publication, SdkError> {
+    decode_candidate(bytes)
+}
+
 fn decode_candidate(bytes: &[u8]) -> Result<Publication, SdkError> {
     let value: Publication =
         parse_i_json(bytes).map_err(|_| SdkError::PairingField("candidate"))?;

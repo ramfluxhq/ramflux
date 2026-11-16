@@ -35,12 +35,6 @@ pub(super) fn start(
         });
         register_courier(handle, &work, "surface-resync", crate::bus::couriers::surface::pass);
         register_courier(handle, &work, "pair-reset", crate::bus::couriers::reset::pass);
-        register_courier(
-            handle,
-            &work,
-            crate::bus::couriers::layer_publish::COURIER,
-            crate::bus::couriers::layer_publish::pass,
-        );
         register_private_history_couriers(handle, &work);
         register_courier(
             handle,
@@ -154,6 +148,12 @@ fn spawn_receive(fut: impl std::future::Future<Output = ()> + Send + 'static) ->
 }
 
 fn register_private_history_couriers(handle: &ConnectionHandle, work: &mpsc::Sender<AccountWork>) {
+    register_courier(
+        handle,
+        work,
+        crate::bus::couriers::layer_publish::COURIER,
+        crate::bus::couriers::layer_publish::pass,
+    );
     register_courier(handle, work, "self-sync", crate::bus::couriers::self_sync::pass);
     register_courier(handle, work, "own-history", crate::bus::couriers::history::pass);
     register_courier(

@@ -20,6 +20,7 @@ fn native_card(sender: &NativeFixture) -> TestResult<String> {
             master_public_key: record.body.master_certificate.body.master_public_key.clone(),
             master_certificate: record.body.master_certificate.clone(),
             authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            authority_epoch: record.body.device_set_epoch,
             devices: record.body.devices.clone(),
             node_url: "https://node.example".into(),
             node_key_fingerprint: crate::contact_node_fingerprint(

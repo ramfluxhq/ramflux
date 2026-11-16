@@ -10,7 +10,7 @@ use super::super::schema::{
 };
 use super::helpers::{
     TestResult, ack_bytes, adoption, context_bytes, field_err, floor, h, head, invited,
-    publication, publication_at, terminal,
+    publication, publication_at, ref_bytes, terminal,
 };
 use ramflux_protocol::MAX_SAFE_JSON_INTEGER;
 

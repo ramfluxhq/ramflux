@@ -32,13 +32,8 @@ fn media_dm_between_two_current_accounts_needs_no_seeded_rows() -> e2e::Result<(
     configure_node(&bob_d, &stack.discovery_url)?;
     let alice = create_account(&alice_d, "Alice")?;
     let bob = create_account(&bob_d, "Bob")?;
-    // A contact card pins the exact authority head. Publishing the layer declaration advances
-    // that head, so cards are taken only after both declarations are installed.
-    for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob)] {
-        wait_json(daemon, &["account", "status", "--account", account.id.as_str()], |value| {
-            value["layer_declaration"]["state"] == "fresh"
-        })?;
-    }
+    // Cards are exported right after creation, before either primary has published its
+    // declaration: a later head must not invalidate them (CARD-HEAD-PIN-01).
     exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
     let conversation = dm_conversation(&alice, &bob)?;
 

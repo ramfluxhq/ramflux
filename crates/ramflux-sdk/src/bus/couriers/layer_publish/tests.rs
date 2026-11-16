@@ -247,7 +247,7 @@ async fn expired_prepared_candidate_is_rebuilt_not_resubmitted() -> TestResult {
     within(async {
         let (mut account, _keep) = live_primary("layer-expired").await?;
         let prepared = stage_prepared(&mut account)?;
-        let candidate: Publication = ramflux_protocol::parse_i_json(&prepared.candidate)?;
+        let candidate = custody::pairing::publication::decode_head_candidate(&prepared.candidate)?;
         let declaration = candidate.record.body.devices[0]
             .message_layer
             .as_ref()
@@ -296,7 +296,7 @@ async fn held_publish_leaves_the_actor_free_and_cancel_loses_nothing() -> TestRe
         // Floor-send stand-in: an ordinary writer step completes while Publish is held.
         // A blocked actor would hang here until the watchdog fails the test.
         let state = writer
-            .apply(|account| Ok(head_state(account).map_err(|_| SdkError::NetworkingPending)?))
+            .apply(|account| head_state(account).map_err(|_| SdkError::NetworkingPending))
             .await?;
         assert_eq!(state, Some(("layer_update".into(), "submitted".into())));
         // No signing lease or lock is held across the await.

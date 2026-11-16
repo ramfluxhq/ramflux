@@ -46,6 +46,11 @@ pub(crate) fn manifest_failure(error: SdkError) -> SdkError {
         _ => ContactReason::ManifestInvalid.into(),
     }
 }
+/// A native card is an account introduction, not a snapshot: the fetched, fully verified current
+/// authority must carry the card's account and master certificate, and must be at or above the
+/// card's signed issuance epoch (the exact signed head when the epochs are equal). Later roster
+/// and layer changes therefore keep the card valid, a replayed older head does not, and the card's
+/// own device list is never an input to recipient selection.
 pub(crate) fn verify_native_card_head(
     card: Option<&crate::ContactCardBody>,
     manifest: &SdkDeviceManifestResponse,
@@ -56,12 +61,18 @@ pub(crate) fn verify_native_card_head(
         }
         let authority = manifest.custody.as_ref().ok_or(ContactReason::ManifestInvalid)?;
         let chain = card.native_authority.as_ref().ok_or(ContactReason::ManifestInvalid)?;
-        if ramflux_protocol::custody::object_hash(&authority.publication.record)? != chain.head_hash
-            || ramflux_protocol::custody::object_hash(
-                &authority.publication.record.body.master_certificate,
-            )? != chain.master_certificate_hash
+        let record = &authority.publication.record;
+        if ramflux_protocol::custody::object_hash(&record.body.master_certificate)?
+            != chain.master_certificate_hash
         {
             return Err(ContactReason::ManifestInvalid.into());
+        }
+        let epoch = record.body.device_set_epoch;
+        if epoch < chain.epoch
+            || (epoch == chain.epoch
+                && ramflux_protocol::custody::object_hash(record)? != chain.head_hash)
+        {
+            return Err(ContactReason::AuthorityStale.into());
         }
     }
     Ok(())
@@ -348,3 +359,7 @@ pub(crate) struct ContactResolution<'a> {
     pub replace_provisional_root: Option<&'a str>,
     pub verification: Option<&'a SdkContactSafetyNumber>,
 }
+
+#[cfg(test)]
+#[path = "contact_card_authority_tests.rs"]
+mod authority_tests;

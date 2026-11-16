@@ -225,6 +225,7 @@ pub(super) fn export(
                 .clone(),
             master_certificate: current.record().body.master_certificate.clone(),
             authority_head_hash: ramflux_protocol::custody::object_hash(current.record())?,
+            authority_epoch: current.record().body.device_set_epoch,
             devices: current.record().body.devices.clone(),
             node_url: profile.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?,
             node_key_fingerprint: crate::contact_node_fingerprint(&profile.node_public_key)?,

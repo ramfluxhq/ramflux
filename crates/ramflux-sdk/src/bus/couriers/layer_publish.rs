@@ -30,7 +30,7 @@ const MAX_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_REMAINING_SECONDS: u64 = 2 * 60 * 60;
 const PUBLISH_DEADLINE: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
-const BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+const BACKOFF_MAX: Duration = Duration::from_mins(15);
 
 /// Per-account retry scheduling. Lives on the writer; never crosses an await.
 #[derive(Default)]
@@ -138,7 +138,7 @@ where
     F: FnOnce(PublishInput) -> Fut,
     Fut: std::future::Future<Output = Result<String, SdkError>>,
 {
-    let plan = match writer.apply(|account| prepare(account)).await {
+    let plan = match writer.apply(prepare).await {
         Ok(plan) => plan,
         Err(error) if not_ready(&error) => return Ok(false),
         Err(error) => {
@@ -197,7 +197,7 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
         if head.kind != "layer_update" {
             return Ok(None);
         }
-        return resume(account, &config, head, now);
+        return resume(account, &config, &head, now);
     }
     let born = account.client.born_v3_account.as_deref().ok_or(SdkError::NetworkingPending)?;
     let record = born.record();
@@ -280,11 +280,10 @@ fn submit(
 fn resume(
     account: &mut LocalBusAccountState,
     config: &crate::gateway::GatewayCustodyConfig,
-    head: ramflux_storage::HeadRow,
+    head: &ramflux_storage::HeadRow,
     now: u64,
 ) -> Result<Option<Box<Plan>>, SdkError> {
-    let candidate: Publication = ramflux_protocol::parse_i_json(&head.candidate)
-        .map_err(|_| SdkError::PairingField("candidate"))?;
+    let candidate = custody::pairing::publication::decode_head_candidate(&head.candidate)?;
     let local = account
         .client
         .born_v3_account
@@ -339,7 +338,7 @@ pub(crate) fn settle_for_other_writer(account: &mut LocalBusAccountState) -> Res
         }
         "acknowledged" => {
             let now = custody::network_now()?;
-            resume(account, &config, head, now)?;
+            resume(account, &config, &head, now)?;
         }
         _ => {}
     }
