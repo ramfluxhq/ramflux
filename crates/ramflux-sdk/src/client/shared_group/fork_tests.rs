@@ -105,44 +105,59 @@ fn creator_device_conflicts_replay_losing_removal_or_name() -> Result<(), SdkErr
         "laptop",
         GroupStateChange::SetName { name: "concurrent name".into() },
     )?;
+    let phone_held = hold_service(&owner.client, "group", "thread")?;
+    let laptop_held = hold_service(&sibling.client, "group", "thread")?;
+    let victim_identity = victim.client.owned_device_identity()?;
+    let victim_root = victim_identity.root_commitment();
     for _ in 0..3 {
         let a = owner
             .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        sibling.client.fixture_accept_group_state(&a, "laptop")?;
+        assert!(
+            !sibling.client.fixture_accept_group_state(&a, "laptop")?,
+            "the laptop does not adopt the phone's divergent removal"
+        );
         let b = sibling
             .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        owner.client.fixture_accept_group_state(&b, "phone")?;
+        assert!(
+            !owner.client.fixture_accept_group_state(&b, "phone")?,
+            "the phone does not adopt the laptop's divergent rename"
+        );
     }
-    let a = owner
+    assert_service_held(&owner.client, "group", "thread", &phone_held)?;
+    assert_service_held(&sibling.client, "group", "thread", &laptop_held)?;
+    let phone = owner
         .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
-    let b = sibling
+    let laptop = sibling
         .client
         .account_db()?
         .shared_group_state("group")?
         .ok_or(StorageError::GroupPermissionDenied)?;
-    assert_eq!(a.view(), b.view());
-    assert_eq!(a.view().name.as_deref(), Some("concurrent name"));
+    assert_ne!(phone.snapshot().state_hash, laptop.snapshot().state_hash);
+    assert_eq!(phone.view().name.as_deref(), Some("base"));
+    assert_eq!(laptop.view().name.as_deref(), Some("concurrent name"));
+    assert!(phone.view().effective_role(victim_root, "phone").is_none());
+    assert!(laptop.view().effective_role(victim_root, "phone").is_some());
+    assert_ne!(phone_held.ids, laptop_held.ids, "each device keeps its own service log");
+    let phone_marker = repair_marker(&owner.client, "group")?;
+    let laptop_marker = repair_marker(&sibling.client, "group")?;
+    let errors: Vec<_> = [phone_marker, laptop_marker]
+        .into_iter()
+        .flatten()
+        .filter_map(|marker| marker["last_error"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(errors.len(), 1, "one side repairs and the preferred side skips");
     assert!(
-        a.view()
-            .effective_role(victim.client.owned_device_identity()?.root_commitment(), "phone")
-            .is_none()
-    );
-    let owner_ids = service_ids(&owner.client, "thread")?;
-    let sibling_ids = service_ids(&sibling.client, "thread")?;
-    assert_eq!(owner_ids, sibling_ids, "creator devices share the signed service history");
-    assert_eq!(
-        owner_ids.len(),
-        a.snapshot().service_events.len(),
-        "the timeline is the signed log, not the union of both branches"
+        errors[0].contains("replay payload mismatch"),
+        "the repair commit is ReplayMismatch: {errors:?}"
     );
     Ok(())
 }
@@ -188,35 +203,34 @@ fn divergent_service_histories_follow_the_signed_order() -> Result<(), SdkError>
     let loser_name = branch_name(loser)?;
     assert!(member.client.fixture_accept_group_state(loser, "phone")?);
     let saw_loser = service_ids(&member.client, "fork-thread")?;
+    let loser_pin = member.client.service_projection_pin("fork-thread")?;
     assert_eq!(
         service_names(&member.client, "fork-thread")?,
         vec![loser_name.to_owned()],
         "the losing branch is visible before the preferred log arrives"
     );
-    assert!(late.client.fixture_accept_group_state(winner, "phone")?);
-    assert!(member.client.fixture_accept_group_state(winner, "phone")?);
-    let adopted = service_ids(&member.client, "fork-thread")?;
-    let late_ids = service_ids(&late.client, "fork-thread")?;
-    assert_eq!(adopted, late_ids, "late admission matches a device that saw the losing branch");
-    assert_eq!(
-        adopted.len(),
-        winner.snapshot().service_events.len(),
-        "rows that are not in the signed log are replaced"
-    );
+    let refused = member.client.fixture_accept_group_state(winner, "phone");
     assert!(
-        saw_loser.iter().any(|id| !adopted.contains(id)),
-        "the losing event id does not remain after the preferred log is adopted"
+        matches!(refused, Err(SdkError::ReplayMismatch)),
+        "a divergent service log is refused: {refused:?}"
     );
-    assert!(!member.client.fixture_accept_group_state(winner, "phone")?);
     assert_eq!(
         service_ids(&member.client, "fork-thread")?,
-        adopted,
-        "projecting the convergent state again does not resurrect the losing row"
+        saw_loser,
+        "the refusal leaves the stored service rows"
     );
+    assert_eq!(member.client.service_projection_pin("fork-thread")?, loser_pin);
+    assert!(late.client.fixture_accept_group_state(winner, "phone")?);
     assert_eq!(
-        service_names(&member.client, "fork-thread")?,
+        service_names(&late.client, "fork-thread")?,
         vec![winner_name.to_owned()],
-        "the adopted timeline carries the preferred name only"
+        "a device whose log is a prefix accepts the preferred extension"
+    );
+    assert!(!member.client.fixture_accept_group_state(loser, "phone")?);
+    assert_eq!(
+        service_ids(&member.client, "fork-thread")?,
+        saw_loser,
+        "replaying the stored log does not change the rows"
     );
     Ok(())
 }
@@ -281,6 +295,53 @@ fn service_rows(
     let mut rows: Vec<_> = page.messages.into_iter().filter(|row| row.kind == "service").collect();
     rows.sort_by_key(|row| (row.hlc_ms, row.hlc_logical, row.device_sequence.0));
     Ok(rows)
+}
+
+struct ServiceHold {
+    hash: String,
+    ids: Vec<String>,
+    pin: Vec<(String, Vec<u8>)>,
+}
+
+fn hold_service(
+    client: &RamfluxClient,
+    group: &str,
+    thread: &str,
+) -> Result<ServiceHold, SdkError> {
+    let state = client
+        .account_db()?
+        .shared_group_state(group)?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    Ok(ServiceHold {
+        hash: state.snapshot().state_hash.clone(),
+        ids: service_ids(client, thread)?,
+        pin: client.service_projection_pin(thread)?,
+    })
+}
+
+fn assert_service_held(
+    client: &RamfluxClient,
+    group: &str,
+    thread: &str,
+    held: &ServiceHold,
+) -> Result<(), SdkError> {
+    let state = client
+        .account_db()?
+        .shared_group_state(group)?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(state.snapshot().state_hash, held.hash, "the refused fork leaves the group state");
+    assert_eq!(service_ids(client, thread)?, held.ids, "the refused fork leaves the service rows");
+    assert_eq!(client.service_projection_pin(thread)?, held.pin);
+    assert_eq!(held.ids.len(), state.snapshot().service_events.len());
+    Ok(())
+}
+
+fn repair_marker(
+    client: &RamfluxClient,
+    group: &str,
+) -> Result<Option<serde_json::Value>, SdkError> {
+    let key = format!("group-state/creator-repair/{}", ramflux_protocol::encode_base64url(group));
+    client.account_db()?.load_actor_state(&key).map_err(SdkError::from)
 }
 #[test]
 fn offline_admin_removal_waits_for_owner_and_duplicate_has_one_result() -> Result<(), SdkError> {
@@ -591,23 +652,31 @@ fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_reques
         } else {
             (&sibling.client, left, &second, "laptop")
         };
-    let revoked = primary_revoked_manifest(&admin, "admin")?;
-    loser.persist_fetched_identity_directory(&revoked)?;
-    loser.fixture_accept_group_state(&winning, target)?;
-    assert_eq!(
-        loser
-            .account_db()?
-            .shared_group_state("group")?
-            .ok_or(StorageError::GroupPermissionDenied)?
-            .view()
-            .name,
-        winning.view().name
-    );
-    let refused = loser
+    let applied = loser
         .group_change_record(request, true)?
         .and_then(|record| record.result)
         .ok_or(StorageError::GroupPermissionDenied)?;
-    assert_eq!(refused.status, GroupChangeStatus::PermissionDenied);
+    assert_eq!(applied.status, GroupChangeStatus::Applied);
+    let held = hold_service(loser, "group", "thread")?;
+    let revoked = primary_revoked_manifest(&admin, "admin")?;
+    loser.persist_fetched_identity_directory(&revoked)?;
+    assert!(
+        !loser.fixture_accept_group_state(&winning, target)?,
+        "a divergent foreign-name repair is refused"
+    );
+    assert_service_held(loser, "group", "thread", &held)?;
+    let still_applied = loser
+        .group_change_record(request, true)?
+        .and_then(|record| record.result)
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(
+        still_applied.status,
+        GroupChangeStatus::Applied,
+        "the revocation result rolls back with the refused service log"
+    );
+    let marker = repair_marker(loser, "group")?.ok_or(StorageError::GroupPermissionDenied)?;
+    let error = marker["last_error"].as_str().ok_or(StorageError::GroupPermissionDenied)?;
+    assert!(error.contains("replay payload mismatch"), "{error}");
     Ok(())
 }
 
@@ -662,30 +731,30 @@ fn r7_owner_forks_repair_durable_removals_without_pending_intent() -> Result<(),
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        assert!(phone.client.fixture_accept_group_state(&incoming, "phone")?);
-        let repaired = phone
+        let phone_held = hold_service(&phone.client, "group", "thread")?;
+        let laptop_held = hold_service(&laptop.client, "group", "thread")?;
+        assert!(
+            !phone.client.fixture_accept_group_state(&incoming, "phone")?,
+            "removing the pending marker does not make a divergent log adoptable"
+        );
+        assert_service_held(&phone.client, "group", "thread", &phone_held)?;
+        assert_service_held(&laptop.client, "group", "thread", &laptop_held)?;
+        let stayed = phone
             .client
             .account_db()?
             .shared_group_state("group")?
             .ok_or(StorageError::GroupPermissionDenied)?;
-        assert!(laptop.client.fixture_accept_group_state(&repaired, "laptop")?);
-        assert_eq!(
-            laptop
-                .client
-                .account_db()?
-                .shared_group_state("group")?
-                .ok_or(StorageError::GroupPermissionDenied)?
-                .snapshot()
-                .state_hash,
-            repaired.snapshot().state_hash
-        );
-        assert_eq!(repaired.view().name.as_deref(), Some("laptop latest"));
+        assert!(stayed.view().name.is_none());
         assert!(
-            repaired
+            stayed
                 .view()
                 .effective_role(peer.client.owned_device_identity()?.root_commitment(), "peer")
                 .is_none()
         );
+        let marker =
+            repair_marker(&phone.client, "group")?.ok_or(StorageError::GroupPermissionDenied)?;
+        let error = marker["last_error"].as_str().ok_or(StorageError::GroupPermissionDenied)?;
+        assert!(error.contains("replay payload mismatch"), "{error}");
     }
     Ok(())
 }
@@ -727,56 +796,25 @@ fn r7_pruned_wire_exclusions_still_repair_from_indexed_receiver_floors() -> Resu
             GroupStateChange::SetName { name: name.into() },
         )?;
     }
-    phone.client.fixture_accept_group_state(&pruned, "phone")?;
-    assert_eq!(
-        phone
-            .client
-            .account_db()?
-            .shared_group_state("group")?
-            .ok_or(StorageError::AuthorizationRejected)?
-            .view()
-            .excluded,
-        []
-    );
-    phone.client.account_db()?.remove_actor_state(&format!(
-        "group-state/creator-pending/{}",
-        ramflux_protocol::encode_base64url("group")
-    ))?;
-    for name in ["laptop one", "laptop two", "laptop three"] {
-        laptop.client.fixture_group_change(
-            "group",
-            "laptop",
-            GroupStateChange::SetName { name: name.into() },
-        )?;
-    }
-    let incoming = laptop
-        .client
-        .account_db()?
-        .shared_group_state("group")?
-        .ok_or(StorageError::AuthorizationRejected)?;
-    assert_eq!(incoming.relation_to(&pruned)?, ramflux_crypto::GroupStateRelation::Extension);
-    phone.client.fixture_accept_group_state(&incoming, "phone")?;
-    let repaired = phone
-        .client
-        .account_db()?
-        .shared_group_state("group")?
-        .ok_or(StorageError::AuthorizationRejected)?;
-    laptop.client.fixture_accept_group_state(&repaired, "laptop")?;
-    assert_eq!(
-        laptop
-            .client
-            .account_db()?
-            .shared_group_state("group")?
-            .ok_or(StorageError::AuthorizationRejected)?
-            .snapshot()
-            .state_hash,
-        repaired.snapshot().state_hash
-    );
+    let held = hold_service(&phone.client, "group", "thread")?;
+    let refused = phone.client.fixture_accept_group_state(&pruned, "phone");
     assert!(
-        repaired
+        matches!(refused, Err(SdkError::ReplayMismatch)),
+        "a pruned snapshot that is not a prefix of the stored log is refused: {refused:?}"
+    );
+    assert_service_held(&phone.client, "group", "thread", &held)?;
+    let stayed = phone
+        .client
+        .account_db()?
+        .shared_group_state("group")?
+        .ok_or(StorageError::AuthorizationRejected)?;
+    assert!(
+        stayed
             .view()
             .effective_role(peer.client.owned_device_identity()?.root_commitment(), "peer")
-            .is_none()
+            .is_none(),
+        "the local removal stays"
     );
+    assert!(repair_marker(&phone.client, "group")?.is_none());
     Ok(())
 }

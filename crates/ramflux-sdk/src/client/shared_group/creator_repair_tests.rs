@@ -27,8 +27,9 @@ fn markers(account: &LocalBusAccountState) -> Result<usize, SdkError> {
     Ok(account.client.account_db()?.list_actor_states::<serde_json::Value>(MARKER_PREFIX)?.len())
 }
 
-/// The owner's laptop renames the group while the phone durably removed a member: the phone
-/// must repair the removal on top of the laptop's state before it may adopt it.
+/// The owner's laptop renames the group while the phone durably removed a member. The signed
+/// repair extends the laptop log, which is not a prefix of the phone's stored log, so the
+/// commit is refused and the phone keeps its rows.
 fn fork() -> Result<Fork, SdkError> {
     let mut phone = native_person("owner", "phone")?;
     let laptop = native_sibling(&mut phone, "owner-laptop", "laptop")?;
@@ -66,30 +67,33 @@ fn fork() -> Result<Fork, SdkError> {
     Ok(Fork { phone, laptop, peer, incoming })
 }
 
-fn assert_natively_repaired(fork: &Fork, repaired: &ramflux_crypto::VerifiedGroupState) {
-    assert_eq!(repaired.view().name.as_deref(), Some("laptop latest"), "the winning name is kept");
-    assert!(
-        repaired
-            .view()
-            .effective_role(
-                fork.peer
-                    .client
-                    .owned_device_identity()
-                    .expect("test: peer identity")
-                    .root_commitment(),
-                "peer"
-            )
-            .is_none(),
-        "the durable removal is repaired"
-    );
-    let issuer = &repaired.snapshot().issuer;
-    assert!(issuer.native_authority.is_some(), "the repair carries native authority");
-    assert!(issuer.root_signature.is_empty(), "the repair is not root-signed");
-    assert_eq!(
-        issuer.identity.device_id,
-        fork.phone.client.owned_device_identity().expect("test: phone identity").device_id(),
-        "the repair is signed by the creator device that redrove it"
-    );
+fn assert_divergent_repair_refused(fork: &Fork, before_hash: &str) -> Result<(), SdkError> {
+    let before_pin = fork.phone.client.service_projection_pin("thread")?;
+    let primary = fork.phone.client.fixture_primary()?;
+    assert_eq!(fork.phone.client.redrive_creator_repairs(primary.as_ref())?, 0);
+    assert_eq!(markers(&fork.phone)?, 1, "the refused repair stays pending");
+    let stayed = stored(&fork.phone)?;
+    assert_eq!(stayed.snapshot().state_hash, before_hash);
+    assert_eq!(fork.phone.client.service_projection_pin("thread")?, before_pin);
+    let peer = fork.peer.client.owned_device_identity()?;
+    let root = peer.root_commitment();
+    assert!(stayed.view().effective_role(root, "peer").is_none(), "the local removal stays");
+    assert!(stayed.view().name.is_none(), "the laptop name is not adopted");
+    let laptop = stored(&fork.laptop)?;
+    assert_eq!(laptop.view().name.as_deref(), Some("laptop latest"));
+    let marker = fork
+        .phone
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!(
+            "{MARKER_PREFIX}{}",
+            ramflux_protocol::encode_base64url("group")
+        ))?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    let error = marker["last_error"].as_str().ok_or(StorageError::GroupPermissionDenied)?;
+    assert!(error.contains("replay payload mismatch"), "{error}");
+    assert!(marker["failures"].as_u64().is_some_and(|count| count >= 1));
+    Ok(())
 }
 
 #[test]
@@ -108,13 +112,7 @@ fn accept_records_a_pending_repair_and_unlock_signs_it_natively() -> Result<(), 
         before.snapshot().state_hash,
         "the unrepaired fork is never committed"
     );
-    let primary = fork.phone.client.fixture_primary()?;
-    assert_eq!(fork.phone.client.redrive_creator_repairs(primary.as_ref())?, 1);
-    assert_eq!(markers(&fork.phone)?, 0, "the marker is cleared with the repair");
-    let repaired = stored(&fork.phone)?;
-    assert_natively_repaired(&fork, &repaired);
-    assert_eq!(repaired.view().epoch, fork.incoming.view().epoch + 1, "one removal was signed");
-    assert!(fork.laptop.client.fixture_accept_group_state(&repaired, "laptop")?);
+    assert_divergent_repair_refused(&fork, &before.snapshot().state_hash)?;
     Ok(())
 }
 
@@ -133,9 +131,7 @@ fn a_missing_primary_keeps_the_repair_pending_with_a_typed_error() -> Result<(),
     );
     assert_eq!(markers(&fork.phone)?, 1, "the marker stays pending");
     assert_eq!(stored(&fork.phone)?.snapshot().state_hash, before.snapshot().state_hash);
-    let primary = fork.phone.client.fixture_primary()?;
-    assert_eq!(fork.phone.client.redrive_creator_repairs(primary.as_ref())?, 1);
-    assert_natively_repaired(&fork, &stored(&fork.phone)?);
+    assert_divergent_repair_refused(&fork, &before.snapshot().state_hash)?;
     Ok(())
 }
 
@@ -146,18 +142,18 @@ fn a_repeated_accept_around_the_redrive_repairs_exactly_once() -> Result<(), Sdk
     assert!(!fork.phone.client.accept_shared_group_state(&fork.incoming, &target)?);
     assert!(!fork.phone.client.accept_shared_group_state(&fork.incoming, &target)?);
     assert_eq!(markers(&fork.phone)?, 1, "a repeated accept keeps one marker");
-    let primary = fork.phone.client.fixture_primary()?;
-    assert_eq!(fork.phone.client.redrive_creator_repairs(primary.as_ref())?, 1);
-    let repaired = stored(&fork.phone)?;
+    let before = stored(&fork.phone)?;
+    assert_divergent_repair_refused(&fork, &before.snapshot().state_hash)?;
     assert!(
         !fork.phone.client.accept_shared_group_state(&fork.incoming, &target)?,
-        "the already-repaired fork is superseded"
+        "another accept of the same fork still adopts nothing"
     );
-    assert_eq!(markers(&fork.phone)?, 0, "an accept after the repair records no new marker");
+    assert_eq!(markers(&fork.phone)?, 1, "the refused marker stays one row");
+    let primary = fork.phone.client.fixture_primary()?;
     assert_eq!(fork.phone.client.redrive_creator_repairs(primary.as_ref())?, 0);
     let after = stored(&fork.phone)?;
-    assert_eq!(after.snapshot().state_hash, repaired.snapshot().state_hash, "no double advance");
-    assert_eq!(after.view().epoch, fork.incoming.view().epoch + 1, "exactly one repair advance");
+    assert_eq!(after.snapshot().state_hash, before.snapshot().state_hash, "no advance");
+    assert_eq!(after.view().epoch, before.view().epoch);
     Ok(())
 }
 
@@ -179,14 +175,15 @@ fn a_failing_repair_marker_does_not_block_the_next_group() -> Result<(), SdkErro
         }),
     )?;
     assert_eq!(markers(&fork.phone)?, 2, "one poisoned and one good marker are pending");
+    let before = stored(&fork.phone)?;
     let primary = fork.phone.client.fixture_primary()?;
     assert_eq!(
         fork.phone.client.redrive_creator_repairs(primary.as_ref())?,
-        1,
-        "the good group is repaired although the poisoned marker fails"
+        0,
+        "the poison does not hide the good group's refusal"
     );
-    assert_natively_repaired(&fork, &stored(&fork.phone)?);
-    assert_eq!(markers(&fork.phone)?, 1, "only the failing marker stays pending");
+    assert_eq!(stored(&fork.phone)?.snapshot().state_hash, before.snapshot().state_hash);
+    assert_eq!(markers(&fork.phone)?, 2, "both markers stay pending");
     let poisoned = fork
         .phone
         .client
@@ -195,5 +192,15 @@ fn a_failing_repair_marker_does_not_block_the_next_group() -> Result<(), SdkErro
         .ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(poisoned["failures"], 1, "the failure is recorded on the marker");
     assert!(poisoned["last_error"].as_str().is_some_and(|text| !text.is_empty()));
+    let group_key = format!("{MARKER_PREFIX}{}", ramflux_protocol::encode_base64url("group"));
+    let group = fork
+        .phone
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&group_key)?
+        .ok_or(StorageError::GroupPermissionDenied)?;
+    assert_eq!(group["failures"], 1);
+    let error = group["last_error"].as_str().ok_or(StorageError::GroupPermissionDenied)?;
+    assert!(error.contains("replay payload mismatch"), "{error}");
     Ok(())
 }

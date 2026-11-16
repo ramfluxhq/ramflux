@@ -63,25 +63,24 @@ impl RamfluxClient {
 
     /// Project the signed change log in `next`.
     ///
-    /// The timeline is that log. Replay of the same bytes is a no-op. A shorter log that is a
-    /// prefix of the accepted log is refused, because that rewinds a stored change. Any other
-    /// verified log replaces rows it does not contain, so two devices that adopt the same
-    /// snapshot keep the same service history. A different body under the same derived id is
-    /// `ReplayMismatch`.
+    /// The stored log must be an exact prefix of `next`, including an equal replay. A shorter
+    /// prefix is refused because it rewinds a stored change. Any other difference is a divergent
+    /// history: `ReplayMismatch`, and the existing rows stay. Replay of the same bytes is a
+    /// no-op. A different body under the same derived id is `ReplayMismatch` even after that
+    /// row was removed, because the event-id body fence is kept.
     ///
     /// # Errors
-    /// Rejects a rewound log, an invalid signed event, or a storage conflict.
+    /// Rejects a rewound or divergent log, an invalid signed event, or a storage conflict.
     pub(crate) fn project_accepted_group_service(
         &self,
         previous: Option<&VerifiedGroupState>,
         next: &VerifiedGroupState,
     ) -> Result<(), SdkError> {
         if let Some(previous) = previous {
-            let old = previous.snapshot().service_events.as_slice();
-            let new = next.snapshot().service_events.as_slice();
-            if rewinds_accepted_log(old, new) {
-                return Err(invalid("group service event log rewrote an accepted change"));
-            }
+            certify_service_extension(
+                previous.snapshot().service_events.as_slice(),
+                next.snapshot().service_events.as_slice(),
+            )?;
         }
         self.account_db()?.join_write(|| self.write_service_log(next))
     }
@@ -143,6 +142,7 @@ impl RamfluxClient {
         let created_at = i64::try_from(event.hlc_ms / 1000).unwrap_or(state.snapshot().issued_at);
         let db = self.account_db()?;
         db.join_write(|| {
+            self.remember_service_body(&message_id, exact)?;
             if db.message_is_deleted(&message_id)? {
                 return Ok(());
             }
@@ -180,12 +180,34 @@ impl RamfluxClient {
             self.journal_generated_receive_updates(exact)
         })
     }
+
+    fn remember_service_body(&self, message_id: &str, exact: &[u8]) -> Result<(), SdkError> {
+        let hash = ramflux_crypto::blake3_256("ramflux.group-service-body.v1", exact);
+        let db = self.account_db()?;
+        if let Some(stored) = db.service_body_fence(message_id)? {
+            if stored.as_slice() != hash.as_slice() {
+                return Err(SdkError::ReplayMismatch);
+            }
+            return Ok(());
+        }
+        db.record_service_body_fence(message_id, hash.as_slice())?;
+        Ok(())
+    }
 }
 
-/// A strict shorter prefix drops an accepted change. A divergent log is a replacement.
-fn rewinds_accepted_log(old: &[GroupServiceEvent], new: &[GroupServiceEvent]) -> bool {
-    new.len() < old.len()
-        && new.iter().zip(old.iter()).all(|(next_event, old_event)| next_event == old_event)
+/// Accept `new` only when `old` is an exact prefix of it. A shorter prefix rewinds a stored change.
+fn certify_service_extension(
+    old: &[GroupServiceEvent],
+    new: &[GroupServiceEvent],
+) -> Result<(), SdkError> {
+    let prefix = old.iter().zip(new.iter()).all(|(old_event, next_event)| old_event == next_event);
+    if prefix && new.len() >= old.len() {
+        return Ok(());
+    }
+    if new.len() < old.len() && prefix {
+        return Err(invalid("group service event log rewrote an accepted change"));
+    }
+    Err(SdkError::ReplayMismatch)
 }
 
 fn body_is_service(body: &[u8]) -> bool {
@@ -782,6 +804,69 @@ mod tests {
         let mut rows: Vec<&crate::client::typed_read_model::MessageView> = rows.iter().collect();
         rows.sort_by_key(|row| (row.hlc_ms, row.hlc_logical, row.device_sequence.0));
         rows.into_iter().map(|row| row.id.clone()).collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removed_service_event_keeps_its_body_fence() -> TestResult {
+        match crate::client::native_test_support::watchdog::within(fence_body()).await {
+            Ok(result) => result,
+            Err(elapsed) => Err(elapsed.into()),
+        }
+    }
+
+    async fn fence_body() -> TestResult {
+        let scenario = prepare().await?;
+        let client = &scenario.owner.client;
+        let event = scenario
+            .renamed
+            .snapshot()
+            .service_events
+            .iter()
+            .find(|event| matches!(&event.change, GroupServiceChange::SetName { .. }))
+            .ok_or("test: rename event")?;
+        let identity = service_identity(&scenario.renamed, event)?;
+        let message_id = ramflux_protocol::encode_base64url(&identity.id);
+        let db = client.account_db()?;
+        let fence = db.service_body_fence(&message_id)?.ok_or("test: fence missing")?;
+        let pin = client.service_projection_pin(THREAD)?;
+        db.drop_replaced_service_projection(THREAD, &message_id)?;
+        assert!(
+            client.direct_messages(THREAD)?.iter().all(|row| row.message_id != message_id),
+            "test: removing the projection leaves no live row"
+        );
+        assert_eq!(db.service_body_fence(&message_id)?.as_deref(), Some(fence.as_slice()));
+        client.project_accepted_group_service(Some(&scenario.renamed), &scenario.renamed)?;
+        assert_eq!(client.service_projection_pin(THREAD)?, pin, "test: unchanged bytes replay");
+        client.project_accepted_group_service(Some(&scenario.renamed), &scenario.renamed)?;
+        assert_eq!(client.service_projection_pin(THREAD)?, pin, "test: a second replay is a no-op");
+        db.drop_replaced_service_projection(THREAD, &message_id)?;
+        let mut flipped =
+            pin.iter().find(|(id, _)| id == &message_id).ok_or("test: pinned rename")?.1.clone();
+        let first = flipped.first_mut().ok_or("test: service body")?;
+        *first ^= 0xff;
+        let mismatch =
+            client.store_group_service_row(&scenario.renamed, event, &identity, &flipped);
+        assert!(
+            matches!(mismatch, Err(SdkError::ReplayMismatch)),
+            "test: changed bytes after removal must be refused, got {mismatch:?}"
+        );
+        assert!(client.direct_messages(THREAD)?.iter().all(|row| row.message_id != message_id));
+        assert_eq!(db.service_body_fence(&message_id)?.as_deref(), Some(fence.as_slice()));
+        let rolled = db.join_write(|| {
+            db.record_service_body_fence("rollback-service-id", &fence)?;
+            Err::<(), SdkError>(SdkError::ReplayMismatch)
+        });
+        assert!(matches!(rolled, Err(SdkError::ReplayMismatch)));
+        assert!(db.service_body_fence("rollback-service-id")?.is_none());
+        assert_eq!(db.service_body_fence(&message_id)?.as_deref(), Some(fence.as_slice()));
+        let remaining: Vec<_> = client
+            .service_projection_pin(THREAD)?
+            .into_iter()
+            .filter(|(id, _)| id != &message_id)
+            .collect();
+        let expected: Vec<_> = pin.into_iter().filter(|(id, _)| id != &message_id).collect();
+        assert_eq!(remaining, expected, "test: rollback leaves the other service rows");
+        Ok(())
     }
 
     fn name_texts<'a>(

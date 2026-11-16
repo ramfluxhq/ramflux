@@ -517,6 +517,7 @@ impl AccountDb {
         if removed != 1 {
             return Err(StorageError::MessageNotFound(message_id.to_owned()));
         }
+        // The event-id body fence stays. A later rewrite of this id is still ReplayMismatch.
         let identity = format!("routed/generated-identity/{message_id}");
         self.remove_actor_state(&identity)?;
         self.connection.execute(
@@ -554,5 +555,37 @@ impl AccountDb {
             params![name],
             |row| row.get(0),
         )?)
+    }
+
+    /// Body hash recorded for a service event id, including one whose row was removed.
+    ///
+    /// # Errors
+    /// Returns a storage error when the fence table cannot be read.
+    pub fn service_body_fence(&self, message_id: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT body_hash FROM group_service_body_fence WHERE message_id=?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record the first body hash for a service event id. A stored hash is never replaced.
+    ///
+    /// # Errors
+    /// Returns a storage error when the fence row cannot be inserted.
+    pub fn record_service_body_fence(
+        &self,
+        message_id: &str,
+        body_hash: &[u8],
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO group_service_body_fence(message_id, body_hash) VALUES(?1, ?2)
+             ON CONFLICT(message_id) DO NOTHING",
+            params![message_id, body_hash],
+        )?;
+        Ok(())
     }
 }
