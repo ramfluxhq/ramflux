@@ -2,6 +2,12 @@ node_id = "localhost"
 service_id = "ramflux-router"
 redb_path = "/var/lib/ramflux/router/router.redb"
 
+# Echoed by GET /mvp1/session-push-capabilities. Federation publishes this same list.
+gateway_client_capabilities = [
+  "gateway.session_push.v1",
+  "gateway.ephemeral.v1",
+]
+
 [mesh]
 listen_addr = "0.0.0.0:7443"
 ca_cert = "/etc/ramflux/mesh/ca.pem"

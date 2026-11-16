@@ -105,6 +105,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             home_node_forward,
             config.node_id.clone(),
         ));
+        if let Some(configured) = config.gateway_client_capabilities.as_deref() {
+            router.install_gateway_client_capabilities(configured);
+        }
         router.enable_custody(&config)?;
         custody_listener::start(&config, Arc::clone(&router))?;
         retention::start(Arc::clone(&router));
