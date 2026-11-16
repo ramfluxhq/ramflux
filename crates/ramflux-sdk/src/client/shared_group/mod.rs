@@ -5,7 +5,7 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{
-    VerifiedGroupState, advance_native_group_state, certify_native_group_state_actor,
+    VerifiedGroupState, advance_native_group_state_with_order, certify_native_group_state_actor,
     create_native_group_state,
 };
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
@@ -29,6 +29,7 @@ mod message_ids;
 mod own_consent;
 mod requests;
 mod routes;
+mod service_row;
 mod transfer;
 mod transfer_outcome;
 mod transfer_wire;
@@ -149,20 +150,26 @@ impl RamfluxClient {
         self.check_group_transfer_lease(group, nonce)?;
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let state = advance_native_group_state(
-            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-            branch,
-            &actor,
-            &previous,
-            change.clone(),
-        )?;
-        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            self.account_db()?.commit_shared_group_state(&state, &actor)?;
-            self.observe_native_task_roster(&state)?;
-            self.record_group_write(&state, change)?;
-            self.finish_group_transfer_head_change(&state)?;
-            crate::bus::enqueue_shared_group(self, &state, Some(&previous))
-        })?;
+        let primary = primary.ok_or(SdkError::CustodyVaultUnavailable)?;
+        let state =
+            self.account_db()?.write_transaction(|| -> Result<VerifiedGroupState, SdkError> {
+                let order = self.service_order_for_change(&previous, &change, &actor)?;
+                let state = advance_native_group_state_with_order(
+                    primary,
+                    branch,
+                    &actor,
+                    &previous,
+                    change.clone(),
+                    order,
+                )?;
+                self.account_db()?.commit_shared_group_state(&state, &actor)?;
+                self.observe_native_task_roster(&state)?;
+                self.record_group_write(&state, change)?;
+                self.finish_group_transfer_head_change(&state)?;
+                self.project_accepted_group_service(&previous, &state)?;
+                crate::bus::enqueue_shared_group(self, &state, Some(&previous))?;
+                Ok(state)
+            })?;
         Ok(state)
     }
     pub(crate) fn accept_shared_group_state(
@@ -216,6 +223,9 @@ impl RamfluxClient {
                     &federation,
                 )?;
             }
+        }
+        if changed && let Some(previous_state) = previous {
+            self.project_accepted_group_service(previous_state, reconciled)?;
         }
         if reconciled.snapshot().state_hash != received.snapshot().state_hash {
             crate::bus::enqueue_shared_group(self, reconciled, previous)?;

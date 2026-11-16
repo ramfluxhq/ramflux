@@ -6,7 +6,7 @@ use super::{
     GroupStateChange, RamfluxClient, SdkError, VerifiedGroupState, json, now_unix_timestamp,
 };
 use ramflux_crypto::custody::SelfSigningKey;
-use ramflux_crypto::{GroupStateRelation, advance_native_group_state};
+use ramflux_crypto::{GroupStateRelation, advance_native_group_state_with_order};
 use ramflux_protocol::group_state::GroupStateSnapshot;
 use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize)]
@@ -255,7 +255,8 @@ impl RamfluxClient {
     ) -> Result<VerifiedGroupState, SdkError> {
         let primary = primary.ok_or(SdkError::CustodyVaultUnavailable)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        Ok(advance_native_group_state(primary, branch, actor, state, change)?)
+        let order = self.service_order_for_change(state, &change, actor)?;
+        Ok(advance_native_group_state_with_order(primary, branch, actor, state, change, order)?)
     }
     /// Hold an incoming creator fork whose repair has to be signed once the primary is available.
     fn record_creator_repair(

@@ -150,9 +150,10 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     }
     assert_eq!(count, 2, "owner must receive both key distribution and application payload");
     let rows = owner.client.direct_messages("group-thread")?;
-    assert_eq!(rows.len(), 1, "first group message must be present exactly once");
-    let row = &rows[0];
-    assert_eq!(row.message_id, canonical);
+    let applications: Vec<_> = rows.iter().filter(|row| row.message_id == canonical).collect();
+    assert_eq!(applications.len(), 1, "first group message must be present exactly once");
+    let row = *applications.first().expect("test: first group message");
+    assert_member_add_is_one_service_row(&owner.client)?;
     assert_ne!(canonical, logical, "caller tokens cannot reserve canonical message ids");
     if collision {
         assert_eq!(
@@ -176,6 +177,21 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     directory.abort();
     drop((owner, sibling, peer));
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn assert_member_add_is_one_service_row(client: &RamfluxClient) -> TestResult {
+    let page = client.generated_message_view_page("group-thread", None, 100)?;
+    assert_eq!(
+        page.messages.iter().filter(|view| view.kind == "service").count(),
+        1,
+        "the member add is one service row beside the message"
+    );
+    assert_eq!(
+        page.messages.iter().filter(|view| view.kind == "message").count(),
+        1,
+        "the service row is not a second application message"
+    );
     Ok(())
 }
 

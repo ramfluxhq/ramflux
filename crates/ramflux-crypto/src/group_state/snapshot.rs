@@ -3,13 +3,13 @@
 
 //! Full snapshots jump across arbitrary lag while preserving creator-root transfer authority.
 use super::{
-    CryptoError, DeviceBranch, GROUP_STATE_SNAPSHOT_DOMAIN, GroupCreatorTransfer, GroupStateActor,
-    GroupStateChange, GroupStateGenesis, GroupStateLimit, GroupStateSnapshot, IdentityRoot,
-    MAX_GROUP_CREATOR_TRANSFERS, MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT,
-    MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_EXCLUSIONS, SharedGroupRole, Signer, Value,
-    VerifiedGroupState, branch_matches, canonical_json_bytes, encode_base64url, identity_valid,
-    invalid, json, root_matches, transition, transport_body, verify_group_state_actor,
-    verify_group_state_actor_at, verify_group_state_snapshot,
+    CryptoError, DeviceBranch, GROUP_STATE_SNAPSHOT_DOMAIN, GroupCreatorTransfer,
+    GroupServiceOrder, GroupStateActor, GroupStateChange, GroupStateGenesis, GroupStateLimit,
+    GroupStateSnapshot, IdentityRoot, MAX_GROUP_CREATOR_TRANSFERS, MAX_GROUP_DEVICES,
+    MAX_GROUP_DEVICES_PER_ROOT, MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_EXCLUSIONS, SharedGroupRole,
+    Signer, Value, VerifiedGroupState, branch_matches, canonical_json_bytes, encode_base64url,
+    identity_valid, invalid, json, root_matches, transition, transport_body,
+    verify_group_state_actor, verify_group_state_actor_at, verify_group_state_snapshot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 const GENESIS_DOMAIN: &str = "ramflux.group_state.genesis.v2";
@@ -55,7 +55,8 @@ fn core_body(snapshot: &GroupStateSnapshot) -> Value {
     state.head_hash.clear();
     json!({"domain": GROUP_STATE_SNAPSHOT_DOMAIN,"genesis":snapshot.genesis,"creator":snapshot.creator,
         "transfers":snapshot.transfers,"group_id":snapshot.group_id,"epoch":snapshot.epoch,
-        "previous_hash":snapshot.previous_hash,"state":state,"issued_at":snapshot.issued_at})
+        "previous_hash":snapshot.previous_hash,"state":state,"issued_at":snapshot.issued_at,
+        "service_order":snapshot.service_order})
 }
 fn root_body(snapshot: &GroupStateSnapshot) -> Value {
     json!({"domain":ramflux_protocol::group_state::GROUP_STATE_CREATOR_SIGNATURE_DOMAIN,"content":core_body(snapshot),"state_hash":snapshot.state_hash})
@@ -111,6 +112,7 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
     {
         return Err(invalid("invalid creator snapshot header"));
     }
+    snapshot.service_order.check().map_err(|_| invalid("group service order"))?;
     if let Some(previous) = &snapshot.previous_hash {
         hash_valid(previous)?;
     }
@@ -296,6 +298,8 @@ fn create_with_signer(
         transfers: Vec::new(),
         state,
         issued_at: input.now,
+        service_order: GroupServiceOrder::from_clock(1, input.now)
+            .map_err(|_| invalid("group service order"))?,
         root_signature: String::new(),
         issuer: actor.clone(),
         signature: String::new(),
@@ -351,7 +355,13 @@ pub fn advance_group_state(
             .as_secs(),
     )
     .map_err(|_| invalid("group clock"))?;
-    advance_as(root, branch, actor, previous, Apply { requester: actor, change, now })
+    advance_as(
+        root,
+        branch,
+        actor,
+        previous,
+        Apply::clock(actor, change, now, previous.snapshot().epoch)?,
+    )
 }
 /// Advance creator state under born-v3 primary authority.
 ///
@@ -376,13 +386,58 @@ pub fn advance_native_group_state(
         branch,
         actor,
         previous,
-        Apply { requester: actor, change, now },
+        Apply::clock(actor, change, now, previous.snapshot().epoch)?,
+    )
+}
+
+/// Advance creator state and stamp the message-timeline order the caller allocated.
+///
+/// # Errors
+/// Rejects stale state, unauthorized changes, invalid custody authority, or state limits.
+pub fn advance_native_group_state_with_order(
+    primary: &crate::custody::SelfSigningKey,
+    branch: &DeviceBranch,
+    actor: &GroupStateActor,
+    previous: &VerifiedGroupState,
+    change: GroupStateChange,
+    service_order: GroupServiceOrder,
+) -> Result<VerifiedGroupState, CryptoError> {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| invalid("group clock"))?
+            .as_secs(),
+    )
+    .map_err(|_| invalid("group clock"))?;
+    advance_as_with_signer(
+        CreatorSigner::Native(primary),
+        branch,
+        actor,
+        previous,
+        Apply { requester: actor, change, now, service_order },
     )
 }
 pub(super) struct Apply<'a> {
     pub requester: &'a GroupStateActor,
     pub change: GroupStateChange,
     pub now: i64,
+    pub service_order: GroupServiceOrder,
+}
+impl<'a> Apply<'a> {
+    pub(super) fn clock(
+        requester: &'a GroupStateActor,
+        change: GroupStateChange,
+        now: i64,
+        previous_epoch: u64,
+    ) -> Result<Self, CryptoError> {
+        Ok(Self {
+            requester,
+            change,
+            now,
+            service_order: GroupServiceOrder::from_clock(previous_epoch.saturating_add(1), now)
+                .map_err(|_| invalid("group service order"))?,
+        })
+    }
 }
 pub(super) fn advance_as(
     root: &IdentityRoot,
@@ -400,7 +455,7 @@ fn advance_as_with_signer(
     previous: &VerifiedGroupState,
     input: Apply<'_>,
 ) -> Result<VerifiedGroupState, CryptoError> {
-    let Apply { requester, change, now } = input;
+    let Apply { requester, change, now, service_order } = input;
     branch_matches(branch, actor)?;
     signer.matches(actor)?;
     if actor.identity.root_commitment != previous.creator().identity.root_commitment {
@@ -415,6 +470,7 @@ fn advance_as_with_signer(
     snapshot.previous_hash = Some(snapshot.state_hash.clone());
     snapshot.epoch = epoch;
     snapshot.issued_at = now;
+    snapshot.service_order = service_order;
     // A still-member root must never silently regain an excluded sibling.
     // Only departed-root exclusions can age out with their delivery boundary.
     snapshot.state.excluded.retain(|entry| {
