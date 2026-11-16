@@ -775,12 +775,12 @@ mod publication_state_tests {
         assert!(matches!(
             publication_unavailable(SdkError::Io(broken)),
             SdkError::PairingCode("PublicationPending")
-        ));
+        ), "a lost publication connection must classify as the typed retryable PublicationPending");
         assert!(matches!(
             publication_unavailable(SdkError::CustodyNetwork(
                 ramflux_protocol::custody::CustodyRefusal::BindingRefused
             )),
             SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::BindingRefused)
-        ));
+        ), "a typed custody refusal must be preserved, not rewritten to PublicationPending");
     }
 }
