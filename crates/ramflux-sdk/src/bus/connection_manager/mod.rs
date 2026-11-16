@@ -191,6 +191,7 @@ fn new_shared(
             "group-delivery",
             "call-signaling",
             "own-contact-backfill",
+            "layer-publish",
         ]
         .into_iter()
         .map(|name| (name, Arc::new(Notify::new())))

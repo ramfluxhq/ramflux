@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS pairing_head (
  operation_id TEXT NOT NULL CHECK(typeof(operation_id)='text' AND length(operation_id)=43),
  invitation_id TEXT CHECK(invitation_id IS NULL OR (typeof(invitation_id)='text' AND length(invitation_id)=43)),
  generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=1 AND generation<=9007199254740991),
- kind TEXT NOT NULL CHECK(kind IN ('enroll','transfer','revoke','head_update')),
+ kind TEXT NOT NULL CHECK(kind IN ('enroll','transfer','revoke','head_update','layer_update')),
  base_record_hash TEXT NOT NULL CHECK(typeof(base_record_hash)='text' AND length(base_record_hash)=43),
  base_epoch INTEGER NOT NULL CHECK(typeof(base_epoch)='integer' AND base_epoch>=0 AND base_epoch<=9007199254740991),
  publisher_ref BLOB NOT NULL CHECK(typeof(publisher_ref)='blob' AND length(publisher_ref)>0 AND length(publisher_ref)<=4096),
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS pairing_head (
  UNIQUE(account_id, operation_id),
  CHECK((kind IN ('enroll','transfer') AND recipient_ref IS NOT NULL AND revoked_ref IS NULL AND invitation_id IS NOT NULL)
     OR (kind='revoke' AND recipient_ref IS NULL AND revoked_ref IS NOT NULL AND invitation_id IS NULL)
-    OR (kind='head_update' AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)),
+    OR (kind IN ('head_update','layer_update') AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)),
  CHECK((state='acknowledged' AND ack IS NOT NULL) OR (state<>'acknowledged' AND ack IS NULL))
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pairing_terminal (

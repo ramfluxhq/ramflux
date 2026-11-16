@@ -143,21 +143,22 @@ impl RamfluxClient {
         }
         let required_layer = Self::required_content_layer(content)?;
         if required_layer > g::registry::PROFILE_FLOOR {
-            let plan = if let Some(group) = group {
-                Self::candidate_target_plan(|| {
+            if let Some(group) = group {
+                let plan = Self::candidate_target_plan(|| {
                     self.group_selection_request(
                         group,
                         &message.sender_id,
                         &message.message_id,
                         g::KindId::KindMessage,
                     )
-                })?
+                })?;
+                super::target_selection::require_layer(plan, required_layer)?;
             } else {
-                Self::candidate_target_plan(|| {
+                let plan = Self::candidate_target_plan(|| {
                     self.dm_selection_request(message, g::KindId::KindMessage)
-                })?
-            };
-            super::target_selection::require_layer(plan, required_layer)?;
+                })?;
+                self.require_dm_layer(message, plan, required_layer)?;
+            }
         }
         Ok((own, own_only, required_layer))
     }

@@ -153,6 +153,16 @@ fn sign_layers(
     layers: &[(&str, &ramflux_crypto::DeviceBranch, u64, u64)],
     issued: u64,
 ) -> TestResult {
+    sign_layers_at(fixture, native, layers, issued, MESSAGE_LAYER_FLOOR)
+}
+
+fn sign_layers_at(
+    fixture: &Fixture,
+    native: &mut CustodyManifest,
+    layers: &[(&str, &ramflux_crypto::DeviceBranch, u64, u64)],
+    issued: u64,
+    max_layer: u32,
+) -> TestResult {
     let primary = primary_key(fixture)?;
     let mut body = native.publication.record.body.clone();
     body.previous_record_hash =
@@ -171,7 +181,7 @@ fn sign_layers(
                 device_id: (*device_id).into(),
                 device_epoch: device.device_epoch,
             },
-            MESSAGE_LAYER_FLOOR,
+            max_layer,
             1,
             *layer_issued,
             *layer_expires,
@@ -926,5 +936,123 @@ fn group_logical_event_id_is_message_id_not_group_id() -> TestResult {
     let generated = group_logical_event_id("g1", None)?;
     assert_ne!(generated, "g1");
     assert_ne!(generated, "");
+    Ok(())
+}
+
+/// Primary declares layer 4; the enrolled secondary has never published a declaration.
+fn layer4_roster(
+    fixture: &Fixture,
+    secondary: Option<&str>,
+    issued: u64,
+) -> TestResult<SdkDeviceManifestResponse> {
+    let mut native = native_of(&fixture.manifest)?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let account = load_account(&fixture.root.0, &id, issued)?;
+    let (_, primary_branch) =
+        account.credentials(fixture.vault.as_ref(), &fixture.config.device_id, issued)?;
+    if let Some(secondary) = secondary {
+        enroll_sibling(fixture, &mut native, secondary, issued)?;
+    }
+    let primary_id = fixture.config.device_id.clone();
+    sign_layers_at(
+        fixture,
+        &mut native,
+        &[(primary_id.as_str(), &primary_branch.signing, issued, issued + 3_600)],
+        issued,
+        COMPILED_LAYER,
+    )?;
+    Ok(SdkDeviceManifestResponse::from_native(native)?)
+}
+
+fn assert_layer_refusal(result: Result<(), SdkError>, required: u32) -> TestResult {
+    match result {
+        Err(SdkError::LocalBusRefused { code, body, .. }) if code == "PeerUpgradeRequired" => {
+            assert_eq!(body["required_layer"], required, "refusal must name the required layer");
+            assert_eq!(body["retry_after_ms"], RETRY_AFTER_MS, "refusal carries the fixed hint");
+            Ok(())
+        }
+        other => Err(format!("expected a layer refusal, got {other:?}").into()),
+    }
+}
+
+/// MEDIA-LAYER-DECL-01 section 1: the sender's own declaration is not a send gate, and a
+/// device without a layer-4 declaration (a secondary until LAYER-SECONDARY-01) is not a layer-4
+/// receive target in any scope.
+#[tokio::test]
+async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResult {
+    let owner = Fixture::with_device("m4-owner", "owner").await?;
+    let sender = Fixture::with_device("m4-sender", "sender").await?;
+    let member = Fixture::with_device("m4-member", "member").await?;
+    let undeclared = Fixture::with_device("m4-undeclared", "undeclared").await?;
+    let issued = wall_now()? + 1;
+    let owner_m = layer4_roster(&owner, Some("phone"), issued)?;
+    let owner_primary_only = layer4_roster(&owner, None, issued)?;
+    let member_m = layer4_roster(&member, None, issued)?;
+    persist_declared(&sender, &owner_primary_only)?;
+    persist_declared(&sender, &member_m)?;
+    persist_declared(&sender, &undeclared.manifest)?;
+    let _clock = FixedClock::set(i64::try_from(issued + 20)?);
+
+    // Own-copy fan-out: the secondary is isolated at the floor, so layer-4 content is refused.
+    let own_plan = plan_of(&RamfluxClient::own_copy_selection_request(
+        "own-media",
+        &owner.config.device_id,
+        &owner_m,
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(representation(&own_plan, "phone")?.selected_layer, PROFILE_FLOOR);
+    assert_layer_refusal(require_layer(Some(own_plan), COMPILED_LAYER), COMPILED_LAYER)?;
+
+    // DM scope toward the undeclared secondary device: floor only, refused.
+    let mut to_phone = RamfluxClient::own_copy_selection_request(
+        "dm-phone",
+        "sender",
+        &owner_m,
+        KindId::KindMessage,
+    )?;
+    to_phone.scope = FanoutScope::Dm;
+    to_phone.targets.retain(|target| target.device_id() == "phone");
+    let phone_plan = plan_of(&to_phone)?;
+    assert_eq!(representation(&phone_plan, "phone")?.selected_layer, PROFILE_FLOOR);
+    assert_layer_refusal(require_layer(Some(phone_plan), COMPILED_LAYER), COMPILED_LAYER)?;
+
+    // DM to the declared primary: allowed although the SENDER has no declaration at all
+    // (source cap is the compiled layer when its own declaration is absent).
+    let to_primary = dm_message(&sender, &owner, "dm-primary");
+    let primary_plan =
+        plan_of(&sender.client.dm_selection_request(&to_primary, KindId::KindMessage)?)?;
+    assert_eq!(primary_plan.fresh_cohort_layer, Some(COMPILED_LAYER));
+    sender.client.require_dm_layer(&to_primary, Some(primary_plan), COMPILED_LAYER)?;
+
+    // The undeclared secondary may itself send layer 4 to a fresh target.
+    let from_phone = plan_of(&RamfluxClient::own_copy_selection_request(
+        "own-from-phone",
+        "phone",
+        &owner_m,
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(
+        representation(&from_phone, &owner.config.device_id)?.selected_layer,
+        COMPILED_LAYER
+    );
+    require_layer(Some(from_phone), COMPILED_LAYER)?;
+
+    // Group scope: one undeclared member device refuses layer-4 content for the whole send.
+    let sender_m = sender.manifest.clone();
+    shared_group(
+        &sender,
+        &sender_m,
+        &[(&member, &member_m), (&undeclared, &undeclared.manifest)],
+        "g-media",
+    )?;
+    let group = plan_of(&sender.client.group_selection_request(
+        "g-media",
+        "sender",
+        "group-media",
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(representation(&group, "member")?.selected_layer, COMPILED_LAYER);
+    assert_eq!(representation(&group, "undeclared")?.selected_layer, PROFILE_FLOOR);
+    assert_layer_refusal(require_layer(Some(group), COMPILED_LAYER), COMPILED_LAYER)?;
     Ok(())
 }

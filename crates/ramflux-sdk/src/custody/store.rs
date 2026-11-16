@@ -249,6 +249,7 @@ impl BornAccount {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn require_unfenced_primary_snapshot(&self) -> Result<std::fs::File, SdkError> {
         self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
@@ -263,11 +264,48 @@ impl BornAccount {
         Ok(lock)
     }
     /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
-    /// The caller may publish the returned candidate only through an explicit later action.
+    /// The caller holds the primary signing barrier through `lease`; no second lock is taken, so
+    /// the same lease may stay held through the prepared-journal commit that follows.
     /// # Errors
     /// Rejects a mismatched primary/branch credential, invalid validity bounds, exhausted native
     /// revision, or any candidate that fails native authority verification.
-    pub fn candidate_message_layer_publication(
+    pub(crate) fn candidate_message_layer_publication_leased(
+        &self,
+        root: &Path,
+        lease: &super::PrimarySigningLease,
+        branch: &super::BranchCredentials,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        self.require_current_snapshot()?;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        self.candidate_message_layer_publication_with(
+            root,
+            branch,
+            lease,
+            ramflux_protocol::custody::MAX_MESSAGE_LAYER,
+            validity,
+        )
+    }
+
+    /// Fixture entry that takes the signing barrier itself. Product code uses the leased builder.
+    /// # Errors
+    /// As [`Self::candidate_message_layer_publication_leased`].
+    #[cfg(test)]
+    pub(crate) fn candidate_message_layer_publication(
+        &self,
+        root: &Path,
+        branch: &super::BranchCredentials,
+        primary: &ramflux_crypto::custody::SelfSigningKey,
+        max_layer: u32,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        let _signing = self.require_unfenced_primary_snapshot()?;
+        self.candidate_message_layer_publication_with(root, branch, primary, max_layer, validity)
+    }
+
+    fn candidate_message_layer_publication_with(
         &self,
         root: &Path,
         branch: &super::BranchCredentials,
@@ -276,7 +314,6 @@ impl BornAccount {
         validity: super::DeclarationValidity,
     ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
         use ramflux_protocol::custody::{decode_epoch, encode_epoch};
-        let _signing = self.require_unfenced_primary_snapshot()?;
         let now = validity.issued_at;
         let expires_at = validity.expires_at;
         require_current_authority(&self.stored.pins, &self.verified)?;

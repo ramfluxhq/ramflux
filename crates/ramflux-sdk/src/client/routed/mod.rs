@@ -531,7 +531,8 @@ impl RamfluxClient {
                 i32::try_from(inner.kind).map_err(|_| invalid("invalid generated kind"))?,
             )
             .map_err(|_| invalid("unsupported generated kind"))?;
-            crate::client::target_selection::require_layer(
+            self.require_dm_layer(
+                message,
                 Self::candidate_target_plan(|| self.dm_selection_request(message, kind))?,
                 inner.layer,
             )?;

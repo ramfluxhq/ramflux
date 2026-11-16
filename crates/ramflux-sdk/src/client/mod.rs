@@ -17,6 +17,7 @@ pub(crate) mod contact_verification_cas;
 pub mod conversation;
 pub(crate) mod conversation_projection;
 mod deferred_attachment;
+pub(crate) mod manifest_demand;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
 pub(crate) mod application_outbox;
 mod authored_delete;
@@ -104,6 +105,7 @@ pub struct RamfluxClient {
     pub(crate) self_sync_restore_clock:
         std::cell::RefCell<Option<self_sync::restore::RefreshClock>>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
+    pub(crate) manifest_demand: manifest_demand::ManifestDemand,
     pub(crate) verified_authority_cache:
         std::cell::RefCell<identity_authority::VerifiedAuthorityCache>,
     pub(crate) verified_durable_authority: std::cell::RefCell<crate::custody::PublicAuthorityCache>,
@@ -144,6 +146,7 @@ impl Default for RamfluxClient {
             self_sync_live_generation: std::cell::Cell::new(None),
             self_sync_restore_clock: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
+            manifest_demand: manifest_demand::ManifestDemand::default(),
             verified_authority_cache: std::cell::RefCell::default(),
             verified_durable_authority: std::cell::RefCell::default(),
             born_v3_account: None,

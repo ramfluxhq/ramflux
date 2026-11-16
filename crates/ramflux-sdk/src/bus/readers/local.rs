@@ -193,6 +193,8 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             now,
         )?;
         status["networking"] = serde_json::to_value(native.state())?;
+        status["layer_declaration"] =
+            crate::bus::couriers::layer_publish::status_view(&native, now);
         let reason = native.networking_view(now);
         status["networking_reason"] = serde_json::to_value(&reason)?;
         status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");

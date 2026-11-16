@@ -35,6 +35,12 @@ pub(super) fn start(
         });
         register_courier(handle, &work, "surface-resync", crate::bus::couriers::surface::pass);
         register_courier(handle, &work, "pair-reset", crate::bus::couriers::reset::pass);
+        register_courier(
+            handle,
+            &work,
+            crate::bus::couriers::layer_publish::COURIER,
+            crate::bus::couriers::layer_publish::pass,
+        );
         register_private_history_couriers(handle, &work);
         register_courier(
             handle,

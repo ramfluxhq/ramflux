@@ -26,6 +26,8 @@ pub enum HeadKind {
     Enroll,
     Profile,
     Revoke,
+    /// The primary's own message-layer declaration, endorsed by a new native head.
+    Layer(crate::custody::DeclarationValidity),
 }
 
 /// Request for one fenced primary head write.
@@ -178,6 +180,19 @@ pub(crate) fn prepare_head_submission_in(
     prepare_submission(db, root, vault, write)
 }
 
+/// Test seam: stop after the `prepared` row is durable, as a crash before the submitted commit.
+#[cfg(test)]
+pub(crate) fn stage_prepared_head(
+    db: &AccountDb,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<HeadRow, SdkError> {
+    with_pending_head_fence(db, &write.account_id, &write.operation_id, || {
+        prepare_candidate(db, root, vault, write)
+    })
+}
+
 fn prepare_submission(
     db: &impl Journal,
     root: &Path,
@@ -282,6 +297,20 @@ fn prepare_candidate(
                     write.revoked_id.as_deref().ok_or(SdkError::PairingField("revoked_ref"))?,
                     write.now,
                 )?,
+                HeadKind::Layer(validity) => {
+                    if validity.issued_at != write.now {
+                        return Err(SdkError::PairingField("issued_at"));
+                    }
+                    // `primary` is the one signing lease: it stays held until the prepared row
+                    // below is committed, and the builder never takes a second lock.
+                    let (_, branch) =
+                        account.credentials(vault, &write.local_ref.device_id, write.now)?;
+                    account
+                        .candidate_message_layer_publication_leased(
+                            root, &primary, &branch, validity,
+                        )?
+                        .record
+                }
             };
             let head = prepared_head_row(&account, write, &record)?;
             journal(db, |db| {
@@ -561,6 +590,7 @@ fn kind_label(kind: HeadKind) -> &'static str {
         HeadKind::Enroll => "enroll",
         HeadKind::Profile => "head_update",
         HeadKind::Revoke => "revoke",
+        HeadKind::Layer(_) => "layer_update",
     }
 }
 
