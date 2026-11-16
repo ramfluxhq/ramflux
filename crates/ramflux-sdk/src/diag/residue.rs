@@ -6,7 +6,9 @@
 use super::files::{self, ScanRoot};
 use crate::RamfluxClient;
 use crate::SdkError;
-use ramflux_storage::{AccountDb, ResidueScan, ResidueTable};
+use ramflux_storage::{
+    AccountDb, ResidueScan, ResidueScanStatus, ResidueTable, ResidueTableStatus,
+};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -98,6 +100,7 @@ fn report_json(account: &str, scan: &ResidueScan, files: &files::FileScan) -> Va
     let file_rows = files.records.iter().map(file_json).collect::<Vec<_>>();
     serde_json::json!({
         "account": account,
+        "status": publish_status(scan, files),
         "hits": scan.hits.saturating_add(files.hits),
         "truncated": scan.truncated || files.truncated,
         "tables": tables,
@@ -105,7 +108,30 @@ fn report_json(account: &str, scan: &ResidueScan, files: &files::FileScan) -> Va
     })
 }
 
+fn publish_status(scan: &ResidueScan, files: &files::FileScan) -> &'static str {
+    let mut status = scan.status;
+    if files.truncated {
+        status = status.merge(ResidueScanStatus::Truncated);
+    }
+    if files.hits > 0 {
+        status = status.merge(ResidueScanStatus::Residue);
+    }
+    status.as_str()
+}
+
 fn table_json(table: &ResidueTable) -> Value {
+    let ResidueTableStatus::Scanned = table.status else {
+        return serde_json::json!({
+            "name": table.name,
+            "status": ResidueTableStatus::Unscannable.as_str(),
+        });
+    };
+    let Some(hits) = table.hits else {
+        return serde_json::json!({
+            "name": table.name,
+            "status": ResidueTableStatus::Unscannable.as_str(),
+        });
+    };
     let locations = table.locations.iter().map(|hit| {
         let mut location = Map::new();
         if let Some(rowid) = hit.rowid {
@@ -116,7 +142,8 @@ fn table_json(table: &ResidueTable) -> Value {
     });
     serde_json::json!({
         "name": table.name,
-        "hits": table.hits,
+        "status": ResidueTableStatus::Scanned.as_str(),
+        "hits": hits,
         "truncated": table.truncated,
         "locations": locations.collect::<Vec<_>>(),
     })
@@ -142,7 +169,8 @@ fn file_json(record: &files::FileRecord) -> Value {
 mod tests {
     use super::*;
     use ramflux_storage::{
-        AccountDb, AccountDbKey, AccountIndex, DirectMessageWrite, MessageMetadata,
+        AccountDb, AccountDbKey, AccountIndex, DirectMessageWrite, MessageMetadata, ResidueScan,
+        ResidueScanStatus, ResidueTable, ResidueTableStatus,
     };
     use std::time::Duration;
 
@@ -239,6 +267,7 @@ mod tests {
         assert_eq!(marker, vec![0; MARKER.len()], "the marker buffer is wiped");
         let rendered = report.to_string();
         assert!(!rendered.contains("b11canarymarker"), "the report must not contain the marker");
+        assert_ne!(report["status"], "clean", "a located marker is not a clean scan");
         let tables = report["tables"].as_array().expect("test: tables");
         assert!(
             tables.iter().any(|table| {
@@ -287,5 +316,27 @@ mod tests {
         };
         let oversized = diagnose_plaintext_residue(&client, &mut oversized_diagnostic);
         assert!(oversized.is_err(), "a file over 16 MiB must not look like a clean scan");
+    }
+
+    #[test]
+    fn unscannable_table_json_omits_the_hit_count() {
+        let scan = ResidueScan {
+            tables: vec![ResidueTable {
+                name: "residue_probe".into(),
+                status: ResidueTableStatus::Unscannable,
+                hits: None,
+                truncated: false,
+                locations: Vec::new(),
+            }],
+            hits: 0,
+            status: ResidueScanStatus::Unscannable,
+            truncated: false,
+        };
+        let files = super::files::FileScan { records: Vec::new(), hits: 3, truncated: true };
+        let report = super::report_json("acct", &scan, &files);
+        assert_eq!(report["status"], "unscannable");
+        let table = report["tables"][0].to_string();
+        assert!(table.contains("\"status\":\"unscannable\""));
+        assert!(!table.contains("hits"), "an unscannable table must not report a hit count");
     }
 }

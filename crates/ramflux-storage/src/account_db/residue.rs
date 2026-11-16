@@ -24,11 +24,73 @@ pub struct ResidueHit {
     pub column: String,
 }
 
-/// Every user table the scan opened, including tables with no hits.
+/// Whether a table was read, or its query failed closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidueTableStatus {
+    /// The table was queried. `hits` is `Some`.
+    Scanned,
+    /// A virtual table could not be queried. This is not a zero-hit result.
+    Unscannable,
+}
+
+impl ResidueTableStatus {
+    /// The JSON token for this table status.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scanned => "scanned",
+            Self::Unscannable => "unscannable",
+        }
+    }
+}
+
+/// Whether the scan can be treated as a complete absence proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidueScanStatus {
+    /// Every table was read, nothing matched, and the result is not truncated.
+    Clean,
+    /// Every required table was read and at least one needle matched.
+    Residue,
+    /// A read stopped at its hit or row cap.
+    Truncated,
+    /// At least one virtual table could not be queried.
+    Unscannable,
+}
+
+impl ResidueScanStatus {
+    /// The JSON token for this status.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Residue => "residue",
+            Self::Truncated => "truncated",
+            Self::Unscannable => "unscannable",
+        }
+    }
+
+    /// Keeps the stronger reason a scan is not a clean absence proof.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        use ResidueScanStatus::{Clean, Residue, Truncated, Unscannable};
+        match (self, other) {
+            (Unscannable, _) | (_, Unscannable) => Unscannable,
+            (Truncated, _) | (_, Truncated) => Truncated,
+            (Residue, _) | (_, Residue) => Residue,
+            (Clean, Clean) => Clean,
+        }
+    }
+}
+
+/// Every user table the scan considered, including tables with no hits.
+///
+/// A [`ResidueTableStatus::Unscannable`] table has `hits: None`. It must not
+/// be reported as zero hits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResidueTable {
     pub name: String,
-    pub hits: u64,
+    pub status: ResidueTableStatus,
+    pub hits: Option<u64>,
     pub truncated: bool,
     pub locations: Vec<ResidueHit>,
 }
@@ -38,6 +100,7 @@ pub struct ResidueTable {
 pub struct ResidueScan {
     pub tables: Vec<ResidueTable>,
     pub hits: u64,
+    pub status: ResidueScanStatus,
     pub truncated: bool,
 }
 
@@ -83,8 +146,9 @@ impl AccountDb {
     /// Scans every account table through a new query-only connection.
     ///
     /// The caller must already hold the unlocked database. Blob and FTS shadow
-    /// tables are included. Virtual tables that cannot be read are still listed
-    /// after their content and shadow tables are scanned.
+    /// tables are included. A virtual table whose query fails is
+    /// [`ResidueTableStatus::Unscannable`] and the scan status is not
+    /// [`ResidueScanStatus::Clean`].
     ///
     /// # Errors
     /// Returns an error when the marker, a table name, the deadline, or a
@@ -104,16 +168,30 @@ impl AccountDb {
         let mut report = Vec::with_capacity(tables.len());
         let mut hits = 0u64;
         let mut truncated = false;
+        let mut status = ResidueScanStatus::Clean;
         for table in tables {
             if Instant::now() >= deadline {
                 return Err(StorageError::Integrity("residue scan exceeded its deadline"));
             }
             let scanned = scan_table(&reader, &table, &needles.0)?;
-            hits = hits.saturating_add(scanned.hits);
-            truncated |= scanned.truncated;
+            match (scanned.status, scanned.hits) {
+                (ResidueTableStatus::Unscannable, _) | (ResidueTableStatus::Scanned, None) => {
+                    status = status.merge(ResidueScanStatus::Unscannable);
+                }
+                (ResidueTableStatus::Scanned, Some(table_hits)) => {
+                    hits = hits.saturating_add(table_hits);
+                    if table_hits > 0 {
+                        status = status.merge(ResidueScanStatus::Residue);
+                    }
+                    if scanned.truncated {
+                        truncated = true;
+                        status = status.merge(ResidueScanStatus::Truncated);
+                    }
+                }
+            }
             report.push(scanned);
         }
-        Ok(ResidueScan { tables: report, hits, truncated })
+        Ok(ResidueScan { tables: report, hits, status, truncated })
     }
 }
 
@@ -161,24 +239,30 @@ fn scan_table(
     table: &ListedTable,
     needles: &[Vec<u8>],
 ) -> Result<ResidueTable, StorageError> {
-    let columns = columns(reader, &table.name)?;
+    let columns = match columns(reader, &table.name) {
+        Ok(columns) => columns,
+        Err(_) if table.virtual_table => return Ok(unscannable_table(&table.name)),
+        Err(error) => return Err(error),
+    };
     if columns.is_empty() || needles.is_empty() {
         return Ok(empty_table(&table.name));
     }
-    let has_rowid = table_has_rowid(reader, &table.name)?;
+    let has_rowid = match table_has_rowid(reader, &table.name) {
+        Ok(has_rowid) => has_rowid,
+        Err(_) if table.virtual_table => return Ok(unscannable_table(&table.name)),
+        Err(error) => return Err(error),
+    };
     let sql = match_sql(&table.name, &columns, needles.len(), has_rowid);
     let params: Vec<&dyn rusqlite::ToSql> =
         needles.iter().map(|needle| needle as &dyn rusqlite::ToSql).collect();
     let rows = match reader.rows(&sql, params.as_slice()) {
         Ok(rows) => rows,
-        Err(error) if table.virtual_table => {
-            let _ = error;
-            return Ok(empty_table(&table.name));
-        }
+        Err(_) if table.virtual_table => return Ok(unscannable_table(&table.name)),
         Err(error) => return Err(error.into()),
     };
     let mut scanned = empty_table(&table.name);
     scanned.truncated = rows.len() > MAX_HITS;
+    let mut table_hits = 0u64;
     for row in rows.iter().take(MAX_HITS) {
         let rowid = if has_rowid { Some(row.get::<_, i64>(0)?) } else { None };
         let first = usize::from(has_rowid);
@@ -187,7 +271,7 @@ fn scan_table(
             if flag == 0 {
                 continue;
             }
-            scanned.hits = scanned.hits.saturating_add(1);
+            table_hits = table_hits.saturating_add(1);
             if scanned.locations.len() < MAX_LOCATIONS {
                 scanned.locations.push(ResidueHit { rowid, column: (*column).clone() });
             } else {
@@ -195,11 +279,28 @@ fn scan_table(
             }
         }
     }
+    scanned.hits = Some(table_hits);
     Ok(scanned)
 }
 
 fn empty_table(name: &str) -> ResidueTable {
-    ResidueTable { name: name.to_owned(), hits: 0, truncated: false, locations: Vec::new() }
+    ResidueTable {
+        name: name.to_owned(),
+        status: ResidueTableStatus::Scanned,
+        hits: Some(0),
+        truncated: false,
+        locations: Vec::new(),
+    }
+}
+
+fn unscannable_table(name: &str) -> ResidueTable {
+    ResidueTable {
+        name: name.to_owned(),
+        status: ResidueTableStatus::Unscannable,
+        hits: None,
+        truncated: false,
+        locations: Vec::new(),
+    }
 }
 
 fn columns(reader: &crate::database::Connection, table: &str) -> Result<Vec<String>, StorageError> {
@@ -303,16 +404,20 @@ mod tests {
         (directory, db)
     }
 
-    fn plant(db: &AccountDb, body: &[u8]) {
+    fn project(db: &AccountDb, message_id: &str, body: &[u8]) {
         db.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "thread",
-            message_id: "message-1",
+            message_id,
             sender_id: "sender",
             encrypted_body: body,
             metadata: &MessageMetadata::default(),
             created_at: 1,
         })
         .expect("test: projection");
+    }
+
+    fn plant(db: &AccountDb, body: &[u8]) {
+        project(db, "message-1", body);
         db.store_message_content("thread", "message-1", MARKER).expect("test: content");
         let activation = SearchActivation::testing();
         let _watch = db.search_prepare(&activation).expect("test: search");
@@ -357,11 +462,16 @@ mod tests {
     fn needles_cover_utf16_and_raw_hashes() {
         let needles = residue_needles(MARKER).expect("test: needles");
         assert!(needles.iter().any(|needle| needle.as_slice() == MARKER), "raw marker bytes");
-        let mut utf16_le = Vec::new();
+        let mut little_endian = Vec::new();
         for unit in "b11canarymarker".encode_utf16() {
-            utf16_le.extend(unit.to_le_bytes());
+            little_endian.extend(unit.to_le_bytes());
         }
-        assert!(needles.iter().any(|needle| needle == &utf16_le), "utf-16le form");
+        assert!(needles.iter().any(|needle| needle == &little_endian), "utf-16le form");
+        let mut big_endian = Vec::new();
+        for unit in "b11canarymarker".encode_utf16() {
+            big_endian.extend(unit.to_be_bytes());
+        }
+        assert!(needles.iter().any(|needle| needle == &big_endian), "utf-16be form");
         let sha = sha2::Sha256::digest(MARKER);
         assert!(needles.iter().any(|needle| needle.as_slice() == sha.as_slice()), "raw sha-256");
         let blake = blake3::hash(MARKER);
@@ -369,30 +479,67 @@ mod tests {
         assert!(residue_needles(b"").is_err(), "empty marker is refused");
     }
 
+    fn assert_absent(report: &ResidueScan) {
+        assert!(!report.truncated, "absence scan must finish");
+        assert_eq!(report.hits, 0, "scanned tables must not count a hit");
+        assert!(
+            matches!(report.status, ResidueScanStatus::Clean | ResidueScanStatus::Unscannable),
+            "absence is clean or honestly unscannable, got {:?}",
+            report.status
+        );
+        for table in &report.tables {
+            match table.status {
+                ResidueTableStatus::Scanned => {
+                    assert_eq!(table.hits, Some(0), "{} must not invent hits", table.name);
+                    assert_eq!(table.locations.len(), 0, "{} locations must be empty", table.name);
+                }
+                ResidueTableStatus::Unscannable => {
+                    assert_eq!(table.hits, None, "{} must not report zero hits", table.name);
+                    assert_eq!(table.locations.len(), 0, "{} locations must be empty", table.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn unerased_message_marker_is_found() {
         let (_dir, db) = open();
-        let mut utf16_le = Vec::new();
-        for unit in "b11canarymarker".encode_utf16() {
-            utf16_le.extend(unit.to_le_bytes());
-        }
-        plant(&db, &utf16_le);
+        let marker = std::str::from_utf8(MARKER).expect("test: marker text");
+        let little_endian = utf16(marker, u16::to_le_bytes);
+        let big_endian = utf16(marker, u16::to_be_bytes);
+        plant(&db, &little_endian);
+        project(&db, "message-be", &big_endian);
+        project(&db, "message-sha", sha2::Sha256::digest(MARKER).as_slice());
+        project(&db, "message-blake", blake3::hash(MARKER).as_bytes());
         let report = scan(&db);
         assert!(!report.truncated, "control scan must finish");
         assert!(report.hits > 0, "control message must be visible to the scan");
         assert!(
+            matches!(report.status, ResidueScanStatus::Residue | ResidueScanStatus::Unscannable),
+            "a located marker is not a clean scan, got {:?}",
+            report.status
+        );
+        assert!(
             report.tables.iter().any(|table| {
                 table.name == "runtime_message_content"
+                    && table.status == ResidueTableStatus::Scanned
                     && table.locations.iter().any(|hit| hit.column == "body")
             }),
             "plaintext body must be located without returning its bytes"
         );
+        let encrypted = report
+            .tables
+            .iter()
+            .find(|table| table.name == "direct_message_projection")
+            .and_then(|table| {
+                (table.status == ResidueTableStatus::Scanned).then_some(
+                    table.locations.iter().filter(|hit| hit.column == "encrypted_body").count(),
+                )
+            })
+            .unwrap_or(0);
         assert!(
-            report.tables.iter().any(|table| {
-                table.name == "direct_message_projection"
-                    && table.locations.iter().any(|hit| hit.column == "encrypted_body")
-            }),
-            "utf-16 form in the projection must be located"
+            encrypted >= 4,
+            "utf-16le, utf-16be, sha-256, and blake3 must be located, got {encrypted}"
         );
         assert!(
             report.tables.iter().any(|table| table.name.starts_with("local_search_")),
@@ -408,8 +555,7 @@ mod tests {
         plant(&db, MARKER);
         erase(&db);
         let report = scan(&db);
-        assert!(!report.truncated, "erase scan must finish");
-        assert_eq!(report.hits, 0, "erased message leaves no marker, utf-16 form, or raw hash");
+        assert_absent(&report);
         assert!(
             report.tables.iter().any(|table| table.name == "runtime_message_content"),
             "content table must still be listed"
@@ -431,11 +577,33 @@ mod tests {
         })
         .expect("test: delayed import");
         db.store_message_content("thread", "message-1", MARKER).expect("test: delayed content");
+        assert_absent(&scan(&db));
+    }
+
+    #[test]
+    fn failed_virtual_table_is_unscannable_not_zero_hits() {
+        let (_dir, db) = open();
+        db.connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE residue_probe USING fts5(body, content='residue_missing', content_rowid='id')",
+            )
+            .expect("test: virtual table");
         let report = scan(&db);
-        assert!(!report.truncated, "delayed own-copy scan must finish");
-        assert_eq!(
-            report.hits, 0,
-            "a delayed own-copy that arrives after erasure must stay absent"
-        );
+        let probe = report
+            .tables
+            .iter()
+            .find(|table| table.name == "residue_probe")
+            .expect("test: probe listed");
+        assert_eq!(probe.status, ResidueTableStatus::Unscannable);
+        assert_eq!(probe.hits, None, "a failed virtual table must not report zero hits");
+        assert_eq!(probe.locations.len(), 0);
+        assert_eq!(report.status, ResidueScanStatus::Unscannable);
+        let content = report
+            .tables
+            .iter()
+            .find(|table| table.name == "runtime_message_content")
+            .expect("test: content");
+        assert_eq!(content.status, ResidueTableStatus::Scanned);
+        assert_eq!(content.hits, Some(0));
     }
 }
