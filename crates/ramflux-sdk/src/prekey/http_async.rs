@@ -30,14 +30,7 @@ async fn request<R: DeserializeOwned>(
 ) -> Result<R, SdkError> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     let client = CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .pool_max_idle_per_host(0)
-                .build()
-                .map_err(|error| error.without_url().to_string())
-        })
+        .get_or_init(|| client_builder().build().map_err(|error| error.without_url().to_string()))
         .as_ref()
         .map_err(|error| SdkError::LocalBus(error.clone()))?;
     let host = super::sdk_http_host_port(base)?;
@@ -80,4 +73,39 @@ async fn request<R: DeserializeOwned>(
 }
 fn http_error(error: reqwest::Error) -> SdkError {
     SdkError::LocalBus(error.without_url().to_string())
+}
+
+/// Trust policy for directory fetches and the prekey probe.
+///
+/// Roots are reqwest's default public roots. The node CA is not added.
+pub(crate) fn client_builder() -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(0);
+    #[cfg(test)]
+    {
+        apply_test_root(builder)
+    }
+    #[cfg(not(test))]
+    builder
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Fixture stand-in for a publicly trusted issuer. Production never sets this.
+    pub(crate) static TEST_PREKEY_TRUST_ROOT: String;
+}
+
+#[cfg(test)]
+fn apply_test_root(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let mut stored = Some(builder);
+    if let Ok(builder) = TEST_PREKEY_TRUST_ROOT.try_with(|pem| {
+        let certificate = reqwest::Certificate::from_pem(pem.as_bytes())
+            .expect("test: prekey trust root is a certificate");
+        stored.take().expect("test: directory client builder").add_root_certificate(certificate)
+    }) {
+        return builder;
+    }
+    stored.expect("test: directory client builder")
 }
