@@ -221,6 +221,8 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
             // Also supports the gateway binary built by the local-mint feature matrix.
             .env("RAMFLUX_RELAY_SERVICE_KEY_REF", "literal:rf-cli-e2e-relay-test-key")
             .env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE", &signing_seed)
+            // The router reads the node identity key from its own file when pairing is on.
+            .env("RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE", &signing_seed)
             .env("RAMFLUX_FEDERATION_PUBLIC_ADDR", &public_addr)
             .env("RAMFLUX_FEDERATION_ADMIN_ADDR", &admin_addr)
             .env("RAMFLUX_ITEST_GATEWAY_QUIC_ADDR", &gateway_quic)

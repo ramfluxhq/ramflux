@@ -68,41 +68,21 @@ class DemoNodeConfigTests(unittest.TestCase):
             CONFIG.finish_initial_recovery(self.state)
         self.assertEqual(list(self.state.iterdir()), [])
 
-    def test_legacy_snapshot_copy_failures_never_publish_the_transaction_marker(self):
-        real_atomic = CONFIG.atomic_bytes
-        for failure_at in range(1, 13):
-            with self.subTest(failure_at=failure_at):
-                snapshots = self.state / "version-snapshots"
-                if snapshots.exists():
-                    import shutil
-                    shutil.rmtree(snapshots)
-                (self.state / "owner.json.pending").unlink(missing_ok=True)
-                (self.state / "transaction.pending").unlink(missing_ok=True)
-                calls = 0
-
-                def fail_copy(path, content, mode=0o600):
-                    nonlocal calls
-                    calls += 1
-                    if calls == failure_at:
-                        raise OSError("simulated disk full")
-                    return real_atomic(path, content, mode)
-
-                with mock.patch.dict(os.environ, self.settings, clear=False), \
-                        mock.patch.object(CONFIG, "atomic_bytes", side_effect=fail_copy):
-                    with self.assertRaises(OSError):
-                        CONFIG.prepare(HELPER.parents[2], self.state, "upgrade")
-                self.assertFalse((self.state / "transaction.pending").exists())
-                self.assertFalse((self.state / "owner.json.pending").exists())
+    def test_owner_without_snapshot_history_is_refused_not_adopted(self):
+        with mock.patch.dict(os.environ, self.settings, clear=False):
+            with self.assertRaisesRegex(SystemExit, "obsolete data directory layout"):
+                CONFIG.prepare(HELPER.parents[2], self.state, "upgrade")
+        self.assertFalse((self.state / "version-snapshots").exists())
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertFalse((self.state / "owner.json.pending").exists())
 
     def test_symlinked_snapshot_root_is_refused_without_writing_outside_state(self):
         outside = Path(self.temp.name) / "outside"
         outside.mkdir()
         (self.state / "version-snapshots").symlink_to(outside, target_is_directory=True)
-        with mock.patch.dict(os.environ, self.settings, clear=False):
-            with self.assertRaisesRegex(CONFIG.SnapshotError, "symlinked"):
-                CONFIG.prepare(HELPER.parents[2], self.state, "upgrade")
+        with self.assertRaisesRegex(CONFIG.SnapshotError, "symlinked"):
+            CONFIG.capture_snapshot(self.state, "demo-v1/current")
         self.assertEqual(list(outside.iterdir()), [])
-        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_snapshot_pruning_keeps_three_previous_snapshots_and_current(self):
         root = self.state / "version-snapshots"

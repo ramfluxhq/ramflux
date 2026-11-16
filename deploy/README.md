@@ -622,6 +622,14 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
+Device pairing has its own opt-in, off by default: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
+(operator env, `0` or `1`) and run `up`. It requires the custody inputs
+(`RAMFLUX_CUSTODY_NODE_RECORD_FILE`) and `certs/node-identity/node-signing.key` (mode 0640 or
+stricter), sets the switch on the router and federation only, and mounts that single key file
+read-only into the router (`RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE`, router supplementary
+group `RAMFLUX_SECRET_GID`). The router refuses to start when the key is missing, malformed or not
+the node identity key; there is no service-seed fallback and the key never enters env or logs.
+It does not change discovery advertisement (compile-time release gate).
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing
@@ -883,13 +891,10 @@ client contract and `CHANGELOG.md` for the breaking development wire notice.
 
 Use `RAMFLUX_ROUTER_ADMIN_ENABLED=1` with `RAMFLUX_ROUTER_ADMIN_PORT` for the
 independent loopback router administration listener. The port defaults to 59488
-only when this listener is selected. The demo wrapper accepts the old
-`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` input alias for one release; an explicit
-`RAMFLUX_ROUTER_ADMIN_PORT` takes precedence. New runtime files save the canonical
-name, while immutable historical snapshots keep their original runtime keys and
-frozen Compose inputs. Direct Compose renames
-`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to `RAMFLUX_ROUTER_ADMIN_PORT` without an
-input alias.
+only when this listener is selected. The demo wrapper refuses the obsolete
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` name, and runtime files carry only the canonical
+name. Direct Compose renames `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to
+`RAMFLUX_ROUTER_ADMIN_PORT` without an input alias.
 
 `up`, `upgrade`, `rollback`, and `recover` share enabled-port validation and the
 same occupied-port refusal. Maintenance inspects the target snapshot read-only

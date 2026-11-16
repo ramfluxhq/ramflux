@@ -460,16 +460,7 @@ impl RouterHandle {
             migration.as_ref().map(|_| (config.node_id.as_str(), trusted.as_str())),
         )?;
         let pairing_seed = if ramflux_node_core::device_pairing_enabled()? {
-            let seed = config
-                .node_service_signing_seed_b64url
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("pairing requires the node service signing seed"))?;
-            let seed = ramflux_node_core::decode_node_service_signing_seed(seed.as_str())?;
-            let ticket_key = ramflux_crypto::public_key_base64url_from_seed(seed);
-            if ticket_key != node.envelope().body.node_signing_public_key {
-                anyhow::bail!("pairing ticket signing key does not match node identity");
-            }
-            Some(seed)
+            Some(crate::pairing_key::load(&node.envelope().body.node_signing_public_key)?)
         } else {
             None
         };
@@ -483,10 +474,10 @@ impl RouterHandle {
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
         }
-        if let Some(seed) = pairing_seed {
+        if let Some(secret) = pairing_seed {
             let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
                 .unwrap_or_else(|_| format!("https://{}", config.node_id));
-            service = service.with_pairing_relay_if_enabled(seed, origin)?;
+            service = service.with_pairing_relay_if_enabled(secret.guarded_seed(), origin)?;
         }
         let Self::Tokio(runtime) = self;
         let service = Arc::new(service);

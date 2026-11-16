@@ -153,22 +153,12 @@ EOF
 # members are the operators), otherwise the invoking operator's primary group. Its id is
 # recorded as RAMFLUX_SECRET_GID in deploy/.env, which compose reads, unless that file
 # already sets it.
-migrate_signing_seed() {
-  _legacy="${cert_dir}/federation/node-signing.key"
-  _identity="${cert_dir}/node-identity/node-signing.key"
-  [ -e "${_legacy}" ] || return 0
-  if [ ! -e "${_identity}" ]; then
-    # Preserve an existing identity when moving it out of the mesh directory.
-    mkdir -p "$(dirname "${_identity}")"
-    mv "${_legacy}" "${_identity}"
-  elif cmp -s "${_legacy}" "${_identity}"; then
-    rm -f "${_legacy}"
-  else
-    printf 'refusing to continue: %s and %s hold different node signing seeds.\n' \
-      "${_legacy}" "${_identity}" >&2
-    printf 'Keep the seed that matches the federation identity pin, remove the other, and rerun.\n' >&2
+refuse_obsolete_signing_seed() {
+  [ ! -e "${cert_dir}/federation/node-signing.key" ] || {
+    printf 'refusing to continue: obsolete layout %s/federation/node-signing.key;\n' "${cert_dir}" >&2
+    printf 'the node identity key lives only in node-identity/ (no migration before v1).\n' >&2
     return 1
-  fi
+  }
 }
 
 # Resolves a group name to its id without assuming getent (absent on macOS).
@@ -216,7 +206,7 @@ record_secret_gid() {
 }
 
 ensure_node_secrets() {
-  migrate_signing_seed
+  refuse_obsolete_signing_seed
   _gid=$(secret_group_id)
   [ -n "${_gid}" ] || { printf 'cannot resolve the node secret group\n' >&2; return 1; }
   for _secret in node-identity/node-signing.key notify/route.key; do

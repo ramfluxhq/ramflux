@@ -17,6 +17,7 @@ SNAPSHOT_ROOT_FILES = (
     "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
     "identity.env", ".env",
 )
+PAIRING_KEY_PATH = "/etc/ramflux/pairing/node-signing.key"
 SNAPSHOT_DIRECTORIES = ("config", "certs", "secrets")
 SNAPSHOT_REQUIRED = {
     "compose.yml", "runtime.env", "owner.json", "demo-override.json",
@@ -278,7 +279,7 @@ def validate_snapshot_overlays(state, reference):
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
         "RAMFLUX_ROUTER_ADMIN_ENABLED": router_enabled,
-        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) if router_enabled else "",
+        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") if router_enabled else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
@@ -458,7 +459,7 @@ def validate_selected_overlay_values(state):
     if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" and (
             not (state / "compose.router-admin.yml").is_file()
             or values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") != "1"
-            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
+            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
         sys.exit("router admin configuration was not applied by the last up; run up first")
 
 
@@ -493,6 +494,24 @@ def render_files(repo, state, owner):
                        for key in keys if key in custody}
         if environment:
             override["services"][f"ramflux-{service}"]["environment"] = environment
+    if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
+        if record is None:
+            sys.exit("DEMO_PAIRING_REQUIRES_CUSTODY: RAMFLUX_CUSTODY_NODE_RECORD_FILE is required")
+        # Tickets and invitations are signed by the pinned node identity key. The router gets
+        # that one file read-only, through the restricted secret group; the key bytes never
+        # enter the environment, this JSON or logs.
+        # `prepare` runs before certificates exist on a first up, so only an existing key is
+        # checked here; a missing key makes the router refuse to start with a typed error.
+        node_key = state / "certs/node-identity/node-signing.key"
+        if node_key.is_symlink() or (node_key.exists() and node_key.stat().st_mode & 0o7137):
+            sys.exit("DEMO_PAIRING_NODE_KEY_MODE: node-signing.key must be a regular file, 0640 or stricter")
+        for service in ("router", "federation"):
+            environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
+            environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
+        router = override["services"]["ramflux-router"]
+        router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
+        router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
+        router["group_add"] = ["${RAMFLUX_SECRET_GID:-0}"]
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (
@@ -590,11 +609,8 @@ def prepare(repo, state, command, validate_only=False):
         custody_inputs(state)
 
     previous_snapshot = owner.get("current_snapshot")
-    capture_legacy_snapshot = bool(
-        marker.exists() and not previous_snapshot and "snapshot_history" not in owner
-    )
-    if capture_legacy_snapshot:
-        previous_snapshot = new_snapshot_reference(owner["settings"]["DEMO_VERSION"])
+    if marker.exists() and not previous_snapshot and "snapshot_history" not in owner:
+        sys.exit("obsolete data directory layout (no snapshot history); no adoption before v1, redeploy into a fresh directory")
 
     if command == "upgrade":
         versions, snapshots = normalize_history(owner, previous_snapshot)
@@ -621,8 +637,6 @@ def prepare(repo, state, command, validate_only=False):
 
     if validate_only:
         return owner
-    if capture_legacy_snapshot:
-        capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
     transaction = {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
@@ -674,7 +688,7 @@ def router_admin_settings(state, command):
     values = snapshot_runtime_values(state, reference)
     source, _, _ = read_snapshot_manifest(state, reference)
     token = json.loads((source / "owner.json").read_text())["token"]
-    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488"))
+    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")
     admin = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
     voice = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "").rsplit(":", 1)[-1]
     print(values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0"), port or "-", admin or "-", voice or "-", token)

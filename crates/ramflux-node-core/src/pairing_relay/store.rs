@@ -131,17 +131,28 @@ impl PairingRelayStore {
     /// # Errors
     /// Refuses CSPRNG failure or a non-HTTPS origin.
     pub fn new(config: PairingRelayConfig) -> Result<Self, PairingRelayError> {
+        Self::with_seed(config.clock, config.public_origin, Zeroizing::new(config.node_seed))
+    }
+
+    /// Same as [`Self::new`] for a seed that is already zeroize-guarded (no plain copy is made).
+    ///
+    /// # Errors
+    /// Refuses CSPRNG failure or a non-HTTPS origin.
+    pub fn with_seed(
+        clock: Arc<dyn PairingClock>,
+        origin: String,
+        seed: Zeroizing<[u8; 32]>,
+    ) -> Result<Self, PairingRelayError> {
         let boot_id = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
-        let origin = config.public_origin;
         if !origin.starts_with("https://") || origin.len() > 256 {
             return Err(PairingRelayError::invalid("public_origin"));
         }
         let mut store = Self {
             full_resume: None,
             allocations: super::PairingAllocations::default(),
-            clock: config.clock,
-            node_key: public_key_base64url_from_seed(config.node_seed),
-            seed: Zeroizing::new(config.node_seed),
+            clock,
+            node_key: public_key_base64url_from_seed(*seed),
+            seed,
             boot_id_b64: encode_base64url(boot_id),
             public_origin: origin,
             issuer_seq: 0,

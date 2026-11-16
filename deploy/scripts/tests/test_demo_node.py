@@ -11,6 +11,7 @@ import tempfile
 import sys
 import unittest
 
+SCRIPT_DEADLINE_SECONDS = 120
 SCRIPT = Path(__file__).resolve().parents[1] / "demo-node.sh"
 
 
@@ -103,7 +104,8 @@ else:
 
     def run_script(self, command, *flags, success=True, env_file=None):
         result = subprocess.run(["sh", str(SCRIPT), command, str(env_file or self.env_file), *flags],
-                                env=self.environment, text=True, capture_output=True, check=False)
+                                env=self.environment, text=True, capture_output=True, check=False,
+                                timeout=SCRIPT_DEADLINE_SECONDS)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -121,6 +123,79 @@ else:
     def enable_prebuilt_images(self):
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
+
+    def pairing_override(self, enabled, with_record=True):
+        with self.env_file.open("a") as output:
+            if with_record:
+                record = self.root / "node-record.json"
+                record.write_bytes(b'{"signed-record":"version-one"}\n')
+                output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                             "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-custody-public\n"
+                             "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n")
+            if enabled:
+                output.write("RAMFLUX_DEVICE_PAIRING_ENABLED=1\n")
+        return self.run_script("up", success=with_record or not enabled)
+
+    def test_pairing_is_off_by_default_in_generated_override(self):
+        self.pairing_override(False)
+        text = (self.state / "demo-override.json").read_text()
+        self.assertNotIn("DEVICE_PAIRING", text)
+        router = json.loads(text)["services"]["ramflux-router"]
+        self.assertNotIn("RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL", router["environment"])
+
+    def test_pairing_opt_in_wires_router_and_federation_without_inline_secret(self):
+        self.pairing_override(True)
+        text = (self.state / "demo-override.json").read_text()
+        services = json.loads(text)["services"]
+        for name in ("ramflux-router", "ramflux-federation"):
+            self.assertEqual(services[name]["environment"]["RAMFLUX_DEVICE_PAIRING_ENABLED"], "1")
+        self.assertNotIn("RAMFLUX_DEVICE_PAIRING_ENABLED", json.dumps(services["ramflux-gateway"]))
+        router = services["ramflux-router"]
+        self.assertNotIn("RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL", router["environment"])
+        self.assertEqual(router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"],
+                         "/etc/ramflux/pairing/node-signing.key")
+        self.assertEqual(router["environment"]["RAMFLUX_CUSTODY_NODE_RECORD_FILE"],
+                         "${RF_COMPOSE_CUSTODY_NODE_RECORD_FILE}")
+        self.assertIn("./secrets/custody:/etc/ramflux/custody:ro", router["volumes"])
+        self.assertIn(
+            "./certs/node-identity/node-signing.key:/etc/ramflux/pairing/node-signing.key:ro",
+            router["volumes"])
+        self.assertEqual(router["group_add"], ["${RAMFLUX_SECRET_GID:-0}"])
+        for other in ("ramflux-gateway", "ramflux-federation", "ramflux-retention"):
+            self.assertNotIn("pairing/node-signing.key", json.dumps(services.get(other, {})))
+        self.assertNotIn("BEGIN", text)
+
+    def test_pairing_off_adds_no_key_mount(self):
+        self.pairing_override(False)
+        router = json.loads((self.state / "demo-override.json").read_text())["services"]["ramflux-router"]
+        self.assertNotIn("RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE", router["environment"])
+        self.assertNotIn("pairing/node-signing.key", json.dumps(router))
+        self.assertNotIn("group_add", router)
+
+    def test_pairing_opt_in_with_permissive_node_key_is_refused(self):
+        self.run_script("up")
+        key = self.state / "certs/node-identity/node-signing.key"
+        self.assertTrue(key.is_file(), "test: first up must issue the node identity key")
+        key.chmod(0o644)
+        record = self.root / "node-record.json"
+        record.write_bytes(b'{"signed-record":"version-one"}\n')
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-custody-public\n"
+                         "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n"
+                         "RAMFLUX_DEVICE_PAIRING_ENABLED=1\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("DEMO_PAIRING_NODE_KEY_MODE", result.stdout + result.stderr)
+
+    def test_pairing_opt_in_without_custody_record_is_refused(self):
+        result = self.pairing_override(True, with_record=False)
+        self.assertIn("DEMO_PAIRING_REQUIRES_CUSTODY", result.stdout + result.stderr)
+
+    def test_invalid_pairing_value_is_refused(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_DEVICE_PAIRING_ENABLED=yes\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("must be 0 or 1", result.stdout + result.stderr)
 
     def test_custody_inputs_survive_upgrade_and_snapshot_rollback(self):
         record = self.root / "node-record.json"
@@ -961,25 +1036,28 @@ else:
     def test_router_admin_recover_checks_snapshot_port_before_restoring(self):
         self.router_admin_maintenance_refuses_occupied_snapshot_port("recover")
 
-    # Mutation: ignore RAMFLUX_ROUTER_ADMIN_PORT and always use the old alias/default.
-    def test_router_admin_canonical_port_and_legacy_input_alias(self):
-        with socket.socket() as legacy, socket.socket() as selected:
-            legacy.bind(("127.0.0.1", 0))
+    def test_router_admin_canonical_port_only_and_obsolete_alias_refused(self):
+        with socket.socket() as selected:
             selected.bind(("127.0.0.1", 0))
-            alias = legacy.getsockname()[1]
             canonical = selected.getsockname()[1]
-        self.assertNotEqual(alias, canonical)
         with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={alias}\n")
-        self.run_script("up")
-        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={alias}", (self.state / "runtime.env").read_text())
-        with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}\n")
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={canonical}\n")
         self.run_script("up")
         runtime = (self.state / "runtime.env").read_text()
         self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}", runtime)
-        self.assertNotIn("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
-        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
+        self.assertNotIn("LOOPBACK_PORT=", runtime.replace("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=", ""))
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=59999\n")
+        refused = self.run_script("up", success=False)
+        self.assertIn("DEMO_ROUTER_ADMIN_LOOPBACK_PORT is obsolete", refused.stdout + refused.stderr)
+
+    def test_obsolete_federation_signing_seed_layout_is_refused_not_migrated(self):
+        self.run_script("up")
+        legacy = self.state / "certs/federation/node-signing.key"
+        legacy.write_text("obsolete\n")
+        refused = self.run_script("up", success=False)
+        self.assertIn("obsolete layout", refused.stdout + refused.stderr)
+        self.assertTrue(legacy.exists(), "test: the obsolete file must not be moved or deleted")
 
     def test_router_admin_port_is_distinct_and_saved(self):
         with self.env_file.open("a") as output:

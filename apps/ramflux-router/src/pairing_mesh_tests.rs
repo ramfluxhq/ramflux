@@ -37,7 +37,49 @@ fn env_keys() -> &'static [&'static str] {
         "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY",
         "RAMFLUX_FEDERATION_PUBLIC_ORIGIN",
+        crate::pairing_key::PAIRING_KEY_FILE_ENV,
     ]
+}
+
+const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs the whole scenario (setup included) on a worker thread and fails the test when it is
+/// still pending at the deadline; the pending worker is abandoned, never waited on.
+fn with_deadline<T: std::marker::Send + 'static>(
+    what: &'static str,
+    scenario: impl FnOnce() -> anyhow::Result<T> + std::marker::Send + 'static,
+) -> anyhow::Result<T> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new().name(what.into()).spawn(move || {
+        let _ = sender.send(scenario());
+    })?;
+    // On timeout the worker stays detached. CI runs nextest with one process per test, so when
+    // this test returns Err its process exits and the worker dies with it; nothing leaks
+    // across tests.
+    match receiver.recv_timeout(TEST_DEADLINE) {
+        Ok(result) => {
+            let _ = worker.join();
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("test: {what} still pending at its {TEST_DEADLINE:?} deadline")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(()) => anyhow::bail!("test: {what} worker ended without a result"),
+        },
+    }
+}
+
+fn write_key_file(path: &std::path::Path, contents: &[u8], mode: u32) -> anyhow::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, contents)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(path.to_str().ok_or_else(|| anyhow::anyhow!("key path"))?.to_owned())
+}
+
+fn key_text(seed: [u8; 32]) -> Vec<u8> {
+    format!("{}\n", encode_base64url(seed)).into_bytes()
 }
 
 #[allow(unsafe_code)]
@@ -112,26 +154,20 @@ fn spec(account: u8, wall: u64) -> CreateSpec {
     }
 }
 
-fn node_config(
-    node_id: &str,
-    seed: [u8; 32],
-) -> anyhow::Result<ramflux_node_core::NodeServiceConfig> {
-    let mut config: ramflux_node_core::NodeServiceConfig =
-        serde_json::from_value(serde_json::json!({
-            "node_id": node_id,
-            "service_id": "ramflux-router",
-            "redb_path": "unused.redb",
-            "mesh": {
-                "listen_addr": "127.0.0.1:0",
-                "ca_cert": "unused.pem",
-                "service_cert": "unused.pem",
-                "service_key": "unused.key",
-                "allowed_service_ids": [],
-                "endpoints": {}
-            }
-        }))?;
-    config.node_service_signing_seed_b64url =
-        Some(ramflux_node_core::RedactedString::new(encode_base64url(seed)));
+fn node_config(node_id: &str) -> anyhow::Result<ramflux_node_core::NodeServiceConfig> {
+    let config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(serde_json::json!({
+        "node_id": node_id,
+        "service_id": "ramflux-router",
+        "redb_path": "unused.redb",
+        "mesh": {
+            "listen_addr": "127.0.0.1:0",
+            "ca_cert": "unused.pem",
+            "service_cert": "unused.pem",
+            "service_key": "unused.key",
+            "allowed_service_ids": [],
+            "endpoints": {}
+        }
+    }))?;
     Ok(config)
 }
 
@@ -198,6 +234,14 @@ fn native_create(handle: &RouterHandle, account: u8) -> anyhow::Result<(Created,
     let mut store = store.lock().map_err(|_| anyhow::anyhow!("pairing lock"))?;
     let issued: Issued = store.issue(spec(account, wall))?;
     let node_key = issued.ticket.body.node_key.clone();
+    let ticket_bytes =
+        ramflux_protocol::custody::pairing::native::ticket_signing_bytes(&issued.ticket.body)?;
+    ramflux_protocol::verify_canonical_signature(
+        &ticket_bytes,
+        &issued.ticket.signature,
+        &node_key,
+    )
+    .map_err(|error| anyhow::anyhow!("ticket signature: {error}"))?;
     let created = store.create(Create {
         schema: "ramflux.pairing.Create.v2".into(),
         version: 2,
@@ -288,6 +332,11 @@ fn wired_handle(
     let record = redb.with_extension("node-record.json");
     let now = wall()?;
     let public = write_node_record(&record, "node", now)?;
+    let key = write_key_file(
+        &redb.with_extension("pairing.key"),
+        &key_text(ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES),
+        0o640,
+    )?;
     let env = pairing_env(&[
         ("RAMFLUX_DEVICE_PAIRING_ENABLED", "1"),
         (
@@ -296,9 +345,10 @@ fn wired_handle(
         ),
         ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &public),
         ("RAMFLUX_FEDERATION_PUBLIC_ORIGIN", "https://relay.example:443"),
+        (crate::pairing_key::PAIRING_KEY_FILE_ENV, &key),
     ]);
     let handle = RouterHandle::tokio(state, store, None);
-    handle.enable_custody(&node_config("node", ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES)?)?;
+    handle.enable_custody(&node_config("node")?)?;
     Ok((redb, record, handle, env, public))
 }
 
@@ -311,48 +361,150 @@ fn pairing_mesh_requires_federation_peer() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn enable_custody_requires_ticket_key_match() -> TestResult {
-    let (redb, state, store) =
-        crate::router_runtime::tests::test_router("pairing-mesh-key-mismatch")?;
+/// Starts custody with pairing on and the given key-file contents; `None` leaves the setting unset.
+fn start_with_key(
+    name: &'static str,
+    key: Option<(Vec<u8>, u32)>,
+) -> anyhow::Result<Result<(), crate::pairing_key::PairingKeyError>> {
+    with_deadline(name, move || start_with_key_inner(name, key))
+}
+
+fn start_with_key_inner(
+    name: &str,
+    key: Option<(Vec<u8>, u32)>,
+) -> anyhow::Result<Result<(), crate::pairing_key::PairingKeyError>> {
+    let (redb, state, store) = crate::router_runtime::tests::test_router(name)?;
     let record = redb.with_extension("node-record.json");
-    let now = wall()?;
-    let public = write_node_record(&record, "node", now)?;
-    let env = pairing_env(&[
+    let public = write_node_record(&record, "node", wall()?)?;
+    let record = record.to_str().ok_or_else(|| anyhow::anyhow!("record"))?.to_owned();
+    let mut values = vec![
         ("RAMFLUX_DEVICE_PAIRING_ENABLED", "1"),
-        (
-            "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
-            record.to_str().ok_or_else(|| anyhow::anyhow!("record"))?,
-        ),
-        ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &public),
+        ("RAMFLUX_CUSTODY_NODE_RECORD_FILE", record.as_str()),
+        ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", public.as_str()),
         ("RAMFLUX_FEDERATION_PUBLIC_ORIGIN", "https://relay.example:443"),
-    ]);
+    ];
+    let key_path;
+    if let Some((contents, mode)) = key {
+        key_path = write_key_file(&redb.with_extension("pairing.key"), &contents, mode)?;
+        values.push((crate::pairing_key::PAIRING_KEY_FILE_ENV, key_path.as_str()));
+    }
+    let env = pairing_env(&values);
     let handle = RouterHandle::tokio(state, store, None);
-    let Err(error) = handle.enable_custody(&node_config("node", [9; 32])?) else {
-        anyhow::bail!("mismatched ticket key attached");
-    };
-    anyhow::ensure!(
-        error.to_string().contains("pairing ticket signing key does not match node identity"),
-        "{error}"
-    );
+    let result = handle.enable_custody(&node_config("node")?);
     drop(env);
+    Ok(match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(*error
+            .downcast_ref::<crate::pairing_key::PairingKeyError>()
+            .ok_or_else(|| anyhow::anyhow!("untyped startup error: {error}"))?),
+    })
+}
+
+#[test]
+fn enable_custody_refuses_mismatched_pairing_key() -> TestResult {
+    let result = start_with_key("pairing-key-mismatch", Some((key_text([9; 32]), 0o640)))?;
+    assert_eq!(
+        result,
+        Err(crate::pairing_key::PairingKeyError::Mismatch),
+        "test: a key that is not the node identity attached"
+    );
     Ok(())
 }
 
 #[test]
-fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
-    let (_redb, _record, handle, env, public) = wired_handle("pairing-mesh-wiring")?;
-    let (created, node_key) = native_create(&handle, 1)?;
-    assert_eq!(node_key, public);
-    relay_cycle(&handle, &created)?;
-    let forbidden = mesh(&handle, "ramflux-gateway", PAIRING_CLAIM_PATH, b"{}")?;
-    assert_eq!(forbidden.status, "403 Forbidden");
-    set_pairing_enabled(false);
-    let absent = mesh(&handle, "ramflux-federation", PAIRING_CLAIM_PATH, b"{}")?;
-    assert_eq!(absent.status, "200 OK");
-    assert_eq!(inner_reply(&absent)?.status, "404 Not Found");
-    drop(env);
+fn enable_custody_refuses_missing_pairing_key() -> TestResult {
+    let result = start_with_key("pairing-key-missing", None)?;
+    assert_eq!(
+        result,
+        Err(crate::pairing_key::PairingKeyError::Missing),
+        "test: pairing started without the node identity key file"
+    );
     Ok(())
+}
+
+#[test]
+fn enable_custody_refuses_malformed_pairing_key() -> TestResult {
+    let good = key_text(ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES);
+    let short = format!("{}\n", encode_base64url([7_u8; 16])).into_bytes();
+    let cases: [(&'static str, Vec<u8>, u32); 5] = [
+        ("pairing-key-bad-garbage", b"not a key!!".to_vec(), 0o640),
+        ("pairing-key-bad-short", short, 0o640),
+        ("pairing-key-bad-oversized", vec![b'A'; 4096], 0o640),
+        ("pairing-key-bad-empty", Vec::new(), 0o640),
+        ("pairing-key-bad-world-readable", good, 0o644),
+    ];
+    for (label, contents, mode) in cases {
+        let result = start_with_key(label, Some((contents, mode)))?;
+        assert_eq!(
+            result,
+            Err(crate::pairing_key::PairingKeyError::Malformed),
+            "test: {label} key file attached"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn enable_custody_ignores_service_signing_seed_for_pairing() -> TestResult {
+    with_deadline("no-seed-fallback", || {
+        let (redb, state, store) =
+            crate::router_runtime::tests::test_router("pairing-key-no-seed")?;
+        let record = redb.with_extension("node-record.json");
+        let public = write_node_record(&record, "node", wall()?)?;
+        let env = pairing_env(&[
+            ("RAMFLUX_DEVICE_PAIRING_ENABLED", "1"),
+            (
+                "RAMFLUX_CUSTODY_NODE_RECORD_FILE",
+                record.to_str().ok_or_else(|| anyhow::anyhow!("record"))?,
+            ),
+            ("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &public),
+            ("RAMFLUX_FEDERATION_PUBLIC_ORIGIN", "https://relay.example:443"),
+        ]);
+        let mut config = node_config("node")?;
+        config.node_service_signing_seed_b64url = Some(ramflux_node_core::RedactedString::new(
+            encode_base64url(ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES),
+        ));
+        let handle = RouterHandle::tokio(state, store, None);
+        let Err(error) = handle.enable_custody(&config) else {
+            anyhow::bail!("service seed was accepted as the pairing key");
+        };
+        assert_eq!(
+            error.downcast_ref::<crate::pairing_key::PairingKeyError>(),
+            Some(&crate::pairing_key::PairingKeyError::Missing),
+            "test: service seed fallback must not exist"
+        );
+        drop(env);
+        Ok(())
+    })
+}
+
+#[test]
+fn enable_custody_wires_pairing_mesh_through_router_entry() -> TestResult {
+    with_deadline("pairing-mesh-wiring", || {
+        let (_redb, _record, handle, env, public) = wired_handle("pairing-mesh-wiring")?;
+        let (created, node_key) = native_create(&handle, 1)?;
+        assert_eq!(node_key, public);
+        assert_eq!(created.invitation.body.node_key, public, "test: invitation not bound to node");
+        let invitation_bytes =
+            ramflux_protocol::custody::pairing::native::invitation_signing_bytes(
+                &created.invitation.body,
+            )?;
+        ramflux_protocol::verify_canonical_signature(
+            &invitation_bytes,
+            &created.invitation.signature,
+            &public,
+        )
+        .map_err(|error| anyhow::anyhow!("invitation signature: {error}"))?;
+        relay_cycle(&handle, &created)?;
+        let forbidden = mesh(&handle, "ramflux-gateway", PAIRING_CLAIM_PATH, b"{}")?;
+        assert_eq!(forbidden.status, "403 Forbidden");
+        set_pairing_enabled(false);
+        let absent = mesh(&handle, "ramflux-federation", PAIRING_CLAIM_PATH, b"{}")?;
+        assert_eq!(absent.status, "200 OK");
+        assert_eq!(inner_reply(&absent)?.status, "404 Not Found");
+        drop(env);
+        Ok(())
+    })
 }
 
 #[test]
