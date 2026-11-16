@@ -179,18 +179,39 @@ async fn handle_contact_accept(
     bus: &mut LocalBusClient,
     accept: ContactAccept,
 ) -> Result<(), RfError> {
-    let account = accept.link.account.clone();
-    if let Some(federated) = accept.federated {
-        let request = rf_contact_federated_request(accept.link, federated);
-        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
-    } else {
-        let request = LocalBusContactAddRequest {
-            link_id: accept.link.link,
-            requester_id: accept.link.requester,
-            target_id: accept.link.target,
-        };
-        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
+    let account = accept.account.clone();
+    let body = contact_accept_body(&accept)?;
+    let frame = ramflux_sdk::LocalBusFrame::request(
+        "rf-contact-accept",
+        Some(account),
+        "contact",
+        "contact.accept",
+        body,
+    );
+    print_json(&bus.request_frame_structured(frame).await?)
+}
+
+pub(crate) fn contact_accept_body(accept: &ContactAccept) -> Result<serde_json::Value, RfError> {
+    let (key, value) = match (
+        accept.principal.as_deref(),
+        accept.request.as_deref(),
+        accept.link.as_deref(),
+        accept.root.as_deref(),
+    ) {
+        (Some(value), None, None, None) => ("principal_id", value),
+        (None, Some(value), None, None) => ("request_id", value),
+        (None, None, Some(value), None) => ("link_id", value),
+        (None, None, None, Some(value)) => ("root_commitment", value),
+        _ => return Err(RfError::Message("contact accept requires one selector".into())),
+    };
+    if value.is_empty() || value.len() > 4096 {
+        return Err(RfError::Message(
+            "contact accept selector is empty or longer than 4096 bytes".into(),
+        ));
     }
+    let mut body = serde_json::Map::new();
+    body.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+    Ok(serde_json::Value::Object(body))
 }
 
 fn contact_add_body(add: &ContactAdd) -> serde_json::Value {
@@ -227,4 +248,139 @@ async fn contact_add_response(
         return Err(ramflux_sdk::SdkError::LocalBus(serde_json::to_string(&error)?).into());
     }
     print_json(&response.body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contact_accept_body;
+    use crate::cli::{Cli, Command, ContactAction};
+    use clap::Parser;
+
+    fn accept(args: &[&str]) -> ContactAction {
+        let cli = Cli::try_parse_from(args).expect("contact accept parses");
+        let Command::Contact(command) = cli.command else {
+            panic!("expected contact command");
+        };
+        command.action
+    }
+
+    #[test]
+    fn contact_accept_principal_sends_the_selector_without_a_federation_envelope() {
+        let ContactAction::Accept(parsed) =
+            accept(&["rf", "contact", "accept", "--account", "acct", "--principal", "peer"])
+        else {
+            panic!("expected accept");
+        };
+        let body = contact_accept_body(&parsed).expect("body");
+        assert_eq!(body["principal_id"], "peer");
+        assert!(body.get("requester_id").is_none());
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "contact",
+                "accept",
+                "--account",
+                "acct",
+                "--principal",
+                "peer",
+                "--envelope",
+                "env",
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["rf", "contact", "accept", "--account", "acct"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "contact",
+                "accept",
+                "--account",
+                "acct",
+                "--principal",
+                "peer",
+                "--request",
+                "request",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn contact_accept_rejects_an_empty_or_oversized_selector() {
+        let ContactAction::Accept(mut parsed) =
+            accept(&["rf", "contact", "accept", "--account", "acct", "--request", "request"])
+        else {
+            panic!("expected accept");
+        };
+        assert_eq!(contact_accept_body(&parsed).expect("request")["request_id"], "request");
+        parsed.request = Some(String::new());
+        assert!(contact_accept_body(&parsed).is_err());
+        parsed.request = None;
+        parsed.link = Some("link".to_owned());
+        assert_eq!(contact_accept_body(&parsed).expect("link")["link_id"], "link");
+        parsed.link = None;
+        parsed.root = Some("r".repeat(4097));
+        assert!(contact_accept_body(&parsed).is_err());
+        parsed.root = Some("root".to_owned());
+        assert_eq!(contact_accept_body(&parsed).expect("root")["root_commitment"], "root");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contact_accept_keeps_a_daemon_refusal_code_and_body() {
+        // The canonical macOS temp path exceeds SUN_LEN, so the socket lives in a unique directory under /tmp.
+        let root = tempfile::TempDir::new_in("/tmp").expect("test: fixture directory");
+        let socket = root.path().join("bus.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("test: bus socket");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let len = tokio::io::AsyncReadExt::read_u32(&mut stream).await?;
+            let mut bytes = vec![0; usize::try_from(len)?];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut bytes).await?;
+            let mut request: ramflux_sdk::LocalBusFrame = serde_json::from_slice(&bytes)?;
+            assert_eq!(request.method, "contact.accept");
+            assert_eq!(request.body["principal_id"], "peer");
+            request.kind = ramflux_sdk::LocalBusFrameKind::Error;
+            request.ok = Some(false);
+            request.error = Some(ramflux_sdk::LocalBusErrorBody {
+                details: None,
+                reason_code: Some("not_linked".to_owned()),
+                code: "NotAContact".to_owned(),
+                message: "no inbound request matches that principal".to_owned(),
+                retry_after_ms: None,
+                cause: None,
+            });
+            request.body = serde_json::json!({"kept": true});
+            let encoded = serde_json::to_vec(&request)?;
+            tokio::io::AsyncWriteExt::write_u32(&mut stream, u32::try_from(encoded.len())?).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &encoded).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let mut bus = ramflux_sdk::LocalBusClient::connect(&socket).await.expect("test: connect");
+        let error = super::handle_contact_accept(
+            &mut bus,
+            crate::cli::ContactAccept {
+                account: "acct".to_owned(),
+                principal: Some("peer".to_owned()),
+                request: None,
+                link: None,
+                root: None,
+            },
+        )
+        .await
+        .expect_err("test: daemon refusal");
+        let shown = error.to_string();
+        match error {
+            crate::RfError::Sdk(ramflux_sdk::SdkError::LocalBusRefused { code, message, body }) => {
+                assert_eq!(code, "NotAContact");
+                assert!(message.contains("no inbound request"));
+                assert_eq!(body["kept"], true);
+            }
+            other => panic!("test: refusal lost its type: {other}"),
+        }
+        assert!(shown.contains("NotAContact"), "test: process text keeps the typed code");
+        drop(bus);
+        server.await.expect("test: server").expect("test: refusal frame");
+        drop(root);
+    }
 }
