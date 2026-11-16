@@ -15,9 +15,10 @@ use std::{collections::BTreeSet, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zeroize::Zeroizing;
 const IO_TIMEOUT: Duration = Duration::from_secs(330);
-const CLOSE_DRAIN_CAP: usize = 64 * 1024;
+pub(crate) const CLOSE_DRAIN_CAP: usize = 64 * 1024;
 const CLOSE_DRAIN_BUDGET: Duration = Duration::from_millis(200);
 const CLOSE_WRITE_BUDGET: Duration = Duration::from_secs(1);
+pub(crate) const MAX_CUSTODY_SESSION_FRAMES: usize = 2048;
 
 /// Values read once from the process environment. Tests substitute a copy on the task.
 #[derive(Clone)]
@@ -96,7 +97,13 @@ where
         if left.is_zero() {
             break;
         }
-        match tokio::time::timeout(left.min(Duration::from_millis(50)), reader.read(&mut buf)).await
+        let room = CLOSE_DRAIN_CAP - total;
+        let take = room.min(buf.len());
+        match tokio::time::timeout(
+            left.min(Duration::from_millis(50)),
+            reader.read(&mut buf[..take]),
+        )
+        .await
         {
             Ok(Ok(0) | Err(_)) | Err(_) => break,
             Ok(Ok(n)) => total = total.saturating_add(n),
@@ -130,7 +137,7 @@ async fn finish_quic(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream)
     let _ = send.finish();
 }
 
-async fn refuse_quic(
+pub(crate) async fn refuse_quic(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     code: &CustodyRefusal,
@@ -545,7 +552,7 @@ async fn tcp_drive(
     proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
     let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
     write_deadline(proxy.deadline(), write_custody_tcp_frame(stream, &encoded)).await?;
-    for _ in 0..2048 {
+    for _ in 0..MAX_CUSTODY_SESSION_FRAMES {
         let deadline = proxy.deadline();
         let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(stream))
             .await
@@ -587,7 +594,7 @@ async fn tcp_drive(
             return Ok(DriveEnd::Finished);
         }
     }
-    Ok(DriveEnd::Finished)
+    Err(custody_deadline_error(CustodyRefusal::FrameLimit))
 }
 
 async fn quic_drive(
@@ -607,7 +614,7 @@ async fn quic_drive(
     proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
     let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
     write_deadline(proxy.deadline(), write_custody_tcp_frame(send, &encoded)).await?;
-    for _ in 0..2048 {
+    for _ in 0..MAX_CUSTODY_SESSION_FRAMES {
         let deadline = proxy.deadline();
         let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(recv))
             .await
@@ -649,7 +656,7 @@ async fn quic_drive(
             return Ok(DriveEnd::Finished);
         }
     }
-    Ok(DriveEnd::Finished)
+    Err(custody_deadline_error(CustodyRefusal::FrameLimit))
 }
 
 async fn supervise<F>(

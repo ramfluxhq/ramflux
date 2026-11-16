@@ -229,6 +229,8 @@ pub enum CustodyRefusal {
     },
     IdempotencyConflict,
     PayloadTooLarge,
+    /// The connection served its frame budget and will not read another request.
+    FrameLimit,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -386,6 +388,7 @@ impl CustodyRefusal {
             Self::CapacityRetryAfter { .. } => "CapacityRetryAfter",
             Self::IdempotencyConflict => "IdempotencyConflict",
             Self::PayloadTooLarge => "PayloadTooLarge",
+            Self::FrameLimit => "FrameLimit",
         }
     }
 }
@@ -452,6 +455,7 @@ mod capacity_hint_tests {
         assert_eq!(CustodyRefusal::AuthorityUnavailable.reason_code(), "AuthorityUnavailable");
         assert_eq!(CustodyRefusal::SessionRequired.reason_code(), "SessionRequired");
         assert_eq!(CustodyRefusal::AbortedRetrySafe.reason_code(), "AbortedRetrySafe");
+        assert_eq!(CustodyRefusal::FrameLimit.reason_code(), "FrameLimit");
         let nested = CustodyRefusal::CapacityRetryAfter { retry_after_ms: 5 };
         assert_eq!(nested.reason_code(), "CapacityRetryAfter");
         assert!(!nested.reason_code().contains('5'));

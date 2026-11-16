@@ -72,6 +72,7 @@ const KNOWN_CODES: &[&str] = &[
     "CapacityRetryAfter",
     "IdempotencyConflict",
     "PayloadTooLarge",
+    "FrameLimit",
 ];
 /// The fixed category for a code outside the allowlist.
 const UNKNOWN: &str = "unknown";

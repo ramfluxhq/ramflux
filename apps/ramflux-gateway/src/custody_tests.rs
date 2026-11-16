@@ -35,6 +35,10 @@ impl Fixture {
         std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
         Ok(Self { tls, root })
     }
+
+    pub(crate) fn tls(&self) -> &ramflux_transport::MeshTlsConfig {
+        &self.tls
+    }
 }
 struct AuthorityFixture {
     node: VerifiedNodeRecord,
