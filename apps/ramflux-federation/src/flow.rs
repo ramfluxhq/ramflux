@@ -971,9 +971,9 @@ mod tests {
             delivery_class: "opaque_event".to_owned(),
             required_capability: "opaque_delivery".to_owned(),
             envelope: ramflux_protocol::Envelope {
-                schema: "ramflux.envelope.v1".to_owned(),
-                version: 1,
-                domain: "ramflux.envelope.v1".to_owned(),
+                schema: "ramflux.envelope.v2".to_owned(),
+                version: 2,
+                domain: "ramflux.envelope.v2".to_owned(),
                 ext: ramflux_protocol::Ext::default(),
                 signed: ramflux_protocol::SignedFields {
                     signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -991,9 +991,9 @@ mod tests {
                 created_at: 1_760_000_000,
                 encrypted_payload: "ciphertext".to_owned(),
                 payload_hash: "payload_hash".to_owned(),
-                delivery_mode: None,
-                collapse_tag: None,
-                report_commitment: None,
+                delivery_mode: Some("durable".to_owned()),
+                collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".to_owned()),
+                report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".to_owned()),
             },
         };
 

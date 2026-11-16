@@ -34,7 +34,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     let mut receiver = b.account(None, mail)?;
     let pool = receiver.relay_quic_pool()?;
     let mut engine = receiver.session_client().await?;
-    let pending = receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await;
+    let pending = receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await;
     assert!(
         matches!(pending, Err(SdkError::InboundPending(_)) | Ok(_)),
         "missing key remains retryable"
@@ -49,7 +49,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
         0
     );
     receiver.client.import_group_sender_key_distribution(&distribution)?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     assert_eq!(
         receiver.client.generated_message_detail("thread", &logical)?.message.text.as_deref(),
         Some("held group body")
@@ -67,7 +67,7 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     assert_eq!(work.sender, a.identity()?.storage_key());
     assert_eq!(work.wire_message.as_deref(), Some(entry.envelope.envelope_id.as_str()));
     receiver.client.import_group_sender_key_distribution(&distribution)?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     assert_eq!(
         receiver
             .client

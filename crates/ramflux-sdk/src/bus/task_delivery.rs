@@ -291,7 +291,7 @@ mod tests {
         account.engine = None;
         account.test_connector = Some(Arc::new(HeldAdmission));
         let envelope = serde_json::from_value(serde_json::json!({
-            "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+            "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
             "signing_key_id":"device-sender","signature_alg":"ed25519","signature":"fixture",
             "envelope_id":"acquire-deadline","source_principal_id":"sender",
             "source_device_id":"device-sender","target_delivery_id":"remote-target",
@@ -352,7 +352,7 @@ mod tests {
             Box::new(HangingLegacyGateway { last: None, stall_heartbeat: false }),
         ));
         let envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
-            "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+            "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
             "signing_key_id":"device-sender","signature_alg":"ed25519","signature":"fixture",
             "envelope_id":"timed-out-envelope","source_principal_id":"sender",
             "source_device_id":"device-sender","target_delivery_id":"remote-target",

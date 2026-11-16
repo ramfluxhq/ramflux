@@ -84,7 +84,7 @@ pub(super) fn scripted_raw(mode: SessionMode, script: Vec<Vec<u8>>) -> GatewaySe
 
 pub(super) fn envelope() -> ramflux_protocol::Envelope {
     serde_json::from_value(json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
         "signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture",
         "envelope_id":"env-route","source_principal_id":"p","source_device_id":"d",
         "target_delivery_id":"target-route","delivery_class":"opaque_event",
@@ -401,7 +401,7 @@ async fn sdk_ijson_receive_refuses_unsafe_integer() {
 }
 
 fn deliver_frame_bytes(capable: bool, created_at: &str, duplicate_extension_key: bool) -> Vec<u8> {
-    let mut bytes = br#"{"frame_type":"deliver","entry":{"inbox_seq":71,"target_delivery_id":"target-route","envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":"#.to_vec();
+    let mut bytes = br#"{"frame_type":"deliver","entry":{"inbox_seq":71,"target_delivery_id":"target-route","envelope":{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":"#.to_vec();
     bytes.extend_from_slice(created_at.as_bytes());
     bytes.extend_from_slice(br#", "encrypted_payload":"opaque","payload_hash":"hash-route""#);
     if duplicate_extension_key {

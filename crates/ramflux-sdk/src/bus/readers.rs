@@ -569,7 +569,6 @@ mod read_model_selector_tests {
     #[test]
     fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let fixture =
             crate::client::native_test_support::account::blocking("reader-selectors", "local")?;
         let client = &fixture.client;

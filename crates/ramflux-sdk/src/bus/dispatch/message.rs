@@ -915,9 +915,9 @@ mod pending_ack_entry_tests {
             "inbox_seq": inbox_seq,
             "target_delivery_id": target,
             "envelope": {
-                "schema": "ramflux.envelope.v1",
-                "version": 1,
-                "domain": "ramflux.envelope.v1",
+                "schema": "ramflux.envelope.v2",
+                "version": 2,
+                "domain": "ramflux.envelope.v2",
                 "ext": {},
                 "signing_key_id": "device",
                 "signature_alg": "ed25519",
@@ -1017,7 +1017,7 @@ mod projection_failure_tests {
         let client = crate::RamfluxClient::new();
         let entry: crate::GatewayInboxEntry = serde_json::from_value(serde_json::json!({
             "inbox_seq":1,"target_delivery_id":"target","envelope":{
-                "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{},
+                "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","ext":{},
                 "signing_key_id":"device","signature_alg":"ed25519","signature":"invalid",
                 "envelope_id":"malformed","source_principal_id":"peer","source_device_id":"device",
                 "target_delivery_id":"target","routing_set_id":null,"delivery_class":"opaque_event",

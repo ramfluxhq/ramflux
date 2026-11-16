@@ -14,7 +14,6 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
             let itest_vault_path =
                 start.itest_memory_vault.then(|| start.data_root.join("itest-memory-vault.json"));
             let mut config = LocalBusConfig::new(socket, start.data_root);
-            config.itest_legacy_accounts = start.itest_legacy_accounts;
             #[cfg(feature = "itest-memory-vault")]
             if let Some(path) = itest_vault_path {
                 config.custody_vault = Some(std::sync::Arc::new(

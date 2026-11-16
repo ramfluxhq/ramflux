@@ -1660,10 +1660,10 @@ pub(crate) mod tests {
             S: serde::Serializer,
         {
             use serde::ser::SerializeMap;
-            let mut map = serializer.serialize_map(Some(20))?;
-            map.serialize_entry("schema", "ramflux.envelope.v1")?;
-            map.serialize_entry("version", &1)?;
-            map.serialize_entry("domain", "ramflux.envelope.v1")?;
+            let mut map = serializer.serialize_map(Some(22))?;
+            map.serialize_entry("schema", "ramflux.envelope.v2")?;
+            map.serialize_entry("version", &2)?;
+            map.serialize_entry("domain", "ramflux.envelope.v2")?;
             map.serialize_entry("ext", &RawExt { duplicate: self.duplicate_ext })?;
             map.serialize_entry("signing_key_id", "device")?;
             map.serialize_entry("signature_alg", "ed25519")?;
@@ -1680,6 +1680,11 @@ pub(crate) mod tests {
             map.serialize_entry("encrypted_payload", "opaque")?;
             map.serialize_entry("payload_hash", "hash")?;
             map.serialize_entry("delivery_mode", "durable")?;
+            map.serialize_entry("collapse_tag", "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI")?;
+            map.serialize_entry(
+                "report_commitment",
+                "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+            )?;
             map.end()
         }
     }

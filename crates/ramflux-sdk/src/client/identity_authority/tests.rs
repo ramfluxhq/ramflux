@@ -353,33 +353,46 @@ fn mode(
     client_mode: LocalBusClientMode,
 ) -> Result<(), SdkError> {
     let branch = actor.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let body = LocalBusAccountCreateRequest {
-        label: None,
-        kind: Some(kind),
-        node_id: None,
-        local_account_id: actor.id.clone(),
+    let kind_name =
+        serde_json::to_value(kind)?.as_str().map(str::to_owned).ok_or_else(|| invalid("kind"))?;
+    let gateway = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
+        gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
+        server_name: "test".into(),
+        ca_cert: actor.path.join("ca.pem"),
         principal_id: branch.principal_id.clone(),
-        principal_commitment: actor.manifest()?.principal_commitment,
         device_id: actor.id.clone(),
         target_delivery_id: actor.id.clone(),
-        account_secret: "test-secret".into(),
-        root_seed: [111; 32],
-        device_seed: [112; 32],
-        client_mode,
-        gateway: GatewayQuicEndpointConfig {
-            bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
-            gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
-            server_name: "test".into(),
-            ca_cert: actor.path.join("ca.pem"),
-            principal_id: branch.principal_id.clone(),
-            device_id: actor.id.clone(),
-            target_delivery_id: actor.id.clone(),
-            prekey_http_url: None,
-        },
+        prekey_http_url: None,
     };
     write_local_bus_account_manifest(
         &actor.path,
-        &LocalBusPersistedAccount::from_create_request(&body),
+        &LocalBusPersistedAccount {
+            activation_pending: true,
+            label: None,
+            kind: Some(kind_name),
+            schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
+            local_account_id: actor.id.clone(),
+            principal_id: branch.principal_id.clone(),
+            principal_commitment: actor.manifest()?.principal_commitment,
+            device_id: actor.id.clone(),
+            target_delivery_id: actor.id.clone(),
+            account_secret: "test-secret".into(),
+            root_seed: [111; 32],
+            device_seed: [112; 32],
+            client_mode,
+            node_id: None,
+            node_tcp_addr: None,
+            node_relay: None,
+            gateway,
+            devices: vec![LocalBusDeviceRecord {
+                device_id: actor.id.clone(),
+                device_epoch: 1,
+                target_delivery_id: actor.id.clone(),
+                capability_scope: default_device_capability_scope(),
+                is_local: true,
+            }],
+        },
     )
 }
 #[test]

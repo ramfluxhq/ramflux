@@ -147,7 +147,6 @@ fn edit(target: &g::MessageRef, revision: u64, digest: [u8; 32], text: &str) -> 
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_original_redelivery_never_replaces_current_edit() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(185, 187).await?;
     commit_content(
         &a,
@@ -227,7 +226,6 @@ async fn retired_original_redelivery_never_replaces_current_edit() -> Result<(),
 #[tokio::test(flavor = "current_thread")]
 async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(239, 241).await?;
     commit_content(
         &a,
@@ -310,7 +308,6 @@ async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
 
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(211, 213).await?;
     let raw = unknown_inner(&a, "unknown-wire")?;
     let entry = seal(&a, &b, message("unknown-wire", "c"), &raw)?;
@@ -377,7 +374,6 @@ async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError>
 
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_field_entity_layer_and_signed_payload_keep_exact_bytes() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(215, 217).await?;
     let mut body = g::Message {
         text: "exact unknown field".into(),
@@ -420,7 +416,6 @@ async fn unknown_field_entity_layer_and_signed_payload_keep_exact_bytes() -> Res
 
 #[tokio::test(flavor = "current_thread")]
 async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(219, 221).await?;
     let mut control = g::Control {
         operation: 15,
@@ -444,7 +439,6 @@ async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<
 
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_preserves_unicode_and_unsupported_projection() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(223, 225).await?;
     let known = RamfluxClient::encode_generated_inner(
         generated_identity(&a, "known-wire")?,
@@ -471,7 +465,6 @@ async fn message_page_preserves_unicode_and_unsupported_projection() -> Result<(
 
 #[tokio::test(flavor = "current_thread")]
 async fn raw_inner_crash_commit_precedes_ack() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(231, 233).await?;
     let raw = unknown_inner(&a, "crash-wire")?;
     let entry = seal(&a, &b, message("crash-wire", "c"), &raw)?;
@@ -517,7 +510,6 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     use ramflux_storage::{
         DirectMessageWrite, MessageMetadata, RawInnerCopyKind, RawInnerCopyWrite,
     };
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(235, 237).await?;
     let identity = generated_identity(&a, "upgrade-target")?;
     let id = ramflux_protocol::encode_base64url(&identity.id);
@@ -729,7 +721,6 @@ fn assert_group_authority_guard(
 }
 
 async fn group_authority_case(change: &str) -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(231, 233).await?;
     for client in [&a.client, &b.client] {
         for peer in [&a, &b] {
@@ -842,7 +833,6 @@ async fn generated_group_decrypts_with_outer_authority() -> Result<(), SdkError>
 #[tokio::test(flavor = "current_thread")]
 async fn generated_refusals_settle_and_never_stage_locally()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for kind in [3, 4, 5, 7, 108, 110] {
         let (a, mut b) = pair(201, 203).await?;
         // A known malformed payload has no target/replacement/operation. This is peer input.
@@ -956,7 +946,6 @@ fn assert_only_original_header_retained(client: &RamfluxClient, id: &str) -> Res
 
 #[tokio::test(flavor = "current_thread")]
 async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(207, 209).await?;
     let target = g::MessageRef {
         id: generated_identity(&a, "late-target")?.id,
@@ -1020,7 +1009,6 @@ async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Res
 
 #[tokio::test(flavor = "current_thread")]
 async fn message_receipt_requires_matching_metadata_commitment() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for row in 0..3 {
         let (a, mut b) = pair(199, 201).await?;
         let identity = generated_identity(&a, "header-receipt")?;
@@ -1124,7 +1112,6 @@ fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkE
 
 #[tokio::test(flavor = "current_thread")]
 async fn full_message_edit_drops_reply_forward_and_two_media() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(195, 197).await?;
     let reference = g::MessageRef {
         id: vec![7; 32],
@@ -1202,7 +1189,6 @@ async fn reaction_at(
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_signed_order_advances_absent_noops_and_bounds_visible_tokens()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(181, 183).await?;
     commit_content(
         &a,
@@ -1244,7 +1230,6 @@ async fn reaction_signed_order_advances_absent_noops_and_bounds_visible_tokens()
 #[tokio::test(flavor = "current_thread")]
 async fn reaction_register_capacity_counts_absent_markers_and_allows_existing_updates()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(177, 179).await?;
     commit_content(
         &a,
@@ -1294,7 +1279,6 @@ async fn reaction_register_capacity_counts_absent_markers_and_allows_existing_up
 #[tokio::test(flavor = "current_thread")]
 async fn message_logical_id_refuses_changed_body_or_hlc_without_retaining_a_body_digest()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(173, 175).await?;
     commit_content(
         &a,
@@ -1398,7 +1382,6 @@ fn moderator_delete_entry(
 #[tokio::test(flavor = "current_thread")]
 async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_target()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b, c, epoch) = moderator_group_fixture().await?;
     let mut target_identity = generated_identity(&c, "late-moderated-target")?;
     target_identity.group_id = Some("moderator-group".into());
@@ -1451,7 +1434,6 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
 #[tokio::test(flavor = "current_thread")]
 async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_actual_cache()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(131, 133).await?;
     let mut cache = crate::typed_messages::MessageCache::default();
     for (name, local) in [("everyone-reader", false), ("local-reader", true)] {
@@ -1533,7 +1515,6 @@ async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_ac
 #[tokio::test(flavor = "current_thread")]
 async fn typed_identity_retention_never_preserves_payload_shadows_or_unbound_headers()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(127, 129).await?;
     for case in 0..7 {
         let name = format!("invalid-header-{case}");
@@ -1579,7 +1560,6 @@ async fn typed_identity_retention_never_preserves_payload_shadows_or_unbound_hea
 
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_projects_generated_content_and_unsupported() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(151, 153).await?;
     let mut expected = Vec::new();
     for index in 0..8 {
@@ -1656,7 +1636,6 @@ async fn message_page_projects_generated_content_and_unsupported() -> Result<(),
 
 #[tokio::test(flavor = "current_thread")]
 async fn message_page_respects_encoded_byte_cap_and_continuation() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(161, 163).await?;
     for index in 0..4 {
         commit_content(
@@ -1694,7 +1673,6 @@ async fn message_page_respects_encoded_byte_cap_and_continuation() -> Result<(),
 
 #[tokio::test]
 async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for ordinal in 0..7 {
         // Each refusal is independent; the receive-pass settlement regression covers
         // ratchet progress after refused peer input on the same pair.
@@ -1786,7 +1764,6 @@ async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Res
 
 #[tokio::test(flavor = "current_thread")]
 async fn early_edit_register_is_qualified_by_original_author_root() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(173, 175).await?;
     let c = Fixture::new("carol", 177)?;
     b.client.establish_friend_link(
@@ -1868,7 +1845,6 @@ mod native_control;
 
 #[tokio::test(flavor = "current_thread")]
 async fn floorless_self_sync_draft_refuses_before_delivery_retention() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::owned("alice", "sync-receipt-owner", 231, 232)?;
     let mut b = Fixture::owned("bob", "sync-receipt-owner", 231, 234)?;
     let value = a.client.change_self_sync(
@@ -1906,7 +1882,6 @@ async fn floorless_self_sync_draft_refuses_before_delivery_retention() -> Result
 
 #[test]
 fn floorless_self_sync_never_prepares_courier_plan_or_ratchet() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::owned("alice", "sync-plan-owner", 221, 222)?;
     let b = Fixture::owned("bob", "sync-plan-owner", 221, 224)?;
     super::review::trust(&a, &b)?;

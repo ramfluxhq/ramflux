@@ -164,7 +164,7 @@ async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<Deli
     let mut session =
         GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
     let pool = pool()?;
-    receiver.client.apply_routed_entry(&mut session, &pool, entry, false).await
+    receiver.client.apply_routed_entry(&mut session, &pool, entry).await
 }
 
 fn projected(receiver: &Fixture, conversation: &str) -> Result<usize, SdkError> {
@@ -254,7 +254,6 @@ fn reply_to(alice: &str) -> GatewayDirectMessage {
 
 #[tokio::test(flavor = "current_thread")]
 async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(141, 142).await?;
     let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
     let tag = ramflux_protocol::decode_base64url(
@@ -276,7 +275,6 @@ async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkErro
 
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(143, 144).await?;
     let first = seal(&a, &b, message("report-bootstrap", "c"), b"first-body")?;
     apply(&mut b, &first).await?;
@@ -304,7 +302,6 @@ async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkErro
 
 #[tokio::test(flavor = "current_thread")]
 async fn redelivery_after_uncommitted_open_still_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(149, 150).await?;
     let entry = seal(&a, &b, message("report-redeliver", "c"), b"once")?;
     super::super::receive::commit_fault::fail_before(
@@ -324,7 +321,6 @@ async fn redelivery_after_uncommitted_open_still_opens() -> Result<(), SdkError>
 
 #[tokio::test(flavor = "current_thread")]
 async fn collapse_tag_stable_across_dh_step() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, mut b) = pair(151, 152).await?;
     friend(&mut a, &b)?;
     let first = seal(&a, &b, message("report-dh-1", "c"), b"one")?;
@@ -342,7 +338,6 @@ async fn collapse_tag_stable_across_dh_step() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn missing_direct_commitment_refused_under_gate() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(153, 154).await?;
     let _omit = omit_direct_report();
     assert!(
@@ -355,7 +350,6 @@ async fn missing_direct_commitment_refused_under_gate() -> Result<(), SdkError> 
 
 #[tokio::test(flavor = "current_thread")]
 async fn a0_from_signed_envelope_uses_device_key_id_and_delivery_class() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(155, 156).await?;
     let entry = seal(&a, &b, message("report-a0", "c"), b"a0-body")?;
     assert_eq!(entry.envelope.signed.signing_key_id, "device:alice");
@@ -371,7 +365,6 @@ async fn a0_from_signed_envelope_uses_device_key_id_and_delivery_class() -> Resu
 
 #[tokio::test(flavor = "current_thread")]
 async fn payload_outer_commitment_mismatch_is_refused() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(157, 158).await?;
     let entry = seal(&a, &b, message("report-l5", "c"), b"l5")?;
     let mut tampered = entry.clone();
@@ -384,7 +377,6 @@ async fn payload_outer_commitment_mismatch_is_refused() -> Result<(), SdkError> 
 
 #[tokio::test(flavor = "current_thread")]
 async fn ad_binds_report_commitment_so_matched_c_tamper_fails_aead() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(159, 160).await?;
     let entry = seal(&a, &b, message("report-ad", "c"), b"ad")?;
     let forged = ramflux_protocol::encode_base64url([0x00_u8; 32]);
@@ -399,7 +391,6 @@ async fn ad_binds_report_commitment_so_matched_c_tamper_fails_aead() -> Result<(
 
 #[tokio::test(flavor = "current_thread")]
 async fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(145, 146).await?;
     let first = seal(&a, &b, message("report-fresh-1", "c"), b"one")?;
     let mut second = seal(&a, &b, message("report-fresh-2", "c"), b"two")?;
@@ -416,7 +407,6 @@ async fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn active_sender_refuses_legacy_bytes_before_projection() -> Result<(), SdkError> {
-    assert!(ramflux_protocol::schema_profile::schema_v1_live());
     let (a, b) = pair(147, 148).await?;
     let mut draft = message("report-legacy", "c");
     draft.source_principal_id = a.config()?.principal_id;
@@ -444,7 +434,6 @@ async fn active_sender_refuses_legacy_bytes_before_projection() -> Result<(), Sd
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_control_route_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(161, 162).await?;
     let entry =
         seal_as(&a, &b, message("report-control", "c"), &reset_inner(&a, &b)?, Route::control())?;
@@ -455,7 +444,6 @@ async fn gate_on_control_route_opens() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, b) = pair(163, 164).await?;
     friend(&mut a, &b)?;
     let body = receipt_body(&b, &a, "report-receipt", "outgoing")?;
@@ -472,7 +460,6 @@ async fn gate_on_receipt_route_opens() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_group_message_route_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(165, 166).await?;
     let body = group_inner(&a, &b, "report-group")?;
     let entry = seal_as(
@@ -489,7 +476,6 @@ async fn gate_on_group_message_route_opens() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, _) = pair(167, 168).await?;
     let mut packet = crate::client::own_device_copy::PREFIX.to_vec();
     packet.extend(br#"{"schema":"ramflux.sdk.own_device_message.v2","id":"opaque"}"#);
@@ -504,7 +490,6 @@ async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), Sd
 
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(169, 170).await?;
     let entry = seal(&a, &b, message("report-compact", "c"), b"compact-body")?;
     let compact = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
@@ -542,7 +527,6 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
 
 #[tokio::test(flavor = "current_thread")]
 async fn abandoned_direct_seal_does_not_fail_later_control_send() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(171, 172).await?;
     let _abandoned =
         nested_text(&a, &b, message("report-abandoned", "c"), b"abandoned-body", Route::direct())?;
@@ -559,7 +543,6 @@ async fn abandoned_direct_seal_does_not_fail_later_control_send() -> Result<(), 
 
 #[tokio::test(flavor = "current_thread")]
 async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(173, 174).await?;
     let (mut message, sealed) =
         nested_text(&a, &b, message("report-a0-drift", "c"), b"drift", Route::direct())?;
@@ -578,7 +561,6 @@ async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
 }
 
 async fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(alice, bob).await?;
     let (mut message, sealed) = nested_text(&a, &b, message(id, "c"), b"drift", Route::direct())?;
     message.ttl = message.ttl.saturating_add(1);
@@ -606,7 +588,6 @@ async fn helper_a0_drift_outbox() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(187, 188).await?;
     let (mut message, sealed) =
         nested_text(&a, &b, message("report-wrapper-direct", "c"), b"direct", Route::direct())?;
@@ -624,7 +605,6 @@ async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn task_transport_prepared_a0_drift_is_a_send_error() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, b) = pair(189, 190).await?;
     if a.client
         .account_db()?
@@ -772,7 +752,6 @@ fn receipt_message(id: &str) -> GatewayDirectMessage {
 
 #[tokio::test(flavor = "current_thread")]
 async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(189, 190).await?;
     uniform_tag_and_commitment(&seal(&a, &b, message("t07-direct", "c"), b"direct")?.envelope)?;
     let (a, b) = pair(191, 192).await?;
@@ -848,7 +827,6 @@ fn report_mismatch_maps_to_authentication_failed() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn refused_first_c_does_not_strand_pair_successor() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(187, 189).await?;
     let mut bad = seal(&a, &b, message("bad-first-c", "c"), b"must not project")?;
     // Signed issue time is in C's A0, while the pair AEAD still authenticates this exact ciphertext.

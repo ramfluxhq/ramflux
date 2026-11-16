@@ -291,14 +291,12 @@ impl RamfluxClient {
     /// Returns an error when resume fails, the opaque delivery cannot be appended locally, or SDK
     /// DM decryption fails.
     #[allow(clippy::too_many_lines)]
-    #[allow(clippy::too_many_arguments)]
     pub async fn receive_gateway_plaintext_deliveries(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         limit: usize,
         conversation_id: &str,
-        auto_fetch_attachments: bool,
     ) -> Result<Vec<GatewayPlaintextDelivery>, SdkError> {
         self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
@@ -315,7 +313,7 @@ impl RamfluxClient {
         for entry in entries {
             if crate::client::routed::decode(&entry.envelope).is_ok() {
                 let delivery: crate::client::routed::Delivery = self
-                    .apply_routed_entry(engine, pool, &entry, auto_fetch_attachments)
+                    .apply_routed_entry(engine, pool, &entry)
                     .await
                     .map_err(SdkError::without_directory_context)?;
                 self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
@@ -577,14 +575,7 @@ impl RamfluxClient {
         let mut ack = gateway_ack(&entry.envelope.envelope_id, &receiver, received_at);
         ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(entry.inbox_seq));
         let cursor = engine.ack(ack).await?;
-        if entry.envelope.delivery_class == ramflux_protocol::DeliveryClass::SelfDeviceControl {
-            self.account_db()?.write_transaction(|| {
-                self.record_own_copy_ack(entry)?;
-                self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)
-            })?;
-        } else {
-            self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
-        }
+        self.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
         Ok(cursor)
     }
 

@@ -48,7 +48,7 @@ impl AccountView {
         views.insert("mcp.server.refresh", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash()}));
         views.insert("mcp.tool.list", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash(),"tools":account.mcp_registry.tools()}));
         views.insert("bot.list", json!({"bots":account.bots.values().collect::<Vec<_>>()}));
-        let devices = super::super::dispatch::device::account_known_devices(state, id, account);
+        let devices = super::super::dispatch::device::account_known_devices(account);
         if let Ok(devices) = devices {
             views.insert(
                 "device.list",

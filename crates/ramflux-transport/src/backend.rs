@@ -547,9 +547,9 @@ mod tests {
                 "expires_at": 2
             },
             "envelope": {
-                "schema": "ramflux.envelope.v1",
-                "version": 1,
-                "domain": "ramflux.envelope",
+                "schema": "ramflux.envelope.v2",
+                "version": 2,
+                "domain": "ramflux.envelope.v2",
                 "ext": {},
                 "signing_key_id": "key",
                 "signature_alg": "ed25519",
@@ -575,7 +575,7 @@ mod tests {
             r#""ext":{},"#
         };
         format!(
-            r#"{{"backend":"GrpcH2","signed_request_canonical":[],"envelope_canonical":[],"envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope",{ext}"signing_key_id":"key","signature_alg":"ed25519","signature":"signature","envelope_id":"envelope","source_principal_id":"principal","source_device_id":"device","target_delivery_id":"delivery","delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":{created_at},"encrypted_payload":"payload","payload_hash":"hash"}}}}"#
+            r#"{{"backend":"GrpcH2","signed_request_canonical":[],"envelope_canonical":[],"envelope":{{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",{ext}"signing_key_id":"key","signature_alg":"ed25519","signature":"signature","envelope_id":"envelope","source_principal_id":"principal","source_device_id":"device","target_delivery_id":"delivery","delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":{created_at},"encrypted_payload":"payload","payload_hash":"hash"}}}}"#
         )
         .into_bytes()
     }

@@ -62,9 +62,9 @@ fn envelope(
     ttl: u32,
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
     Ok(ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         ext: ramflux_protocol::Ext::default(),
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "test-envelope-key".to_owned(),
@@ -82,9 +82,9 @@ fn envelope(
         created_at: i64::try_from(now).map_err(|_| "envelope time does not fit")?,
         encrypted_payload: "ciphertext-sentinel".to_owned(),
         payload_hash: "hash-sentinel".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        delivery_mode: Some("durable".to_owned()),
+        collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".to_owned()),
+        report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".to_owned()),
     })
 }
 

@@ -340,15 +340,14 @@ async fn assert_deliveries(
                     config,
                     Box::new(super::fixture::RecordingGateway::new(Arc::default())),
                 );
-                let result =
-                    peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+                let result = peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
                 assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
                 assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 1);
                 assert_eq!(peer.client.direct_messages(&conversation(source)?)?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
                 assert_eq!(
                     peer.client
-                        .apply_routed_entry(&mut engine, &pool, &entry, false)
+                        .apply_routed_entry(&mut engine, &pool, &entry)
                         .await?
                         .routing
                         .map(|route| route.message_id),

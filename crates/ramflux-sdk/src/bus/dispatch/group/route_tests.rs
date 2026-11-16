@@ -82,7 +82,7 @@ async fn sender_key_snapshot_uses_signed_group_conversation_instead_of_legacy_co
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
+    peer.client.apply_routed_entry(&mut receiver, &pool, &entry).await?;
     assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &entry)?.is_some());
     directory.abort();
     drop((source, peers));

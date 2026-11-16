@@ -29,11 +29,6 @@ pub(crate) async fn dispatch_device_bus_request(
                 serde_json::from_value(request.body.clone())?;
             dispatch_device_sync_export(request, state, &body)
         }
-        "device.sync.import" => {
-            let body: LocalBusDeviceSyncImportRequest =
-                serde_json::from_value(request.body.clone())?;
-            dispatch_device_sync_import(request, state, body)
-        }
         "device.pair.begin"
         | "device.pair.join"
         | "device.pair.confirm"
@@ -241,7 +236,7 @@ fn dispatch_device_list(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
     let account = local_bus_account(state, account_id)?;
-    let devices = account_known_devices(state, account_id, account)?;
+    let devices = account_known_devices(account)?;
     Ok(local_bus_ok(serde_json::to_value(LocalBusDeviceListResponse {
         principal_id: account.gateway_config.principal_id.clone(),
         local_device_id: account.gateway_config.device_id.clone(),
@@ -373,19 +368,6 @@ fn dispatch_device_sync_export(
     Ok(local_bus_ok(serde_json::json!({"target_device_id":body.target_device_id,"staged":staged})))
 }
 
-fn dispatch_device_sync_import(
-    request: &LocalBusFrame,
-    state: &mut LocalBusDaemonState,
-    body: LocalBusDeviceSyncImportRequest,
-) -> Result<LocalBusDispatchResult, SdkError> {
-    let _ = (request, state, body);
-    Err(SdkError::GeneratedRefused {
-        code: crate::GeneratedRefusalCode::Content,
-        reason: "retired object history carrier; receive authenticated generated history pages"
-            .into(),
-    })
-}
-
 fn append_device_branch_authorized_event(
     account: &LocalBusAccountState,
     device_id: &str,
@@ -487,45 +469,34 @@ fn device_activate_response(
 }
 
 pub(crate) fn account_known_devices(
-    state: &LocalBusDaemonState,
-    account_id: &str,
     account: &LocalBusAccountState,
 ) -> Result<Vec<LocalBusDeviceRecord>, SdkError> {
-    if let Some(native) = &account.client.born_v3_account {
-        let local = native.local_device_id()?;
-        return native
-            .record()
-            .body
-            .devices
-            .iter()
-            .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
-            .map(|device| {
-                Ok(LocalBusDeviceRecord {
-                    device_id: device.device_id.clone(),
-                    device_epoch: device.device_epoch,
-                    target_delivery_id: ramflux_protocol::qualified_device_id(
-                        &native.record().body.account_anchor,
-                        &device.device_id,
-                    )?,
-                    capability_scope: device
-                        .branch_certificate
-                        .as_ref()
-                        .map_or_else(Vec::new, |certificate| certificate.body.capabilities.clone()),
-                    is_local: device.device_id == local,
-                })
-            })
-            .collect();
-    }
-    let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
-    let manifest = read_local_bus_account_manifest(&manifest_path)?;
-    let current = LocalBusDeviceRecord {
-        device_id: account.gateway_config.device_id.clone(),
-        device_epoch: account.gateway_config.device_epoch,
-        target_delivery_id: account.target_delivery_id.clone(),
-        capability_scope: default_device_capability_scope(),
-        is_local: true,
+    let Some(native) = &account.client.born_v3_account else {
+        return Err(SdkError::IdentityRootMissing);
     };
-    Ok(normalize_manifest_devices(manifest.devices, &current))
+    let local = native.local_device_id()?;
+    native
+        .record()
+        .body
+        .devices
+        .iter()
+        .filter(|device| device.status == ramflux_protocol::DeviceSetStatus::Active)
+        .map(|device| {
+            Ok(LocalBusDeviceRecord {
+                device_id: device.device_id.clone(),
+                device_epoch: device.device_epoch,
+                target_delivery_id: ramflux_protocol::qualified_device_id(
+                    &native.record().body.account_anchor,
+                    &device.device_id,
+                )?,
+                capability_scope: device
+                    .branch_certificate
+                    .as_ref()
+                    .map_or_else(Vec::new, |certificate| certificate.body.capabilities.clone()),
+                is_local: device.device_id == local,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn normalize_manifest_devices(

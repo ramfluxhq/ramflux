@@ -20,7 +20,7 @@ fn carrier() -> serde_json::Value {
     let context = context();
     json!({
         "signed_request":{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","signing_key_id":"branch","signature_alg":"ed25519","signature":"fixture","source_device_id":"device","request_id":"request","method":"POST","path":"/gateway/session/submit","device_proof_hash":"already_authed","body_hash":"hash","nonce":"nonce","created_at":100,"expires_at":200},
-        "envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"branch","signature_alg":"ed25519","signature":"fixture","envelope_id":"envelope","source_principal_id":"source","source_device_id":"device","target_delivery_id":"target","delivery_class":"opaque_event","priority":"normal","ttl":30,"created_at":100,"encrypted_payload":"opaque","payload_hash":"hash"},
+        "envelope":{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"branch","signature_alg":"ed25519","signature":"fixture","envelope_id":"envelope","source_principal_id":"source","source_device_id":"device","target_delivery_id":"target","delivery_class":"opaque_event","priority":"normal","ttl":30,"created_at":100,"encrypted_payload":"opaque","payload_hash":"hash"},
         "call_intent":null,"wake_id":null,"call_ref":context.call_ref,"call_terminal":null,"call_context":context
     })
 }

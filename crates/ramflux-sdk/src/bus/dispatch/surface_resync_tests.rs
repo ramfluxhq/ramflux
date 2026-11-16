@@ -170,7 +170,7 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
         };
-        peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 2);
     }
     assert_eq!(group.source.client.direct_messages("thread")?.len(), before);

@@ -33,9 +33,9 @@ mod tests {
             inbox_seq: 1,
             target_delivery_id: "t".into(),
             envelope: ramflux_protocol::Envelope {
-                schema: "ramflux.envelope.v1".into(),
-                version: 1,
-                domain: "test".into(),
+                schema: "ramflux.envelope.v2".into(),
+                version: 2,
+                domain: "ramflux.envelope.v2".into(),
                 ext: ramflux_protocol::Ext::default(),
                 signed: crate::prelude::sdk_device_signed_fields("device", ""),
                 envelope_id: "env".into(),
@@ -49,9 +49,9 @@ mod tests {
                 created_at: 1,
                 encrypted_payload: "cipher".into(),
                 payload_hash: "hash".into(),
-                delivery_mode: None,
-                collapse_tag: None,
-                report_commitment: None,
+                delivery_mode: Some("durable".into()),
+                collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+                report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
             },
         };
         let first = legacy_key(&entry)?;

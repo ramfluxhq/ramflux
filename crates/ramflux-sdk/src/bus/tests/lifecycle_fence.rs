@@ -86,10 +86,7 @@ pub(super) fn runtime_for(
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {
             account_index: None,
-            config: LocalBusConfig {
-                itest_legacy_accounts: true,
-                ..LocalBusConfig::new(root.join("bus.sock"), root.join("source"))
-            },
+            config: LocalBusConfig::new(root.join("bus.sock"), root.join("source")),
             nodes: crate::node::NodeStore::default(),
             accounts: BTreeMap::from([("sender".into(), account)]),
             active_account_id: None,

@@ -286,7 +286,7 @@ async fn receive_generated(
 ) -> Result<(), SdkError> {
     let mut engine =
         GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
-    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry).await?;
     Ok(())
 }
 
@@ -621,8 +621,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     assert!(!outer.contains(conversation));
     assert!(!outer.contains(group));
     let mut engine = GatewaySessionEngine::with_test_transport(b.config()?, Box::new(NoNetwork));
-    let delivery =
-        b.client.apply_routed_entry(&mut engine, &review::pool()?, &control, false).await?;
+    let delivery = b.client.apply_routed_entry(&mut engine, &review::pool()?, &control).await?;
     assert_eq!(delivery.routing.ok_or_else(|| invalid("control route"))?.kind, Kind::GroupControl);
     let identity = a.client.allocate_generated_identity(
         conversation,
@@ -639,8 +638,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let mut entry =
         effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
     entry.inbox_seq = 2;
-    let delivery =
-        b.client.apply_routed_entry(&mut engine, &review::pool()?, &entry, false).await?;
+    let delivery = b.client.apply_routed_entry(&mut engine, &review::pool()?, &entry).await?;
     assert_eq!(delivery.routing.ok_or_else(|| invalid("message route"))?.kind, Kind::GroupMessage);
     assert_eq!(
         b.client.generated_message_detail(conversation, &id)?.message.text.as_deref(),
@@ -668,9 +666,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     let mut next =
         effect_marker_tests::generated_control_entry(&a, &b, &exact, Route::group_message(group))?;
     next.inbox_seq = 3;
-    assert!(
-        b.client.apply_routed_entry(&mut engine, &review::pool()?, &next, false).await.is_err()
-    );
+    assert!(b.client.apply_routed_entry(&mut engine, &review::pool()?, &next).await.is_err());
     assert_eq!(b.client.direct_chat_messages(conversation)?.len(), 1);
     Ok(())
 }

@@ -732,7 +732,6 @@ fn retain_upgrade_candidate(
 
 #[test]
 fn reparse_preserves_original_channel_and_authority() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for mode in ["ephemeral", "durable"] {
         let root = Root::new()?;
         let now = crate::custody::network_now()?;

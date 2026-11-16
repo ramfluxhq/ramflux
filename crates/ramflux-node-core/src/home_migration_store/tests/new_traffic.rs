@@ -101,7 +101,6 @@ fn forwarded_envelope_is_never_forwarded_a_second_hop() -> TestResult {
 }
 #[test]
 fn committed_forward_refuses_missing_named_binding() -> TestResult {
-    assert!(ramflux_protocol::schema_profile::schema_v1_live());
     let s = Scenario::prepared()?;
     s.commit(&s.seal()?)?;
     let (source, mut envelope) = input(&s)?;

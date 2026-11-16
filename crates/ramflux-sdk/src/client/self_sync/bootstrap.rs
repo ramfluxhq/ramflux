@@ -128,16 +128,11 @@ mod tests {
         let mut own = Fixture::new("dormant-sync-backfill").await?;
         let sibling = own.enroll_sibling("dormant-sync-sibling", "sibling").await?;
 
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         own.client.change_self_sync(
             "thread",
             ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
         )?;
 
-        assert!(
-            ramflux_protocol::schema_profile::schema_v1_live(),
-            "backfill must be tested with the active profile"
-        );
         let before = registers(&own.client)?;
         assert!(!before.is_empty(), "fixture must retain an actual previously written register");
         own.client.stage_native_self_sync_bootstrap()?;

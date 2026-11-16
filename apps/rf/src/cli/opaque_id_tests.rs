@@ -58,7 +58,7 @@ fn other_opaque_message_and_surface_selectors_accept_hyphen_prefixed_values()
 }
 
 #[test]
-fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), clap::Error> {
+fn native_account_commands_parse_and_unknown_create_aliases_do_not() -> Result<(), clap::Error> {
     Cli::try_parse_from(["rf", "account", "create", "--display-name", "Alice"])?;
     Cli::try_parse_from([
         "rf",
@@ -100,11 +100,7 @@ fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), cla
         "--expected-commitment",
         "-abc",
     ];
-    if cfg!(feature = "itest-legacy-accounts") {
-        Cli::try_parse_from(fixture)?;
-    } else {
-        assert!(Cli::try_parse_from(fixture).is_err());
-    }
+    assert!(Cli::try_parse_from(fixture).is_err());
     Ok(())
 }
 

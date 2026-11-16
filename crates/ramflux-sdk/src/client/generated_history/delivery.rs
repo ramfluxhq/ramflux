@@ -300,9 +300,9 @@ mod tests {
         own.client.send_direct_message("c", "owner", "sender", b"body")?;
         let mut row = Outgoing::new(&own.client.owned_device_identity()?, 1)?;
         let envelope = Envelope {
-            schema: "test".into(),
-            version: 1,
-            domain: "test".into(),
+            schema: "ramflux.envelope.v2".into(),
+            version: 2,
+            domain: "ramflux.envelope.v2".into(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "key".into(),
@@ -320,9 +320,9 @@ mod tests {
             created_at: crate::time::now_unix_timestamp(),
             encrypted_payload: "ciphertext".into(),
             payload_hash: "payload-hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         };
         row.in_flight = Some(InFlight {
             page: 0,

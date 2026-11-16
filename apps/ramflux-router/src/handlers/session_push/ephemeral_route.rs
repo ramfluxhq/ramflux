@@ -383,7 +383,6 @@ fn row_not_local() -> TestResult {
 }
 
 fn row_malformed_named_candidate_fields_are_refused() -> TestResult {
-    anyhow::ensure!(ramflux_protocol::schema_profile::schema_v1_live());
     let (path, router) = fresh("p06b-gate-off-named")?;
     establish_capable(&router, TARGET)?;
     let mut envelope = signed_ephemeral("named", TARGET)?;

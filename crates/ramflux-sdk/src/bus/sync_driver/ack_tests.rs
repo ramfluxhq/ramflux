@@ -21,9 +21,9 @@ fn entry(target: &str) -> GatewayInboxEntry {
         inbox_seq: 1,
         target_delivery_id: target.to_owned(),
         envelope: Envelope {
-            schema: "ramflux.envelope.v1".into(),
-            version: 1,
-            domain: "test".into(),
+            schema: "ramflux.envelope.v2".into(),
+            version: 2,
+            domain: "ramflux.envelope.v2".into(),
             ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "key".into(),
@@ -41,9 +41,9 @@ fn entry(target: &str) -> GatewayInboxEntry {
             created_at: 1,
             encrypted_payload: "cipher".into(),
             payload_hash: "hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         },
     }
 }

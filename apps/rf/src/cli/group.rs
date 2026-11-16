@@ -181,14 +181,10 @@ pub(crate) struct GroupMessageDelete {
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) group: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) actor: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
     #[arg(long = "scope", alias = "delete-scope", default_value = "everyone", value_parser = ["local", "everyone"])]
     pub(crate) delete_scope: String,
-    #[arg(long)]
-    pub(crate) reason: Option<String>,
     /// Local retry token; the SDK allocates the generated Delete event.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: Option<String>,

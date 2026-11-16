@@ -11,7 +11,6 @@ use serde_json::json;
 const THREAD: &str = "refresh-thread";
 
 fn mute(client: &RamfluxClient) -> Result<g::SelfSync, SdkError> {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     client.change_self_sync(THREAD, g::SelfSync { operation: 6, mute: true, ..Default::default() })
 }
 
@@ -62,7 +61,6 @@ async fn self_sync_refresh_barrier_parks_apply_and_emit_under_older_roster() -> 
         "nothing is applied across the barrier"
     );
     queue_rows(&own.client, "behind", true)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(own.client.prepare_self_sync_repair(&own.config)?.is_none(), "nothing is emitted");
     assert_eq!(usage(&own.client, "self-sync/pending/")?, 1, "a parked courier retires nothing");
     Ok(())
@@ -102,7 +100,6 @@ async fn self_sync_restored_incarnation_rebuilds_queues_without_retired_targets(
     queue_rows(&own.client, "old-incarnation-submitted", false)?;
     // Restore activation gives the device a new incarnation; the previous one queued these.
     own.client.force_self_sync_refresh_barrier(|_, _, local| *local += 1)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(own.client.prepare_self_sync_repair(&own.config)?.is_none());
     for prefix in ["self-sync/pending/", "self-sync/repair/", "self-sync/repair-sent/"] {
         assert_eq!(
@@ -147,7 +144,6 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
         db.persist_actor_state("self-sync/repair/obsolete", &row(&obsolete)?)?;
         Ok::<(), SdkError>(())
     })?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(
         own.client.prepare_self_sync_repair(&own.config)?.is_none(),
         "a obsolete body is neither sent nor allowed to block the courier"
@@ -170,7 +166,6 @@ async fn self_sync_courier_retires_repair_whose_body_left_the_register() -> Test
 #[tokio::test]
 async fn self_sync_sent_draft_issues_one_explicit_clear_and_retires_draft_body() -> TestResult {
     let own = Fixture::new("self-sync-draft-sent").await?;
-    let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(own.client.clear_self_sync_draft_after_send(THREAD)?.is_none(), "no draft, no clear");
     let draft = own.client.change_self_sync(
         THREAD,
@@ -202,7 +197,6 @@ async fn self_sync_courier_never_forwards_register_with_unauthenticated_referenc
     let own = Fixture::new("self-sync-courier-reference").await?;
     let id = blake3::hash(b"pinned before arrival").as_bytes().to_vec();
     // The pin target is unknown at first, so the register is stored as received.
-    let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let pin = own.client.change_self_sync(
         THREAD,
         g::SelfSync {
@@ -248,7 +242,6 @@ async fn self_sync_courier_never_forwards_register_with_unauthenticated_referenc
         db.persist_actor_state("self-sync/repair/unauthentic", &repair)?;
         Ok::<(), SdkError>(())
     })?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let _planned = own.client.prepare_self_sync_repair(&own.config);
     assert!(
         !db.actor_state_exists("self-sync/repair/unauthentic")?,

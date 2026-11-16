@@ -35,9 +35,6 @@ fn account_label_counts_characters_and_kind_is_closed() -> Result<(), SdkError> 
         let typed: LocalBusAccountCreateRequest = serde_json::from_value(body.clone())?;
         assert_eq!(typed.label.as_ref().map(|label| label.chars().count()), Some(64));
         assert_eq!(serde_json::to_value(typed.kind)?, json!(kind));
-        let manifest = LocalBusPersistedAccount::from_create_request(&typed);
-        assert_eq!(manifest.label, typed.label);
-        assert_eq!(manifest.kind.as_deref(), Some(kind));
     }
     body["label"] = json!("🦀".repeat(65));
     assert!(serde_json::from_value::<LocalBusAccountCreateRequest>(body.clone()).is_err());

@@ -599,7 +599,7 @@ async fn process_with_prepared_source(
     let delivery = if let Some(prepared) = prepared_source {
         account.client.apply_routed_prepared_entry(engine, pool, entry, Ok(prepared)).await?
     } else {
-        account.client.apply_routed_entry(engine, pool, entry, false).await?
+        account.client.apply_routed_entry(engine, pool, entry).await?
     };
     let reply =
         if defer_controls { None } else { account.client.take_surface_resync_answer(entry)? };

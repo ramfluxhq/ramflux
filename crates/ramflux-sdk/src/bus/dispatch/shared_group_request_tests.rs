@@ -129,7 +129,7 @@ async fn receive_control(
         config,
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
     );
-    account.client.apply_routed_entry(&mut receiver, pool, &incoming, false).await?;
+    account.client.apply_routed_entry(&mut receiver, pool, &incoming).await?;
     Ok(())
 }
 
@@ -256,7 +256,7 @@ async fn reject_demoted_federated_add(
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    owner.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    owner.apply_routed_entry(&mut receiver, &pool, &incoming).await?;
     assert_eq!(
         owner
             .process_group_request_with_primary(

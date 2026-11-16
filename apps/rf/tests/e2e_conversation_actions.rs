@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Span Brain
 
 //! Reply, edit, reaction, delete and typing through the rf binary, a real daemon and a real router.
-//! Generation zero refuses the schema-gated methods with the existing `peer_upgrade_required` code.
-//! The live branch runs when message schema v1 is active.
 #![cfg(all(unix, feature = "itest-memory-vault"))]
 
 #[path = "e2e/mod.rs"]
@@ -18,8 +16,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-const REFUSAL: &str = "peer_upgrade_required";
 
 struct World<'a> {
     stack: &'a Stack,
@@ -54,113 +50,7 @@ fn conversation_actions_reply_edit_react_delete_and_typing() -> e2e::Result<()> 
         bob: &bob,
         conversation: &conversation,
     };
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        eprintln!("conversation action live rows not exercised: message schema v1 is dormant");
-        let seed = "conversation seed";
-        dm_send(world.alice_d, world.alice, world.bob, world.conversation, &unique("seed"), seed)?;
-        wait_dm_texts(world.bob_daemon()?, world.bob, world.conversation, &[seed])?;
-        return dormant(&mut world, seed);
-    }
     live(&mut world)
-}
-
-fn dormant(world: &mut World<'_>, seed: &str) -> e2e::Result<()> {
-    let sent = drive_send(world, "conversation send body")?;
-    let submitted =
-        sent.pointer("/body/delivery_state").and_then(Value::as_str) == Some("submitted");
-    let message_id = sent.pointer("/body/message_id").and_then(Value::as_str);
-    if !submitted || message_id.is_none() {
-        return Err(format!("conversation.send: {sent}; logs={}", logs(world)).into());
-    }
-    wait_dm_texts(
-        world.bob_daemon()?,
-        world.bob,
-        world.conversation,
-        &[seed, "conversation send body"],
-    )
-    .map_err(|error| format!("{error}; logs={}", logs(world)))?;
-    let before = texts(world)?;
-    refuse_mutations(world)?;
-    let typing = world.alice_args(&[
-        "conversation",
-        "typing",
-        "start",
-        "--account",
-        &world.alice.id,
-        "--conversation",
-        world.conversation,
-        "--operation-id",
-        &unique("typing-start-op"),
-    ])?;
-    expect_code(&typing, "message.focus", REFUSAL)?;
-    let stop_op = unique("typing-stop-op");
-    let stopped = world.alice_args(&[
-        "conversation",
-        "typing",
-        "stop",
-        "--account",
-        &world.alice.id,
-        "--conversation",
-        world.conversation,
-        "--operation-id",
-        &stop_op,
-    ])?;
-    expect_code(&stopped, "message.submit", REFUSAL)?;
-    let watched = watch(world, 2)?;
-    expect_empty_watch(&watched)?;
-    if texts(world)? != before {
-        return Err("typing changed message rows".into());
-    }
-    reconnect_bob(world)?;
-    expect_empty_watch(&watch(world, 2)?)?;
-    Ok(())
-}
-
-fn refuse_mutations(world: &World<'_>) -> e2e::Result<()> {
-    let message = "absent-target";
-    for (method, action, extra) in [
-        ("conversation.reply", "reply", vec!["--text", "reply text"]),
-        ("conversation.edit", "edit", vec!["--text", "edited text", "--expected-revision", "0"]),
-        ("conversation.react", "react", vec!["--token", "thumb"]),
-        ("conversation.react", "react", vec!["--token", "thumb", "--remove"]),
-        ("conversation.delete", "delete", vec!["--scope", "local"]),
-        ("conversation.delete", "delete", vec!["--scope", "everyone"]),
-    ] {
-        let op = unique("mut-op");
-        let mut args = vec![
-            "conversation",
-            action,
-            "--account",
-            world.alice.id.as_str(),
-            "--conversation",
-            world.conversation,
-            "--message",
-            message,
-            "--operation-id",
-            op.as_str(),
-        ];
-        args.extend(extra);
-        expect_code(&rf_json(&world.alice_d.socket, &args)?, method, REFUSAL)?;
-    }
-    let op = unique("peer-delete-op");
-    let peer = rf_json(
-        &world.bob_daemon()?.socket,
-        &[
-            "conversation",
-            "delete",
-            "--account",
-            &world.bob.id,
-            "--conversation",
-            world.conversation,
-            "--message",
-            message,
-            "--scope",
-            "everyone",
-            "--operation-id",
-            &op,
-        ],
-    )?;
-    expect_code(&peer, "conversation.delete", REFUSAL)
 }
 
 /// Typed content JSON carries event ids as padded standard base64; the view `id` is unpadded

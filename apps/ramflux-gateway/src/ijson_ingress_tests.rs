@@ -60,7 +60,7 @@ impl Row {
 
 fn envelope(timestamp: i64) -> anyhow::Result<ramflux_protocol::Envelope> {
     let mut envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
         "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
         "envelope_id":"ijson-envelope","source_principal_id":"principal",
         "source_device_id":"source-device","target_delivery_id":"target",

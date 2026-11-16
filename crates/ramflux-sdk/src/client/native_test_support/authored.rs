@@ -61,7 +61,6 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
         .map_err(|error| format!("enroll third: {error}"))?;
     second.manifest = source.manifest.clone();
     second.client.persist_fetched_identity_directory(&source.manifest)?;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     Box::pin(bootstrap_peer_contact(&source, &peer, &mut second, &mut third, &conversation))
         .await?;
     source
@@ -113,7 +112,6 @@ pub(super) fn capture_before_enrollment(
     owner: &str,
     exact: &[u8],
 ) -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     source.client.account_db()?.write_transaction(|| {
         let envelope = source.seal_inner_to(peer, exact)?;
         source.client.send_direct_message(

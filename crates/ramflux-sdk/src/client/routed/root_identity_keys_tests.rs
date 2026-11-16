@@ -134,7 +134,7 @@ async fn retired_replay_rows_cannot_replace_current_root_qualified_receipts() ->
     let mut engine =
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let entry = generated_delivery(&bob, &alice, "migrate-id", "body")?.entry;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry).await?;
     let key = alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let db = alice.client.account_db()?;
     let receipt =
@@ -147,7 +147,7 @@ async fn retired_replay_rows_cannot_replace_current_root_qualified_receipts() ->
     db.persist_actor_state("legacy/committed/migrate-id", &"mallory-thread")?;
     assert_eq!(alice.client.committed_direct_context(&entry)?, None);
     assert!(
-        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err(),
+        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err(),
         "retired receipts cannot resurrect an already consumed ratchet counter"
     );
     let db = alice.client.account_db()?;

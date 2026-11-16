@@ -270,7 +270,7 @@ impl Case {
         Ok(self
             .b
             .client
-            .apply_routed_entry(&mut engine, &review::pool()?, &self.entry, false)
+            .apply_routed_entry(&mut engine, &review::pool()?, &self.entry)
             .await
             .err()
             .ok_or("revoke unexpectedly accepted")?)

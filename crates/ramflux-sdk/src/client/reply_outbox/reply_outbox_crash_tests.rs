@@ -119,8 +119,8 @@ pub(crate) fn envelope(id: &str) -> Envelope {
 
 fn envelope_at(id: &str, target: &str) -> Envelope {
     serde_json::from_value(json!({
-        "schema": "ramflux.envelope.v1",
-        "version": 1,
+        "schema": "ramflux.envelope.v2",
+        "version": 2,
         "domain": "test",
         "signing_key_id": "key",
         "signature_alg": "ed25519",

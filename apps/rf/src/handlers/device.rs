@@ -105,30 +105,5 @@ async fn handle_device_sync(
                 .await?,
             )
         }
-        DeviceSyncAction::Import(import) => {
-            let envelope = if let Some(envelope_json) = import.envelope_json {
-                serde_json::from_str(&envelope_json)?
-            } else if let Some(envelope_file) = import.envelope_file {
-                let body = std::fs::read_to_string(envelope_file)?;
-                serde_json::from_str(&body)?
-            } else {
-                return Err(RfError::Message(
-                    "device sync import requires --envelope-json or --envelope-file".to_owned(),
-                ));
-            };
-            let request = ramflux_sdk::LocalBusDeviceSyncImportRequest {
-                envelope,
-                relay_service_key_base64: None,
-            };
-            print_json(
-                &bus.request(
-                    Some(import.account),
-                    "device",
-                    "device.sync.import",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
     }
 }

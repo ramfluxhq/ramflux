@@ -228,7 +228,6 @@ async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
             erasure_nonce: vec![50 + counter; 32],
             ..Default::default()
         };
-        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let wrapper = owner.client.encrypt_generated_group_message(
             "opening-group",
             &owner.config.device_id,
@@ -325,7 +324,6 @@ async fn group_reparse_uses_signed_opening_without_retaining_sender_chain() -> T
         Ok(())
     })?;
     // No native sender-key distribution was ever installed: reparse has only the original proof.
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let progress = owner.client.reparse_raw_inner_page()?;
     assert_eq!(progress.projected, 1, "signed group origin did not reparse without chain keys");
     let db = owner.client.account_db()?;

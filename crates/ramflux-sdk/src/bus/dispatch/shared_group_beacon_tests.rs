@@ -69,7 +69,7 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     let creator_root = creator.client.owned_device_identity()?.root_commitment().to_owned();
     // The hint names a sender head newer than the one the peer cached: it is refused as a typed
     // pending outcome until the head is refreshed from the directory, then redriven.
-    match peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await {
+    match peer.client.apply_routed_entry(&mut receiver, &pool, &entry).await {
         Err(SdkError::FreshHeadRequired { root }) if root == creator_root => {}
         other => {
             let refusal = format!("stale sender head must demand a refresh: {:?}", other.err());
@@ -79,7 +79,7 @@ async fn shared_group_device_beacon_refreshes_existing_peer_roster_without_full_
     peer.client
         .cache_verified_device_manifest(&receiver.config, &creator_root, "beacon-refresh")
         .await?;
-    peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
+    peer.client.apply_routed_entry(&mut receiver, &pool, &entry).await?;
     let view = peer.client.group_state("group")?;
     assert_eq!(view.group_epoch, 2);
     assert_eq!(view.members.len(), 4);

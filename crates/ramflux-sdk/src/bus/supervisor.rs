@@ -1081,18 +1081,11 @@ fn reply(body: serde_json::Value) -> ActorResponse {
 }
 
 fn opens_account(method: &str) -> bool {
-    matches!(
-        method,
-        "account.create"
-            | "account.itest_legacy.create"
-            | "account.unlock"
-            | "account.backup.import"
-    )
+    matches!(method, "account.create" | "account.unlock" | "account.backup.import")
 }
 
 fn account_actor_id(request: &LocalBusFrame) -> Result<String, SdkError> {
-    let id = if matches!(request.method.as_str(), "account.create" | "account.itest_legacy.create")
-    {
+    let id = if request.method.as_str() == "account.create" {
         request.body.get("local_account_id").and_then(serde_json::Value::as_str).ok_or_else(
             || SdkError::LocalBus("account creation requires local_account_id".into()),
         )?

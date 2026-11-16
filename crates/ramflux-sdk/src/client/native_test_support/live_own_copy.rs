@@ -19,7 +19,6 @@ pub(crate) async fn exercise(erase: bool) -> TestResult {
 pub(crate) async fn exercise_order(erase: bool, history_first: bool) -> TestResult {
     let mut source = Fixture::new("live-copy-source").await?;
     let peer = Fixture::new("live-copy-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let conversation = g::dm_scope::derive(
         &source.client.own_account_anchor()?,
         &peer.client.own_account_anchor()?,

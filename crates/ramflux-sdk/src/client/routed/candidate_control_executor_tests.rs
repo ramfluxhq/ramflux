@@ -52,7 +52,6 @@ fn control_entry(
 
 #[tokio::test(flavor = "current_thread")]
 async fn generated_friend_actions_reach_native_state_with_endpoint_roles() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for action in 1..=5 {
         let (a, mut b) = pair(141, 143).await?;
         let peer = a.client.own_account_anchor()?;
@@ -92,7 +91,6 @@ async fn generated_friend_actions_reach_native_state_with_endpoint_roles() -> Re
 #[tokio::test(flavor = "current_thread")]
 async fn generated_friend_wrong_actor_is_refused_before_unsupported_retention()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(145, 147).await?;
     // Requested is authored by requester, never by target. Both roots are otherwise valid.
     let friend = g::FriendControl {
@@ -114,7 +112,6 @@ async fn generated_friend_wrong_actor_is_refused_before_unsupported_retention()
 
 #[tokio::test(flavor = "current_thread")]
 async fn generated_friend_replay_is_exact_and_cannot_rebind_a_link() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(149, 151).await?;
     let friend = g::FriendControl {
         action: 1,
@@ -141,7 +138,6 @@ async fn generated_friend_replay_is_exact_and_cannot_rebind_a_link() -> Result<(
 
 #[tokio::test(flavor = "current_thread")]
 async fn generated_friend_accept_cannot_invent_a_local_request() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(153, 155).await?;
     let friend = g::FriendControl {
         action: 2,
@@ -160,7 +156,6 @@ async fn generated_friend_accept_cannot_invent_a_local_request() -> Result<(), S
 #[tokio::test(flavor = "current_thread")]
 async fn generated_unknown_control_retention_never_parses_legacy_cache_json() -> Result<(), SdkError>
 {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(157, 159).await?;
     let friend = g::FriendControl {
         action: 1,
@@ -188,7 +183,6 @@ async fn generated_unknown_control_retention_never_parses_legacy_cache_json() ->
 #[tokio::test(flavor = "current_thread")]
 async fn generated_pair_reset_and_ack_reach_native_executor_with_exact_replay()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for operation in [1, 2] {
         let (a, mut b) = pair(161, 163).await?;
         let payload = if operation == 1 {
@@ -239,7 +233,6 @@ async fn generated_pair_reset_and_ack_reach_native_executor_with_exact_replay()
 #[tokio::test(flavor = "current_thread")]
 async fn known_control_payload_mismatch_is_refused_before_unsupported_retention()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(165, 167).await?;
     let malformed = g::Control {
         operation: 1,

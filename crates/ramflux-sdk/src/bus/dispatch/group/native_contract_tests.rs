@@ -481,7 +481,7 @@ async fn assert_deferred_reason(
     // Replay the same production admission leg without changing the retained retry/backoff.
     let mut engine = account.session_client().await?;
     let pool = account.relay_quic_pool()?;
-    let result = account.client.apply_routed_entry(&mut engine, &pool, entry, false).await;
+    let result = account.client.apply_routed_entry(&mut engine, &pool, entry).await;
     account.apply_session_metadata(engine);
     if unavailable {
         let error = result.err().ok_or("unavailable directory unexpectedly admitted")?;

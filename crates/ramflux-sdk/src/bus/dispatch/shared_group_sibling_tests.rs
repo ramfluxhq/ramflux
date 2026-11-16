@@ -165,7 +165,7 @@ async fn check_first_send(logical: &str, collision: bool) -> TestResult {
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
         };
-        owner.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        owner.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         count += 1;
     }
     assert_eq!(count, 2, "owner must receive both key distribution and application payload");

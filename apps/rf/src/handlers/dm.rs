@@ -11,16 +11,6 @@ pub(crate) mod unified;
 mod wait;
 
 pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(), RfError> {
-    if let DmAction::Send(send) = &command.action
-        && (!send.attach.is_empty() || send.relay_url.is_some())
-    {
-        return Err(ramflux_sdk::SdkError::GeneratedRefused {
-            code: ramflux_sdk::GeneratedRefusalCode::Content,
-            reason: "--attach/--relay-url are retired; use --media-ref with an r4 large_manifest"
-                .into(),
-        }
-        .into());
-    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         DmAction::Send(send) => {
@@ -74,7 +64,7 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
                 conversation_id: delete.conversation,
                 message_id: delete.message,
                 delete_scope: delete.scope,
-                tombstone_id: delete.tombstone,
+                tombstone_id: None,
                 operation_id: delete.operation_id,
             };
             print_json(
@@ -280,17 +270,15 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    #[tokio::test]
-    async fn retired_attachment_flags_refuse_content_before_socket_or_file_access()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let socket = root.path().join("absent.sock");
-        let path = socket.to_str().ok_or("test: socket path")?;
-        for retired in [["--attach", "absent-attachment"], ["--relay-url", "invalid-relay"]] {
+    #[test]
+    fn retired_dm_flags_are_unknown_arguments() -> Result<(), Box<dyn std::error::Error>> {
+        for retired in [
+            ["--attach", "absent-attachment"],
+            ["--relay-url", "invalid-relay"],
+            ["--tombstone", "old-id"],
+        ] {
             let mut args = vec![
                 "rf",
-                "--socket",
-                path,
                 "dm",
                 "send",
                 "--account",
@@ -310,22 +298,23 @@ mod tests {
                 "--body",
                 "caption",
             ];
+            if retired[0] == "--tombstone" {
+                args = vec![
+                    "rf",
+                    "dm",
+                    "delete",
+                    "--account",
+                    "account",
+                    "--conversation",
+                    "conversation",
+                    "--message",
+                    "operation",
+                ];
+            }
             args.extend(retired);
-            let cli = crate::cli::Cli::try_parse_from(args)?;
-            let crate::cli::Command::Dm(command) = cli.command else {
-                return Err("test: expected DM command".into());
-            };
-            let result = handle_dm(cli.socket, command).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(RfError::Sdk(ramflux_sdk::SdkError::GeneratedRefused {
-                        code: ramflux_sdk::GeneratedRefusalCode::Content,
-                        ..
-                    }))
-                ),
-                "the retired CLI input must refuse Content before accessing an absent socket or file"
-            );
+            let error =
+                crate::cli::Cli::try_parse_from(args).err().ok_or("retired flag accepted")?;
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
         Ok(())
     }

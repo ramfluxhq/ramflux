@@ -118,7 +118,6 @@ policies! {
     "device.refresh" => ("device", true, true, false, false),
     "device.revoke" => ("device", true, true, false, false),
     "device.sync.export" => ("device", true, true, false, true),
-    "device.sync.import" => ("device", true, true, false, false),
     "device.transfer.affirm" => ("device", true, true, false, false),
     "device.transfer.begin" => ("device", true, true, false, false),
     "device.transfer.cancel" => ("device", true, true, false, false),

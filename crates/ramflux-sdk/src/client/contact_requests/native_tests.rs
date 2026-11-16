@@ -409,7 +409,6 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
 async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity() -> TestResult {
     use prost::Message as _;
     use ramflux_protocol::message as g;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let sender = Box::pin(Fixture::new("generated-native-contact-sender")).await?;
     let target = Box::pin(Fixture::new("generated-native-contact-target")).await?;
     target.client.persist_fetched_identity_directory(&sender.manifest)?;

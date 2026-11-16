@@ -92,7 +92,7 @@ pub(crate) async fn receive_copy(
             crate::SdkError::LocalBus(format!("test: relay pool config: {error}"))
         })?,
     );
-    let received = Box::pin(client.apply_routed_entry(&mut engine, &pool, entry, false)).await?;
+    let received = Box::pin(client.apply_routed_entry(&mut engine, &pool, entry)).await?;
     Ok(received.routing.is_some())
 }
 

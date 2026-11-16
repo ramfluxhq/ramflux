@@ -311,50 +311,6 @@ impl LocalBusAccountState {
         Ok(())
     }
 
-    pub(crate) async fn refresh_legacy_authorization(&mut self) -> Result<(), SdkError> {
-        let root = self.client.account_index()?.root().to_path_buf();
-        let id = self.client.account_db()?.local_account_id.clone();
-        let path = local_bus_account_manifest_path(&root, &id);
-        if !super::daemon::account_manifest_available(&path) {
-            return Ok(());
-        }
-        let manifest = read_local_bus_account_manifest(&path)?;
-        let refresh_due = self.client.own_proof_refresh_due(now_unix_timestamp())?;
-        if !manifest.activation_pending && !refresh_due {
-            return Ok(());
-        }
-        let result = tokio::time::timeout(self.timeouts.network_wait, async {
-            self.client
-                .initialize_and_publish_prekey_bundle_via_gateway_request(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    &manifest.device_id,
-                    &manifest.target_delivery_id,
-                    manifest.device_seed,
-                )
-                .await?;
-            self.client
-                .cache_verified_device_manifest(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    "account.create",
-                )
-                .await?;
-            Ok::<(), SdkError>(())
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS })
-        });
-        result.map_err(|error| {
-            if refresh_due && !manifest.activation_pending {
-                SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-            } else {
-                error
-            }
-        })
-    }
-
     pub(crate) async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
         // A scripted gateway speaks ordinary session frames. The branch is already
         // created, and this config carries no node selection to register.
@@ -471,8 +427,8 @@ impl LocalBusAccountState {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
-            if self.connection_work.is_none() && self.client.born_v3_account.is_none() {
-                self.refresh_legacy_authorization().await?;
+            if self.client.born_v3_account.is_none() {
+                return Err(SdkError::IdentityRootMissing);
             }
             if self.connection.as_ref().is_some_and(ConnectionHandle::retirement_requested)
                 && self.connection_work.is_none()

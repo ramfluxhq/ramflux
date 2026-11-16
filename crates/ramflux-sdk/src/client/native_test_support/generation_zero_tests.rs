@@ -39,7 +39,6 @@ async fn active_profile_malformed_effects_preserve_account() -> TestResult {
 async fn active_profile_malformed_effects_preserve_account_body() -> TestResult {
     let mut own = Fixture::new("active-effects").await?;
     let sibling = own.enroll_sibling("active-sibling", "sibling").await?;
-    assert!(ramflux_protocol::schema_profile::schema_v1_live(), "test requires the active profile");
     own.client.require_native_operation(
         &sibling.client.owned_device_identity()?,
         crate::client::identity_authority::NativeOperation::Sync,

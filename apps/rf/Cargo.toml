@@ -14,8 +14,6 @@ path = "src/main.rs"
 default = []
 # Process-local credential vault for native integration fixtures only.
 itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
-# Explicit legacy fixture creation; never enabled by production builds.
-itest-legacy-accounts = ["ramflux-sdk/itest-legacy-accounts"]
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = ["ramflux-sdk/itest-identity-proof"]
 # T24-B2: propagate the SDK rfd mid-flight crash-resume barrier gate. Never enabled by production rf.

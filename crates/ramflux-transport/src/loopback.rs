@@ -212,9 +212,9 @@ mod tests {
 
     fn envelope(created_at: i64) -> Result<Envelope, serde_json::Error> {
         serde_json::from_value(serde_json::json!({
-            "schema": "ramflux.envelope.v1",
-            "version": 1,
-            "domain": "ramflux.envelope",
+            "schema": "ramflux.envelope.v2",
+            "version": 2,
+            "domain": "ramflux.envelope.v2",
             "ext": {},
             "signing_key_id": "key",
             "signature_alg": "ed25519",

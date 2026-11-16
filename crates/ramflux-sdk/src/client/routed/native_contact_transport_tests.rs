@@ -114,7 +114,7 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     let mut engine = receiver.session_client().await?;
     let result = receiver
         .client
-        .apply_routed_entry(&mut engine, &super::super::review::pool()?, &entry, false)
+        .apply_routed_entry(&mut engine, &super::super::review::pool()?, &entry)
         .await;
     receiver.install_test_session(engine);
     result?;

@@ -71,10 +71,10 @@ pub(super) async fn settle(alice: &mut Fixture, bob: &mut Fixture) -> Result<(),
     }
     let entry = fresh(alice, bob, "initial")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false)).await?;
+    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry)).await?;
     let reply = seal(bob, alice, native_outgoing(bob, alice, "reply")?, b"reply")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    Box::pin(alice.client.apply_routed_entry(&mut ae, &pool()?, &reply, false)).await?;
+    Box::pin(alice.client.apply_routed_entry(&mut ae, &pool()?, &reply)).await?;
     Ok(())
 }
 #[tokio::test]
@@ -107,7 +107,7 @@ async fn verified_peer_state_loss_bootstrap_supersedes_a_settled_pair_body() -> 
     bob.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&bob, &alice, "after-state-loss")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &entry, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &entry).await?;
     let active = alice
         .client
         .active_pair(
@@ -153,7 +153,7 @@ async fn unverified_fresh_bootstrap_cannot_displace_a_settled_pair_body() -> Res
     let mut entry = fresh(&bob, &alice, "forged")?;
     entry.envelope.signed.signature = "invalid".to_owned();
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    assert!(alice.client.apply_routed_entry(&mut ae, &pool()?, &entry, false).await.is_err());
+    assert!(alice.client.apply_routed_entry(&mut ae, &pool()?, &entry).await.is_err());
     assert_eq!(
         alice
             .client
@@ -277,7 +277,7 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
         sent: sent.clone(),
     };
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(wire));
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &gap, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &gap).await.is_err());
     let reset = sent
         .lock()
         .map_err(|_| invalid("mutex"))?
@@ -287,9 +287,9 @@ async fn a_gap_beyond_one_thousand_packets_sends_an_encrypted_reset_and_recovers
     let outer = serde_json::to_value(&reset.envelope)?;
     assert!(outer.get("conversation_id").is_none());
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &reset, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &reset).await?;
     let next = seal(&alice, &bob, native_outgoing(&alice, &bob, "recovered")?, b"works-after-gap")?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &next).await?;
     assert!(
         alice
             .client
@@ -384,7 +384,7 @@ async fn verified_rebootstrap_also_replaces_a_passively_confirmed_pair_body() ->
     alice.client.account_db()?.remove_actor_state(&format!("dm-pair/session/{old}"))?;
     let entry = fresh(&alice, &bob, "alice-state-loss")?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false)).await?;
+    Box::pin(bob.client.apply_routed_entry(&mut be, &pool()?, &entry)).await?;
     assert_eq!(
         bob.client
             .active_pair(
@@ -448,7 +448,7 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id_b
         )?,
     };
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &reset).await?;
     let incoming = decode(&reset.envelope)?.ciphertext.session_id;
     assert_eq!(
         bob.client

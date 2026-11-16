@@ -95,12 +95,6 @@ pub(crate) struct DmSend {
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) body: String,
     #[arg(long)]
-    pub(crate) attach: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) relay_url: Option<String>,
-    #[arg(long, default_value_t = 1024)]
-    pub(crate) attachment_chunk_size: usize,
-    #[arg(long)]
     pub(crate) federation_url: Option<String>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) source_node: Option<String>,
@@ -145,9 +139,6 @@ pub(crate) struct DmDelete {
     pub(crate) message: String,
     #[arg(long, default_value = "local", value_parser = ["local", "everyone"])]
     pub(crate) scope: String,
-    /// Retired input; use --operation-id for retries.
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) tombstone: Option<String>,
     /// Reuse this token to retry the same logical deletion.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: Option<String>,

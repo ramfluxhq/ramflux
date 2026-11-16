@@ -760,12 +760,11 @@ async fn prepare_account_connection(
     account: &mut crate::bus::state::LocalBusAccountState,
     deadline: Instant,
 ) -> Result<crate::GatewaySessionConfig, SdkError> {
+    if account.client.born_v3_account.is_none() {
+        return Err(SdkError::IdentityRootMissing);
+    }
     timeout_at(deadline, async {
-        if account.client.born_v3_account.is_some() {
-            account.prepare_native_branch().await?;
-        } else {
-            account.refresh_legacy_authorization().await?;
-        }
+        account.prepare_native_branch().await?;
         account.connection_config()
     })
     .await

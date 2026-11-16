@@ -292,7 +292,7 @@ async fn engine_is_resident_across_consecutive_network_calls() -> Case {
 }
 
 /// The submitted envelope as the wire must carry it, in struct order.
-const DEADLINE_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-deadline","source_principal_id":"p","source_device_id":"d","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-deadline"}"#;
+const DEADLINE_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-deadline","source_principal_id":"p","source_device_id":"d","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-deadline"}"#;
 
 /// (r12) and (r14) of `sender_outcome_classification`: the call deadline expiring after the
 /// submit was written is an uncertain outcome in the outer error, never a typed refusal, and

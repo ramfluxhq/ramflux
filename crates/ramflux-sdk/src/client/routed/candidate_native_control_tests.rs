@@ -206,7 +206,6 @@ async fn received_object_reference(
 async fn generated_object_revoke_requires_the_owner_of_the_received_reference()
 -> Result<(), SdkError> {
     use crate::error::GeneratedRefusalCode::Authority;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let revoke = |b: &Fixture| -> Result<g::Control, SdkError> {
         Ok(g::Control {
             operation: 12,
@@ -268,7 +267,6 @@ async fn generated_object_revoke_requires_the_owner_of_the_received_reference()
 async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_and_signature()
 -> Result<(), SdkError> {
     use crate::error::GeneratedRefusalCode::Authority;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     // No accepted contact link: refused before any share is stored.
     let (a, mut b) = pair(213, 215).await?;
     b.client.remove_friend_link("link", "both")?;
@@ -327,7 +325,6 @@ async fn generated_recovery_invite_waits_for_local_acceptance_and_needs_contact_
 #[tokio::test(flavor = "current_thread")]
 async fn generated_recovery_accept_is_bound_to_a_locally_issued_invite() -> Result<(), SdkError> {
     use crate::error::GeneratedRefusalCode::Authority;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     // The owner never issued this invite: a valid guardian signature is not enough.
     let (guardian, mut owner) = pair(225, 227).await?;
     let native = invite(&owner, &guardian, "invite-unissued")?;
@@ -358,7 +355,6 @@ async fn generated_recovery_accept_is_bound_to_a_locally_issued_invite() -> Resu
 #[tokio::test(flavor = "current_thread")]
 async fn guardian_pending_decisions_bind_source_fingerprint_and_transaction() -> Result<(), SdkError>
 {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for reverse in [false, true] {
         let a = Fixture::owned("shared-device", "alice", 31, 32)?;
         let c = Fixture::owned("shared-device", "carol", 33, 34)?;
@@ -414,7 +410,6 @@ async fn guardian_pending_decisions_bind_source_fingerprint_and_transaction() ->
 #[tokio::test(flavor = "current_thread")]
 async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<(), SdkError> {
     use crate::error::GeneratedRefusalCode::Authority;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for (grant, unknown) in [None, Some("missing"), Some("foreign"), Some("revoked")]
         .into_iter()
         .flat_map(|grant| [false, true].map(|unknown| (grant, unknown)))
@@ -454,7 +449,6 @@ async fn generated_a2i_requires_pinned_signature_and_device_binding() -> Result<
 #[tokio::test(flavor = "current_thread")]
 async fn generated_group_key_off_its_group_route_is_refused_without_retention()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let key = |event: bool| g::Control {
         operation: 5,
         payload: Some(g::control::Payload::GroupKeyControl(g::GroupKeyControl {
@@ -496,7 +490,6 @@ async fn generated_group_key_off_its_group_route_is_refused_without_retention()
 
 #[tokio::test(flavor = "current_thread")]
 async fn peer_control_author_must_be_the_authenticated_pair_peer() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(249, 251).await?;
     b.client.account_db()?.persist_client_record(
         "object",

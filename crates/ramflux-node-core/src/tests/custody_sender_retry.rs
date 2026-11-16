@@ -173,7 +173,6 @@ fn hold(root: PathBuf, abort: bool) -> Hold {
 
 #[test]
 fn sender_signature_requires_ciphertext_hash_on_custody_delivery() -> Result {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let root = temp_store_path("native-v2-hash-binding")?;
     let store = crate::publication::open_durability_fixture(&root, 0)?;
     let router = RouterCore::new();

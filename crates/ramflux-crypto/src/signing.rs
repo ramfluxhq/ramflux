@@ -56,7 +56,9 @@ pub fn sign_canonical_bytes_with_device_branch(bytes: &[u8], branch: &DeviceBran
 fn protocol_signing_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CryptoError> {
     let object = serde_json::to_value(value).map_err(ramflux_protocol::ProtocolError::from)?;
     let schema = object.get("schema").and_then(serde_json::Value::as_str);
-    if matches!(schema, Some("ramflux.envelope.v1" | "ramflux.envelope.v2")) {
+    // Current envelopes use the v2 sender transcript. Any other envelope schema
+    // fails that profile check. Non-envelope objects keep their own canonical bytes.
+    if schema.is_some_and(|name| name.starts_with("ramflux.envelope.")) {
         return Ok(ramflux_protocol::sender_signed_transcript(
             value,
             ramflux_protocol::SenderTranscriptMode::WithCiphertext,

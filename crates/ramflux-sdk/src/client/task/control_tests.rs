@@ -9,9 +9,9 @@ fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
         inbox_seq: 1,
         target_delivery_id: "target".into(),
         envelope: ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".into(),
-            version: 1,
-            domain: "task".into(),
+            schema: "ramflux.envelope.v2".into(),
+            version: 2,
+            domain: "ramflux.envelope.v2".into(),
             ext: ramflux_protocol::Ext::default(),
             signed: crate::prelude::sdk_device_signed_fields(device, ""),
             envelope_id: "control-envelope".into(),
@@ -25,9 +25,9 @@ fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
             created_at: crate::time::now_unix_timestamp(),
             encrypted_payload: String::new(),
             payload_hash: String::new(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         },
     }
 }

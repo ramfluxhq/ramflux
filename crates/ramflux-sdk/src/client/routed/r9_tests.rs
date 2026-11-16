@@ -112,7 +112,7 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     let entry = seal_as(&impostor, &bob, msg, &body, Route::group_control("pinned"))?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     let keyless_rejected =
-        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err();
+        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err();
     let body = forged_body;
     let mut msg = outgoing(&impostor, &bob, "forged-group-data");
     msg.source_principal_id = principal.into();
@@ -120,7 +120,7 @@ async fn replaced_key_traffic(cross_principal: bool) -> Result<(), SdkError> {
     msg.conversation_id = "group-thread".into();
     let entry = seal_as(&impostor, &bob, msg, &body, Route::group_message("pinned"))?;
     let message_rejected =
-        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err();
+        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err();
     assert!(
         keyless_rejected && message_rejected,
         "keyless rejected={keyless_rejected}, message rejected={message_rejected}"
@@ -162,7 +162,7 @@ async fn restored_device_with_empty_allocator_bootstraps_without_manual_recovery
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for n in 0..6 {
         let entry = fresh(&alice, &bob, &format!("before-restore-{n}"))?;
-        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await?;
     }
     let key = super::super::bootstrap_sequence::bootstrap_sequence_key(
         &alice.client.owned_device_identity()?,
@@ -170,7 +170,7 @@ async fn restored_device_with_empty_allocator_bootstraps_without_manual_recovery
     alice.client.account_db()?.remove_actor_state(&key)?;
     alice.reopen_native().await?;
     let entry = fresh(&alice, &bob, "first-after-restore")?;
-    bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await?;
     assert_eq!(active(&bob, "alice")?, decode(&entry.envelope)?.ciphertext.session_id);
     Ok(())
 }
@@ -196,7 +196,7 @@ async fn a_clock_behind_restore_recovers_through_an_authenticated_rate_limited_r
     )?;
     let entry = fresh(&alice, &bob, "old-future-clock")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &entry).await?;
     alice.client.account_db()?.remove_actor_state(
         &super::super::bootstrap_sequence::bootstrap_sequence_key(
             &alice.client.owned_device_identity()?,
@@ -211,11 +211,11 @@ async fn a_clock_behind_restore_recovers_through_an_authenticated_rate_limited_r
     )?;
     let entry = fresh(&restored, &bob, "clock-behind-restore")?;
     let (mut be, bsent) = Wire::engine(&bob, &restored)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &entry).await.is_err());
     let reset = last(&bsent)?;
     let (mut ae, asent) = Wire::engine(&restored, &bob)?;
-    restored.client.apply_routed_entry(&mut ae, &pool()?, &reset, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&asent)?, false).await?;
+    restored.client.apply_routed_entry(&mut ae, &pool()?, &reset).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&asent)?).await?;
     assert_eq!(active(&restored, "bob")?, active(&bob, "alice")?);
     let good = super::r5::seal(
         &restored,
@@ -223,10 +223,10 @@ async fn a_clock_behind_restore_recovers_through_an_authenticated_rate_limited_r
         super::r5::native_outgoing(&restored, &bob, "recovered")?,
         b"recovered",
     )?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &good, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &good).await?;
     let count = bsent.lock().map_err(|_| invalid("mutex"))?.len();
     for _ in 0..5 {
-        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &entry, false).await.is_err());
+        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &entry).await.is_err());
     }
     assert_eq!(bsent.lock().map_err(|_| invalid("mutex"))?.len(), count);
     Ok(())

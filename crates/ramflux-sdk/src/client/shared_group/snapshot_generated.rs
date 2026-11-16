@@ -322,7 +322,6 @@ mod tests {
     #[tokio::test]
     async fn generated_snapshot_roundtrip_requires_exact_canonical_state_and_seed_grammar()
     -> TestResult {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let source = Box::pin(Fixture::new("generated-snapshot-owner")).await?;
         let primary = source
             .client
@@ -410,7 +409,6 @@ mod tests {
     #[tokio::test]
     async fn generated_snapshot_recipient_keys_and_invitation_do_not_install_before_consent()
     -> TestResult {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let source = Box::pin(Fixture::new("snapshot-consent-source")).await?;
         let receiver = Box::pin(Fixture::new("snapshot-consent-receiver")).await?;
         source.client.persist_fetched_identity_directory(&receiver.manifest)?;

@@ -449,23 +449,12 @@ set `RAMFLUX_ITEST_BUILD=1` explicitly; default consumer builds need no marker.
 Integration builds may explicitly
 enable the fixture; production artifacts must not.
 
-### Temporary legacy integration fixtures
+### Account creation
 
-The `itest-legacy-accounts` SDK/CLI feature is disabled by default. It is compiled
-only in explicitly marked development/test integration builds (`RAMFLUX_ITEST_BUILD=1`).
-Release profiles reject it independently of that marker or debug-assertion settings;
-guarded production builds reject it in every profile. Production feature
-provenance checks forbid it alongside the memory-vault fixture.
-
-An integration daemon must also opt in with `--itest-legacy-accounts` (or
-`LocalBusConfig::with_itest_legacy_accounts`). Unsupported builds refuse this
-startup setting before binding the local bus. The only seed-taking creation
-method is `account.itest_legacy.create`; the corresponding hidden CLI command is
-`rf account itest-legacy-create`. The ordinary `account.create` ceremony and
-`rf account create --display-name` stay native regardless of fixture opt-in.
-The fixture path refuses an existing native account and cannot downgrade its
-latched authority. The integration harness selects it explicitly for scenarios
-awaiting native migration; native account scenarios keep the normal ceremony.
+Seed-taking account creation is not a supported surface. `account.create` on the
+local bus stays refused (`CustodySetupInvalid`); the native ceremony owns
+creation through `rf account create --display-name`. An unrecognized account
+method is rejected by ordinary method dispatch.
 
 ## Retrying custody admission
 

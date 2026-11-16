@@ -23,13 +23,6 @@ compile_error!("production builds must not enable itest-memory-vault");
 #[cfg(all(feature = "itest-memory-vault", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-memory-vault");
 
-#[cfg(all(feature = "itest-legacy-accounts", not(any(test, ramflux_itest))))]
-compile_error!("itest-legacy-accounts requires cfg(test) or RAMFLUX_ITEST_BUILD=1");
-#[cfg(all(feature = "itest-legacy-accounts", ramflux_production))]
-compile_error!("production builds must not enable itest-legacy-accounts");
-#[cfg(all(feature = "itest-legacy-accounts", ramflux_release_profile))]
-compile_error!("release profiles must not enable itest-legacy-accounts");
-
 pub mod bindings;
 mod bus;
 #[cfg(feature = "c-abi")]
@@ -111,9 +104,9 @@ pub use bus::{
     LocalBusConversationMuteRequest, LocalBusConversationRequest, LocalBusCreatedAccount,
     LocalBusCreatedAccountState, LocalBusCreationClient, LocalBusDeviceActivateRequest,
     LocalBusDeviceActivateResponse, LocalBusDeviceListResponse, LocalBusDeviceRecord,
-    LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest, LocalBusDeviceSyncImportRequest,
-    LocalBusErrorBody, LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind,
-    LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
+    LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest, LocalBusErrorBody,
+    LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind, LocalBusGrantRequest,
+    LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
     LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
     LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
     LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,

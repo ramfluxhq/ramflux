@@ -39,10 +39,8 @@ async fn deliver(
 ) -> Result<Delivery, SdkError> {
     let account = state.accounts.get_mut(who).ok_or_else(|| invalid("account"))?;
     let mut engine = account.session_client().await?;
-    let result = account
-        .client
-        .apply_routed_entry(&mut engine, &super::super::review::pool()?, entry, false)
-        .await;
+    let result =
+        account.client.apply_routed_entry(&mut engine, &super::super::review::pool()?, entry).await;
     account.install_test_session(engine);
     result
 }

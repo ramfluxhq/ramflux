@@ -47,10 +47,11 @@ async fn retired_relay_keys_refuse_device_sync_ipc_before_cached_receipts_or_ses
                 SdkError::CapabilityDenied(message) if method == "device.sync.export" => {
                     assert_eq!(message, "relay service keys are unsupported; use gateway-issued QUIC tokens");
                 },
-                SdkError::GeneratedRefused { code, reason } if method == "device.sync.import" => {
-                    assert_eq!(code, crate::error::GeneratedRefusalCode::Content);
-                    assert!(reason.contains("retired object history carrier"),
-                        "device sync must refuse the retired carrier: {reason}");
+                SdkError::LocalBus(message) if method == "device.sync.import" => {
+                    assert!(
+                        message.contains("unsupported local bus method: device.sync.import"),
+                        "an old history import is an unknown method: {message}"
+                    );
                 },
                 other => return Err(format!("test: unexpected device sync refusal: {other}").into()),
             }

@@ -159,7 +159,6 @@ async fn native_guardian_send_retries_capture_and_requires_explicit_local_accept
 {
     let mut owner = Fixture::new("native-recovery-owner").await?;
     let mut guardian = Fixture::new("native-recovery-guardian").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
         local.client.persist_fetched_identity_directory(&remote.manifest)?;
         local.client.establish_friend_link(
@@ -252,7 +251,6 @@ async fn native_object_revoke_sender_preserves_original_owner_and_uses_generated
 -> TestResult {
     let owner = Fixture::new("native-revoke-owner").await?;
     let mut recipient = Fixture::new("native-revoke-recipient").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, _, conversation) =
         Box::pin(super::history::receive_first_hand(&mut recipient, &owner)).await?;
     let id = ramflux_protocol::encode_base64url(&original.id);
@@ -305,7 +303,6 @@ async fn native_guardian_accept_capture_keeps_colliding_owner_invite_ids_indepen
     let first = Fixture::new("native-first-owner").await?;
     let second = Fixture::new("native-second-owner").await?;
     let guardian = Fixture::new("native-common-guardian").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let first_reply = guardian.client.accept_guardian_invite(&invite(&first, &guardian)?)?;
     let second_reply = guardian.client.accept_guardian_invite(&invite(&second, &guardian)?)?;
     assert_eq!(first_reply.invite_id, second_reply.invite_id);
@@ -336,7 +333,6 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     let mut guardian = Fixture::new("pending-invite-guardian").await?;
     let expires_at;
     {
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
             local.client.persist_fetched_identity_directory(&remote.manifest)?;
             local.client.establish_friend_link(
@@ -399,7 +395,6 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
     source.client.establish_friend_link("conversation-peer-link", &source_root, &peer_root)?;
     peer.client.establish_friend_link("conversation-source-link", &source_root, &peer_root)?;
     let conversation = g::dm_scope::derive(&source_root, &peer_root)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let identity = source.client.allocate_generated_identity(&conversation, 1000, false)?;
     let id = ramflux_protocol::encode_base64url(&identity.id);
     let exact = RamfluxClient::encode_generated_inner(
@@ -499,7 +494,6 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
     prepare_conversation_group(&source, &peer)?;
     let state =
         source.client.account_db()?.shared_group_state("conversation-group")?.ok_or("group")?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let distribution = ramflux_protocol::parse_i_json(
         &source
             .client
@@ -675,7 +669,6 @@ async fn durable_edit_retry() -> TestResult {
         peer.client.establish_friend_link("durable-source", &own, &remote)?;
     }
     let conversation = g::dm_scope::derive(&own, &remote)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (target, recipients) =
         Box::pin(seed_durable_edit(&mut source, &mut first, &mut second, &conversation))
             .await

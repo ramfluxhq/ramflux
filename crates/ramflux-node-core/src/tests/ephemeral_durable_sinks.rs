@@ -55,7 +55,6 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
         "ramflux_protocol::verify_envelope_sender_signature",
         "pure v2 envelope signature and ciphertext binding verification",
     ),
-    ("crate::schema_profile::schema_v1_live", "pure storage-generation predicate (no I/O)"),
     ("crate::message::outer::refuse_live_bridge", "pure named-field bridge refusal (no I/O)"),
     ("crate::message::outer::parse_live_named_delivery_mode", "pure envelope mode parser (no I/O)"),
     ("crate::message::outer::NamedDeliveryMode", "delivery-mode enum (type only)"),

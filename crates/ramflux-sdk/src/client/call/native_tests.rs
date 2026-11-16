@@ -197,7 +197,6 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
     outgoing.pin_peer(peer, bob.manifest.devices[0].branch_public_key.clone())?;
     let (entry, native_body) =
         signed_control(&alice, &bob, outgoing.pending.first().ok_or("test: invite")?)?;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let signed = decode(&native_body)?.ok_or("signed call")?;
     let identity = alice.client.account_db()?.write_transaction(|| {
         alice.client.allocate_generated_identity(

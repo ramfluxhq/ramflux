@@ -59,7 +59,6 @@ pub(crate) struct DeviceSyncCommand {
 #[derive(Subcommand)]
 pub(crate) enum DeviceSyncAction {
     Export(DeviceSyncExport),
-    Import(DeviceSyncImport),
 }
 
 #[derive(Args)]
@@ -72,16 +71,6 @@ pub(crate) struct DeviceSyncExport {
     pub(crate) relay_endpoint: String,
     #[arg(long)]
     pub(crate) chunk_size: Option<usize>,
-}
-
-#[derive(Args)]
-pub(crate) struct DeviceSyncImport {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long)]
-    pub(crate) envelope_json: Option<String>,
-    #[arg(long)]
-    pub(crate) envelope_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
