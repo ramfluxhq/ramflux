@@ -411,8 +411,8 @@ mod tests {
     -> TestResult {
         let source = Box::pin(Fixture::new("snapshot-consent-source")).await?;
         let receiver = Box::pin(Fixture::new("snapshot-consent-receiver")).await?;
-        source.client.persist_fetched_identity_directory(&receiver.manifest)?;
-        receiver.client.persist_fetched_identity_directory(&source.manifest)?;
+        source.client.persist_observed_identity_directory_now(&receiver.manifest)?;
+        receiver.client.persist_observed_identity_directory_now(&source.manifest)?;
         let primary = source
             .client
             .born_v3_account

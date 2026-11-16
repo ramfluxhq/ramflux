@@ -181,6 +181,7 @@ impl RamfluxClient {
         }
         let cached = self.account_db()?.client_record("identity", selector)?;
         let root_hint = resolution_root(selector, expected_root, cached.as_ref(), allow_commitment);
+        let started = std::time::Instant::now();
         let manifest: Option<SdkDeviceManifestResponse> = if let Some(root) = root_hint {
             sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
                 .await
@@ -188,7 +189,7 @@ impl RamfluxClient {
         } else {
             engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
         };
-        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
         verify_native_card_head(card, &manifest)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)

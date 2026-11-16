@@ -207,7 +207,7 @@ async fn native_contact_request_crosses_body() -> TestResult {
             responses: VecDeque::new(),
         }),
     );
-    sender.client.persist_fetched_identity_directory(&target.manifest)?;
+    sender.client.persist_observed_identity_directory_now(&target.manifest)?;
     sender.client.stage_contact_request(&target.manifest, "native-transport-contact", None)?;
     let mut intent = sender
         .client

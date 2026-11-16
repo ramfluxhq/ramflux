@@ -291,13 +291,14 @@ pub(super) async fn refresh_public_authority(
         .require_fresh_custody_head(HeadUse::NewAuthorization, &anchor, native.record())
         .is_err()
     {
+        let started = std::time::Instant::now();
         let manifest = crate::prekey::sdk_gateway_get_json::<
             Option<crate::prekey::SdkDeviceManifestResponse>,
         >(
             &account.gateway_config, &format!("/mvp1/device-manifest/{anchor}")
         )
         .await?;
-        if let Some(manifest) = manifest {
+        if let Some(manifest) = manifest.map(|manifest| manifest.fetched_from(started)) {
             if manifest.principal_commitment != anchor || manifest.custody.is_none() {
                 return Err(SdkError::CustodyModeDowngrade);
             }

@@ -76,15 +76,15 @@ impl Fixture {
             .devices
             .extend(sibling.manifest.custody.as_ref().ok_or("sibling manifest")?.devices.clone());
         let full = SdkDeviceManifestResponse::from_native((*native).clone())?;
-        self.client.persist_fetched_identity_directory(&full)?;
-        sibling.client.persist_fetched_identity_directory(&full)?;
+        self.client.persist_observed_identity_directory_now(&full)?;
+        sibling.client.persist_observed_identity_directory_now(&full)?;
         self.manifest = full.clone();
         sibling.manifest = full;
         Ok(sibling)
     }
 
     pub(crate) fn material_for(&self, target: &Self) -> Result<SendMaterial, SdkError> {
-        self.client.persist_fetched_identity_directory(&target.manifest)?;
+        self.client.persist_observed_identity_directory_now(&target.manifest)?;
         let reference = target.client.owned_device_identity()?;
         Ok(SendMaterial {
             manifest: Some((reference.root_commitment().into(), target.manifest.clone())),

@@ -73,6 +73,12 @@ struct Wire {
     devices: Vec<SdkDeviceManifestEntry>,
 }
 impl SdkDeviceManifestResponse {
+    /// Records the instant a network fetch of this manifest began.
+    #[must_use]
+    pub(crate) fn fetched_from(mut self, began: std::time::Instant) -> Self {
+        self.fetched_after = FetchStamp(Some(began));
+        self
+    }
     pub(crate) fn from_native(native: CustodyManifest) -> Result<Self, SdkError> {
         let body = &native.publication.record.body;
         let mut devices = Vec::with_capacity(native.devices.len());

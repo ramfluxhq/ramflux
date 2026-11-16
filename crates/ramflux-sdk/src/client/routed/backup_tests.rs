@@ -195,8 +195,8 @@ async fn native_data_merge_rebootstraps_without_reusing_the_archived_outbound_ra
     use crate::client::native_test_support::Fixture as NativeFixture;
     let alice = NativeFixture::new("native-restore-alice").await?;
     let bob = NativeFixture::new("native-restore-bob").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let local = alice.client.owned_device_identity()?;
     let remote = bob.client.owned_device_identity()?;
     let bundle = bob.client.load_x3dh_private_state(&remote)?.bundle;

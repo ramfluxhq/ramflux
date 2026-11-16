@@ -9,7 +9,7 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
 {
     let mut own = Fixture::new("native-own-contact").await?;
     let peer = Fixture::new("native-own-contact-peer").await?;
-    own.client.persist_fetched_identity_directory(&peer.manifest)?;
+    own.client.persist_observed_identity_directory_now(&peer.manifest)?;
     own.client.establish_friend_link(
         "native-before-enrollment",
         &own.manifest.principal_commitment,
@@ -80,7 +80,7 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
         message_layer: None,
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native((*native).clone())?;
-    own.client.persist_fetched_identity_directory(&fetched)?;
+    own.client.persist_observed_identity_directory_now(&fetched)?;
     assert_history_bootstrap_once(&own.client)?;
     let before = crate::bus::own_device_copy::copy_id(&own.client, "public-id")?;
     own.client.device_branch = None;
@@ -120,7 +120,7 @@ fn remove_sibling_sync(
     entry.branch_certificate = Some(primary.certify_branch(certificate)?);
     native.publication.record = primary.sign_record(body)?;
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
-    own.client.persist_fetched_identity_directory(&fetched)?;
+    own.client.persist_observed_identity_directory_now(&fetched)?;
     Ok(())
 }
 

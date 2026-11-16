@@ -55,7 +55,7 @@ impl Fixture {
         Self::ready(client, root, vault, id, device, record)
     }
     pub(crate) fn accept_peer(&self, peer: &Self) -> TestResult {
-        self.client.persist_fetched_identity_directory(&peer.manifest)?;
+        self.client.persist_observed_identity_directory_now(&peer.manifest)?;
         self.client.establish_friend_link(
             &format!("authored-link:{}", peer.client.own_account_anchor()?),
             &self.client.own_account_anchor()?,
@@ -183,6 +183,8 @@ impl Fixture {
                     message_layer: None,
                 }],
             })?;
+        // The fixture models a directory manifest the account just fetched.
+        let manifest = manifest.fetched_from(std::time::Instant::now());
         client.persist_fetched_identity_directory(&manifest)?;
         let endpoint = GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse()?,

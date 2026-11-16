@@ -105,7 +105,7 @@ mod tests {
             body.devices[0].branch_certificate = Some(primary.certify_branch(certificate)?);
             native.publication.record = primary.sign_record(body)?;
             manifest = crate::prekey::SdkDeviceManifestResponse::from_native((**native).clone())?;
-            fixture.client.persist_fetched_identity_directory(&manifest)?;
+            fixture.client.persist_observed_identity_directory_now(&manifest)?;
             fixture.client.require_current_device_authorization(&identity)?;
             assert!(fixture.client.require_native_operation(&identity, operation).is_err());
             match operation {

@@ -176,7 +176,7 @@ fn prepare_lease(
         return Ok(None);
     }
     let targets = match manifest.and_then(|manifest| {
-        account.client.persist_queued_fetched_identity_directory(&manifest)?;
+        account.client.persist_fetched_identity_directory(&manifest)?;
         task_transport::direct_targets_from_manifest(account, &plan.thread, manifest)
     }) {
         Ok(targets) => targets,
@@ -464,7 +464,7 @@ fn prepare_controls(
         .map(|device| (device.device_id.clone(), device.device_epoch))
         .collect::<Vec<_>>();
     let targets = {
-        account.client.persist_queued_fetched_identity_directory(&manifest)?;
+        account.client.persist_fetched_identity_directory(&manifest)?;
         task_transport::direct_targets_from_manifest(account, &plan.thread, manifest)
     }?;
     let now = u64::try_from(now_unix_timestamp()).unwrap_or(0);

@@ -153,8 +153,8 @@ pub(crate) async fn deliver_pages(
 pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seeded) -> TestResult {
     let own = target.client.owned_device_identity()?;
     let prekeys_before = serde_json::to_value(target.client.load_x3dh_private_state(&own)?.bundle)?;
-    target.client.persist_fetched_identity_directory(&source.manifest)?;
-    source.client.persist_fetched_identity_directory(&target.manifest)?;
+    target.client.persist_observed_identity_directory_now(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&target.manifest)?;
     assert!(
         source.client.start_generated_history_transfer(&target.config.device_id)?,
         "test: no history transfer was staged for the enrolled device"

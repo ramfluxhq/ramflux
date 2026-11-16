@@ -11,7 +11,7 @@ fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
     for (local, peer) in [(a, b), (b, a)] {
         review::trust(local, peer)?;
         let own = r9::manifest(local)?;
-        local.client.persist_fetched_identity_directory(&own)?;
+        local.client.persist_observed_identity_directory_now(&own)?;
         let remote = r9::manifest(peer)?;
         local
             .client

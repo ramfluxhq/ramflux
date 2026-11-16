@@ -643,7 +643,7 @@ async fn reset_requests_use_the_verified_identity_directory_delivery_alias_body(
     let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let manifest = alice.manifest()?;
-    bob.client.persist_fetched_identity_directory(&manifest)?;
+    bob.client.persist_observed_identity_directory_now(&manifest)?;
     let packet = gap(&alice, &bob, "alias-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet).await.is_err());

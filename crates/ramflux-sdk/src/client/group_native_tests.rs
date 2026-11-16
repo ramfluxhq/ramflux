@@ -118,8 +118,8 @@ fn assert_removed_sender(alice: &Fixture, bob: &Fixture) -> TestResult {
 async fn native_shared_group_create_add_rename_and_remove_use_custody_authority() -> TestResult {
     let alice = Fixture::with_device("native-shared-owner", "owner-device").await?;
     let bob = Fixture::with_device("native-shared-member", "member-device").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let owner = alice.client.owned_device_identity()?;
     let member = bob.client.owned_device_identity()?;
     let primary = alice

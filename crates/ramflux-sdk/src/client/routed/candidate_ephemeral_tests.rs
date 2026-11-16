@@ -100,8 +100,8 @@ pub(crate) async fn native_pair() -> TestResult<(Native, Native)> {
     let mut b = Native::new("ephemeral-receiver").await?;
     // Install the fixture's completed current-directory results. These endpoint tests
     // make no claim about the network lookup or freshness transport itself.
-    a.client.persist_fetched_identity_directory(&b.manifest)?;
-    b.client.persist_fetched_identity_directory(&a.manifest)?;
+    a.client.persist_observed_identity_directory_now(&b.manifest)?;
+    b.client.persist_observed_identity_directory_now(&a.manifest)?;
     for (receiver, sender) in [(&a, &b), (&b, &a)] {
         receiver.client.establish_friend_link(
             "native-ephemeral-link",
@@ -205,7 +205,7 @@ async fn ephemeral_unknown_is_retained_and_known_non_typing_is_dropped() -> Test
     b.client.active_account_db = None;
     b.client.unlock_account("ephemeral-receiver", b"native fixture data passphrase")?;
     b.client.initialize_born_v3_branch("primary", b.vault.clone()).await?;
-    b.client.persist_fetched_identity_directory(&a.manifest)?;
+    b.client.persist_observed_identity_directory_now(&a.manifest)?;
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 16);
     assert_fault_rollback_and_retry(&b.client, &mut receiver, &blocked, now)?;
     Ok(())

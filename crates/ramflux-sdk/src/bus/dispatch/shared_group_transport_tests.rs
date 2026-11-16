@@ -160,7 +160,7 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
     };
     let source = Box::pin(Fixture::new("native-group-frame-source")).await?;
     let peer = Box::pin(Fixture::new("native-group-frame-peer")).await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let primary = source
         .client
         .born_v3_account

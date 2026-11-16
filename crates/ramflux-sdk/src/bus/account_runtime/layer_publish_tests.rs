@@ -40,7 +40,7 @@ async fn harness(id: &str) -> TestResult<Rig> {
     let account_id = fixture.client.account_db()?.local_account_id.clone();
     crate::custody::tests::mark_live(&fixture.root.0, &account_id, now)?;
     fixture.client.initialize_born_v3_branch("primary", fixture.vault.clone()).await?;
-    fixture.client.persist_fetched_identity_directory(&peer.manifest)?;
+    fixture.client.persist_observed_identity_directory_now(&peer.manifest)?;
     fixture.client.establish_friend_link(
         "layer-link",
         &fixture.manifest.principal_commitment,

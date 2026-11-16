@@ -362,7 +362,7 @@ pub(crate) async fn born_account(
     client.unlock_account(account_id, passphrase)?;
     client.initialize_born_v3_branch(device_id, vault.clone()).await?;
     let manifest = native_manifest(&client, device_id)?;
-    client.persist_fetched_identity_directory(&manifest)?;
+    client.persist_observed_identity_directory_now(&manifest)?;
     mark_account_live(&mut client, root, account_id)?;
     let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
     let identity = client.owned_device_identity()?;

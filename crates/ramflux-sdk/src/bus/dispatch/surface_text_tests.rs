@@ -159,8 +159,8 @@ pub(in crate::bus::dispatch) async fn native_group_with(
     source.gateway_config = config.clone();
     for peer in &peers {
         let manifest = super::fixture::manifest(&peer.client)?;
-        source.client.persist_fetched_identity_directory(&manifest)?;
-        peer.client.persist_fetched_identity_directory(&own)?;
+        source.client.persist_observed_identity_directory_now(&manifest)?;
+        peer.client.persist_observed_identity_directory_now(&own)?;
         bus::seed_pair(&source.client, &peer.client)?;
     }
     source.client.fixture_group_create("group", &ids.conversation, None, &ids.device)?;

@@ -125,7 +125,7 @@ async fn verify_cas_restore_never_imports_a_grant() -> TestResult {
             let peer_root = peer.manifest.principal_commitment.clone();
             let grant_key = format!("identity/contact_safety_confirmation/{peer_root}");
             let origin_key = format!("identity/contact_safety_origin_inner/{peer_root}");
-            client.persist_fetched_identity_directory(&peer.manifest)?;
+            client.persist_observed_identity_directory_now(&peer.manifest)?;
             client.establish_friend_link(
                 "restore-link",
                 &client.own_account_anchor()?,

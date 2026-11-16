@@ -147,7 +147,7 @@ async fn card_issued_before_activation_survives_repeated_layer_renewals_then_acc
         // Each helper head is stamped just after the previous one; read the roster after them.
         let _clock = crate::time::FixedClock::set(i64::try_from(now + 30)?);
         verify_native_card_head(Some(&card), &peer.manifest)?;
-        holder.client.persist_fetched_identity_directory(&peer.manifest)?;
+        holder.client.persist_observed_identity_directory_now(&peer.manifest)?;
         // The current roster, not the card, decides the recipient and the layer.
         let message = crate::GatewayDirectMessage {
             conversation_id: "dm".into(),
@@ -230,7 +230,7 @@ async fn stale_card_with_the_current_roster_never_selects_a_revoked_device() -> 
         let revoked = primary(&peer)?.revoke_device(&verified(&enrolled)?, "phone", now + 2)?;
         let current = manifest_at(&peer, &revoked)?;
         verify_native_card_head(Some(&card), &current)?;
-        holder.client.persist_fetched_identity_directory(&current)?;
+        holder.client.persist_observed_identity_directory_now(&current)?;
         holder.client.establish_friend_link(
             "stale-link",
             &holder.manifest.principal_commitment,
@@ -395,7 +395,7 @@ async fn reopening_the_store_keeps_pins_and_requires_a_new_network_observation()
         let older = peer.manifest.clone();
         publish_layer_four(&mut peer).await?;
         let newer = peer.manifest.clone();
-        holder.client.persist_fetched_identity_directory(&newer)?;
+        holder.client.persist_observed_identity_directory_now(&newer)?;
         let record = newer.custody.as_ref().ok_or("native")?.publication.record.clone();
         let root = newer.principal_commitment.clone();
         holder.client.require_fresh_custody_head(HeadUse::NewAuthorization, &root, &record)?;
@@ -413,7 +413,7 @@ async fn reopening_the_store_keeps_pins_and_requires_a_new_network_observation()
             "restored state cannot stand in for a network observation"
         );
         assert!(
-            reopened.persist_fetched_identity_directory(&older).is_err(),
+            reopened.persist_observed_identity_directory_now(&older).is_err(),
             "an older head must stay refused after the store is reopened"
         );
         Ok(())
@@ -508,7 +508,7 @@ async fn a_held_older_fetch_cannot_replace_a_newer_head_or_regain_freshness() ->
         let newer = peer.manifest.clone();
         let held = std::time::Instant::now();
         // The head changes while an older fetch is still queued for application.
-        holder.client.persist_fetched_identity_directory(&newer)?;
+        holder.client.persist_observed_identity_directory_now(&newer)?;
         assert!(
             holder.client.persist_fetched_identity_directory_at(&older, held).is_err(),
             "a queued older fetch must be refused after the head changed"
@@ -539,7 +539,7 @@ async fn retry_of_an_accepted_contact_with_an_old_card_changes_no_provenance() -
         let record = peer.manifest.custody.as_ref().ok_or("native")?.publication.record.clone();
         let card = card_for(&peer, &record, now)?;
         // The contact exists through lookup provenance, accepted, no card involved.
-        holder.client.persist_fetched_identity_directory(&peer.manifest)?;
+        holder.client.persist_observed_identity_directory_now(&peer.manifest)?;
         holder.client.establish_friend_link(
             "retry-link",
             &holder.manifest.principal_commitment,

@@ -64,7 +64,7 @@ async fn native_principal_creates_and_renames_a_signed_group() -> TestResult {
 async fn cached_native_principal_selects_its_only_active_device() -> TestResult {
     let owner = Fixture::new("native-member-owner").await?;
     let member = Fixture::with_device("native-member-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&member.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&member.manifest)?;
     let selected = cached_principal_member(&owner.client, &member.manifest.principal_id)?
         .ok_or("native principal selector was not resolved")?;
     assert_eq!(selected.0, member.manifest.principal_commitment);

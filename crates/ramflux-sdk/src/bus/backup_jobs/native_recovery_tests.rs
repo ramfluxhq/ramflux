@@ -421,14 +421,14 @@ async fn source_group_history(
         "peer-device",
     )
     .await?;
-    data.persist_fetched_identity_directory(&peer.manifest)
+    data.persist_observed_identity_directory_now(&peer.manifest)
         .map_err(|error| format!("cache peer authority: {error}"))?;
     let owner_manifest = history_manifest(data, account)
         .map_err(|error| format!("source own authority: {error}"))?;
-    data.persist_fetched_identity_directory(&owner_manifest)
+    data.persist_observed_identity_directory_now(&owner_manifest)
         .map_err(|error| format!("cache own authority: {error}"))?;
     peer.client
-        .persist_fetched_identity_directory(&owner_manifest)
+        .persist_observed_identity_directory_now(&owner_manifest)
         .map_err(|error| format!("cache owner at peer: {error}"))?;
     data.shared_group_create_with_primary(
         "restore-group",
@@ -613,7 +613,7 @@ async fn native_restore_into_a_new_root_imports_no_peer_authority_and_no_freshne
                 let mut holder = RamfluxClient::new();
                 holder.open_account_index(&source_root.0)?;
                 holder.unlock_account("account", LOCAL_SECRET.as_bytes())?;
-                holder.persist_fetched_identity_directory(&peer.manifest)?;
+                holder.persist_observed_identity_directory_now(&peer.manifest)?;
                 assert!(
                     holder.account_db()?.actor_state_exists(&format!("identity/custody/{root}"))?,
                     "test: the source must hold a retained peer authority to archive"

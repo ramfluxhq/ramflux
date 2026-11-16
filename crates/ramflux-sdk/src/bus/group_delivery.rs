@@ -212,7 +212,7 @@ mod tests {
     -> TestResult {
         let owner = Fixture::with_device("group-reader-owner", "owner-device").await?;
         let peer = Fixture::with_device("group-reader-peer", "peer-device").await?;
-        owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+        owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
         let primary = owner
             .client
             .born_v3_account

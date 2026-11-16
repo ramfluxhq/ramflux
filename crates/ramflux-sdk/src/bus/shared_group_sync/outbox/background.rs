@@ -221,7 +221,7 @@ fn root_devices(
             return persisted(account, plan).map(|plan| Some((plan, Vec::new())));
         }
     };
-    account.client.persist_queued_fetched_identity_directory(&manifest)?;
+    account.client.persist_fetched_identity_directory(&manifest)?;
     if !plan.intent.cursor.as_ref().is_some_and(|cursor| cursor.root == root && !cursor.complete) {
         plan.intent.cursor =
             Some(RecipientCursor { root: root.into(), after_device: None, complete: false });

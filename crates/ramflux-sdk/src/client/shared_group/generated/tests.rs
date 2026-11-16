@@ -76,7 +76,7 @@ async fn generated_group_state_uses_native_current_role_and_exact_actor_before_r
 -> TestResult {
     let own = Box::pin(Fixture::new("generated-group-state-owner")).await?;
     let outsider = Box::pin(Fixture::new("generated-group-state-outsider")).await?;
-    own.client.persist_fetched_identity_directory(&outsider.manifest)?;
+    own.client.persist_observed_identity_directory_now(&outsider.manifest)?;
     let primary =
         own.client.born_v3_account.as_ref().ok_or("account")?.group_primary(own.vault.as_ref())?;
     own.client.shared_group_create_with_primary(

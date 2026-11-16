@@ -44,25 +44,12 @@ impl NativeHeadFreshness {
     }
 }
 impl RamfluxClient {
-    /// Only a completed current-directory network fetch may call this helper. Own-device
-    /// history, archive import, cached manifests and caller-supplied JSON use the evidence-only
-    /// persistence helper; none can refresh this process-local authorization clock.
+    /// Applies a directory manifest. Only a manifest stamped with the instant its network fetch
+    /// began renews the process-local send-authorization clock, and only from that instant, so
+    /// a queued result never looks newer than the authorization it is applied to. A manifest
+    /// without a stamp (inbound, cached, archived or caller-supplied) is evidence only; there
+    /// is no fallback to the time of application.
     pub(crate) fn persist_fetched_identity_directory(
-        &self,
-        manifest: &SdkDeviceManifestResponse,
-    ) -> Result<(), SdkError> {
-        // A queued result keeps the instant its fetch began, so applying it later never makes
-        // an older observation look newer than the authorization it is applied to.
-        self.persist_fetched_identity_directory_at(
-            manifest,
-            manifest.fetched_after.0.unwrap_or_else(Instant::now),
-        )
-    }
-
-    /// Applies a queued network result. The result must carry the instant its fetch began; a
-    /// manifest without that provenance is persisted as evidence only and never renews the
-    /// send-authorization clock (fail closed, never a fresh observation at Apply time).
-    pub(crate) fn persist_queued_fetched_identity_directory(
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
@@ -70,6 +57,15 @@ impl RamfluxClient {
             Some(began) => self.persist_fetched_identity_directory_at(manifest, began),
             None => self.persist_identity_directory(manifest),
         }
+    }
+
+    /// Test and fixture seam: treats a locally built manifest as fetched just now.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn persist_observed_identity_directory_now(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        self.persist_fetched_identity_directory_at(manifest, Instant::now())
     }
 
     /// A prepared network result retains its conservative fetch-time lower bound while queued.
@@ -138,7 +134,7 @@ mod tests {
                 .is_err(),
             "queued public evidence cannot renew the directory permission clock"
         );
-        local.client.persist_fetched_identity_directory(&remote.manifest)?;
+        local.client.persist_observed_identity_directory_now(&remote.manifest)?;
         local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
         assert!(
             local

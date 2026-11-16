@@ -46,7 +46,7 @@ async fn restored_account_has_empty_freshness_and_refreshes_on_connect() -> Test
             let initializer: AccountInitializer = Box::new(move |index| {
                 let account = initialize(&source_root, index)?;
                 for manifest in source_manifests {
-                    account.client.persist_fetched_identity_directory(&manifest)?;
+                    account.client.persist_observed_identity_directory_now(&manifest)?;
                     account.client.require_fresh_custody_head(
                         HeadUse::NewAuthorization,
                         &manifest.principal_commitment,
@@ -201,7 +201,7 @@ async fn restore_over_a_live_account_cannot_roll_back_a_peer_pin() -> TestResult
             data.seal_new_account_data("account", &own_commitment, LOCAL_SECRET.as_bytes())?;
             data.unlock_account("account", LOCAL_SECRET.as_bytes())?;
             // The archive is made while the pin is at the older head.
-            data.persist_fetched_identity_directory(&older)?;
+            data.persist_observed_identity_directory_now(&older)?;
             drop(data);
             let source = supervisor(&root.0)?;
             let archive = root.0.join("older-pin.rfb");
@@ -209,7 +209,7 @@ async fn restore_over_a_live_account_cannot_roll_back_a_peer_pin() -> TestResult
             source.shutdown().await?;
             // The live account then advances its pin to the newer head.
             let live = initialize(&root.0, AccountIndex::open(&root.0)?)?;
-            live.client.persist_fetched_identity_directory(&newer)?;
+            live.client.persist_observed_identity_directory_now(&newer)?;
             drop(live);
             let target = supervisor(&root.0)?;
             let id = verify(&target, &archive).await?;
@@ -218,7 +218,7 @@ async fn restore_over_a_live_account_cannot_roll_back_a_peer_pin() -> TestResult
             target.shutdown().await?;
             let restored = initialize(&root.0, AccountIndex::open(&root.0)?)?;
             assert!(
-                restored.client.persist_fetched_identity_directory(&older).is_err(),
+                restored.client.persist_observed_identity_directory_now(&older).is_err(),
                 "a restored archive must not roll the live peer pin back to the older head"
             );
             let record =

@@ -51,7 +51,7 @@ pub(crate) async fn sibling(
     let vault = native.vault.clone();
     Box::pin(activation_send::tests::publish_layer_four(&mut native)).await?;
     sibling.manifest = native.manifest.clone();
-    sibling.client.persist_fetched_identity_directory(&sibling.manifest)?;
+    sibling.client.persist_observed_identity_directory_now(&sibling.manifest)?;
     Box::pin(activation_send::tests::publish_layer_four_with_primary(&mut sibling, vault)).await?;
     let now = crate::custody::network_now()?;
     let account_id = native.client.account_db()?.local_account_id.clone();
@@ -69,7 +69,7 @@ pub(crate) async fn sibling(
     native
         .client
         .initialize_born_v3_branch_for_fixture(&native.config.device_id, native.vault.as_ref())?;
-    native.client.persist_fetched_identity_directory(&native.manifest)?;
+    native.client.persist_observed_identity_directory_now(&native.manifest)?;
     let primary_vault = native.vault.clone();
     *source = native.into_bus();
     let mut sibling = sibling.into_bus();
@@ -281,7 +281,7 @@ pub(crate) fn revoke_device(account: &mut LocalBusAccountState, device: &str) ->
     fixture
         .client
         .initialize_born_v3_branch_for_fixture(&fixture.config.device_id, fixture.vault.as_ref())?;
-    fixture.client.persist_fetched_identity_directory(&fixture.manifest)?;
+    fixture.client.persist_observed_identity_directory_now(&fixture.manifest)?;
     let updated = fixture.into_bus();
     account.client = updated.client;
     account.native_setup = updated.native_setup;

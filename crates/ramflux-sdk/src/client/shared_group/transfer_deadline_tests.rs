@@ -49,8 +49,8 @@ impl Fixture {
             .map_err(|error| native_err(&*error))?;
         phone.accept_peer(&next).map_err(|error| native_err(&*error))?;
         next.accept_peer(&phone).map_err(|error| native_err(&*error))?;
-        laptop.client.persist_fetched_identity_directory(&next.manifest)?;
-        next.client.persist_fetched_identity_directory(&laptop.manifest)?;
+        laptop.client.persist_observed_identity_directory_now(&next.manifest)?;
+        next.client.persist_observed_identity_directory_now(&laptop.manifest)?;
         let laptop_bus = laptop.into_bus();
         let laptop_root = laptop_bus
             .native_setup

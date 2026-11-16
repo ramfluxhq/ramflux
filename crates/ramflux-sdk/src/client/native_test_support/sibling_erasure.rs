@@ -25,7 +25,7 @@ pub(crate) async fn exercise(deletion_first: bool, copies: usize) -> TestResult 
     let mut forwarder = source.enroll_sibling("sibling-erasure-forwarder", "forwarder").await?;
     for fixture in [&mut target, &mut forwarder] {
         fixture.manifest = source.manifest.clone();
-        fixture.client.persist_fetched_identity_directory(&source.manifest)?;
+        fixture.client.persist_observed_identity_directory_now(&source.manifest)?;
     }
     super::authored_edit::deliver_contact(&source, &peer, &mut target, &conversation).await?;
     let owner = original.message_id.clone();

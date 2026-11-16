@@ -55,8 +55,8 @@ fn seal(
 async fn pair(group: bool) -> TestResult<(Fixture, Fixture, String, Option<String>)> {
     let source = Box::pin(Fixture::with_device("delete-source", "source-device")).await?;
     let target = Box::pin(Fixture::with_device("delete-target", "target-device")).await?;
-    source.client.persist_fetched_identity_directory(&target.manifest)?;
-    target.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&target.manifest)?;
+    target.client.persist_observed_identity_directory_now(&source.manifest)?;
     if !group {
         source.accept_peer(&target)?;
         target.accept_peer(&source)?;

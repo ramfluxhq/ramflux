@@ -95,7 +95,7 @@ impl Fixture {
             remote.root_commitment(),
         ))
         .await?;
-        client.persist_fetched_identity_directory(&manifest)?;
+        client.persist_observed_identity_directory_now(&manifest)?;
         client.require_cached_root_authority(HeadUse::NewAuthorization, &remote)?;
         Ok(client)
     }

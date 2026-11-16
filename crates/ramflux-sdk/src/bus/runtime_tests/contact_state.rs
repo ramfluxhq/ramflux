@@ -19,7 +19,7 @@ async fn contact_changes_publish_reachability_kind_and_current_safety_verificati
     let peer =
         opened(crate::client::native_test_support::Fixture::new("contact-state-peer").await)?;
     let client = &local.client;
-    client.persist_fetched_identity_directory(&peer.manifest)?;
+    client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own = local.manifest.principal_commitment.clone();
     let peer_root = peer.manifest.principal_commitment.clone();
     let peer_id = peer.manifest.principal_id.clone();

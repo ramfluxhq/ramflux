@@ -14,8 +14,8 @@ async fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_
         crate::client::native_test_support::Fixture::headless("other", "other", "phone", "Alіce")
             .await?;
     let reader = crate::client::native_test_support::Fixture::new("reader").await?;
-    reader.client.persist_fetched_identity_directory(&alice.manifest)?;
-    reader.client.persist_fetched_identity_directory(&impostor.manifest)?;
+    reader.client.persist_observed_identity_directory_now(&alice.manifest)?;
+    reader.client.persist_observed_identity_directory_now(&impostor.manifest)?;
     let contact = reader.client.contact_entry("other")?;
     assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["display_name_confusable_with"], "alice");
@@ -222,7 +222,7 @@ async fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit()
         "z-alice",
         &json!({"principal_id":"z-alice","display_name":"Alice"}),
     )?;
-    reader.client.persist_fetched_identity_directory(&owner.manifest)?;
+    reader.client.persist_observed_identity_directory_now(&owner.manifest)?;
     assert_eq!(reader.client.contact_entry("owner")?["display_name_confusable_with"], "z-alice");
     Ok(())
 }

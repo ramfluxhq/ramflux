@@ -106,11 +106,12 @@ impl RamfluxClient {
         }
         let own_root = self.own_account_anchor()?;
         let fetch = |root: String| async move {
+            let started = std::time::Instant::now();
             let manifest: Option<SdkDeviceManifestResponse> =
                 sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
                     .await
                     .map_err(super::contact_resolution::lookup_failure)?;
-            let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+            let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
             super::contact::verify_device_manifest(&manifest, &root)
                 .map_err(|_| SdkError::ContactInput(ContactReason::ManifestInvalid))?;
             Ok::<_, SdkError>(manifest)

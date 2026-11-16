@@ -15,7 +15,7 @@ async fn own_authored_history_target_epoch_rechecks_before_cached_exposure_and_r
         &source.client.own_account_anchor()?,
         &peer.client.own_account_anchor()?,
     )?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     source.client.establish_friend_link(
         "authored-link",
         &source.client.own_account_anchor()?,
@@ -110,8 +110,8 @@ fn certify_target_epoch(source: &mut Fixture, target: &mut Fixture, epoch: u64) 
         }
     }
     let full = SdkDeviceManifestResponse::from_native((*native).clone())?;
-    source.client.persist_fetched_identity_directory(&full)?;
-    target.client.persist_fetched_identity_directory(&full)?;
+    source.client.persist_observed_identity_directory_now(&full)?;
+    target.client.persist_observed_identity_directory_now(&full)?;
     source.manifest = full.clone();
     target.manifest = full;
     Ok(())

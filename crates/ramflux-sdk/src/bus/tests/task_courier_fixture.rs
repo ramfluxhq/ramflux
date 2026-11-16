@@ -322,8 +322,8 @@ impl Fixture {
         for local in
             [Some(&source), Some(&peer), Some(&sibling), peer2.as_ref()].into_iter().flatten()
         {
-            local.client.persist_fetched_identity_directory(&own)?;
-            local.client.persist_fetched_identity_directory(&remote)?;
+            local.client.persist_observed_identity_directory_now(&own)?;
+            local.client.persist_observed_identity_directory_now(&remote)?;
             local.client.account_db()?.establish_friend_link(
                 "test-friend",
                 &own.principal_commitment,
@@ -357,7 +357,7 @@ impl Fixture {
         let stalled = stalled.into_bus();
         let stalled_manifest =
             stalled.client.native_bus_fixture.as_ref().ok_or("stalled fixture")?.manifest.clone();
-        source.client.persist_fetched_identity_directory(&stalled_manifest)?;
+        source.client.persist_observed_identity_directory_now(&stalled_manifest)?;
         let scope = ramflux_protocol::message::dm_scope::derive(
             &own.principal_commitment,
             &stalled_manifest.principal_commitment,

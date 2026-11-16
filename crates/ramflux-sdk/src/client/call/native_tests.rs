@@ -96,8 +96,8 @@ fn signed_control(
 async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() -> TestResult {
     let mut alice = Fixture::new("native-call-alice").await?;
     let mut bob = Fixture::new("native-call-bob").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     for fixture in [&alice, &bob] {
         fixture.client.establish_friend_link(
             "native-call-friend",
@@ -163,8 +163,8 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
 async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() -> TestResult {
     let alice = Fixture::new("generated-cache-alice").await?;
     let mut bob = Fixture::new("generated-cache-bob").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let conversation = ramflux_protocol::message::dm_scope::derive(
         &alice.client.own_account_anchor()?,
         &bob.client.own_account_anchor()?,
@@ -236,9 +236,9 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let mut alice = Fixture::new("call-sibling-alice").await?;
         let mut bob = Fixture::new("call-sibling-bob").await?;
         let mut secondary = bob.enroll_sibling("call-sibling-secondary", "secondary").await?;
-        alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+        alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
         for receiver in [&mut bob, &mut secondary] {
-            receiver.client.persist_fetched_identity_directory(&alice.manifest)?;
+            receiver.client.persist_observed_identity_directory_now(&alice.manifest)?;
         }
         let conversation = ramflux_protocol::message::dm_scope::derive(&alice.client.own_account_anchor()?, &bob.client.own_account_anchor()?)?;
         for fixture in [&alice, &bob, &secondary] {

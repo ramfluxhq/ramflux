@@ -100,13 +100,15 @@ impl RamfluxClient {
         principal_commitment: &str,
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
+        let started = std::time::Instant::now();
         let manifest: SdkDeviceManifestResponse =
             sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
                 gateway,
                 &format!("/mvp1/device-manifest/{principal_commitment}"),
             )
             .await?
-            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?;
+            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?
+            .fetched_from(started);
         self.accept_fetched_device_manifest(manifest, principal_commitment, source)
     }
 

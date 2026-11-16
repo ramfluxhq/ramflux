@@ -6,7 +6,7 @@ use super::*;
 
 pub(super) fn trust(receiver: &Fixture, sender: &Fixture) -> Result<(), SdkError> {
     if let Some(native) = &sender.native {
-        receiver.client.persist_fetched_identity_directory(&native.manifest)?;
+        receiver.client.persist_observed_identity_directory_now(&native.manifest)?;
         return Ok(());
     }
     let mut manifest = crate::client::identity_authority::test_support::manifest(&sender.client)?;

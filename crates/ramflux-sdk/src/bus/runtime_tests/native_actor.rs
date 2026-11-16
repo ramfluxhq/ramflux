@@ -60,8 +60,8 @@ pub(super) async fn pair() -> Case<Pair> {
     Box::pin(publish_layer_four(&mut alice)).await?;
     let mut bob = Box::pin(alice.peer_at_same_home("bob", "device-bob", "bob")).await?;
     Box::pin(publish_layer_four(&mut bob)).await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     bus::seed_pair(&alice.client, &bob.client)?;
     let alice_root = alice.client.owned_device_identity()?.root_commitment().to_owned();
     let bob_root = bob.client.owned_device_identity()?.root_commitment().to_owned();
@@ -161,8 +161,8 @@ impl Side {
             client.unlock_account(id, PASSPHRASE)?;
             client.initialize_born_v3_branch_for_fixture(&device, vault.as_ref())?;
             let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
-            client.persist_fetched_identity_directory(&own)?;
-            client.persist_fetched_identity_directory(&peer)?;
+            client.persist_observed_identity_directory_now(&own)?;
+            client.persist_observed_identity_directory_now(&peer)?;
             // `with_account_identity` marks networking ready but clears these two; the session
             // needs both to sign and open.
             let mut config = config.with_account_identity(&client)?;

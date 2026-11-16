@@ -75,6 +75,7 @@ pub(crate) async fn fetch(
     remote: RemoteManifest<'_>,
     root: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
     let manifest: Option<SdkDeviceManifestResponse> = crate::prekey::http_async::get(
         remote.url,
         &format!("/mvp1/device-manifest/{root}"),
@@ -82,7 +83,8 @@ pub(crate) async fn fetch(
     )
     .await?;
     let manifest = manifest
-        .ok_or_else(|| SdkError::LocalBus(format!("missing device manifest for {root}")))?;
+        .ok_or_else(|| SdkError::LocalBus(format!("missing device manifest for {root}")))?
+        .fetched_from(started);
     verify_device_manifest(&manifest, root)?;
     Ok(crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }

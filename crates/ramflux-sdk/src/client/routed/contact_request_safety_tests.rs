@@ -13,8 +13,8 @@ fn link_headless(state: &LocalBusDaemonState, directory: &Directory) -> Result<(
     let bob_manifest = manifests.get(1).cloned().ok_or_else(|| invalid("bob manifest"))?;
     let alice = account(state, "alice")?;
     let bob = account(state, "bob")?;
-    alice.persist_fetched_identity_directory(&bob_manifest)?;
-    bob.persist_fetched_identity_directory(&alice_manifest)?;
+    alice.persist_observed_identity_directory_now(&bob_manifest)?;
+    bob.persist_observed_identity_directory_now(&alice_manifest)?;
     let alice_root = alice.owned_device_identity()?.root_commitment().to_owned();
     let bob_root = bob.owned_device_identity()?.root_commitment().to_owned();
     alice.establish_friend_link("headless-link", &alice_root, &bob_root)?;

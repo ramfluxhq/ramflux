@@ -332,7 +332,7 @@ async fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() ->
         .into_bus();
     for holder in [&owner, &peer] {
         for source in [&owner, &peer] {
-            holder.client.persist_fetched_identity_directory(&native_manifest(source)?)?;
+            holder.client.persist_observed_identity_directory_now(&native_manifest(source)?)?;
         }
     }
     peer.client.establish_friend_link(

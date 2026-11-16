@@ -61,7 +61,7 @@ fn native_of(manifest: &SdkDeviceManifestResponse) -> TestResult<CustodyManifest
 }
 
 fn persist_declared(fixture: &Fixture, manifest: &SdkDeviceManifestResponse) -> TestResult {
-    fixture.client.persist_fetched_identity_directory(manifest)?;
+    fixture.client.persist_observed_identity_directory_now(manifest)?;
     Ok(())
 }
 

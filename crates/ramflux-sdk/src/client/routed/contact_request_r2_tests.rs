@@ -76,7 +76,7 @@ async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_con
         .first()
         .cloned()
         .ok_or_else(|| invalid("source manifest"))?;
-    account(&state, "bob")?.persist_fetched_identity_directory(&manifest)?;
+    account(&state, "bob")?.persist_observed_identity_directory_now(&manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
     account(&state, "bob")?.verify_contact_control(&entry, &opened.routing, &opened.body)?;
     let original = crate::client::contact_requests::native_tests::decoded_consent(&opened.body)
@@ -760,10 +760,10 @@ async fn known_peer_traffic(
     let conversation = ramflux_protocol::message::dm_scope::derive(&source_root, &peer_root)
         .map_err(|_| invalid("known direct scope"))?;
     let receiver = bus_state.accounts.get("bob").ok_or_else(|| invalid("receiver"))?;
-    receiver.client.persist_fetched_identity_directory(&manifest)?;
+    receiver.client.persist_observed_identity_directory_now(&manifest)?;
     receiver.client.establish_friend_link("known-peer", &source_root, &peer_root)?;
     let source = bus_state.accounts.get_mut("carol").ok_or_else(|| invalid("source"))?;
-    source.client.persist_fetched_identity_directory(&bob_manifest)?;
+    source.client.persist_observed_identity_directory_now(&bob_manifest)?;
     source.client.establish_friend_link("known-peer", &source_root, &peer_root)?;
     let device = bob_manifest.devices.first().ok_or_else(|| invalid("peer device"))?;
     let message = GatewayDirectMessage {

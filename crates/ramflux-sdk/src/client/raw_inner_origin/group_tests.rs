@@ -191,8 +191,8 @@ async fn group_origin_signed_wrapper_rejects_altered_plaintext_and_missing_evide
 async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
     let owner = Fixture::with_device("opening-owner", "owner-device").await?;
     let peer = Fixture::with_device("opening-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
     let primary = owner
         .client
         .born_v3_account
