@@ -45,7 +45,10 @@ jobs:
   windows-host:
     name: Windows host (rf.exe, pipe, vault, store)
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Release rf.exe and the dev-profile DM test each compile ramflux-rf.
+    # On a slow runner the second compile starts with only a few minutes left
+    # on a 60-minute cap, and the job is cancelled while cargo is still compiling.
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -156,22 +159,58 @@ jobs:
       # Design M2 acceptance: two accounts, one DM, delivery, then the receiver reopens.
       # The release rf.exe above stays free of itest features. This step builds its own
       # dev-profile rf with the memory vault and the four local node services.
+      # Once that binary exists the test itself is about 15 seconds. The cargo
+      # invocation has a 25-minute deadline so a stuck compile or test prints its
+      # log and fails instead of sitting until the job cap. Real rf refusals are
+      # unchanged: only a typed refusal exits nonzero.
       - name: Two-account DM through the gateway
+        timeout-minutes: 40
         shell: pwsh
         env:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           cargo build --locked -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $log = Join-Path $env:RUNNER_TEMP 'dm-acceptance.txt'
-          cargo test --locked -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm f1_two_accounts_contact_dm_receive_ack -- --ignored --exact --test-threads=1 *> $log
-          $code = $LASTEXITCODE
-          Get-Content $log | Write-Host
-          if ($code -ne 0) { exit $code }
-          $joined = Get-Content $log -Raw
+          $out = Join-Path $env:RUNNER_TEMP 'dm-acceptance.out'
+          $err = Join-Path $env:RUNNER_TEMP 'dm-acceptance.err'
+          Remove-Item -Force -ErrorAction SilentlyContinue $out, $err
+          $cargo = (Get-Command -Name cargo.exe -ErrorAction SilentlyContinue).Source
+          if (-not $cargo) { $cargo = (Get-Command -Name cargo).Source }
+          $cargoArgs = @(
+            'test', '--locked', '-p', 'ramflux-rf', '--features', 'itest-memory-vault',
+            '--test', 'e2e_boot_dm', 'f1_two_accounts_contact_dm_receive_ack',
+            '--', '--ignored', '--exact', '--test-threads=1'
+          )
+          $started = Get-Date
+          $deadline = $started.AddMinutes(25)
+          $killed = $false
+          $proc = Start-Process -FilePath $cargo -WorkingDirectory (Get-Location).Path -PassThru -RedirectStandardOutput $out -RedirectStandardError $err -ArgumentList $cargoArgs
+          while (-not $proc.HasExited) {
+            $elapsed = [int]((Get-Date) - $started).TotalSeconds
+            Write-Host "dm-acceptance running pid=$($proc.Id) elapsed=${elapsed}s"
+            if ((Get-Date) -ge $deadline) {
+              Write-Host '::error::DM acceptance exceeded 25 minutes'
+              & taskkill.exe /F /T /PID $proc.Id | Out-Host
+              $null = $proc.WaitForExit(15000)
+              $killed = $true
+              break
+            }
+            Start-Sleep -Seconds 30
+          }
+          if (-not $proc.HasExited) { $null = $proc.WaitForExit(15000) } else { $null = $proc.WaitForExit() }
+          foreach ($path in @($out, $err)) {
+            if (Test-Path $path) { Get-Content -Path $path | Write-Host }
+          }
+          $joined = ''
+          foreach ($path in @($out, $err)) {
+            if (Test-Path $path) { $joined += [IO.File]::ReadAllText($path) }
+          }
+          if ($killed -or $null -eq $proc.ExitCode) { exit 1 }
+          if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
           if ($joined -notmatch 'test result: ok\. 1 passed;') {
-            Write-Error 'DM acceptance did not report exactly one passing test'
+            Write-Host '::error::DM acceptance did not report exactly one passing test'
             exit 1
           }
 
