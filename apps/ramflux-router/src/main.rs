@@ -29,6 +29,7 @@ mod send_authority;
 mod serve;
 mod startup;
 
+use ramflux_node_core::version::VERSION_SHA;
 use std::sync::Arc;
 
 #[cfg(feature = "itest-http")]
@@ -73,6 +74,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
+        tracing::info!(service, version = VERSION_SHA, node_id = config.node_id, "router starting");
         validate_migration_config(&config)?;
         let pools = ramflux_node_core::CustodyPoolSettings::from_env()?;
         ramflux_node_core::CustodyIssuanceSettings::from_env()?;

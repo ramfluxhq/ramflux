@@ -6,6 +6,7 @@
 mod provider_issuance;
 mod provider_outcome;
 use provider_issuance::SendBoundary;
+use ramflux_node_core::version::VERSION_SHA;
 mod provider_payload;
 mod push_registration;
 mod retention;
@@ -53,6 +54,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if let Some(config) =
         ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
     {
+        tracing::info!(service, version = VERSION_SHA, node_id = config.node_id, "notify starting");
         let route_key =
             ramflux_node_core::NodeSecret::required_env("RAMFLUX_NOTIFY_ROUTE_KEY_FILE")?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);

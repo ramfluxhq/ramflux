@@ -522,13 +522,19 @@ fn a_fresh_record_that_withdraws_the_advertisement_clears_the_pin_despite_an_old
 fn record_without_a_node_version_is_refused() -> TestResult {
     let mut value = serde_json::to_value(signed(None)?)?;
     value.as_object_mut().ok_or("record object")?.remove("version");
-    assert!(serde_json::from_value::<FederationServerRecord>(value).is_err());
+    assert!(
+        serde_json::from_value::<FederationServerRecord>(value).is_err(),
+        "a server record with no version key must not decode"
+    );
     let mut r = record(None);
     r.version = String::new();
     sign_federation_server_record_with_seed(&mut r, [7; 32])?;
-    assert!(matches!(
-        crate::verify_federation_server_record(&r, NOW),
-        Err(crate::NodeCoreError::MissingNodeVersion)
-    ));
+    assert!(
+        matches!(
+            crate::verify_federation_server_record(&r, NOW),
+            Err(crate::NodeCoreError::MissingNodeVersion)
+        ),
+        "a blank version must be refused with MissingNodeVersion"
+    );
     Ok(())
 }

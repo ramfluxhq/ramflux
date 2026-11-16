@@ -227,10 +227,16 @@ mod tests {
             crate::encode_base64url(key.sign(&client_discovery_signing_bytes(&record)?).to_bytes());
         let decoded =
             serde_json::from_slice::<WellKnownClientRecord>(&canonical_json_bytes(&record)?)?;
-        assert_eq!(decoded.version, "0.2.0 (abcdef123456)");
+        assert_eq!(
+            decoded.version, "0.2.0 (abcdef123456)",
+            "the signed version must survive a canonical JSON round trip"
+        );
         verify_client_discovery_record(&decoded, 1500)?;
         record.version = "9.9.9 (000000000000)".to_owned();
-        assert!(verify_client_discovery_record(&record, 1500).is_err());
+        assert!(
+            verify_client_discovery_record(&record, 1500).is_err(),
+            "changing the version after signing must break the signature"
+        );
         Ok(())
     }
 
@@ -241,16 +247,22 @@ mod tests {
             include_str!("../../../deploy/scripts/tests/fixtures/rust-signed-discovery.json");
         let mut value: serde_json::Value = serde_json::from_str(fixture)?;
         value.as_object_mut().ok_or("record object")?.remove("version");
-        assert!(serde_json::from_value::<WellKnownClientRecord>(value).is_err());
+        assert!(
+            serde_json::from_value::<WellKnownClientRecord>(value).is_err(),
+            "a record with no version key must not decode"
+        );
 
         let mut record: WellKnownClientRecord = serde_json::from_str(fixture)?;
         record.version = String::new();
         record.signature =
             crate::encode_base64url(key.sign(&client_discovery_signing_bytes(&record)?).to_bytes());
-        assert!(matches!(
-            verify_client_discovery_record(&record, 1500),
-            Err(ProtocolError::MissingNodeVersion)
-        ));
+        assert!(
+            matches!(
+                verify_client_discovery_record(&record, 1500),
+                Err(ProtocolError::MissingNodeVersion)
+            ),
+            "a blank version must be refused with MissingNodeVersion"
+        );
         Ok(())
     }
 

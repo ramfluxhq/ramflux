@@ -371,6 +371,11 @@ fn run_case(
     if let Some(mut stderr) = child.0.stderr.take() {
         stderr.read_to_string(&mut logs)?;
     }
+    assert!(
+        logs.contains(ramflux_node_core::version::VERSION_SHA),
+        "{service} did not log its version {} at startup: {logs}",
+        ramflux_node_core::version::VERSION_SHA
+    );
     if mode == "second" {
         assert_eq!(status.code(), Some(1), "{logs}");
         assert!(elapsed < Duration::from_secs(1), "second signal did not force exit");
