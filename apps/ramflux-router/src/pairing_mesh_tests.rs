@@ -53,6 +53,9 @@ fn with_deadline<T: std::marker::Send + 'static>(
     let worker = std::thread::Builder::new().name(what.into()).spawn(move || {
         let _ = sender.send(scenario());
     })?;
+    // On timeout the worker stays detached. CI runs nextest with one process per test, so when
+    // this test returns Err its process exits and the worker dies with it; nothing leaks
+    // across tests.
     match receiver.recv_timeout(TEST_DEADLINE) {
         Ok(result) => {
             let _ = worker.join();
