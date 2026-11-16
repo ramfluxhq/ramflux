@@ -29,6 +29,12 @@ pub struct NodeServiceConfig {
     pub signaling: Option<SignalingConfig>,
     #[serde(default)]
     pub relay: Option<RelayConfig>,
+    /// Gateway client capabilities this node serves.
+    /// Federation publishes this list. The router echoes it on
+    /// `GET /mvp1/session-push-capabilities`. Absent: federation publishes nothing,
+    /// and the router keeps its historical echo of both features.
+    #[serde(default)]
+    pub gateway_client_capabilities: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

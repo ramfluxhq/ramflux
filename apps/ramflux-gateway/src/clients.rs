@@ -1513,6 +1513,7 @@ pub(crate) mod tests {
             gateway: None,
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         }
     }
 

@@ -516,6 +516,7 @@ pub(crate) fn test_config(
         gateway: None,
         signaling: None,
         relay: None,
+        gateway_client_capabilities: None,
     }
 }
 

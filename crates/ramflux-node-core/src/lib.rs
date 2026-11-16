@@ -245,6 +245,11 @@ mod device_pairing_release;
 pub use device_pairing_release::{
     DEVICE_PAIRING_CAPABILITY, DEVICE_PAIRING_RELEASE_GATE, device_pairing_enabled,
 };
+mod gateway_client_capabilities;
+pub use gateway_client_capabilities::{
+    published_gateway_client_capabilities, router_echo_gateway_client_capabilities,
+    select_gateway_client_capabilities,
+};
 
 pub use router_store::sender_retry;
 

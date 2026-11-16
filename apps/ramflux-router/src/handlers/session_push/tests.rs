@@ -432,3 +432,52 @@ fn legacy_nack_keeps_cursor_shape() -> anyhow::Result<()> {
     drop(router);
     Ok(())
 }
+
+#[test]
+fn session_push_capabilities_follow_the_configured_list() -> anyhow::Result<()> {
+    let push = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY;
+    let ephemeral = ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
+    let (unset_path, unset_state, unset_store) =
+        crate::router_runtime::tests::test_router("capability-unset")?;
+    let unset = RouterHandle::tokio(unset_state, unset_store, None);
+    let historical = call(&unset, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
+    assert_eq!(
+        historical["capabilities"],
+        json!([push, ephemeral]),
+        "an unset list keeps the historical router echo"
+    );
+    drop(unset);
+    drop(unset_path);
+
+    let (served_path, served_state, served_store) =
+        crate::router_runtime::tests::test_router("capability-served")?;
+    let served = RouterHandle::tokio(served_state, served_store, None);
+    served.install_gateway_client_capabilities(&[
+        ephemeral.to_owned(),
+        push.to_owned(),
+        push.to_owned(),
+        "not-a-capability".to_owned(),
+    ]);
+    let echoed = call(&served, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
+    assert_eq!(
+        echoed["capabilities"],
+        json!([push, ephemeral]),
+        "the router echoes the configured feature list"
+    );
+    drop(served);
+    drop(served_path);
+
+    let (off_path, off_state, off_store) =
+        crate::router_runtime::tests::test_router("capability-off")?;
+    let off = RouterHandle::tokio(off_state, off_store, None);
+    off.install_gateway_client_capabilities(&[ephemeral.to_owned()]);
+    let disabled = call(&off, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
+    assert_eq!(
+        disabled["capabilities"].as_array().map(Vec::len),
+        Some(0),
+        "ephemeral without session push is not echoed"
+    );
+    drop(off);
+    drop(off_path);
+    Ok(())
+}

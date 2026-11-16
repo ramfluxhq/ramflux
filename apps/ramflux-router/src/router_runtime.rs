@@ -30,6 +30,8 @@ pub(crate) struct TokioRouterRuntime {
     /// Per-router injected clock for ephemeral HTTP tests. Production stays None.
     #[cfg(test)]
     ephemeral_now_ms: std::sync::Mutex<Option<u64>>,
+    /// Set when config names gateway client capabilities. Unset keeps the historical echo.
+    gateway_client_capabilities: std::sync::OnceLock<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -86,6 +88,7 @@ impl TokioRouterRuntime {
             ingress_probe: IngressProbe::default(),
             #[cfg(test)]
             ephemeral_now_ms: std::sync::Mutex::new(None),
+            gateway_client_capabilities: std::sync::OnceLock::new(),
         }
     }
 }
@@ -149,6 +152,21 @@ impl RouterHandle {
         match self {
             Self::Tokio(runtime) => &runtime.node_id,
         }
+    }
+
+    pub(crate) fn install_gateway_client_capabilities(&self, configured: &[String]) {
+        let names = ramflux_node_core::router_echo_gateway_client_capabilities(Some(configured));
+        let Self::Tokio(runtime) = self;
+        let _ = runtime.gateway_client_capabilities.set(names);
+    }
+
+    pub(crate) fn echoed_gateway_client_capabilities(&self) -> Vec<String> {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .gateway_client_capabilities
+            .get()
+            .cloned()
+            .unwrap_or_else(|| ramflux_node_core::router_echo_gateway_client_capabilities(None))
     }
 
     pub(crate) fn state(&self) -> &ramflux_node_core::RouterCore {

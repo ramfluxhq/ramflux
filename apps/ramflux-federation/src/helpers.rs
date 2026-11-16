@@ -370,6 +370,7 @@ mod router_quic_tests {
             gateway: None,
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         }
     }
 

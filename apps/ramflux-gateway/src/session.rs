@@ -3154,6 +3154,7 @@ pub(crate) mod tests {
             }),
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         };
         Ok(crate::GatewayQuicContext {
             custody: None,

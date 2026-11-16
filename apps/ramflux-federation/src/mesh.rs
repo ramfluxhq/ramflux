@@ -1743,6 +1743,7 @@ pub(crate) mod tests {
                     protocol_versions: vec!["s8".to_owned()],
                     transport_backends: vec!["quic".to_owned()],
                     node_capabilities: vec!["mesh".to_owned()],
+                    served_gateway_capabilities: Vec::new(),
                     attachment_authority: None,
                 },
                 observability: Arc::new(crate::FederationMeshObservability::default()),
@@ -1843,6 +1844,7 @@ pub(crate) mod tests {
                 protocol_versions: vec!["s8".to_owned()],
                 transport_backends: vec!["quic".to_owned()],
                 node_capabilities: vec!["mesh".to_owned()],
+                served_gateway_capabilities: Vec::new(),
                 attachment_authority: None,
             },
         };

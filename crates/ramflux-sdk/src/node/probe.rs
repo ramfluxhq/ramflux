@@ -72,6 +72,7 @@ pub(crate) async fn dispatch_probe(
     if status != "ok" {
         let error = fetched.as_ref().err().map(local_bus_error_body);
         return Ok(local_bus_ok(serde_json::json!({"node_id": id, "healthy": false,
+            "client_capabilities": profile.client_capabilities,
             "discovery": {"status": status, "expires_at": profile.expires_at, "error": error},
             "gateway": {"transport": {"quic": "not_attempted", "tcp": "not_attempted"}, "app": "not_available", "session": "not_attempted", "rtt_ms": 0},
             "relay": {"status": "not_attempted"}, "prekey": {"status": "not_attempted"}, "checked_at": now})));
@@ -99,6 +100,7 @@ pub(crate) async fn dispatch_probe(
     let relay_error = relay.as_ref().err().map(local_bus_error_body);
     Ok(local_bus_ok(serde_json::json!({"node_id": id,
         "healthy": status == "ok" && gateway.app == "ok" && relay_ok,
+        "client_capabilities": fresh.client_capabilities,
         "discovery": {"status": status, "expires_at": expires_at}, "gateway": gateway,
         "relay": {"status": if relay_ok {"ok"} else {"failed"}, "error": relay_error},
         "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
