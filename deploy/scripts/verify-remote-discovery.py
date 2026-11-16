@@ -28,6 +28,8 @@ GATEWAY_CAPABILITY_ASSIGNMENT = re.compile(
     r"(?m)^gateway_client_capabilities\s*=\s*\[(.*?)\]",
     re.DOTALL,
 )
+PRODUCT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+PRODUCT_SHA = re.compile(r"[0-9a-f]{12}|unknown")
 
 
 def fail(message):
@@ -72,6 +74,25 @@ def gateway_capability_names(text):
     return re.findall(r'"([^"]*)"', matches[0].group(1))
 
 
+def env_assignment(text, name):
+    """Last assignment of name, or None when the key is absent."""
+    value = None
+    prefix = name + "="
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):]
+    return value
+
+
+def signed_product_version(version, sha):
+    """Exact discovery version: `0.2.0 (abcdef012345)` or `0.2.0 (unknown)`."""
+    if not isinstance(version, str) or not isinstance(sha, str):
+        return None
+    if PRODUCT_VERSION.fullmatch(version) is None or PRODUCT_SHA.fullmatch(sha) is None:
+        return None
+    return f"{version} ({sha})"
+
+
 def applied_deployment(state):
     root = Path(state)
     runtime_path = root / "runtime.env"
@@ -85,11 +106,11 @@ def applied_deployment(state):
         federation_names = gateway_capability_names(federation_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError) as error:
         fail(f"applied deployment configuration is incomplete: {error}")
-    version = ""
-    for line in runtime_text.splitlines():
-        if line.startswith("RAMFLUX_VERSION="):
-            version = line.split("=", 1)[1]
-    if version.strip() == "":
+    version = signed_product_version(
+        env_assignment(runtime_text, "RAMFLUX_EXPECTED_PRODUCT_VERSION"),
+        env_assignment(runtime_text, "RAMFLUX_EXPECTED_PRODUCT_SHA"),
+    )
+    if version is None:
         fail("applied deployment configuration is incomplete")
     if router_names is None or federation_names is None:
         fail("applied deployment configuration is incomplete")

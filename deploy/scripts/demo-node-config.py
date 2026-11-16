@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 from urllib.parse import urlsplit
 
@@ -864,6 +865,65 @@ def recover(state):
     print(owner["settings"]["DEMO_VERSION"])
 
 
+def normalize_product_sha(raw):
+    """First 12 characters of a lowercase hex commit, or None when it is not one."""
+    value = raw.strip()
+    if len(value) < 12 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value[:12]
+
+
+def workspace_product_version(cargo_toml):
+    """Numeric X.Y.Z from [workspace.package], the version compiled into every binary."""
+    section = ""
+    version = None
+    try:
+        lines = Path(cargo_toml).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"cannot read workspace package version: {error}")
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "workspace.package":
+            continue
+        match = re.fullmatch(r'version\s*=\s*"([^"]*)"', line)
+        if match:
+            version = match.group(1)
+    if version is None or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    return version
+
+
+def product_sha(repo):
+    """Build commit the same way the binaries do: override, then git, else unknown."""
+    override = os.environ.get("RAMFLUX_GIT_SHA", "")
+    if override.strip():
+        sha = normalize_product_sha(override)
+        if sha is None:
+            sys.exit("RAMFLUX_GIT_SHA must be lowercase hexadecimal of at least 12 characters")
+        return sha
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return normalize_product_sha(result.stdout) or "unknown"
+
+
+def product_identity(repo):
+    """Env lines for the product version and commit, distinct from the image tag."""
+    version = workspace_product_version(Path(repo) / "Cargo.toml")
+    sha = product_sha(repo)
+    print(f"RAMFLUX_EXPECTED_PRODUCT_VERSION={version}")
+    print(f"RAMFLUX_EXPECTED_PRODUCT_SHA={sha}")
+
+
 def set_node_id(state, node_id):
     for config in sorted((state / "config").glob("*.toml")):
         content = config.read_text().replace(
@@ -916,6 +976,8 @@ def main():
             append_custody_runtime(state, Path(sys.argv[4]))
         elif action == "custody-status":
             print(custody_status(state))
+        elif action == "product-identity":
+            product_identity(repo)
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:

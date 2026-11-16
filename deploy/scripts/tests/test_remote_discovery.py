@@ -105,7 +105,10 @@ class RemoteDiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "missing or unknown fields|openssl lacks"):
                 VERIFY.verify(path, record["node_public_key"], now=1500)
 
-    def write_deployment(self, state, capabilities, version, federation_capabilities=None):
+    def write_deployment(
+        self, state, capabilities, product_version, product_sha,
+        image_tag="demo-v2", federation_capabilities=None,
+    ):
         config = state / "config"
         config.mkdir(parents=True)
         router = self.capability_toml(capabilities)
@@ -114,7 +117,11 @@ class RemoteDiscoveryTests(unittest.TestCase):
         )
         (config / "router.toml").write_text(router)
         (config / "federation.toml").write_text(federation)
-        (state / "runtime.env").write_text(f"RAMFLUX_VERSION={version}\n")
+        (state / "runtime.env").write_text(
+            f"RAMFLUX_VERSION={image_tag}\n"
+            f"RAMFLUX_EXPECTED_PRODUCT_VERSION={product_version}\n"
+            f"RAMFLUX_EXPECTED_PRODUCT_SHA={product_sha}\n"
+        )
 
     def capability_toml(self, capabilities):
         lines = ["gateway_client_capabilities = ["]
@@ -166,16 +173,21 @@ class RemoteDiscoveryTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("openssl"), "openssl is required")
     def test_applied_deployment_accepts_gateway_names_and_rejects_mismatches(self):
         applied = ["gateway.session_push.v1", "gateway.ephemeral.v1"]
-        version = "0.2.0 (abcdef123456)"
+        product_version = "0.2.0"
+        product_sha = "abcdef012345"
+        signed = "0.2.0 (abcdef012345)"
         with tempfile.TemporaryDirectory(prefix="ramflux-discovery-deploy-") as directory:
             root = Path(directory)
             state = root / "state"
             state.mkdir()
-            self.write_deployment(state, applied, version)
+            self.write_deployment(state, applied, product_version, product_sha)
+            runtime = (state / "runtime.env").read_text()
+            self.assertIn("RAMFLUX_VERSION=demo-v2\n", runtime)
+            self.assertNotIn(signed, runtime)
             advertised = [
                 "opaque_delivery", "prekey", "object_relay", "device_pairing_v2", *applied,
             ]
-            record_path, public_key = self.sign_record(root, advertised, version)
+            record_path, public_key = self.sign_record(root, advertised, signed)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 VERIFY.verify(record_path, public_key, now=1500, deploy_state=state)
@@ -183,7 +195,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
             missing = root / "missing"
             missing.mkdir()
-            missing_path, missing_key = self.sign_record(missing, ["prekey"], version)
+            missing_path, missing_key = self.sign_record(missing, ["prekey"], signed)
             with self.assertRaisesRegex(
                 SystemExit, "discovery capabilities do not match the applied deployment"
             ):
@@ -195,24 +207,36 @@ class RemoteDiscoveryTests(unittest.TestCase):
                 "opaque_delivery", "prekey", "object_relay",
                 "gateway.ephemeral.v1", "gateway.session_push.v1",
             ]
-            order_path, order_key = self.sign_record(wrong_order, reversed_caps, version)
+            order_path, order_key = self.sign_record(wrong_order, reversed_caps, signed)
             with self.assertRaisesRegex(
                 SystemExit, "discovery capabilities do not match the applied deployment"
             ):
                 VERIFY.verify(order_path, order_key, now=1500, deploy_state=state)
 
-            wrong_version = root / "version"
-            wrong_version.mkdir()
-            version_path, version_key = self.sign_record(wrong_version, advertised, "demo-v2")
-            with self.assertRaisesRegex(
-                SystemExit, "discovery version does not match the applied deployment"
-            ):
-                VERIFY.verify(version_path, version_key, now=1500, deploy_state=state)
+            for wrong in ("demo-v2", "0.2.0 (0123456789ab)", "0.2.1 (abcdef012345)"):
+                with self.subTest(wrong=wrong):
+                    wrong_version = root / "version"
+                    wrong_version.mkdir(exist_ok=True)
+                    version_path, version_key = self.sign_record(wrong_version, advertised, wrong)
+                    with self.assertRaisesRegex(
+                        SystemExit, "discovery version does not match the applied deployment"
+                    ):
+                        VERIFY.verify(version_path, version_key, now=1500, deploy_state=state)
+
+            unknown = root / "unknown"
+            unknown.mkdir()
+            self.write_deployment(unknown, applied, product_version, "unknown")
+            unknown_path, unknown_key = self.sign_record(
+                unknown, advertised, "0.2.0 (unknown)",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                VERIFY.verify(unknown_path, unknown_key, now=1500, deploy_state=unknown)
 
             self.write_deployment(
                 root / "split",
                 applied,
-                version,
+                product_version,
+                product_sha,
                 federation_capabilities=["gateway.session_push.v1"],
             )
             with self.assertRaisesRegex(
@@ -222,9 +246,14 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
             incomplete = root / "incomplete"
             incomplete.mkdir()
-            (incomplete / "runtime.env").write_text(f"RAMFLUX_VERSION={version}\n")
+            (incomplete / "runtime.env").write_text("RAMFLUX_VERSION=demo-v2\n")
             with self.assertRaisesRegex(SystemExit, "applied deployment configuration is incomplete"):
                 VERIFY.verify(record_path, public_key, now=1500, deploy_state=incomplete)
+
+            malformed = root / "malformed"
+            self.write_deployment(malformed, applied, "demo-v2", product_sha)
+            with self.assertRaisesRegex(SystemExit, "applied deployment configuration is incomplete"):
+                VERIFY.verify(record_path, public_key, now=1500, deploy_state=malformed)
 
             blank = root / "blank"
             blank.mkdir()
@@ -235,7 +264,11 @@ class RemoteDiscoveryTests(unittest.TestCase):
             (blank / "config" / "federation.toml").write_text(
                 'gateway_client_capabilities = [\n  "",\n]\n'
             )
-            (blank / "runtime.env").write_text(f"RAMFLUX_VERSION={version}\n")
+            (blank / "runtime.env").write_text(
+                "RAMFLUX_VERSION=demo-v2\n"
+                "RAMFLUX_EXPECTED_PRODUCT_VERSION=0.2.0\n"
+                "RAMFLUX_EXPECTED_PRODUCT_SHA=abcdef012345\n"
+            )
             with self.assertRaisesRegex(
                 SystemExit, "applied deployment has an empty gateway capability"
             ):
@@ -250,7 +283,8 @@ class RemoteDiscoveryTests(unittest.TestCase):
             self.write_deployment(
                 state,
                 ["gateway.session_push.v1", "gateway.ephemeral.v1"],
-                record["version"],
+                "0.2.0",
+                "abcdef123456",
             )
             with self.assertRaisesRegex(
                 SystemExit, "discovery capabilities do not match the applied deployment"

@@ -678,6 +678,8 @@ RAMFLUX_FEDERATION_MESH_PORT=127.0.0.1:$DEMO_MESH_PORT
 RAMFLUX_SIGNALING_TURN_UDP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 RAMFLUX_SIGNALING_TURN_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 ENV
+      # Discovery signs "X.Y.Z (sha)". That is not the image tag in RAMFLUX_VERSION.
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-identity >> "$runtime_pending"
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" client-runtime >> "$runtime_pending"
       if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
         printf '%s\n' "RAMFLUX_ROUTER_ADMIN_PORT=$RAMFLUX_ROUTER_ADMIN_PORT" >> "$runtime_pending"

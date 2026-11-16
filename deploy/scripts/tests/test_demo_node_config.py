@@ -100,6 +100,18 @@ class DemoNodeConfigTests(unittest.TestCase):
         }
         self.assertEqual(retained, set(history[-4:]))
 
+    def test_product_identity_comes_from_the_build_input(self):
+        repo = Path(__file__).resolve().parents[3]
+        self.assertEqual(CONFIG.workspace_product_version(repo / "Cargo.toml"), "0.2.0")
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "ABCDEF012345"}):
+            with self.assertRaisesRegex(SystemExit, "lowercase hexadecimal"):
+                CONFIG.product_sha(repo)
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "abcdef0123456789"}):
+            self.assertEqual(CONFIG.product_sha(repo), "abcdef012345")
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": ""}):
+            sha = CONFIG.product_sha(repo)
+        self.assertRegex(sha, r"^(?:[0-9a-f]{12}|unknown)$")
+
 
 if __name__ == "__main__":
     unittest.main()

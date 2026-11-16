@@ -6,8 +6,10 @@ line is recorded. A successful fetch appends public-probes.jsonl and writes a
 record that verify-remote-discovery.py accepts with the real OpenSSL.
 
 The signed client_capabilities list is the federation base plus the gateway
-capabilities in the applied router and federation config. control.json may set
-public_client_capabilities or public_version to publish a different signed record.
+capabilities in the applied router and federation config. The signed version is
+the applied product version and sha (`0.2.0 (abcdef012345)`), not the image tag.
+control.json may set public_client_capabilities or public_version to publish a
+different signed record.
 """
 import importlib.util
 import json
@@ -53,13 +55,19 @@ def signed_client_capabilities(control, state, verify):
     return names
 
 
-def signed_version(control, runtime_version):
-    if "public_version" not in control:
-        return runtime_version or "demo"
-    version = control["public_version"]
-    if not isinstance(version, str) or not version.strip():
-        sys.exit("public_version must be a non-empty string")
-    return version
+def signed_version(control, values, verify):
+    if "public_version" in control:
+        version = control["public_version"]
+        if not isinstance(version, str) or not version.strip():
+            sys.exit("public_version must be a non-empty string")
+        return version
+    composed = verify.signed_product_version(
+        values.get("RAMFLUX_EXPECTED_PRODUCT_VERSION"),
+        values.get("RAMFLUX_EXPECTED_PRODUCT_SHA"),
+    )
+    if composed is None:
+        sys.exit("applied product version is missing")
+    return composed
 
 
 def main():
@@ -120,7 +128,7 @@ def main():
         "signaling_turn_addr": "demo.example.org:59478",
         "protocol_versions": ["v1"],
         "client_capabilities": signed_client_capabilities(control, state, verify),
-        "version": signed_version(control, version),
+        "version": signed_version(control, values, verify),
         "updated_at": now,
         "expires_at": now + 3600,
         "signature": "",

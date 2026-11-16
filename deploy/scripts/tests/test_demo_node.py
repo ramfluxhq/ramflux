@@ -1019,6 +1019,83 @@ class DemoNodeTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(self.managed_state(), initial)
 
+    def runtime_values(self):
+        return dict(
+            line.split("=", 1)
+            for line in (self.state / "runtime.env").read_text().splitlines()
+            if "=" in line
+        )
+
+    def test_product_version_stays_with_its_image_across_recovery(self):
+        self.run_script("up")
+        original = self.runtime_values()
+        signed = (
+            f"{original['RAMFLUX_EXPECTED_PRODUCT_VERSION']} "
+            f"({original['RAMFLUX_EXPECTED_PRODUCT_SHA']})"
+        )
+        self.assertEqual(original["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(original["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.2.0")
+        self.assertRegex(original["RAMFLUX_EXPECTED_PRODUCT_SHA"], r"^(?:[0-9a-f]{12}|unknown)$")
+        self.assertNotEqual(signed, original["RAMFLUX_VERSION"])
+        initial = self.managed_state()
+        new_sha = "0123456789ab"
+        if original["RAMFLUX_EXPECTED_PRODUCT_SHA"] == new_sha:
+            new_sha = "abcdef012345"
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.environment["RAMFLUX_GIT_SHA"] = new_sha
+        self.control.write_text(json.dumps({"public_version": "0.2.0 (ffffffffffff)"}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("discovery version does not match the applied deployment", failed.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        # The selected image's build must not satisfy the restored snapshot.
+        self.control.write_text(json.dumps({"public_version": f"0.2.0 ({new_sha})"}))
+        failed_recovery = self.run_script("recover", success=False)
+        self.assertIn(
+            "discovery version does not match the applied deployment",
+            failed_recovery.stderr,
+        )
+        restored = self.runtime_values()
+        self.assertEqual(restored["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(
+            restored["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+            original["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+        )
+        self.assertEqual(self.managed_state(), initial)
+        self.assertIn("DEMO_VERSION=demo-v2\n", self.env_file.read_text())
+        self.control.write_text("{}")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(
+            self.runtime_values()["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+            original["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+        )
+        self.assertEqual(self.managed_state(), initial)
+
+    def test_upgrade_records_the_selected_build_and_rollback_restores_it(self):
+        self.run_script("up")
+        original_sha = self.runtime_values()["RAMFLUX_EXPECTED_PRODUCT_SHA"]
+        new_sha = "abcdef012345" if original_sha != "abcdef012345" else "0123456789ab"
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.environment["RAMFLUX_GIT_SHA"] = new_sha
+        upgraded = self.run_script("upgrade")
+        self.assertIn("rollback command:", upgraded.stdout)
+        upgraded_runtime = self.runtime_values()
+        self.assertEqual(upgraded_runtime["RAMFLUX_VERSION"], "demo-v2")
+        self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.2.0")
+        self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], new_sha)
+        snapshot_runtime = (self.current_snapshot() / "runtime.env").read_text()
+        self.assertIn(f"RAMFLUX_EXPECTED_PRODUCT_SHA={new_sha}\n", snapshot_runtime)
+        self.assertIn("RAMFLUX_VERSION=demo-v2\n", snapshot_runtime)
+        rolled = self.run_script("rollback")
+        self.assertIn("rolled back demo images to version demo-test", rolled.stdout)
+        restored = self.runtime_values()
+        self.assertEqual(restored["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(restored["RAMFLUX_EXPECTED_PRODUCT_SHA"], original_sha)
+        self.assertNotIn(f"RAMFLUX_EXPECTED_PRODUCT_SHA={new_sha}\n", (self.state / "runtime.env").read_text())
+
     def test_missing_snapshot_recovery_refuses_manual_path_without_locking_commands(self):
         self.run_script("up")
         previous_snapshot = self.current_snapshot()
