@@ -179,7 +179,7 @@ else:
         federation = services["ramflux-federation"]
         self.assertEqual(federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"], "10.89.1.110")
         self.assertEqual(federation["networks"], {"default": {"ipv4_address": "10.89.1.110"}})
-        self.assertEqual(override["networks"]["default"]["ipam"], {"config": [{"subnet": "10.89.1.0/24"}]})
+        self.assertEqual(override["networks"]["default"]["ipam"], {"config": [{"subnet": "10.89.1.0/24", "ip_range": "10.89.1.128/25"}]})
         self.assertEqual(federation["environment"]["RAMFLUX_FEDERATION_PUBLIC_ORIGIN"],
                          "https://demo.example.org")
         self.assertEqual(
@@ -191,7 +191,7 @@ else:
 
     def test_pairing_refuses_missing_or_unsafe_federation_ip(self):
         for value in (None, "", "0.0.0.0", "::1", "fe80::1%eth0", "10.89.1.0/24", "10.89.1.0",
-                      "10.89.1.1", "10.89.1.255", "8.8.8.8", "127.0.0.1", "169.254.1.5",
+                      "10.89.1.1", "10.89.1.255", "10.89.1.128", "10.89.1.200", "8.8.8.8", "127.0.0.1", "169.254.1.5",
                       "proxy.example", "10.89.1.110,10.89.1.111", " 10.89.1.110", "010.89.1.110x"):
             with self.subTest(static_ip=value):
                 self.setUp()
@@ -203,6 +203,26 @@ else:
             output.write("RAMFLUX_FEDERATION_TRUSTED_PROXIES=10.89.1.103\n")
         result = self.pairing_override(True, success=False)
         self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE", result.stdout + result.stderr)
+
+    def test_pairing_off_also_refuses_the_obsolete_trusted_proxies_input(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_FEDERATION_TRUSTED_PROXIES=10.89.1.103\n")
+        result = self.pairing_override(False, success=False)
+        self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE", result.stdout + result.stderr)
+
+    def test_dynamic_range_excludes_the_static_address(self):
+        import ipaddress
+        for value in ("10.89.1.2", "10.89.1.110", "10.89.1.127", "192.168.7.50"):
+            with self.subTest(static_ip=value):
+                self.setUp()
+                self.pairing_override(True, static_ip=value)
+                config = json.loads((self.state / "demo-override.json").read_text())["networks"]["default"]["ipam"]["config"][0]
+                subnet = ipaddress.ip_network(config["subnet"])
+                dynamic = ipaddress.ip_network(config["ip_range"])
+                address = ipaddress.ip_address(value)
+                self.assertIn(address, subnet)
+                self.assertTrue(dynamic.subnet_of(subnet))
+                self.assertNotIn(address, dynamic)
 
     def test_public_origin_publishes_federation_port_on_loopback_only(self):
         with self.env_file.open("a") as output:

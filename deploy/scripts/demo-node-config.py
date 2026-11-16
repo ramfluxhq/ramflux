@@ -51,6 +51,18 @@ def federation_bind():
     return explicit or os.environ.get("DEMO_BIND_ADDR", "0.0.0.0")
 
 
+# The compose network is the /24 around the federation address. Its upper half is the only range
+# the runtime may allocate dynamically, so addresses .2-.127 can never be taken by another container.
+STATIC_RANGE_END = 128
+
+
+def reject_obsolete_inputs():
+    """Refuse operator inputs that are now derived, in every mode (pairing on or off)."""
+    if os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", ""):
+        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE: RAMFLUX_FEDERATION_TRUSTED_PROXIES is derived "
+                 "from DEMO_FEDERATION_STATIC_IP and must not be set")
+
+
 def pairing_federation_ip():
     """The federation's pinned compose-network address, the only proxy peer pairing trusts.
 
@@ -59,9 +71,6 @@ def pairing_federation_ip():
     operator names a private IPv4 inside the compose network; the generator pins the federation
     to it and trusts exactly it.
     """
-    if os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", ""):
-        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE: RAMFLUX_FEDERATION_TRUSTED_PROXIES is derived "
-                 "from DEMO_FEDERATION_STATIC_IP and must not be set")
     raw = os.environ.get("DEMO_FEDERATION_STATIC_IP", "")
     try:
         if not raw or raw != raw.strip() or not raw.isascii() or "/" in raw or "%" in raw:
@@ -74,6 +83,10 @@ def pairing_federation_ip():
     if not address.is_private or address.is_loopback or address.is_link_local or last in (0, 1, 255):
         sys.exit(f"DEMO_FEDERATION_STATIC_IP_INVALID: {raw} must be a private host address "
                  "(not the network, gateway or broadcast address)")
+    if last >= STATIC_RANGE_END:
+        sys.exit(f"DEMO_FEDERATION_STATIC_IP_INVALID: {raw} must be in the reserved static part of "
+                 f"its /24 (host .2 to .{STATIC_RANGE_END - 1}); .{STATIC_RANGE_END} and above is the "
+                 "dynamic allocation range of the other services")
     return str(address)
 
 
@@ -537,6 +550,7 @@ def render_files(repo, state, owner):
                        for key in keys if key in custody}
         if environment:
             override["services"][f"ramflux-{service}"]["environment"] = environment
+    reject_obsolete_inputs()
     if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
         if record is None:
             sys.exit("DEMO_PAIRING_REQUIRES_CUSTODY: RAMFLUX_CUSTODY_NODE_RECORD_FILE is required")
@@ -568,7 +582,9 @@ def render_files(repo, state, owner):
         federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = static_ip
         federation["networks"] = {"default": {"ipv4_address": static_ip}}
         subnet = str(ipaddress.ip_network(f"{static_ip}/24", strict=False))
-        override["networks"]["default"]["ipam"] = {"config": [{"subnet": subnet}]}
+        dynamic = ipaddress.ip_network(f"{subnet.split('/')[0].rsplit('.', 1)[0]}.{STATIC_RANGE_END}/25")
+        override["networks"]["default"]["ipam"] = {
+            "config": [{"subnet": subnet, "ip_range": str(dynamic)}]}
         router = override["services"]["ramflux-router"]
         router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
         router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
