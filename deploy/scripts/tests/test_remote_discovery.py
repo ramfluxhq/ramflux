@@ -70,6 +70,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
                 "signaling_turn_addr": "node.example.org:3478",
                 "protocol_versions": ["v1"],
                 "client_capabilities": ["prekey"],
+                "version": "0.2.0 (abcdef123456)",
                 "updated_at": 1000,
                 "expires_at": 2000,
                 "signature": "",
@@ -93,6 +94,16 @@ class RemoteDiscoveryTests(unittest.TestCase):
             record_path.write_text(json.dumps(record))
             with self.assertRaisesRegex(SystemExit, "signature verification failed"):
                 VERIFY.verify(record_path, public_key, now=1500)
+
+    def test_refuses_a_record_without_a_node_version(self):
+        fixture = Path(__file__).parent / "fixtures" / "rust-signed-discovery.json"
+        record = json.loads(fixture.read_text())
+        del record["version"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "record.json"
+            path.write_text(json.dumps(record))
+            with self.assertRaisesRegex(SystemExit, "missing or unknown fields|openssl lacks"):
+                VERIFY.verify(path, record["node_public_key"], now=1500)
 
 
 if __name__ == "__main__":

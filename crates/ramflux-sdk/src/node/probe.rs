@@ -79,6 +79,7 @@ pub(crate) async fn dispatch_probe(
     }
     let record = fetched?;
     let expires_at = record.expires_at;
+    let node_version = record.version.clone();
     let fresh = NodeProfile::from_record(record, now);
     let ca = fresh.write_ca(&state.config.data_root)?;
     let mut gateway = probe_gateway(&fresh, &ca).await;
@@ -101,7 +102,7 @@ pub(crate) async fn dispatch_probe(
     Ok(local_bus_ok(serde_json::json!({"node_id": id,
         "healthy": status == "ok" && gateway.app == "ok" && relay_ok,
         "client_capabilities": fresh.client_capabilities,
-        "discovery": {"status": status, "expires_at": expires_at}, "gateway": gateway,
+        "discovery": {"status": status, "expires_at": expires_at, "version": node_version}, "gateway": gateway,
         "relay": {"status": if relay_ok {"ok"} else {"failed"}, "error": relay_error},
         "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
 }

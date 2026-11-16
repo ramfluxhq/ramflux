@@ -50,7 +50,12 @@ pub(crate) use pairing::*;
 pub(crate) use transfer::*;
 
 #[derive(Parser)]
-#[command(name = "rf", about = "Ramflux reference CLI over the local SDK bus")]
+#[command(
+    name = "rf",
+    display_name = "ramflux",
+    version = ramflux_core::version::VERSION_SHA,
+    about = "Ramflux reference CLI over the local SDK bus"
+)]
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,

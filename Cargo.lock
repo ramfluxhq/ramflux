@@ -3373,7 +3373,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramflux-agent-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "clap",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-card"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3420,11 +3420,11 @@ dependencies = [
 
 [[package]]
 name = "ramflux-client-model"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "ramflux-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "aes-gcm 0.11.1",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-federation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "compio",
  "quinn",
@@ -3497,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "compio",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-message-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pbjson-build",
  "prettyplease",
@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-node-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -3575,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-notify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "blake3",
@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-relay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dhat",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-retention"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ramflux-node-core",
  "ramflux-test-support",
@@ -3676,12 +3676,13 @@ dependencies = [
 
 [[package]]
 name = "ramflux-rf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "dbus-secret-service",
  "ed25519-dalek",
  "keyring",
+ "ramflux-core",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
@@ -3702,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "compio",
@@ -3728,7 +3729,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "blake3",
@@ -3780,7 +3781,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-signaling"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ramflux-node-core",
@@ -3795,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "caseless",
@@ -3825,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chacha20poly1305",
  "ramflux-core",
@@ -3839,14 +3840,14 @@ dependencies = [
 
 [[package]]
 name = "ramflux-test-support"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "ramflux-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "blake3",

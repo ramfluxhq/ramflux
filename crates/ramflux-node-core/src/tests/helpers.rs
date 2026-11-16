@@ -505,6 +505,7 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
         transport_backends: vec!["quic_quinn".to_owned(), "https_json".to_owned()],
         node_capabilities: vec!["opaque_delivery".to_owned(), "federation_relay".to_owned()],
         node_policy_hash: "node_policy_hash".to_owned(),
+        version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: 1_760_000_000,
         expires_at: 1_760_086_400,
         attachment_authority: None,

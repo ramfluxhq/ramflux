@@ -21,6 +21,7 @@ fn client_record(
         signaling_turn_addr: "127.0.0.1:9002".into(),
         protocol_versions: vec!["v3".into()],
         client_capabilities: vec![crate::HOME_MIGRATION_CAPABILITY.into()],
+        version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: now,
         expires_at: now + 60,
         signature: String::new(),

@@ -18,6 +18,7 @@ mod fatal_durability;
 pub mod username_directory;
 pub use authority_refusal::*;
 pub use ramflux_core::environment;
+pub use ramflux_core::version;
 mod error;
 mod federation_attachment;
 mod federation_crypto;

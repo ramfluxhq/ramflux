@@ -18,7 +18,7 @@ PUBLIC_KEY_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 STRING_FIELDS = {
     "schema", "node_id", "node_public_key", "node_ca_cert_pem", "gateway_quic_addr",
     "gateway_tcp_addr", "gateway_server_name", "relay_quic_addr", "relay_server_name",
-    "prekey_http_url", "signaling_turn_addr", "signature",
+    "prekey_http_url", "signaling_turn_addr", "version", "signature",
 }
 LIST_FIELDS = {"protocol_versions", "client_capabilities"}
 INTEGER_FIELDS = {"updated_at", "expires_at"}
@@ -86,6 +86,8 @@ def verify(record_path, expected_key, now=None):
         fail("discovery record contains an invalid capability list")
     if not isinstance(record.get("node_ca_cert_pem"), str) or not record["node_ca_cert_pem"].strip():
         fail("discovery record has no node CA certificate")
+    if not record["version"].strip():
+        fail("discovery record has no node version")
     if record.get("node_public_key") != expected_key:
         fail("discovery public key does not match operator pin")
     updated_at = record.get("updated_at")

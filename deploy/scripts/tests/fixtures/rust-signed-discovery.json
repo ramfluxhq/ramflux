@@ -12,7 +12,8 @@
   "signaling_turn_addr": "node.example.org:3478",
   "protocol_versions": ["v1"],
   "client_capabilities": ["prekey"],
+  "version": "0.2.0 (abcdef123456)",
   "updated_at": 1000,
   "expires_at": 2000,
-  "signature": "xqNbfEkGv24Fo_wVE0ZwWfJbsE56XU36IQzXXnFpZL7L6OoeT_4K5nIxZmfgSUjMdV1ZSjpke_8vB6-sxd_qDA"
+  "signature": "_O_f9HYfzDU7ThXzD-f5ybpt9dF7F5h4-lutXRdjVj8E3Rsv_lSUDgBse5MzYBYJlqWmvI7H5uDFStiwQtzUBw"
 }

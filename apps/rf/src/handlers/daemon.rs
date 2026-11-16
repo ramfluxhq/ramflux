@@ -9,6 +9,7 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
     match command.action {
         DaemonAction::Start(start) => {
             crate::logging::init()?;
+            eprintln!("{}", ramflux_core::version::BANNER);
             #[cfg(feature = "itest-memory-vault")]
             let itest_vault_path =
                 start.itest_memory_vault.then(|| start.data_root.join("itest-memory-vault.json"));
