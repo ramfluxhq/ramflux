@@ -576,6 +576,21 @@ impl RamfluxClient {
     }
 }
 
+impl RamfluxClient {
+    /// Whether a received attachment reference exists for `selector`. A media object that was
+    /// only recorded as a message owner (a layer-4 media reference carried by the message, with
+    /// no deferred attachment reference to fetch) has none and is not a background-fetch target.
+    pub(crate) fn has_received_attachment_reference(
+        &self,
+        selector: &str,
+    ) -> Result<bool, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&reference_key(selector))?
+            .is_some())
+    }
+}
+
 fn reference_key(object_id: &str) -> String {
     format!("attachment/reference/{object_id}")
 }

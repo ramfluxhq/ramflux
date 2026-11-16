@@ -64,7 +64,11 @@ pub(super) async fn fetch_for_page(
             continue;
         }
         selected += 1;
-        ids.extend(account.client.account_db()?.client_message_object_ids(&message)?);
+        for id in account.client.account_db()?.client_message_object_ids(&message)? {
+            if account.client.has_received_attachment_reference(&id)? {
+                ids.insert(id);
+            }
+        }
     }
     let deadline =
         tokio::time::Instant::now() + super::runtime_limits::RuntimeTimeouts::default().fetch;
@@ -129,6 +133,31 @@ mod tests {
         assert_eq!(db.pending_received_attachment_ids(10, 64)?.len(), 0);
         assert_eq!(db.pending_received_attachment_ids(20, 64)?, vec!["b"]);
         drop(client);
+        Ok(())
+    }
+
+    /// A layer-4 media reference is recorded as a message owner without any deferred attachment
+    /// reference; the background page fetch must not treat it as a fetch target.
+    #[test]
+    fn an_owner_only_media_object_is_not_a_background_fetch_target() -> Result<(), SdkError> {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let root = ramflux_test_support::TestPath::new()
+            .expect("test: allocate fixture directory")
+            .child(format!("ramflux-attachment-owner-only-{}-{suffix}", std::process::id()));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "commitment")?;
+        client.unlock_account("a", b"secret")?;
+        let db = client.account_db()?;
+        db.persist_actor_state("attachment/reference/with-ref", &serde_json::json!({"x":1}))?;
+        assert!(
+            client.has_received_attachment_reference("with-ref")?,
+            "a stored deferred reference is fetchable"
+        );
+        assert!(
+            !client.has_received_attachment_reference("owner-only")?,
+            "an object with no deferred reference must not be fetched"
+        );
         Ok(())
     }
 }
