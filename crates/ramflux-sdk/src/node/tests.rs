@@ -304,42 +304,89 @@ fn signed_record(capabilities: Vec<String>) -> Result<WellKnownClientRecord, Sdk
     Ok(discovered)
 }
 
-fn serve_record(body: &[u8]) -> Result<String, SdkError> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    let origin = format!("http://{}", listener.local_addr()?);
-    let payload = body.to_vec();
-    std::thread::spawn(move || {
-        let _ = listener.set_nonblocking(true);
-        let started = std::time::Instant::now();
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-                    let mut buffer = [0_u8; 2048];
-                    let _ = std::io::Read::read(&mut stream, &mut buffer);
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        payload.len()
-                    );
-                    let _ = std::io::Write::write_all(&mut stream, header.as_bytes());
-                    let _ = std::io::Write::write_all(&mut stream, &payload);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if started.elapsed() > std::time::Duration::from_secs(8) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(_) => break,
-            }
+const FIXTURE_IO_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const PROBE_SCENARIO_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+const REQUEST_BUFFER: usize = 2048;
+
+/// One local discovery response. `accept` blocks until a client connects. Drop joins the thread
+/// on every path, including a scenario timeout, by connecting once so `accept` returns.
+struct ServedRecord {
+    origin: String,
+    addr: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<Result<(), std::io::Error>>>,
+}
+
+impl ServedRecord {
+    fn finish(mut self) -> Result<(), SdkError> {
+        self.wake();
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker
+            .join()
+            .map_err(|_| SdkError::LocalBus("discovery fixture thread panicked".to_owned()))??;
+        Ok(())
+    }
+
+    fn wake(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(stream) = std::net::TcpStream::connect(self.addr) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
+    }
+}
+
+impl Drop for ServedRecord {
+    fn drop(&mut self) {
+        if self.worker.is_none() {
+            return;
+        }
+        self.wake();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn serve_record(body: &[u8]) -> Result<ServedRecord, SdkError> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let addr = listener.local_addr()?;
+    let payload = body.to_vec();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_thread = std::sync::Arc::clone(&stop);
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        if stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        stream.set_read_timeout(Some(FIXTURE_IO_LIMIT))?;
+        stream.set_write_timeout(Some(FIXTURE_IO_LIMIT))?;
+        let mut buffer = [0_u8; REQUEST_BUFFER];
+        let read = std::io::Read::read(&mut stream, &mut buffer)?;
+        let request = buffer.get(..read).unwrap_or(&[]);
+        if request.is_empty() {
+            return Ok(());
+        }
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        std::io::Write::write_all(&mut stream, header.as_bytes())?;
+        std::io::Write::write_all(&mut stream, &payload)?;
+        Ok(())
     });
-    Ok(origin)
+    Ok(ServedRecord { origin: format!("http://{addr}"), addr, stop, worker: Some(worker) })
 }
 
 #[tokio::test]
 async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkError> {
+    tokio::time::timeout(PROBE_SCENARIO_DEADLINE, fetched_client_capabilities())
+        .await
+        .map_err(|_| SdkError::NodeTimeout { retry_after_ms: 5_000 })?
+}
+
+async fn fetched_client_capabilities() -> Result<(), SdkError> {
     let capabilities = vec![
         "opaque_delivery".to_owned(),
         "prekey".to_owned(),
@@ -348,10 +395,10 @@ async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkErro
         ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned(),
     ];
     let discovered = signed_record(capabilities.clone())?;
-    let origin = serve_record(&serde_json::to_vec(&discovered)?)?;
+    let served = serve_record(&serde_json::to_vec(&discovered)?)?;
     let root = TestRoot::new()?;
     let mut profile = NodeProfile::from_record(record(4)?, 1);
-    profile.discovery_url = origin;
+    profile.discovery_url = served.origin.clone();
     profile.client_capabilities = vec!["stored-only".to_owned()];
     let mut nodes = NodeStore::default();
     nodes.profiles.insert(profile.node_id.clone(), profile);
@@ -371,8 +418,19 @@ async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkErro
         "node.probe",
         serde_json::json!({"node_id": "node.example.com"}),
     );
-    let result = super::probe::dispatch_probe(&request, &mut state).await?;
-    assert_eq!(result.response_body["client_capabilities"], serde_json::json!(capabilities));
-    assert_ne!(result.response_body["client_capabilities"], serde_json::json!(["stored-only"]));
+    let probed = super::probe::dispatch_probe(&request, &mut state).await;
+    let served_result = served.finish();
+    let result = probed?;
+    served_result?;
+    assert_eq!(
+        result.response_body["client_capabilities"],
+        serde_json::json!(capabilities),
+        "probe JSON must copy the fetched record, not the stored profile"
+    );
+    assert_ne!(
+        result.response_body["client_capabilities"],
+        serde_json::json!(["stored-only"]),
+        "a stored profile list must not replace the fetched capabilities"
+    );
     Ok(())
 }
