@@ -280,21 +280,35 @@ fn assert_restored_group_history(
         "historical display must not supply current roster authority"
     );
     let rows = reader.direct_messages("restore-group-thread")?;
-    let [message] = rows.as_slice() else {
-        return Err("test: restored group storage row count differs".into());
-    };
-    let exact = reader
-        .account_db()?
-        .message_content(&message.message_id)?
-        .ok_or("test: restored group Inner missing")?;
-    let (_, content) = RamfluxClient::decode_generated_inner(&exact)?;
-    let Some(g::content::Value::Message(value)) = content.value else {
-        return Err("test: restored group content is not Message".into());
-    };
-    assert_eq!(
-        value.text, "restored group history",
-        "restore must preserve generated group content"
-    );
+    let mut history = false;
+    let mut fences = 0_u32;
+    for message in &rows {
+        let exact = reader
+            .account_db()?
+            .message_content(&message.message_id)?
+            .ok_or("test: restored group Inner missing")?;
+        let (_, content) = RamfluxClient::decode_generated_inner(&exact)?;
+        match content.value {
+            Some(g::content::Value::Message(value)) if value.text == "restored group history" => {
+                history = true;
+            }
+            Some(g::content::Value::Service(_)) => {
+                let stored = reader.account_db()?.service_body_fence(&message.message_id)?;
+                let expected = ramflux_crypto::blake3_256("ramflux.group-service-body.v1", &exact);
+                if stored.as_deref() != Some(expected.as_slice()) {
+                    return Err("test: restored service body fence differs".into());
+                }
+                fences = fences.saturating_add(1);
+            }
+            _ => return Err("test: restored group row is not history or a service event".into()),
+        }
+    }
+    if !history {
+        return Err("test: restored group history missing".into());
+    }
+    if fences == 0 {
+        return Err("test: restored service body fence is missing".into());
+    }
     Ok(())
 }
 
@@ -336,13 +350,19 @@ async fn recover_group_read_projection(
         serde_json::to_value(&repeated)?,
         "repeated reads must preserve the restored durable view"
     );
-    let [message] = page.messages.as_slice() else {
-        return Err("test: restored group message count differs".into());
-    };
+    let history = page
+        .messages
+        .iter()
+        .find(|message| message.text.as_deref() == Some("restored group history"))
+        .ok_or("test: restored group history missing from the view")?;
     assert_eq!(
-        message.text.as_deref(),
+        history.text.as_deref(),
         Some("restored group history"),
         "restored group raw Inner must render"
+    );
+    assert!(
+        page.messages.iter().any(|message| message.kind == "service"),
+        "restored service rows must stay beside the generated message"
     );
     assert!(
         reader.generated_message_view_page("unbound-thread", None, 100)?.messages.is_empty(),

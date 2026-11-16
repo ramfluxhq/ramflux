@@ -90,12 +90,18 @@ genesis["signature"] = b64(primary.sign(canonical(dict(genesis, domain="ramflux.
 state = {"group_id": group, "conversation_id": conversation, "epoch": 1, "max_members": 200,
          "new_member_history": "all_history", "name": None, "name_epoch": 0,
          "members": [{"identity": identity, "role": "owner", "joined_epoch": 1}], "excluded": [], "head_hash": ""}
+# Clock order for a genesis snapshot that does not enter the message timeline.
+# Both fields are inside the content hash and the transport signature.
+order = {"device_sequence": (1 << 52) + 1, "hlc_ms": now * 1000, "hlc_logical": 0, "device_epoch": 1}
+events = []
 core = {"domain": "ramflux.group_state.snapshot.v2", "genesis": genesis, "creator": actor,
-        "transfers": [], "group_id": group, "epoch": 1, "previous_hash": None, "state": state, "issued_at": now}
+        "transfers": [], "group_id": group, "epoch": 1, "previous_hash": None, "state": state,
+        "issued_at": now, "service_order": order, "service_events": events}
 head = b64(digest(b"ramflux.group_state.content.v2", canonical(core)))
 snapshot = {"schema": "ramflux.group_state.snapshot.v2", "group_id": group, "epoch": 1,
             "state_hash": head, "previous_hash": None, "genesis": genesis, "creator": actor,
             "transfers": [], "state": dict(state, head_hash=head), "issued_at": now,
+            "service_order": order, "service_events": events,
             "root_signature": b64(primary.sign(canonical({"domain": "ramflux.group_state.creator_signature.v2", "content": core, "state_hash": head}))),
             "issuer": actor}
 snapshot["signature"] = b64(branch.sign(canonical(snapshot)))

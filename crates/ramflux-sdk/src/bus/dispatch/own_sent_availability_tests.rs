@@ -388,6 +388,23 @@ async fn a_rejected_primary_dm_discards_its_staged_copy() -> TestResult {
     f.cleanup();
     Ok(())
 }
+fn refused_group_event(client: &crate::RamfluxClient, conversation: &str) -> TestResult<String> {
+    let rows = client.direct_messages(conversation)?;
+    let mut authored = None;
+    let mut service_rows = 0_u32;
+    for row in &rows {
+        let detail = client.generated_message_detail(conversation, &row.message_id)?;
+        if detail.message.kind == "service" {
+            service_rows = service_rows.saturating_add(1);
+            continue;
+        }
+        if detail.message.text.as_deref() == Some("not accepted") {
+            authored = Some(row.message_id.clone());
+        }
+    }
+    assert!(service_rows >= 1, "accepted group changes stay beside the refused send");
+    authored.ok_or("allocated rejected group message".into())
+}
 #[tokio::test]
 async fn a_rejected_primary_group_preserves_its_allocated_event_for_retry() -> TestResult {
     let mut f = Fixture::new("own-copy-group-reject").await?;
@@ -453,12 +470,11 @@ async fn a_rejected_primary_group_preserves_its_allocated_event_for_retry() -> T
     let result = super::super::group::dispatch_group_send_request(&request, &mut f.source).await;
     let error = result.err().ok_or("group send unexpectedly succeeded")?;
     assert!(error.to_string().contains("injected submit failure"), "{error}");
-    let rows = f.source.client.direct_messages("rejected-group-thread")?;
-    let id = &rows.first().ok_or("allocated rejected group message")?.message_id;
+    let id = refused_group_event(&f.source.client, "rejected-group-thread")?;
     assert_eq!(
         f.source
             .client
-            .generated_message_detail("rejected-group-thread", id)?
+            .generated_message_detail("rejected-group-thread", &id)?
             .message
             .text
             .as_deref(),
