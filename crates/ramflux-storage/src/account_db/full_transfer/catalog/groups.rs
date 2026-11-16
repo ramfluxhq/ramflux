@@ -1185,3 +1185,33 @@ pub(super) const RULE_157: FamilyRule = table_rule!(
         ),
     ]
 );
+
+/// Event id is the canonical base64url form of the 32-byte service identity.
+/// The body cell is the raw domain-separated digest. A later put with a different
+/// digest is a conflict, so device transfer cannot rewrite a remembered body.
+pub(super) const RULE_160: FamilyRule = table_rule!(
+    "sql/group_service_body_fence",
+    "group_service_body_fence",
+    Transfer,
+    RestrictUnion,
+    false,
+    ["message_id"],
+    [
+        (
+            "message_id",
+            Utf8,
+            true,
+            Transfer,
+            Immutable,
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
+        ),
+        (
+            "body_hash",
+            Bytes,
+            false,
+            Transfer,
+            Immutable,
+            CodecRule::SqlBytes { length: U64(32), nullable: false }
+        ),
+    ]
+);

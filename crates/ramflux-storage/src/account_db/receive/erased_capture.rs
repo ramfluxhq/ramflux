@@ -188,6 +188,9 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     // Replay counters keyed by group, epoch, sender and counter (`group_pending.rs:171`):
     // no payload hash, device or signing key.
     "group_sender_key_counter_seen",
+    // Service-event body digest (`messages.rs` `record_service_body_fence`). The row is the
+    // replay fence, not an inbound envelope, and message erasure must not delete it.
+    "group_service_body_fence",
     "root_group_sender_key_counter_seen",
     // The projection itself: writers `messages.rs:77,107` and `deleted_messages.rs:297,456` store
     // the sender principal, `encrypted_body` and typed `MessageMetadata`, whose optional

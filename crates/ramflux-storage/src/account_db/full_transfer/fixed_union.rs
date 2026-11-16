@@ -143,6 +143,17 @@ pub(super) fn apply_fixed_base_in_transaction(
         "sql/object_payload_dependency" => {
             db.execute("INSERT INTO object_payload_dependency(parent_commitment,child_commitment) VALUES(?1,?2) ON CONFLICT DO NOTHING",params![cells.text(0)?,cells.text(1)?])?;
         }
+        "sql/group_service_body_fence" => {
+            let changed = db.execute(
+                "INSERT INTO group_service_body_fence(message_id, body_hash) VALUES(?1, ?2)
+                 ON CONFLICT(message_id) DO UPDATE SET body_hash=excluded.body_hash
+                 WHERE group_service_body_fence.body_hash=excluded.body_hash",
+                params![cells.text(0)?, cells.bytes(1)?],
+            )?;
+            if changed != 1 {
+                return Err(conflict());
+            }
+        }
         "sql/account_mac_bundle/portable" => {
             super::super::mac_subkeys::full::import_into_private_generation(
                 db,

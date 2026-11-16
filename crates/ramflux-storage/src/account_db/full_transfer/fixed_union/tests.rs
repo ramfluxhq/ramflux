@@ -255,3 +255,79 @@ fn pairing_full_fixed_base_lookup_conflict_rolls_back_all_provisional_projection
     std::fs::remove_dir_all(target_root)?;
     Ok(())
 }
+
+#[test]
+fn pairing_full_group_service_body_fence_transfers_and_refuses_a_different_digest() -> ResultOf {
+    let (source_root, source) = database("full-service-fence-source")?;
+    source.enable_runtime()?;
+    let rules = crate::full_transfer_catalog();
+    let empty = source.inspect_full_transfer_schema(rules)?;
+    empty.require_typed_owners(rules)?;
+    let empty_rows = empty
+        .families
+        .iter()
+        .find(|family| family.id == "sql/group_service_body_fence")
+        .ok_or("fence family")?;
+    assert_eq!(empty_rows.source_rows.0, 0, "test: an empty fence is still declared");
+    let message_id = h(41);
+    let digest = [41_u8; 32];
+    source.connection.execute(
+        "INSERT INTO group_service_body_fence(message_id, body_hash) VALUES(?1, ?2)",
+        rusqlite::params![message_id, digest.as_slice()],
+    )?;
+    let filled = source.inspect_full_transfer_schema(rules)?;
+    filled.require_typed_owners(rules)?;
+    let filled_rows = filled
+        .families
+        .iter()
+        .find(|family| family.id == "sql/group_service_body_fence")
+        .ok_or("fence family")?;
+    assert_eq!(filled_rows.source_rows.0, 1, "test: a fence row is in the census");
+    source.connection.execute_batch("CREATE TABLE unclassified_service_fence(secret BLOB);")?;
+    assert!(matches!(
+        source.inspect_full_transfer_schema(rules),
+        Err(StorageError::PairingField("UnsupportedRecord"))
+    ));
+    source.connection.execute_batch("DROP TABLE unclassified_service_fence;")?;
+    let bytes = stream(&source)?;
+    let (target_root, target) = database("full-service-fence-target")?;
+    target.enable_runtime()?;
+    target.connection.execute(
+        "INSERT INTO group_service_body_fence(message_id, body_hash) VALUES(?1, ?2)",
+        rusqlite::params![message_id, [42_u8; 32].as_slice()],
+    )?;
+    let path = target_root.join("private-service-fence.db");
+    let (cut, observation) = target.pin_full_transfer_target()?;
+    let snapshot = cut.write_private_snapshot(&path, Arc::new(AtomicBool::new(false)))?;
+    let mut private = BackupDatabase::open(&path, &snapshot.key)?;
+    private.db.execute_batch("BEGIN IMMEDIATE")?;
+    assert!(
+        matches!(
+            apply(&mut private, &reference("source-A"), &bytes.0),
+            Err(StorageError::PairingField("TransferConflict"))
+        ),
+        "test: a different body digest must not replace the fence"
+    );
+    private.db.execute_batch("ROLLBACK")?;
+    private.db.execute(
+        "UPDATE group_service_body_fence SET body_hash=?1 WHERE message_id=?2",
+        rusqlite::params![digest.as_slice(), message_id],
+    )?;
+    private.db.execute_batch("BEGIN IMMEDIATE")?;
+    apply(&mut private, &reference("source-A"), &bytes.0)?;
+    apply(&mut private, &reference("source-A"), &bytes.0)?;
+    private.db.execute_batch("COMMIT")?;
+    observation.require_current(&target)?;
+    let stored: Vec<u8> = private.db.query_row(
+        "SELECT body_hash FROM group_service_body_fence WHERE message_id=?1",
+        rusqlite::params![message_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(stored, digest);
+    drop(private);
+    drop(target);
+    drop(source);
+    std::fs::remove_dir_all(source_root)?;
+    std::fs::remove_dir_all(target_root)?;
+    Ok(())
+}
