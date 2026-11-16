@@ -299,12 +299,13 @@ impl AccountDb {
 
     /// # Errors
     /// Registers each message even when a shared reference already exists; deleted messages fail closed.
+    /// Joins an open write so a message and its owners share one commit.
     pub fn register_object_reference(
         &self,
         admission: ObjectReferenceAdmission,
         owner: &ObjectReferenceOwner<'_>,
     ) -> Result<(), StorageError> {
-        self.write_transaction(|| {
+        self.join_write(|| {
             if self.message_is_deleted(owner.message_id)? { return Err(StorageError::ObjectErased); }
             self.check_object_identity(owner.wire_id, owner.manifest_hash)?;
             self.check_reference_admission(admission, owner)?;

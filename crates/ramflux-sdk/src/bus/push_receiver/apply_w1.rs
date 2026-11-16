@@ -1051,6 +1051,7 @@ fn stage_open(
         None => account.client.inbox_admission_key(&prepared.entry)?,
     };
     let sequence = prepared.entry.inbox_seq;
+    let incoming = prepared.entry.clone();
     let retain_until = now_unix_timestamp() + 300;
     let first_seen = now_unix_timestamp();
     let opened =
@@ -1071,7 +1072,12 @@ fn stage_open(
                     Ok(StageOpen::Continue(Opened { cover: false, retained: false }))
                 }
                 ReceiveStageResult::Conflict { .. } => {
-                    Ok(StageOpen::Retain(Box::new(admitted_work_entry(tx, sequence)?)))
+                    let admitted = admitted_work_entry(tx, sequence)?;
+                    if authority_stamp_only(&admitted, &incoming)? {
+                        Ok(StageOpen::Retain(Box::new(admitted)))
+                    } else {
+                        Err(SdkError::InboundRejected("receive stage conflict".into()))
+                    }
                 }
                 ReceiveStageResult::PausedWork
                 | ReceiveStageResult::PausedBytes
@@ -1091,6 +1097,23 @@ fn stage_open(
 
 /// Resume may stamp `source_device_authority` onto a second encoding of an inbox
 /// sequence that W0 already admitted. The stored copy stays the input.
+/// Any other difference is a typed conflict: the admitted bytes stay, and the
+/// caller must not settle that coordinate from the conflicting copy.
+fn authority_stamp_only(
+    stored: &GatewayInboxEntry,
+    incoming: &GatewayInboxEntry,
+) -> Result<bool, SdkError> {
+    let mut admitted = stored.clone();
+    let mut presented = incoming.clone();
+    admitted.envelope.ext.ext.remove("source_device_authority");
+    presented.envelope.ext.ext.remove("source_device_authority");
+    let left = ramflux_protocol::canonical_json_bytes(&admitted)
+        .map_err(|_| SdkError::InboundRejected("receive stage conflict".into()))?;
+    let right = ramflux_protocol::canonical_json_bytes(&presented)
+        .map_err(|_| SdkError::InboundRejected("receive stage conflict".into()))?;
+    Ok(left == right)
+}
+
 fn admitted_work_entry(
     tx: &ReceiveTransaction<'_>,
     sequence: u64,

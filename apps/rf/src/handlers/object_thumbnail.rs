@@ -122,22 +122,26 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), RfError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
+    let mut file = options.open(path).map_err(|error| output_refused(&error))?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = written {
         let _ = std::fs::remove_file(path);
-        return Err(error.into());
+        return Err(output_refused(&error));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             let _ = std::fs::remove_file(path);
-            return Err(error.into());
+            return Err(output_refused(&error));
         }
     }
     Ok(())
+}
+
+fn output_refused(error: &std::io::Error) -> RfError {
+    refused("ThumbnailOutput", format!("thumbnail output: {error}"))
 }
 
 fn json_u64(value: Option<&serde_json::Value>, name: &str) -> Result<u64, RfError> {
@@ -229,6 +233,23 @@ mod tests {
         assert!(
             matches!(error, RfError::Refused { code: "ThumbnailInvalid", .. }),
             "typed code, got {error}"
+        );
+    }
+
+    #[test]
+    fn existing_output_file_is_thumbnail_output() {
+        let dir = tempfile::TempDir::new().expect("test: temp");
+        let path = dir.path().join("thumb.bin");
+        std::fs::write(&path, b"already").expect("test: seed");
+        let error = write_private(&path, b"new").expect_err("existing output file");
+        assert!(
+            matches!(error, RfError::Refused { code: "ThumbnailOutput", .. }),
+            "typed output refusal, got {error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("test: read"),
+            b"already",
+            "an existing output file is left unchanged"
         );
     }
 }

@@ -483,9 +483,9 @@ impl RamfluxClient {
                 }),
             )?;
             self.clear_self_sync_draft_after_send(&message.conversation_id)?;
-            self.journal_generated_receive_updates(exact)
-        })?;
-        self.bind_local_media_owners(&message.message_id, exact)
+            self.journal_generated_receive_updates(exact)?;
+            self.bind_local_media_owners(&message.message_id, exact)
+        })
     }
 
     /// Bind a locally stored object whose id matches a sent media reference.
@@ -496,6 +496,8 @@ impl RamfluxClient {
             return Ok(());
         };
         let db = self.account_db()?;
+        #[cfg(test)]
+        let mut bound = 0_usize;
         for media in &body.media {
             if media.object_id.is_empty() {
                 continue;
@@ -523,7 +525,35 @@ impl RamfluxClient {
                     metadata: &metadata,
                 },
             )?;
+            #[cfg(test)]
+            {
+                bound = bound.saturating_add(1);
+                if media_owner_stopped(bound) {
+                    return Err(SdkError::InboundRejected(
+                        "media owner registration stopped".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static MEDIA_OWNER_STOP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Stop after `bound` owners have been inserted in the open projection transaction.
+#[cfg(test)]
+pub(crate) fn stop_media_owners_after(bound: usize) {
+    MEDIA_OWNER_STOP.with(|cell| cell.set(bound));
+}
+
+#[cfg(test)]
+fn media_owner_stopped(bound: usize) -> bool {
+    MEDIA_OWNER_STOP.with(|cell| {
+        let stop = cell.get();
+        stop > 0 && bound >= stop
+    })
 }

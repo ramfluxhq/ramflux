@@ -13,14 +13,15 @@ use ramflux_storage::{
     AccountDb, AccountIndex, FileVaultSecretSource, VaultSecretSource, unwrap_with_vault_secret,
 };
 use ramflux_sync::{EncryptedObject, ObjectStore};
-use ramflux_test_support::TestPath;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+const CHILD_OUTPUT_CAP: usize = 65_536;
+const DAEMON_LOG_CAP: usize = 65_536;
 const ACCOUNT: &str = "acct";
 const PRINCIPAL: &str = "principal_spool_test";
 const DEVICE: &str = "device_spool_test";
@@ -88,9 +89,25 @@ fn run_rf(
     let status = wait_exit(&mut child.0, Duration::from_secs(30))?;
     Ok(Captured {
         status,
-        stdout: std::fs::read_to_string(stdout)?,
-        stderr: std::fs::read_to_string(stderr)?,
+        stdout: read_bounded(stdout, CHILD_OUTPUT_CAP, "child stdout")?,
+        stderr: read_bounded(stderr, CHILD_OUTPUT_CAP, "child stderr")?,
     })
+}
+
+fn read_bounded(path: &Path, cap: usize, label: &str) -> Result<String, TestError> {
+    let mut file = File::open(path)?;
+    let mut buf = vec![0_u8; cap.saturating_add(1)];
+    let mut filled = 0_usize;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            read => filled = filled.saturating_add(read),
+        }
+    }
+    if filled > cap {
+        return Err(format!("{label} exceeded {cap} bytes").into());
+    }
+    String::from_utf8(buf[..filled].to_vec()).map_err(|_| format!("{label} is not utf-8").into())
 }
 
 fn require_success(captured: &Captured, label: &str) -> Result<(), TestError> {
@@ -273,7 +290,7 @@ fn seed(data: &Path) -> Result<(String, String, String), TestError> {
 }
 
 struct Live {
-    root: TestPath,
+    root: tempfile::TempDir,
     socket: PathBuf,
     sole: String,
     shared: String,
@@ -282,13 +299,14 @@ struct Live {
 }
 
 fn bring_up() -> Result<Live, TestError> {
-    let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = TestPath::new()?.child(format!("observe-b4-{}-{unique}", std::process::id()));
-    let data = root.join("data");
+    // A pathname socket must be shorter than SUN_LEN. The canonical user temp
+    // directory plus this fixture name exceeds that on macOS.
+    let root = tempfile::Builder::new().prefix("rf-ob4-").tempdir_in("/tmp")?;
+    let data = root.path().join("data");
     std::fs::create_dir_all(&data)?;
     let (sole, shared, text) = seed(&data)?;
-    let socket = root.join("rfd.sock");
-    let log = root.join("daemon.err");
+    let socket = root.path().join("rfd.sock");
+    let log = root.path().join("daemon.err");
     let mut daemon = Process(
         Command::new(env!("CARGO_BIN_EXE_rf"))
             .arg("--socket")
@@ -303,8 +321,8 @@ fn bring_up() -> Result<Live, TestError> {
     let unlocked = run_rf(
         &socket,
         &["account", "unlock", "--account", ACCOUNT, "--passphrase-env", "OBSERVE_B4_PASSPHRASE"],
-        &root.join("unlock.out"),
-        &root.join("unlock.err"),
+        &root.path().join("unlock.out"),
+        &root.path().join("unlock.err"),
     )?;
     require_success(&unlocked, "unlock")?;
     Ok(Live { root, socket, sole, shared, text, daemon })
@@ -314,7 +332,7 @@ fn wait_socket(daemon: &mut Process, socket: &Path, log: &Path) -> Result<(), Te
     let ready = Instant::now() + Duration::from_secs(30);
     while !socket.exists() {
         if daemon.0.try_wait()?.is_some() {
-            let detail = std::fs::read_to_string(log).unwrap_or_default();
+            let detail = read_bounded(log, DAEMON_LOG_CAP, "daemon log")?;
             return Err(format!("daemon exited before bind: {detail}").into());
         }
         if Instant::now() >= ready {
@@ -338,8 +356,8 @@ fn check_sole_thumbnail(live: &Live) -> Result<(), TestError> {
             "--message",
             &live.sole,
         ],
-        &live.root.join("thumb.out"),
-        &live.root.join("thumb.err"),
+        &live.root.path().join("thumb.out"),
+        &live.root.path().join("thumb.err"),
     )?;
     require_success(&thumb, "thumbnail")?;
     if thumb.stdout.contains("encodedImage") {
@@ -365,7 +383,7 @@ fn check_sole_thumbnail(live: &Live) -> Result<(), TestError> {
 }
 
 fn check_text_thumbnail_count(live: &Live) -> Result<(), TestError> {
-    let out = live.root.join("text-thumb.bin");
+    let out = live.root.path().join("text-thumb.bin");
     let out_arg = out.to_str().ok_or("thumbnail --out path is not utf-8")?;
     let refused = run_rf(
         &live.socket,
@@ -381,8 +399,8 @@ fn check_text_thumbnail_count(live: &Live) -> Result<(), TestError> {
             "--out",
             out_arg,
         ],
-        &live.root.join("count.out"),
-        &live.root.join("count.err"),
+        &live.root.path().join("count.out"),
+        &live.root.path().join("count.err"),
     )?;
     if refused.status.code() != Some(1) {
         return Err(format!("text thumbnail exit: {}", refused.stderr).into());
@@ -411,8 +429,8 @@ fn delete_local(live: &Live, message: &str, label: &str) -> Result<serde_json::V
             "--scope",
             "local",
         ],
-        &live.root.join(format!("{label}.out")),
-        &live.root.join(format!("{label}.err")),
+        &live.root.path().join(format!("{label}.out")),
+        &live.root.path().join(format!("{label}.err")),
     )?;
     require_success(&captured, label)?;
     parse_json(&captured, label)
