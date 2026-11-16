@@ -170,10 +170,11 @@ fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Resu
 
 #[test]
 fn contact_selectors_accept_hyphen_values_for_links_and_federation() -> Result<(), clap::Error> {
-    for verb in ["accept", "request"] {
-        parse_both(&format!(
-            "contact {verb} --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc --federation-url https://node.example --source-node -abc --target-node -abc"
-        ))?;
+    parse_both(
+        "contact request --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc --federation-url https://node.example --source-node -abc --target-node -abc",
+    )?;
+    for selector in ["--principal -abc", "--request -abc", "--link -abc", "--root -abc"] {
+        parse_both(&format!("contact accept --account -abc {selector}"))?;
     }
     for verb in ["reject", "block", "unblock", "remove"] {
         parse_both(&format!("contact {verb} --account -abc --link -abc"))?;

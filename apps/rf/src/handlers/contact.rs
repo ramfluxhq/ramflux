@@ -188,14 +188,7 @@ async fn handle_contact_accept(
         "contact.accept",
         body,
     );
-    let response = bus.request_frame_response(frame).await?;
-    if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
-        let error = response
-            .error
-            .ok_or_else(|| ramflux_sdk::SdkError::LocalBus("contact error body missing".into()))?;
-        return Err(ramflux_sdk::SdkError::LocalBus(serde_json::to_string(&error)?).into());
-    }
-    print_json(&response.body)
+    print_json(&bus.request_frame_structured(frame).await?)
 }
 
 pub(crate) fn contact_accept_body(accept: &ContactAccept) -> Result<serde_json::Value, RfError> {
@@ -330,5 +323,64 @@ mod tests {
         assert!(contact_accept_body(&parsed).is_err());
         parsed.root = Some("root".to_owned());
         assert_eq!(contact_accept_body(&parsed).expect("root")["root_commitment"], "root");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contact_accept_keeps_a_daemon_refusal_code_and_body() {
+        // The canonical macOS temp path exceeds SUN_LEN, so the socket lives in a unique directory under /tmp.
+        let root = tempfile::TempDir::new_in("/tmp").expect("test: fixture directory");
+        let socket = root.path().join("bus.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("test: bus socket");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await?;
+            let len = tokio::io::AsyncReadExt::read_u32(&mut stream).await?;
+            let mut bytes = vec![0; usize::try_from(len)?];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut bytes).await?;
+            let mut request: ramflux_sdk::LocalBusFrame = serde_json::from_slice(&bytes)?;
+            assert_eq!(request.method, "contact.accept");
+            assert_eq!(request.body["principal_id"], "peer");
+            request.kind = ramflux_sdk::LocalBusFrameKind::Error;
+            request.ok = Some(false);
+            request.error = Some(ramflux_sdk::LocalBusErrorBody {
+                details: None,
+                reason_code: Some("not_linked".to_owned()),
+                code: "NotAContact".to_owned(),
+                message: "no inbound request matches that principal".to_owned(),
+                retry_after_ms: None,
+                cause: None,
+            });
+            request.body = serde_json::json!({"kept": true});
+            let encoded = serde_json::to_vec(&request)?;
+            tokio::io::AsyncWriteExt::write_u32(&mut stream, u32::try_from(encoded.len())?).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &encoded).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let mut bus = ramflux_sdk::LocalBusClient::connect(&socket).await.expect("test: connect");
+        let error = super::handle_contact_accept(
+            &mut bus,
+            crate::cli::ContactAccept {
+                account: "acct".to_owned(),
+                principal: Some("peer".to_owned()),
+                request: None,
+                link: None,
+                root: None,
+            },
+        )
+        .await
+        .expect_err("test: daemon refusal");
+        let shown = error.to_string();
+        match error {
+            crate::RfError::Sdk(ramflux_sdk::SdkError::LocalBusRefused { code, message, body }) => {
+                assert_eq!(code, "NotAContact");
+                assert!(message.contains("no inbound request"));
+                assert_eq!(body["kept"], true);
+            }
+            other => panic!("test: refusal lost its type: {other}"),
+        }
+        assert!(shown.contains("NotAContact"), "test: process text keeps the typed code");
+        drop(bus);
+        server.await.expect("test: server").expect("test: refusal frame");
+        drop(root);
     }
 }
