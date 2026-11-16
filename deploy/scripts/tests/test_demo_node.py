@@ -122,13 +122,7 @@ else:
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
 
-    def pairing_override(self, enabled, with_record=True, node_key_mode=0o640):
-        if node_key_mode is not None:
-            identity = self.state / "certs/node-identity"
-            identity.mkdir(parents=True, exist_ok=True)
-            key = identity / "node-signing.key"
-            key.write_text("TEST-NODE-KEY-BYTES-SHOULD-NEVER-LEAK\n")
-            key.chmod(node_key_mode)
+    def pairing_override(self, enabled, with_record=True):
         with self.env_file.open("a") as output:
             if with_record:
                 record = self.root / "node-record.json"
@@ -167,7 +161,7 @@ else:
         self.assertEqual(router["group_add"], ["${RAMFLUX_SECRET_GID:-0}"])
         for other in ("ramflux-gateway", "ramflux-federation", "ramflux-retention"):
             self.assertNotIn("pairing/node-signing.key", json.dumps(services.get(other, {})))
-        self.assertNotIn("TEST-NODE-KEY-BYTES", text)
+        self.assertNotIn("BEGIN", text)
 
     def test_pairing_off_adds_no_key_mount(self):
         self.pairing_override(False)
@@ -176,12 +170,19 @@ else:
         self.assertNotIn("pairing/node-signing.key", json.dumps(router))
         self.assertNotIn("group_add", router)
 
-    def test_pairing_opt_in_without_node_key_is_refused(self):
-        result = self.pairing_override(True, node_key_mode=None)
-        self.assertIn("DEMO_PAIRING_REQUIRES_NODE_KEY", result.stdout + result.stderr)
-
     def test_pairing_opt_in_with_permissive_node_key_is_refused(self):
-        result = self.pairing_override(True, node_key_mode=0o644)
+        self.run_script("up")
+        key = self.state / "certs/node-identity/node-signing.key"
+        self.assertTrue(key.is_file(), "test: first up must issue the node identity key")
+        key.chmod(0o644)
+        record = self.root / "node-record.json"
+        record.write_bytes(b'{"signed-record":"version-one"}\n')
+        with self.env_file.open("a") as output:
+            output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                         "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-custody-public\n"
+                         "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n"
+                         "RAMFLUX_DEVICE_PAIRING_ENABLED=1\n")
+        result = self.run_script("up", success=False)
         self.assertIn("DEMO_PAIRING_NODE_KEY_MODE", result.stdout + result.stderr)
 
     def test_pairing_opt_in_without_custody_record_is_refused(self):

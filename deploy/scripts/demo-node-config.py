@@ -500,11 +500,11 @@ def render_files(repo, state, owner):
         # Tickets and invitations are signed by the pinned node identity key. The router gets
         # that one file read-only, through the restricted secret group; the key bytes never
         # enter the environment, this JSON or logs.
+        # `prepare` runs before certificates exist on a first up, so only an existing key is
+        # checked here; a missing key makes the router refuse to start with a typed error.
         node_key = state / "certs/node-identity/node-signing.key"
-        if not node_key.is_file() or node_key.is_symlink():
-            sys.exit("DEMO_PAIRING_REQUIRES_NODE_KEY: certs/node-identity/node-signing.key is missing")
-        if node_key.stat().st_mode & 0o7137:
-            sys.exit("DEMO_PAIRING_NODE_KEY_MODE: node-signing.key must be 0640 or stricter")
+        if node_key.is_symlink() or (node_key.exists() and node_key.stat().st_mode & 0o7137):
+            sys.exit("DEMO_PAIRING_NODE_KEY_MODE: node-signing.key must be a regular file, 0640 or stricter")
         for service in ("router", "federation"):
             environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
             environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
