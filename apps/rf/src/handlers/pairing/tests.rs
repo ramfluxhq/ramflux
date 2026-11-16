@@ -159,6 +159,18 @@ fn pairing_cli_outcome_exit_codes_preserve_retry_and_refusal_categories() {
     for (error, expected) in [
         (RfError::Sdk(ramflux_sdk::SdkError::PairingCode("Busy")), 3),
         (RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy), 3),
+        (
+            RfError::Sdk(ramflux_sdk::SdkError::CustodyNetwork(
+                ramflux_protocol::custody::CustodyRefusal::BindingRefused,
+            )),
+            2,
+        ),
+        (
+            RfError::Sdk(ramflux_sdk::SdkError::CustodyNetwork(
+                ramflux_protocol::custody::CustodyRefusal::Busy,
+            )),
+            3,
+        ),
         (RfError::Message("never display this input".into()), 1),
     ] {
         let fixed = output::failure(error);
@@ -200,6 +212,20 @@ fn pairing_failure_class_is_allow_listed_and_never_echoes_received_text() {
         (refused("x", "pairing HTTPS status 600"), "unknown"),
         (refused("x", "pairing HTTPS status 40a"), "unknown"),
         (refused("x", "pairing HTTPS status SECRET-TOKEN"), "unknown"),
+        (
+            RfError::Sdk(SdkError::CustodyNetwork(
+                ramflux_protocol::custody::CustodyRefusal::BindingRefused,
+            )),
+            "BindingRefused",
+        ),
+        (
+            RfError::Sdk(SdkError::LocalBusRefused {
+                code: "AuthorityUnavailable".into(),
+                message: "custody networking refused: AuthorityUnavailable".into(),
+                body: Box::new(serde_json::Value::Null),
+            }),
+            "AuthorityUnavailable",
+        ),
         (RfError::Sdk(SdkError::LocalBus("pairing HTTPS status 502".into())), "HTTP 502"),
         (RfError::Sdk(SdkError::LocalBus("SECRET-TOKEN".into())), "unknown"),
         (RfError::Message("never display this input SECRET-TOKEN".into()), "unknown"),

@@ -114,9 +114,11 @@ async fn handle_gateway_quic_stream_with_connection(
     .await??;
     if crate::custody::is_open(&bytes) {
         let Some(pools) = context.custody.as_ref() else {
-            ramflux_transport::write_quic_json_frame(&mut send, &crate::custody::unavailable())
-                .await?;
-            send.finish()?;
+            crate::custody::log_refusal(&ramflux_protocol::custody::CustodyRefusal::Unsupported);
+            let _ =
+                ramflux_transport::write_quic_json_frame(&mut send, &crate::custody::unavailable())
+                    .await;
+            crate::custody::drain_unread(&mut recv).await;
             return Ok(());
         };
         let Some(permit) = crate::custody::admit_quic(
@@ -128,6 +130,7 @@ async fn handle_gateway_quic_stream_with_connection(
         )
         .await?
         else {
+            crate::custody::drain_unread(&mut recv).await;
             return Ok(());
         };
         return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes, permit))

@@ -297,6 +297,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::InboundRejected(code) if code == super::push_receiver::MANAGED_ACK_CODE => {
             super::push_receiver::MANAGED_ACK_CODE
         }
+        SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
+            code.reason_code()
+        }
         _ => "ValidationFailed",
     }
 }

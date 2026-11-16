@@ -12,8 +12,136 @@ use ramflux_protocol::custody::{
 };
 use ramflux_transport::{GatewayTcpTlsStream, read_custody_tcp_frame, write_custody_tcp_frame};
 use std::{collections::BTreeSet, time::Duration};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use zeroize::Zeroizing;
 const IO_TIMEOUT: Duration = Duration::from_secs(330);
+const CLOSE_DRAIN_CAP: usize = 64 * 1024;
+const CLOSE_DRAIN_BUDGET: Duration = Duration::from_millis(200);
+const CLOSE_WRITE_BUDGET: Duration = Duration::from_secs(1);
+
+/// Values read once from the process environment. Tests substitute a copy on the task.
+#[derive(Clone)]
+struct OpenMaterial {
+    node_public_key: Option<String>,
+    allow_unbound: bool,
+    proxy_seed: Option<Zeroizing<String>>,
+}
+
+fn material_from_env() -> OpenMaterial {
+    OpenMaterial {
+        node_public_key: std::env::var("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY").ok(),
+        allow_unbound: std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").ok().as_deref()
+            == Some("1"),
+        proxy_seed: std::env::var("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED").ok().map(Zeroizing::new),
+    }
+}
+
+fn current_material() -> OpenMaterial {
+    #[cfg(test)]
+    if let Ok(material) = TEST_OPEN_MATERIAL.try_with(Clone::clone) {
+        return material;
+    }
+    material_from_env()
+}
+
+#[cfg(test)]
+enum TestRpc {
+    Fail,
+    Frame(CustodyServerFrame),
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_OPEN_MATERIAL: OpenMaterial;
+    static TEST_RPC: std::cell::RefCell<std::collections::VecDeque<TestRpc>>;
+}
+
+#[cfg(test)]
+fn take_test_rpc() -> Option<anyhow::Result<CustodyServerFrame>> {
+    let step = TEST_RPC.try_with(|queue| queue.borrow_mut().pop_front()).ok().flatten()?;
+    Some(match step {
+        TestRpc::Fail => Err(CustodyRefusal::AuthorityUnavailable.into()),
+        TestRpc::Frame(frame) => Ok(frame),
+    })
+}
+
+pub(crate) fn log_refusal(code: &CustodyRefusal) {
+    tracing::warn!(reason = code.reason_code(), "custody connection refused");
+}
+
+fn classify_custody_close(error: &anyhow::Error) -> CustodyRefusal {
+    if let Some(code) = error.downcast_ref::<CustodyRefusal>() {
+        return code.clone();
+    }
+    if error.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
+        return CustodyRefusal::AbortedRetrySafe;
+    }
+    CustodyRefusal::InvalidInput
+}
+
+fn refused(code: &CustodyRefusal) -> CustodyServerFrame {
+    CustodyServerFrame::Refused { code: code.clone(), capacity: None, retry: None }
+}
+
+/// Drop already-buffered client bytes so a later close is a FIN, not a kernel RST.
+pub(crate) async fn drain_unread<R>(reader: &mut R)
+where
+    R: AsyncRead + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + CLOSE_DRAIN_BUDGET;
+    let mut total = 0usize;
+    let mut buf = [0u8; 4096];
+    while total < CLOSE_DRAIN_CAP {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left.min(Duration::from_millis(50)), reader.read(&mut buf)).await
+        {
+            Ok(Ok(0) | Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => total = total.saturating_add(n),
+        }
+    }
+}
+
+async fn shutdown_write<W>(writer: &mut W)
+where
+    W: AsyncWrite + Unpin,
+{
+    let _ = tokio::time::timeout(CLOSE_WRITE_BUDGET, writer.shutdown()).await;
+}
+
+async fn finish_tcp(stream: &mut GatewayTcpTlsStream) {
+    drain_unread(stream).await;
+    shutdown_write(stream).await;
+}
+
+async fn refuse_tcp(stream: &mut GatewayTcpTlsStream, code: &CustodyRefusal) {
+    log_refusal(code);
+    if let Ok(bytes) = serde_json::to_vec(&refused(code)) {
+        let _ =
+            tokio::time::timeout(CLOSE_WRITE_BUDGET, write_custody_tcp_frame(stream, &bytes)).await;
+    }
+    finish_tcp(stream).await;
+}
+
+async fn finish_quic(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) {
+    drain_unread(recv).await;
+    let _ = send.finish();
+}
+
+async fn refuse_quic(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    code: &CustodyRefusal,
+) {
+    log_refusal(code);
+    if let Ok(bytes) = serde_json::to_vec(&refused(code)) {
+        let _ =
+            tokio::time::timeout(CLOSE_WRITE_BUDGET, write_custody_tcp_frame(send, &bytes)).await;
+    }
+    finish_quic(send, recv).await;
+}
 pub(crate) fn is_open(bytes: &[u8]) -> bool {
     ramflux_protocol::parse_i_json::<serde_json::Value>(bytes).is_ok_and(|v| {
         v.get("frame_type").and_then(serde_json::Value::as_str) == Some("custody_open")
@@ -56,6 +184,10 @@ async fn rpc(
     context: &GatewayQuicContext,
     request: &CustodyMeshRequest,
 ) -> anyhow::Result<CustodyServerFrame> {
+    #[cfg(test)]
+    if let Some(scripted) = take_test_rpc() {
+        return scripted;
+    }
     Ok(crate::router_post_json_async(&context.router, CUSTODY_RPC_PATH, request).await?)
 }
 impl Proxy {
@@ -63,40 +195,53 @@ impl Proxy {
         context: &GatewayQuicContext,
         bytes: &[u8],
     ) -> anyhow::Result<(Self, CustodyServerFrame)> {
-        let auth_deadline =
-            tokio::time::Instant::now() + ramflux_node_core::custody_auth_timeout()?;
-        let open: CustodyClientFrame = decode(bytes, 4096)?;
+        let material = current_material();
+        let auth_deadline = tokio::time::Instant::now()
+            + ramflux_node_core::custody_auth_timeout()
+                .map_err(|_| CustodyRefusal::AuthorityUnavailable)?;
+        let open: CustodyClientFrame =
+            decode(bytes, 4096).map_err(|_| CustodyRefusal::InvalidInput)?;
         let CustodyClientFrame::CustodyOpen { binding_mode: mode } = open else {
-            anyhow::bail!("expected custody preface")
+            return Err(CustodyRefusal::InvalidInput.into());
         };
         if mode == BindingMode::DirectExporter {
-            anyhow::bail!("gateway cannot advertise direct router exporter binding")
+            return Err(CustodyRefusal::BindingRefused.into());
         }
-        let node = rpc(context, &CustodyMeshRequest::NodeIdentity { record_hash: None }).await?;
+        let node = rpc(context, &CustodyMeshRequest::NodeIdentity { record_hash: None })
+            .await
+            .map_err(|_| CustodyRefusal::AuthorityUnavailable)?;
         let CustodyServerFrame::NodeIdentity { record, audience, .. } = node else {
-            anyhow::bail!("custody unavailable")
+            return Err(CustodyRefusal::AuthorityUnavailable.into());
         };
-        let trusted = std::env::var("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY")?;
+        let Some(trusted) = material.node_public_key.as_deref() else {
+            return Err(CustodyRefusal::AuthorityUnavailable.into());
+        };
         let node = verify_node_identity_record(
             &record,
             &context.node_id,
-            &trusted,
+            trusted,
             ramflux_node_core::now_unix_seconds(),
-        )?;
+        )
+        .map_err(|_| CustodyRefusal::AuthorityUnavailable)?;
         if !node.envelope().body.channel_binding_modes.contains(&mode) {
-            anyhow::bail!("binding mode not advertised")
+            return Err(CustodyRefusal::BindingRefused.into());
         }
         if mode == BindingMode::NoChannelBinding {
-            if std::env::var("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING").as_deref() != Ok("1") {
-                anyhow::bail!("unbound custody not opted in")
+            if !material.allow_unbound {
+                return Err(CustodyRefusal::BindingRefused.into());
             }
             crate::ingress_log::record(crate::ingress_log::Event::NoChannelBinding);
         }
         let signer = if mode == BindingMode::HomeRelayReceipt {
-            let encoded = Zeroizing::new(std::env::var("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED")?);
-            let bytes = Zeroizing::new(ramflux_protocol::decode_base64url(&encoded)?);
+            let Some(encoded) = material.proxy_seed.as_ref() else {
+                return Err(CustodyRefusal::InvalidInput.into());
+            };
+            let bytes = Zeroizing::new(
+                ramflux_protocol::decode_base64url(encoded)
+                    .map_err(|_| CustodyRefusal::InvalidInput)?,
+            );
             if bytes.len() != 32 {
-                anyhow::bail!("proxy seed must contain 32 bytes")
+                return Err(CustodyRefusal::InvalidInput.into());
             }
             let mut seed = Zeroizing::new([0; 32]);
             seed.copy_from_slice(&bytes);
@@ -107,7 +252,7 @@ impl Proxy {
                     && k.proxy_id == context.gateway_id
                     && k.audiences.contains(&audience)
             }) {
-                anyhow::bail!("proxy key is not authorized by the receiving node")
+                return Err(CustodyRefusal::BindingRefused.into());
             }
             Some(signer)
         } else {
@@ -123,7 +268,10 @@ impl Proxy {
             Self {
                 node,
                 signer,
-                connection: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+                connection: ramflux_protocol::encode_base64url(
+                    ramflux_crypto::random_32()
+                        .map_err(|_| CustodyRefusal::AuthorityUnavailable)?,
+                ),
                 mode,
                 session_ids: BTreeSet::new(),
                 handoff_session: None,
@@ -207,18 +355,15 @@ impl Proxy {
             },
             CustodyClientFrame::Prove { action, proof } => {
                 if proof.body.binding_mode != self.mode {
-                    anyhow::bail!("custody mode changed")
+                    return Err(CustodyRefusal::BindingRefused.into());
                 }
-                let actual = observed
-                    .ok_or_else(|| anyhow::anyhow!("client-facing exporter unavailable"))?;
+                let actual = observed.ok_or(CustodyRefusal::BindingRefused)?;
                 if actual != proof.body.transport_binding {
                     return Err(CustodyRefusal::BindingRefused.into());
                 }
                 let receipt = if self.mode == BindingMode::HomeRelayReceipt {
                     Some(Box::new(sign_proxy_acceptance(
-                        self.signer.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("authorized proxy signer unavailable")
-                        })?,
+                        self.signer.as_ref().ok_or(CustodyRefusal::AuthorityUnavailable)?,
                         &self.node,
                         &proof,
                         actual,
@@ -255,8 +400,9 @@ impl Proxy {
 }
 fn nonce(frame: &CustodyClientFrame) -> anyhow::Result<Option<[u8; 32]>> {
     let CustodyClientFrame::Prove { proof, .. } = frame else { return Ok(None) };
-    let bytes = ramflux_protocol::decode_base64url(&proof.body.challenge_nonce)?;
-    Ok(Some(bytes.try_into().map_err(|_| anyhow::anyhow!("invalid challenge context"))?))
+    let bytes = ramflux_protocol::decode_base64url(&proof.body.challenge_nonce)
+        .map_err(|_| CustodyRefusal::InvalidInput)?;
+    Ok(Some(bytes.try_into().map_err(|_| CustodyRefusal::InvalidInput)?))
 }
 type Limiter = std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>;
 #[derive(Clone)]
@@ -296,11 +442,14 @@ pub(crate) async fn admit_tcp(
     } else {
         unavailable()
     };
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        write_custody_tcp_frame(stream, &serde_json::to_vec(&response)?),
-    )
-    .await??;
+    if let CustodyServerFrame::Refused { code, .. } = &response {
+        log_refusal(code);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&response) {
+        let _ =
+            tokio::time::timeout(CLOSE_WRITE_BUDGET, write_custody_tcp_frame(stream, &bytes)).await;
+    }
+    finish_tcp(stream).await;
     Ok(None)
 }
 pub(crate) async fn admit_quic(
@@ -314,12 +463,14 @@ pub(crate) async fn admit_quic(
         Ok(permit) => return Ok(Some(permit)),
         Err(refusal) => refusal.into_frame(),
     };
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        write_custody_tcp_frame(send, &serde_json::to_vec(&refusal)?),
-    )
-    .await??;
-    send.finish()?;
+    if let CustodyServerFrame::Refused { code, .. } = &refusal {
+        log_refusal(code);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&refusal) {
+        let _ =
+            tokio::time::timeout(CLOSE_WRITE_BUDGET, write_custody_tcp_frame(send, &bytes)).await;
+    }
+    let _ = send.finish();
     Ok(None)
 }
 impl Proxy {
@@ -360,76 +511,201 @@ impl Drop for Proxy {
         }
     }
 }
-async fn tcp_inner(
+enum DriveEnd {
+    Finished,
+    Handoff { grant: GatewayGrant, first: Box<ramflux_node_core::GatewayClientFrame> },
+}
+
+fn custody_deadline_error(code: CustodyRefusal) -> anyhow::Error {
+    anyhow::Error::from(code)
+}
+
+async fn write_deadline(
+    deadline: tokio::time::Instant,
+    write: impl std::future::Future<Output = Result<(), ramflux_transport::TransportError>>,
+) -> anyhow::Result<()> {
+    tokio::time::timeout_at(deadline, write)
+        .await
+        .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?
+        .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))
+}
+
+async fn tcp_drive(
+    stream: &mut GatewayTcpTlsStream,
+    context: &GatewayQuicContext,
+    first: &[u8],
+    capacity: &ramflux_node_core::CustodyIngressPermit,
+) -> anyhow::Result<DriveEnd> {
+    let (mut proxy, response) = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(capacity.auth_deadline()),
+        Proxy::open(context, first),
+    )
+    .await
+    .map_err(|_| custody_deadline_error(CustodyRefusal::AuthorityUnavailable))??;
+    proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
+    let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
+    write_deadline(proxy.deadline(), write_custody_tcp_frame(stream, &encoded)).await?;
+    for _ in 0..2048 {
+        let deadline = proxy.deadline();
+        let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(stream))
+            .await
+            .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?
+            .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
+        let frame: CustodyClientFrame =
+            decode(&bytes, MAX_CUSTODY_FRAME_BYTES).map_err(|_| CustodyRefusal::InvalidInput)?;
+        if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
+            let grant = proxy.handoff(session_id)?;
+            let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(stream))
+                .await
+                .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?
+                .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
+            let first =
+                ramflux_protocol::parse_i_json(&first).map_err(|_| CustodyRefusal::InvalidInput)?;
+            return Ok(DriveEnd::Handoff { grant, first: Box::new(first) });
+        }
+        let observed = nonce(&frame)?
+            .map(|nonce| {
+                ramflux_transport::custody_tcp_exporter(stream, &nonce)
+                    .map(|exporter| branch_exporter_hash(&exporter))
+            })
+            .transpose()
+            .map_err(|_| CustodyRefusal::BindingRefused)?;
+        let response = tokio::time::timeout_at(
+            deadline,
+            proxy.frame(context, frame, observed.as_deref(), capacity),
+        )
+        .await
+        .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))??;
+        let saturated =
+            matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
+        let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
+        write_deadline(deadline, write_custody_tcp_frame(stream, &encoded)).await?;
+        if saturated {
+            if let CustodyServerFrame::Refused { code, .. } = &response {
+                log_refusal(code);
+            }
+            return Ok(DriveEnd::Finished);
+        }
+    }
+    Ok(DriveEnd::Finished)
+}
+
+async fn quic_drive(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    connection: &quinn::Connection,
+    context: &GatewayQuicContext,
+    first: &[u8],
+    capacity: &ramflux_node_core::CustodyIngressPermit,
+) -> anyhow::Result<DriveEnd> {
+    let (mut proxy, response) = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(capacity.auth_deadline()),
+        Proxy::open(context, first),
+    )
+    .await
+    .map_err(|_| custody_deadline_error(CustodyRefusal::AuthorityUnavailable))??;
+    proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
+    let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
+    write_deadline(proxy.deadline(), write_custody_tcp_frame(send, &encoded)).await?;
+    for _ in 0..2048 {
+        let deadline = proxy.deadline();
+        let bytes = tokio::time::timeout_at(deadline, read_custody_tcp_frame(recv))
+            .await
+            .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?
+            .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
+        let frame: CustodyClientFrame =
+            decode(&bytes, MAX_CUSTODY_FRAME_BYTES).map_err(|_| CustodyRefusal::InvalidInput)?;
+        if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
+            let grant = proxy.handoff(session_id)?;
+            let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(recv))
+                .await
+                .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?
+                .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
+            let first =
+                ramflux_protocol::parse_i_json(&first).map_err(|_| CustodyRefusal::InvalidInput)?;
+            return Ok(DriveEnd::Handoff { grant, first: Box::new(first) });
+        }
+        let observed = nonce(&frame)?
+            .map(|nonce| {
+                ramflux_transport::custody_quic_exporter(connection, &nonce)
+                    .map(|exporter| branch_exporter_hash(&exporter))
+            })
+            .transpose()
+            .map_err(|_| CustodyRefusal::BindingRefused)?;
+        let response = tokio::time::timeout_at(
+            deadline,
+            proxy.frame(context, frame, observed.as_deref(), capacity),
+        )
+        .await
+        .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))??;
+        let saturated =
+            matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
+        let encoded = serde_json::to_vec(&response).map_err(|_| CustodyRefusal::InvalidInput)?;
+        write_deadline(deadline, write_custody_tcp_frame(send, &encoded)).await?;
+        if saturated {
+            if let CustodyServerFrame::Refused { code, .. } = &response {
+                log_refusal(code);
+            }
+            return Ok(DriveEnd::Finished);
+        }
+    }
+    Ok(DriveEnd::Finished)
+}
+
+async fn supervise<F>(
+    capacity: &ramflux_node_core::CustodyIngressPermit,
+    drive: F,
+) -> anyhow::Result<DriveEnd>
+where
+    F: std::future::Future<Output = anyhow::Result<DriveEnd>>,
+{
+    let session_deadline = tokio::time::Instant::now() + Duration::from_mins(15);
+    let drive = drive;
+    tokio::pin!(drive);
+    tokio::select! {
+        biased;
+        () = capacity.revoked() => Err(custody_deadline_error(CustodyRefusal::AbortedRetrySafe)),
+        () = tokio::time::sleep_until(session_deadline) => {
+            Err(custody_deadline_error(CustodyRefusal::AbortedRetrySafe))
+        }
+        result = &mut drive => result,
+    }
+}
+
+pub(crate) async fn tcp(
     mut stream: GatewayTcpTlsStream,
     context: GatewayQuicContext,
     first: &[u8],
     capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    let run = async {
-        let (mut proxy, response) = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(capacity.auth_deadline()),
-            Proxy::open(&context, first),
-        )
-        .await??;
-        proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
-        tokio::time::timeout_at(
-            proxy.deadline(),
-            write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
-        )
-        .await??;
-        for _ in 0..2048 {
-            let deadline = proxy.deadline();
-            let bytes =
-                tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream)).await??;
-            let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
-            if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
-                let grant = proxy.handoff(session_id)?;
-                let first = tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut stream))
-                    .await??;
-                let first = ramflux_protocol::parse_i_json(&first)?;
-                let (recv, send) = tokio::io::split(stream);
-                drop(proxy);
-                return Box::pin(crate::session::handle_gateway_custody_session_transport(
-                    Box::new(send),
-                    Box::new(recv),
-                    context,
-                    first,
-                    grant,
-                ))
-                .await;
-            }
-            let observed = nonce(&frame)?
-                .map(|nonce| {
-                    ramflux_transport::custody_tcp_exporter(&stream, &nonce)
-                        .map(|exporter| branch_exporter_hash(&exporter))
-                })
-                .transpose()?;
-            let response = tokio::time::timeout_at(
-                deadline,
-                proxy.frame(&context, frame, observed.as_deref(), &capacity),
-            )
-            .await??;
-            let saturated =
-                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
-            tokio::time::timeout_at(
-                deadline,
-                write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?),
-            )
-            .await??;
-            if saturated {
-                return Ok(());
-            }
-        }
-        Ok(())
+    let outcome = {
+        let drive = tcp_drive(&mut stream, &context, first, &capacity);
+        supervise(&capacity, drive).await
     };
-    tokio::select! {
-        biased;
-        () = capacity.revoked() => anyhow::bail!("custody admission revoked"),
-        result = run => result,
+    match outcome {
+        Ok(DriveEnd::Finished) => {
+            finish_tcp(&mut stream).await;
+            Ok(())
+        }
+        Ok(DriveEnd::Handoff { grant, first }) => {
+            let (recv, send) = tokio::io::split(stream);
+            Box::pin(crate::session::handle_gateway_custody_session_transport(
+                Box::new(send),
+                Box::new(recv),
+                context,
+                *first,
+                grant,
+            ))
+            .await
+        }
+        Err(error) => {
+            refuse_tcp(&mut stream, &classify_custody_close(&error)).await;
+            Ok(())
+        }
     }
 }
-async fn quic_inner(
+
+pub(crate) async fn quic(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     connection: quinn::Connection,
@@ -437,98 +713,35 @@ async fn quic_inner(
     first: &[u8],
     capacity: ramflux_node_core::CustodyIngressPermit,
 ) -> anyhow::Result<()> {
-    let run = async {
-        let (mut proxy, response) = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(capacity.auth_deadline()),
-            Proxy::open(&context, first),
-        )
-        .await??;
-        proxy.auth_deadline = tokio::time::Instant::from_std(capacity.auth_deadline());
-        tokio::time::timeout_at(
-            proxy.deadline(),
-            write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
-        )
-        .await??;
-        for _ in 0..2048 {
-            let deadline = proxy.deadline();
-            let bytes =
-                tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
-            let frame: CustodyClientFrame = decode(&bytes, MAX_CUSTODY_FRAME_BYTES)?;
-            if let CustodyClientFrame::GatewayHandoff { session_id } = &frame {
-                let grant = proxy.handoff(session_id)?;
-                let first =
-                    tokio::time::timeout_at(deadline, read_custody_tcp_frame(&mut recv)).await??;
-                let first = ramflux_protocol::parse_i_json(&first)?;
-
-                drop(proxy);
-                return Box::pin(crate::session::handle_gateway_custody_session_transport(
-                    Box::new(send),
-                    Box::new(recv),
-                    context,
-                    first,
-                    grant,
-                ))
-                .await;
-            }
-            let observed = nonce(&frame)?
-                .map(|nonce| {
-                    ramflux_transport::custody_quic_exporter(&connection, &nonce)
-                        .map(|exporter| branch_exporter_hash(&exporter))
-                })
-                .transpose()?;
-            let response = tokio::time::timeout_at(
-                deadline,
-                proxy.frame(&context, frame, observed.as_deref(), &capacity),
-            )
-            .await??;
-            let saturated =
-                matches!(response, CustodyServerFrame::Refused { code: CustodyRefusal::Busy, .. });
-            tokio::time::timeout_at(
-                deadline,
-                write_custody_tcp_frame(&mut send, &serde_json::to_vec(&response)?),
-            )
-            .await??;
-            if saturated {
-                send.finish()?;
-                return Ok(());
-            }
-        }
-        Ok(())
+    let outcome = {
+        let drive = quic_drive(&mut send, &mut recv, &connection, &context, first, &capacity);
+        supervise(&capacity, drive).await
     };
-    tokio::select! {
-        biased;
-        () = capacity.revoked() => anyhow::bail!("custody admission revoked"),
-        result = run => result,
+    match outcome {
+        Ok(DriveEnd::Finished) => {
+            finish_quic(&mut send, &mut recv).await;
+            Ok(())
+        }
+        Ok(DriveEnd::Handoff { grant, first }) => {
+            Box::pin(crate::session::handle_gateway_custody_session_transport(
+                Box::new(send),
+                Box::new(recv),
+                context,
+                *first,
+                grant,
+            ))
+            .await
+        }
+        Err(error) => {
+            refuse_quic(&mut send, &mut recv, &classify_custody_close(&error)).await;
+            Ok(())
+        }
     }
 }
 
-pub(crate) async fn tcp(
-    stream: GatewayTcpTlsStream,
-    context: GatewayQuicContext,
-    first: &[u8],
-    capacity: ramflux_node_core::CustodyIngressPermit,
-) -> anyhow::Result<()> {
-    tokio::time::timeout(
-        Duration::from_mins(15),
-        Box::pin(tcp_inner(stream, context, first, capacity)),
-    )
-    .await?
-}
-pub(crate) async fn quic(
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
-    connection: quinn::Connection,
-    context: GatewayQuicContext,
-    first: &[u8],
-    capacity: ramflux_node_core::CustodyIngressPermit,
-) -> anyhow::Result<()> {
-    tokio::time::timeout(
-        Duration::from_mins(15),
-        Box::pin(quic_inner(send, recv, connection, context, first, capacity)),
-    )
-    .await?
-}
-
+#[cfg(test)]
+#[path = "custody_close_tests.rs"]
+mod close_tests;
 #[cfg(test)]
 #[path = "custody_tests.rs"]
 pub(crate) mod tests;

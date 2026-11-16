@@ -1323,6 +1323,7 @@ async fn networking_view_and_bus_error_report_server_retry_after() -> Result {
         let body = super::io::local_bus_error_body(&hinted);
         assert_eq!(body.retry_after_ms, Some(120_000));
         assert_eq!(serde_json::to_value(&body)?["details"]["retry"], serde_json::to_value(retry)?);
+        assert_eq!(body.code, code.reason_code());
         assert_eq!(
             body.code,
             super::io::local_bus_error_code(&crate::SdkError::CustodyNetwork(code))

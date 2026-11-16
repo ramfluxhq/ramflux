@@ -11,12 +11,12 @@ use ramflux_protocol::custody::*;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-struct Fixture {
+pub(crate) struct Fixture {
     tls: ramflux_transport::MeshTlsConfig,
     root: ramflux_test_support::TestPath,
 }
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let root = ramflux_test_support::TestPath::new()
             .expect("test: allocate fixture directory")
             .child(format!(
@@ -212,7 +212,9 @@ fn exercise(
     );
     Ok(())
 }
-async fn tcp_pair(fixture: &Fixture) -> Result<(GatewayTcpTlsStream, GatewayTcpTlsStream)> {
+pub(crate) async fn tcp_pair(
+    fixture: &Fixture,
+) -> Result<(GatewayTcpTlsStream, GatewayTcpTlsStream)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
