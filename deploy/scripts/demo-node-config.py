@@ -493,6 +493,17 @@ def render_files(repo, state, owner):
                        for key in keys if key in custody}
         if environment:
             override["services"][f"ramflux-{service}"]["environment"] = environment
+    if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
+        if record is None:
+            sys.exit("DEMO_PAIRING_REQUIRES_CUSTODY: RAMFLUX_CUSTODY_NODE_RECORD_FILE is required")
+        # The router verifies the ticket key against the node identity record, so it needs the
+        # same node service signing seed the other services already receive from runtime.env.
+        for service in ("router", "federation"):
+            environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
+            environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
+        override["services"]["ramflux-router"]["environment"][
+            "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL"] = (
+                "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL}")
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (

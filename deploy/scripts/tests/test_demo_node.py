@@ -122,6 +122,50 @@ else:
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
 
+    def pairing_override(self, enabled, with_record=True):
+        with self.env_file.open("a") as output:
+            if with_record:
+                record = self.root / "node-record.json"
+                record.write_bytes(b'{"signed-record":"version-one"}\n')
+                output.write(f"RAMFLUX_CUSTODY_NODE_RECORD_FILE={record}\n"
+                             "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY=test-custody-public\n"
+                             "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED=test-proxy-seed\n")
+            if enabled:
+                output.write("RAMFLUX_DEVICE_PAIRING_ENABLED=1\n")
+        return self.run_script("up", success=with_record or not enabled)
+
+    def test_pairing_is_off_by_default_in_generated_override(self):
+        self.pairing_override(False)
+        text = (self.state / "demo-override.json").read_text()
+        self.assertNotIn("DEVICE_PAIRING", text)
+        router = json.loads(text)["services"]["ramflux-router"]
+        self.assertNotIn("RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL", router["environment"])
+
+    def test_pairing_opt_in_wires_router_and_federation_without_inline_secret(self):
+        self.pairing_override(True)
+        text = (self.state / "demo-override.json").read_text()
+        services = json.loads(text)["services"]
+        for name in ("ramflux-router", "ramflux-federation"):
+            self.assertEqual(services[name]["environment"]["RAMFLUX_DEVICE_PAIRING_ENABLED"], "1")
+        self.assertNotIn("RAMFLUX_DEVICE_PAIRING_ENABLED", json.dumps(services["ramflux-gateway"]))
+        router = services["ramflux-router"]
+        self.assertEqual(router["environment"]["RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL"],
+                         "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL}")
+        self.assertEqual(router["environment"]["RAMFLUX_CUSTODY_NODE_RECORD_FILE"],
+                         "${RF_COMPOSE_CUSTODY_NODE_RECORD_FILE}")
+        self.assertIn("./secrets/custody:/etc/ramflux/custody:ro", router["volumes"])
+        self.assertNotIn("test-service-seed", text)
+
+    def test_pairing_opt_in_without_custody_record_is_refused(self):
+        result = self.pairing_override(True, with_record=False)
+        self.assertIn("DEMO_PAIRING_REQUIRES_CUSTODY", result.stdout + result.stderr)
+
+    def test_invalid_pairing_value_is_refused(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_DEVICE_PAIRING_ENABLED=yes\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("must be 0 or 1", result.stdout + result.stderr)
+
     def test_custody_inputs_survive_upgrade_and_snapshot_rollback(self):
         record = self.root / "node-record.json"
         record.write_bytes(b'{"signed-record":"version-one"}\n')

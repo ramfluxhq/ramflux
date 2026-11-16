@@ -622,6 +622,11 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
+Device pairing has its own opt-in, off by default: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
+(operator env, `0` or `1`) and run `up`. It requires the custody inputs
+(`RAMFLUX_CUSTODY_NODE_RECORD_FILE`), sets the switch on the router and federation only, and
+passes the node service signing seed to the router through `runtime.env` like the other
+services. It does not change discovery advertisement (compile-time release gate).
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing

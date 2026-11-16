@@ -63,6 +63,10 @@ RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-${DEMO_ROUTER_ADMIN_LOOPB
 RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
 case "$RAMFLUX_ROUTER_ADMIN_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_ROUTER_ADMIN_ENABLED must be 0 or 1' ;; esac
 export DEMO_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
+# Explicit operator opt-in for device pairing on this node; off unless set to 1.
+RAMFLUX_DEVICE_PAIRING_ENABLED=${RAMFLUX_DEVICE_PAIRING_ENABLED:-0}
+case "$RAMFLUX_DEVICE_PAIRING_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_DEVICE_PAIRING_ENABLED must be 0 or 1' ;; esac
+export RAMFLUX_DEVICE_PAIRING_ENABLED
 case "$DEMO_HOST" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'DEMO_HOST must be a DNS name or IPv4 address' ;; esac
 case "$DEMO_NODE_ID" in ''|*[!a-zA-Z0-9.-]*|-*) fail 'invalid DEMO_NODE_ID' ;; esac
 case "$DEMO_PROJECT" in [a-z0-9]*) ;; *) fail 'invalid DEMO_PROJECT' ;; esac
