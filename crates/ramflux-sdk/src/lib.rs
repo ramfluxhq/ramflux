@@ -121,7 +121,7 @@ pub use bus::{
     LocalBusObjectGetReadRequest, LocalBusObjectGetRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
     LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,

@@ -219,6 +219,7 @@ methods! {
         "conversation.delete",
         "object.fetch",
         "object.import",
+        "object.revoke",
         "object.share",
         "object.transfer.resume",
         "surface.action",

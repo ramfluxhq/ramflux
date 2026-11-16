@@ -1576,6 +1576,15 @@
       "bridge_allowed": true,
       "capability": "object",
       "key_export": false,
+      "name": "object.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "object",
+      "key_export": false,
       "name": "object.share",
       "secret_input": true,
       "secret_output": true,

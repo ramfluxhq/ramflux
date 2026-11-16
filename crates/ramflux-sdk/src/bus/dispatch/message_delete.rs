@@ -87,6 +87,7 @@ fn local(
     account: &LocalBusAccountState,
     body: &LocalBusMessageDeleteRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    let preview = super::object_erasure::preview(account.client.account_db()?, &body.message_id)?;
     let db = account.client.account_db()?;
     let tombstone = db.write_transaction(|| {
         if db.message_is_deleted(&body.message_id)?
@@ -102,12 +103,15 @@ fn local(
             &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
         )
     })?;
-    Ok(local_bus_ok(json!({
+    let (erased, bytes) = super::object_erasure::confirm(account.client.account_db()?, &preview)?;
+    let mut response = json!({
         "conversation_id":tombstone.conversation_id,
         "message_id":tombstone.message_id,
         "delete_scope":tombstone.delete_scope,
         "tombstone_id":tombstone.tombstone_id,
-    })))
+    });
+    super::object_erasure::attach(&mut response, erased, bytes);
+    Ok(local_bus_ok(response))
 }
 
 fn direct_peer(client: &RamfluxClient, conversation: &str) -> Result<String, SdkError> {

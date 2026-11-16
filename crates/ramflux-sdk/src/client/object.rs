@@ -213,8 +213,11 @@ impl RamfluxClient {
         if package.schema != "ramflux.sdk.object_share_package.v1" || package.version != 1 {
             return Err(SdkError::LocalBus("unsupported object share package version".into()));
         }
-        self.account_db()?
-            .check_object_identity(&package.object.object_id, &package.object.manifest_hash)?;
+        let db = self.account_db()?;
+        db.check_object_identity(&package.object.object_id, &package.object.manifest_hash)?;
+        if db.object_is_tombstoned(&package.object.object_id)? {
+            return Err(SdkError::AttachmentDeleted);
+        }
         let slot = self.decrypt_object_key_slot(&package.key_slot)?;
         let ciphertext = ramflux_protocol::decode_base64url(&package.ciphertext_base64)
             .map_err(|_| SdkError::LocalBus("invalid object ciphertext encoding".into()))?;

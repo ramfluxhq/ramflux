@@ -68,7 +68,7 @@ pub(crate) use ramflux_sdk::{
     LocalBusObjectGetFinishRequest, LocalBusObjectGetReadRequest, LocalBusObjectGetRequest,
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES,
     MAX_LOCAL_BUS_OBJECT_BYTES, MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES, OBJECT_PUT_PROTOCOL_VERSION,
     bindings,

@@ -145,6 +145,44 @@ impl AccountDb {
         if erased { Err(StorageError::ObjectErased) } else { Ok(()) }
     }
 
+    /// Ciphertext bytes of objects whose only message owner is `message_id`.
+    ///
+    /// Measured before a delete. The erasure trigger removes the ciphertext in the
+    /// same statement that drops the last owner, so the byte count has to be read first.
+    /// A second message that references the same payload is not included.
+    ///
+    /// # Errors
+    /// Returns an error when the ownership query cannot be read.
+    pub fn sole_owner_ciphertext(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<(String, u64)>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT p.wire_id, COALESCE(length(o.ciphertext), 0)
+             FROM object_message_reference m
+             JOIN object_retention_reference r ON r.reference_hash = m.reference_hash
+             JOIN object_retention_payload p ON p.commitment = r.commitment
+             LEFT JOIN object_index o ON o.object_id = p.wire_id
+             WHERE m.message_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM object_retention_reference r2
+                 JOIN object_message_reference m2 ON m2.reference_hash = r2.reference_hash
+                 WHERE r2.commitment = p.commitment AND m2.message_id <> ?1
+               )",
+        )?;
+        let rows = statement.query_map(params![message_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut owned = Vec::new();
+        for row in rows {
+            let (wire, length) = row?;
+            let length =
+                u64::try_from(length).map_err(|_| StorageError::Integrity("ciphertext length"))?;
+            owned.push((wire, length));
+        }
+        Ok(owned)
+    }
+
     /// # Errors
     /// Returns `ObjectErased` for an erased selector, including after payload removal.
     pub fn check_object_access(&self, selector: &str) -> Result<(), StorageError> {
