@@ -22,7 +22,7 @@ pub(crate) enum DiagAction {
 
 #[derive(Args)]
 pub(crate) struct ResidueArgs {
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub(crate) account: String,
     /// File whose bytes are the marker. The marker is never taken from argv.
     #[arg(long)]
