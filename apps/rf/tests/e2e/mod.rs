@@ -645,8 +645,8 @@ pub fn wait_receive_settled(daemon: &Daemon, account: &Account) -> Result<Value>
 }
 
 pub fn exchange_contacts(a: &Daemon, alice: &Account, b: &Daemon, bob: &Account) -> Result<()> {
-    let alice_card = rf_json(&a.socket, &["contact", "card", "--account", &alice.id])?;
-    let bob_card = rf_json(&b.socket, &["contact", "card", "--account", &bob.id])?;
+    let alice_card = contact_card_json(a, &alice.id)?;
+    let bob_card = contact_card_json(b, &bob.id)?;
     let alice_text = required_str(&alice_card, "card")?;
     let bob_text = required_str(&bob_card, "card")?;
     rf_json(&b.socket, &["contact", "add", "--account", &bob.id, "--card", &alice_text])?;
@@ -1225,6 +1225,25 @@ pub fn assert_texts_once_in_order(value: &Value, expected: &[&str]) -> Result<()
         return Err(format!("expected {expected:?} once in order, got {texts:?}").into());
     }
     Ok(())
+}
+
+/// Exports a contact card, retrying only the typed retryable `PublicationPending` refusal (a
+/// layer install still in flight on a slow host) within a bounded deadline; any other refusal
+/// fails at once.
+pub fn contact_card_json(daemon: &Daemon, account_id: &str) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match rf_json(&daemon.socket, &["contact", "card", "--account", account_id]) {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.to_string().contains("PublicationPending")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Poll one CLI command until `ready` accepts its JSON, within the shared poll budget.

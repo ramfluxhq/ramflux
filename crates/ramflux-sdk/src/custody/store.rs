@@ -751,7 +751,7 @@ pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkE
     read_account(root, id, now, true, None)
 }
 /// Like [`load_account`], but when a local head installation is in flight it awaits that
-/// installation's completion notification (bounded by a timeout) instead of reporting it as
+/// installation's completion notification (bounded by 15 s) instead of reporting it as
 /// pending. A crashed installation never signals: the timeout elapses and the typed
 /// `PublicationPending` is returned, to be repaired at unlock.
 pub(crate) async fn load_account_after_install(
@@ -759,22 +759,23 @@ pub(crate) async fn load_account_after_install(
     id: &str,
     now: u64,
 ) -> Result<BornAccount, SdkError> {
-    const WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-    for _ in 0..2 {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
         // Arm before reading so a completion between the read and the wait is not lost.
         let settled = super::pairing::activate::INSTALL_SETTLED.notified();
         tokio::pin!(settled);
         settled.as_mut().enable();
         match load_account(root, id, now) {
             Err(SdkError::PairingCode("PublicationPending")) => {
-                if tokio::time::timeout(WAIT, settled).await.is_err() {
-                    break;
+                if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                    // Still in flight: a typed, retryable refusal, never masked.
+                    return load_account(root, id, now);
                 }
             }
             other => return other,
         }
     }
-    load_account(root, id, now)
 }
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.
