@@ -69,12 +69,24 @@ async fn native_typing_host_consumer_projects_without_durable_intake_and_clears_
             tokio::task::yield_now().await;
         }
     });
-    let result = tokio::task::LocalSet::new().run_until(Box::pin(case())).await;
+    let result = tokio::task::LocalSet::new().run_until(Box::pin(case(false))).await;
     witness.abort();
     result
 }
 
-async fn case() -> TestResult {
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn full_router_keeps_the_typing_frame_until_a_slot_is_free() -> TestResult {
+    let witness = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let result = tokio::task::LocalSet::new().run_until(Box::pin(case(true))).await;
+    witness.abort();
+    result
+}
+
+async fn case(hold: bool) -> TestResult {
     use crate::gateway::access::GatewaySessionAccess;
     let (a, b): (Fixture, Fixture) =
         Box::pin(crate::client::routed::native_typing_pair_fixture()).await?;
@@ -120,8 +132,37 @@ async fn case() -> TestResult {
         .send(serde_json::to_vec(&GatewayServerFrame::Ephemeral { envelope, expires_at_ms })?)?;
     let frame = runtime.transient.next(&runtime.state, &id).await;
     assert!(frame.is_some());
+    if hold {
+        // The router channel has 8 slots. Occupy every slot but one so publication
+        // must refuse. The bound is the channel capacity.
+        for _ in 0..8 {
+            if runtime.events.capacity() <= 1 {
+                break;
+            }
+            let (accepted, _done) = tokio::sync::oneshot::channel();
+            runtime
+                .events
+                .try_send(EventBatch { events: Vec::new(), accepted })
+                .map_err(|_| "test: router hold slot")?;
+        }
+        assert!(runtime.events.capacity() <= 1, "test: router has no spare slot");
+    }
     runtime.apply_transient_frame(frame);
-    let batch = batches.recv().await.ok_or("transient update")?;
+    let batch = if hold {
+        let mut occupied = 0_u32;
+        for _ in 0..8 {
+            let Ok(queued) = batches.try_recv() else {
+                break;
+            };
+            assert!(queued.events.is_empty(), "test: a full router must not take the typing frame");
+            occupied += 1;
+        }
+        assert!(occupied > 0, "test: the hold occupied the router");
+        runtime.publish_transient_updates();
+        batches.try_recv().map_err(|_| "test: held typing frame publishes once a slot is free")?
+    } else {
+        batches.recv().await.ok_or("transient update")?
+    };
     assert_typing(&batch, &id, true)?;
     let client = &runtime.state.accounts.get(&id).ok_or("account")?.client;
     assert_eq!(client.account_db()?.journal_bounds()?.head_seq, head);

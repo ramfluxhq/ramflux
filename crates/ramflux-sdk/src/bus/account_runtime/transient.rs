@@ -134,6 +134,14 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get(&self.id) else {
             return;
         };
+        // Leave one router slot for durable publication. A refused reserve does not
+        // drain: the queued update stays and the next loop publishes it.
+        if self.events.capacity() <= 1 {
+            return;
+        }
+        let Ok(permit) = self.events.try_reserve() else {
+            return;
+        };
         let Ok(updates) = account.client.drain_transient_updates(
             &self.id,
             wall_ms(),
@@ -157,14 +165,10 @@ impl AccountRuntime {
                 Some(event)
             })
             .collect::<Vec<_>>();
-        if !events.is_empty() {
-            // Leave one router slot for durable publication, as subscriber delivery does.
-            if let Ok(permit) = self.events.try_reserve()
-                && self.events.capacity() > 0
-            {
-                let (accepted, _done) = tokio::sync::oneshot::channel();
-                permit.send(crate::bus::events::EventBatch { events, accepted });
-            }
+        if events.is_empty() {
+            return;
         }
+        let (accepted, _done) = tokio::sync::oneshot::channel();
+        permit.send(crate::bus::events::EventBatch { events, accepted });
     }
 }

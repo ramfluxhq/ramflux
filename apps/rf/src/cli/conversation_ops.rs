@@ -145,6 +145,9 @@ pub(crate) struct TypingWatch {
     /// Created after `bus.subscribe` succeeds, before the observation window.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) ready_file: Option<String>,
+    /// Return when the first active indicator arrives. `for_secs` stays the deadline.
+    #[arg(long)]
+    pub(crate) until_active: bool,
 }
 
 fn for_secs_in_range(raw: &str) -> Result<u64, String> {
@@ -339,6 +342,24 @@ mod tests {
         };
         assert_eq!(watch.for_secs, 6, "test: typing watch defaults to 6 seconds");
         assert!(watch.ready_file.is_none(), "test: typing watch has no ready file by default");
+        assert!(!watch.until_active, "test: typing watch collects until the deadline by default");
+        let ConversationAction::Typing(early) = parse(&[
+            "rf",
+            "conversation",
+            "typing",
+            "watch",
+            "--account",
+            "bob",
+            "--conversation",
+            "thread",
+            "--until-active",
+        ]) else {
+            panic!("expected typing watch");
+        };
+        let TypingAction::Watch(early) = early.action else {
+            panic!("expected watch");
+        };
+        assert!(early.until_active, "test: --until-active returns on the first active frame");
         assert!(for_secs_in_range("0").is_err(), "test: typing watch rejects 0 seconds");
         assert!(for_secs_in_range("31").is_err(), "test: typing watch rejects 31 seconds");
         assert_eq!(
