@@ -36,8 +36,8 @@ apps/ramflux-federation/src/pairing_full.rs | full_body_without_permit | 1 | A |
 apps/ramflux-gateway/src/clients.rs | router_get_json_blocking_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/clients.rs | router_post_json_until | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/custody.rs | is_open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/custody.rs | quic_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/custody.rs | tcp_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-gateway/src/custody.rs | quic_drive | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-gateway/src/custody.rs | tcp_drive | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/device_set_limit.rs | admit_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/ingress.rs | parse_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/ingress.rs | parse_inner | 2 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1

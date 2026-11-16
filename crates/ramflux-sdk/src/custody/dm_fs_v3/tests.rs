@@ -146,6 +146,7 @@ fn dm_fs_v3_sdk_adapter_maps_every_refusal() -> Result {
         CustodyRefusal::CapacityRetryAfter { retry_after_ms: 1 },
         CustodyRefusal::IdempotencyConflict,
         CustodyRefusal::PayloadTooLarge,
+        CustodyRefusal::FrameLimit,
     ] {
         assert_eq!(DmFsV3Refusal::try_from(&refusal), Err(refusal));
     }

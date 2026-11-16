@@ -57,6 +57,22 @@ const KNOWN_CODES: &[&str] = &[
     "CustodyAccountConflict",
     "DataRootInUse",
     "GatewayWriterBusy",
+    "Unsupported",
+    "AuthorityUnavailable",
+    "PrincipalIdTaken",
+    "ChallengeUnknown",
+    "ChallengeExpired",
+    "BindingRefused",
+    "SessionRequired",
+    "SessionExpired",
+    "Capacity",
+    "PersistenceUnavailable",
+    "HomeMigration",
+    "AbortedRetrySafe",
+    "CapacityRetryAfter",
+    "IdempotencyConflict",
+    "PayloadTooLarge",
+    "FrameLimit",
 ];
 /// The fixed category for a code outside the allowlist.
 const UNKNOWN: &str = "unknown";
@@ -76,6 +92,9 @@ pub(super) fn class(error: &RfError) -> String {
             .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),
         RfError::Sdk(SdkError::LocalBus(message)) => http_status(message)
             .map_or_else(|| UNKNOWN.to_owned(), |status| format!("HTTP {status}")),
+        RfError::Sdk(SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. }) => {
+            known(code.reason_code()).to_owned()
+        }
         _ => UNKNOWN.to_owned(),
     }
 }
@@ -102,6 +121,10 @@ pub(super) fn failure(error: RfError) -> RfError {
         RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy) => 3,
         RfError::Sdk(ramflux_sdk::SdkError::PairingCode(code)) => code_category(code),
         RfError::Sdk(ramflux_sdk::SdkError::LocalBusRefused { code, .. }) => code_category(&code),
+        RfError::Sdk(
+            ramflux_sdk::SdkError::CustodyNetwork(code)
+            | ramflux_sdk::SdkError::CustodyAdmission { code, .. },
+        ) => code_category(code.reason_code()),
         _ => 1,
     };
     RfError::PairingExit { code: exit }
