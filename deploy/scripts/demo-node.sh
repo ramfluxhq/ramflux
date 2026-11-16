@@ -38,7 +38,6 @@ esac
 : "${DEMO_HOST:?advertised DNS name or IPv4 address required}"
 : "${DEMO_PROJECT:?dedicated compose project required}"
 : "${DEMO_DATA_DIR:?absolute private data directory required}"
-DEMO_TOOL=${DEMO_TOOL:-}
 DEMO_NODE_ID=${DEMO_NODE_ID:-demo.invalid}
 DEMO_GATEWAY_PORT=${DEMO_GATEWAY_PORT:-59443}
 DEMO_RELAY_PORT=${DEMO_RELAY_PORT:-59447}
@@ -172,29 +171,36 @@ if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT
 fi
 export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
+verify_published_discovery() {
+  discovery_pin=$1
+  [ -n "$discovery_pin" ] || fail 'DEMO_EXPECTED_NODE_PUBLIC_KEY is required'
+  command -v curl >/dev/null 2>&1 || fail 'curl is required to verify published discovery'
+  command -v openssl >/dev/null 2>&1 || fail 'openssl is required to verify published discovery'
+  discovery_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create discovery temporary file'
+  if ! curl --fail --silent --show-error --max-time 10 \
+    --output "$discovery_record" "$origin/.well-known/ramflux/client"
+  then
+    rm -f -- "$discovery_record"
+    fail 'published discovery endpoint unhealthy'
+  fi
+  if [ -n "${state-}" ] && [ -f "$state/runtime.env" ]; then
+    python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin" \
+      --deploy-state "$state"
+  else
+    python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin"
+  fi || {
+    rm -f -- "$discovery_record"
+    exit 1
+  }
+  rm -f -- "$discovery_record"
+}
 origin=$(python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" public-origin)
 if [ "$flag" = --remote ]; then
   : "${DEMO_EXPECTED_NODE_PUBLIC_KEY:?copy the public pin from the QA identity.env over a trusted channel}"
-  if [ -n "$DEMO_TOOL" ]; then
-    case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
-    [ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
-    exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
-  fi
-  command -v curl >/dev/null 2>&1 || fail 'curl is required for tool-free remote status'
-  command -v openssl >/dev/null 2>&1 || fail 'openssl is required for tool-free remote status'
-  remote_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create remote status temporary file'
-  trap 'rm -f -- "$remote_record"' EXIT
-  trap 'exit 1' HUP INT TERM
-  curl --fail --silent --show-error --max-time 10 \
-    --output "$remote_record" "$origin/.well-known/ramflux/client"
-  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-  python3 "$script_dir/verify-remote-discovery.py" "$remote_record" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
-  printf '%s\n' 'gateway and relay application probes: skipped (set DEMO_TOOL to a matching demo-node-tool for full probes)'
+  verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
   exit 0
 fi
-[ -n "$DEMO_TOOL" ] || fail 'DEMO_TOOL must name an absolute executable demo-node-tool for local operations'
-case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
-[ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
+sh "$script_dir/provision-node.sh" --check
 
 # Canonicalize before checking ownership or allowing recursive deletion.
 case "$command" in
@@ -243,8 +249,19 @@ esac
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
 clean_env() {
   # Rootless Podman needs the user's runtime directory; ignore inherited compose/remote overrides.
+  # Image-build stamps are forwarded only when this process is building an image.
   if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" "$@"
+    if [ -n "${RAMFLUX_BUILD_PRODUCT_VERSION:-}" ]; then
+      env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        RAMFLUX_BUILD_PRODUCT_VERSION="$RAMFLUX_BUILD_PRODUCT_VERSION" \
+        RAMFLUX_BUILD_PRODUCT_REVISION="$RAMFLUX_BUILD_PRODUCT_REVISION" "$@"
+    else
+      env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" "$@"
+    fi
+  elif [ -n "${RAMFLUX_BUILD_PRODUCT_VERSION:-}" ]; then
+    env -i PATH="$PATH" HOME="$HOME" \
+      RAMFLUX_BUILD_PRODUCT_VERSION="$RAMFLUX_BUILD_PRODUCT_VERSION" \
+      RAMFLUX_BUILD_PRODUCT_REVISION="$RAMFLUX_BUILD_PRODUCT_REVISION" "$@"
   else
     env -i PATH="$PATH" HOME="$HOME" "$@"
   fi
@@ -276,8 +293,16 @@ if [ -z "$compose_provider" ]; then
   fi
 fi
 runtime() { clean_env "$container_engine" "$@"; }
+image_product_env=
 check_prebuilt_images() {
-  clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
+  version=${1:-$DEMO_VERSION}
+  clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "$version"
+  # Up and upgrade snapshot the selected image. Rollback keeps the snapshot's facts.
+  case "$command" in
+    up|upgrade)
+      image_product_env=$(clean_env python3 "$script_dir/demo-node-config.py" "$repo" "$state" image-product-identity "$container_engine" "$version") || exit 1
+      ;;
+  esac
 }
 check_resources() {
   for kind in container volume network; do
@@ -533,7 +558,7 @@ wait_for_services() {
 verify_public_endpoints() {
   # shellcheck disable=SC1091
   . "$state/identity.env"
-  "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+  verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 }
 load_applied_overlays() {
   RAMFLUX_DEMO_VOICE_UDP_PORT=$(sed -n 's/^RAMFLUX_RELAY_VOICE_UDP_PORT=.*://p' "$state/runtime.env" | tail -n 1)
@@ -605,15 +630,16 @@ case "$command" in
   up|upgrade|rollback|recover)
     chmod 700 "$state"
     if [ "$command" != rollback ] && [ "$command" != recover ]; then
+      # Before issue-certs can create a key: an existing node without metadata
+      # must fail here, and a first init must own the discovery seed.
+      python3 "$script_dir/demo-node-trust.py" init "$state" "$DEMO_NODE_ID"
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/bootstrap-ca.sh"
       RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
-      "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
       [ ! -e "$state/certs/federation/node-signing.key" ] || fail "obsolete layout: $state/certs/federation/node-signing.key; the node identity key lives only in certs/node-identity (no migration before v1; redeploy into a fresh data directory)"
-      seed="$state/certs/node-identity/node-signing.key"
       chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
       chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
@@ -671,6 +697,10 @@ RAMFLUX_FEDERATION_MESH_PORT=127.0.0.1:$DEMO_MESH_PORT
 RAMFLUX_SIGNALING_TURN_UDP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 RAMFLUX_SIGNALING_TURN_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 ENV
+      # Discovery signs "X.Y.Z (sha)". Prebuilt deploys already inspected that image.
+      if [ -n "$image_product_env" ]; then
+        printf '%s\n' "$image_product_env" >> "$runtime_pending"
+      fi
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" client-runtime >> "$runtime_pending"
       if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
         printf '%s\n' "RAMFLUX_ROUTER_ADMIN_PORT=$RAMFLUX_ROUTER_ADMIN_PORT" >> "$runtime_pending"
@@ -707,8 +737,20 @@ PY
     if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       compose_up no-build
     else
+      RAMFLUX_BUILD_PRODUCT_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-version) || exit 1
+      RAMFLUX_BUILD_PRODUCT_REVISION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-revision) || exit 1
+      export RAMFLUX_BUILD_PRODUCT_VERSION RAMFLUX_BUILD_PRODUCT_REVISION
+      # The binary embeds this same commit. `unknown` is not a valid override.
+      case "$RAMFLUX_BUILD_PRODUCT_REVISION" in
+        unknown) unset RAMFLUX_GIT_SHA ;;
+        *) export RAMFLUX_GIT_SHA="$RAMFLUX_BUILD_PRODUCT_REVISION" ;;
+      esac
       sh "$script_dir/build-prod-images.sh"
       compose_up build
+    fi
+    if [ "$command" != rollback ] && [ "$command" != recover ] && [ -z "$image_product_env" ]; then
+      image_product_env=$(clean_env python3 "$script_dir/demo-node-config.py" "$repo" "$state" image-product-identity "$container_engine" "$DEMO_VERSION") || exit 1
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" merge-runtime "$image_product_env" || exit 1
     fi
     if [ "$command" = up ] && [ "$custody_state" = record-changed ]; then
       printf 'custody record changed; restarting ramflux-router\n'
@@ -737,7 +779,7 @@ PY
     if inspect_services; then :; else fail "$health_problem"; fi
     # shellcheck disable=SC1091
     . "$state/identity.env"
-    "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+    verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
     ;;
   logs) compose logs ;;
   down)

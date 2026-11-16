@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Crash-safety tests for the demo snapshot transaction helper."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -99,6 +103,160 @@ class DemoNodeConfigTests(unittest.TestCase):
             for snapshot in version.iterdir()
         }
         self.assertEqual(retained, set(history[-4:]))
+
+    def test_product_identity_comes_from_the_build_input(self):
+        repo = Path(__file__).resolve().parents[3]
+        self.assertEqual(CONFIG.workspace_product_version(repo / "Cargo.toml"), "0.2.0")
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "ABCDEF012345"}):
+            with self.assertRaisesRegex(SystemExit, "lowercase hexadecimal"):
+                CONFIG.product_sha(repo)
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "abcdef0123456789"}):
+            self.assertEqual(CONFIG.product_sha(repo), "abcdef012345")
+        with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": ""}):
+            sha = CONFIG.product_sha(repo)
+        self.assertRegex(sha, r"^(?:[0-9a-f]{12}|unknown)$")
+
+    def test_selected_image_labels_supply_product_identity(self):
+        def inspect(command, **_kwargs):
+            self.assertEqual(command[:3], ["podman", "image", "inspect"])
+            service = command[3].rsplit("/ramflux-", 1)[1].split(":", 1)[0]
+            revision = "aaaaaaaaaaaa" if service != "relay" else "bbbbbbbbbbbb"
+            payload = json.dumps([{
+                "Config": {"Labels": {
+                    "org.opencontainers.image.version": "0.1.9",
+                    "org.opencontainers.image.revision": revision,
+                }},
+            }])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=inspect), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "cccccccccccccccc"}):
+            with self.assertRaisesRegex(SystemExit, "DEMO_IMAGE_PRODUCT_MISMATCH"):
+                CONFIG.image_product_identity("podman", "demo-v2")
+
+        def uniform(command, **_kwargs):
+            payload = json.dumps([{
+                "Config": {"Labels": {
+                    "org.opencontainers.image.version": "0.1.9",
+                    "org.opencontainers.image.revision": "aaaaaaaaaaaa",
+                }},
+            }])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=uniform), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            CONFIG.image_product_identity("podman", "demo-v2")
+        self.assertEqual(
+            output.getvalue(),
+            "RAMFLUX_EXPECTED_PRODUCT_VERSION=0.1.9\n"
+            "RAMFLUX_EXPECTED_PRODUCT_SHA=aaaaaaaaaaaa\n",
+        )
+
+        def unlabeled(command, **_kwargs):
+            payload = json.dumps([{"Config": {"Labels": {}}}])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=unlabeled), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}):
+            with self.assertRaisesRegex(SystemExit, "DEMO_IMAGE_PRODUCT_UNLABELED"):
+                CONFIG.image_product_identity("podman", "demo-v2")
+
+    def test_release_labels_satisfy_the_image_reader_when_metadata_uses_the_tag(self):
+        full_sha = "ab" * 20
+        metadata = "\n".join([
+            "org.opencontainers.image.created=2026-11-16T00:00:00.000Z",
+            "org.opencontainers.image.version=v0.2.0",
+            "org.opencontainers.image.title=ramflux-gateway",
+            f"org.opencontainers.image.revision={full_sha}",
+            "org.opencontainers.image.source=https://github.com/ramfluxhq/ramflux",
+        ])
+        raw = CONFIG.label_assignments(metadata)
+        version = "0.2.1"
+        revision = "abcdef012345"
+        produced = CONFIG.release_image_labels(metadata, version, revision)
+        labels = CONFIG.label_assignments(produced)
+        lines = produced.splitlines()
+        self.assertEqual(lines[-2], f"org.opencontainers.image.version={version}")
+        self.assertEqual(lines[-1], f"org.opencontainers.image.revision={revision}")
+        self.assertEqual(
+            [line for line in lines if line.startswith("org.opencontainers.image.version=")],
+            [lines[-2]],
+        )
+        self.assertEqual(
+            [line for line in lines if line.startswith("org.opencontainers.image.revision=")],
+            [lines[-1]],
+        )
+        self.assertEqual(labels["org.opencontainers.image.title"], "ramflux-gateway")
+        self.assertEqual(
+            labels["org.opencontainers.image.source"],
+            "https://github.com/ramfluxhq/ramflux",
+        )
+        self.assertNotIn("v0.2.0", produced)
+        self.assertNotIn(full_sha, produced)
+        self.assertNotIn(full_sha[:12], produced)
+
+        def inspect(mapping):
+            def run(command, **_kwargs):
+                payload = json.dumps([{"Config": {"Labels": mapping}}])
+                return subprocess.CompletedProcess(command, 0, payload, "")
+            return run
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=inspect(raw)), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}):
+            with self.assertRaisesRegex(SystemExit, "DEMO_IMAGE_PRODUCT_INVALID"):
+                CONFIG.image_product_identity("podman", "v0.2.0")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=inspect(labels)), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            CONFIG.image_product_identity("podman", "v0.2.0")
+        self.assertEqual(
+            output.getvalue(),
+            f"RAMFLUX_EXPECTED_PRODUCT_VERSION={version}\n"
+            f"RAMFLUX_EXPECTED_PRODUCT_SHA={revision}\n",
+        )
+
+        sneaky = metadata.replace(
+            "org.opencontainers.image.version=v0.2.0",
+            "org.opencontainers.image.version=9.9.9",
+        )
+        replaced = CONFIG.label_assignments(
+            CONFIG.release_image_labels(sneaky, version, revision)
+        )
+        self.assertEqual(replaced["org.opencontainers.image.version"], version)
+
+        with self.assertRaisesRegex(SystemExit, "numeric X.Y.Z"):
+            CONFIG.release_image_labels(metadata, "v0.2.0", revision)
+        with self.assertRaisesRegex(SystemExit, "12 lowercase"):
+            CONFIG.release_image_labels(metadata, version, full_sha)
+        with self.assertRaisesRegex(SystemExit, "12 lowercase"):
+            CONFIG.release_image_labels(metadata, version, "unknown")
+
+        repo = Path(__file__).resolve().parents[3]
+        cli = subprocess.run(
+            [
+                sys.executable, str(HELPER), str(repo), str(repo),
+                "release-image-labels", version, revision,
+            ],
+            input=metadata + "\n",
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(cli.returncode, 0, cli.stderr)
+        self.assertEqual(cli.stdout, produced + "\n")
+
+        workflow = (repo / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        image = workflow.split("image-release:", 1)[1]
+        self.assertLess(image.index("id: meta"), image.index("id: product"))
+        self.assertLess(image.index("id: product"), image.index("id: build"))
+        self.assertIn("release-image-labels", image)
+        self.assertIn("RAMFLUX_PRODUCT_VERSION=${{ steps.product.outputs.version }}", image)
+        self.assertIn("RAMFLUX_PRODUCT_REVISION=${{ steps.product.outputs.revision }}", image)
+        self.assertIn("labels: ${{ steps.product.outputs.labels }}", image)
+        self.assertNotIn("labels: ${{ steps.meta.outputs.labels }}", image)
 
 
 if __name__ == "__main__":

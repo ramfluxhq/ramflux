@@ -46,52 +46,18 @@ class DemoNodeTests(unittest.TestCase):
             + "\nexit 0\n",
         )
         self.executable("rustup", "#!/bin/sh\nexit 1\n")
-        tool = '''#!/usr/bin/env python3
-from pathlib import Path
-import sys
-if sys.argv[1] == "init":
-    root = Path(sys.argv[2])
-    for name in ("gateway-v3", "federation"):
-        directory = root / "secrets" / name
-        directory.mkdir(parents=True, exist_ok=True)
-        files = ("issuer-cert.json",) if name == "gateway-v3" else ("provider-keyring.json", "trust-snapshot.json")
-        for filename in files:
-            (directory / filename).write_text("{}")
-    identity = {
-        "DEMO_EXPECTED_NODE_PUBLIC_KEY": "test-public-pin",
-        "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY": "test-offline-root",
-        "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL": "test-service-seed",
-        "RAMFLUX_GATEWAY_V3_ISSUER_SEED": "test-issuer-seed",
-        "RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL": "test-discovery-seed",
-        "RAMFLUX_ROUTER_ADMIN_TOKEN": "test-admin-token",
-        "RAMFLUX_FEDERATION_ADMIN_TOKEN": "test-admin-token",
-    }
-    (root / "identity.env").write_text("".join(f"{key}={value}\\n" for key, value in identity.items()))
-else:
-    assert sys.argv[3] == "test-public-pin"
-    import json
-    control = json.loads((Path(__file__).parent.parent / "control.json").read_text())
-    root = Path(__file__).parent.parent / "data"
-    runtime = root / "runtime.env"
-    values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
-                  if "=" in line) if runtime.exists() else {}
-    with (Path(__file__).parent.parent / "public-probes.jsonl").open("a") as output:
-        output.write(json.dumps({"origin": sys.argv[2], "version": values.get("RAMFLUX_VERSION"),
-                                 "compose": (root / "compose.yml").read_text()
-                                 if (root / "compose.yml").exists() else ""}) + "\\n")
-    if values.get("RAMFLUX_VERSION") in control.get("public_unhealthy_versions", []):
-        sys.exit("published discovery endpoint unhealthy")
-    if control.get("relay_quic_unhealthy"):
-        sys.exit("relay QUIC unhealthy")
-    print("mock discovery and QUIC verification")
-    print("node key fingerprint: test-public-fingerprint")
-    print("gateway pre-account health: healthy (quic=ok tcp=not_attempted session=requires_account)")
-    print("relay QUIC TLS/application health: healthy (demo.example.org:59447)")
-'''
-        self.tool = self.executable("demo-node-tool", tool)
+        discovery_curl = SCRIPT.parent / "tests/fake_discovery_curl.py"
+        self.executable(
+            "curl",
+            "#!/bin/sh\nexec "
+            + " ".join(shlex.quote(str(part)) for part in (
+                sys.executable, discovery_curl, "--fixture-root", self.root,
+            ))
+            + ' "$@"\n',
+        )
         self.env_file = self.root / "demo.env"
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
-                      DEMO_DATA_DIR=str(self.state), DEMO_TOOL=str(self.tool),
+                      DEMO_DATA_DIR=str(self.state),
                       DEMO_HEALTH_TIMEOUT_SECONDS="3", DEMO_HEALTH_POLL_SECONDS="1")
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
         self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", HOME=str(self.home))
@@ -463,7 +429,8 @@ else:
             warnings = [line for line in result.stderr.splitlines() if line.startswith("WARNING:")]
             self.assertEqual(warnings,
                              ["WARNING: custody is not configured; accounts remain networking_pending"])
-            self.assertIn("mock discovery and QUIC verification", result.stdout)
+            self.assertIn(
+                "discovery signature, freshness and operator pin: healthy", result.stdout)
         result = self.run_script("status")
         expected_warning = "" if self.PROVIDER == "docker" else (
             "warning: per-source federation limits disabled because rootless-bridge "
@@ -504,12 +471,22 @@ else:
         self.assertEqual(loaded.read_bytes(), b"record-v2")
 
     def test_default_up_builds_locally_and_uses_compose_build(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
         self.run_script("up")
         self.assertTrue(self.cargo_journal.is_file())
         compose_up = next(args for args in self.compose_commands() if "up" in args)
         self.assertIn("--build", compose_up)
         self.assertNotIn("--no-build", compose_up)
-        self.assertFalse(any(args[:2] == ["image", "inspect"] for args in self.commands()))
+        expected = {
+            f"ghcr.io/ramfluxhq/ramflux-{service}:demo-test"
+            for service in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
+        }
+        inspected = {args[2] for args in self.commands() if args[:2] == ["image", "inspect"]}
+        self.assertEqual(inspected, expected)
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_VERSION=0.2.0\n", runtime)
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_SHA=abcdef012345\n", runtime)
+        self.assertNotIn("bbbbbbbbbbbb", runtime)
 
     def test_prebuilt_up_skips_local_build_after_all_images_are_verified(self):
         self.enable_prebuilt_images()
@@ -1004,6 +981,137 @@ else:
         self.assertEqual(self.managed_state(), initial)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
+    def test_signed_capability_mismatch_keeps_the_pending_marker(self):
+        self.run_script("up")
+        initial = self.managed_state()
+        key = (self.state / "certs/node-identity/node-signing.key").read_bytes()
+        metadata = (self.state / "secrets/demo-identity.json").read_bytes()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+            output.write(
+                "DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1\n"
+            )
+        # A valid signature over the wrong capabilities must not commit, and
+        # recovery must judge the restored snapshot rather than this env file.
+        self.control.write_text(json.dumps({"public_client_capabilities": ["prekey"]}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn(
+            "discovery capabilities do not match the applied deployment",
+            failed.stderr,
+        )
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes()
+        self.assertEqual((self.state / "certs/node-identity/node-signing.key").read_bytes(), key)
+        self.assertEqual((self.state / "secrets/demo-identity.json").read_bytes(), metadata)
+        # The signed version is the operator's new value. The restored snapshot
+        # is still demo-test, so a version error means that snapshot was compared.
+        self.control.write_text(json.dumps({"public_version": "demo-v2"}))
+        failed_recovery = self.run_script("recover", success=False)
+        self.assertIn(
+            "discovery version does not match the applied deployment",
+            failed_recovery.stderr,
+        )
+        self.assertEqual(marker.read_bytes(), pending)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertEqual((self.state / "certs/node-identity/node-signing.key").read_bytes(), key)
+        runtime = dict(
+            line.split("=", 1)
+            for line in (self.state / "runtime.env").read_text().splitlines()
+            if "=" in line
+        )
+        self.assertEqual(runtime["RAMFLUX_VERSION"], "demo-test")
+        env_text = self.env_file.read_text()
+        self.assertIn("DEMO_VERSION=demo-v2\n", env_text)
+        self.assertIn("DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1\n", env_text)
+        self.control.write_text("{}")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.managed_state(), initial)
+
+    def runtime_values(self):
+        return dict(
+            line.split("=", 1)
+            for line in (self.state / "runtime.env").read_text().splitlines()
+            if "=" in line
+        )
+
+    def test_product_version_stays_with_its_image_across_recovery(self):
+        self.run_script("up")
+        original = self.runtime_values()
+        signed = (
+            f"{original['RAMFLUX_EXPECTED_PRODUCT_VERSION']} "
+            f"({original['RAMFLUX_EXPECTED_PRODUCT_SHA']})"
+        )
+        self.assertEqual(original["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(original["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.2.0")
+        self.assertRegex(original["RAMFLUX_EXPECTED_PRODUCT_SHA"], r"^(?:[0-9a-f]{12}|unknown)$")
+        self.assertNotEqual(signed, original["RAMFLUX_VERSION"])
+        initial = self.managed_state()
+        new_sha = "0123456789ab"
+        if original["RAMFLUX_EXPECTED_PRODUCT_SHA"] == new_sha:
+            new_sha = "abcdef012345"
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.environment["RAMFLUX_GIT_SHA"] = new_sha
+        self.control.write_text(json.dumps({"public_version": "0.2.0 (ffffffffffff)"}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn("discovery version does not match the applied deployment", failed.stderr)
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        # The selected image's build must not satisfy the restored snapshot.
+        self.control.write_text(json.dumps({"public_version": f"0.2.0 ({new_sha})"}))
+        failed_recovery = self.run_script("recover", success=False)
+        self.assertIn(
+            "discovery version does not match the applied deployment",
+            failed_recovery.stderr,
+        )
+        restored = self.runtime_values()
+        self.assertEqual(restored["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(
+            restored["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+            original["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+        )
+        self.assertEqual(self.managed_state(), initial)
+        self.assertIn("DEMO_VERSION=demo-v2\n", self.env_file.read_text())
+        self.control.write_text("{}")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(
+            self.runtime_values()["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+            original["RAMFLUX_EXPECTED_PRODUCT_SHA"],
+        )
+        self.assertEqual(self.managed_state(), initial)
+
+    def test_upgrade_records_the_selected_build_and_rollback_restores_it(self):
+        self.run_script("up")
+        original_sha = self.runtime_values()["RAMFLUX_EXPECTED_PRODUCT_SHA"]
+        new_sha = "abcdef012345" if original_sha != "abcdef012345" else "0123456789ab"
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product_by_tag": {
+                "demo-v2": {"version": "0.2.0", "revision": new_sha},
+            },
+        }))
+        upgraded = self.run_script("upgrade")
+        self.assertIn("rollback command:", upgraded.stdout)
+        upgraded_runtime = self.runtime_values()
+        self.assertEqual(upgraded_runtime["RAMFLUX_VERSION"], "demo-v2")
+        self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.2.0")
+        self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], new_sha)
+        self.assertNotEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "bbbbbbbbbbbb")
+        snapshot_runtime = (self.current_snapshot() / "runtime.env").read_text()
+        self.assertIn(f"RAMFLUX_EXPECTED_PRODUCT_SHA={new_sha}\n", snapshot_runtime)
+        self.assertIn("RAMFLUX_VERSION=demo-v2\n", snapshot_runtime)
+        rolled = self.run_script("rollback")
+        self.assertIn("rolled back demo images to version demo-test", rolled.stdout)
+        restored = self.runtime_values()
+        self.assertEqual(restored["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(restored["RAMFLUX_EXPECTED_PRODUCT_SHA"], original_sha)
+        self.assertNotIn(f"RAMFLUX_EXPECTED_PRODUCT_SHA={new_sha}\n", (self.state / "runtime.env").read_text())
+
     def test_missing_snapshot_recovery_refuses_manual_path_without_locking_commands(self):
         self.run_script("up")
         previous_snapshot = self.current_snapshot()
@@ -1071,7 +1179,7 @@ else:
         result = self.run_script("upgrade")
         self.assertIn("rollback command:", result.stdout)
         inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
-        self.assertEqual(len(inspect_images), 7)
+        self.assertEqual(len(inspect_images), 14)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
     def test_prebuilt_images_require_distinct_ids_and_matching_binaries_before_writes(self):
@@ -1101,6 +1209,47 @@ else:
         self.control.write_text("{}")
         self.run_script("upgrade")
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+
+    def test_prebuilt_image_from_another_checkout_uses_its_own_labels(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product": {"version": "0.1.9", "revision": "aaaaaaaaaaaa"},
+        }))
+        self.enable_prebuilt_images()
+        self.run_script("up")
+        runtime = self.runtime_values()
+        self.assertEqual(runtime["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.1.9")
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "aaaaaaaaaaaa")
+        snapshot = (self.current_snapshot() / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_VERSION=0.1.9\n", snapshot)
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_SHA=aaaaaaaaaaaa\n", snapshot)
+        self.assertNotIn("bbbbbbbbbbbb", snapshot)
+
+    def test_prebuilt_image_refuses_a_different_published_build(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product": {"version": "0.2.0", "revision": "aaaaaaaaaaaa"},
+            "public_version": "0.2.0 (bbbbbbbbbbbb)",
+        }))
+        self.enable_prebuilt_images()
+        failed = self.run_script("up", success=False)
+        self.assertIn("discovery version does not match the applied deployment", failed.stderr)
+        runtime = self.runtime_values()
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "aaaaaaaaaaaa")
+        self.assertNotIn("bbbbbbbbbbbb", (self.state / "runtime.env").read_text())
+        self.assertTrue((self.state / "transaction.pending").is_file())
+
+    def test_prebuilt_image_without_product_labels_is_refused(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({"omit_image_product": True}))
+        self.enable_prebuilt_images()
+        failed = self.run_script("up", success=False)
+        self.assertIn("DEMO_IMAGE_PRODUCT_UNLABELED", failed.stderr)
+        self.assertNotIn("bbbbbbbbbbbb", failed.stdout + failed.stderr)
+        self.assertEqual(self.compose_commands(), [])
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_rollback_and_recover_verify_target_image_identity_before_restoring(self):
         self.run_script("up")
@@ -1388,15 +1537,34 @@ else:
         self.run_script("up")
         self.assertFalse(any("down" in args or "--volumes" in args for args in self.compose_commands()))
 
-    def test_status_reports_relay_quic_health_and_propagates_probe_failure(self):
+    def test_status_reports_discovery_health_and_propagates_probe_failure(self):
         self.run_script("up")
         result = self.run_script("status")
-        self.assertIn("relay QUIC TLS/application health: healthy", result.stdout)
-        self.assertIn("node key fingerprint: test-public-fingerprint", result.stdout)
-        self.assertIn("gateway pre-account health: healthy", result.stdout)
-        self.control.write_text('{"relay_quic_unhealthy": true}')
+        self.assertIn("discovery signature, freshness and operator pin: healthy", result.stdout)
+        pin = dict(line.split("=", 1) for line in (self.state / "identity.env").read_text().splitlines())
+        self.assertIn(f"node public key: {pin['DEMO_EXPECTED_NODE_PUBLIC_KEY']}", result.stdout)
+        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-test"]}))
         result = self.run_script("status", success=False)
-        self.assertIn("relay QUIC unhealthy", result.stderr)
+        self.assertIn("published discovery endpoint unhealthy", result.stderr)
+
+    def test_unknown_gateway_capability_refuses_before_state(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1,not-a-capability\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("refuses unknown name: not-a-capability", result.stderr)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
+    def test_generated_router_and_federation_publish_default_gateway_capabilities(self):
+        self.run_script("up")
+        for name in ("router.toml", "federation.toml"):
+            text = (self.state / "config" / name).read_text()
+            self.assertIn("gateway_client_capabilities = [", text)
+            self.assertLess(
+                text.index('"gateway.session_push.v1"'),
+                text.index('"gateway.ephemeral.v1"'),
+            )
+        self.assertNotIn("gateway_client_capabilities", (self.state / "config/gateway.toml").read_text())
 
     def test_refuses_foreign_containers_volumes_and_networks_even_on_purge(self):
         self.run_script("up")
@@ -1455,15 +1623,7 @@ else:
         self.run_script("up", success=False)
         self.assertTrue(lock.exists())
 
-    def test_remote_verification_requires_public_pin_and_needs_no_docker_or_state(self):
-        self.run_script("status", "--remote", success=False)
-        with self.env_file.open("a") as output:
-            output.write("DEMO_EXPECTED_NODE_PUBLIC_KEY=test-public-pin\n")
-        self.run_script("status", "--remote")
-        self.assertFalse(self.state.exists())
-        self.assertEqual(self.commands(), [])
-
-    def test_remote_status_without_demo_tool_verifies_downloaded_record(self):
+    def accept_remote_discovery(self):
         public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         signature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         record = {
@@ -1501,9 +1661,19 @@ shutil.copyfile({str(record_file)!r}, output)
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
                       DEMO_DATA_DIR=str(self.state), DEMO_EXPECTED_NODE_PUBLIC_KEY=public_key)
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
-        result = self.run_script("status", "--remote")
+        return self.run_script("status", "--remote")
+
+    def test_remote_verification_requires_public_pin_and_needs_no_docker_or_state(self):
+        refused = self.run_script("status", "--remote", success=False)
+        self.assertIn("DEMO_EXPECTED_NODE_PUBLIC_KEY", refused.stderr)
+        self.accept_remote_discovery()
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
+    def test_remote_status_verifies_downloaded_record(self):
+        result = self.accept_remote_discovery()
         self.assertIn("discovery signature, freshness and operator pin: healthy", result.stdout)
-        self.assertIn("gateway and relay application probes: skipped", result.stdout)
+        self.assertNotIn("demo-node-tool", result.stdout + result.stderr)
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands(), [])
 

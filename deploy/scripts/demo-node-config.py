@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 from urllib.parse import urlsplit
 
@@ -864,6 +865,187 @@ def recover(state):
     print(owner["settings"]["DEMO_VERSION"])
 
 
+def normalize_product_sha(raw):
+    """First 12 characters of a lowercase hex commit, or None when it is not one."""
+    value = raw.strip()
+    if len(value) < 12 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value[:12]
+
+
+def workspace_product_version(cargo_toml):
+    """Numeric X.Y.Z from [workspace.package], the version compiled into every binary."""
+    section = ""
+    version = None
+    try:
+        lines = Path(cargo_toml).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"cannot read workspace package version: {error}")
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "workspace.package":
+            continue
+        match = re.fullmatch(r'version\s*=\s*"([^"]*)"', line)
+        if match:
+            version = match.group(1)
+    if version is None or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    return version
+
+
+def product_sha(repo):
+    """Build commit the same way the binaries do: override, then git, else unknown."""
+    override = os.environ.get("RAMFLUX_GIT_SHA", "")
+    if override.strip():
+        sha = normalize_product_sha(override)
+        if sha is None:
+            sys.exit("RAMFLUX_GIT_SHA must be lowercase hexadecimal of at least 12 characters")
+        return sha
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return normalize_product_sha(result.stdout) or "unknown"
+
+
+PRODUCT_VERSION_LABEL = "org.opencontainers.image.version"
+PRODUCT_REVISION_LABEL = "org.opencontainers.image.revision"
+PRODUCT_SHA_EXACT = re.compile(r"[0-9a-f]{12}|unknown")
+RELEASE_REVISION_EXACT = re.compile(r"[0-9a-f]{12}")
+RUNTIME_PRODUCT_KEYS = (
+    "RAMFLUX_EXPECTED_PRODUCT_VERSION",
+    "RAMFLUX_EXPECTED_PRODUCT_SHA",
+)
+
+
+def label_assignments(text):
+    """Parse label lines. The last assignment of a key wins."""
+    labels = {}
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        key, separator, value = raw.strip().partition("=")
+        if separator != "=" or key == "":
+            sys.exit("release metadata label is missing a value")
+        labels[key] = value
+    return labels
+
+
+def release_image_labels(metadata_text, product_version, revision):
+    """Labels for a release image. Generic metadata cannot overwrite the contract.
+
+    The release tag and the full commit SHA are removed from
+    org.opencontainers.image.version and org.opencontainers.image.revision.
+    The workspace X.Y.Z version and the 12-hex revision are written last.
+    Other metadata labels stay. A release commit always has a sha, so
+    ``unknown`` is refused here.
+    """
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    if RELEASE_REVISION_EXACT.fullmatch(revision) is None:
+        sys.exit("release revision must be 12 lowercase hexadecimal characters")
+    labels = label_assignments(metadata_text)
+    labels.pop(PRODUCT_VERSION_LABEL, None)
+    labels.pop(PRODUCT_REVISION_LABEL, None)
+    labels[PRODUCT_VERSION_LABEL] = product_version
+    labels[PRODUCT_REVISION_LABEL] = revision
+    return "\n".join(f"{key}={value}" for key, value in labels.items())
+
+
+def image_name(service, version):
+    return f"ghcr.io/ramfluxhq/ramflux-{service}:{version}"
+
+
+def inspected_labels(engine, image):
+    """Labels from `podman image inspect` or `docker image inspect`. No checkout lookup."""
+    try:
+        result = subprocess.run(
+            [engine, "image", "inspect", image],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}: {error}")
+    if result.returncode != 0:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    try:
+        items = json.loads(result.stdout)
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise ValueError("one image")
+        labels = (items[0].get("Config") or {}).get("Labels") or {}
+        if not isinstance(labels, dict):
+            raise ValueError("labels")
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    return labels
+
+
+def image_product_identity(engine, version):
+    """Env lines for the build stamped on the selected image. Never the deploying checkout."""
+    found = []
+    for service in SERVICES:
+        image = image_name(service, version)
+        labels = inspected_labels(engine, image)
+        product_version = labels.get(PRODUCT_VERSION_LABEL)
+        revision = labels.get(PRODUCT_REVISION_LABEL)
+        if (
+            not isinstance(product_version, str) or product_version == ""
+            or not isinstance(revision, str) or revision == ""
+        ):
+            sys.exit(
+                "DEMO_IMAGE_PRODUCT_UNLABELED: "
+                f"{image} is missing {PRODUCT_VERSION_LABEL} or {PRODUCT_REVISION_LABEL}"
+            )
+        if (
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None
+            or PRODUCT_SHA_EXACT.fullmatch(revision) is None
+        ):
+            sys.exit(f"DEMO_IMAGE_PRODUCT_INVALID: {image}")
+        found.append((product_version, revision))
+    if any(item != found[0] for item in found):
+        sys.exit(
+            "DEMO_IMAGE_PRODUCT_MISMATCH: selected images disagree on product version or revision"
+        )
+    product_version, revision = found[0]
+    print(f"RAMFLUX_EXPECTED_PRODUCT_VERSION={product_version}")
+    print(f"RAMFLUX_EXPECTED_PRODUCT_SHA={revision}")
+
+
+def merge_runtime_assignments(state, text):
+    """Replace the product facts in runtime.env with the inspected image lines."""
+    updates = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        if "=" not in line:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        key, value = line.split("=", 1)
+        if key not in RUNTIME_PRODUCT_KEYS:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        updates[key] = value
+    if set(updates) != set(RUNTIME_PRODUCT_KEYS):
+        sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+    path = state / "runtime.env"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {error}")
+    kept = [line for line in current.splitlines() if line.split("=", 1)[0] not in updates]
+    body = "\n".join([
+        *kept,
+        f"RAMFLUX_EXPECTED_PRODUCT_VERSION={updates['RAMFLUX_EXPECTED_PRODUCT_VERSION']}",
+        f"RAMFLUX_EXPECTED_PRODUCT_SHA={updates['RAMFLUX_EXPECTED_PRODUCT_SHA']}",
+    ]) + "\n"
+    atomic_bytes(path, body.encode(), mode=0o600)
+
+
 def set_node_id(state, node_id):
     for config in sorted((state / "config").glob("*.toml")):
         content = config.read_text().replace(
@@ -916,6 +1098,21 @@ def main():
             append_custody_runtime(state, Path(sys.argv[4]))
         elif action == "custody-status":
             print(custody_status(state))
+        elif action == "product-version":
+            print(workspace_product_version(repo / "Cargo.toml"))
+        elif action == "product-revision":
+            print(product_sha(repo))
+        elif action == "release-image-labels":
+            if len(sys.argv) != 6:
+                sys.exit(
+                    "usage: demo-node-config.py REPO STATE "
+                    "release-image-labels VERSION REVISION"
+                )
+            print(release_image_labels(sys.stdin.read(), sys.argv[4], sys.argv[5]))
+        elif action == "image-product-identity":
+            image_product_identity(sys.argv[4], sys.argv[5])
+        elif action == "merge-runtime":
+            merge_runtime_assignments(state, sys.argv[4])
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:
