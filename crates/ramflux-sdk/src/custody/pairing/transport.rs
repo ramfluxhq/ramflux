@@ -772,15 +772,21 @@ mod publication_state_tests {
     #[test]
     fn a_lost_publication_connection_is_the_typed_retryable_publication_state() {
         let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
-        assert!(matches!(
-            publication_unavailable(SdkError::Io(broken)),
-            SdkError::PairingCode("PublicationPending")
-        ), "a lost publication connection must classify as the typed retryable PublicationPending");
-        assert!(matches!(
-            publication_unavailable(SdkError::CustodyNetwork(
-                ramflux_protocol::custody::CustodyRefusal::BindingRefused
-            )),
-            SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::BindingRefused)
-        ), "a typed custody refusal must be preserved, not rewritten to PublicationPending");
+        assert!(
+            matches!(
+                publication_unavailable(SdkError::Io(broken)),
+                SdkError::PairingCode("PublicationPending")
+            ),
+            "a lost publication connection must classify as the typed retryable PublicationPending"
+        );
+        assert!(
+            matches!(
+                publication_unavailable(SdkError::CustodyNetwork(
+                    ramflux_protocol::custody::CustodyRefusal::BindingRefused
+                )),
+                SdkError::CustodyNetwork(ramflux_protocol::custody::CustodyRefusal::BindingRefused)
+            ),
+            "a typed custody refusal must be preserved, not rewritten to PublicationPending"
+        );
     }
 }
