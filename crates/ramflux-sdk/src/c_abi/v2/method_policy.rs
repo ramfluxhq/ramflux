@@ -204,6 +204,7 @@ policies! {
     "object.put.chunk" => ("object", true, true, false, false),
     "object.put.finish" => ("object", true, true, false, false),
     "object.put.status" => ("object", false, true, false, false),
+    "object.revoke" => ("object", true, true, false, false),
     "object.share" => ("object", true, true, false, false),
     "object.transfer.resume" => ("object", true, true, false, false),
     "object.transfer.status" => ("object", false, true, false, false),

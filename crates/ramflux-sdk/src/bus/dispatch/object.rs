@@ -437,6 +437,7 @@ pub(crate) async fn dispatch_object_bus_request(
                 "node_visible_object_key": false,
             })))
         }
+        "object.revoke" => Box::pin(super::object_revoke::dispatch(request, account)).await,
         "object.import" => {
             let body: LocalBusObjectImportRequest = serde_json::from_value(request.body.clone())?;
             let object = account.client.import_shared_object(&body.package)?;

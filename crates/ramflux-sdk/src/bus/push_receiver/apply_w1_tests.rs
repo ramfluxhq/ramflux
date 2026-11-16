@@ -184,13 +184,34 @@ fn current_generation() -> u64 {
     GENERATION.with(Cell::get)
 }
 
+const DRIVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const STAMP_CASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+std::thread_local! {
+    static ADMITTED_DURING_APPLY: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn capture_admitted(db: &AccountDb) {
+    let bytes = db.staged_entry_json_for_test(1).unwrap_or_else(|_| Vec::new());
+    ADMITTED_DURING_APPLY.with(|cell| *cell.borrow_mut() = bytes);
+}
+
 async fn drive(
     account: &mut crate::bus::state::LocalBusAccountState,
     prepared: ReceiveEntry,
     generation: impl Fn() -> u64 + 'static,
 ) -> Result<crate::bus::connection_manager::ReceiveApplied, SdkError> {
     let prepared_turn = turn(account, 1)?;
-    drive_with_turn(account, &prepared_turn, prepared, generation).await
+    match tokio::time::timeout(
+        DRIVE_DEADLINE,
+        drive_with_turn(account, &prepared_turn, prepared, generation),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(SdkError::InboundRejected("receive drive deadline".into())),
+    }
 }
 
 async fn drive_with_turn(
@@ -383,6 +404,149 @@ async fn retired_a2i_bytes_settle_without_binding_retry() -> Result<(), SdkError
         0,
         "refusal cannot create an application projection"
     );
+    Ok(())
+}
+
+fn admit_work(harness: &Harness, entry: &ReceiveEntry) -> Result<Vec<u8>, SdkError> {
+    let bytes = serde_json::to_vec(&entry.entry)?;
+    let staged_turn = turn(&harness.account, 1)?;
+    let now = now_unix_timestamp();
+    let staged = harness.account.client.account_db()?.receive_transaction(
+        staged_turn.expected(),
+        1,
+        |tx| {
+            tx.stage(ReceiveStage {
+                target: &staged_turn.target,
+                incarnation: &staged_turn.incarnation,
+                sequence: entry.entry.inbox_seq,
+                entry_json: &bytes,
+                admission_key: "authenticated-key",
+                retain_until: now + 300,
+                first_seen: now,
+            })
+        },
+    )?;
+    assert!(matches!(staged, ReceiveStageResult::Staged), "admit the first copy: {staged:?}");
+    Ok(bytes)
+}
+
+fn stamp_authority(entry: &mut ReceiveEntry) {
+    entry
+        .entry
+        .envelope
+        .ext
+        .ext
+        .insert("source_device_authority".into(), json!({"branch_public_key": "resume-stamp"}));
+}
+
+type ConflictCase = (&'static str, fn(&mut ReceiveEntry));
+
+fn mutate_payload(entry: &mut ReceiveEntry) {
+    let payload = encode_base64url(b"tampered-content");
+    entry.entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        payload.as_bytes(),
+    );
+    entry.entry.envelope.encrypted_payload = payload;
+}
+
+fn mutate_identity(entry: &mut ReceiveEntry) {
+    entry.entry.envelope.source_principal_id = "forged-principal".into();
+    entry.entry.envelope.source_device_id = "forged-device".into();
+}
+
+fn mutate_target(entry: &mut ReceiveEntry) {
+    entry.entry.envelope.routing_set_id = Some("other-target".into());
+}
+
+fn mutate_tampered(entry: &mut ReceiveEntry) {
+    entry.entry.envelope.payload_hash = encode_base64url([0x44; 32]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authority_stamp_conflict_applies_the_admitted_copy() -> Result<(), SdkError> {
+    match tokio::time::timeout(STAMP_CASE_DEADLINE, stamp_only_case()).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(SdkError::InboundRejected("authority stamp case deadline".into())),
+    }
+}
+
+async fn stamp_only_case() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let original = real_entry(&harness)?;
+    let stored = admit_work(&harness, &original)?;
+    let message = harness.real.as_ref().expect("test: real copy").message.clone();
+    let conversation = harness.real.as_ref().expect("test: real copy").conversation.clone();
+    let mut stamped = original;
+    stamp_authority(&mut stamped);
+    let stamped_bytes = serde_json::to_vec(&stamped.entry)?;
+    assert_ne!(stored, stamped_bytes, "the authority stamp must change the staged bytes");
+    set_after_classify(capture_admitted);
+    drive(&mut harness.account, stamped, || 1).await?;
+    let applied = ADMITTED_DURING_APPLY.with(|cell| cell.borrow().clone());
+    assert_eq!(applied, stored, "apply must read the admitted bytes, not the stamped copy");
+    assert_eq!(cursor(&harness.account)?, 1, "the admitted copy must settle");
+    let db = harness.account.client.account_db()?;
+    assert_eq!(
+        db.receive_state_for_test(1)?,
+        (None, 0),
+        "settlement removes the admitted work row"
+    );
+    let rows = harness.account.client.direct_messages(&conversation)?;
+    assert_eq!(rows.len(), 1, "stamp-only replay projects the admitted message once");
+    let projected = rows.first().expect("test: admitted message");
+    assert_eq!(projected.message_id, message, "the projected id is the admitted message");
+    real::reopen(&mut harness.account)?;
+    let recovered = harness.account.client.direct_messages(&conversation)?;
+    assert_eq!(recovered.len(), 1, "reopen keeps the one admitted projection");
+    let kept = recovered.first().expect("test: recovered message");
+    assert_eq!(kept.message_id, message, "recovery does not project a second copy");
+    assert_eq!(cursor(&harness.account)?, 1, "recovery does not advance the cursor");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn content_conflict_keeps_the_admitted_bytes() -> Result<(), SdkError> {
+    match tokio::time::timeout(STAMP_CASE_DEADLINE, content_conflict_case()).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(SdkError::InboundRejected("content conflict case deadline".into())),
+    }
+}
+
+async fn content_conflict_case() -> Result<(), SdkError> {
+    let mut harness = open_real().await?;
+    let original = real_entry(&harness)?;
+    let stored = admit_work(&harness, &original)?;
+    let message = harness.real.as_ref().expect("test: real copy").message.clone();
+    let cases: &[ConflictCase] = &[
+        ("payload", mutate_payload),
+        ("identity", mutate_identity),
+        ("target", mutate_target),
+        ("tampered content", mutate_tampered),
+    ];
+    for (label, mutate) in cases {
+        let mut changed = original.clone();
+        mutate(&mut changed);
+        let refused = drive(&mut harness.account, changed, || 1).await;
+        let error = refused.as_ref().err();
+        assert!(
+            matches!(
+                error,
+                Some(SdkError::InboundRejected(text)) if text.contains("receive stage conflict")
+            ),
+            "{label} must refuse: {error:?}"
+        );
+        assert_eq!(cursor(&harness.account)?, 0, "{label} must not advance the cursor");
+        assert_eq!(
+            harness.account.client.account_db()?.staged_entry_json_for_test(1)?,
+            stored,
+            "{label} must keep the admitted bytes"
+        );
+        assert!(
+            harness.account.client.direct_message_by_id(&message)?.is_none(),
+            "{label} must not project the conflicting copy"
+        );
+    }
     Ok(())
 }
 

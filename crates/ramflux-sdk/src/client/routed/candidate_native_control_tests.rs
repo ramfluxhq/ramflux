@@ -157,6 +157,50 @@ fn a2i_event(
     Ok(event)
 }
 
+fn broken_object_package(object_id: &str) -> crate::SdkObjectSharePackage {
+    crate::SdkObjectSharePackage {
+        schema: "ramflux.sdk.object_share_package.v1".to_owned(),
+        version: 1,
+        object: ramflux_sync::EncryptedObject {
+            object_id: object_id.to_owned(),
+            manifest_hash: "not-the-retained-manifest".to_owned(),
+            nonce: "nonce".to_owned(),
+            ciphertext: Vec::new(),
+            plaintext_hash: "plain".to_owned(),
+            tombstoned: false,
+            backup_excluded: false,
+        },
+        ciphertext_base64: "!!!!".to_owned(),
+        key_slot: crate::SdkObjectKeySlot {
+            schema: "slot".to_owned(),
+            version: 1,
+            object_id: object_id.to_owned(),
+            conversation_id: "thread".to_owned(),
+            recipient_device_id: "device".to_owned(),
+            source_principal_commitment: None,
+            x3dh: None,
+            ciphertext: ramflux_crypto::DmCiphertext {
+                session_id: String::new(),
+                counter: 0,
+                nonce: [0; 12],
+                ciphertext: Vec::new(),
+                ratchet_public_key: None,
+                previous_chain_length: 0,
+                sender_device_id_hash: [0; 32],
+                recipient_device_id_hash: [0; 32],
+                device_epoch: 0,
+                message_event_id: String::new(),
+                canonical_header_bytes: Vec::new(),
+                header_hash: String::new(),
+                key_commitment: String::new(),
+                franking_commitment: String::new(),
+                commitment: String::new(),
+                ciphertext_hash: String::new(),
+            },
+        },
+    }
+}
+
 fn refused<T>(result: &Result<T, SdkError>, code: crate::error::GeneratedRefusalCode) -> bool {
     matches!(result, Err(SdkError::GeneratedRefused { code: got, .. }) if *got == code)
 }
@@ -244,8 +288,19 @@ async fn generated_object_revoke_requires_the_owner_of_the_received_reference()
     // The owner's revoke reaches the native tombstone once; replay is exact.
     let (a, mut b) = pair(209, 211).await?;
     received_object_reference(&a, &mut b, "owned-object-message").await?;
+    let broken = broken_object_package("obj-1");
+    let before = b.client.import_shared_object(&broken);
+    assert!(
+        !matches!(before, Err(SdkError::AttachmentDeleted)),
+        "untombstoned import must not be AttachmentDeleted: {before:?}"
+    );
     let entry = manual_entry(&a, &b, "revoke-own", &revoke(&b)?, false)?;
     run(&mut b, &entry).await?;
+    let refused = b.client.import_shared_object(&broken);
+    assert!(
+        matches!(refused, Err(SdkError::AttachmentDeleted)),
+        "owner revoke must refuse import as AttachmentDeleted: {refused:?}"
+    );
     assert_eq!(b.client.account_db()?.actor_state_keys(APPLIED)?.len(), 1);
     assert!(
         b.client.account_db()?.object_is_tombstoned("obj-1")?,

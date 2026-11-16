@@ -863,6 +863,23 @@ pub struct LocalBusObjectShareRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct LocalBusObjectRevokeRequest {
+    pub object_id: String,
+    pub conversation_id: String,
+    pub recipient_principal_id: String,
+    pub link_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub effective_at: i64,
+    pub recipient_device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_principal_commitment: Option<String>,
+    pub target_delivery_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusObjectDeleteRequest {
     pub object_id: String,
     #[serde(default)]

@@ -88,26 +88,32 @@ fn local(
     body: &LocalBusMessageDeleteRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let db = account.client.account_db()?;
-    let tombstone = db.write_transaction(|| {
-        if db.message_is_deleted(&body.message_id)?
+    let (tombstone, erased, bytes) = db.write_transaction(|| {
+        let preview = super::object_erasure::preview(db, &body.message_id)?;
+        let tombstone = if db.message_is_deleted(&body.message_id)?
             && let Some(old) =
                 db.message_tombstone_for_message(&body.conversation_id, &body.message_id)?
         {
-            return Ok::<_, SdkError>(old);
-        }
-        account.client.delete_direct_message(
-            &body.conversation_id,
-            &body.message_id,
-            "local",
-            &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
-        )
+            old
+        } else {
+            account.client.delete_direct_message(
+                &body.conversation_id,
+                &body.message_id,
+                "local",
+                &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            )?
+        };
+        let (erased, bytes) = super::object_erasure::confirm(db, &preview)?;
+        Ok::<_, SdkError>((tombstone, erased, bytes))
     })?;
-    Ok(local_bus_ok(json!({
+    let mut response = json!({
         "conversation_id":tombstone.conversation_id,
         "message_id":tombstone.message_id,
         "delete_scope":tombstone.delete_scope,
         "tombstone_id":tombstone.tombstone_id,
-    })))
+    });
+    super::object_erasure::attach(&mut response, erased, bytes);
+    Ok(local_bus_ok(response))
 }
 
 fn direct_peer(client: &RamfluxClient, conversation: &str) -> Result<String, SdkError> {

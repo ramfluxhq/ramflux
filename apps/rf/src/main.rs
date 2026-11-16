@@ -23,6 +23,8 @@ pub(crate) enum RfError {
     #[cfg(not(unix))]
     #[error("{command} is unsupported on this platform.")]
     UnsupportedPlatform { command: &'static str },
+    #[error("{code}: {message}")]
+    Refused { code: &'static str, message: String },
     #[error("{0}")]
     Message(String),
     #[error("SDK error: {0}")]

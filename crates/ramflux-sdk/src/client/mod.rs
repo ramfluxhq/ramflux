@@ -21,6 +21,8 @@ pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPrepara
 pub(crate) mod application_outbox;
 mod authored_delete;
 mod authored_send;
+#[cfg(test)]
+mod authored_send_owner_tests;
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;

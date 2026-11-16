@@ -268,6 +268,8 @@ async fn dispatcher_preserves_typed_input_refusals_and_local_delete_never_routes
         .await?;
         assert_eq!(response.response_body["delivery_state"], "local");
         assert_eq!(response.response_body["deliveries"], json!([]));
+        assert_eq!(response.response_body["object_erased"], json!(false));
+        assert_eq!(response.response_body["bytes_erased"], json!(0));
         let db = state.accounts.get("source").ok_or("account")?.client.account_db()?;
         assert!(db.message_is_deleted(&id)?);
         assert!(db.message_content(&id)?.is_none(), "local deletion must erase the target content");
