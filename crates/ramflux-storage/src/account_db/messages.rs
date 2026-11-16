@@ -477,4 +477,82 @@ impl AccountDb {
             },
         )?)
     }
+
+    /// Remove a live service projection the accepted log no longer contains.
+    ///
+    /// No tombstone is written. A user-deleted row is left in place. The call joins the
+    /// current write so a later failure rolls the replacement back with the group commit.
+    ///
+    /// # Errors
+    /// Returns storage errors, including a row that disappears inside the transaction.
+    pub fn drop_replaced_service_projection(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), StorageError> {
+        self.join_write(|| self.remove_replaced_service_row(conversation_id, message_id))
+    }
+
+    fn remove_replaced_service_row(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT deleted FROM direct_message_projection WHERE conversation_id=?1 AND message_id=?2",
+                params![conversation_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if deleted != Some(0) {
+            return Ok(());
+        }
+        self.delete_replaced_service_copies(message_id)?;
+        let removed = self.connection.execute(
+            "DELETE FROM direct_message_projection WHERE conversation_id=?1 AND message_id=?2 AND deleted=0",
+            params![conversation_id, message_id],
+        )?;
+        if removed != 1 {
+            return Err(StorageError::MessageNotFound(message_id.to_owned()));
+        }
+        let identity = format!("routed/generated-identity/{message_id}");
+        self.remove_actor_state(&identity)?;
+        self.connection.execute(
+            "DELETE FROM runtime_journal WHERE source_key=?1",
+            params![format!("generated/receive/{message_id}/{message_id}")],
+        )?;
+        self.connection.execute(
+            "DELETE FROM runtime_outbox WHERE table_name='direct_message_projection' AND json_extract(keys_json,'$.message_id')=?1",
+            params![message_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND json_extract(keys_json,'$.state_kind')=?1",
+            params![identity],
+        )?;
+        Ok(())
+    }
+
+    fn delete_replaced_service_copies(&self, message_id: &str) -> Result<(), StorageError> {
+        if self.table_present("message_footprint")? {
+            self.connection.execute(
+                "DELETE FROM message_footprint WHERE message_id=?1",
+                params![message_id],
+            )?;
+        }
+        if self.table_present("local_search_doc")? {
+            self.connection
+                .execute("DELETE FROM local_search_doc WHERE message_id=?1", params![message_id])?;
+        }
+        Ok(())
+    }
+
+    fn table_present(&self, name: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            params![name],
+            |row| row.get(0),
+        )?)
+    }
 }

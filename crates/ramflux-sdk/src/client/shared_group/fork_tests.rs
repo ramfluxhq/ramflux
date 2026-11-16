@@ -136,7 +136,151 @@ fn creator_device_conflicts_replay_losing_removal_or_name() -> Result<(), SdkErr
             .effective_role(victim.client.owned_device_identity()?.root_commitment(), "phone")
             .is_none()
     );
+    let owner_ids = service_ids(&owner.client, "thread")?;
+    let sibling_ids = service_ids(&sibling.client, "thread")?;
+    assert_eq!(owner_ids, sibling_ids, "creator devices share the signed service history");
+    assert_eq!(
+        owner_ids.len(),
+        a.snapshot().service_events.len(),
+        "the timeline is the signed log, not the union of both branches"
+    );
     Ok(())
+}
+
+#[test]
+fn divergent_service_histories_follow_the_signed_order() -> Result<(), SdkError> {
+    let mut phone = native_person("fork-owner", "phone")?;
+    let laptop = native_sibling(&mut phone, "fork-owner-laptop", "laptop")?;
+    let member = native_person("fork-member", "phone")?;
+    let late = native_person("fork-late", "phone")?;
+    phone.client.fixture_group_create("fork-group", "fork-thread", Some("base".into()), "phone")?;
+    phone.client.fixture_group_change(
+        "fork-group",
+        "phone",
+        GroupStateChange::Add {
+            member: member.client.fixture_group_actor("phone")?.identity,
+            role: SharedGroupRole::Member,
+        },
+    )?;
+    let parent = phone.client.fixture_group_change(
+        "fork-group",
+        "phone",
+        GroupStateChange::Add {
+            member: late.client.fixture_group_actor("phone")?.identity,
+            role: SharedGroupRole::Member,
+        },
+    )?;
+    assert!(laptop.client.fixture_accept_group_state(&parent, "laptop")?);
+    assert!(member.client.fixture_accept_group_state(&parent, "phone")?);
+    assert!(late.client.fixture_accept_group_state(&parent, "phone")?);
+    let alpha = phone.client.fixture_group_change(
+        "fork-group",
+        "phone",
+        GroupStateChange::SetName { name: "alpha".into() },
+    )?;
+    let beta = laptop.client.fixture_group_change(
+        "fork-group",
+        "laptop",
+        GroupStateChange::SetName { name: "beta".into() },
+    )?;
+    let (winner, loser) = preferred_branch(&alpha, &beta)?;
+    let winner_name = branch_name(winner)?;
+    let loser_name = branch_name(loser)?;
+    assert!(member.client.fixture_accept_group_state(loser, "phone")?);
+    let saw_loser = service_ids(&member.client, "fork-thread")?;
+    assert_eq!(
+        service_names(&member.client, "fork-thread")?,
+        vec![loser_name.to_owned()],
+        "the losing branch is visible before the preferred log arrives"
+    );
+    assert!(late.client.fixture_accept_group_state(winner, "phone")?);
+    assert!(member.client.fixture_accept_group_state(winner, "phone")?);
+    let adopted = service_ids(&member.client, "fork-thread")?;
+    let late_ids = service_ids(&late.client, "fork-thread")?;
+    assert_eq!(adopted, late_ids, "late admission matches a device that saw the losing branch");
+    assert_eq!(
+        adopted.len(),
+        winner.snapshot().service_events.len(),
+        "rows that are not in the signed log are replaced"
+    );
+    assert!(
+        saw_loser.iter().any(|id| !adopted.contains(id)),
+        "the losing event id does not remain after the preferred log is adopted"
+    );
+    assert!(!member.client.fixture_accept_group_state(winner, "phone")?);
+    assert_eq!(
+        service_ids(&member.client, "fork-thread")?,
+        adopted,
+        "projecting the convergent state again does not resurrect the losing row"
+    );
+    assert_eq!(
+        service_names(&member.client, "fork-thread")?,
+        vec![winner_name.to_owned()],
+        "the adopted timeline carries the preferred name only"
+    );
+    Ok(())
+}
+
+fn preferred_branch<'a>(
+    alpha: &'a ramflux_crypto::VerifiedGroupState,
+    beta: &'a ramflux_crypto::VerifiedGroupState,
+) -> Result<
+    (&'a ramflux_crypto::VerifiedGroupState, &'a ramflux_crypto::VerifiedGroupState),
+    SdkError,
+> {
+    use ramflux_crypto::GroupStateRelation::{ExistingPreferred, IncomingPreferred};
+    match alpha.relation_to(beta)? {
+        IncomingPreferred => Ok((alpha, beta)),
+        ExistingPreferred => Ok((beta, alpha)),
+        other => Err(SdkError::LocalBus(format!("test: fork relation {other:?}"))),
+    }
+}
+
+fn service_ids(client: &RamfluxClient, thread: &str) -> Result<Vec<String>, SdkError> {
+    Ok(service_rows(client, thread)?.into_iter().map(|row| row.id).collect())
+}
+
+fn branch_name(state: &ramflux_crypto::VerifiedGroupState) -> Result<&str, SdkError> {
+    state
+        .snapshot()
+        .service_events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.change {
+            ramflux_protocol::group_state::GroupServiceChange::SetName { name } => {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| SdkError::LocalBus("test: branch has no name event".into()))
+}
+
+fn service_names(client: &RamfluxClient, thread: &str) -> Result<Vec<String>, SdkError> {
+    let mut names = Vec::new();
+    for row in service_rows(client, thread)? {
+        if row.state == "tombstone" {
+            return Err(SdkError::LocalBus("test: replaced service row left a tombstone".into()));
+        }
+        let Some(ramflux_protocol::message::content::Value::Service(service)) =
+            row.content.as_ref().and_then(|content| content.value.as_ref())
+        else {
+            continue;
+        };
+        if let Some(text) = &service.text {
+            names.push(text.clone());
+        }
+    }
+    Ok(names)
+}
+
+fn service_rows(
+    client: &RamfluxClient,
+    thread: &str,
+) -> Result<Vec<crate::client::typed_read_model::MessageView>, SdkError> {
+    let page = client.generated_message_view_page(thread, None, 100)?;
+    let mut rows: Vec<_> = page.messages.into_iter().filter(|row| row.kind == "service").collect();
+    rows.sort_by_key(|row| (row.hlc_ms, row.hlc_logical, row.device_sequence.0));
+    Ok(rows)
 }
 #[test]
 fn offline_admin_removal_waits_for_owner_and_duplicate_has_one_result() -> Result<(), SdkError> {

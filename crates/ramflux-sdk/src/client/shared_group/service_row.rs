@@ -61,12 +61,13 @@ impl RamfluxClient {
         )?)
     }
 
-    /// Project every signed change in `next`.
+    /// Project the signed change log in `next`.
     ///
-    /// Replay of the same bytes is a no-op. A shorter log that is a prefix of the accepted log
-    /// is refused, because that rewinds a stored change. A divergent log is a fork or a creator
-    /// repair: each of its events is stored, and rows the new log omits stay. A different body
-    /// under the same derived id is `ReplayMismatch`.
+    /// The timeline is that log. Replay of the same bytes is a no-op. A shorter log that is a
+    /// prefix of the accepted log is refused, because that rewinds a stored change. Any other
+    /// verified log replaces rows it does not contain, so two devices that adopt the same
+    /// snapshot keep the same service history. A different body under the same derived id is
+    /// `ReplayMismatch`.
     ///
     /// # Errors
     /// Rejects a rewound log, an invalid signed event, or a storage conflict.
@@ -82,13 +83,39 @@ impl RamfluxClient {
                 return Err(invalid("group service event log rewrote an accepted change"));
             }
         }
+        self.account_db()?.join_write(|| self.write_service_log(next))
+    }
+
+    fn write_service_log(&self, next: &VerifiedGroupState) -> Result<(), SdkError> {
+        let mut kept = std::collections::BTreeSet::new();
         for event in &next.snapshot().service_events {
             let identity = service_identity(next, event)?;
+            let message_id = ramflux_protocol::encode_base64url(&identity.id);
             let exact = Self::encode_generated_inner(
                 identity.clone(),
                 &g::Content { value: Some(g::content::Value::Service(service_for_event(event))) },
             )?;
             self.store_group_service_row(next, event, &identity, &exact)?;
+            kept.insert(message_id);
+        }
+        self.drop_service_rows_outside(next, &kept)
+    }
+
+    fn drop_service_rows_outside(
+        &self,
+        next: &VerifiedGroupState,
+        kept: &std::collections::BTreeSet<String>,
+    ) -> Result<(), SdkError> {
+        let conversation = next.view().conversation_id.clone();
+        let rows = self.account_db()?.direct_messages(&conversation)?;
+        for row in rows {
+            if row.deleted
+                || kept.contains(&row.message_id)
+                || !body_is_service(&row.encrypted_body)
+            {
+                continue;
+            }
+            self.account_db()?.drop_replaced_service_projection(&conversation, &row.message_id)?;
         }
         Ok(())
     }
@@ -155,10 +182,17 @@ impl RamfluxClient {
     }
 }
 
-/// A strict shorter prefix drops an accepted change. An equal or longer divergent log does not.
+/// A strict shorter prefix drops an accepted change. A divergent log is a replacement.
 fn rewinds_accepted_log(old: &[GroupServiceEvent], new: &[GroupServiceEvent]) -> bool {
     new.len() < old.len()
         && new.iter().zip(old.iter()).all(|(next_event, old_event)| next_event == old_event)
+}
+
+fn body_is_service(body: &[u8]) -> bool {
+    matches!(
+        RamfluxClient::decode_generated_inner(body).ok().and_then(|(_, content)| content.value),
+        Some(g::content::Value::Service(_))
+    )
 }
 
 #[cfg(test)]
@@ -172,14 +206,25 @@ impl RamfluxClient {
         conversation_id: &str,
     ) -> Result<Vec<ramflux_storage::DirectMessageRecord>, SdkError> {
         let rows = self.direct_messages(conversation_id)?;
-        Ok(rows.into_iter().filter(|row| !Self::body_is_service(&row.encrypted_body)).collect())
+        Ok(rows.into_iter().filter(|row| !body_is_service(&row.encrypted_body)).collect())
     }
 
-    fn body_is_service(body: &[u8]) -> bool {
-        matches!(
-            Self::decode_generated_inner(body).ok().and_then(|(_, content)| content.value),
-            Some(g::content::Value::Service(_))
-        )
+    /// Live service projections in timeline order, as message id and exact stored bytes.
+    ///
+    /// # Errors
+    /// Returns an error when the conversation cannot be read.
+    pub(crate) fn service_projection_pin(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, SdkError> {
+        let mut rows = Vec::new();
+        for row in self.direct_messages(conversation_id)? {
+            if !row.deleted && body_is_service(&row.encrypted_body) {
+                rows.push((row.message_id, row.encrypted_body));
+            }
+        }
+        rows.sort();
+        Ok(rows)
     }
 }
 

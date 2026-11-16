@@ -164,6 +164,12 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
     tokio::task::LocalSet::new()
         .run_until(Box::pin(async {
             let mut case = Box::pin(setup_refreshed()).await?;
+            let service_pin = {
+                let account = case.runtime.state.accounts.get("sender").ok_or("account")?;
+                let pin = account.client.service_projection_pin("thread")?;
+                assert!(pin.len() >= 2, "the fixture's accepted add and rename are the baseline");
+                pin
+            };
             let (entered, ready) = oneshot::channel();
             let (_release, held) = oneshot::channel();
             case.runtime.receive_gate_hook = Some((entered, held));
@@ -191,6 +197,11 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
             assert!(
                 account.client.direct_chat_messages("thread")?.is_empty(),
                 "cancelled dispatch must not apply the ready message"
+            );
+            assert_eq!(
+                account.client.service_projection_pin("thread")?,
+                service_pin,
+                "cancellation must not write a service row"
             );
             *account.client.native_head_freshness.borrow_mut() =
                 crate::client::identity_authority::NativeHeadFreshness::default();
