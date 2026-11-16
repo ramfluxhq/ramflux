@@ -249,8 +249,19 @@ esac
 # Even a matching project name is insufficient: every existing resource must carry our owner token.
 clean_env() {
   # Rootless Podman needs the user's runtime directory; ignore inherited compose/remote overrides.
+  # Image-build stamps are forwarded only when this process is building an image.
   if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" "$@"
+    if [ -n "${RAMFLUX_BUILD_PRODUCT_VERSION:-}" ]; then
+      env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        RAMFLUX_BUILD_PRODUCT_VERSION="$RAMFLUX_BUILD_PRODUCT_VERSION" \
+        RAMFLUX_BUILD_PRODUCT_REVISION="$RAMFLUX_BUILD_PRODUCT_REVISION" "$@"
+    else
+      env -i PATH="$PATH" HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" "$@"
+    fi
+  elif [ -n "${RAMFLUX_BUILD_PRODUCT_VERSION:-}" ]; then
+    env -i PATH="$PATH" HOME="$HOME" \
+      RAMFLUX_BUILD_PRODUCT_VERSION="$RAMFLUX_BUILD_PRODUCT_VERSION" \
+      RAMFLUX_BUILD_PRODUCT_REVISION="$RAMFLUX_BUILD_PRODUCT_REVISION" "$@"
   else
     env -i PATH="$PATH" HOME="$HOME" "$@"
   fi
@@ -282,8 +293,16 @@ if [ -z "$compose_provider" ]; then
   fi
 fi
 runtime() { clean_env "$container_engine" "$@"; }
+image_product_env=
 check_prebuilt_images() {
-  clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "${1:-$DEMO_VERSION}"
+  version=${1:-$DEMO_VERSION}
+  clean_env python3 "$script_dir/demo-image-check.py" "$container_engine" "$version"
+  # Up and upgrade snapshot the selected image. Rollback keeps the snapshot's facts.
+  case "$command" in
+    up|upgrade)
+      image_product_env=$(clean_env python3 "$script_dir/demo-node-config.py" "$repo" "$state" image-product-identity "$container_engine" "$version") || exit 1
+      ;;
+  esac
 }
 check_resources() {
   for kind in container volume network; do
@@ -678,8 +697,10 @@ RAMFLUX_FEDERATION_MESH_PORT=127.0.0.1:$DEMO_MESH_PORT
 RAMFLUX_SIGNALING_TURN_UDP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 RAMFLUX_SIGNALING_TURN_TCP_PORT=$DEMO_BIND_ADDR:$DEMO_TURN_PORT
 ENV
-      # Discovery signs "X.Y.Z (sha)". That is not the image tag in RAMFLUX_VERSION.
-      python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-identity >> "$runtime_pending"
+      # Discovery signs "X.Y.Z (sha)". Prebuilt deploys already inspected that image.
+      if [ -n "$image_product_env" ]; then
+        printf '%s\n' "$image_product_env" >> "$runtime_pending"
+      fi
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" client-runtime >> "$runtime_pending"
       if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ]; then
         printf '%s\n' "RAMFLUX_ROUTER_ADMIN_PORT=$RAMFLUX_ROUTER_ADMIN_PORT" >> "$runtime_pending"
@@ -716,8 +737,20 @@ PY
     if [ "$command" = rollback ] || [ "$command" = recover ] || [ "$DEMO_PREBUILT_IMAGES" = 1 ]; then
       compose_up no-build
     else
+      RAMFLUX_BUILD_PRODUCT_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-version) || exit 1
+      RAMFLUX_BUILD_PRODUCT_REVISION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" product-revision) || exit 1
+      export RAMFLUX_BUILD_PRODUCT_VERSION RAMFLUX_BUILD_PRODUCT_REVISION
+      # The binary embeds this same commit. `unknown` is not a valid override.
+      case "$RAMFLUX_BUILD_PRODUCT_REVISION" in
+        unknown) unset RAMFLUX_GIT_SHA ;;
+        *) export RAMFLUX_GIT_SHA="$RAMFLUX_BUILD_PRODUCT_REVISION" ;;
+      esac
       sh "$script_dir/build-prod-images.sh"
       compose_up build
+    fi
+    if [ "$command" != rollback ] && [ "$command" != recover ] && [ -z "$image_product_env" ]; then
+      image_product_env=$(clean_env python3 "$script_dir/demo-node-config.py" "$repo" "$state" image-product-identity "$container_engine" "$DEMO_VERSION") || exit 1
+      python3 "$script_dir/demo-node-config.py" "$repo" "$state" merge-runtime "$image_product_env" || exit 1
     fi
     if [ "$command" = up ] && [ "$custody_state" = record-changed ]; then
       printf 'custody record changed; restarting ramflux-router\n'

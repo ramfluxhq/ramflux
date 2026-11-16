@@ -42,7 +42,27 @@ if args[:2] == ["image", "inspect"]:
     service = image.split("/ramflux-", 1)[1].split(":", 1)[0]
     identity = control.get("image_ids", {}).get(service, f"sha256:{service}")
     binary = control.get("image_bins", {}).get(service, f"ramflux-{service}")
-    item = {"Id": identity, "Config": {"Env": [f"RAMFLUX_BIN={binary}"]}}
+    tag = image.rsplit(":", 1)[-1]
+    selected = (control.get("image_product_by_tag") or {}).get(tag, control.get("image_product"))
+    if control.get("omit_image_product"):
+        labels = {}
+    elif selected is None:
+        # Keep aligned with fake_discovery_curl.published_product.
+        labels = {
+            "org.opencontainers.image.version": "0.2.0",
+            "org.opencontainers.image.revision": "abcdef012345",
+        }
+    elif not isinstance(selected, dict) or "version" not in selected or "revision" not in selected:
+        sys.exit("image_product must include version and revision")
+    else:
+        labels = {
+            "org.opencontainers.image.version": selected["version"],
+            "org.opencontainers.image.revision": selected["revision"],
+        }
+    item = {
+        "Id": identity,
+        "Config": {"Env": [f"RAMFLUX_BIN={binary}"], "Labels": labels},
+    }
     item = control.get("image_metadata", {}).get(service, item)
     print(json.dumps([item]))
     sys.exit(0)

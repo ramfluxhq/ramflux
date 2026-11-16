@@ -7,9 +7,10 @@ record that verify-remote-discovery.py accepts with the real OpenSSL.
 
 The signed client_capabilities list is the federation base plus the gateway
 capabilities in the applied router and federation config. The signed version is
-the applied product version and sha (`0.2.0 (abcdef012345)`), not the image tag.
-control.json may set public_client_capabilities or public_version to publish a
-different signed record.
+the build stamped on the selected image (`0.2.0 (abcdef012345)` by default),
+not RAMFLUX_EXPECTED_PRODUCT_* and not the image tag. control.json may set
+public_client_capabilities, public_version, image_product, or
+image_product_by_tag to publish a different signed record.
 """
 import importlib.util
 import json
@@ -55,19 +56,28 @@ def signed_client_capabilities(control, state, verify):
     return names
 
 
-def signed_version(control, values, verify):
+def published_product(control, image_tag):
+    """Build identity of the selected image. Keep the default aligned with fake_demo_runtime."""
+    if control.get("omit_image_product"):
+        sys.exit("published image has no product labels")
+    selected = (control.get("image_product_by_tag") or {}).get(
+        image_tag, control.get("image_product")
+    )
+    if selected is None:
+        return "0.2.0", "abcdef012345"
+    if not isinstance(selected, dict) or "version" not in selected or "revision" not in selected:
+        sys.exit("image_product must include version and revision")
+    return selected["version"], selected["revision"]
+
+
+def signed_version(control, values):
     if "public_version" in control:
         version = control["public_version"]
         if not isinstance(version, str) or not version.strip():
             sys.exit("public_version must be a non-empty string")
         return version
-    composed = verify.signed_product_version(
-        values.get("RAMFLUX_EXPECTED_PRODUCT_VERSION"),
-        values.get("RAMFLUX_EXPECTED_PRODUCT_SHA"),
-    )
-    if composed is None:
-        sys.exit("applied product version is missing")
-    return composed
+    product_version, revision = published_product(control, values.get("RAMFLUX_VERSION", ""))
+    return f"{product_version} ({revision})"
 
 
 def main():
@@ -128,7 +138,7 @@ def main():
         "signaling_turn_addr": "demo.example.org:59478",
         "protocol_versions": ["v1"],
         "client_capabilities": signed_client_capabilities(control, state, verify),
-        "version": signed_version(control, values, verify),
+        "version": signed_version(control, values),
         "updated_at": now,
         "expires_at": now + 3600,
         "signature": "",

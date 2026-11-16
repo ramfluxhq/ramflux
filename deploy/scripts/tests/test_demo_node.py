@@ -471,12 +471,22 @@ class DemoNodeTests(unittest.TestCase):
         self.assertEqual(loaded.read_bytes(), b"record-v2")
 
     def test_default_up_builds_locally_and_uses_compose_build(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
         self.run_script("up")
         self.assertTrue(self.cargo_journal.is_file())
         compose_up = next(args for args in self.compose_commands() if "up" in args)
         self.assertIn("--build", compose_up)
         self.assertNotIn("--no-build", compose_up)
-        self.assertFalse(any(args[:2] == ["image", "inspect"] for args in self.commands()))
+        expected = {
+            f"ghcr.io/ramfluxhq/ramflux-{service}:demo-test"
+            for service in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
+        }
+        inspected = {args[2] for args in self.commands() if args[:2] == ["image", "inspect"]}
+        self.assertEqual(inspected, expected)
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_VERSION=0.2.0\n", runtime)
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_SHA=abcdef012345\n", runtime)
+        self.assertNotIn("bbbbbbbbbbbb", runtime)
 
     def test_prebuilt_up_skips_local_build_after_all_images_are_verified(self):
         self.enable_prebuilt_images()
@@ -1079,13 +1089,19 @@ class DemoNodeTests(unittest.TestCase):
         new_sha = "abcdef012345" if original_sha != "abcdef012345" else "0123456789ab"
         with self.env_file.open("a") as output:
             output.write("DEMO_VERSION=demo-v2\n")
-        self.environment["RAMFLUX_GIT_SHA"] = new_sha
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product_by_tag": {
+                "demo-v2": {"version": "0.2.0", "revision": new_sha},
+            },
+        }))
         upgraded = self.run_script("upgrade")
         self.assertIn("rollback command:", upgraded.stdout)
         upgraded_runtime = self.runtime_values()
         self.assertEqual(upgraded_runtime["RAMFLUX_VERSION"], "demo-v2")
         self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.2.0")
         self.assertEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], new_sha)
+        self.assertNotEqual(upgraded_runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "bbbbbbbbbbbb")
         snapshot_runtime = (self.current_snapshot() / "runtime.env").read_text()
         self.assertIn(f"RAMFLUX_EXPECTED_PRODUCT_SHA={new_sha}\n", snapshot_runtime)
         self.assertIn("RAMFLUX_VERSION=demo-v2\n", snapshot_runtime)
@@ -1163,7 +1179,7 @@ class DemoNodeTests(unittest.TestCase):
         result = self.run_script("upgrade")
         self.assertIn("rollback command:", result.stdout)
         inspect_images = [args[2] for args in self.commands() if args[:2] == ["image", "inspect"]]
-        self.assertEqual(len(inspect_images), 7)
+        self.assertEqual(len(inspect_images), 14)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
     def test_prebuilt_images_require_distinct_ids_and_matching_binaries_before_writes(self):
@@ -1193,6 +1209,47 @@ class DemoNodeTests(unittest.TestCase):
         self.control.write_text("{}")
         self.run_script("upgrade")
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
+
+    def test_prebuilt_image_from_another_checkout_uses_its_own_labels(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product": {"version": "0.1.9", "revision": "aaaaaaaaaaaa"},
+        }))
+        self.enable_prebuilt_images()
+        self.run_script("up")
+        runtime = self.runtime_values()
+        self.assertEqual(runtime["RAMFLUX_VERSION"], "demo-test")
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_VERSION"], "0.1.9")
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "aaaaaaaaaaaa")
+        snapshot = (self.current_snapshot() / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_VERSION=0.1.9\n", snapshot)
+        self.assertIn("RAMFLUX_EXPECTED_PRODUCT_SHA=aaaaaaaaaaaa\n", snapshot)
+        self.assertNotIn("bbbbbbbbbbbb", snapshot)
+
+    def test_prebuilt_image_refuses_a_different_published_build(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({
+            "image_product": {"version": "0.2.0", "revision": "aaaaaaaaaaaa"},
+            "public_version": "0.2.0 (bbbbbbbbbbbb)",
+        }))
+        self.enable_prebuilt_images()
+        failed = self.run_script("up", success=False)
+        self.assertIn("discovery version does not match the applied deployment", failed.stderr)
+        runtime = self.runtime_values()
+        self.assertEqual(runtime["RAMFLUX_EXPECTED_PRODUCT_SHA"], "aaaaaaaaaaaa")
+        self.assertNotIn("bbbbbbbbbbbb", (self.state / "runtime.env").read_text())
+        self.assertTrue((self.state / "transaction.pending").is_file())
+
+    def test_prebuilt_image_without_product_labels_is_refused(self):
+        self.environment["RAMFLUX_GIT_SHA"] = "bbbbbbbbbbbb"
+        self.control.write_text(json.dumps({"omit_image_product": True}))
+        self.enable_prebuilt_images()
+        failed = self.run_script("up", success=False)
+        self.assertIn("DEMO_IMAGE_PRODUCT_UNLABELED", failed.stderr)
+        self.assertNotIn("bbbbbbbbbbbb", failed.stdout + failed.stderr)
+        self.assertEqual(self.compose_commands(), [])
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertFalse((self.state / "transaction.pending").exists())
 
     def test_rollback_and_recover_verify_target_image_identity_before_restoring(self):
         self.run_script("up")

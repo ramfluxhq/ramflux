@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Crash-safety tests for the demo snapshot transaction helper."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -111,6 +114,52 @@ class DemoNodeConfigTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": ""}):
             sha = CONFIG.product_sha(repo)
         self.assertRegex(sha, r"^(?:[0-9a-f]{12}|unknown)$")
+
+    def test_selected_image_labels_supply_product_identity(self):
+        def inspect(command, **_kwargs):
+            self.assertEqual(command[:3], ["podman", "image", "inspect"])
+            service = command[3].rsplit("/ramflux-", 1)[1].split(":", 1)[0]
+            revision = "aaaaaaaaaaaa" if service != "relay" else "bbbbbbbbbbbb"
+            payload = json.dumps([{
+                "Config": {"Labels": {
+                    "org.opencontainers.image.version": "0.1.9",
+                    "org.opencontainers.image.revision": revision,
+                }},
+            }])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=inspect), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "cccccccccccccccc"}):
+            with self.assertRaisesRegex(SystemExit, "DEMO_IMAGE_PRODUCT_MISMATCH"):
+                CONFIG.image_product_identity("podman", "demo-v2")
+
+        def uniform(command, **_kwargs):
+            payload = json.dumps([{
+                "Config": {"Labels": {
+                    "org.opencontainers.image.version": "0.1.9",
+                    "org.opencontainers.image.revision": "aaaaaaaaaaaa",
+                }},
+            }])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=uniform), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            CONFIG.image_product_identity("podman", "demo-v2")
+        self.assertEqual(
+            output.getvalue(),
+            "RAMFLUX_EXPECTED_PRODUCT_VERSION=0.1.9\n"
+            "RAMFLUX_EXPECTED_PRODUCT_SHA=aaaaaaaaaaaa\n",
+        )
+
+        def unlabeled(command, **_kwargs):
+            payload = json.dumps([{"Config": {"Labels": {}}}])
+            return subprocess.CompletedProcess(command, 0, payload, "")
+
+        with mock.patch.object(CONFIG.subprocess, "run", side_effect=unlabeled), \
+                mock.patch.dict(os.environ, {"RAMFLUX_GIT_SHA": "bbbbbbbbbbbb"}):
+            with self.assertRaisesRegex(SystemExit, "DEMO_IMAGE_PRODUCT_UNLABELED"):
+                CONFIG.image_product_identity("podman", "demo-v2")
 
 
 if __name__ == "__main__":

@@ -146,14 +146,22 @@ use it for every image:
 cd /path/to/ramflux
 DEMO_VERSION=release-2026-10-27
 sh deploy/scripts/build-prod-images.sh
+product_version=$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-version)
+product_revision=$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-revision)
 for service in gateway router notify federation relay signaling retention; do
-  docker build -f deploy/Dockerfile --build-arg "BIN=ramflux-$service" \
+  docker build -f deploy/Dockerfile \
+    --build-arg "BIN=ramflux-$service" \
+    --build-arg "RAMFLUX_PRODUCT_VERSION=$product_version" \
+    --build-arg "RAMFLUX_PRODUCT_REVISION=$product_revision" \
     -t "ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION" .
 done
 
 ```
 
-Use `podman build` instead when Podman is the selected engine. Follow the
+Use `podman build` with the same `--build-arg` values when Podman is the selected
+engine. Those arguments become the image labels
+`org.opencontainers.image.version` and `org.opencontainers.image.revision`.
+Follow the
 one-image-per-archive transfer procedure and image identity checklist in
 [Upgrading or rolling back](#upgrading-or-rolling-back-an-existing-demo-and-private-admin-access).
 Load all seven archives into the same engine/user context used by the wrapper,
@@ -165,6 +173,10 @@ local Cargo build and invokes Compose with `--no-build`. Before Compose starts,
 the wrapper inspects all seven exact `ghcr.io/ramfluxhq/ramflux-<service>:TAG`
 images in the detected engine. It lists every missing image and exits without
 starting the project if any image is absent. It never pulls or substitutes tags.
+It then reads the two product labels with `podman image inspect` or
+`docker image inspect`, snapshots them, and compares discovery with those
+facts. A missing or malformed label is a typed error. The deploying checkout's
+version and commit are not used in their place.
 
 Initialization, local `status`, and remote verification use the product scripts
 in this repository (`demo-node-trust.py` and `verify-remote-discovery.py`) plus

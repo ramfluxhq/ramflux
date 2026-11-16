@@ -916,12 +916,99 @@ def product_sha(repo):
     return normalize_product_sha(result.stdout) or "unknown"
 
 
-def product_identity(repo):
-    """Env lines for the product version and commit, distinct from the image tag."""
-    version = workspace_product_version(Path(repo) / "Cargo.toml")
-    sha = product_sha(repo)
-    print(f"RAMFLUX_EXPECTED_PRODUCT_VERSION={version}")
-    print(f"RAMFLUX_EXPECTED_PRODUCT_SHA={sha}")
+PRODUCT_VERSION_LABEL = "org.opencontainers.image.version"
+PRODUCT_REVISION_LABEL = "org.opencontainers.image.revision"
+PRODUCT_SHA_EXACT = re.compile(r"[0-9a-f]{12}|unknown")
+RUNTIME_PRODUCT_KEYS = (
+    "RAMFLUX_EXPECTED_PRODUCT_VERSION",
+    "RAMFLUX_EXPECTED_PRODUCT_SHA",
+)
+
+
+def image_name(service, version):
+    return f"ghcr.io/ramfluxhq/ramflux-{service}:{version}"
+
+
+def inspected_labels(engine, image):
+    """Labels from `podman image inspect` or `docker image inspect`. No checkout lookup."""
+    try:
+        result = subprocess.run(
+            [engine, "image", "inspect", image],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}: {error}")
+    if result.returncode != 0:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    try:
+        items = json.loads(result.stdout)
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise ValueError("one image")
+        labels = (items[0].get("Config") or {}).get("Labels") or {}
+        if not isinstance(labels, dict):
+            raise ValueError("labels")
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    return labels
+
+
+def image_product_identity(engine, version):
+    """Env lines for the build stamped on the selected image. Never the deploying checkout."""
+    found = []
+    for service in SERVICES:
+        image = image_name(service, version)
+        labels = inspected_labels(engine, image)
+        product_version = labels.get(PRODUCT_VERSION_LABEL)
+        revision = labels.get(PRODUCT_REVISION_LABEL)
+        if (
+            not isinstance(product_version, str) or product_version == ""
+            or not isinstance(revision, str) or revision == ""
+        ):
+            sys.exit(
+                "DEMO_IMAGE_PRODUCT_UNLABELED: "
+                f"{image} is missing {PRODUCT_VERSION_LABEL} or {PRODUCT_REVISION_LABEL}"
+            )
+        if (
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None
+            or PRODUCT_SHA_EXACT.fullmatch(revision) is None
+        ):
+            sys.exit(f"DEMO_IMAGE_PRODUCT_INVALID: {image}")
+        found.append((product_version, revision))
+    if any(item != found[0] for item in found):
+        sys.exit(
+            "DEMO_IMAGE_PRODUCT_MISMATCH: selected images disagree on product version or revision"
+        )
+    product_version, revision = found[0]
+    print(f"RAMFLUX_EXPECTED_PRODUCT_VERSION={product_version}")
+    print(f"RAMFLUX_EXPECTED_PRODUCT_SHA={revision}")
+
+
+def merge_runtime_assignments(state, text):
+    """Replace the product facts in runtime.env with the inspected image lines."""
+    updates = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        if "=" not in line:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        key, value = line.split("=", 1)
+        if key not in RUNTIME_PRODUCT_KEYS:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        updates[key] = value
+    if set(updates) != set(RUNTIME_PRODUCT_KEYS):
+        sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+    path = state / "runtime.env"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {error}")
+    kept = [line for line in current.splitlines() if line.split("=", 1)[0] not in updates]
+    body = "\n".join([
+        *kept,
+        f"RAMFLUX_EXPECTED_PRODUCT_VERSION={updates['RAMFLUX_EXPECTED_PRODUCT_VERSION']}",
+        f"RAMFLUX_EXPECTED_PRODUCT_SHA={updates['RAMFLUX_EXPECTED_PRODUCT_SHA']}",
+    ]) + "\n"
+    atomic_bytes(path, body.encode(), mode=0o600)
 
 
 def set_node_id(state, node_id):
@@ -976,8 +1063,14 @@ def main():
             append_custody_runtime(state, Path(sys.argv[4]))
         elif action == "custody-status":
             print(custody_status(state))
-        elif action == "product-identity":
-            product_identity(repo)
+        elif action == "product-version":
+            print(workspace_product_version(repo / "Cargo.toml"))
+        elif action == "product-revision":
+            print(product_sha(repo))
+        elif action == "image-product-identity":
+            image_product_identity(sys.argv[4], sys.argv[5])
+        elif action == "merge-runtime":
+            merge_runtime_assignments(state, sys.argv[4])
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:
