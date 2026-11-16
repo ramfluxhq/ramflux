@@ -25,8 +25,10 @@ mod mcp;
 mod node;
 mod object;
 mod surface;
+mod task;
 pub(crate) use node::*;
 pub(crate) use surface::*;
+pub(crate) use task::*;
 
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
@@ -80,6 +82,8 @@ pub(crate) enum Command {
     A2i(A2iCommand),
     A2ui(A2uiCommand),
     Surface(SurfaceCommand),
+    /// Task drivers over the existing task.* bus methods.
+    Task(TaskCommand),
     Admin(AdminCommand),
 }
 

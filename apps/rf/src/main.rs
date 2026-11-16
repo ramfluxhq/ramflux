@@ -76,6 +76,7 @@ async fn run() -> Result<(), RfError> {
         Command::A2i(command) => handlers::a2i::handle_a2i(cli.socket, command).await,
         Command::A2ui(command) => handlers::a2ui::handle_a2ui(cli.socket, command).await,
         Command::Surface(command) => handlers::surface::handle_surface(cli.socket, command).await,
+        Command::Task(command) => handlers::task::handle_task(cli.socket, command).await,
         Command::Admin(command) => handlers::admin::handle_admin(command),
     }
 }

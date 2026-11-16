@@ -8,3 +8,4 @@ mod output;
 mod typing;
 
 pub(crate) use drive::handle;
+pub(crate) use output::{commit_write, outcome};

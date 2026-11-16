@@ -10,10 +10,13 @@ a surface. `ramflux_protocol::surface_snapshot_hash` is authoritative.
 
 `surface.send` and `surface.action` take `conversation_id`, `message_id`,
 `wire_base64` and optional `author_principal_id`. Protocol ingress parses the exact
-original bytes using `from_wire_bytes`. Local Rust callers can use the output-only
-`SurfaceSendRequest` typed builder. Builder IDs contain 128 random bits; persist
-the request before sending and reuse its ID and bytes for retries. `rf surface`
-commands read `--wire-file`; `--message` is optional and otherwise generates an ID.
+original bytes using `from_wire_bytes`. Local Rust callers encode events with
+`encode_a2ui_conversation_event` and actions with `encode_a2ui_surface_action`.
+`rf surface send --command-file` sends an event. `rf surface send --action` sends
+a typed action; the encoder supplies the schema and argument hash, so the caller
+does not hand-build wire bytes. `--message` is optional and otherwise generates an ID.
+Builder IDs contain 128 random bits; persist the request before sending and reuse
+its ID and bytes for retries.
 
 The response reports `accepted`, `renderer_error`, and `delivery_state: "submitted"`.
 Surface carriers have `content_type: "surface"` and use the same synchronous
