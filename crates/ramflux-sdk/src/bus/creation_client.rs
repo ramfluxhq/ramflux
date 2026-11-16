@@ -316,6 +316,9 @@ fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
     if let Some(reason) = crate::custody::CustodyVaultReason::from_wire(code, reason_code) {
         return SdkError::CustodyVault(reason);
     }
+    if let Some(error) = crate::CustodyConfirmReason::decode(code, reason_code) {
+        return error;
+    }
     match code {
         "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
         "CustodyPublicationFailed" => SdkError::CustodyPublicationFailed,
@@ -355,6 +358,24 @@ mod reason_tests {
             SdkError::CustodyVaultUnavailable
         ));
         assert!(matches!(decode_error("CustodySetupInvalid", None), SdkError::CustodySetupInvalid));
+        assert!(matches!(
+            decode_error("CustodySetupInvalid", Some("passphrase_empty")),
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::PassphraseEmpty)
+        ));
+        assert!(matches!(
+            decode_error("CustodyConfirmationFailed", Some("word_8")),
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::WordMismatch {
+                position: 8
+            })
+        ));
+        assert!(matches!(
+            decode_error("CustodySetupInvalid", Some("word_8")),
+            SdkError::CustodySetupInvalid
+        ));
+        assert!(matches!(
+            decode_error("CustodyExpired", Some("deadline")),
+            SdkError::CustodyExpired
+        ));
         Ok(())
     }
 

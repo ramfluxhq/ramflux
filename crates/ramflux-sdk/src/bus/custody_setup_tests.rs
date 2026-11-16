@@ -445,6 +445,15 @@ async fn custody_shutdown_cannot_release_the_data_root_while_confirmation_is_blo
 
 #[tokio::test]
 async fn custody_native_shutdown_retains_root_lease_and_cancels_uncommitted_authority() -> Result {
+    match tokio::time::timeout(std::time::Duration::from_secs(45), shutdown_uncommitted_authority())
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("shutdown scenario exceeded its deadline".into()),
+    }
+}
+
+async fn shutdown_uncommitted_authority() -> Result {
     struct Release(Arc<BlockingVault>);
     impl Drop for Release {
         fn drop(&mut self) {

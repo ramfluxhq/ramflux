@@ -443,36 +443,36 @@ pub(crate) fn pending_restore(
     seeds[32..].copy_from_slice(&*crate::custody::random()?);
     let dir =
         genesis::reserve_account(root, id, &authority.publication.record.body.account_anchor)?;
-    let mut pins = ramflux_crypto::custody::AuthorityPins::default();
-    pins.observe(&verified)?;
-    let stored = StoredAuthority {
-        schema: "ramflux.local.custody_account.v1".into(),
-        local_account_id: id.into(),
-        local_device_id: device,
-        state: CreationState::NetworkingPending,
-        networking_reason: None,
-        networking_node: None,
-        capacity_retry_at: None,
-        pending_branch: true,
-        custody_v3_observed: true,
-        pairing_adoption_required: false,
-        primary_vault_ref: String::new(),
-        branch_vault_ref: branch_ref.clone(),
-        vault_class: vault.vault_class().into(),
-        record: authority.publication.record.clone(),
-        compacted_ids: authority.publication.compacted_ids.clone(),
-        custodian_publication: authority.custodian_publication.clone().map(Box::new),
-        pins,
-        message_layer_sequences: super::super::layer_declaration::sequence_high_water(
-            &authority.publication.record.body.account_anchor,
-            &authority.publication.record.body.devices,
-        )?,
-        custodian_account_id: None,
-        agent_provisioning_vault_ref: None,
-    };
     let anchor = authority.publication.record.body.account_anchor.clone();
-    vault.store_branch(&branch_ref, &seeds)?;
     let result = (|| {
+        let mut pins = ramflux_crypto::custody::AuthorityPins::default();
+        pins.observe(&verified)?;
+        let stored = StoredAuthority {
+            schema: "ramflux.local.custody_account.v1".into(),
+            local_account_id: id.into(),
+            local_device_id: device,
+            state: CreationState::NetworkingPending,
+            networking_reason: None,
+            networking_node: None,
+            capacity_retry_at: None,
+            pending_branch: true,
+            custody_v3_observed: true,
+            pairing_adoption_required: false,
+            primary_vault_ref: String::new(),
+            branch_vault_ref: branch_ref.clone(),
+            vault_class: vault.vault_class().into(),
+            record: authority.publication.record.clone(),
+            compacted_ids: authority.publication.compacted_ids.clone(),
+            custodian_publication: authority.custodian_publication.clone().map(Box::new),
+            pins,
+            message_layer_sequences: super::super::layer_declaration::sequence_high_water(
+                &authority.publication.record.body.account_anchor,
+                &authority.publication.record.body.devices,
+            )?,
+            custodian_account_id: None,
+            agent_provisioning_vault_ref: None,
+        };
+        vault.store_branch(&branch_ref, &seeds)?;
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
         client.seal_new_account_data(id, &stored.record.body.account_anchor, passphrase)?;

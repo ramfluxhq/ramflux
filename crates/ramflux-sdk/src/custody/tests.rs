@@ -26,7 +26,7 @@ impl Root {
 pub(crate) struct TestVault {
     secrets: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     pub(crate) fail: AtomicBool,
-    fail_branch: AtomicBool,
+    pub(crate) fail_branch: AtomicBool,
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
     commit_obstacle: Mutex<Option<PathBuf>>,
 }

@@ -115,20 +115,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
     LocalBusErrorBody {
         details: bus_error_details(error),
-        reason_code: match error {
-            SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
-            SdkError::ContactInput(reason) => Some(reason.to_string()),
-            SdkError::CustodyVault(reason) => Some(reason.as_str().into()),
-            SdkError::CustodyPublicationFailed => Some("authority_publication".into()),
-            SdkError::ContactConfirmationRequired(_) => {
-                Some("root_replacement_confirmation_required".into())
-            }
-            SdkError::ContactHomeNodeUnsupported => Some("invalid_card".into()),
-            _ if local_bus_error_code(error) == "transfer_requires_sync" => {
-                Some("head_or_removal_floor_mismatch".into())
-            }
-            _ => None,
-        },
+        reason_code: bus_reason_code(error),
         code: local_bus_error_code(error).to_owned(),
         message: if local_bus_error_code(error) == "account_busy" {
             "account in use by another process".into()
@@ -156,6 +143,23 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         },
         cause,
     }
+}
+
+fn bus_reason_code(error: &SdkError) -> Option<String> {
+    Some(match error {
+        SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
+        SdkError::ContactInput(reason) => reason.to_string(),
+        SdkError::CustodyVault(reason) => reason.as_str().into(),
+        SdkError::CustodyPublicationFailed => "authority_publication".into(),
+        SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
+        SdkError::CustodyExpired => "deadline".into(),
+        SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
+        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
+        _ if local_bus_error_code(error) == "transfer_requires_sync" => {
+            "head_or_removal_floor_mismatch".into()
+        }
+        _ => return None,
+    })
 }
 
 fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
@@ -301,6 +305,7 @@ fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
+        SdkError::CustodyConfirmRejected(reason) => reason.family(),
         SdkError::CustodyExpired => "CustodyExpired",
         SdkError::CustodyAccountConflict => "CustodyAccountConflict",
         SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",

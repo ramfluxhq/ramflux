@@ -244,6 +244,71 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
     }
     Ok(())
 }
+fn deny_hard_link(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::from_raw_os_error(1))
+}
+
+#[test]
+fn hard_link_eperm_at_the_syscall_still_publishes_by_rename() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (ceremony, answers) = prepared(&root.0, "link-eperm")?;
+    let dir = directory(&root.0, "link-eperm")?;
+    let calls = Rc::new(std::cell::Cell::new(0_u8));
+    let seen = Rc::clone(&calls);
+    let observed = dir.clone();
+    let _link = crate::platform::fs::install_hard_link(deny_hard_link);
+    let _hook = checkpoints::install(move |stage| {
+        if stage != Stage::Publish {
+            return Ok(());
+        }
+        let temps = temporaries(&observed)?;
+        assert_eq!(temps.len(), 1, "the publication temporary must exist at the link boundary");
+        let destination = observed.join("authority.json");
+        let error = crate::platform::fs::hard_link(&temps[0], &destination)
+            .expect_err("hard link must fail");
+        assert_eq!(error.raw_os_error(), Some(1), "the link syscall must return EPERM");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!destination.exists(), "a refused hard link must not publish authority");
+        seen.set(seen.get() + 1);
+        Ok(())
+    });
+    let account = ceremony.confirm(&answers, &vault, 100)?;
+    assert_eq!(calls.get(), 1, "publication must reach the hard-link syscall once");
+    assert_eq!(
+        fs::read(dir.join("authority.json"))?,
+        ramflux_protocol::canonical_json_bytes(&account.stored)?
+    );
+    assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new(), "rename must consume the temporary");
+    Ok(())
+}
+
+#[test]
+fn restore_branch_store_failure_leaves_no_account_or_directory() -> Result {
+    let (_source, authority) = source_authority()?;
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    vault.fail_branch.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = super::super::recovery::pending_restore(
+        &root.0,
+        "restored",
+        &authority,
+        &vault,
+        b"restore data secret",
+        100,
+    )
+    .expect_err("branch store refused");
+    assert!(matches!(error, SdkError::CustodyVaultUnavailable), "{error}");
+    assert_eq!(AccountIndex::open(&root.0)?.known_account_ids()?.len(), 0);
+    for parent in ["custody_accounts", "accounts"] {
+        let path = root.0.join(parent);
+        let leftover = if path.is_dir() { fs::read_dir(&path)?.count() } else { 0 };
+        assert_eq!(leftover, 0, "{parent}");
+    }
+    assert_eq!(vault.entry_count()?, 0);
+    Ok(())
+}
+
 #[test]
 fn custody_restore_reservation_preserves_existing_index_row_and_wrapped_key() -> Result {
     let (_source, authority) = source_authority()?;

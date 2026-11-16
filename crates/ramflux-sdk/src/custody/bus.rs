@@ -165,6 +165,9 @@ fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
     if let Some(reason) = super::CustodyVaultReason::from_wire(code, reason_code) {
         return SdkError::CustodyVault(reason);
     }
+    if let Some(error) = crate::CustodyConfirmReason::decode(code, reason_code) {
+        return error;
+    }
     match code {
         "CustodyExpired" => SdkError::CustodyExpired,
         "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
@@ -209,6 +212,20 @@ mod reason_tests {
             SdkError::CustodyVaultUnavailable
         ));
         assert!(matches!(decode_error("CustodySetupInvalid", None), SdkError::CustodySetupInvalid));
+        assert!(matches!(
+            decode_error("CustodySetupInvalid", Some("passphrase_too_long")),
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::PassphraseTooLong)
+        ));
+        assert!(matches!(
+            decode_error("CustodyConfirmationFailed", Some("word_2")),
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::WordMismatch {
+                position: 2
+            })
+        ));
+        assert!(matches!(
+            decode_error("CustodyExpired", Some("deadline")),
+            SdkError::CustodyExpired
+        ));
         Ok(())
     }
 

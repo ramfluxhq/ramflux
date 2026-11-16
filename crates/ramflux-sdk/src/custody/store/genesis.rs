@@ -142,8 +142,11 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 }
 
 fn publication_failure(error: &std::io::Error) -> SdkError {
-    // The OS error can carry the account path. Keep only the kind.
+    // Release builds stay silent. Debug logs the I/O kind only: no path and no account id.
+    #[cfg(debug_assertions)]
     tracing::warn!(kind = ?error.kind(), "custody authority publication failed");
+    #[cfg(not(debug_assertions))]
+    let _ = error.kind();
     SdkError::CustodyPublicationFailed
 }
 

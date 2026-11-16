@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 struct Draft {
     path: PathBuf,
-    file: File,
 }
 impl Drop for Draft {
     fn drop(&mut self) {
@@ -16,7 +15,22 @@ impl Drop for Draft {
     }
 }
 
-fn draft(parent: &Path) -> Result<Draft, StorageError> {
+/// Publish `from` as `to` only when `to` is absent.
+///
+/// Hard links fail with `EPERM` on private app directories. A non-replacing
+/// rename has the same result: an existing generation stays untouched.
+fn publish_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        from,
+        rustix::fs::CWD,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(std::io::Error::from)
+}
+
+fn draft(parent: &Path) -> Result<(Draft, File), StorageError> {
     const ATTEMPTS: usize = 8;
     for _ in 0..ATTEMPTS {
         let name = format!(
@@ -32,7 +46,7 @@ fn draft(parent: &Path) -> Result<Draft, StorageError> {
             options.mode(0o600);
         }
         match options.open(&path) {
-            Ok(file) => return Ok(Draft { path, file }),
+            Ok(file) => return Ok((Draft { path }, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
@@ -52,7 +66,7 @@ pub(crate) fn initialize_if_absent(
         return Ok(());
     }
     let parent = path.parent().ok_or(StorageError::AuthorizationRejected)?;
-    let draft = draft(parent)?;
+    let (draft, file) = draft(parent)?;
     let connection = Connection::open(&draft.path)?;
     if let Some(key) = key {
         crate::encryption::apply_key(&connection, key)?;
@@ -62,9 +76,10 @@ pub(crate) fn initialize_if_absent(
         ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
     ))?;
     drop(connection);
-    draft.file.sync_all()?;
-    // No replacing rename: another creator or an existing generation-0 path wins unchanged.
-    match std::fs::hard_link(&draft.path, path) {
+    file.sync_all()?;
+    drop(file);
+    // An existing file, including a generation-0 database, wins unchanged.
+    match publish_exclusive(&draft.path, path) {
         Ok(()) => {
             #[cfg(unix)]
             File::open(parent)?.sync_all()?;
