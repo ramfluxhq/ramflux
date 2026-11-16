@@ -370,7 +370,7 @@ fn verified_forward(
 ) -> TestResult<crate::ForwardedEnvelopeRequest> {
     crate::verify_federated_envelope_forward(
         request,
-        &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+        &ramflux_crypto::public_key_base64url_from_seed(&[81; 32]),
     )?;
     Ok(crate::ForwardedEnvelopeRequest {
         peer_node_id: "test-peer".into(),

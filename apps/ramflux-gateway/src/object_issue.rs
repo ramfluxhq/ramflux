@@ -69,7 +69,7 @@ mod tests {
             node_id: NODE_ID.to_owned(),
             gateway_instance_id: GATEWAY_INSTANCE.to_owned(),
             attestation_public_key: ramflux_crypto::public_key_base64url_from_seed(
-                ATTESTATION_SEED,
+                &ATTESTATION_SEED,
             ),
             attestation_key_id: "att-b-1".to_owned(),
             not_before: now - 10,
@@ -146,7 +146,7 @@ mod tests {
             principal_id: "attacker".into(),
             device_id: "shared".into(),
             target_delivery_id: "delivery".into(),
-            branch_public_key: ramflux_crypto::public_key_base64url_from_seed([3; 32]),
+            branch_public_key: ramflux_crypto::public_key_base64url_from_seed(&[3; 32]),
             device_epoch: 7,
             supports_forward_ack: false,
             ephemeral_rate: std::sync::Arc::default(),
@@ -190,7 +190,7 @@ mod tests {
         ramflux_node_core::verify_relay_token_v3_with_certificate(
             &token,
             &config.certificate,
-            &ramflux_crypto::public_key_base64url_from_seed(ROOT_SEED),
+            &ramflux_crypto::public_key_base64url_from_seed(&ROOT_SEED),
             ramflux_node_core::ObjectRelayCapability::Get,
             AUDIENCE_NODE,
             now,

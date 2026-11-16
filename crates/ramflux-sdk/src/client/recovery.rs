@@ -908,7 +908,7 @@ fn now_unix_u64() -> Result<u64, SdkError> {
 
 #[must_use]
 pub fn recovery_member_public_key_base64url(member_signing_seed: [u8; 32]) -> String {
-    ramflux_crypto::public_key_base64url_from_seed(member_signing_seed)
+    ramflux_crypto::public_key_base64url_from_seed(&member_signing_seed)
 }
 
 fn to_crypto_member_kind(

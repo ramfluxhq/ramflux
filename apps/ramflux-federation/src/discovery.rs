@@ -29,7 +29,7 @@ pub(crate) fn federation_discovery_surface(
             .unwrap_or_else(|_| config.node_id.clone()),
         public_endpoint: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ENDPOINT")
             .unwrap_or_else(|_| config.mesh.listen_addr.clone()),
-        node_public_key: ramflux_crypto::public_key_base64url_from_seed(node_signing_seed),
+        node_public_key: ramflux_crypto::public_key_base64url_from_seed(&node_signing_seed),
         node_ca_cert_pem,
         node_signing_seed,
         protocol_versions: vec!["v1".to_owned()],
@@ -198,7 +198,7 @@ mod tests {
         let surface = FederationDiscoverySurface {
             node_id: "node_test.realnet".to_owned(),
             public_endpoint: "ramflux-test-federation:7443".to_owned(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
             node_ca_cert_pem: "test-ca".to_owned(),
             node_signing_seed: seed,
             protocol_versions: vec!["v1".to_owned()],
@@ -298,7 +298,7 @@ mod attachment_capability_tests {
         FederationDiscoverySurface {
             node_id: "A".into(),
             public_endpoint: "https://a.example".into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             node_ca_cert_pem: "test-ca".into(),
             node_signing_seed: [8; 32],
             protocol_versions: vec!["v1".into()],

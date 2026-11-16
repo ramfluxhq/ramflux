@@ -339,7 +339,7 @@ fn init_custody(
     seed: [u8; 32],
 ) -> Result<CustodyEnv> {
     let output_dir = root.join("custody");
-    let public = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let public = ramflux_crypto::public_key_base64url_from_seed(&seed);
     let mut command = Command::new(rf_bin());
     command
         .args([
@@ -377,7 +377,7 @@ fn init_custody_record(root: &Path, node_id: &str, seed: [u8; 32]) -> Result<Cus
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sign_until = now.checked_add(VALIDITY_DAYS * DAY).ok_or("custody expiry overflow")?;
     let overlap_until = sign_until.checked_add(OVERLAP).ok_or("custody overlap overflow")?;
-    let node_public_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let node_public_key = ramflux_crypto::public_key_base64url_from_seed(&seed);
     let proxy_seed = ramflux_crypto::random_32()?;
     let key_seed = ramflux_crypto::random_32()?;
     let proxy_public = ramflux_protocol::encode_base64url(

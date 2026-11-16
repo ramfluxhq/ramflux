@@ -39,7 +39,7 @@ fn signature_with_noncanonical_s(signature_base64url: &str) -> Result<String, Cr
 fn strict_ed25519_verification_rejects_noncanonical_signature_s() -> Result<(), CryptoError> {
     let message = b"ramflux strict ed25519 verification";
     let seed = [0x31; 32];
-    let public_key = public_key_base64url_from_seed(seed);
+    let public_key = public_key_base64url_from_seed(&seed);
     let signature = sign_canonical_bytes_with_seed(message, seed);
     verify_canonical_signature(message, &signature, &public_key)?;
 

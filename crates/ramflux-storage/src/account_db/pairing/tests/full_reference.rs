@@ -46,7 +46,7 @@ fn local_floor_record(
         device_id: "tail-target".into(),
         device_epoch: 1,
     };
-    let destination_key = ramflux_crypto::public_key_base64url_from_seed([10; 32]);
+    let destination_key = ramflux_crypto::public_key_base64url_from_seed(&[10; 32]);
     record.grant.source_ref = source.clone();
     record.grant.destination_ref = destination.clone();
     record.grant.branch_keys.source = base.body.devices[0]

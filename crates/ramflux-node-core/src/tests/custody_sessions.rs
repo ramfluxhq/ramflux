@@ -440,7 +440,7 @@ fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_res
         body.previous_record_hash = Some(retired.hash().into());
         body.issued_at = NOW + 2;
         let mut key = first.envelope().body.proxy_keys[0].clone();
-        key.public_key = ramflux_crypto::public_key_base64url_from_seed([21; 32]);
+        key.public_key = ramflux_crypto::public_key_base64url_from_seed(&[21; 32]);
         body.proxy_keys = vec![key];
         let rebound = sign_node_identity_record(&root, body)?;
         let rebound = verify_node_identity_record(

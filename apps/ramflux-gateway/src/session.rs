@@ -1274,7 +1274,7 @@ fn load_gateway_v3_issuer_material()
         .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_CERT_FILE_ENV} is required"))?;
     let cert: ramflux_node_core::GatewayIssuerCertificate =
         serde_json::from_slice(&std::fs::read(cert_file)?)?;
-    let expected_attestation_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let expected_attestation_key = ramflux_crypto::public_key_base64url_from_seed(&seed);
     if cert.attestation_public_key != expected_attestation_key {
         anyhow::bail!("v3 issuer seed does not match configured certificate");
     }

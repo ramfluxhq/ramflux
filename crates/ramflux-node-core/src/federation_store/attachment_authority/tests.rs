@@ -41,7 +41,7 @@ fn record(authority: Option<FederationAttachmentAuthority>) -> FederationServerR
     FederationServerRecord {
         schema: "ramflux.well_known_server.v1".into(),
         node_id: NODE.into(),
-        node_public_key: ramflux_crypto::public_key_base64url_from_seed([7; 32]),
+        node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[7; 32]),
         node_ca_cert_pem: "-----BEGIN CERTIFICATE-----\nAA\n-----END CERTIFICATE-----".into(),
         node_endpoint: "https://a.example".into(),
         protocol_versions: vec!["v1".into()],

@@ -57,7 +57,7 @@ fn lease(
         .clone();
     destination_branch.device_id = destination_ref.device_id.clone();
     destination_branch.branch_signing_public_key =
-        ramflux_crypto::public_key_base64url_from_seed([69; 32]);
+        ramflux_crypto::public_key_base64url_from_seed(&[69; 32]);
     destination_branch.agreement_identity_public_key =
         encode_base64url(ramflux_crypto::X25519KeyPair::from_seed([79; 32]).public);
     destination_branch.cert_id = id(80);
@@ -87,8 +87,8 @@ fn lease(
             source_ref,
             destination_ref,
             branch_keys: BranchKeys {
-                source: ramflux_crypto::public_key_base64url_from_seed([63; 32]),
-                destination: ramflux_crypto::public_key_base64url_from_seed([69; 32]),
+                source: ramflux_crypto::public_key_base64url_from_seed(&[63; 32]),
+                destination: ramflux_crypto::public_key_base64url_from_seed(&[69; 32]),
             },
             opaque_commitment: id(70),
             expires_at: now + 604_800,

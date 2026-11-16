@@ -348,7 +348,7 @@ fn recovery_quorum_config(
                 ramflux_protocol::RecoveryQuorumMemberCommitment {
                     member_kind: member_kind.clone(),
                     signing_key_id: (*signing_key_id).to_owned(),
-                    public_key_base64url: ramflux_crypto::public_key_base64url_from_seed(*seed),
+                    public_key_base64url: ramflux_crypto::public_key_base64url_from_seed(seed),
                 }
             })
             .collect(),

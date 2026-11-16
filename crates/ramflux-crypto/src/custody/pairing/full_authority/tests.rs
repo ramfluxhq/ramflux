@@ -35,7 +35,7 @@ fn fixture() -> TestResult<(SelfSigningKey, Envelope<DeviceSet>, DataGrant)> {
                 .body
                 .branch_signing_public_key
                 .clone(),
-            destination: public_key_base64url_from_seed([10; 32]),
+            destination: public_key_base64url_from_seed(&[10; 32]),
         },
         opaque_commitment: b(2),
         expires_at: genesis.body.issued_at + 604_800,
@@ -52,7 +52,7 @@ fn enroll(
         record.body.devices[0].branch_certificate.as_ref().ok_or("branch")?.body.clone();
     branch.device_id = name.into();
     branch.cert_id = b(seed);
-    branch.branch_signing_public_key = public_key_base64url_from_seed([seed; 32]);
+    branch.branch_signing_public_key = public_key_base64url_from_seed(&[seed; 32]);
     branch.agreement_identity_public_key =
         encode_base64url(crate::X25519KeyPair::from_seed([seed + 1; 32]).public);
     Ok(primary.enroll_device(
@@ -91,7 +91,7 @@ fn full_lease_authority_allows_head_updates_but_refuses_revocation_and_reused_de
         .is_err()
     );
     let mut changed = grant.clone();
-    changed.branch_keys.destination = public_key_base64url_from_seed([21; 32]);
+    changed.branch_keys.destination = public_key_base64url_from_seed(&[21; 32]);
     assert!(
         verify_full_prepublication_authority(
             &changed,
@@ -235,14 +235,14 @@ fn full_data_lease_uses_independently_trusted_node_and_original_grant() -> TestR
         schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
         version: 1,
         node_id: grant.node_id.clone(),
-        node_signing_public_key: public_key_base64url_from_seed([50; 32]),
+        node_signing_public_key: public_key_base64url_from_seed(&[50; 32]),
         client_tls_certificate_sha256: Some(b(51)),
         epoch: 1,
         previous_record_hash: None,
         issued_at: now,
         receipt_keys: vec![ReceiptKey {
             key_id: b(52),
-            public_key: public_key_base64url_from_seed([53; 32]),
+            public_key: public_key_base64url_from_seed(&[53; 32]),
             not_before: now,
             sign_until: now + 2_591_900,
             overlap_until: now + 2_591_900 + 605_400,
@@ -257,7 +257,7 @@ fn full_data_lease_uses_independently_trusted_node_and_original_grant() -> TestR
     let node = crate::custody::verify_node_identity_record(
         &record,
         &grant.node_id,
-        &public_key_base64url_from_seed([50; 32]),
+        &public_key_base64url_from_seed(&[50; 32]),
         now,
     )?;
     let lease = DataLease {
@@ -328,8 +328,8 @@ fn tail_admission_predicate() -> TestResult {
     for changed in 0..5 {
         let mut wrong = grant.clone();
         match changed {
-            0 => wrong.branch_keys.source = public_key_base64url_from_seed([90; 32]),
-            1 => wrong.branch_keys.destination = public_key_base64url_from_seed([91; 32]),
+            0 => wrong.branch_keys.source = public_key_base64url_from_seed(&[90; 32]),
+            1 => wrong.branch_keys.destination = public_key_base64url_from_seed(&[91; 32]),
             2 => wrong.source_ref.device_epoch += 1,
             3 => wrong.destination_ref.device_epoch += 1,
             _ => {

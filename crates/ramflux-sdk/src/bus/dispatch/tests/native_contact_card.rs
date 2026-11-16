@@ -68,7 +68,7 @@ async fn native_ordinary_card_export_and_import_selector_keep_the_master_anchor(
 }
 
 fn legacy_card(now: i64) -> TestResult<String> {
-    let public = ramflux_crypto::public_key_base64url_from_seed([7; 32]);
+    let public = ramflux_crypto::public_key_base64url_from_seed(&[7; 32]);
     let body = ContactCardBody {
         version: 1,
         principal_id: "legacy-peer".into(),

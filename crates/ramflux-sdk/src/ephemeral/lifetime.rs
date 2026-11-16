@@ -296,7 +296,7 @@ mod tests {
     }
 
     fn signing_public_key() -> String {
-        ramflux_crypto::public_key_base64url_from_seed(SEED)
+        ramflux_crypto::public_key_base64url_from_seed(&SEED)
     }
 
     fn sign_envelope(envelope: &mut Envelope) {
@@ -646,7 +646,7 @@ mod tests {
         );
         assert!(admit(&unsigned, NOW_MS, MONOTONIC_MS, None).ciphertext.is_none());
 
-        let wrong_key = ramflux_crypto::public_key_base64url_from_seed([8; 32]);
+        let wrong_key = ramflux_crypto::public_key_base64url_from_seed(&[8; 32]);
         assert_eq!(
             authenticate(&envelope, PRINCIPAL, &wrong_key),
             Err(ReceiverDropReason::BadSignature)

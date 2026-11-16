@@ -1049,7 +1049,7 @@ pub(crate) mod tests {
         use ramflux_node_core::test_support::federation_fixtures::{
             federation_route_with_key, signed_federation_handshake, test_federation_ca_pem,
         };
-        let source_public_key = ramflux_crypto::public_key_base64url_from_seed(source_seed);
+        let source_public_key = ramflux_crypto::public_key_base64url_from_seed(&source_seed);
         let mut route = federation_route_with_key(
             "node-b",
             &source_public_key,

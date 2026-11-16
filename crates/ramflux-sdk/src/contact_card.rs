@@ -253,7 +253,7 @@ pub(crate) fn encode_contact_card(
 mod tests {
     use super::*;
     fn body() -> Result<ContactCardBody, SdkError> {
-        let public = ramflux_crypto::public_key_base64url_from_seed([7; 32]);
+        let public = ramflux_crypto::public_key_base64url_from_seed(&[7; 32]);
         Ok(ContactCardBody {
             version: 1,
             principal_id: "alice".into(),
@@ -262,7 +262,7 @@ mod tests {
             node: ContactNode {
                 url: "https://node.example".into(),
                 key_fingerprint: contact_node_fingerprint(
-                    &ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+                    &ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
                 )?,
             },
             display_name: Some("Alice".into()),

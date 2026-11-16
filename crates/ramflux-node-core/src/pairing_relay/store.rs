@@ -151,7 +151,7 @@ impl PairingRelayStore {
             full_resume: None,
             allocations: super::PairingAllocations::default(),
             clock,
-            node_key: public_key_base64url_from_seed(*seed),
+            node_key: public_key_base64url_from_seed(&seed),
             seed,
             boot_id_b64: encode_base64url(boot_id),
             public_origin: origin,

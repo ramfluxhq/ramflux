@@ -251,8 +251,8 @@ fn authenticated_lease_updates_preserve_active_state_until_the_new_expiry() -> R
 fn a_device_key_change_requires_a_new_call_with_fresh_media_secrets() -> Result<(), SdkError> {
     let mut origin = outgoing()?;
     let device = endpoint("bob", "b1");
-    let first = ramflux_crypto::public_key_base64url_from_seed([3; 32]);
-    let replacement = ramflux_crypto::public_key_base64url_from_seed([4; 32]);
+    let first = ramflux_crypto::public_key_base64url_from_seed(&[3; 32]);
+    let replacement = ramflux_crypto::public_key_base64url_from_seed(&[4; 32]);
     origin.pin_peer(device.clone(), first.clone())?;
     assert!(origin.pin_peer(device.clone(), replacement.clone()).is_err());
     assert!(origin.peer_key_matches(&device, &first));

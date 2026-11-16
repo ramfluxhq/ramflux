@@ -30,8 +30,8 @@ struct Fixture {
 }
 fn fixture() -> TestResult<Fixture> {
     let mut context = full_transcript()?;
-    context.initiator.branch_key = crate::public_key_base64url_from_seed([70; 32]);
-    context.responder.branch_key = crate::public_key_base64url_from_seed([71; 32]);
+    context.initiator.branch_key = crate::public_key_base64url_from_seed(&[70; 32]);
+    context.responder.branch_key = crate::public_key_base64url_from_seed(&[71; 32]);
     context.initiator.hpke_key = Some(encode_base64url(public(21)));
     context.responder.hpke_key = Some(encode_base64url(public(22)));
     let start = context.initiator.common.lease_not_before;
@@ -137,11 +137,11 @@ fn pairing_full_resume_node_forged_lease_branch_keys_refused() -> TestResult {
         let f = fixture()?;
         let mut forged = f.lease.clone();
         if as_key {
-            forged.body.grant.branch_keys.source = crate::public_key_base64url_from_seed([81; 32]);
+            forged.body.grant.branch_keys.source = crate::public_key_base64url_from_seed(&[81; 32]);
         }
         if bs_key {
             forged.body.grant.branch_keys.destination =
-                crate::public_key_base64url_from_seed([82; 32]);
+                crate::public_key_base64url_from_seed(&[82; 32]);
         }
         forged.signature =
             crate::sign_canonical_bytes_with_seed(&forged.body.signing_bytes()?, [80; 32]);
@@ -428,7 +428,7 @@ fn saved_resume_node(now: u64) -> TestResult<crate::custody::VerifiedNodeRecord>
         schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
         version: 1,
         node_id: "node.example".into(),
-        node_signing_public_key: crate::public_key_base64url_from_seed([80; 32]),
+        node_signing_public_key: crate::public_key_base64url_from_seed(&[80; 32]),
         client_tls_certificate_sha256: Some(b(90)),
         epoch: 1,
         previous_record_hash: None,
@@ -446,7 +446,7 @@ fn saved_resume_node(now: u64) -> TestResult<crate::custody::VerifiedNodeRecord>
     Ok(crate::custody::verify_node_identity_record(
         &signed,
         "node.example",
-        &crate::public_key_base64url_from_seed([80; 32]),
+        &crate::public_key_base64url_from_seed(&[80; 32]),
         now,
     )?)
 }
@@ -523,7 +523,7 @@ fn pairing_full_saved_resume_record_restores_only_local_scope_with_fresh_keys() 
             1 => record.base_record_hash = b(91),
             2 => {
                 record.grant.branch_keys.destination =
-                    crate::public_key_base64url_from_seed([92; 32]);
+                    crate::public_key_base64url_from_seed(&[92; 32]);
             }
             3 => record.transfer_id = b(93),
             _ => record.role = PairingRole::Responder,

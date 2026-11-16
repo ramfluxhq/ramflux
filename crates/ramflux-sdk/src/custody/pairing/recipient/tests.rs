@@ -65,7 +65,7 @@ fn invitation(
         invitation_id: b32(1),
         issuer_seq: 1,
         request_id: b32(request),
-        node_key: ramflux_crypto::public_key_base64url_from_seed(NODE_SEED),
+        node_key: ramflux_crypto::public_key_base64url_from_seed(&NODE_SEED),
         public_origin: "https://relay.example:443".into(),
         account_anchor: anchor,
         primary_ref: primary,

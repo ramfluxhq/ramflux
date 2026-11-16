@@ -323,7 +323,7 @@ fn unready_material_never_bypasses_root_bound_key_checks() -> TestResult {
     );
     let mut substituted = manifest.clone();
     substituted.devices[0].branch_public_key =
-        ramflux_crypto::public_key_base64url_from_seed([99; 32]);
+        ramflux_crypto::public_key_base64url_from_seed(&[99; 32]);
     assert!(
         verify_manifest(&substituted, &manifest.principal_commitment).is_err(),
         "unready cannot authenticate a substituted key"

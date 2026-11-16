@@ -27,7 +27,7 @@ fn record(seed: u8) -> Result<WellKnownClientRecord, SdkError> {
     let mut record = WellKnownClientRecord {
         schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
         node_id: "node.example.com".to_owned(),
-        node_public_key: ramflux_crypto::public_key_base64url_from_seed([seed; 32]),
+        node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[seed; 32]),
         node_ca_cert_pem: "test CA".to_owned(),
         gateway_quic_addr: "127.0.0.1:7443".to_owned(),
         gateway_tcp_addr: "127.0.0.1:7444".to_owned(),

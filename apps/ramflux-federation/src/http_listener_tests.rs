@@ -86,7 +86,7 @@ pub(super) fn context(
         discovery: crate::FederationDiscoverySurface {
             node_id: "node-a".into(),
             public_endpoint: "localhost:7443".into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
             node_ca_cert_pem: "test-ca".into(),
             node_signing_seed: seed,
             protocol_versions: vec!["v1".into()],

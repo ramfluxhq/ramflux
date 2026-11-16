@@ -220,7 +220,7 @@ impl Case {
             queued: VecDeque::new(),
             entry: self.entry.clone(),
             device_public_key: ramflux_crypto::public_key_base64url_from_seed(
-                branch.signing_key.to_bytes(),
+                &(branch.signing_key.to_bytes()),
             ),
         };
         let engine = GatewaySessionEngine::with_test_transport(self.b.config()?, Box::new(wire));

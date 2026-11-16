@@ -20,7 +20,7 @@ fn invitation() -> ResultOf<Invitation> {
         invitation_id: h(1),
         issuer_seq: 1,
         request_id: h(3),
-        node_key: ramflux_crypto::public_key_base64url_from_seed([7; 32]),
+        node_key: ramflux_crypto::public_key_base64url_from_seed(&[7; 32]),
         public_origin: "https://relay.example:443".into(),
         account_anchor: h(2),
         primary_ref: reference("A"),
@@ -42,7 +42,7 @@ fn invitation() -> ResultOf<Invitation> {
 }
 fn ceremony(role: PairingRole) -> ResultOf<Ceremony> {
     let invitation = invitation()?;
-    let master = ramflux_crypto::public_key_base64url_from_seed([10; 32]);
+    let master = ramflux_crypto::public_key_base64url_from_seed(&[10; 32]);
     let full = CommonV3::from_full_invitation(&invitation, master.clone())?;
     let common = invitation.project_common(master)?;
     let mut c = PairingActor::open_ceremony(CeremonyOpen {
@@ -63,7 +63,7 @@ fn ceremony(role: PairingRole) -> ResultOf<Ceremony> {
         &mut c,
         &reference,
         Some((
-            ramflux_crypto::public_key_base64url_from_seed([seed; 32]),
+            ramflux_crypto::public_key_base64url_from_seed(&[seed; 32]),
             encode_base64url(X25519KeyPair::from_seed([seed; 32]).public),
         )),
     )?;

@@ -135,10 +135,10 @@ mod tests {
         let (seed, input) = sample();
         let signature =
             sign_node_report_receipt_with_seed(&input, seed).expect("test: sign the node receipt");
-        let trusted = public_key_base64url_from_seed(seed);
+        let trusted = public_key_base64url_from_seed(&seed);
         verify_node_report_receipt(&input, &signature, &trusted)
             .expect("test: verify against the trusted node key");
-        let reporter = public_key_base64url_from_seed([0x72; 32]);
+        let reporter = public_key_base64url_from_seed(&[0x72; 32]);
         assert!(matches!(
             verify_node_report_receipt(&input, &signature, &reporter),
             Err(CryptoError::VerifyFailed)

@@ -23,14 +23,17 @@ pub fn fixture_public_key_base64url() -> String {
     encode_base64url(fixture_verifying_key().to_bytes())
 }
 
+/// Public key of a borrowed seed. A `Zeroizing<[u8; 32]>` is passed as `&seed` and is not copied
+/// into an owned argument.
 #[must_use]
-pub fn public_key_base64url_from_seed(seed: [u8; 32]) -> String {
+pub fn public_key_base64url_from_seed(seed: &[u8; 32]) -> String {
     encode_base64url(public_key_bytes_from_seed(seed))
 }
 
+/// Raw verifying key of a borrowed seed. See [`public_key_base64url_from_seed`].
 #[must_use]
-pub fn public_key_bytes_from_seed(seed: [u8; 32]) -> [u8; 32] {
-    SigningKey::from_bytes(&seed).verifying_key().to_bytes()
+pub fn public_key_bytes_from_seed(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
 #[must_use]
@@ -242,3 +245,21 @@ pub fn verify_fixture_signature(
 #[cfg(test)]
 #[path = "signing_sender_tests.rs"]
 mod sender_tests;
+
+#[cfg(test)]
+mod borrow_tests {
+    use super::{public_key_base64url_from_seed, public_key_bytes_from_seed};
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn public_key_derivation_borrows_a_plain_or_guarded_seed() {
+        let seed = [0x11_u8; 32];
+        let guarded = Zeroizing::new(seed);
+        assert_eq!(public_key_bytes_from_seed(&seed), public_key_bytes_from_seed(&guarded));
+        assert_eq!(public_key_base64url_from_seed(&seed), public_key_base64url_from_seed(&guarded));
+        assert_eq!(
+            public_key_base64url_from_seed(&guarded),
+            ramflux_protocol::encode_base64url(public_key_bytes_from_seed(&seed))
+        );
+    }
+}

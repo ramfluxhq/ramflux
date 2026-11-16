@@ -763,7 +763,7 @@ mod tests {
         ramflux_crypto::verify_canonical_signature(
             &ramflux_protocol::signed_bytes(&frame.signed_request).expect("signed bytes"),
             &frame.signed_request.signed.signature,
-            &ramflux_crypto::public_key_base64url_from_seed([9_u8; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[9_u8; 32]),
         )
         .expect("branch signature covers the session binding");
         // A fresh route is not re-sent on every liveness check.

@@ -306,7 +306,7 @@ async fn unbound_custody_privacy_control(account: &AuthorityFixture) -> Result {
     let node = verify_node_identity_record(
         &record,
         "test-node",
-        &ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+        &ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
         ramflux_node_core::now_unix_seconds(),
     )?;
     let gateway = Gateway::new_custody(Some(&node)).await?;

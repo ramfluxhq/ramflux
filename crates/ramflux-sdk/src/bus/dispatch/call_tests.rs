@@ -16,7 +16,7 @@ pub(crate) fn fixture(
     let peer = CallEndpoint {
         principal_id: "bob".into(),
         device_id: "bob-device".into(),
-        root_public_key: ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+        root_public_key: ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
     };
     let id = ramflux_protocol::encode_base64url([7; 16]);
     let mut call =
@@ -209,7 +209,7 @@ fn committed_call_cache_refresh_is_idempotent_and_cannot_revive_a_restarted_call
     let remote = CallEndpoint {
         principal_id: "bob".into(),
         device_id: "bob-device".into(),
-        root_public_key: ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+        root_public_key: ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
     };
     let caller = LiveCall::outgoing(
         ramflux_protocol::encode_base64url([8; 16]),

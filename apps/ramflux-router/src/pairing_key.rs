@@ -53,7 +53,7 @@ pub(crate) fn load(node_public_key: &str) -> Result<NodeSecret, PairingKeyError>
         .filter(|value| !value.is_empty())
         .ok_or(PairingKeyError::Missing)?;
     let secret = NodeSecret::from_file(path).map_err(|_| PairingKeyError::Malformed)?;
-    let public = secret.with_bytes(|bytes| ramflux_crypto::public_key_base64url_from_seed(*bytes));
+    let public = secret.with_bytes(ramflux_crypto::public_key_base64url_from_seed);
     if public != node_public_key {
         return Err(PairingKeyError::Mismatch);
     }

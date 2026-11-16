@@ -46,7 +46,7 @@ impl Vault {
             let mut agreement = Zeroizing::new([0; 32]);
             signing.copy_from_slice(seeds.get(..32).ok_or_else(unavailable)?);
             agreement.copy_from_slice(seeds.get(32..).ok_or_else(unavailable)?);
-            let public = ramflux_crypto::public_key_base64url_from_seed(*signing);
+            let public = ramflux_crypto::public_key_base64url_from_seed(&signing);
             let device = record
                 .body
                 .devices

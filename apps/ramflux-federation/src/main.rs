@@ -234,7 +234,7 @@ fn validate_enabled_migration_config(
     let signer = ramflux_node_core::require_node_service_signing_key(config)?;
     let mounted =
         ramflux_node_core::NodeSecret::required_env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE")?;
-    let public = mounted.with_bytes(|seed| ramflux_crypto::public_key_base64url_from_seed(*seed));
+    let public = mounted.with_bytes(ramflux_crypto::public_key_base64url_from_seed);
     if signer.public_key_base64url() != public {
         return Err(ramflux_node_core::NodeCoreError::InvalidConfiguration(
             "migration node signer differs from federation identity".into(),

@@ -420,8 +420,8 @@ pub(super) fn fixture() -> TestResult<(FullResumeRecord, SourceManifest, Zeroizi
     ))?;
     let mut transcript =
         TranscriptV3::from_wire_bytes(&canonical_json_bytes(&vectors["transcript"])?)?;
-    transcript.initiator.branch_key = ramflux_crypto::public_key_base64url_from_seed([7; 32]);
-    transcript.responder.branch_key = ramflux_crypto::public_key_base64url_from_seed([8; 32]);
+    transcript.initiator.branch_key = ramflux_crypto::public_key_base64url_from_seed(&[7; 32]);
+    transcript.responder.branch_key = ramflux_crypto::public_key_base64url_from_seed(&[8; 32]);
     let common = &transcript.initiator.common;
     let plaintext =
         Zeroizing::new((0_u8..251).cycle().take(CHUNK_BYTES as usize * 2 + 17).collect::<Vec<_>>());
