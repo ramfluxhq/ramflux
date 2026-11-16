@@ -635,7 +635,8 @@ inside the compose network (for example `10.89.1.110`). Rootless port publishing
 to the federation HTTP port arrive from the federation container's own address, and an unpinned address
 changes on every recreate, so the generator pins the federation to that address (a compose
 `ipv4_address`, plus the /24 subnet of the project network whose dynamic `ip_range` is its upper half
-`.128/25`, so the address must be host `.2` to `.127` and no other container can take it) and sets it as the federation's only trusted
+`.128/25`, so the address must be host `.2` to `.127` and no dynamically allocated container can take it; an
+occupant explicitly pinned to it by other means is not detected) and sets it as the federation's only trusted
 proxy (`RAMFLUX_FEDERATION_TRUSTED_PROXIES` is derived and refused whenever it is set, pairing on or off). The origin goes to the
 federation and the router. An existing `<project>_default` network keeps the IPAM it was created with, so `up` refuses it
 (`DEMO_NETWORK_IPAM_MISMATCH`, before any managed state is written) unless its subnet and dynamic range

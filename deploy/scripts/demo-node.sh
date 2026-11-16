@@ -572,8 +572,12 @@ EOF
 esac
 # An existing network keeps the IPAM it was created with; the generator refuses one that does not
 # reserve the pinned federation address (absent: compose creates it from the override).
-if runtime network ls --format '{{.Name}}' | grep -qx "${DEMO_PROJECT}_default"; then
-  DEMO_EXISTING_NETWORK_INSPECT=$(runtime network inspect "${DEMO_PROJECT}_default")
+# Only a successful listing without the network means absent; a failed listing is refused.
+network_names=$(runtime network ls --format '{{.Name}}') ||
+  fail 'DEMO_NETWORK_LIST_FAILED: cannot list compose networks, so the existing network cannot be checked'
+if printf '%s\n' "$network_names" | grep -qx "${DEMO_PROJECT}_default"; then
+  DEMO_EXISTING_NETWORK_INSPECT=$(runtime network inspect "${DEMO_PROJECT}_default") ||
+    fail 'DEMO_NETWORK_LIST_FAILED: cannot inspect the existing compose network'
   export DEMO_EXISTING_NETWORK_INSPECT
 fi
 if [ "$command" = recover ]; then

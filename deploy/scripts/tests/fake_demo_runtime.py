@@ -184,6 +184,14 @@ if args[:2] == ["network", "inspect"] and "--format" not in args:
                 dynamic = ipaddress.ip_network(ipam["ip_range"])
                 subnets[0]["lease_range"] = {"start_ip": str(dynamic[1]), "end_ip": str(dynamic[-1])}
         print(json.dumps([{"name": "demo-test_default", "subnets": subnets}]))
+elif args == ["network", "ls", "--format", "{{.Name}}"] and control.get("network_ls_fails_after"):
+    # Earlier ownership listings succeed; every listing after that many calls fails.
+    counter = root / "network-ls-count"
+    calls = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(calls))
+    if calls > control["network_ls_fails_after"]:
+        sys.exit("network listing failed")
+    print("demo-test_default")
 elif args == ["network", "ls", "--format", "{{.Name}}"] and (
         control.get("unlabeled") == "network" or "id-demo-network" in resources):
     print("demo-test_default")

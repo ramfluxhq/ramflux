@@ -252,6 +252,21 @@ else:
                 self.assertEqual((self.root / "resources.json").read_text(), before)
         self.control.write_text("{}")
 
+    def test_failed_network_listing_is_refused_not_treated_as_absent(self):
+        self.pairing_override(True)
+        self.control.write_text(json.dumps({"network_ipam": {"subnet": "10.89.1.0/24"},
+                                            "network_ls_fails_after": 1}))
+        before = (self.root / "resources.json").read_text()
+        compose_before = len(self.compose_commands())
+        owner_before = (self.state / "owner.json").read_text()
+        result = self.pairing_override(True, success=False)
+        self.assertIn("DEMO_NETWORK_LIST_FAILED", result.stdout + result.stderr)
+        self.assertEqual((self.root / "resources.json").read_text(), before)
+        self.assertEqual(len(self.compose_commands()), compose_before)
+        self.assertEqual((self.state / "owner.json").read_text(), owner_before)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertFalse((self.state / "owner.json.pending").exists())
+
     def test_existing_network_without_ipam_is_not_checked_when_pairing_is_off(self):
         self.pairing_override(False)
         self.control.write_text(json.dumps({"network_ipam": {"subnet": "10.5.0.0/16"}}))
