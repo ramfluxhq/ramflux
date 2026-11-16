@@ -1114,11 +1114,6 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      - name: Test (legacy accounts)
-        run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label legacy-accounts -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-
       - name: Build same-tree router for the session push real-router gate
         if: ${{ !cancelled() }}
         run: |
@@ -1297,8 +1292,8 @@ jobs:
 
       - name: Migration release gate regressions
         run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
-          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13

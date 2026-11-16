@@ -135,13 +135,6 @@ async fn dispatch_group_bus_request_inner(
             let distribution =
                 account.client.import_group_sender_key_distribution(&distribution)?;
             let mut value = serde_json::to_value(distribution)?;
-            let imported_group_id = value["group_id"]
-                .as_str()
-                .ok_or_else(|| SdkError::LocalBus("missing imported group_id".to_owned()))?
-                .to_owned();
-            value["pending_undecrypted_count"] = serde_json::json!(
-                account.client.account_db()?.group_pending_undecrypted_count(&imported_group_id)?
-            );
             value["durable_reader"] = serde_json::json!("message.read");
             Ok(local_bus_ok(value))
         }

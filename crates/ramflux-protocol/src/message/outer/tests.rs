@@ -15,9 +15,7 @@ use super::{
     refuse_live_bridge, require_live_collapse_tag, require_live_report_commitment,
     validate_candidate_delivery_mode, wire_encrypted_payload,
 };
-use crate::schema_profile::{
-    ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
-};
+use crate::schema_profile::{ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION};
 use crate::{
     DeliveryClass, Envelope, Ext, Priority, ProtocolError, SignatureAlg, SignedFields,
     WELL_KNOWN_CLIENT_SCHEMA, WellKnownClientRecord, canonical_json_bytes,
@@ -223,7 +221,6 @@ fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
         OuterProfileError::UnknownMode.to_string(),
         "new profile rejects unknown delivery_mode"
     );
-    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
     let mut live = active_envelope(None);
     live.delivery_mode = Some("ephemeral".into());
     assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Ephemeral);
@@ -315,7 +312,6 @@ fn one_byte_over_each_real_cap() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn activation_refuses_retired_outer_fixture() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION);
-    assert!(schema_v1_live());
     let envelope = live_envelope(Some("ephemeral"));
     let retired = canonical_json_bytes(&envelope)?;
     assert_eq!(retired, LIVE_ENVELOPE_GOLDEN, "the retired fixture must remain exact");
@@ -506,7 +502,6 @@ fn nested_sdk_value(cryptobox: &[u8]) -> Value {
 
 #[test]
 fn activation_requires_compact_cryptobox() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(schema_v1_live());
     let body = serde_json::to_vec(&nested_sdk_value(&[7_u8; 32]))?;
     assert!(
         decode_compact_cryptobox(&body).is_err(),
@@ -519,7 +514,6 @@ fn activation_requires_compact_cryptobox() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn candidate_wire_payload_is_compact_cryptobox() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
     let cryptobox = vec![7_u8; 64];
     let body = serde_json::to_vec(&nested_sdk_value(&cryptobox))?;
     let payload = wire_encrypted_payload(&body)?;
@@ -604,7 +598,6 @@ fn unknown_field<T: std::fmt::Debug>(
 #[test]
 fn nested_ciphertext_pad_is_unknown_field_on_250kb_envelope()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
     let padded = inject_nested_pad(&compact_250kb()?, "ciphertext", json!("p".repeat(NESTED_PAD)))?;
     assert!(padded.len() > REAL_250KB);
     assert!(padded.len() < MAX_COMPLETE_FRAME_BYTES);
@@ -614,7 +607,6 @@ fn nested_ciphertext_pad_is_unknown_field_on_250kb_envelope()
 
 #[test]
 fn nested_x3dh_pad_is_unknown_field_not_bootstrap_cap() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
     let padded = inject_nested_pad(&compact_250kb()?, "x3dh", json!("x"))?;
     unknown_field(decode_candidate_sidecar(decode_compact_cryptobox(&padded)?.sidecar))?;
     unknown_field(IngressSizes::measure_wire(&envelope_with_payload(&padded), 0, &[], &[]))
@@ -788,7 +780,6 @@ fn candidate_only_fields_are_enumerated() {
         helper_covers_candidate_fields(src, &extra),
         "fields outside generation-0 Envelope must be in candidate_fields_present: {extra:?}"
     );
-    assert!(schema_v1_live());
     let mut envelope = live_envelope(None);
     assert!(!envelope.candidate_fields_present());
     envelope.delivery_mode = Some("durable".into());
@@ -800,7 +791,6 @@ fn candidate_only_fields_are_enumerated() {
 
 #[test]
 fn activation_refuses_retired_bridge_with_named_fields() {
-    assert!(schema_v1_live());
     let mut envelope = live_envelope(None);
     envelope.delivery_mode = Some("durable".into());
     envelope.collapse_tag = Some(collapse_tag());

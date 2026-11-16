@@ -10,7 +10,6 @@ use ramflux_protocol::message as g;
 async fn own_authored_group_history_preserves_plaintext_nonce_for_a_later_third_sibling()
 -> TestResult {
     let mut source = Fixture::new("authored-group-source").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let primary = source
         .client
         .born_v3_account

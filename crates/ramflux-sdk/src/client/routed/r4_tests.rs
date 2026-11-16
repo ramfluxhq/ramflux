@@ -32,8 +32,8 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
     let b = bootstrap(&bob, &alice, "bob-initial")?;
     let mut ae = GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &b, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &a, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &b).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &a).await?;
     let active_a = alice
         .client
         .active_pair(
@@ -59,14 +59,14 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
         super::r5::native_outgoing(&alice, &bob, "reply-a")?,
         b"reply",
     )?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &reply, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &reply).await?;
     let reply = super::r5::seal(
         &bob,
         &alice,
         super::r5::native_outgoing(&bob, &alice, "reply-b")?,
         b"reply",
     )?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &reply, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &reply).await?;
     let next = super::r5::seal(
         &alice,
         &bob,
@@ -75,7 +75,7 @@ async fn simultaneous_verified_bootstraps_converge_and_retire_x3dh_after_peer_co
     )?;
     assert!(decode(&next.envelope)?.x3dh.is_none());
     assert!(decode(&next.envelope)?.ciphertext.ratchet_public_key.is_some());
-    bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &next).await?;
     let (_, _, _) = bob.client.send_pair_session_from_url(
         &bob.client.local_device_identity("bob")?,
         &super::r5::native_outgoing(&bob, &alice, "next")?,

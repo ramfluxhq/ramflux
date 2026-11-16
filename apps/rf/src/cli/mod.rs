@@ -101,17 +101,32 @@ mod tests {
     #[test]
     fn retired_relay_service_key_flags_are_typed_parse_refusals()
     -> Result<(), Box<dyn std::error::Error>> {
-        for arguments in [
-            vec!["rf", "dm", "send", "--relay-service-key", "retired"],
-            vec!["rf", "dm", "read", "--relay-service-key", "retired"],
-            vec!["rf", "device", "sync", "export", "--relay-service-key-base64", "retired"],
-            vec!["rf", "device", "sync", "import", "--relay-service-key-base64", "retired"],
-        ] {
+        // `device sync import` was removed with the relay subcommand. The other
+        // commands remain, and their retired flags are unknown arguments.
+        let cases: &[(&[&str], clap::error::ErrorKind)] = &[
+            (
+                &["rf", "dm", "send", "--relay-service-key", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "dm", "read", "--relay-service-key", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "device", "sync", "export", "--relay-service-key-base64", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "device", "sync", "import", "--relay-service-key-base64", "retired"],
+                clap::error::ErrorKind::InvalidSubcommand,
+            ),
+        ];
+        for (arguments, kind) in cases {
             let error =
-                Cli::try_parse_from(arguments).err().ok_or("test: retired relay flag accepted")?;
+                Cli::try_parse_from(*arguments).err().ok_or("test: retired relay flag accepted")?;
             assert_eq!(
                 error.kind(),
-                clap::error::ErrorKind::UnknownArgument,
+                *kind,
                 "retired flag must fail during parsing rather than be silently ignored"
             );
         }

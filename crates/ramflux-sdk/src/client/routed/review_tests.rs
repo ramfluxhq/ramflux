@@ -85,7 +85,7 @@ async fn a_friend_cannot_inject_into_another_principals_direct_thread() -> Resul
     )?;
     let entry = seal(&alice, &bob, message("injection", "thread"), b"injected")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err());
     assert_eq!(bob.client.direct_messages("thread")?.len(), 0);
     Ok(())
 }
@@ -258,7 +258,7 @@ async fn closed_a2i_api_preserves_mixed_inbox_for_supported_receive() -> Result<
     assert_eq!(writes.lock().map_err(|_| invalid("mutex"))?.len(), 0, "closed API consumed inbox");
     assert_eq!(bob.client.direct_messages(&sent.conversation)?.len(), 0);
     assert_eq!(bob.client.gateway_receive_cursor(&engine.config.target_delivery_id)?, 0);
-    bob.client.apply_routed_entry(&mut engine, &pool()?, &sent.entry, false).await?;
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &sent.entry).await?;
     assert_eq!(bob.client.direct_messages(&sent.conversation)?.len(), 1);
     assert_eq!(bob.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/")?.len(), 0);
     Ok(())
@@ -446,7 +446,7 @@ async fn existing_threads_without_participant_metadata_are_never_claimed_by_a_ne
     bob.client.send_direct_message("thread", "old-history", "carol", b"prior history")?;
     let entry = seal(&alice, &bob, message("claim-old-thread", "thread"), b"injection")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err());
     assert_eq!(bob.client.direct_messages("thread")?.len(), 1);
     Ok(())
 }
@@ -476,7 +476,7 @@ async fn an_authenticated_alias_still_honors_a_block_on_its_root_commitment() ->
     bob.client.block_friend_link("blocked-root")?;
     let sent = generated_delivery(&alice, &bob, "blocked-alias", "blocked message")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    let result = bob.client.apply_routed_entry(&mut engine, &pool()?, &sent.entry, false).await?;
+    let result = bob.client.apply_routed_entry(&mut engine, &pool()?, &sent.entry).await?;
     assert!(result.plaintext.is_none());
     assert!(bob.client.account_db()?.message_content(&sent.message)?.is_none());
     assert_eq!(bob.client.rejected_inbox(&sent.conversation)?.len(), 1);

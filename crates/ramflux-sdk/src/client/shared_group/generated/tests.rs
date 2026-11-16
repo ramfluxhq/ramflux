@@ -74,7 +74,6 @@ fn route() -> Routing {
 #[tokio::test]
 async fn generated_group_state_uses_native_current_role_and_exact_actor_before_retention()
 -> TestResult {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let own = Box::pin(Fixture::new("generated-group-state-owner")).await?;
     let outsider = Box::pin(Fixture::new("generated-group-state-outsider")).await?;
     own.client.persist_fetched_identity_directory(&outsider.manifest)?;

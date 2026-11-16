@@ -162,7 +162,7 @@ async fn capable_events_survive_buffer_and_subscription() {
 
     // (p4) a delivery landing exactly on SESSION_BUFFER_BYTES is accepted; (r2) one byte more
     // is dropped the same way.
-    let mut engine = scripted(SessionMode::Legacy, vec![]);
+    let mut engine = scripted(SessionMode::Direct, vec![]);
     let (hub, resync) = attach_host(&mut engine);
     let mut lagged = hub.subscribe([FrameKind::Resync]);
     engine.last_frame_bytes = SESSION_BUFFER_BYTES;
@@ -177,7 +177,7 @@ async fn capable_events_survive_buffer_and_subscription() {
     assert!(matches!(recv(&mut lagged).await, SessionEvent::Lagged { .. }));
 
     // (p5) take_pending_deliveries on a mixed buffer returns entries in arrival order.
-    let mut engine = scripted(SessionMode::Legacy, vec![]);
+    let mut engine = scripted(SessionMode::Direct, vec![]);
     engine.last_frame_bytes = 1;
     engine.buffer_delivery(entry(1));
     engine.buffer_capable_delivery(entry(2), meta(2));
@@ -189,7 +189,7 @@ async fn capable_events_survive_buffer_and_subscription() {
     // (p6) a Legacy session deliver still publishes SessionEvent::Frame.
     let legacy = json!({"frame_type":"deliver","entry":{
         "inbox_seq":71,"target_delivery_id":"target-route","envelope":envelope()}});
-    let mut engine = scripted(SessionMode::Legacy, vec![legacy, heartbeat()]);
+    let mut engine = scripted(SessionMode::Direct, vec![legacy, heartbeat()]);
     let (hub, _) = attach_host(&mut engine);
     let mut deliveries = hub.subscribe([FrameKind::Deliver]);
     engine.read_reply(ExpectedReply::Heartbeat).await.unwrap();

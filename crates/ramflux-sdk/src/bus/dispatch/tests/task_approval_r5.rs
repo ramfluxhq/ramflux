@@ -385,6 +385,7 @@ async fn r10_stalled_couriers_rotate_while_healthy_confirmations_finish() -> Cas
 #[tokio::test]
 async fn r11_sync_cycle_only_signals_stalled_task_courier_work() -> Case {
     let mut fixture = courier_starvation_fixture()?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut fixture.human.client, "human")?;
     let (wake, mut signalled) = tokio::sync::mpsc::channel(1);
     fixture.human.task_courier_wake = Some(wake);
     let started = std::time::Instant::now();

@@ -230,7 +230,6 @@ mod lag_tests {
 
     #[test]
     fn unified_overflow_ends_with_a_lag_notice_instead_of_a_silent_drop() -> Result<(), SdkError> {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let (tx, mut rx) = mpsc::channel(3);
         let mut subscribers = subscriber(tx);
         broadcast(&mut subscribers, &[durable(1), durable(2), durable(3), durable(4)]);

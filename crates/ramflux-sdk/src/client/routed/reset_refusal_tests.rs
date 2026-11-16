@@ -108,7 +108,7 @@ async fn pending() -> Result<(Fixture, Fixture, crate::time::FixedClock), Box<dy
     let clock = crate::time::FixedClock::set(now);
     let stale = gap(&alice, &bob, "refusal-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     assert_eq!(sent.lock().map_err(|_| "sent")?.len(), 1, "the first reset was submitted");
     let first = work(&bob.client)?.ok_or("work")?;
     assert_eq!(first["attempts"], 1);

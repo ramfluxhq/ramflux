@@ -47,7 +47,7 @@ fn id(n: u8) -> IncarnationId {
 
 fn envelope(tag: &str) -> ramflux_protocol::Envelope {
     serde_json::from_value(json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
         "signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture",
         "envelope_id":format!("env-{tag}"),"source_principal_id":"p","source_device_id":"d",
         "target_delivery_id":format!("target-{tag}"),"delivery_class":"opaque_event",

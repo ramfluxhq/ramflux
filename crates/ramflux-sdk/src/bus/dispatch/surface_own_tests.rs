@@ -400,7 +400,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         peer_config.clone(),
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
     );
-    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming).await?;
     // The author advances while the recipient loses this event.
     let delta = append(&source.client, &create, 2)?;
     send(&mut source, &delta).await?;
@@ -453,7 +453,7 @@ async fn recipient_resync_request_crosses_pair_authentication_and_sync_driver_re
         target_delivery_id: reply.target_delivery_id.clone(),
         envelope: reply,
     };
-    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    peer.client.apply_routed_entry(&mut receiver, &pool, &incoming).await?;
     let view = peer.client.surface_get("surface", 0, None)?;
     assert_eq!(view["version"], 2);
     assert_eq!(view["out_of_sync"], false);

@@ -113,7 +113,7 @@ fn engine(reply: Reply) -> Result<(GatewaySessionEngine, Submissions), SdkError>
 
 fn envelope() -> Result<ramflux_protocol::Envelope, SdkError> {
     Ok(serde_json::from_value(serde_json::json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
         "signing_key_id":"submit-device","signature_alg":"ed25519","signature":"fixture",
         "envelope_id":"forwarded-envelope","source_principal_id":"submit-forward",
         "source_device_id":"submit-device","target_delivery_id":"remote-target",

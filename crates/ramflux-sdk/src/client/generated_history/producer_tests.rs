@@ -29,7 +29,6 @@ async fn history_chain_restart_reexports_prefix_and_starts_at_page_zero() -> Tes
 
 #[tokio::test]
 async fn history_staging_refuses_the_local_device_and_a_foreign_root() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let own = Fixture::new("history-producer-own").await?;
     let peer = Fixture::new("history-producer-peer").await?;
     assert_eq!(
@@ -82,7 +81,6 @@ async fn history_producer_skips_rows_without_first_hand_evidence() -> TestResult
 #[tokio::test]
 async fn history_courier_has_no_work_without_retained_history() -> TestResult {
     let own = Fixture::new("history-producer-dormant").await?;
-    assert!(ramflux_protocol::schema_profile::schema_v1_live());
     assert!(own.client.prepare_generated_history_delivery(&own.config)?.is_none());
     Ok(())
 }
@@ -160,7 +158,6 @@ async fn history_export_never_contains_live_pair_secrets() -> TestResult {
     use prost::Message as _;
     let mut source = Fixture::new("history-secret-source").await?;
     let peer = Fixture::new("history-secret-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, retained, _) = Box::pin(
         crate::client::native_test_support::history::receive_first_hand(&mut source, &peer),
     )

@@ -50,7 +50,6 @@ fn apply(client: &RamfluxClient, update: &g::SelfSync) -> Result<bool, SdkError>
 }
 
 fn install_read_messages(client: &RamfluxClient) -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let db = client.account_db()?;
     for (id, at) in [("m1", 1), ("m2", 2)] {
         db.import_direct_message_projection(DirectMessageWrite {
@@ -75,7 +74,6 @@ fn install_read_messages(client: &RamfluxClient) -> TestResult {
 
 #[tokio::test(flavor = "current_thread")]
 async fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut fixture = Box::pin(Fixture::with_device("self-sync", "local")).await?;
     let client = &fixture.client;
     let db = client.account_db()?;
@@ -172,7 +170,6 @@ async fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestR
 
 #[test]
 fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = g::SelfSync { mute: true, ..value(6, 6) };
     let b = value(7, 6);
     let c = value(7, 7);
@@ -222,7 +219,6 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
 
 #[test]
 fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut states = Vec::new();
     for order in [[read("m2", 1), read("m1", 2)], [read("m1", 2), read("m2", 1)]] {
         let fixture = blocking("self-sync-read-bootstrap", "local")?;
@@ -258,7 +254,6 @@ fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestRe
 
 #[test]
 fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let fixture = blocking("self-sync-unseen-limit", "local")?;
     let client = &fixture.client;
     let own = client.owned_device_identity()?;
@@ -306,7 +301,6 @@ fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply(
 
 #[test]
 fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let fixture = blocking("self-sync-read-order", "local")?;
     let client = &fixture.client;
     install_read_messages(client)?;
@@ -332,7 +326,6 @@ fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() 
 
 #[tokio::test(flavor = "current_thread")]
 async fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut fixture = Box::pin(Fixture::with_device("self-sync-publication", "local")).await?;
     let update = fixture.client.change_self_sync("c", value(7, 0))?;
     for restart in [false, true] {
@@ -392,7 +385,6 @@ fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publica
 
 #[test]
 fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copies() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let fixture = blocking("self-sync-repair-lifetime", "local")?;
     let client = &fixture.client;
     let a = g::SelfSync {
@@ -458,7 +450,6 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
 
 #[test]
 fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let fixture = blocking("self-sync-repair-read-max", "local")?;
     let client = &fixture.client;
     install_read_messages(client)?;
@@ -483,7 +474,6 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
 
 #[test]
 fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let fixture = blocking("self-sync-read-reference", "local")?;
     let client = &fixture.client;
     let mut wrong_author = read("m2", 1);

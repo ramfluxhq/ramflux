@@ -115,7 +115,7 @@ async fn shared_group_routed_fanout_resumes_one_round_and_one_failed_device_does
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
         };
-        peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
+        peer.client.apply_routed_entry(&mut receiver, &pool, &entry).await?;
         assert_eq!(peer.client.group_state("group")?.group_epoch, 2);
         let sender = peer.client.device_identity_for_root(&root_commitment, &config.device_id)?;
         let plaintext =
@@ -158,7 +158,6 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
     use ramflux_protocol::group_state::{
         GroupStateChange, MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_MEMBERS, SharedGroupRole,
     };
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let source = Box::pin(Fixture::new("native-group-frame-source")).await?;
     let peer = Box::pin(Fixture::new("native-group-frame-peer")).await?;
     source.client.persist_fetched_identity_directory(&peer.manifest)?;
@@ -437,7 +436,7 @@ async fn background_group_delivery_preserves_partial_round_and_recipient_crypto(
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
         };
-        peer.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await?;
+        peer.client.apply_routed_entry(&mut receiver, &pool, &entry).await?;
         assert_eq!(peer.client.group_state("group")?.group_epoch, 2);
     }
     directory.abort();

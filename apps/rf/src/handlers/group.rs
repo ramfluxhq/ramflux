@@ -239,12 +239,6 @@ async fn handle_group_message(
 ) -> Result<(), RfError> {
     match message.action {
         GroupMessageAction::Delete(delete) => {
-            if delete.actor.is_some() || delete.reason.is_some() {
-                return Err(ramflux_sdk::SdkError::GeneratedRefused {
-                    code: ramflux_sdk::GeneratedRefusalCode::Content,
-                    reason: "caller-selected group delete actors/reasons are retired; authenticated generated Delete determines authority".into(),
-                }.into());
-            }
             let metadata = request_body(
                 bus,
                 Some(delete.account.clone()),

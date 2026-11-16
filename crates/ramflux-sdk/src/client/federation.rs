@@ -430,9 +430,9 @@ mod tests {
 
     fn test_forward_envelope() -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.message".to_owned(),
+            schema: "ramflux.envelope.v2".to_owned(),
+            version: 2,
+            domain: "ramflux.envelope.v2".to_owned(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "test-key".to_owned(),
@@ -450,9 +450,9 @@ mod tests {
             created_at: now_unix_timestamp(),
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         }
     }
 

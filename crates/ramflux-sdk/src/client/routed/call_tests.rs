@@ -145,7 +145,7 @@ fn entry(
 async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
     let mut engine =
         GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
-    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry).await?;
     Ok(())
 }
 #[tokio::test]

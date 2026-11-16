@@ -1870,9 +1870,7 @@ impl RouterCore {
             return None;
         }
         let route = self.resolve_home_node_route(&migration.identity_commitment)?;
-        if route.home_node != migration.new_home_node
-            || (migration.format_version == 1 && route.expires_at <= now_unix_seconds)
-        {
+        if route.home_node != migration.new_home_node {
             return None;
         }
         let mut forwarded_envelope = envelope.clone();

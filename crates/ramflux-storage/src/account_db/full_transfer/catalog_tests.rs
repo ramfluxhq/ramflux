@@ -214,8 +214,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
     let rules = full_transfer_catalog();
     assert_eq!(
         rules.len(),
-        170,
-        "test: census must count the service body fence and still exclude the cleanup ledger"
+        169,
+        "test: census counts the service body fence, drops group_pending_undecrypted, and excludes the cleanup ledger"
     );
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
@@ -238,8 +238,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         tables.len(),
-        164,
-        "test: schema coverage must include the service body fence and omit the cleanup ledger"
+        163,
+        "test: schema coverage includes the service body fence and omits group_pending_undecrypted and the cleanup ledger"
     );
     assert!(
         matches!(

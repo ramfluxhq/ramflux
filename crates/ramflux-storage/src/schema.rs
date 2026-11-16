@@ -191,18 +191,6 @@ const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_direct_message_conversation
                 ON direct_message_projection(conversation_id, created_at);
-            CREATE TABLE IF NOT EXISTS group_pending_undecrypted (
-                message_id TEXT PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                conversation_id TEXT NOT NULL,
-                group_key_epoch INTEGER NOT NULL,
-                sender_id TEXT NOT NULL,
-                inbox_seq INTEGER NOT NULL,
-                envelope_json BLOB NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_group_pending_undecrypted_epoch
-                ON group_pending_undecrypted(group_id, group_key_epoch, inbox_seq);
             CREATE TABLE IF NOT EXISTS root_group_sender_key_counter_seen (
                 group_id TEXT NOT NULL, group_key_epoch INTEGER NOT NULL,
                 sender_reference TEXT NOT NULL, session_id TEXT NOT NULL, counter INTEGER NOT NULL,

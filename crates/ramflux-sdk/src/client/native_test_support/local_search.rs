@@ -98,7 +98,6 @@ async fn local_search_live_versions_and_scope() -> TestResult {
             // Real media needs an endorsed layer-4 publication on both native devices.
             super::activation_send::tests::publish_layer_four(&mut source).await?;
             super::activation_send::tests::publish_layer_four(&mut target).await?;
-            let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             source.client.persist_fetched_identity_directory(&target.manifest)?;
             target.client.persist_fetched_identity_directory(&source.manifest)?;
             let source_anchor = source.client.own_account_anchor()?;
@@ -196,7 +195,6 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
         Box::pin(async {
             let directory = ramflux_test_support::TestPath::new()?;
             let mut fixture = Fixture::search_fixture(&directory, "epoch-owner").await?;
-            let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             let runtime =
                 LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
             shared_cancellation_and_lease_ownership(&runtime, &fixture).await?;

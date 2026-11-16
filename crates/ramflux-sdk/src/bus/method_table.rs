@@ -189,14 +189,12 @@ methods! {
         "contact.request",
         "contact.request.accept",
         "contact.safety_number",
-        "device.activate",
         "device.authorize",
         "device.migrate",
         "device.push_route.set",
         "device.refresh",
         "device.revoke",
         "device.sync.export",
-        "device.sync.import",
         "group.create",
         "group.invite.accept",
         "group.invite.create",
@@ -237,7 +235,6 @@ methods! {
     ];
     NeedsNetwork(Always) => Supervisor: [
         "account.create",
-        "account.itest_legacy.create",
         "node.add",
         "node.probe",
     ];

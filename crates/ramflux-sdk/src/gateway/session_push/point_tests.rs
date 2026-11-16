@@ -439,7 +439,7 @@ async fn capable_point_and_ack_exact_reply_sets() {
         forwarded(&json!({"frame_type":"ack","cursor":cursor})),
         forwarded(&json!({"frame_type":"cursor","cursor":null})),
     ];
-    let (mut engine, sent) = signed(SessionMode::Legacy, replies);
+    let (mut engine, sent) = signed(SessionMode::Direct, replies);
     let ack = ack_of(&engine);
     assert_eq!(engine.ack(ack).await.unwrap().inbox_seq, 30);
     let written = sent.lock().unwrap().clone();
@@ -453,8 +453,9 @@ async fn capable_point_and_ack_exact_reply_sets() {
 }
 
 async fn refusal_rows() {
-    // (r1)-(r4) fetch_entry and ack_batch on Legacy and on Compat: refused locally, no write.
-    for mode in [SessionMode::Legacy, SessionMode::Compat] {
+    // fetch_entry and ack_batch on a direct session: refused locally, no write.
+    {
+        let mode = SessionMode::Direct;
         let (mut engine, sent) = session(mode.clone(), vec![typed(&entry_frame(7))]);
         let result = engine.fetch_entry(7).await;
         assert!(matches!(&result, Err(SdkError::GatewaySessionRejected(m))

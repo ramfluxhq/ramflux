@@ -143,7 +143,7 @@ impl NativeCallAccount {
                 SdkError::LocalBus(format!("native message fixture relay configuration: {error}"))
             })?,
         );
-        target_client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        target_client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         Ok((message.conversation_id, message.message_id))
     }
 

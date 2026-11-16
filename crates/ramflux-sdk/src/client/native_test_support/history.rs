@@ -85,7 +85,6 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
     let mut source = Fixture::new("native-history-source").await?;
     let mut sibling = source.enroll_sibling("native-history-sibling", "history-sibling").await?;
     let peer = Fixture::new("native-history-original-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, retained, conversation) =
         Box::pin(receive_first_hand(&mut source, &peer)).await?;
     source.client.start_generated_history_transfer(&sibling.config.device_id)?;
@@ -171,7 +170,6 @@ async fn history_preserves_created_at() -> TestResult {
     let mut source = Fixture::new("created-at-source").await?;
     let mut sibling = source.enroll_sibling("created-at-sibling", "created-at-device").await?;
     let peer = Fixture::new("created-at-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, _, conversation) = Box::pin(receive_first_hand(&mut source, &peer)).await?;
     let id = ramflux_protocol::encode_base64url(&original.id);
     let authored_at = source.client.direct_message_by_id(&id)?.ok_or("source row")?.created_at;

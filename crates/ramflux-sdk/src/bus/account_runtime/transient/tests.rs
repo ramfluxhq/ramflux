@@ -76,7 +76,6 @@ async fn native_typing_host_consumer_projects_without_durable_intake_and_clears_
 
 async fn case() -> TestResult {
     use crate::gateway::access::GatewaySessionAccess;
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b): (Fixture, Fixture) =
         Box::pin(crate::client::routed::native_typing_pair_fixture()).await?;
     let (handle, io) =

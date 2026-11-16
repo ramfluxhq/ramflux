@@ -109,7 +109,7 @@ impl Fixture {
         let pool = ramflux_transport::RelayQuicPool::new(
             ramflux_transport::RelayQuicPoolConfig::functional_default()?,
         );
-        self.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        self.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         Ok(())
     }
 }
@@ -154,7 +154,6 @@ async fn native_sibling_self_sync_defers_without_authenticated_floor_bootstrap()
         sibling.client.born_v3_account.as_ref().ok_or("native sibling")?.primary_vault_ref(),
         ""
     );
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let value = source.client.change_self_sync(
         "native-thread",
         g::SelfSync { operation: 6, mute: true, ..Default::default() },
@@ -173,7 +172,6 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
     let mut source = Fixture::new("floor-erased-source").await?;
     let _second = source.enroll_sibling("floor-second", "second").await?;
     let third = source.enroll_sibling("floor-third", "third").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let draft = g::SelfSync {
         operation: 2,
         revision: 1,

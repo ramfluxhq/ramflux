@@ -11,7 +11,6 @@ async fn own_authored_history_target_epoch_rechecks_before_cached_exposure_and_r
 -> TestResult {
     let mut source = Fixture::new("authored-epochs-source").await?;
     let peer = Fixture::new("authored-epochs-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let conversation = g::dm_scope::derive(
         &source.client.own_account_anchor()?,
         &peer.client.own_account_anchor()?,

@@ -13,7 +13,6 @@ async fn own_authored_current_edit_for_later_third_sibling_stays_pending_without
 -> TestResult {
     let mut source = Fixture::new("authored-edit-source").await?;
     let peer = Fixture::new("authored-edit-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut second = source.enroll_sibling("edited-second", "second").await?;
     let (original, exact) = prepare_current_edit(&source, &peer, &second)?;
     let owner = ramflux_protocol::encode_base64url(&original.id);

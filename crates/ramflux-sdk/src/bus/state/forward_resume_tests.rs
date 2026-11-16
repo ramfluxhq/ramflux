@@ -45,16 +45,23 @@ async fn reconnect_gateway(
         let auth: GatewayClientFrame =
             ramflux_transport::read_gateway_session_json(&mut stream).await?;
         assert!(matches!(auth, GatewayClientFrame::Auth { .. }));
+        // The account advertises session push. Echo it; an empty establishment is refused.
         ramflux_transport::write_gateway_session_json(
             &mut stream,
-            &GatewayServerFrame::SessionEstablished {
-                session: crate::GatewaySessionEstablishedFrame {
-                    call_session_generation: None,
-                    session_id: "resumed-session".into(),
-                    gateway_id: "test-gateway".into(),
-                    accepted_cursor: None,
-                    resume_token: "next-token".into(),
-                    resume_window_seconds: 60,
+            &ramflux_node_core::SessionPushServerFrame::SessionEstablished {
+                session: ramflux_node_core::SessionPushEstablishedFrame {
+                    session: ramflux_node_core::GatewaySessionEstablishedFrame {
+                        call_session_generation: None,
+                        session_id: "resumed-session".into(),
+                        gateway_id: "test-gateway".into(),
+                        accepted_cursor: None,
+                        resume_token: "next-token".into(),
+                        resume_window_seconds: 60,
+                    },
+                    capabilities: vec![
+                        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned(),
+                    ],
+                    inbox_incarnation_id: "0123456789abcdef0123456789abcdef".into(),
                 },
             },
         )
@@ -75,6 +82,7 @@ async fn forwarded_session_resume_checkpoint_clears_only_after_success()
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
+    super::super::runtime_tests::graft_explicit_native_root(&mut account.client, "sender")?;
     let mut engine = account.session_client().await?;
     engine.test_update_resume("forwarded-session", "forwarded-resume").await?;
     account
@@ -142,6 +150,7 @@ async fn priority_timeout_retires_with_resume_without_restoring_rotated_authorit
                 None,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             )?;
+            super::super::runtime_tests::graft_explicit_native_root(&mut account.client, "sender")?;
             let client = account.session_client().await?;
             let client = if borrowed { client } else { account.session_client().await? };
             if rotate {

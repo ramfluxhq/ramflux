@@ -48,7 +48,7 @@ impl AccountView {
         views.insert("mcp.server.refresh", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash()}));
         views.insert("mcp.tool.list", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash(),"tools":account.mcp_registry.tools()}));
         views.insert("bot.list", json!({"bots":account.bots.values().collect::<Vec<_>>()}));
-        let devices = super::super::dispatch::device::account_known_devices(state, id, account);
+        let devices = super::super::dispatch::device::account_known_devices(account);
         if let Ok(devices) = devices {
             views.insert(
                 "device.list",
@@ -246,8 +246,7 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         if view.native.is_none() {
             status["networking"] = json!(snapshot.state);
         }
-        status["session_delivery_mode"] =
-            json!(if connection.session_mode().is_push() { "push" } else { "compat" });
+        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);

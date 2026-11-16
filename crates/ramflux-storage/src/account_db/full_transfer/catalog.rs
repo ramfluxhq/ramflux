@@ -649,7 +649,6 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     groups::RULE_42,        // sql/group_member_device_key
     groups::RULE_43,        // sql/group_member_projection
     groups::RULE_44,        // sql/group_message_tombstone_projection
-    groups::RULE_45,        // sql/group_pending_undecrypted
     groups::RULE_46,        // sql/group_projection
     groups::RULE_47,        // sql/group_sender_identity_upgrade
     groups::RULE_48,        // sql/group_sender_key_counter_seen

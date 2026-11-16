@@ -146,7 +146,8 @@ pub(super) struct Gateway {
     pub ack_target: String,
     /// When set, `ack_batch` fails so the actor records Uncertain.
     pub ack_fail: bool,
-    /// Some(count) forces Compat and drops legacy ACKs; count advances before wire close.
+    /// Some(count) drops the next `ack_batch` or legacy `Ack` and advances the count.
+    /// The session-push echo stays on; the count proves the ACK reached the fixture.
     pub compat_ack_loss: Option<usize>,
     pub resumes: Vec<u64>,
     /// Caps `resume_page` entries so tests can observe page-sized catch-up (yield every 16).
@@ -572,6 +573,18 @@ async fn serve(
         let response = if let Some(path) = value["path"].as_str() {
             public_lookup(path, shared).await?
         } else if value["frame_type"].as_str() == Some("ack_batch") {
+            let lose = {
+                let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                if let Some(count) = &mut gateway.compat_ack_loss {
+                    *count += 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            if lose {
+                return Err("injected legacy ACK loss".into());
+            }
             let hold = { shared.lock().map_err(|_| "gateway")?.ack_hold.take() };
             if let Some(hold) = hold {
                 hold.seen.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -610,8 +623,6 @@ async fn serve(
                     let advertised = auth.device_proof.capability_scope.iter().any(|capability| {
                         capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
                     });
-                    let advertised = advertised
-                        && shared.lock().map_err(|_| "gateway")?.compat_ack_loss.is_none();
                     push = advertised;
                     let incarnation = {
                         let gateway = shared.lock().map_err(|_| "gateway")?;

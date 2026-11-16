@@ -118,8 +118,8 @@ fn frame(wire: &n::SessionPushServerFrame) -> Value {
     serde_json::to_value(wire).unwrap()
 }
 
-/// The complete legacy submit frame as written on the wire (fixed clock, fixed keys).
-const LEGACY_SUBMIT_GOLDEN: &str = r#"{"frame_type":"submit","submit":{"signed_request":{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","signing_key_id":"device:split-device","signature_alg":"ed25519","signature":"dFFLNuZtJZETgi9GVSVFxbzLxJwRUSsBRvxRnwiWPgW6e-8RbTxpN8GU53tBBm9enkYk41CZ75oFRYq2lnSKBg","source_device_id":"split-device","request_id":"req_sdk_test-session_0","method":"POST","path":"/gateway/session/submit","device_proof_hash":"already_authed","body_hash":"ciw0_tgfF9AZeUGAVif6x7pPGdBOxV0yhGiAVebx3Y0","nonce":"Ve-x2xgmgbFpMX-MvNzQkI-YrW1rl-G_veTPkY-MA-4","created_at":1700000000,"expires_at":1700000300},"envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}}}"#;
+/// The complete non-push submit frame as written on the wire (fixed clock, fixed keys).
+const LEGACY_SUBMIT_GOLDEN: &str = r#"{"frame_type":"submit","submit":{"signed_request":{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","signing_key_id":"device:split-device","signature_alg":"ed25519","signature":"rdU5kLj4kIa07sn2zHlGk6ISPMfpiEbePuLDLaOqpnoucnZDPc0-g44BsSC-CP_P5ueT94yASKnwDpv_JqECCQ","source_device_id":"split-device","request_id":"req_sdk_test-session_0","method":"POST","path":"/gateway/session/submit","device_proof_hash":"already_authed","body_hash":"FLfKygunVvTAupBqpxF8TEJP-lcqYF5KWN-y74ZzjlM","nonce":"Ve-x2xgmgbFpMX-MvNzQkI-YrW1rl-G_veTPkY-MA-4","created_at":1700000000,"expires_at":1700000300},"envelope":{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}}}"#;
 
 #[tokio::test]
 async fn capable_reply_event_split() {
@@ -170,7 +170,7 @@ async fn capable_reply_event_split() {
     let legacy = json!({"frame_type":"deliver","entry":{
         "inbox_seq":71,"target_delivery_id":"target-route","envelope":envelope()}});
     let clock = crate::time::FixedClock::set(1_700_000_000);
-    let (mut engine, sent) = scripted(SessionMode::Legacy, vec![legacy]);
+    let (mut engine, sent) = scripted(SessionMode::Direct, vec![legacy]);
     let entry = engine.submit_envelope(submitted("target-route")).await.unwrap();
     drop(clock);
     assert_eq!((entry.forwarded, entry.inbox_seq), (false, 71));
@@ -428,7 +428,7 @@ pub(super) fn legacy_unexpected_kinds() -> Vec<(&'static str, Value, String)> {
         (
             "resume",
             json!({"frame_type":"resume","entries":[]}),
-            keyless("legacy resume in a push session"),
+            keyless("direct resume in a push session"),
         ),
         ("heartbeat", heartbeat(), reply("Heartbeat")),
     ]

@@ -125,7 +125,7 @@ impl AccountSessionHarness {
                 )
                 .map_err(|_| SdkError::GatewaySessionNotEstablished)?,
             },
-            None => crate::gateway::session_push::SessionMode::Compat,
+            None => crate::gateway::session_push::SessionMode::Direct,
         };
         let mut account =
             super::super::state::LocalBusAccountState::disconnected(client, config, principal);

@@ -101,9 +101,8 @@ pub(crate) fn remember(
 }
 
 impl RamfluxClient {
-    /// Legacy live ACK path only (the gateway inbox ACK helper): called after the gateway confirms this
-    /// exact inbox entry's ACK. The WA path never calls it; it marks through the locator's
-    /// [`OwnCopyAckBinding`] inside the settlement transaction. Retired with the legacy path.
+    /// Test mark helper. Production settlement marks through [`OwnCopyAckBinding`].
+    #[cfg(test)]
     pub(crate) fn record_own_copy_ack(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
         match self.own_copy_ack_binding(entry)? {
             Some(binding) => Ok(mark_own_copy_acknowledged(self.account_db()?, &binding)?),

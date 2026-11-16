@@ -102,6 +102,14 @@ async fn fixture() -> Case<Fixture> {
                     None,
                     Arc::new(AtomicBool::new(false)),
                 )?;
+                crate::bus::runtime_tests::graft_explicit_native_root(
+                    &mut account.client,
+                    "alice",
+                )?;
+                // The seeded engine keeps the identity captured before the native root.
+                // ACK checks both, so the session must present the grafted device.
+                account.gateway_config.source_identity =
+                    Some(account.client.owned_device_identity()?);
                 let reader = account.client.account_db()?.open_reader()?;
                 let (engine, io) = crate::bus::connection_manager::tests::seeded_engine(
                     account.gateway_config.clone(),

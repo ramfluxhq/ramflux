@@ -46,7 +46,6 @@ fn authority_mismatch(
 
 #[test]
 fn tampered_delivery_mode_fails_node_entry_signature() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let nonce = 901;
     let router = registered_router(nonce)?;
     let signed = signed_candidate("bind-mode", nonce)?;
@@ -75,7 +74,6 @@ fn tampered_delivery_mode_fails_node_entry_signature() -> Result<(), Box<dyn std
 
 #[test]
 fn tampered_collapse_tag_fails_node_entry_signature() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let nonce = 902;
     let router = registered_router(nonce)?;
     let signed = signed_candidate("bind-tag", nonce)?;

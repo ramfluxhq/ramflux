@@ -26,7 +26,6 @@ fn reservation(
 
 #[test]
 fn committed_forward_missing_binding_is_terminal_rejected_security() -> anyhow::Result<()> {
-    anyhow::ensure!(ramflux_protocol::schema_profile::schema_v1_live());
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let (_fixture_directory_0, handle) =
         migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;

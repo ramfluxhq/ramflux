@@ -270,9 +270,9 @@ fn deliver_frame(
 
 fn test_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
     Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         ext: Ext::default(),
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "test-envelope-key".to_owned(),
@@ -290,9 +290,9 @@ fn test_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
         created_at: 1_760_000_000,
         encrypted_payload: "encrypted_payload".to_owned(),
         payload_hash: "payload_hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        delivery_mode: Some("durable".to_owned()),
+        collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".to_owned()),
+        report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".to_owned()),
     }
 }
 

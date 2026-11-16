@@ -9,7 +9,7 @@ use crate::{GatewayInboxEntry, SdkError};
 fn entry(authority: &str) -> Result<GatewayInboxEntry, SdkError> {
     Ok(serde_json::from_value(serde_json::json!({
         "inbox_seq": 3, "target_delivery_id": "target", "envelope": {
-            "schema":"ramflux.envelope.v1", "version":1, "domain":"ramflux.envelope.v1",
+            "schema":"ramflux.envelope.v2", "version":2, "domain":"ramflux.envelope.v2",
             "signing_key_id":"key", "signature_alg":"ed25519", "signature":"signature",
             "envelope_id":"message", "source_principal_id":"principal", "source_device_id":"device",
             "target_delivery_id":"target", "delivery_class":"opaque_event", "priority":"normal",

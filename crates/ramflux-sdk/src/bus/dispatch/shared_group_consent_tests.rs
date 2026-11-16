@@ -55,7 +55,7 @@ async fn r5_encrypted_contact_forward_and_message_preserve_consent_and_decline()
         .enumerate()
         {
             let entry = seal(&contact.client, &mut sender, &user.client, body, route).await?;
-            let result = user.client.apply_routed_entry(&mut receiver, &pool, &entry, false).await;
+            let result = user.client.apply_routed_entry(&mut receiver, &pool, &entry).await;
             if declined {
                 assert!(
                     matches!(result, Err(SdkError::InboundRejected(reason)) if reason == "group invitation was declined")

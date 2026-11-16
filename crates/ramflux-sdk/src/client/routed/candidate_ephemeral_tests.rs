@@ -92,7 +92,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    b.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     Ok(())
 }
 pub(crate) async fn native_pair() -> TestResult<(Native, Native)> {
@@ -165,7 +165,6 @@ fn allowed_receiver_state(b: &Native, a: &Native) -> TestResult<Vec<String>> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_unknown_is_retained_and_known_non_typing_is_dropped() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let allowed = allowed_receiver_state(&b, &a)?;
     let before = b.client.account_db()?.test_table_fingerprints(&allowed)?;
@@ -254,7 +253,6 @@ fn fill_source_quota(client: &RamfluxClient, source: &str) -> TestResult {
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
@@ -337,7 +335,6 @@ async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> Tes
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let message = draft(&a, &b, "future-edit", 5)?;
     let target = b
@@ -396,7 +393,6 @@ async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() ->
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_inner_author_epoch_must_match_verified_peer() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(native_pair()).await?;
     let message = draft(&a, &b, "wrong-inner-epoch", 5)?;
     let source = a.client.owned_device_identity()?;
@@ -473,7 +469,6 @@ fn assert_tables_unchanged(
 
 #[tokio::test(flavor = "current_thread")]
 async fn account_transient_generation_reset_and_durable_message_clear() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
@@ -530,7 +525,6 @@ async fn account_transient_generation_reset_and_durable_message_clear() -> TestR
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_missing_negotiated_echo_refuses_before_ratchet_or_allowance_write() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());

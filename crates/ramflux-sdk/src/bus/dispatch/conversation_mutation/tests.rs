@@ -89,7 +89,6 @@ async fn native_mutation_intents_derive_references_revisions_and_exact_retry_pay
 {
     within_deadline(async {
         let source = Fixture::new("intent-author").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         for (method, fields, kind) in [
             ("conversation.edit", json!({"text":"replacement","expected_revision":0}), 3),
@@ -146,7 +145,6 @@ async fn native_mutation_intents_derive_references_revisions_and_exact_retry_pay
 async fn stale_expected_revision_is_edit_conflict_and_keeps_the_stored_bytes() -> TestResult {
     within_deadline(async {
         let source = Fixture::new("intent-conflict").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         let before = source.client.account_db()?.message_content(&id)?;
         let stale =
@@ -202,7 +200,6 @@ async fn stale_expected_revision_is_edit_conflict_and_keeps_the_stored_bytes() -
 async fn mutation_intents_refuse_forged_routing_cross_thread_and_deleted_targets() -> TestResult {
     within_deadline(async {
         let source = Fixture::new("intent-refusals").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         let mut intent = request(
             "conversation.edit",
@@ -262,7 +259,6 @@ async fn dispatcher_preserves_typed_input_refusals_and_local_delete_never_routes
             assert_eq!(frame.body["name"], "invalid_argument");
             assert_eq!(frame.body["code"], Code::InvalidArgument as i32);
         }
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&state.accounts.get("source").ok_or("account")?.client)?;
         let response = Box::pin(super::super::message::dispatch_message_bus_request(
             &request("conversation.delete", &id, json!({"scope":"local"})),
@@ -288,7 +284,6 @@ async fn dispatcher_preserves_typed_input_refusals_and_local_delete_never_routes
 async fn edit_without_expected_revision_is_refused() -> TestResult {
     within_deadline(async {
         let source = Fixture::new("intent-edit-base-required").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         let before = source.client.account_db()?.actor_state_keys("")?;
         let missing = request("conversation.edit", &id, json!({"text":"replacement"}));
@@ -316,7 +311,6 @@ async fn edit_without_expected_revision_is_refused() -> TestResult {
 async fn same_base_reserves_one_edit_and_refuses_the_other_before_send() -> TestResult {
     within_deadline(async {
         let source = Fixture::new("intent-edit-reserve").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         let before = source.client.account_db()?.message_content(&id)?;
         let mut first =
@@ -438,7 +432,6 @@ fn project_authored_edit(client: &RamfluxClient, exact: &[u8]) -> Result<bool, S
 async fn authored_projection_fork_is_edit_conflict_and_is_not_journalled() -> TestResult {
     within_deadline(async {
         let source = Fixture::new("intent-authored-fork").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let id = seed(&source.client)?;
         let original = source
             .client

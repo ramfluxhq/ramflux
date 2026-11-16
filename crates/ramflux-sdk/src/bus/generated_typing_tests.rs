@@ -138,7 +138,6 @@ fn unchanged(
 }
 #[tokio::test(flavor = "current_thread")]
 async fn typing_generated_send_bypasses_durable_operation_capture() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(crate::client::routed::native_typing_pair_fixture()).await?;
     let conversation =
         g::dm_scope::derive(&a.client.own_account_anchor()?, &b.client.own_account_anchor()?)?;

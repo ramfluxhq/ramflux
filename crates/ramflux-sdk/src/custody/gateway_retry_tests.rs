@@ -140,23 +140,28 @@ pub(super) async fn ordinary(
             return std::future::pending().await;
         }
     }
-    ramflux_transport::write_gateway_session_json(
-        stream,
-        &GatewayServerFrame::SessionEstablished {
-            session: GatewaySessionEstablishedFrame {
-                call_session_generation: None,
-                session_id: session.into(),
-                gateway_id: "ordinary-test".into(),
-                accepted_cursor: None,
-                resume_token: "test-resume".into(),
-                resume_window_seconds: 60,
-            },
-        },
-    )
-    .await?;
     let persistent = script.lock().map_err(|_| "script lock")?.ordinary.is_some();
     if persistent {
+        // The account advertises session push. Echo the capability so the handshake
+        // is the negotiated push session this server then speaks.
+        ramflux_transport::write_gateway_session_json(stream, &negotiated_established(session))
+            .await?;
         serve_session(stream, script, &open.target_delivery_id).await?;
+    } else {
+        ramflux_transport::write_gateway_session_json(
+            stream,
+            &GatewayServerFrame::SessionEstablished {
+                session: GatewaySessionEstablishedFrame {
+                    call_session_generation: None,
+                    session_id: session.into(),
+                    gateway_id: "ordinary-test".into(),
+                    accepted_cursor: None,
+                    resume_token: "test-resume".into(),
+                    resume_window_seconds: 60,
+                },
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -165,7 +170,8 @@ pub(super) async fn ordinary(
 pub(super) struct SessionScript {
     pub inbox: Vec<crate::GatewayInboxEntry>,
     pub manifests: std::collections::BTreeMap<String, crate::prekey::SdkDeviceManifestResponse>,
-    pub received: Vec<GatewayClientFrame>,
+    pub resumes: usize,
+    pub acknowledgements: usize,
     pub held_ack: Option<Arc<HeldAck>>,
 }
 pub(super) struct HeldAck {
@@ -173,79 +179,229 @@ pub(super) struct HeldAck {
     pub entered: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
 }
+
+const PUSH_EPOCH: &str = "0123456789abcdef0123456789abcdef";
+const RETAIN_UNTIL: i64 = 4_102_444_800;
+
+fn negotiated_established(session: &str) -> ramflux_node_core::SessionPushServerFrame {
+    ramflux_node_core::SessionPushServerFrame::SessionEstablished {
+        session: ramflux_node_core::SessionPushEstablishedFrame {
+            session: ramflux_node_core::GatewaySessionEstablishedFrame {
+                call_session_generation: None,
+                session_id: session.to_owned(),
+                gateway_id: "ordinary-test".into(),
+                accepted_cursor: None,
+                resume_token: "test-resume".into(),
+                resume_window_seconds: 60,
+            },
+            capabilities: vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned()],
+            inbox_incarnation_id: PUSH_EPOCH.to_owned(),
+        },
+    }
+}
+
+fn page_record(entry: &crate::GatewayInboxEntry) -> ramflux_node_core::PageEntryRecord {
+    ramflux_node_core::PageEntryRecord {
+        entry: ramflux_node_core::InboxEntry {
+            inbox_seq: entry.inbox_seq,
+            target_delivery_id: entry.target_delivery_id.clone(),
+            envelope: entry.envelope.clone(),
+        },
+        retain_until: RETAIN_UNTIL,
+    }
+}
+
+fn resume_page(
+    target: &str,
+    after: u64,
+    limit: usize,
+    inbox: &[crate::GatewayInboxEntry],
+) -> Result<ramflux_node_core::SessionPushServerFrame> {
+    if limit == 0 {
+        return Err("resume limit".into());
+    }
+    let mut pending: Vec<_> = inbox.iter().filter(|entry| entry.inbox_seq > after).collect();
+    pending.sort_by_key(|entry| entry.inbox_seq);
+    let issued = inbox.iter().map(|entry| entry.inbox_seq).max().unwrap_or(after);
+    let chosen: Vec<_> = pending.into_iter().take(limit).collect();
+    let covered = chosen.last().map_or(after, |entry| entry.inbox_seq);
+    Ok(ramflux_node_core::SessionPushServerFrame::ResumePage {
+        target_delivery_id: target.to_owned(),
+        incarnation_id: PUSH_EPOCH.to_owned(),
+        after_inbox_seq: after,
+        covered_through_seq: covered,
+        issued_inbox_seq: issued,
+        settled_through_seq: after.min(issued),
+        entries: chosen.into_iter().map(page_record).collect(),
+        known_losses: Vec::new(),
+        oversize_next: None,
+        more: covered < issued,
+    })
+}
+
+fn push_cursor(target: &str, inbox_seq: u64) -> ramflux_node_core::InboxCursorResponse {
+    ramflux_node_core::InboxCursorResponse {
+        target_delivery_id: target.to_owned(),
+        inbox_seq,
+        last_envelope_id: None,
+        acked_envelope_ids: Vec::new(),
+        nacked_envelope_ids: std::collections::BTreeMap::new(),
+    }
+}
+
+fn number_at(frame: &serde_json::Value, key: &str) -> Result<u64> {
+    frame
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("missing {key}").into())
+}
+
+async fn next_frame(
+    stream: &mut ramflux_transport::GatewayTcpTlsStream,
+) -> Result<Option<serde_json::Value>> {
+    use ramflux_transport::GatewaySessionFrameSource;
+    match stream.recv_frame().await {
+        Ok(bytes) => Ok(Some(ramflux_protocol::parse_i_json(&bytes)?)),
+        Err(ramflux_transport::TransportError::Io(error))
+            if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn note_frame(session: &mut SessionScript, kind: &str) {
+    match kind {
+        "resume" => session.resumes += 1,
+        "ack" | "ack_batch" => session.acknowledgements += 1,
+        _ => {}
+    }
+}
+
+async fn write_push(
+    stream: &mut ramflux_transport::GatewayTcpTlsStream,
+    frame: &ramflux_node_core::SessionPushServerFrame,
+) -> Result {
+    ramflux_transport::write_gateway_session_json(stream, frame).await?;
+    Ok(())
+}
+
 async fn serve_session(
     stream: &mut ramflux_transport::GatewayTcpTlsStream,
     script: &Arc<Mutex<Script>>,
     target: &str,
 ) -> Result {
     loop {
-        let frame: GatewayClientFrame =
-            match ramflux_transport::read_gateway_session_json(stream).await {
-                Ok(frame) => frame,
-                Err(ramflux_transport::TransportError::Io(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    return Ok(());
-                }
-                Err(error) => return Err(error.into()),
-            };
+        let Some(frame) = next_frame(stream).await? else { return Ok(()) };
+        let kind = frame.get("frame_type").and_then(serde_json::Value::as_str).unwrap_or("");
         let hold = {
-            let script = script.lock().map_err(|_| "script lock")?;
-            script.ordinary.as_ref().and_then(|session|session.held_ack.as_ref())
-                .filter(|held|matches!(&frame,GatewayClientFrame::Ack { ack } if ack.envelope_id==held.id)).cloned()
+            let locked = script.lock().map_err(|_| "script lock")?;
+            let envelope = frame
+                .get("ack")
+                .and_then(|ack| ack.get("envelope_id"))
+                .and_then(serde_json::Value::as_str);
+            locked
+                .ordinary
+                .as_ref()
+                .and_then(|session| session.held_ack.as_ref())
+                .filter(|held| envelope == Some(held.id.as_str()))
+                .cloned()
         };
         if let Some(held) = hold {
             held.entered.notify_one();
             held.release.notified().await;
         }
-        let responses = {
-            let mut script = script.lock().map_err(|_| "script lock")?;
-            let session = script.ordinary.as_mut().ok_or("session script")?;
-            session.received.push(frame.clone());
-            match frame {
-                GatewayClientFrame::Resume { resume } => vec![GatewayServerFrame::Resume {
-                    entries: session
-                        .inbox
-                        .iter()
-                        .filter(|entry| entry.inbox_seq > resume.after_inbox_seq)
-                        .take(64)
-                        .cloned()
-                        .collect(),
-                }],
-                GatewayClientFrame::Ack { ack } => {
-                    let cursor = crate::GatewayCursor {
-                        target_delivery_id: target.into(),
-                        inbox_seq: session
-                            .inbox
-                            .iter()
-                            .find(|entry| entry.envelope.envelope_id == ack.envelope_id)
-                            .map(|entry| entry.inbox_seq)
-                            .or_else(|| {
-                                session
-                                    .held_ack
-                                    .as_ref()
-                                    .filter(|held| held.id == ack.envelope_id)
-                                    .map(|_| 0)
-                            })
-                            .ok_or("unknown inbox ACK")?,
-                        last_envelope_id: Some(ack.envelope_id.clone()),
-                        acked_envelope_ids: vec![ack.envelope_id],
-                        nacked_envelope_ids: std::collections::BTreeMap::new(),
-                    };
-                    vec![
-                        GatewayServerFrame::Ack { cursor: cursor.clone() },
-                        GatewayServerFrame::Cursor { cursor: Some(cursor) },
-                    ]
-                }
-                GatewayClientFrame::Heartbeat { now } => {
-                    vec![GatewayServerFrame::Heartbeat { now }]
-                }
-                other => return Err(format!("unexpected scripted session frame {other:?}").into()),
-            }
-        };
-        for response in responses {
-            ramflux_transport::write_gateway_session_json(stream, &response).await?;
+        reply_frame(stream, script, target, kind, &frame).await?;
+    }
+}
+
+async fn reply_frame(
+    stream: &mut ramflux_transport::GatewayTcpTlsStream,
+    script: &Arc<Mutex<Script>>,
+    target: &str,
+    kind: &str,
+    frame: &serde_json::Value,
+) -> Result {
+    let inbox = {
+        let mut locked = script.lock().map_err(|_| "script lock")?;
+        let session = locked.ordinary.as_mut().ok_or("session script")?;
+        note_frame(session, kind);
+        session.inbox.clone()
+    };
+    match kind {
+        "resume" => {
+            let resume = frame.get("resume").ok_or("resume body")?;
+            let after = number_at(resume, "after_inbox_seq")?;
+            let limit = usize::try_from(number_at(resume, "limit")?)?;
+            write_push(stream, &resume_page(target, after, limit, &inbox)?).await
         }
+        "ack_batch" => {
+            let seqs =
+                frame.get("inbox_seqs").and_then(serde_json::Value::as_array).ok_or("ack batch")?;
+            let seqs: Vec<u64> = seqs
+                .iter()
+                .map(|seq| seq.as_u64().ok_or_else(|| "ack seq".into()))
+                .collect::<Result<_>>()?;
+            let inbox_seq = seqs.last().copied().unwrap_or(0);
+            write_push(
+                stream,
+                &ramflux_node_core::SessionPushServerFrame::AckBatch {
+                    incarnation_id: PUSH_EPOCH.to_owned(),
+                    cursor: push_cursor(target, inbox_seq),
+                    results: seqs
+                        .into_iter()
+                        .map(|inbox_seq| ramflux_node_core::SessionAckResult {
+                            inbox_seq,
+                            outcome: ramflux_node_core::SessionAckOutcome::Acked,
+                            reason: None,
+                        })
+                        .collect(),
+                },
+            )
+            .await
+        }
+        "ack" => {
+            write_push(
+                stream,
+                &ramflux_node_core::SessionPushServerFrame::Ack {
+                    incarnation_id: PUSH_EPOCH.to_owned(),
+                    cursor: push_cursor(target, 0),
+                },
+            )
+            .await
+        }
+        "fetch_entry" => {
+            let seq = number_at(frame, "inbox_seq")?;
+            let reply = if let Some(entry) = inbox.iter().find(|entry| entry.inbox_seq == seq) {
+                ramflux_node_core::SessionPushServerFrame::Entry {
+                    incarnation_id: PUSH_EPOCH.to_owned(),
+                    record: Box::new(page_record(entry)),
+                }
+            } else {
+                ramflux_node_core::SessionPushServerFrame::EntryGone {
+                    incarnation_id: PUSH_EPOCH.to_owned(),
+                    inbox_seq: seq,
+                    observed_issued_inbox_seq: inbox
+                        .iter()
+                        .map(|entry| entry.inbox_seq)
+                        .max()
+                        .unwrap_or(seq),
+                    reason: ramflux_node_core::EntryGoneReason::Unknown,
+                }
+            };
+            write_push(stream, &reply).await
+        }
+        "heartbeat" => {
+            let now = number_at(frame, "now")?;
+            ramflux_transport::write_gateway_session_json(
+                stream,
+                &GatewayServerFrame::Heartbeat { now },
+            )
+            .await?;
+            Ok(())
+        }
+        other => Err(format!("unexpected scripted session frame {other}").into()),
     }
 }
 

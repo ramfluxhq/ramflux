@@ -74,7 +74,6 @@ fn typing_envelope_at(
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     for ttl in [0, 1, 2, 3, 4, 6] {
         let error = typing_envelope(&a, &b, "refused", ttl)
@@ -109,7 +108,6 @@ async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(),
 
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_ephemeral_future_tolerance_uses_local_clock() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let envelope = typing_envelope(&a, &b, "future-event", 5)?;
     let mut receiver = TypingReceiver::default();
@@ -131,7 +129,6 @@ async fn receiver_ephemeral_future_tolerance_uses_local_clock() -> Result<(), Sd
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let envelope = typing_envelope(&a, &b, "transient-event", 5)?;
     let db = b.client.account_db()?;
@@ -160,7 +157,6 @@ async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, mut b) = pair(181, 183).await?;
     friend(&mut a, &b)?;
     let error = typing_envelope(&a, &b, "no-session", 5)
@@ -230,7 +226,6 @@ async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Resul
 #[tokio::test(flavor = "current_thread")]
 async fn future_typing_clear_cannot_remove_visible_indicator_before_signed_start()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let active = typing_envelope_at(&a, &b, "visible", 5, true, 100)?;
     let clear = typing_envelope_at(&a, &b, "future-clear", 1, false, 101)?;
@@ -257,7 +252,6 @@ async fn future_typing_clear_cannot_remove_visible_indicator_before_signed_start
 #[tokio::test(flavor = "current_thread")]
 async fn typing_failed_commit_exposes_no_ciphertext_and_rolls_back_ratchet_and_allowance()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let source = a.client.owned_device_identity()?;
     let remote = b.client.owned_device_identity()?;

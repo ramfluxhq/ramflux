@@ -308,7 +308,7 @@ fn legacy_deadline_clock_skew() -> Result<(), SdkError> {
     let status = crate::bus::connection_manager::ReceiveStatus {
         observations: crate::bus::connection_manager::ReceiveObservation::default(),
         committed_cursor: 0,
-        mode: "compat".into(),
+        mode: "direct".into(),
         last_catch_up_at: None,
         catch_ups_total: 0,
         inbox_gaps_total: 0,

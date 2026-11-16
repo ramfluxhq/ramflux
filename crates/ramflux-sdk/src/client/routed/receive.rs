@@ -34,10 +34,7 @@ struct Finish {
     opened: Opened,
     body: zeroize::Zeroizing<Vec<u8>>,
     plaintext: Option<Vec<u8>>,
-    refs: Vec<crate::dm::SdkDmAttachmentRef>,
-    import: bool,
     background: bool,
-    consume_erased: bool,
 }
 
 struct PreparedGroupControls {
@@ -45,7 +42,6 @@ struct PreparedGroupControls {
 }
 
 struct ApplyOpts {
-    attachments: bool,
     prepared: Option<Result<super::PreparedInbound, SdkError>>,
 }
 
@@ -210,13 +206,12 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
-        attachments: bool,
     ) -> Result<Delivery, SdkError> {
         let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
-            ApplyOpts { attachments, prepared: None },
+            ApplyOpts { prepared: None },
             Self::standalone_persist,
         );
         // The receive state machine must stay off caller stacks in every feature set.
@@ -235,7 +230,7 @@ impl RamfluxClient {
             engine,
             pool,
             entry,
-            ApplyOpts { attachments: false, prepared: Some(prepared) },
+            ApplyOpts { prepared: Some(prepared) },
             Self::standalone_persist,
         );
         let apply = Box::pin(apply);
@@ -255,7 +250,7 @@ impl RamfluxClient {
             engine,
             pool,
             entry,
-            ApplyOpts { attachments: false, prepared },
+            ApplyOpts { prepared },
             persist,
         );
         let apply = Box::pin(apply);
@@ -323,7 +318,7 @@ impl RamfluxClient {
     async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool, const JOINING: bool>(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
+        _pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         opts: ApplyOpts,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
@@ -334,7 +329,7 @@ impl RamfluxClient {
         #[cfg(feature = "itest-rfd-fault")]
         let entry = fault_entry.as_deref().unwrap_or(entry);
         let consume_erased = CONSUME_ERASED;
-        let ApplyOpts { attachments, prepared } = opts;
+        let ApplyOpts { prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
         }
@@ -352,9 +347,8 @@ impl RamfluxClient {
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
         }
-        let mut opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
+        let opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
         let body = opened.body.clone();
-        let refs = Vec::new();
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data_from_outer(
             &entry.envelope,
@@ -364,19 +358,17 @@ impl RamfluxClient {
         )?;
         let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        let accepted = self.friend_rejection_reason(source.root_commitment())?.is_none();
         let held = opened.routing.kind == Kind::Direct
             && self.pending_contact_root(source.root_commitment())?
             && !self.accepted_contact_source(
                 source.root_commitment(),
                 &entry.envelope.source_principal_id,
             )?;
-        let (consumed_slots, references) =
-            self.routed_attachment_refs(&mut opened, &refs, accepted);
+        let consumed_slots = Vec::<crate::SdkObjectKeySlot>::new();
         let groups = self
             .prepare_routed_group_controls(engine, &opened, entry, &body, directory.as_ref())
             .await?;
-        let (plaintext, admitted) = persist(
+        let (plaintext, _) = persist(
             self,
             JoinedW1::Project(Commit {
                 opened: &opened,
@@ -387,7 +379,7 @@ impl RamfluxClient {
                 shared_group: groups.shared.as_ref(),
                 local_target: Some(&engine.config().target_delivery_id),
                 slots: &consumed_slots,
-                references,
+                references: Vec::new(),
                 receipt: &commit,
                 consume_erased,
                 contact_held: held,
@@ -397,16 +389,9 @@ impl RamfluxClient {
         if JOINING {
             self.finish_pair_retirement()?;
         }
-        let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
-        let import = attachments && opened.routing.kind == Kind::Direct && accepted && !held;
         let background = native_prepared;
-        self.finish_routed_receive(
-            engine,
-            pool,
-            entry,
-            Finish { opened, body, plaintext, refs, import, background, consume_erased },
-        )
-        .await
+        self.finish_routed_receive(engine, entry, Finish { opened, body, plaintext, background })
+            .await
     }
 
     // Both persist callbacks complete their outer writer before this hook. Volatile
@@ -425,48 +410,19 @@ impl RamfluxClient {
         }
     }
 
-    fn routed_attachment_refs<'a>(
-        &self,
-        opened: &mut Opened,
-        refs: &'a [crate::dm::SdkDmAttachmentRef],
-        accepted: bool,
-    ) -> (
-        Vec<crate::SdkObjectKeySlot>,
-        Vec<(
-            &'a crate::dm::SdkDmAttachmentRef,
-            Option<crate::client::object::DeferredObjectKeySlot>,
-        )>,
-    ) {
-        let mut consumed_slots = Vec::new();
-        let mut references = Vec::new();
-        for attachment in refs.iter().filter(|_| accepted) {
-            let prepared = if attachment.key_slot.version == 2 {
-                self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
-            } else {
-                self.decrypt_object_key_slot(&attachment.key_slot).ok()
-            };
-            if prepared.is_some() && attachment.key_slot.version == 2 {
-                consumed_slots.push(attachment.key_slot.clone());
-            }
-            references.push((attachment, prepared));
-        }
-        (consumed_slots, references)
-    }
-
     async fn finish_routed_receive(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         finish: Finish,
     ) -> Result<Delivery, SdkError> {
-        let Finish { opened, body, plaintext, refs, import, background, consume_erased } = finish;
+        let Finish { opened, body, plaintext, background } = finish;
         // Durable pair-secret retirement runs at the end of `commit_routed_projection` /
         // `commit_contact_request_bootstrap` after that writer transaction commits (a WAL
         // checkpoint cannot run while the transaction is open). After commit, `voice_calls`,
         // `voice_transition`, and `object_store.tombstone` are RAM-only (rebuilt on load /
         // session). The call refresh (`refresh_call_control` -> `retire_call_without_keys`)
-        // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply, attachment import) is P17 / P16;
+        // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply) is P17;
         // the seen early-return stays for those.
         let pair_reply = if background {
             match self.prepare_received_pair_reply(engine.config(), &opened, &body) {
@@ -480,11 +436,6 @@ impl RamfluxClient {
             self.reply_pair_reset(engine, &opened, &body).await;
             None
         };
-        let imported = if import {
-            self.import_accepted_attachments(engine, pool, &refs, consume_erased).await?
-        } else {
-            Vec::new()
-        };
         self.refresh_routed_control_cache(&opened, &body)?;
         let plaintext = plaintext.map(|plaintext| {
             let plaintext = zeroize::Zeroizing::new(plaintext);
@@ -494,7 +445,7 @@ impl RamfluxClient {
                 message_id: opened.routing.message_id.clone(),
                 sender_id: entry.envelope.source_principal_id.clone(),
                 plaintext_body_base64: ramflux_protocol::encode_base64url(&plaintext),
-                attachments: imported,
+                attachments: Vec::new(),
             }
         });
         #[cfg(feature = "itest-rfd-fault")]
@@ -519,27 +470,6 @@ impl RamfluxClient {
         )
         .await?;
         Ok((native_prepared, directory))
-    }
-
-    async fn import_accepted_attachments(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        refs: &[crate::dm::SdkDmAttachmentRef],
-        consume_erased: bool,
-    ) -> Result<Vec<crate::dm::SdkDmAttachmentImportResult>, SdkError> {
-        let mut imported = Vec::new();
-        for attachment in refs {
-            match self
-                .import_dm_attachment_from_relay_via_gateway(engine, pool, attachment, None)
-                .await
-            {
-                Ok(result) => imported.push(result),
-                Err(SdkError::ObjectErased) if consume_erased => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(imported)
     }
 
     fn routed_committed_content(
@@ -1071,13 +1001,6 @@ fn routed_message_metadata(
     } else {
         Ok(None)
     }
-}
-
-fn admitted_refs(
-    refs: &[crate::dm::SdkDmAttachmentRef],
-    admitted: Vec<usize>,
-) -> Vec<crate::dm::SdkDmAttachmentRef> {
-    admitted.into_iter().map(|index| refs[index].clone()).collect()
 }
 
 #[cfg(test)]

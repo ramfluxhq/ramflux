@@ -123,7 +123,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     let wrong = carrier(&owner, &peer, "operator-thread", "wrong-thread")?;
     let error = peer
         .client
-        .apply_routed_entry(&mut engine, &pool, &wrong, false)
+        .apply_routed_entry(&mut engine, &pool, &wrong)
         .await
         .err()
         .ok_or("wrong thread accepted")?;
@@ -136,7 +136,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     let resolved =
         crate::bus::group_conversation::resolve(&owner.client, "group", "operator-thread")?;
     let correct = carrier(&owner, &peer, &resolved, "resolved-thread")?;
-    let delivered = peer.client.apply_routed_entry(&mut engine, &pool, &correct, false).await?;
+    let delivered = peer.client.apply_routed_entry(&mut engine, &pool, &correct).await?;
     assert_eq!(delivered.routing.ok_or("routing")?.conversation_id, "signed-thread");
     assert!(delivered.plaintext.is_some());
     assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &correct)?.is_some());

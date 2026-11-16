@@ -384,29 +384,29 @@ async fn delayed_loser_bootstrap_behind_membership_keeps_both_directions_decrypt
     let mut le = GatewaySessionEngine::with_test_transport(loser.config()?, Box::new(NoNetwork));
     let mut we = GatewaySessionEngine::with_test_transport(winner.config()?, Box::new(NoNetwork));
     assert!(matches!(
-        winner.client.apply_routed_entry(&mut we, &pool()?, &delayed, false).await,
+        winner.client.apply_routed_entry(&mut we, &pool()?, &delayed).await,
         Err(SdkError::InboundPending(_)
             | SdkError::SenderManifestRequired { .. }
             | SdkError::FreshHeadRequired { .. })
     ));
     membership(&loser, &winner, first_group)?;
-    loser.client.apply_routed_entry(&mut le, &pool()?, &first, false).await?;
+    loser.client.apply_routed_entry(&mut le, &pool()?, &first).await?;
     let confirm = seal(&loser, &winner, outgoing(&loser, &winner, "confirm-winner")?, b"confirm")?;
-    winner.client.apply_routed_entry(&mut we, &pool()?, &confirm, false).await?;
+    winner.client.apply_routed_entry(&mut we, &pool()?, &confirm).await?;
     assert_eq!(active(&winner, &loser.id)?, low);
     membership(&winner, &loser, delayed_group)?;
-    winner.client.apply_routed_entry(&mut we, &pool()?, &delayed, false).await?;
+    winner.client.apply_routed_entry(&mut we, &pool()?, &delayed).await?;
     let old_direction = seal(
         &loser,
         &winner,
         outgoing(&loser, &winner, "old-state-still-live")?,
         b"old direction",
     )?;
-    winner.client.apply_routed_entry(&mut we, &pool()?, &old_direction, false).await?;
+    winner.client.apply_routed_entry(&mut we, &pool()?, &old_direction).await?;
     assert_eq!(active(&winner, &loser.id)?, high);
     let new_direction =
         seal(&winner, &loser, outgoing(&winner, &loser, "new-state-reply")?, b"new direction")?;
-    loser.client.apply_routed_entry(&mut le, &pool()?, &new_direction, false).await?;
+    loser.client.apply_routed_entry(&mut le, &pool()?, &new_direction).await?;
     assert_eq!(active(&loser, &winner.id)?, low);
     assert!(archive(&winner, &loser.id)?.contains(&low));
     assert!(archive(&loser, &winner.id)?.contains(&high));
@@ -431,22 +431,22 @@ async fn simultaneous_resets_converge_without_rejecting_either_valid_state_body(
     let b = gap(&bob, &alice, "bob-gap")?;
     let (mut ae, asent) = Wire::engine(&alice, &bob)?;
     let (mut be, bsent) = Wire::engine(&bob, &alice)?;
-    assert!(alice.client.apply_routed_entry(&mut ae, &pool()?, &b, false).await.is_err());
+    assert!(alice.client.apply_routed_entry(&mut ae, &pool()?, &b).await.is_err());
     let ra = last(&asent)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &a, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &a).await.is_err());
     let rb = last(&bsent)?;
     let sa = decode(&ra.envelope)?.ciphertext.session_id;
     let sb = decode(&rb.envelope)?.ciphertext.session_id;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &rb, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &ra, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &rb).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &ra).await?;
     assert_eq!(active(&alice, "bob")?, active(&bob, "alice")?);
     assert_eq!(active(&alice, "bob")?, sa.min(sb));
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&bsent)?, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&asent)?, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&bsent)?).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&asent)?).await?;
     let a = seal(&alice, &bob, outgoing(&alice, &bob, "after-reset-a")?, b"A survives")?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &a, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &a).await?;
     let b = seal(&bob, &alice, outgoing(&bob, &alice, "after-reset-b")?, b"B survives")?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &b, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &b).await?;
     Ok(())
 }
 #[tokio::test]
@@ -466,7 +466,7 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
     settle(&mut alice, &mut bob).await?;
     let packet = gap(&alice, &bob, "gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet).await.is_err());
     let lost = last(&sent)?;
     let key = format!(
         "dm-pair/reset-work/{}",
@@ -505,12 +505,12 @@ async fn a_lost_reset_is_retried_without_inbound_traffic_until_peer_confirmation
         decode(&lost.envelope)?.ciphertext.session_id
     );
     let (mut ae, acks) = Wire::engine(&alice, &bob)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &retry, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &retry).await?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?).await?;
     assert!(bob.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?.is_none());
     let next = seal(&alice, &bob, outgoing(&alice, &bob, "after-offline")?, b"online again")?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &next).await?;
     Ok(())
 }
 #[tokio::test]
@@ -544,7 +544,7 @@ async fn archive_eviction_erases_the_old_state_and_requests_authenticated_reset_
     );
     assert!(matches!(bob.client.open_routed(&late, "bob"), Err(SdkError::PairRecoveryRequired)));
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late).await.is_err());
     assert_eq!(sent.lock().map_err(|_| invalid("mutex"))?.len(), 1);
     Ok(())
 }
@@ -566,7 +566,7 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it_b
     settle(&mut alice, &mut bob).await?;
     let packet = gap(&alice, &bob, "initial-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet).await.is_err());
     let first = last(&sent)?;
     let (mut session, bundle) = bob
         .client
@@ -620,9 +620,9 @@ async fn an_unacknowledged_reset_rotates_before_its_own_retry_gap_can_wedge_it_b
         decode(&first.envelope)?.ciphertext.session_id
     );
     let (mut ae, ack) = Wire::engine(&alice, &bob)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &retry, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &retry).await?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&ack)?, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&ack)?).await?;
     assert_eq!(active(&alice, "bob")?, active(&bob, "alice")?);
     Ok(())
 }
@@ -646,7 +646,7 @@ async fn reset_requests_use_the_verified_identity_directory_delivery_alias_body(
     bob.client.persist_fetched_identity_directory(&manifest)?;
     let packet = gap(&alice, &bob, "alias-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &packet).await.is_err());
     assert_eq!(last(&sent)?.envelope.target_delivery_id, alice.config()?.target_delivery_id);
     assert_ne!(
         last(&sent)?.envelope.target_delivery_id,

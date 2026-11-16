@@ -66,14 +66,14 @@ impl GatewaySessionFrameSource for Faulty {
 }
 
 /// The submitted envelope as the wire must carry it, in struct order.
-const ORIGINAL_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}"#;
+const ORIGINAL_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}"#;
 
 fn nack_bytes(reason: &str) -> Vec<u8> {
     format!(r#"{{"frame_type":"nack","reason":"{reason}"}}"#).into_bytes()
 }
 
 fn modes() -> [(&'static str, SessionMode); 2] {
-    [("legacy", SessionMode::Legacy), ("push", push())]
+    [("direct", SessionMode::Direct), ("push", push())]
 }
 
 async fn classified(
@@ -96,7 +96,7 @@ fn rejected(result: Result<Result<crate::GatewayInboxEntry, SubmitRefusal>, SdkE
 
 #[tokio::test(start_paused = true)]
 async fn sender_outcome_classification() {
-    // (p1)-(p3) Legacy mode, (p4)-(p6) Push mode: each exact reason is its typed refusal and
+    // Direct mode and Push mode: each exact reason is its typed refusal and
     // the session stays alive.
     let typed = [
         ("aborted_retry_safe", SubmitRefusal::RetrySafe),

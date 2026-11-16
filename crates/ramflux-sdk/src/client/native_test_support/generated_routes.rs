@@ -10,7 +10,6 @@ use ramflux_protocol::message as g;
 async fn native_generated_receipt_opens_on_receipt_route_with_exact_inner() -> TestResult {
     let source = Fixture::new("native-receipt-source").await?;
     let target = Fixture::new("native-receipt-target").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let conversation = g::dm_scope::derive(
         &source.client.own_account_anchor()?,
         &target.client.own_account_anchor()?,
@@ -86,7 +85,6 @@ async fn native_generated_group_key_imports_only_on_its_group_route_and_decrypts
 -> TestResult {
     let source = Fixture::with_device("typed-key-source", "source-device").await?;
     let mut target = Fixture::with_device("typed-key-target", "target-device").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     source.client.persist_fetched_identity_directory(&target.manifest)?;
     target.client.persist_fetched_identity_directory(&source.manifest)?;
     let primary = source

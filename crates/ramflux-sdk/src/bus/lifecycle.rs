@@ -33,7 +33,6 @@ pub(super) fn handles(method: &str) -> bool {
     matches!(
         method,
         "account.create"
-            | "account.itest_legacy.create"
             | "account.unlock"
             | "account.lock"
             | "account.switch"
@@ -64,7 +63,7 @@ pub(super) async fn fingerprint(
     }
     let scope = if request.method.starts_with("node.") {
         String::new()
-    } else if matches!(request.method.as_str(), "account.create" | "account.itest_legacy.create") {
+    } else if request.method.as_str() == "account.create" {
         request
             .body
             .get("local_account_id")

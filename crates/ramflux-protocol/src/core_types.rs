@@ -94,7 +94,6 @@ pub enum DeliveryClass {
     Message,
     CallWake,
     OpaqueEvent,
-    SelfDeviceControl,
     NotificationWake,
     ObjectManifest,
     ObjectChunk,

@@ -24,7 +24,7 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for n in 0..22 {
         let entry = fresh(&alice, &bob, &format!("successor-{n}"))?;
-        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+        bob.client.apply_routed_entry(&mut engine, &pool()?, &entry).await?;
     }
     let db = bob.client.account_db()?;
     for key in db.actor_state_keys("dm-pair/retired/")? {
@@ -46,7 +46,7 @@ async fn pruned_tombstones_cannot_revive_a_held_bootstrap_or_clear_manual_recove
     for key in db.actor_state_keys("dm-pair/retired/")? {
         db.remove_actor_state(&key)?;
     }
-    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &held, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut engine, &pool()?, &held).await.is_err());
     let db = bob.client.account_db()?;
     assert_eq!(db.load_actor_state::<serde_json::Value>(&format!("{pair}/manual"))?, marker);
     assert!(db.load_actor_state::<String>(&pair)?.is_none());
@@ -122,7 +122,7 @@ async fn receive_high_water_and_sender_sequence_survive_account_reopen_body() ->
     let held = fresh(&alice, &bob, "before-reopen-held")?;
     let later = fresh(&alice, &bob, "before-reopen-accepted")?;
     let mut engine = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
-    bob.client.apply_routed_entry(&mut engine, &pool()?, &later, false).await?;
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &later).await?;
     for fixture in [&mut bob, &mut alice] {
         fixture.client.active_account_db = None;
         fixture.client.unlock_account(&fixture.id, b"native fixture data passphrase")?;
@@ -136,6 +136,6 @@ async fn receive_high_water_and_sender_sequence_survive_account_reopen_body() ->
     }
     assert!(bob.client.open_routed(&held, "bob").is_err());
     let next = fresh(&alice, &bob, "after-reopen")?;
-    bob.client.apply_routed_entry(&mut engine, &pool()?, &next, false).await?;
+    bob.client.apply_routed_entry(&mut engine, &pool()?, &next).await?;
     Ok(())
 }

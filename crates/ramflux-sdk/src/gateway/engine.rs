@@ -393,7 +393,7 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             push_route_expiries: BTreeMap::new(),
             pending_push_routes: Vec::new(),
-            mode: super::session_push::SessionMode::Legacy,
+            mode: super::session_push::SessionMode::Direct,
             pending_calls: super::call_resolution::PendingCalls::default(),
         }
     }

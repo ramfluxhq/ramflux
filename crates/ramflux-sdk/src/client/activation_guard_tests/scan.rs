@@ -71,13 +71,13 @@ mod tests {
     use super::*;
     #[test]
     fn scans_production_after_an_inline_test_without_counting_test_calls() -> syn::Result<()> {
-        let marker = ["schema_v1_live()"];
+        let marker = ["active_generation()"];
         assert!(
-            !contains("#[cfg(test)] mod tests { fn f() { schema_v1_live(); } }", &marker)?,
+            !contains("#[cfg(test)] mod tests { fn f() { active_generation(); } }", &marker)?,
             "test-only profile assertions are not production selectors"
         );
         assert!(
-            contains("#[cfg(test)] mod tests {} fn validate() { schema_v1_live(); }", &marker)?,
+            contains("#[cfg(test)] mod tests {} fn validate() { active_generation(); }", &marker)?,
             "production after a test module must remain visible"
         );
         Ok(())

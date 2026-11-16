@@ -147,7 +147,7 @@ fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
 async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<Delivery, SdkError> {
     let mut session = engine(receiver)?;
     let pool = pool()?;
-    receiver.client.apply_routed_entry(&mut session, &pool, entry, false).await
+    receiver.client.apply_routed_entry(&mut session, &pool, entry).await
 }
 
 fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {

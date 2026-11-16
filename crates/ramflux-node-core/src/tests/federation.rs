@@ -520,7 +520,6 @@ fn assert_inner_delivery_classes(
     for refused_class in [
         DeliveryClass::OpaqueEvent,
         DeliveryClass::NotificationWake,
-        DeliveryClass::SelfDeviceControl,
         DeliveryClass::ObjectManifest,
         DeliveryClass::ObjectChunk,
         DeliveryClass::FederationControl,

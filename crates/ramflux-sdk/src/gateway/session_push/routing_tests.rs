@@ -84,7 +84,7 @@ pub(super) fn scripted_raw(mode: SessionMode, script: Vec<Vec<u8>>) -> GatewaySe
 
 pub(super) fn envelope() -> ramflux_protocol::Envelope {
     serde_json::from_value(json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+        "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
         "signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture",
         "envelope_id":"env-route","source_principal_id":"p","source_device_id":"d",
         "target_delivery_id":"target-route","delivery_class":"opaque_event",
@@ -194,7 +194,7 @@ async fn push_reader_routes_shared_and_capable_frames() {
                 }
                 other => panic!("not a capable nack: {other:?}"),
             },
-            Routed::Legacy(other) => panic!("not capable: {other:?}"),
+            Routed::Direct(other) => panic!("not capable: {other:?}"),
         }
     }
 
@@ -294,9 +294,9 @@ async fn push_reader_routes_shared_and_capable_frames() {
     ];
     for (literal, node_bytes) in frozen {
         assert_eq!(literal, node_bytes, "node-core still produces the frozen bytes");
-        for mode in [SessionMode::Legacy, SessionMode::Compat, push()] {
+        for mode in [SessionMode::Direct, push()] {
             match route(&literal, &mode).unwrap() {
-                Routed::Legacy(frame) => {
+                Routed::Direct(frame) => {
                     assert_eq!(serde_json::to_vec(&*frame).unwrap(), literal);
                 }
                 Routed::Capable(other) => panic!("not legacy: {other:?}"),
@@ -317,11 +317,10 @@ async fn push_reader_routes_shared_and_capable_frames() {
     for vector in vectors {
         let bytes = serde_json::to_vec(&vector).unwrap();
         let direct: GatewayServerFrame = serde_json::from_slice(&bytes).unwrap();
-        for mode in [SessionMode::Legacy, SessionMode::Compat] {
-            match route(&bytes, &mode).unwrap() {
-                Routed::Legacy(frame) => assert_eq!(*frame, direct),
-                Routed::Capable(other) => panic!("not legacy: {other:?}"),
-            }
+        let mode = SessionMode::Direct;
+        match route(&bytes, &mode).unwrap() {
+            Routed::Direct(frame) => assert_eq!(*frame, direct),
+            Routed::Capable(other) => panic!("not direct: {other:?}"),
         }
     }
 
@@ -332,7 +331,7 @@ async fn push_reader_routes_shared_and_capable_frames() {
 async fn sdk_ijson_receive_refuses_unsafe_integer() {
     use ramflux_protocol::ProtocolError;
 
-    for (mode, capable) in [(SessionMode::Legacy, false), (push(), true)] {
+    for (mode, capable) in [(SessionMode::Direct, false), (push(), true)] {
         // (bytes, inner I-JSON error text): the text tells the duplicate-name refusal apart
         // from the unsafe-integer refusal.
         for (bytes, needle) in [
@@ -401,7 +400,7 @@ async fn sdk_ijson_receive_refuses_unsafe_integer() {
 }
 
 fn deliver_frame_bytes(capable: bool, created_at: &str, duplicate_extension_key: bool) -> Vec<u8> {
-    let mut bytes = br#"{"frame_type":"deliver","entry":{"inbox_seq":71,"target_delivery_id":"target-route","envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":"#.to_vec();
+    let mut bytes = br#"{"frame_type":"deliver","entry":{"inbox_seq":71,"target_delivery_id":"target-route","envelope":{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":"#.to_vec();
     bytes.extend_from_slice(created_at.as_bytes());
     bytes.extend_from_slice(br#", "encrypted_payload":"opaque","payload_hash":"hash-route""#);
     if duplicate_extension_key {
@@ -437,10 +436,10 @@ async fn refusal_rows() {
     );
     let result = read(&mut engine).await;
     retired(result, &engine, "keyless shape in a push session");
-    // (r4) Push legacy resume.
+    // (r4) A direct resume frame during a push session.
     let mut engine = engine_of(push(), json!({"frame_type":"resume","entries":[]}));
     let result = read(&mut engine).await;
-    retired(result, &engine, "legacy resume in a push session");
+    retired(result, &engine, "direct resume in a push session");
     // (r5) a capable resume_page during a legacy heartbeat wait.
     let page = capable(&n::SessionPushServerFrame::ResumePage {
         target_delivery_id: "target-route".into(),
@@ -457,12 +456,11 @@ async fn refusal_rows() {
     let mut engine = engine_of(push(), page.clone());
     let result = read(&mut engine).await;
     retired(result, &engine, "capable reply outside a capable wait");
-    // (r6) a Legacy session receives resume_page, (r7) a keyed nack, (r8) a Compat session
-    // receives submit_accepted.
-    let mut engine = engine_of(SessionMode::Legacy, page);
+    // A direct session receives resume_page, a keyed nack, and submit_accepted.
+    let mut engine = engine_of(SessionMode::Direct, page);
     let result = read(&mut engine).await;
     retired(result, &engine, "capable frame on an unnegotiated session");
-    let mut engine = engine_of(SessionMode::Legacy, capable_nack(Some(E)));
+    let mut engine = engine_of(SessionMode::Direct, capable_nack(Some(E)));
     let result = read(&mut engine).await;
     retired(result, &engine, "capable frame on an unnegotiated session");
     let accepted = capable(&n::SessionPushServerFrame::SubmitAccepted {
@@ -471,7 +469,7 @@ async fn refusal_rows() {
         target_delivery_id: "target-route".into(),
         inbox_seq: 3,
     });
-    let mut engine = engine_of(SessionMode::Compat, accepted);
+    let mut engine = engine_of(SessionMode::Direct, accepted);
     let result = read(&mut engine).await;
     retired(result, &engine, "capable frame on an unnegotiated session");
     // (r9) a capable nack with an unknown reason: closed enum, no legacy fallback.

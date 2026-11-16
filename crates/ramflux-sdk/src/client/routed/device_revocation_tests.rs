@@ -114,9 +114,7 @@ async fn revoking_the_current_device_clears_all_pairs_and_fences_pair_traffic() 
             "test: local denial retained private sessions"
         );
         assert_local_denial(
-            bob.client
-                .apply_routed_entry(&mut engine, &super::review::pool()?, &incoming, false)
-                .await,
+            bob.client.apply_routed_entry(&mut engine, &super::review::pool()?, &incoming).await,
         );
         assert_local_denial(
             bob.client

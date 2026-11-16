@@ -35,15 +35,15 @@ async fn confirming_a_reset_does_not_remove_its_persistent_minimum_interval_body
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "stale-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let (mut ae, acks) = Wire::engine(&alice, &bob)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&sent)?, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&sent)?).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?).await?;
     assert!(!has_work(&bob)?);
     let current = active(&bob, "alice")?;
     let previous = archive(&bob, "alice")?;
     for _ in 0..10 {
-        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     }
     assert_eq!(sent.lock().map_err(|_| invalid("mutex"))?.len(), 1);
     assert_eq!(active(&bob, "alice")?, current);
@@ -103,7 +103,7 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "expiry-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let now = now_unix_timestamp();
     let mut pending = bob
         .client
@@ -156,7 +156,7 @@ async fn relationship_end(block: bool) -> Result<(), SdkError> {
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "relationship-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let link = bob
         .client
         .account_db()?
@@ -183,7 +183,7 @@ async fn relationship_end(block: bool) -> Result<(), SdkError> {
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     bob.client.retry_pair_resets(&mut be, now_unix_timestamp() + 3600).await?;
     assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     assert!(!has_work(&bob)?);
     Ok(())
 }
@@ -230,7 +230,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "manifest-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let native = alice.native.as_ref().ok_or_else(|| invalid("test: source native vault"))?;
     let old = alice.manifest()?;
     let record = old
@@ -340,8 +340,8 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends_body
     let (mut ae, _) = Wire::engine(&alice, &bob)?;
     let plain_id = decode(&plain.envelope)?.ciphertext.session_id;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &plain, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &plain).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &reset).await?;
     assert_eq!(active(&alice, "bob")?, plain_id);
     assert_eq!(active(&bob, "alice")?, plain_id);
     Ok(())
@@ -364,7 +364,7 @@ async fn session_replacements_prune_nonsecret_flags_and_tombstones_to_the_archiv
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for n in 0..40 {
         let next = fresh(&alice, &bob, &format!("bounded-{n}"))?;
-        bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
+        bob.client.apply_routed_entry(&mut be, &pool()?, &next).await?;
     }
     let db = bob.client.account_db()?;
     assert!(db.list_actor_states::<serde_json::Value>("dm-pair/retired/")?.len() <= 8);
@@ -397,20 +397,15 @@ async fn evicted_packets_older_than_a_confirmed_successor_are_dropped_without_re
     let (mut ae, _) = Wire::engine(&alice, &bob)?;
     alice
         .client
-        .apply_routed_entry(
-            &mut ae,
-            &pool()?,
-            &replacement.ok_or_else(|| invalid("replacement"))?,
-            false,
-        )
+        .apply_routed_entry(&mut ae, &pool()?, &replacement.ok_or_else(|| invalid("replacement"))?)
         .await?;
     let confirm = seal(&alice, &bob, outgoing(&alice, &bob, "confirm-successor")?, b"confirmed")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &confirm, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &confirm).await?;
     let current = active(&bob, "alice")?;
     let previous = archive(&bob, "alice")?;
     for _ in 0..10 {
-        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late, false).await.is_err());
+        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late).await.is_err());
     }
     assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
     assert_eq!(active(&bob, "alice")?, current);

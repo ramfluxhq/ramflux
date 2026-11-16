@@ -77,7 +77,6 @@ fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
         ("group_message_tombstone_projection", "message_id"),
         ("message_projection", "message_id"),
         ("receipt_projection", "message_id"),
-        ("group_pending_undecrypted", "message_id"),
         ("root_group_sender_key_counter_seen", "message_id"),
         ("group_sender_key_counter_seen", "message_id"),
         ("contact_message_request", "message_id"),

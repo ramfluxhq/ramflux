@@ -130,7 +130,6 @@ mod tests {
     async fn shared_generated_sealer_refuses_closed_a2i_and_floorless_self_sync_before_framing()
     -> TestResult {
         let source = Fixture::new("native-closed-sealer").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let identity = source.client.allocate_generated_identity("closed-control", 1, false)?;
         let route = Routing {
             kind: Kind::Control,

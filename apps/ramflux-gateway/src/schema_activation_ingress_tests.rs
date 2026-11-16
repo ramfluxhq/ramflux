@@ -33,7 +33,6 @@ async fn isolated() -> Result {
 }
 
 async fn run() -> Result {
-    assert!(ramflux_protocol::schema_profile::schema_v1_live(), "test requires generation 1");
     let now = ramflux_node_core::now_unix_seconds();
     let account = authority(now)?;
     let gateway = Gateway::new_custody(Some(&account.node)).await?;

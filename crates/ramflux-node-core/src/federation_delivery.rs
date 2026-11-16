@@ -152,7 +152,6 @@ fn candidate_federation_capability(
         }
         DeliveryClass::OpaqueEvent
         | DeliveryClass::NotificationWake
-        | DeliveryClass::SelfDeviceControl
         | DeliveryClass::ObjectManifest
         | DeliveryClass::ObjectChunk
         | DeliveryClass::FederationControl => Err(NodeCoreError::DeliveryClassRefused),

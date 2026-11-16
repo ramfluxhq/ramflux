@@ -246,7 +246,7 @@ async fn a_receipt_backlog_never_blocks_the_authenticated_dm_commit() -> TestRes
     let mut engine = receiver.session_client().await?;
     let pool = receiver.relay_quic_pool()?;
     backlog(&receiver.client, &a, &b)?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     assert_eq!(
         receiver
             .client
@@ -324,7 +324,7 @@ async fn group_storage_and_its_receipt_remain_atomic_with_a_large_backlog() -> T
         256,
         "receipt must roll back with the group message"
     );
-    Box::pin(receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false)).await?;
+    Box::pin(receiver.client.apply_routed_entry(&mut engine, &pool, &entry)).await?;
     assert_eq!(
         receiver.client.generated_message_detail("thread", &id)?.message.text.as_deref(),
         Some("group body"),

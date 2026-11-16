@@ -9,9 +9,6 @@ use crate::prelude::*;
 pub struct LocalBusConfig {
     /// Frozen pairing configuration; None reads the strict default-off environment once at startup.
     pub pairing: Option<crate::custody::pairing::PairingConfig>,
-    /// Explicit runtime opt-in for unmigrated fixture accounts. Startup refuses this
-    /// setting unless the integration-only creation implementation is compiled in.
-    pub itest_legacy_accounts: bool,
     #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
     pub custody_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault + Send + Sync>>,
     #[cfg(test)]
@@ -270,17 +267,6 @@ pub struct LocalBusDeviceListResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusDeviceActivateRequest {
-    #[serde(default)]
-    pub node_id: Option<String>,
-    pub device_id: String,
-    pub target_delivery_id: String,
-    pub device_seed: [u8; 32],
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_epoch: Option<u64>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusDeviceRevokeRequest {
     pub device_id: String,
 }
@@ -293,26 +279,6 @@ pub struct LocalBusDeviceSyncExportRequest {
     pub relay_service_key_base64: Option<String>,
     #[serde(default)]
     pub chunk_size: Option<usize>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusDeviceSyncImportRequest {
-    pub envelope: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay_service_key_base64: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusDeviceActivateResponse {
-    pub local_account_id: String,
-    pub principal_id: String,
-    pub device_id: String,
-    pub device_epoch: u64,
-    pub target_delivery_id: String,
-    pub branch_authorized_event_id: String,
-    pub session_id: String,
-    pub active_transport_kind: String,
-    pub devices: Vec<LocalBusDeviceRecord>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -366,48 +332,7 @@ pub(crate) struct LocalBusPersistedAccount {
     pub(crate) devices: Vec<LocalBusDeviceRecord>,
 }
 
-#[cfg(any(test, feature = "itest-legacy-accounts"))]
-impl LocalBusPersistedAccount {
-    pub(crate) fn from_create_request(body: &LocalBusAccountCreateRequest) -> Self {
-        let devices = vec![LocalBusDeviceRecord {
-            device_id: body.device_id.clone(),
-            device_epoch: 1,
-            target_delivery_id: body.target_delivery_id.clone(),
-            capability_scope: default_device_capability_scope(),
-            is_local: true,
-        }];
-        Self {
-            activation_pending: true,
-            label: body.label.clone(),
-            kind: Some(
-                serde_json::to_value(body.kind.unwrap_or(
-                    if body.client_mode == LocalBusClientMode::HeadlessAi {
-                        ramflux_protocol::PrincipalKind::HeadlessAi
-                    } else {
-                        ramflux_protocol::PrincipalKind::Human
-                    },
-                ))
-                .map_or_else(|_| String::new(), |v| v.as_str().unwrap_or_default().to_owned()),
-            ),
-            schema: "ramflux.local_bus.account_manifest.v1".to_owned(),
-            local_account_id: body.local_account_id.clone(),
-            principal_id: body.principal_id.clone(),
-            principal_commitment: body.principal_commitment.clone(),
-            device_id: body.device_id.clone(),
-            target_delivery_id: body.target_delivery_id.clone(),
-            account_secret: body.account_secret.clone(),
-            root_seed: body.root_seed,
-            device_seed: body.device_seed,
-            client_mode: body.client_mode.clone(),
-            node_id: body.node_id.clone(),
-            node_tcp_addr: None,
-            node_relay: None,
-            gateway: body.gateway.clone(),
-            devices,
-        }
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn default_device_capability_scope() -> Vec<String> {
     vec!["device.delivery.bind".to_owned(), "own_device.sync".to_owned()]
 }
@@ -1174,21 +1099,12 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 impl LocalBusConfig {
-    /// Opt into the temporary legacy integration-fixture namespace.
-    /// The daemon refuses startup when its fixture feature is absent.
-    #[must_use]
-    pub fn with_itest_legacy_accounts(mut self) -> Self {
-        self.itest_legacy_accounts = true;
-        self
-    }
-
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
             pairing: None,
             #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
             custody_vault: None,
-            itest_legacy_accounts: false,
             #[cfg(test)]
             custody_confirm_completed: None,
             #[cfg(test)]

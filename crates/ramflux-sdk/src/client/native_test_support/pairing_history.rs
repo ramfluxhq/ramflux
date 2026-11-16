@@ -57,7 +57,6 @@ impl Fixture {
 /// Seed one received first-hand DM and one own-authored group message, before any enrollment.
 pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> TestResult<Seeded> {
     let peer = Fixture::new("enrollment-history-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (dm, _, dm_conversation) = Box::pin(history::receive_first_hand(source, &peer)).await?;
     let primary = source
         .client
@@ -236,7 +235,6 @@ async fn resume() -> TestResult {
     let mut target = source.enroll_sibling("resume-target", "resume-device").await?;
     let first_peer = Fixture::new("resume-peer-a").await?;
     let second_peer = Fixture::new("resume-peer-b").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (first, _, _) = Box::pin(history::receive_first_hand(&mut source, &first_peer)).await?;
     let (second, _, _) = Box::pin(history::receive_first_hand(&mut source, &second_peer)).await?;
     let id = own_ref(&source, &target)?;

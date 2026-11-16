@@ -139,10 +139,7 @@ async fn launch(
     });
     let actor = AccountActor::start_local(
         "sender".into(),
-        LocalBusConfig {
-            itest_legacy_accounts: true,
-            ..LocalBusConfig::new(root.join("bus.sock"), data_root)
-        },
+        LocalBusConfig::new(root.join("bus.sock"), data_root),
         crate::node::NodeStore::default(),
         index,
         events,

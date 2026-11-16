@@ -213,7 +213,7 @@ pub(in crate::bus::dispatch) async fn deliver_to_peers(
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope: envelope.clone(),
         };
-        peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         reached.insert(index);
     }
     for index in &reached {

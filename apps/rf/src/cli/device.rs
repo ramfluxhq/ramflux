@@ -14,7 +14,6 @@ pub(crate) struct DeviceCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum DeviceAction {
-    Activate(DeviceActivate),
     Revoke(DeviceRevoke),
     /// Export the current device's root-bound public authorization for legacy migration.
     Authorize(AccountSelector),
@@ -24,22 +23,6 @@ pub(crate) enum DeviceAction {
     Refresh(DeviceRefresh),
     List(AccountSelector),
     Sync(DeviceSyncCommand),
-}
-
-#[derive(Args)]
-pub(crate) struct DeviceActivate {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) device: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) target: String,
-    #[arg(long)]
-    pub(crate) device_seed_byte_hex: Option<String>,
-    #[arg(long)]
-    pub(crate) device_epoch: Option<u64>,
 }
 
 #[derive(Args)]
@@ -59,7 +42,6 @@ pub(crate) struct DeviceSyncCommand {
 #[derive(Subcommand)]
 pub(crate) enum DeviceSyncAction {
     Export(DeviceSyncExport),
-    Import(DeviceSyncImport),
 }
 
 #[derive(Args)]
@@ -72,16 +54,6 @@ pub(crate) struct DeviceSyncExport {
     pub(crate) relay_endpoint: String,
     #[arg(long)]
     pub(crate) chunk_size: Option<usize>,
-}
-
-#[derive(Args)]
-pub(crate) struct DeviceSyncImport {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long)]
-    pub(crate) envelope_json: Option<String>,
-    #[arg(long)]
-    pub(crate) envelope_file: Option<PathBuf>,
 }
 
 #[derive(Args)]

@@ -18,7 +18,6 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 0);
     let value = {
-        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         own.client.change_self_sync(
             "native-bootstrap-thread",
             ramflux_protocol::message::SelfSync { operation: 6, mute: true, ..Default::default() },
@@ -93,7 +92,6 @@ async fn native_contacts_backfill_once_after_enrollment_without_private_branch_l
     assert_bootstrap_revision(&own.client, &value)?;
     own.client.stage_own_contact(&peer.manifest, "native-before-enrollment")?;
     assert_eq!(own.client.account_db()?.actor_state_usage("own-device/send/")?.0, 1);
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert_restore_refresh_round(&own.client, &qualified)?;
     remove_sibling_sync(&own, &mut native, &primary)?;
     assert!(own.client.prepare_self_sync_repair(&own.config)?.is_none());
@@ -127,7 +125,6 @@ fn remove_sibling_sync(
 }
 
 fn assert_history_bootstrap_once(client: &crate::RamfluxClient) -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     client.stage_native_history_bootstrap()?;
     let db = client.account_db()?;
     let transfers = db.actor_state_keys("history-out/transfer/")?;

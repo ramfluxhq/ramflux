@@ -25,9 +25,10 @@ pub struct HomeNodeMigrationRecord {
 }
 
 impl HomeNodeMigrationRecord {
+    /// Format 2 is the committed in-memory record. Older versions are not effective.
     #[must_use]
     pub fn is_effective(&self, now: i64) -> bool {
-        self.format_version == 1 && now >= self.effective_at
+        self.format_version == 2 && now >= self.effective_at
     }
 }
 
@@ -169,9 +170,13 @@ mod format_guards {
     #[test]
     fn migration_record_requires_an_explicit_format_version()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut value = serde_json::json!({"format_version":1,"identity_commitment":"root","old_home_node":"old","new_home_node":"new","new_home_node_key_hash":"key","route_record_hash":"route","effective_at":100,"issued_at":99,"migration_proof_hash":"proof","migrated_at":100});
+        let mut value = serde_json::json!({"format_version":2,"identity_commitment":"root","old_home_node":"old","new_home_node":"new","new_home_node_key_hash":"key","route_record_hash":"route","effective_at":100,"issued_at":99,"migration_proof_hash":"proof","migrated_at":100});
         let current: super::HomeNodeMigrationRecord = serde_json::from_value(value.clone())?;
         assert!(current.is_effective(100));
+        assert!(!current.is_effective(99));
+        value["format_version"] = serde_json::json!(1);
+        let retired: super::HomeNodeMigrationRecord = serde_json::from_value(value.clone())?;
+        assert!(!retired.is_effective(100));
         value.as_object_mut().ok_or("migration fixture object")?.remove("format_version");
         assert!(serde_json::from_value::<super::HomeNodeMigrationRecord>(value).is_err());
         Ok(())

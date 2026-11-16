@@ -71,7 +71,6 @@ async fn reaction_restore_preserves_signed_winner_and_replay() -> TestResult {
 async fn reaction_restore_preserves_signed_winner_and_replay_body() -> TestResult {
     let mut own = Fixture::new("reaction-restore").await?;
     let peer = Fixture::new("reaction-restore-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, _, conversation) =
         Box::pin(history::receive_first_hand(&mut own, &peer)).await?;
     let target = g::MessageRef {

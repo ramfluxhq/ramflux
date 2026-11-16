@@ -41,7 +41,6 @@ fn assert_detail_and_missing_ids(
 #[tokio::test(flavor = "current_thread")]
 async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> Result<(), SdkError>
 {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(211, 213).await?;
     commit_content(&a, &mut b, "target", text("first body zq")).await?;
     let target = g::MessageRef {
@@ -146,7 +145,6 @@ async fn read_model_serves_page_changes_and_detail_from_the_durable_store() -> R
 /// served, in commit order, by durable change batches alone.
 #[tokio::test(flavor = "current_thread")]
 async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(215, 217).await?;
     let total = 70_usize;
     for index in 0..total {
@@ -188,7 +186,6 @@ async fn durable_changes_serve_a_backlog_larger_than_the_delivery_page() -> Resu
 /// and nothing reaches the read model. Calibration: the untouched entry is served.
 #[tokio::test(flavor = "current_thread")]
 async fn tampered_committed_binding_is_refused_and_never_served() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(219, 221).await?;
     commit_content(&a, &mut b, "calibration", text("calibration body")).await?;
     assert_eq!(b.client.generated_message_changes("c", 0, 100)?.changes.len(), 1);
@@ -234,7 +231,6 @@ fn assert_cursor_bounds(client: &RamfluxClient, sequence: u64) -> Result<(), Sdk
 #[tokio::test(flavor = "current_thread")]
 async fn read_model_splits_the_hlc_so_the_whole_view_stays_inside_the_ingress_guard()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(221, 223).await?;
     commit_content(&a, &mut b, "target", text("hlc body")).await?;
     let identity = generated_identity(&a, "target")?;

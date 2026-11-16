@@ -358,7 +358,7 @@ fn row_not_local() -> TestResult {
     router.state().test_put_home_node_migration(
         identity.clone(),
         HomeNodeMigrationRecord {
-            format_version: 1,
+            format_version: 2,
             identity_commitment: identity,
             old_home_node: "node-a".into(),
             new_home_node: "node-b".into(),
@@ -383,7 +383,6 @@ fn row_not_local() -> TestResult {
 }
 
 fn row_malformed_named_candidate_fields_are_refused() -> TestResult {
-    anyhow::ensure!(ramflux_protocol::schema_profile::schema_v1_live());
     let (path, router) = fresh("p06b-gate-off-named")?;
     establish_capable(&router, TARGET)?;
     let mut envelope = signed_ephemeral("named", TARGET)?;

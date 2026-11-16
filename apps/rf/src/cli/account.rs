@@ -18,9 +18,6 @@ pub(crate) enum AccountAction {
     Backup(AccountBackupCommand),
     Create(Box<AccountCreate>),
     ExportAgentCredentials(AccountExportAgentCredentials),
-    #[cfg(feature = "itest-legacy-accounts")]
-    #[command(hide = true)]
-    ItestLegacyCreate(Box<ItestLegacyAccountCreate>),
     Recover(AccountSelector),
     List,
     Lock(AccountLock),
@@ -134,39 +131,4 @@ pub(crate) struct AccountPassphraseRotate {
     pub(crate) old_passphrase_env: Option<String>,
     #[arg(long)]
     pub(crate) new_passphrase_env: Option<String>,
-}
-
-#[cfg(feature = "itest-legacy-accounts")]
-#[derive(Args)]
-pub(crate) struct ItestLegacyAccountCreate {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) node: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) principal: String,
-    #[arg(allow_hyphen_values = true, long, hide = true)]
-    pub(crate) expected_commitment: Option<String>,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) device: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) target: String,
-    #[arg(long)]
-    pub(crate) secret: String,
-    #[arg(long)]
-    pub(crate) use_keychain: bool,
-    #[arg(long, default_value = "headless_ai")]
-    pub(crate) client_mode: String,
-    #[arg(long, default_value = "127.0.0.1:7443")]
-    pub(crate) gateway_addr: String,
-    #[arg(long, default_value = "localhost")]
-    pub(crate) server_name: String,
-    #[arg(long, hide = true)]
-    pub(crate) prekey_http_url: Option<String>,
-    #[arg(long)]
-    pub(crate) ca_cert: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) root_seed_byte_hex: Option<String>,
-    #[arg(long)]
-    pub(crate) device_seed_byte_hex: Option<String>,
 }

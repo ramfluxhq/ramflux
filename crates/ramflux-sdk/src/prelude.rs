@@ -14,16 +14,15 @@ pub(crate) use ramflux_storage::{
     DeliveryReceiptRecord, DeviceDirectoryRecord, DirectMessageRecord, DirectMessageWrite,
     DisappearingPolicyRecord, EventStore, FileVaultSecretSource, FrankingReportMetadata,
     FriendLinkRecord, GroupInviteAcceptWrite, GroupInviteWrite, GroupMemberBanWrite,
-    GroupMemberJoinWrite, GroupMemberKickWrite, GroupMessageDeleteWrite,
-    GroupPendingUndecryptedRecord, GroupRoleChangeWrite, GroupSenderKeyCounterRecord, GroupState,
-    GuardianRecoveryShareRecord, GuardianRecoveryShareWrite, HistoryBundle,
-    IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
-    McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageReceiptState,
-    MessageTombstoneRecord, ObjectOperationRecord, ObjectOperationWrite, ObjectShareGrantRecord,
-    ObjectShareGrantWrite, ObjectTransferRecord, ObjectTransferWrite, ObjectWrite,
-    PendingRecoveryApprovalWrite, PendingRecoveryRecord, PendingRecoveryWrite, ProjectionStore,
-    ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord, VaultSecretSource,
-    WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
+    GroupMemberJoinWrite, GroupMemberKickWrite, GroupMessageDeleteWrite, GroupRoleChangeWrite,
+    GroupSenderKeyCounterRecord, GroupState, GuardianRecoveryShareRecord,
+    GuardianRecoveryShareWrite, HistoryBundle, IdentityLifecycleRecord, IdentityLifecycleTiming,
+    McpAuditWrite, McpGrantWrite, McpStandingApprovalWrite, McpToolWrite, MessageMetadata,
+    MessageReceiptState, MessageTombstoneRecord, ObjectOperationRecord, ObjectOperationWrite,
+    ObjectShareGrantRecord, ObjectShareGrantWrite, ObjectTransferRecord, ObjectTransferWrite,
+    ObjectWrite, PendingRecoveryApprovalWrite, PendingRecoveryRecord, PendingRecoveryWrite,
+    ProjectionStore, ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord,
+    VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
     A2iControlEvent, A2uiAction, A2uiSurface, ChunkManifest, ChunkPayload, EncryptedObject,
@@ -58,13 +57,16 @@ pub(crate) use crate::bus::io::{
     local_bus_error, local_bus_error_code, local_bus_event, local_bus_response, local_bus_trace,
     read_local_bus_frame, request_account_id, write_local_bus_frame,
 };
-pub(crate) use crate::bus::protocol::{LocalBusPersistedAccount, default_device_capability_scope};
+pub(crate) use crate::bus::protocol::LocalBusPersistedAccount;
+#[cfg(test)]
+pub(crate) use crate::bus::protocol::default_device_capability_scope;
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };
-pub(crate) use crate::client::contact::assert_manifest_active_device;
 #[cfg(test)]
-pub(crate) use crate::client::contact::assert_target_manifest_active_device;
+pub(crate) use crate::client::contact::{
+    assert_manifest_active_device, assert_target_manifest_active_device,
+};
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
     GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,

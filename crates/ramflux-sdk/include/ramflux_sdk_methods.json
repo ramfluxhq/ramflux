@@ -685,15 +685,6 @@
       "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
-      "name": "device.activate",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
       "name": "device.authorize",
       "secret_input": true,
       "secret_output": true,
@@ -803,15 +794,6 @@
       "capability": "device",
       "key_export": true,
       "name": "device.sync.export",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
-      "name": "device.sync.import",
       "secret_input": true,
       "secret_output": true,
       "show_once": false

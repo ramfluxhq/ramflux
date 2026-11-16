@@ -38,18 +38,6 @@ pub struct GroupKeyEpochState {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct GroupPendingUndecryptedRecord {
-    pub group_id: String,
-    pub conversation_id: String,
-    pub group_key_epoch: u64,
-    pub message_id: String,
-    pub sender_id: String,
-    pub inbox_seq: u64,
-    pub envelope_json: Vec<u8>,
-    pub created_at: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GroupSenderKeyCounterRecord {
     pub group_id: String,
     pub group_key_epoch: u64,
