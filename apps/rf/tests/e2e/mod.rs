@@ -1327,7 +1327,7 @@ fn finish_rf_json(args: &[&str], output: std::process::Output) -> Result<Value> 
         .map_err(|error| format!("rf {args:?} produced non-JSON stdout ({error}): {stdout}").into())
 }
 
-fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+pub(crate) fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     rf_output_env(socket, args, &[])
 }
 

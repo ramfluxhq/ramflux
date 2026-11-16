@@ -14,14 +14,18 @@
     {
       "row": "B9",
       "id": "b9-surface-roundtrip",
-      "status": "BLOCKED",
-      "reason": "surface send/action take a wire file, but no rf command builds a valid A2uiConversationEvent or action for a chosen conversation, and no two-account driver sends and reads it back. Do not invent a wire builder. Needs an agreed generator fixture and actor consent/route setup."
+      "status": "READY",
+      "driver": "apps/rf/tests/e2e_demo_b_tooling.rs b9_surface_round_trip_task_display_and_a2i_refusal",
+      "runs_on": "QA and CI with --ignored and itest-memory-vault",
+      "expected": "create declares choose; Bob observes the patch at the exact version and hash with accepted true; a non-allowed action exits 1 with unknown_action; Bob's allowed action is on the author receipt with Bob as the original signer"
     },
     {
       "row": "B9",
       "id": "b9-task-display",
-      "status": "BLOCKED",
-      "reason": "no rf task command (apps/rf/src/cli/mod.rs has none). The bus exposes task.propose/start/accept/update/resolve (crates/ramflux-sdk/src/bus/method_table.rs) but there is no CLI driver and no chosen Task producer."
+      "status": "READY",
+      "driver": "apps/rf/tests/e2e_demo_b_tooling.rs b9_surface_round_trip_task_display_and_a2i_refusal",
+      "runs_on": "QA and CI with --ignored and itest-memory-vault",
+      "expected": "peer task list and get show the started task; an absent task exits 0 with ok true and a null body; a human task propose exits 1 with invalid_request"
     },
     {
       "row": "B10",

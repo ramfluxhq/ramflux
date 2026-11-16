@@ -2,10 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! `rf task` drivers. Each subcommand sends one existing `task.*` bus method and prints
-//! the same `{ok, method, body}` JSON as `rf conversation`; a bus refusal keeps its code.
+//! the same `{ok, method, body}` JSON as `rf conversation`. A bus refusal keeps its code,
+//! is printed, and fails the process.
 
-use super::conversation_ops::outcome;
-use super::{LocalBusClient, PathBuf, RfError, TaskAction, TaskBodyFile, TaskCommand, print_json};
+use super::conversation_ops::commit_write;
+use super::{LocalBusClient, PathBuf, RfError, TaskAction, TaskBodyFile, TaskCommand};
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
 use std::io::Read;
@@ -66,7 +67,7 @@ pub(crate) async fn handle_task(socket: PathBuf, command: TaskCommand) -> Result
     let bus = LocalBusClient::connect(socket).await?;
     let frame = LocalBusFrame::request(request_id(), Some(account), "task", method, body);
     let response = bus.request_frame_response(frame).await?;
-    print_json(&outcome(method, &response))
+    commit_write(method, &response)
 }
 
 fn versioned_body(task_id: &str, conversation: Option<String>, key: &str, value: u64) -> Value {

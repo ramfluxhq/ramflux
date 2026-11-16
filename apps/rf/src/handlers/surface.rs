@@ -94,10 +94,11 @@ pub(crate) async fn handle_surface(
         }
     };
     if matches!(method, "surface.send" | "surface.action") {
-        // Writes keep the daemon refusal code and details, as `rf conversation` does.
+        // Writes keep the daemon refusal on stdout and fail the process. A surface
+        // action the bus accepts as a frame but marks `accepted: false` is the same refusal.
         let frame = LocalBusFrame::request(request_id(), Some(account), "surface", method, body);
         let response = bus.request_frame_response(frame).await?;
-        return print_json(&crate::handlers::conversation_ops::outcome(method, &response));
+        return crate::handlers::conversation_ops::commit_write(method, &response);
     }
     let response = bus.request(Some(account), "surface", method, body).await?;
     print_json(&response)

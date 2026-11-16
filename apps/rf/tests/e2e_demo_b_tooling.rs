@@ -11,7 +11,11 @@ mod e2e;
 
 use e2e::{
     Account, Daemon, boot_stack, configure_node, create_account, dm_conversation,
-    exchange_contacts, rf_json, start_daemon, unique, wait_json,
+    exchange_contacts, rf_json, rf_output, start_daemon, unique, wait_json,
+};
+use ramflux_protocol::{
+    A2uiConversationCommand, CreateSurfaceCommand, PatchSurfaceCommand, SurfacePatchOp,
+    decode_base64url, surface_snapshot_hash,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -31,7 +35,14 @@ fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
     let conversation = dm_conversation(&alice, &bob)?;
     let scratch = tempfile::TempDir::new()?;
 
-    surface_round_trip(&alice_d, &bob_d, &alice, &bob, &conversation, scratch.path())?;
+    surface_round_trip(&Round {
+        alice_d: &alice_d,
+        bob_d: &bob_d,
+        alice: &alice,
+        bob: &bob,
+        conversation: &conversation,
+        scratch: scratch.path(),
+    })?;
     task_display(&alice_d, &bob_d, &alice, &bob, &conversation, scratch.path())?;
     expect_a2i_authority_refusal(
         &alice_d,
@@ -63,18 +74,37 @@ fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
     Ok(())
 }
 
+struct Round<'a> {
+    alice_d: &'a Daemon,
+    bob_d: &'a Daemon,
+    alice: &'a Account,
+    bob: &'a Account,
+    conversation: &'a str,
+    scratch: &'a Path,
+}
+
+struct SurfaceView {
+    surface_id: String,
+    version: u64,
+    hash: String,
+}
+
+struct Created {
+    view: SurfaceView,
+    snapshot: CreateSurfaceCommand,
+}
+
 /// Alice creates a Surface with `rf surface send`; Bob lists and reads the same surface.
-fn surface_round_trip(
-    alice_d: &Daemon,
-    bob_d: &Daemon,
-    alice: &Account,
-    bob: &Account,
-    conversation: &str,
-    scratch: &Path,
-) -> e2e::Result<()> {
+fn surface_round_trip(trip: &Round<'_>) -> e2e::Result<()> {
+    let created = create_observed_surface(trip)?;
+    let patched = patch_observed_surface(trip, &created)?;
+    prove_action_round_trip(trip, &patched)
+}
+
+fn create_observed_surface(trip: &Round<'_>) -> e2e::Result<Created> {
     let surface_id = unique("demo-b-surface");
     let fallback = unique("Demo B surface fallback");
-    let command = scratch.join("create-surface.json");
+    let command = trip.scratch.join("create-surface.json");
     std::fs::write(
         &command,
         serde_json::to_vec(&json!({
@@ -84,18 +114,19 @@ fn surface_round_trip(
             "catalog": "basic",
             "catalogVersion": "1",
             "fallbackText": fallback,
+            "allowedActions": [{"name": "choose"}],
         }))?,
     )?;
     let command_path = command.to_string_lossy().into_owned();
     let sent = rf_json(
-        &alice_d.socket,
+        &trip.alice_d.socket,
         &[
             "surface",
             "send",
             "--account",
-            &alice.id,
+            &trip.alice.id,
             "--conversation",
-            conversation,
+            trip.conversation,
             "--version",
             "1",
             "--command-file",
@@ -106,72 +137,215 @@ fn surface_round_trip(
         return Err(format!("surface.send refused: {sent}").into());
     }
     let listed = wait_json(
-        bob_d,
-        &["surface", "list", "--account", &bob.id, "--conversation", conversation],
+        trip.bob_d,
+        &["surface", "list", "--account", &trip.bob.id, "--conversation", trip.conversation],
         |value| value.to_string().contains(&surface_id),
     )?;
     if !listed.to_string().contains(&surface_id) {
         return Err(format!("peer surface list lacks {surface_id}: {listed}").into());
     }
-    let read = wait_json(
-        bob_d,
-        &[
-            "surface",
-            "get",
-            "--account",
-            &bob.id,
-            "--surface-id",
-            &surface_id,
-            "--conversation",
-            conversation,
-        ],
-        |value| value.to_string().contains(&fallback),
-    )?;
+    let read = peer_surface(trip, &surface_id, |value| value.to_string().contains(&fallback))?;
     if !read.to_string().contains(&fallback) {
         return Err(format!("peer surface get lacks the created fallback: {read}").into());
     }
+    if !read["snapshot"]["allowedActions"].to_string().contains("choose") {
+        return Err(format!("receiver snapshot does not declare choose: {read}").into());
+    }
     let author_view = rf_json(
-        &alice_d.socket,
-        &["surface", "get", "--account", &alice.id, "--surface-id", &surface_id],
+        &trip.alice_d.socket,
+        &["surface", "get", "--account", &trip.alice.id, "--surface-id", &surface_id],
     )?;
     if !author_view.to_string().contains(&fallback) {
         return Err(format!("author surface get lacks the created fallback: {author_view}").into());
     }
-    let hash = author_view
-        .get("surface_hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("author surface view has no surface_hash: {author_view}"))?;
-    let version = author_view.get("version").and_then(Value::as_u64).unwrap_or(1);
-    let action = scratch.join("surface-action.json");
+    let version = required_u64(&author_view, "version")?;
+    let hash = required_str(&author_view, "surface_hash")?.to_owned();
+    let snapshot: CreateSurfaceCommand = serde_json::from_value(author_view["snapshot"].clone())?;
+    let recomputed = surface_snapshot_hash(&snapshot)?;
+    if recomputed != hash {
+        return Err(format!("author snapshot hash {recomputed} != view {hash}").into());
+    }
+    Ok(Created { view: SurfaceView { surface_id, version, hash }, snapshot })
+}
+
+fn patch_observed_surface(trip: &Round<'_>, created: &Created) -> e2e::Result<SurfaceView> {
+    let patched = unique("Demo B patched fallback");
+    let mut snapshot = created.snapshot.clone();
+    snapshot.fallback_text.clone_from(&patched);
+    let new_hash = surface_snapshot_hash(&snapshot)?;
+    let next_version = created.view.version.checked_add(1).ok_or("surface version exhausted")?;
+    let patch_path = trip.scratch.join("patch-surface.json");
     std::fs::write(
-        &action,
-        serde_json::to_vec(&json!({
-            "surfaceId": surface_id,
-            "version": version,
-            "surfaceHash": hash,
-            "actionId": "choose",
-            "values": {"choice": "yes"},
+        &patch_path,
+        serde_json::to_vec(&A2uiConversationCommand::PatchSurface(PatchSurfaceCommand {
+            surface_id: created.view.surface_id.clone(),
+            base_surface_hash: created.view.hash.clone(),
+            ops: vec![SurfacePatchOp::SetFallbackText { fallback_text: patched.clone() }],
+            new_surface_hash: new_hash.clone(),
         }))?,
     )?;
-    let action_path = action.to_string_lossy().into_owned();
-    let acted = rf_json(
-        &alice_d.socket,
+    let patch_file = patch_path.to_string_lossy().into_owned();
+    let version_arg = next_version.to_string();
+    let patched_send = rf_json(
+        &trip.alice_d.socket,
         &[
             "surface",
             "send",
             "--account",
-            &alice.id,
+            &trip.alice.id,
             "--conversation",
-            conversation,
-            "--action",
-            &action_path,
+            trip.conversation,
+            "--version",
+            &version_arg,
+            "--command-file",
+            &patch_file,
         ],
     )?;
-    if acted.get("ok").and_then(Value::as_bool) == Some(true) {
-        Ok(())
-    } else {
-        Err(format!("surface send --action was refused: {acted}").into())
+    if patched_send.get("ok").and_then(Value::as_bool) != Some(true)
+        || patched_send.pointer("/body/accepted").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(format!("surface patch was not accepted: {patched_send}").into());
     }
+    let observed = peer_surface(trip, &created.view.surface_id, |value| {
+        value.get("surface_hash").and_then(Value::as_str) == Some(new_hash.as_str())
+            && value.get("version").and_then(Value::as_u64) == Some(next_version)
+            && value.to_string().contains(&patched)
+    })?;
+    let version = required_u64(&observed, "version")?;
+    let hash = required_str(&observed, "surface_hash")?.to_owned();
+    if version != next_version || hash != new_hash {
+        return Err(format!(
+            "receiver patch is {version}/{hash}, expected {next_version}/{new_hash}"
+        )
+        .into());
+    }
+    Ok(SurfaceView { surface_id: created.view.surface_id.clone(), version, hash })
+}
+
+fn prove_action_round_trip(trip: &Round<'_>, view: &SurfaceView) -> e2e::Result<()> {
+    let deny = action_command(&action_send(trip, view, "deny"))?;
+    let deny_args: Vec<&str> = deny.iter().map(String::as_str).collect();
+    expect_typed_refusal(trip.bob_d, &deny_args, "unknown_action")?;
+    let choose = action_command(&action_send(trip, view, "choose"))?;
+    let choose_args: Vec<&str> = choose.iter().map(String::as_str).collect();
+    let acted = rf_json(&trip.bob_d.socket, &choose_args)?;
+    if acted.get("ok").and_then(Value::as_bool) != Some(true)
+        || acted.pointer("/body/accepted").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(format!("allowed surface action was not accepted: {acted}").into());
+    }
+    let receipt = wait_json(
+        trip.alice_d,
+        &["surface", "get", "--account", &trip.alice.id, "--surface-id", &view.surface_id],
+        |value| {
+            action_row(value, "choose").is_some_and(|row| {
+                row.get("sender_principal_id").and_then(Value::as_str)
+                    == Some(trip.bob.principal_id.as_str())
+                    && row.get("receipt_verified").and_then(Value::as_bool) == Some(true)
+                    && row.get("version").and_then(Value::as_u64) == Some(view.version)
+            })
+        },
+    )?;
+    assert_author_receipt(&receipt, trip.bob, view)
+}
+
+fn action_send<'a>(
+    trip: &'a Round<'_>,
+    view: &'a SurfaceView,
+    action_id: &'a str,
+) -> ActionSend<'a> {
+    ActionSend {
+        actor: trip.bob,
+        author: trip.alice,
+        conversation: trip.conversation,
+        surface_id: &view.surface_id,
+        version: view.version,
+        hash: &view.hash,
+        action_id,
+        scratch: trip.scratch,
+    }
+}
+
+fn peer_surface(
+    trip: &Round<'_>,
+    surface_id: &str,
+    ready: impl Fn(&Value) -> bool,
+) -> e2e::Result<Value> {
+    wait_json(
+        trip.bob_d,
+        &[
+            "surface",
+            "get",
+            "--account",
+            &trip.bob.id,
+            "--surface-id",
+            surface_id,
+            "--conversation",
+            trip.conversation,
+        ],
+        ready,
+    )
+}
+
+fn assert_author_receipt(receipt: &Value, bob: &Account, view: &SurfaceView) -> e2e::Result<()> {
+    let row = action_row(receipt, "choose")
+        .ok_or_else(|| format!("author surface has no choose receipt: {receipt}"))?;
+    if row.get("sender_principal_id").and_then(Value::as_str) != Some(bob.principal_id.as_str())
+        || row.get("sender_device_id").and_then(Value::as_str) != Some(bob.device_id.as_str())
+    {
+        return Err(format!("author receipt signer is not Bob: {row}").into());
+    }
+    if row.get("signature").and_then(Value::as_str).is_none_or(str::is_empty) {
+        return Err(format!("author receipt has no original signature: {row}").into());
+    }
+    if row.get("receipt_verified").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("author receipt is not verified: {row}").into());
+    }
+    let wire = action_wire(row)?;
+    if wire.get("version").and_then(Value::as_u64) != Some(view.version)
+        || wire.get("surfaceHash").and_then(Value::as_str) != Some(view.hash.as_str())
+        || wire.get("actionId").and_then(Value::as_str) != Some("choose")
+    {
+        return Err(format!("author action wire is not the exact decision: {wire}").into());
+    }
+    Ok(())
+}
+
+struct ActionSend<'a> {
+    actor: &'a Account,
+    author: &'a Account,
+    conversation: &'a str,
+    surface_id: &'a str,
+    version: u64,
+    hash: &'a str,
+    action_id: &'a str,
+    scratch: &'a Path,
+}
+
+fn action_command(send: &ActionSend<'_>) -> e2e::Result<Vec<String>> {
+    let path = send.scratch.join(format!("action-{}.json", send.action_id));
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "surfaceId": send.surface_id,
+            "version": send.version,
+            "surfaceHash": send.hash,
+            "actionId": send.action_id,
+            "values": {"choice": "yes"},
+        }))?,
+    )?;
+    Ok(vec![
+        "surface".to_owned(),
+        "send".to_owned(),
+        "--account".to_owned(),
+        send.actor.id.clone(),
+        "--conversation".to_owned(),
+        send.conversation.to_owned(),
+        "--author".to_owned(),
+        send.author.principal_id.clone(),
+        "--action".to_owned(),
+        path.to_string_lossy().into_owned(),
+    ])
 }
 
 /// Alice starts a Task for Bob; Bob's `task list` and `task get` display it. A missing task is
@@ -219,14 +393,45 @@ fn task_display(
     if got.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(format!("task.get did not succeed on the peer: {got}").into());
     }
-    let missing = rf_json(
-        &bob_d.socket,
-        &["task", "get", "--account", &bob.id, "--task-id", &unique("absent-task")],
-    )?;
+    let absent_id = unique("absent-task");
+    let missing_output =
+        rf_output(&bob_d.socket, &["task", "get", "--account", &bob.id, "--task-id", &absent_id])?;
+    if missing_output.status.code() != Some(0) {
+        return Err(format!(
+            "absent task read exited {:?}: stdout={} stderr={}",
+            missing_output.status.code(),
+            String::from_utf8_lossy(&missing_output.stdout),
+            String::from_utf8_lossy(&missing_output.stderr)
+        )
+        .into());
+    }
+    let missing: Value = serde_json::from_slice(&missing_output.stdout)?;
     if missing.get("ok").and_then(Value::as_bool) != Some(true)
         || !missing.get("body").is_some_and(Value::is_null)
     {
         return Err(format!("absent task was not reported as a null body: {missing}").into());
+    }
+    let proposal = scratch.join("task-propose.json");
+    std::fs::write(
+        &proposal,
+        serde_json::to_vec(&json!({
+            "task_id": unique("demo-b-proposal"),
+            "conversation_id": conversation,
+            "assignee": bob.principal_id,
+            "title": "Demo B",
+            "steps": [],
+        }))?,
+    )?;
+    let proposal_path = proposal.to_string_lossy().into_owned();
+    let refused = expect_typed_refusal(
+        alice_d,
+        &["task", "propose", "--account", &alice.id, "--body-file", &proposal_path],
+        "invalid_request",
+    )?;
+    if refused["error"]["message"].as_str().is_none_or(|message| !message.contains("headless")) {
+        return Err(
+            format!("task propose refusal was not the human-account rule: {refused}").into()
+        );
     }
     Ok(())
 }
@@ -243,6 +448,61 @@ fn settle_contact_requests(
         })?;
     }
     Ok(())
+}
+
+fn required_u64(value: &Value, field: &str) -> e2e::Result<u64> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing {field}: {value}").into())
+}
+
+fn required_str<'a>(value: &'a Value, field: &str) -> e2e::Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing {field}: {value}").into())
+}
+
+fn action_row<'a>(view: &'a Value, action_id: &str) -> Option<&'a Value> {
+    view.get("actions")?.as_array()?.iter().find(|row| {
+        action_wire(row)
+            .ok()
+            .and_then(|wire| wire.get("actionId").and_then(Value::as_str).map(str::to_owned))
+            == Some(action_id.to_owned())
+    })
+}
+
+fn action_wire(row: &Value) -> e2e::Result<Value> {
+    let wire = row
+        .get("wire_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("action row has no wire: {row}"))?;
+    let raw = decode_base64url(wire)?;
+    Ok(serde_json::from_slice(&raw)?)
+}
+
+fn expect_typed_refusal(daemon: &Daemon, args: &[&str], code: &str) -> e2e::Result<Value> {
+    let output = rf_output(&daemon.socket, args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let stderr = String::from_utf8(output.stderr)?;
+    if output.status.code() != Some(1) {
+        return Err(format!(
+            "refusal exited {:?}, expected 1; stdout={stdout} stderr={stderr}",
+            output.status.code()
+        )
+        .into());
+    }
+    let value: Value = serde_json::from_str(stdout.trim())?;
+    if value.get("ok").and_then(Value::as_bool) != Some(false)
+        || value.pointer("/error/code").and_then(Value::as_str) != Some(code)
+    {
+        return Err(format!("structured refusal missing {code}: {value}; stderr={stderr}").into());
+    }
+    if !stderr.contains(code) {
+        return Err(format!("stderr lacks typed {code}: {stderr}").into());
+    }
+    Ok(value)
 }
 
 fn expect_a2i_authority_refusal(daemon: &Daemon, args: &[&str]) -> e2e::Result<()> {
