@@ -178,7 +178,20 @@ fn more_than_sixty_four_epochs_fast_forward_in_one_snapshot() -> Result<(), Cryp
     }
     assert_eq!(state.relation_to(&first)?, GroupStateRelation::Extension);
     assert_eq!(state.view().epoch, 132);
-    assert!(canonical_json_bytes(state.snapshot())?.len() < 5000, "no operation history growth");
+    assert_eq!(
+        state.snapshot().service_events.len(),
+        131,
+        "each rename is one signed service event"
+    );
+    assert_eq!(
+        state.view().name.as_deref(),
+        Some("Name 132"),
+        "the roster keeps only the current name"
+    );
+    assert!(
+        canonical_json_bytes(state.snapshot())?.len() < MAX_GROUP_STATE_BYTES,
+        "the signed service log stays inside the snapshot budget"
+    );
     Ok(())
 }
 #[test]

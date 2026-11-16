@@ -105,6 +105,92 @@ impl GroupServiceOrder {
     }
 }
 
+/// The accepted change that produced one timeline row.
+///
+/// This is the creator-certified action, not a diff of two rosters.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GroupServiceChange {
+    SetName { name: String },
+    Add { root_commitment: String, device_id: String },
+    Remove { root_commitment: String, device_id: String },
+}
+
+/// One accepted timeline change, frozen when the creator certifies that epoch.
+///
+/// `author_root` and `author_device` are the device that allocated `device_sequence`.
+/// Transport forwarding replaces the snapshot issuer and leaves this record unchanged.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupServiceEvent {
+    pub group_epoch: u64,
+    pub device_sequence: u64,
+    pub hlc_ms: u64,
+    pub hlc_logical: u64,
+    pub device_epoch: u64,
+    pub author_root: String,
+    pub author_device: String,
+    pub change: GroupServiceChange,
+}
+
+impl GroupServiceEvent {
+    /// # Errors
+    /// Rejects an order, author, or change that cannot identify a timeline row.
+    pub fn check(&self) -> Result<(), crate::ProtocolError> {
+        GroupServiceOrder {
+            device_sequence: self.device_sequence,
+            hlc_ms: self.hlc_ms,
+            hlc_logical: self.hlc_logical,
+            device_epoch: self.device_epoch,
+        }
+        .check()?;
+        if self.group_epoch == 0 || self.group_epoch > crate::MAX_SAFE_JSON_INTEGER {
+            return Err(crate::ProtocolError::InvalidGroupState("group service event"));
+        }
+        canonical_root(&self.author_root)?;
+        crate::validate_device_name(&self.author_device)?;
+        match &self.change {
+            GroupServiceChange::SetName { name } => {
+                if name.trim().is_empty()
+                    || name.len() > MAX_GROUP_NAME_BYTES
+                    || !crate::text_safety::single_line_is_safe(name)
+                {
+                    return Err(crate::ProtocolError::InvalidGroupState("group service event"));
+                }
+            }
+            GroupServiceChange::Add { root_commitment, device_id }
+            | GroupServiceChange::Remove { root_commitment, device_id } => {
+                canonical_root(root_commitment)?;
+                crate::validate_device_name(device_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hybrid clock packed the same way as a conversation message.
+    ///
+    /// # Errors
+    /// Rejects an order that fails [`GroupServiceOrder::check`].
+    pub fn hlc(&self) -> Result<u64, crate::ProtocolError> {
+        GroupServiceOrder {
+            device_sequence: self.device_sequence,
+            hlc_ms: self.hlc_ms,
+            hlc_logical: self.hlc_logical,
+            device_epoch: self.device_epoch,
+        }
+        .hlc()
+    }
+}
+
+fn canonical_root(value: &str) -> Result<(), crate::ProtocolError> {
+    let bytes = crate::decode_base64url(value)
+        .map_err(|_| crate::ProtocolError::InvalidGroupState("group service event"))?;
+    if bytes.len() != 32 || crate::encode_base64url(&bytes) != value {
+        return Err(crate::ProtocolError::InvalidGroupState("group service event"));
+    }
+    Ok(())
+}
+
 /// A deterministic group capacity refusal, distinct from an authentication failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum GroupStateLimit {
@@ -244,6 +330,8 @@ pub struct GroupStateSnapshot {
     pub state: SharedGroupState,
     pub issued_at: i64,
     pub service_order: GroupServiceOrder,
+    /// Accepted timeline changes in epoch order. A later snapshot carries every earlier event.
+    pub service_events: Vec<GroupServiceEvent>,
     pub root_signature: String,
     pub issuer: GroupStateActor,
     pub signature: String,
@@ -376,7 +464,10 @@ pub fn group_message_id(
 
 #[cfg(test)]
 mod service_order_tests {
-    use super::{GroupServiceOrder, GroupStateSnapshot, MAX_SERVICE_HLC_MS};
+    use super::{
+        GroupServiceChange, GroupServiceEvent, GroupServiceOrder, GroupStateSnapshot,
+        MAX_SERVICE_HLC_MS,
+    };
 
     fn order(sequence: u64, hlc_ms: u64, hlc_logical: u64, device_epoch: u64) -> GroupServiceOrder {
         GroupServiceOrder { device_sequence: sequence, hlc_ms, hlc_logical, device_epoch }
@@ -475,7 +566,33 @@ mod service_order_tests {
             GroupStateSnapshot::from_wire_bytes(&stripped).is_err(),
             "test: a snapshot without service_order is rejected"
         );
+        let mut value = serde_json::to_value(&snapshot).expect("test: snapshot serializes");
+        let object = value.as_object_mut().expect("test: snapshot is an object");
+        assert!(
+            object.remove("service_events").is_some(),
+            "test: the sample carries service_events"
+        );
+        let stripped = crate::canonical_json_bytes(&value)?;
+        assert!(
+            GroupStateSnapshot::from_wire_bytes(&stripped).is_err(),
+            "test: a snapshot without service_events is rejected"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn service_event_rejects_an_author_that_is_not_a_root() {
+        let event = GroupServiceEvent {
+            group_epoch: 1,
+            device_sequence: 1,
+            hlc_ms: 1,
+            hlc_logical: 0,
+            device_epoch: 1,
+            author_root: "root".to_owned(),
+            author_device: "phone".to_owned(),
+            change: GroupServiceChange::SetName { name: "Checklist".to_owned() },
+        };
+        assert!(event.check().is_err(), "test: a service author must be a canonical root");
     }
 
     fn sample_snapshot() -> Result<GroupStateSnapshot, crate::ProtocolError> {
@@ -527,6 +644,7 @@ mod service_order_tests {
             },
             issued_at: 1,
             service_order: GroupServiceOrder::from_clock(1, 1)?,
+            service_events: Vec::new(),
             root_signature: "root-body-sig".to_owned(),
             issuer: actor,
             signature: "snapshot-sig".to_owned(),

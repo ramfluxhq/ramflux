@@ -80,7 +80,27 @@ fn prepare_group(
     sibling.client.fixture_accept_group_state(&state, "device-sibling")?;
     peer.client.fixture_accept_group_state(&state, "sender")?;
     assert_eq!(state.view().members.len(), 2, "the sibling has not explicitly joined");
+    assert_same_add_row(&owner.client, &sibling.client)?;
+    assert_same_add_row(&owner.client, &peer.client)?;
     Ok(())
+}
+
+fn assert_same_add_row(owner: &RamfluxClient, other: &RamfluxClient) -> TestResult {
+    let owner_ids = service_ids(owner)?;
+    let other_ids = service_ids(other)?;
+    assert_eq!(other_ids.len(), 1, "first admission projects the signed add");
+    assert_eq!(other_ids, owner_ids, "first admission keeps the creator's event id");
+    Ok(())
+}
+
+fn service_ids(client: &RamfluxClient) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let page = client.generated_message_view_page("group-thread", None, 100)?;
+    Ok(page
+        .messages
+        .iter()
+        .filter(|view| view.kind == "service")
+        .map(|view| view.id.clone())
+        .collect())
 }
 async fn check_first_send(logical: &str, collision: bool) -> TestResult {
     let root = runtime_tests::root("group-implicit-sibling");

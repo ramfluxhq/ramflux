@@ -56,7 +56,7 @@ fn core_body(snapshot: &GroupStateSnapshot) -> Value {
     json!({"domain": GROUP_STATE_SNAPSHOT_DOMAIN,"genesis":snapshot.genesis,"creator":snapshot.creator,
         "transfers":snapshot.transfers,"group_id":snapshot.group_id,"epoch":snapshot.epoch,
         "previous_hash":snapshot.previous_hash,"state":state,"issued_at":snapshot.issued_at,
-        "service_order":snapshot.service_order})
+        "service_order":snapshot.service_order,"service_events":snapshot.service_events})
 }
 fn root_body(snapshot: &GroupStateSnapshot) -> Value {
     json!({"domain":ramflux_protocol::group_state::GROUP_STATE_CREATOR_SIGNATURE_DOMAIN,"content":core_body(snapshot),"state_hash":snapshot.state_hash})
@@ -113,6 +113,30 @@ pub(super) fn verify(snapshot: &GroupStateSnapshot) -> Result<(), CryptoError> {
         return Err(invalid("invalid creator snapshot header"));
     }
     snapshot.service_order.check().map_err(|_| invalid("group service order"))?;
+    let event_count = u64::try_from(snapshot.service_events.len())
+        .map_err(|_| invalid("group service event log"))?;
+    if event_count > snapshot.epoch.saturating_sub(1) {
+        return Err(invalid("group service event log"));
+    }
+    let mut service_ids = BTreeSet::new();
+    let mut previous_event_epoch = 0;
+    for event in &snapshot.service_events {
+        event.check().map_err(|_| invalid("group service event"))?;
+        if event.group_epoch <= previous_event_epoch || event.group_epoch > snapshot.epoch {
+            return Err(invalid("group service event log"));
+        }
+        previous_event_epoch = event.group_epoch;
+        if let ramflux_protocol::GroupServiceChange::SetName { name } = &event.change {
+            transition::name_valid(name)?;
+        }
+        if !service_ids.insert((
+            event.author_root.as_str(),
+            event.author_device.as_str(),
+            event.device_sequence,
+        )) {
+            return Err(invalid("group service event identity repeated"));
+        }
+    }
     if let Some(previous) = &snapshot.previous_hash {
         hash_valid(previous)?;
     }
@@ -300,6 +324,7 @@ fn create_with_signer(
         issued_at: input.now,
         service_order: GroupServiceOrder::from_clock(1, input.now)
             .map_err(|_| invalid("group service order"))?,
+        service_events: Vec::new(),
         root_signature: String::new(),
         issuer: actor.clone(),
         signature: String::new(),
@@ -529,7 +554,59 @@ fn advance_as_with_signer(
             snapshot.creator = actor.clone();
         }
     }
+    // The author is the signer that allocated the sequence, not the transport issuer.
+    if let Some(event) = service_event(actor, snapshot.epoch, &snapshot.service_order, &change)? {
+        if snapshot.service_events.iter().any(|old| {
+            old.author_root == event.author_root
+                && old.author_device == event.author_device
+                && old.device_sequence == event.device_sequence
+        }) {
+            return Err(invalid("group service event identity repeated"));
+        }
+        snapshot.service_events.push(event);
+    }
     sign_with_signer(signer, branch, actor, snapshot)
+}
+
+/// The timeline record for a mapped change. Role and transfer epochs carry the prior log.
+fn service_event(
+    actor: &GroupStateActor,
+    group_epoch: u64,
+    order: &GroupServiceOrder,
+    change: &GroupStateChange,
+) -> Result<Option<ramflux_protocol::GroupServiceEvent>, CryptoError> {
+    let mapped = match change {
+        GroupStateChange::SetName { name } => {
+            transition::name_valid(name)?;
+            Some(ramflux_protocol::GroupServiceChange::SetName { name: name.clone() })
+        }
+        GroupStateChange::Add { member, .. } => Some(ramflux_protocol::GroupServiceChange::Add {
+            root_commitment: member.root_commitment.clone(),
+            device_id: member.device_id.clone(),
+        }),
+        GroupStateChange::Remove { root_commitment, device_id } => {
+            Some(ramflux_protocol::GroupServiceChange::Remove {
+                root_commitment: root_commitment.clone(),
+                device_id: device_id.clone(),
+            })
+        }
+        GroupStateChange::SetRole { .. } | GroupStateChange::TransferOwnership { .. } => None,
+    };
+    let Some(change) = mapped else {
+        return Ok(None);
+    };
+    let event = ramflux_protocol::GroupServiceEvent {
+        group_epoch,
+        device_sequence: order.device_sequence,
+        hlc_ms: order.hlc_ms,
+        hlc_logical: order.hlc_logical,
+        device_epoch: order.device_epoch,
+        author_root: actor.identity.root_commitment.clone(),
+        author_device: actor.identity.device_id.clone(),
+        change,
+    };
+    event.check().map_err(|_| invalid("group service event"))?;
+    Ok(Some(event))
 }
 pub(super) fn advance_as_with_native_signer(
     primary: &crate::custody::SelfSigningKey,

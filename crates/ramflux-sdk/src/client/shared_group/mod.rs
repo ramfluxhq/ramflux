@@ -166,7 +166,7 @@ impl RamfluxClient {
                 self.observe_native_task_roster(&state)?;
                 self.record_group_write(&state, change)?;
                 self.finish_group_transfer_head_change(&state)?;
-                self.project_accepted_group_service(&previous, &state)?;
+                self.project_accepted_group_service(Some(&previous), &state)?;
                 crate::bus::enqueue_shared_group(self, &state, Some(&previous))?;
                 Ok(state)
             })?;
@@ -224,8 +224,8 @@ impl RamfluxClient {
                 )?;
             }
         }
-        if changed && let Some(previous_state) = previous {
-            self.project_accepted_group_service(previous_state, reconciled)?;
+        if changed {
+            self.project_accepted_group_service(previous, reconciled)?;
         }
         if reconciled.snapshot().state_hash != received.snapshot().state_hash {
             crate::bus::enqueue_shared_group(self, reconciled, previous)?;

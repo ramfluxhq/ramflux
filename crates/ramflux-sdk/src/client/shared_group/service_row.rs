@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! One timeline service row for an accepted group-state snapshot.
+//! One timeline service row for each creator-signed group change.
 //!
-//! The signed `service_order` is the message ordering key. Every member reconstructs the same
-//! event identity from it. A snapshot that does not change the name or the membership writes no row.
-use std::collections::BTreeSet;
-
+//! `service_events` is the accepted log. Every member projects that log, including a device whose
+//! first snapshot already contains changes it never saw. Transport re-signing replaces the issuer
+//! and leaves the log, and therefore the event identity, unchanged.
 use ramflux_crypto::VerifiedGroupState;
 use ramflux_protocol::group_state::{
-    GroupServiceOrder, GroupStateActor, GroupStateChange, SharedGroupState,
+    GroupServiceChange, GroupServiceEvent, GroupServiceOrder, GroupStateActor, GroupStateChange,
 };
 use ramflux_protocol::message as g;
 use ramflux_storage::{DirectMessageWrite, MessageMetadata};
@@ -17,9 +16,6 @@ use ramflux_storage::{DirectMessageWrite, MessageMetadata};
 use crate::{RamfluxClient, SdkError};
 
 use super::invalid;
-
-/// `validate_service` refuses more subjects than this. A jump past the cap is an error.
-const MAX_SERVICE_SUBJECTS: usize = 64;
 
 impl RamfluxClient {
     /// Message-timeline order for a mapped change, or a clock order that stays out of that timeline.
@@ -65,36 +61,59 @@ impl RamfluxClient {
         )?)
     }
 
-    /// Write the one service row for `next` when it differs from `previous` in a mapped way.
+    /// Project every signed change in `next`.
     ///
-    /// Replay of the same bytes is a no-op. A different body under the same derived id is
-    /// `ReplayMismatch`.
+    /// A later log must start with the log already accepted. Replay of the same bytes is a no-op.
+    /// A different body under the same derived id is `ReplayMismatch`.
     ///
     /// # Errors
-    /// Rejects an invalid signed order, more than 64 subjects, or a storage conflict.
+    /// Rejects a rewritten log, an invalid signed event, or a storage conflict.
     pub(crate) fn project_accepted_group_service(
         &self,
-        previous: &VerifiedGroupState,
+        previous: Option<&VerifiedGroupState>,
         next: &VerifiedGroupState,
     ) -> Result<(), SdkError> {
-        let Some(service) = service_for_delta(previous.view(), next.view())? else {
-            return Ok(());
-        };
-        let identity = service_identity(next)?;
-        let exact = Self::encode_generated_inner(
-            identity.clone(),
-            &g::Content { value: Some(g::content::Value::Service(service)) },
-        )?;
-        self.store_group_service_row(next, &identity, &exact)
+        if let Some(previous) = previous {
+            let old = &previous.snapshot().service_events;
+            let new = &next.snapshot().service_events;
+            if new.len() < old.len()
+                || new.iter().zip(old.iter()).any(|(next_event, old_event)| next_event != old_event)
+            {
+                return Err(invalid("group service event log rewrote an accepted change"));
+            }
+        }
+        for event in &next.snapshot().service_events {
+            let identity = service_identity(next, event)?;
+            let exact = Self::encode_generated_inner(
+                identity.clone(),
+                &g::Content { value: Some(g::content::Value::Service(service_for_event(event))) },
+            )?;
+            self.store_group_service_row(next, event, &identity, &exact)?;
+        }
+        Ok(())
     }
 
     fn store_group_service_row(
         &self,
         state: &VerifiedGroupState,
+        event: &GroupServiceEvent,
         identity: &g::EventIdentity,
         exact: &[u8],
     ) -> Result<(), SdkError> {
         let message_id = ramflux_protocol::encode_base64url(&identity.id);
+        let sender = state
+            .view()
+            .members
+            .iter()
+            .find(|member| {
+                member.identity.root_commitment == event.author_root
+                    && member.identity.device_id == event.author_device
+            })
+            .map_or_else(
+                || event.author_root.clone(),
+                |member| member.identity.principal_id.clone(),
+            );
+        let created_at = i64::try_from(event.hlc_ms / 1000).unwrap_or(state.snapshot().issued_at);
         let db = self.account_db()?;
         db.join_write(|| {
             if db.message_is_deleted(&message_id)? {
@@ -113,10 +132,10 @@ impl RamfluxClient {
             db.send_direct_message_at_with_metadata(DirectMessageWrite {
                 conversation_id: &identity.conversation_id,
                 message_id: &message_id,
-                sender_id: &state.snapshot().issuer.identity.principal_id,
+                sender_id: &sender,
                 encrypted_body: exact,
                 metadata: &metadata,
-                created_at: state.snapshot().issued_at,
+                created_at,
             })?;
             db.store_message_content(&identity.conversation_id, &message_id, exact)?;
             db.persist_message_actor_state(
@@ -136,68 +155,30 @@ impl RamfluxClient {
     }
 }
 
-/// One snapshot has one signed order. A jump that changes several categories records the
-/// highest-priority one: the name, then additions, then removals.
-fn service_for_delta(
-    previous: &SharedGroupState,
-    next: &SharedGroupState,
-) -> Result<Option<g::Service>, SdkError> {
-    if previous.name != next.name {
-        return Ok(Some(service(
-            g::ServiceAction::ServiceNameChanged,
-            Vec::new(),
-            Some(next.name.clone().unwrap_or_default()),
-        )));
+fn service_for_event(event: &GroupServiceEvent) -> g::Service {
+    match &event.change {
+        GroupServiceChange::SetName { name } => {
+            service(g::ServiceAction::ServiceNameChanged, Vec::new(), Some(name.clone()))
+        }
+        GroupServiceChange::Add { root_commitment, device_id } => service(
+            g::ServiceAction::ServiceMemberAdded,
+            vec![subject(root_commitment, device_id)],
+            None,
+        ),
+        GroupServiceChange::Remove { root_commitment, device_id } => service(
+            g::ServiceAction::ServiceMemberRemoved,
+            vec![subject(root_commitment, device_id)],
+            None,
+        ),
     }
-    let previous_ids = member_ids(previous);
-    let next_ids = member_ids(next);
-    let added = members_only(next, &previous_ids)?;
-    if !added.is_empty() {
-        return Ok(Some(service(g::ServiceAction::ServiceMemberAdded, added, None)));
-    }
-    let removed = members_only(previous, &next_ids)?;
-    if !removed.is_empty() {
-        return Ok(Some(service(g::ServiceAction::ServiceMemberRemoved, removed, None)));
-    }
-    Ok(None)
 }
 
-fn member_ids(state: &SharedGroupState) -> BTreeSet<(&str, &str)> {
-    state
-        .members
-        .iter()
-        .map(|member| {
-            (member.identity.root_commitment.as_str(), member.identity.device_id.as_str())
-        })
-        .collect()
-}
-
-fn members_only(
-    state: &SharedGroupState,
-    other: &BTreeSet<(&str, &str)>,
-) -> Result<Vec<g::QualifiedDevice>, SdkError> {
-    let mut subjects: Vec<g::QualifiedDevice> = state
-        .members
-        .iter()
-        .filter(|member| {
-            !other.contains(&(
-                member.identity.root_commitment.as_str(),
-                member.identity.device_id.as_str(),
-            ))
-        })
-        .map(|member| g::QualifiedDevice {
-            account_anchor: member.identity.root_commitment.clone(),
-            device_id: member.identity.device_id.clone(),
-            device_epoch: 0,
-        })
-        .collect();
-    if subjects.len() > MAX_SERVICE_SUBJECTS {
-        return Err(invalid("group service subjects exceed the row limit"));
+fn subject(root: &str, device: &str) -> g::QualifiedDevice {
+    g::QualifiedDevice {
+        account_anchor: root.to_owned(),
+        device_id: device.to_owned(),
+        device_epoch: 0,
     }
-    subjects.sort_by(|left, right| {
-        (&left.account_anchor, &left.device_id).cmp(&(&right.account_anchor, &right.device_id))
-    });
-    Ok(subjects)
 }
 
 fn service(
@@ -214,25 +195,26 @@ fn service(
     }
 }
 
-fn service_identity(state: &VerifiedGroupState) -> Result<g::EventIdentity, SdkError> {
-    let snapshot = state.snapshot();
-    let order = &snapshot.service_order;
+fn service_identity(
+    state: &VerifiedGroupState,
+    event: &GroupServiceEvent,
+) -> Result<g::EventIdentity, SdkError> {
     let author = g::QualifiedDevice {
-        account_anchor: snapshot.issuer.identity.root_commitment.clone(),
-        device_id: snapshot.issuer.identity.device_id.clone(),
-        device_epoch: order.device_epoch,
+        account_anchor: event.author_root.clone(),
+        device_id: event.author_device.clone(),
+        device_epoch: event.device_epoch,
     };
     let conversation = state.view().conversation_id.clone();
-    let id = g::identity::derive(&author, &conversation, order.device_sequence)
+    let id = g::identity::derive(&author, &conversation, event.device_sequence)
         .map_err(|_| invalid("group service identity"))?;
     let identity = g::EventIdentity {
         id: id.to_vec(),
         conversation_id: conversation,
         author: Some(author),
-        device_sequence: order.device_sequence,
-        hlc: order.hlc()?,
+        device_sequence: event.device_sequence,
+        hlc: event.hlc().map_err(|_| invalid("group service identity"))?,
         group_id: Some(state.view().group_id.clone()),
-        group_epoch: Some(state.view().epoch),
+        group_epoch: Some(event.group_epoch),
     };
     g::identity::verify(&identity).map_err(|_| invalid("group service identity"))?;
     Ok(identity)
@@ -246,6 +228,8 @@ mod tests {
 
     const GROUP: &str = "service-row-group";
     const THREAD: &str = "service-row-thread";
+    const JUMP_GROUP: &str = "service-jump-group";
+    const JUMP_THREAD: &str = "service-jump-thread";
 
     fn lease(source: &Fixture) -> TestResult<crate::custody::PrimarySigningLease> {
         Ok(source
@@ -269,7 +253,14 @@ mod tests {
     fn service_rows(
         client: &RamfluxClient,
     ) -> TestResult<Vec<crate::client::typed_read_model::MessageView>> {
-        let page = client.generated_message_view_page(THREAD, None, 100)?;
+        service_rows_in(client, THREAD)
+    }
+
+    fn service_rows_in(
+        client: &RamfluxClient,
+        thread: &str,
+    ) -> TestResult<Vec<crate::client::typed_read_model::MessageView>> {
+        let page = client.generated_message_view_page(thread, None, 100)?;
         Ok(page.messages.into_iter().filter(|row| row.kind == "service").collect())
     }
 
@@ -355,8 +346,10 @@ mod tests {
         let scenario = prepare().await?;
         let name = assert_owner_timeline(&scenario)?;
         assert_peer_rename(&scenario, &name)?;
+        assert_prefix_rejects_a_shorter_log(&scenario)?;
         assert_role_change_writes_no_row(&scenario)?;
         assert_remove(&scenario)?;
+        assert_late_device_keeps_every_signed_change().await?;
         Ok(())
     }
 
@@ -414,10 +407,15 @@ mod tests {
             &scenario.added,
             &scenario.peer.config.target_delivery_id
         )?);
+        let peer_rows = service_rows(&scenario.peer.client)?;
+        let peer_added = rows_with(&peer_rows, g::ServiceAction::ServiceMemberAdded);
+        assert_eq!(peer_added.len(), 1, "test: the first snapshot projects the signed add");
+        let owner_rows = service_rows(&scenario.owner.client)?;
+        let owner_added = rows_with(&owner_rows, g::ServiceAction::ServiceMemberAdded);
         assert_eq!(
-            service_rows(&scenario.peer.client)?.len(),
-            0,
-            "test: the first snapshot has no earlier state to diff"
+            peer_added.first().map(|row| row.id.as_str()),
+            owner_added.first().map(|row| row.id.as_str()),
+            "test: both devices share the add event id"
         );
         assert!(scenario.peer.client.accept_shared_group_state(
             &scenario.renamed,
@@ -446,6 +444,33 @@ mod tests {
                 .len(),
             1,
             "test: replaying the rename does not duplicate the row"
+        );
+        Ok(())
+    }
+
+    fn assert_prefix_rejects_a_shorter_log(scenario: &Scenario) -> TestResult {
+        let before = service_rows(&scenario.owner.client)?.len();
+        let error = scenario
+            .owner
+            .client
+            .project_accepted_group_service(Some(&scenario.renamed), &scenario.added);
+        match error {
+            Err(SdkError::InboundRejected(reason)) => {
+                assert!(
+                    reason.contains("rewrote an accepted change"),
+                    "test: shorter log refusal names the rewrite: {reason}"
+                );
+            }
+            other => {
+                return Err(
+                    format!("test: a shorter service log must be refused, got {other:?}").into()
+                );
+            }
+        }
+        assert_eq!(
+            service_rows(&scenario.owner.client)?.len(),
+            before,
+            "test: the refusal writes nothing"
         );
         Ok(())
     }
@@ -530,5 +555,177 @@ mod tests {
             "test: replaying the remove does not duplicate the row"
         );
         Ok(())
+    }
+
+    async fn assert_late_device_keeps_every_signed_change() -> TestResult {
+        let owner = Fixture::with_device("service-jump-owner", "phone").await?;
+        let peer = Fixture::with_device("service-jump-peer", "phone").await?;
+        let late = Fixture::with_device("service-jump-late", "phone").await?;
+        owner.accept_peer(&peer)?;
+        peer.accept_peer(&owner)?;
+        owner.accept_peer(&late)?;
+        late.accept_peer(&owner)?;
+        {
+            let primary = lease(&owner)?;
+            owner.client.shared_group_create_with_primary(
+                JUMP_GROUP,
+                JUMP_THREAD,
+                Some("Checklist".into()),
+                &owner.config.target_delivery_id,
+                Some(&primary),
+            )?;
+        }
+        let added = change_in(
+            &owner,
+            JUMP_GROUP,
+            GroupStateChange::Add {
+                member: peer.client.owned_group_actor(&peer.config.target_delivery_id)?.identity,
+                role: SharedGroupRole::Member,
+            },
+        )?;
+        let renamed =
+            change_in(&owner, JUMP_GROUP, GroupStateChange::SetName { name: "Renamed".into() })?;
+        let restored =
+            change_in(&owner, JUMP_GROUP, GroupStateChange::SetName { name: "Checklist".into() })?;
+        let final_state = change_in(
+            &owner,
+            JUMP_GROUP,
+            GroupStateChange::Add {
+                member: late.client.owned_group_actor(&late.config.target_delivery_id)?.identity,
+                role: SharedGroupRole::Member,
+            },
+        )?;
+        for state in [&added, &renamed, &restored, &final_state] {
+            assert!(peer.client.accept_shared_group_state(state, &peer.config.target_delivery_id)?);
+        }
+        let branch = peer.client.device_branch.as_ref().ok_or("test: peer branch")?;
+        let actor = peer.client.owned_group_actor(&peer.config.target_delivery_id)?;
+        let resigned = ramflux_crypto::resign_group_state_snapshot(branch, &actor, &final_state)?;
+        assert_ne!(
+            resigned.snapshot().issuer.identity.root_commitment,
+            final_state.snapshot().issuer.identity.root_commitment,
+            "test: forwarding replaces the transport issuer"
+        );
+        assert_eq!(
+            resigned.snapshot().service_events,
+            final_state.snapshot().service_events,
+            "test: forwarding keeps the creator-signed log"
+        );
+        assert_eq!(
+            resigned.snapshot().state_hash,
+            final_state.snapshot().state_hash,
+            "test: forwarding keeps the creator state hash"
+        );
+        assert!(late.client.accept_shared_group_state(&resigned, &late.config.target_delivery_id)?);
+        assert_jumped_and_forwarded_rows(&owner, &peer, &late, &final_state, &resigned)
+    }
+
+    fn assert_jumped_and_forwarded_rows(
+        owner: &Fixture,
+        peer: &Fixture,
+        late: &Fixture,
+        final_state: &VerifiedGroupState,
+        resigned: &VerifiedGroupState,
+    ) -> TestResult {
+        let owner_ids = ordered_ids(&service_rows_in(&owner.client, JUMP_THREAD)?);
+        let peer_ids = ordered_ids(&service_rows_in(&peer.client, JUMP_THREAD)?);
+        let late_rows = service_rows_in(&late.client, JUMP_THREAD)?;
+        let late_ids = ordered_ids(&late_rows);
+        assert_eq!(owner_ids.len(), 4, "test: add, rename, rename-back and late add");
+        assert_eq!(peer_ids, owner_ids, "test: a sequential peer shares every signed id");
+        assert_eq!(late_ids, owner_ids, "test: one jumped snapshot projects the whole log");
+        let names = rows_with(&late_rows, g::ServiceAction::ServiceNameChanged);
+        assert_eq!(names.len(), 2, "test: rename-back is a second name row, not a cancellation");
+        let texts = name_texts(&names)?;
+        assert!(texts.contains(&"Renamed"), "test: the intermediate rename survives the jump");
+        assert!(texts.contains(&"Checklist"), "test: the rename back is its own row");
+        let owner_device = owner.client.owned_device_identity()?;
+        for row in &names {
+            let author = row.author.as_ref().ok_or("test: name row author")?;
+            assert_eq!(author.account_anchor, owner_device.root_commitment());
+            assert_eq!(author.device_id, owner_device.device_id());
+            assert_ne!(
+                author.account_anchor,
+                resigned.snapshot().issuer.identity.root_commitment,
+                "test: the row author is the allocating device, not the forwarder"
+            );
+        }
+        let renamed_event = final_state
+            .snapshot()
+            .service_events
+            .iter()
+            .find(|event| {
+                matches!(&event.change, GroupServiceChange::SetName { name } if name == "Renamed")
+            })
+            .ok_or("test: signed rename event")?;
+        let forwarder = g::QualifiedDevice {
+            account_anchor: resigned.snapshot().issuer.identity.root_commitment.clone(),
+            device_id: resigned.snapshot().issuer.identity.device_id.clone(),
+            device_epoch: renamed_event.device_epoch,
+        };
+        let derived = g::identity::derive(&forwarder, JUMP_THREAD, renamed_event.device_sequence)
+            .map_err(|error| format!("test: forwarder derive: {error}"))?;
+        let forwarder_id = ramflux_protocol::encode_base64url(derived);
+        let renamed_row = names
+            .iter()
+            .find(|row| {
+                row.content.as_ref().is_some_and(|content| {
+                    matches!(
+                        content.value.as_ref(),
+                        Some(g::content::Value::Service(service))
+                            if service.text.as_deref() == Some("Renamed")
+                    )
+                })
+            })
+            .ok_or("test: renamed row")?;
+        assert_ne!(
+            forwarder_id, renamed_row.id,
+            "test: the forwarder's own sequence is a different event id"
+        );
+        assert!(!late.client.accept_shared_group_state(resigned, &late.config.target_delivery_id)?);
+        assert_eq!(
+            ordered_ids(&service_rows_in(&late.client, JUMP_THREAD)?),
+            late_ids,
+            "test: replaying the forwarded snapshot does not duplicate rows"
+        );
+        Ok(())
+    }
+
+    fn change_in(
+        source: &Fixture,
+        group: &str,
+        change: GroupStateChange,
+    ) -> TestResult<VerifiedGroupState> {
+        let primary = lease(source)?;
+        Ok(source.client.shared_group_change_with_primary(
+            group,
+            &source.config.target_delivery_id,
+            change,
+            Some(&primary),
+        )?)
+    }
+
+    fn ordered_ids(rows: &[crate::client::typed_read_model::MessageView]) -> Vec<String> {
+        let mut rows: Vec<&crate::client::typed_read_model::MessageView> = rows.iter().collect();
+        rows.sort_by_key(|row| (row.hlc_ms, row.hlc_logical, row.device_sequence.0));
+        rows.into_iter().map(|row| row.id.clone()).collect()
+    }
+
+    fn name_texts<'a>(
+        rows: &[&'a crate::client::typed_read_model::MessageView],
+    ) -> TestResult<Vec<&'a str>> {
+        let mut texts = Vec::new();
+        for row in rows {
+            let text = row
+                .content
+                .as_ref()
+                .and_then(|content| match content.value.as_ref() {
+                    Some(g::content::Value::Service(service)) => service.text.as_deref(),
+                    _ => None,
+                })
+                .ok_or("test: name row text")?;
+            texts.push(text);
+        }
+        Ok(texts)
     }
 }

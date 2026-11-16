@@ -308,7 +308,7 @@ impl RamfluxClient {
                         }
                         self.record_group_request_write(&state, request)?;
                         if committed {
-                            self.project_accepted_group_service(&previous, &state)?;
+                            self.project_accepted_group_service(Some(&previous), &state)?;
                         }
                         crate::bus::enqueue_shared_group(self, &state, Some(&previous))?;
                     }

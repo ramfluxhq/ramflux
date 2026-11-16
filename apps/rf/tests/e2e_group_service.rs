@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use e2e::{
     boot_stack, configure_node, create_account, dump_logs, exchange_contacts, group_create,
-    group_send, rf_json, start_daemon, unique, wait_json,
+    group_send, restart_daemon, rf_json, shutdown_daemon, start_daemon, start_daemon_at, unique,
+    unlock_account, wait_json, wait_receive_settled,
 };
 use serde_json::Value;
 
-const SCENARIO_BUDGET: Duration = Duration::from_secs(180);
+const SCENARIO_BUDGET: Duration = Duration::from_secs(240);
 const POLL_BUDGET: Duration = Duration::from_secs(90);
 
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
@@ -53,6 +54,7 @@ fn group_rename_is_one_service_row_between_messages() -> e2e::Result<()> {
         })?;
     }
 
+    let (carol_socket, carol_root) = shutdown_daemon(carol_d)?;
     reserve_poll(deadline)?;
     rf_json(
         &alice_d.socket,
@@ -60,35 +62,129 @@ fn group_rename_is_one_service_row_between_messages() -> e2e::Result<()> {
     )?;
     group_send(&alice_d, &alice, &group, &group, "svc-after", after)?;
 
-    let mut views = Vec::new();
+    let mut online = Vec::new();
+    for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob)] {
+        reserve_poll(deadline)?;
+        online.push(wait_positioned(
+            &stack,
+            daemon,
+            account,
+            &group,
+            before,
+            after,
+            &[&alice_d, &bob_d],
+        )?);
+    }
+    let first = online.first().ok_or("test: alice view missing")?;
+    let row = name_row(first)?.clone();
+    let second = online.get(1).ok_or("test: bob view missing")?;
+    same_name_keys(second, &row)?;
+
+    let carol_d = start_daemon_at(carol_socket, carol_root)?;
+    unlock_account(&carol_d, &carol)?;
+    reserve_poll(deadline)?;
+    wait_receive_settled(&carol_d, &carol).map_err(|error| {
+        format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d, &carol_d]))
+    })?;
+    let carol_view = wait_positioned(
+        &stack,
+        &carol_d,
+        &carol,
+        &group,
+        before,
+        after,
+        &[&alice_d, &bob_d, &carol_d],
+    )?;
+    same_name_keys(&carol_view, &row)?;
+
+    let bob_d = restart_daemon(bob_d)?;
+    unlock_account(&bob_d, &bob)?;
+    reserve_poll(deadline)?;
+    wait_receive_settled(&bob_d, &bob).map_err(|error| {
+        format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d, &carol_d]))
+    })?;
+    let bob_view = wait_positioned(
+        &stack,
+        &bob_d,
+        &bob,
+        &group,
+        before,
+        after,
+        &[&alice_d, &bob_d, &carol_d],
+    )?;
+    same_name_keys(&bob_view, &row)?;
+
+    reserve_poll(deadline)?;
+    rf_json(
+        &alice_d.socket,
+        &[
+            "group",
+            "role",
+            "set",
+            "--account",
+            &alice.id,
+            "--group",
+            &group,
+            "--actor",
+            &alice.device_id,
+            "--member-device",
+            &bob.device_id,
+            "--role",
+            "admin",
+        ],
+    )?;
     for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob), (&carol_d, &carol)] {
         reserve_poll(deadline)?;
-        let view = wait_json(daemon, &read_args(&account.id, &group), |value| {
-            positioned(value, before, after)
+        wait_json(daemon, &member_args(&account.id, &group), |value| {
+            member_is_admin(value, &bob.device_id)
         })
-        .map_err(|error| {
-            format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d, &carol_d]))
-        })?;
-        let again = rf_json(&daemon.socket, &read_args(&account.id, &group))?;
-        if name_rows(&again).len() != 1 {
-            return Err(format!("replay read duplicated the name row: {again}").into());
-        }
-        views.push(view);
-    }
-    let first = name_rows(&views[0]);
-    let row = first.first().ok_or("test: name row missing after the wait")?;
-    for view in views.iter().skip(1) {
-        let other = name_rows(view);
-        let peer = other.first().ok_or("test: peer name row missing")?;
-        if peer["id"] != row["id"]
-            || peer["hlc_ms"] != row["hlc_ms"]
-            || peer["hlc_logical"] != row["hlc_logical"]
-            || peer["device_sequence"] != row["device_sequence"]
-        {
-            return Err(format!("service row keys differ: {row} vs {peer}").into());
-        }
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[daemon])))?;
+        let view = wait_positioned(&stack, daemon, account, &group, before, after, &[daemon])?;
+        same_name_keys(&view, &row)?;
     }
     Ok(())
+}
+
+fn wait_positioned(
+    stack: &e2e::Stack,
+    daemon: &e2e::Daemon,
+    account: &e2e::Account,
+    group: &str,
+    before: &str,
+    after: &str,
+    logs: &[&e2e::Daemon],
+) -> e2e::Result<Value> {
+    wait_json(daemon, &read_args(&account.id, group), |value| positioned(value, before, after))
+        .map_err(|error| format!("{error}; logs={}", dump_logs(stack, logs)).into())
+}
+
+fn name_row(view: &Value) -> e2e::Result<&Value> {
+    name_rows(view).into_iter().next().ok_or_else(|| "test: name row missing after the wait".into())
+}
+
+fn same_name_keys(view: &Value, row: &Value) -> e2e::Result<()> {
+    let peer = name_row(view)?;
+    if peer["id"] != row["id"]
+        || peer["hlc_ms"] != row["hlc_ms"]
+        || peer["hlc_logical"] != row["hlc_logical"]
+        || peer["device_sequence"] != row["device_sequence"]
+    {
+        return Err(format!("service row keys differ: {row} vs {peer}").into());
+    }
+    Ok(())
+}
+
+fn member_args<'a>(account: &'a str, group: &'a str) -> [&'a str; 6] {
+    ["group", "members", "--account", account, "--group", group]
+}
+
+fn member_is_admin(value: &Value, device_id: &str) -> bool {
+    value["member_roster"].as_array().is_some_and(|roster| {
+        roster.iter().any(|member| {
+            member["identity"]["device_id"].as_str() == Some(device_id)
+                && member["role"].as_str() == Some("admin")
+        })
+    })
 }
 
 fn reserve_poll(deadline: Instant) -> e2e::Result<()> {

@@ -32,8 +32,8 @@ impl RamfluxClient {
             let previous = self.account_db()?.shared_group_state(&group.group_id)?;
             let changed = self.account_db()?.commit_shared_group_state(&state, &actor)?;
             self.observe_native_task_roster(&state)?;
-            if changed && let Some(previous) = previous.as_ref() {
-                self.project_accepted_group_service(previous, &state)?;
+            if changed {
+                self.project_accepted_group_service(previous.as_ref(), &state)?;
             }
             Ok(())
         })?;

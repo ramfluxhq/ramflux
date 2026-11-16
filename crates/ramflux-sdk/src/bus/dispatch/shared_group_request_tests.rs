@@ -102,8 +102,8 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
     assert_eq!(admin_messages, 0, "a group state change is not an application message");
     assert_eq!(owner_service, 2, "the owner records the member add and the rename");
     assert_eq!(
-        admin_service, 1,
-        "the admin's first snapshot is the add; the rename is the one service row"
+        admin_service, 2,
+        "the admin's first snapshot projects the add, and the rename adds the name row"
     );
     Box::pin(reject_demoted_federated_add(
         &mut owner.client,
