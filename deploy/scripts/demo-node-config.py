@@ -63,6 +63,45 @@ def reject_obsolete_inputs():
                  "from DEMO_FEDERATION_STATIC_IP and must not be set")
 
 
+def pairing_network_ipam(static_ip):
+    """The compose network's /24 and its dynamic range (upper half), which excludes the pin."""
+    subnet = ipaddress.ip_network(f"{static_ip}/24", strict=False)
+    dynamic = ipaddress.ip_network(f"{str(subnet.network_address).rsplit('.', 1)[0]}.{STATIC_RANGE_END}/25")
+    return str(subnet), str(dynamic)
+
+
+def verify_existing_network():
+    """Refuse an existing compose network whose applied IPAM is not the generated one.
+
+    Compose creates a network only when it is absent and never reconfigures an existing one, so a
+    network created before the address reservation keeps an unrestricted allocation pool. The shell
+    passes the engine's inspection JSON (Docker or Podman shape) in DEMO_EXISTING_NETWORK_INSPECT
+    only when the network exists. Nothing is mutated or adopted; the operator recreates it.
+    """
+    raw = os.environ.get("DEMO_EXISTING_NETWORK_INSPECT", "")
+    if not raw or os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") != "1":
+        return
+    subnet, dynamic = pairing_network_ipam(pairing_federation_ip())
+    first, last = ipaddress.ip_network(dynamic)[1], ipaddress.ip_network(dynamic)[-1]
+    found = []
+    try:
+        entry = json.loads(raw)[0]
+        for item in entry.get("subnets") or []:  # Podman: lease range as host addresses
+            lease = item.get("lease_range") or {}
+            found.append((item.get("subnet"), (lease.get("start_ip"), lease.get("end_ip"))))
+        for item in (entry.get("IPAM") or {}).get("Config") or []:  # Docker: the CIDR
+            found.append((item.get("Subnet"), item.get("IPRange")))
+    except (ValueError, IndexError, AttributeError, TypeError):
+        found = []
+    if (subnet, dynamic) in [(a, b) for a, b in found if isinstance(b, str)] or \
+            (subnet, (str(first), str(last))) in [(a, b) for a, b in found if isinstance(b, tuple)]:
+        return
+    sys.exit(f"DEMO_NETWORK_IPAM_MISMATCH: the existing compose network does not have subnet {subnet} "
+             f"with dynamic range {dynamic}, so the pinned federation address is not reserved. It is "
+             "never modified here: stop the node, remove the compose network, and run up again to "
+             "recreate it")
+
+
 def pairing_federation_ip():
     """The federation's pinned compose-network address, the only proxy peer pairing trusts.
 
@@ -581,10 +620,8 @@ def render_files(repo, state, owner):
         federation = override["services"]["ramflux-federation"]
         federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = static_ip
         federation["networks"] = {"default": {"ipv4_address": static_ip}}
-        subnet = str(ipaddress.ip_network(f"{static_ip}/24", strict=False))
-        dynamic = ipaddress.ip_network(f"{subnet.split('/')[0].rsplit('.', 1)[0]}.{STATIC_RANGE_END}/25")
-        override["networks"]["default"]["ipam"] = {
-            "config": [{"subnet": subnet, "ip_range": str(dynamic)}]}
+        subnet, dynamic = pairing_network_ipam(static_ip)
+        override["networks"]["default"]["ipam"] = {"config": [{"subnet": subnet, "ip_range": dynamic}]}
         router = override["services"]["ramflux-router"]
         router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
         router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
@@ -712,6 +749,7 @@ def prepare(repo, state, command, validate_only=False):
         target_owner = {**owner, "settings": settings, "version_history": versions,
                         "snapshot_history": snapshots, "current_snapshot": target_snapshot}
 
+    verify_existing_network()
     if validate_only:
         return owner
     atomic_json(pending_marker, target_owner)

@@ -224,6 +224,39 @@ else:
                 self.assertTrue(dynamic.subnet_of(subnet))
                 self.assertNotIn(address, dynamic)
 
+    def resource_ipam(self):
+        resources = json.loads((self.root / "resources.json").read_text())
+        return resources["id-demo-network"]["ipam"]
+
+    def test_absent_network_is_created_with_the_reserving_ipam(self):
+        self.pairing_override(True)
+        self.assertEqual(self.resource_ipam(), {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.128/25"})
+
+    def test_existing_network_with_matching_ipam_is_accepted(self):
+        self.pairing_override(True)
+        result = self.pairing_override(True)
+        self.assertNotIn("DEMO_NETWORK_IPAM_MISMATCH", result.stdout + result.stderr)
+
+    def test_existing_network_with_other_ipam_is_refused_and_untouched(self):
+        self.pairing_override(True)
+        for bad in ({"subnet": "10.89.1.0/24"},
+                    {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.0/25"},
+                    {"subnet": "10.89.1.0/24", "ip_range": "10.89.1.192/26"},
+                    {"subnet": "10.89.2.0/24", "ip_range": "10.89.2.128/25"},
+                    {"subnet": "10.89.0.0/16", "ip_range": "10.89.1.128/25"}):
+            with self.subTest(ipam=bad):
+                self.control.write_text(json.dumps({"network_ipam": bad}))
+                before = (self.root / "resources.json").read_text()
+                result = self.pairing_override(True, success=False)
+                self.assertIn("DEMO_NETWORK_IPAM_MISMATCH", result.stdout + result.stderr)
+                self.assertEqual((self.root / "resources.json").read_text(), before)
+        self.control.write_text("{}")
+
+    def test_existing_network_without_ipam_is_not_checked_when_pairing_is_off(self):
+        self.pairing_override(False)
+        self.control.write_text(json.dumps({"network_ipam": {"subnet": "10.5.0.0/16"}}))
+        self.run_script("up")
+
     def test_public_origin_publishes_federation_port_on_loopback_only(self):
         with self.env_file.open("a") as output:
             output.write("DEMO_PUBLIC_ORIGIN=https://demo.example.org\n")

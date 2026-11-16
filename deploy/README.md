@@ -637,8 +637,10 @@ changes on every recreate, so the generator pins the federation to that address 
 `ipv4_address`, plus the /24 subnet of the project network whose dynamic `ip_range` is its upper half
 `.128/25`, so the address must be host `.2` to `.127` and no other container can take it) and sets it as the federation's only trusted
 proxy (`RAMFLUX_FEDERATION_TRUSTED_PROXIES` is derived and refused whenever it is set, pairing on or off). The origin goes to the
-federation and the router. On an existing deployment pick an unused address in the network that
-`podman network inspect <project>_default` shows. A wrong address fails closed with `400 tls required`.
+federation and the router. An existing `<project>_default` network keeps the IPAM it was created with, so `up` refuses it
+(`DEMO_NETWORK_IPAM_MISMATCH`, before any managed state is written) unless its subnet and dynamic range
+are exactly the generated /24 and `.128/25`; it is never modified or adopted. Stop the node, remove that
+network (`podman network rm <project>_default`) and run `up` again to recreate it. A wrong address fails closed with `400 tls required`.
 Because rootless port publishing makes every connection to the published federation HTTP port arrive
 from that same peer address, a configured `DEMO_PUBLIC_ORIGIN` (a reverse proxy on this host in front
 of the node) always publishes the federation HTTP port on `127.0.0.1` only; the generator refuses a

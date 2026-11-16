@@ -570,6 +570,12 @@ EOF
     probe_router_admin_port "$snapshot_router_enabled" "$snapshot_router_port" "$snapshot_admin_port" "$snapshot_voice_port"
     ;;
 esac
+# An existing network keeps the IPAM it was created with; the generator refuses one that does not
+# reserve the pinned federation address (absent: compose creates it from the override).
+if runtime network ls --format '{{.Name}}' | grep -qx "${DEMO_PROJECT}_default"; then
+  DEMO_EXISTING_NETWORK_INSPECT=$(runtime network inspect "${DEMO_PROJECT}_default")
+  export DEMO_EXISTING_NETWORK_INSPECT
+fi
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
