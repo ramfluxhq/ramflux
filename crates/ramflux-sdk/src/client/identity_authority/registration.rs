@@ -31,6 +31,8 @@ pub(crate) struct RegistrationTarget<'a> {
     pub delivery: &'a str,
 }
 impl RamfluxClient {
+    /// Proof-lifetime due check used by registration tests. Native connect does not call it.
+    #[cfg(test)]
     pub(crate) fn own_proof_refresh_due(&self, now: i64) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         let own = self.owned_device_identity()?;

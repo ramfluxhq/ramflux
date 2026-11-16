@@ -1374,19 +1374,15 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
 }
 
 #[tokio::test]
-async fn own_authorization_refresh_failure_has_a_distinct_error_code() -> Result<(), SdkError> {
+async fn gateway_live_without_native_root_is_identity_root_missing() -> Result<(), SdkError> {
     let root = root("proof-refresh-status");
     let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    account.gateway_config.timeout = Duration::from_millis(20);
-    account.gateway_config.quic_fallback_timeout = Duration::from_millis(20);
-    account.client.record_owned_proof_published(now_unix_timestamp() - 3600)?;
     let error = account
         .ensure_gateway_live()
         .await
         .err()
-        .ok_or_else(|| SdkError::LocalBus("expected refresh failure".into()))?;
-    assert!(matches!(error, SdkError::OwnDeviceAuthorizationRefreshFailed(_)));
-    assert_eq!(local_bus_error_code(&error), "OwnDeviceAuthorizationRefreshFailed");
+        .ok_or_else(|| SdkError::LocalBus("expected a missing identity root".into()))?;
+    assert!(matches!(error, SdkError::IdentityRootMissing));
     drop(account);
     Ok(())
 }
