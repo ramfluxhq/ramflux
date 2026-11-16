@@ -51,28 +51,30 @@ def federation_bind():
     return explicit or os.environ.get("DEMO_BIND_ADDR", "0.0.0.0")
 
 
-def pairing_trusted_proxies():
-    """Exact proxy peer IPs for pairing; refuses empty input, prefixes and wildcard addresses."""
-    raw = os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", "")
-    addresses = []
-    for item in (part.strip() for part in raw.split(",")):
-        if not item:
-            continue
-        try:
-            # The backend parses a bare IpAddr: no scope id, no brackets, no prefix.
-            if "%" in item or "/" in item or item != item.strip() or not item.isascii():
-                raise ValueError(item)
-            address = ipaddress.ip_address(item)
-        except ValueError:
-            sys.exit(f"DEMO_PAIRING_TRUSTED_PROXIES_INVALID: {item!r} is not a single IP address")
-        if address.is_unspecified or address.is_multicast:
-            sys.exit(f"DEMO_PAIRING_TRUSTED_PROXIES_INVALID: {item} cannot be trusted")
-        if str(address) not in addresses:
-            addresses.append(str(address))
-    if not addresses or len(addresses) > 4:
-        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_REQUIRED: set RAMFLUX_FEDERATION_TRUSTED_PROXIES to "
-                 "the measured proxy peer address (1 to 4 exact IPs)")
-    return ",".join(addresses)
+def pairing_federation_ip():
+    """The federation's pinned compose-network address, the only proxy peer pairing trusts.
+
+    Rootless port publishing makes every connection to the federation HTTP port arrive from the
+    federation container's own address, and an unpinned address changes on every recreate. The
+    operator names a private IPv4 inside the compose network; the generator pins the federation
+    to it and trusts exactly it.
+    """
+    if os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", ""):
+        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE: RAMFLUX_FEDERATION_TRUSTED_PROXIES is derived "
+                 "from DEMO_FEDERATION_STATIC_IP and must not be set")
+    raw = os.environ.get("DEMO_FEDERATION_STATIC_IP", "")
+    try:
+        if not raw or raw != raw.strip() or not raw.isascii() or "/" in raw or "%" in raw:
+            raise ValueError(raw)
+        address = ipaddress.IPv4Address(raw)
+    except ValueError:
+        sys.exit("DEMO_FEDERATION_STATIC_IP_REQUIRED: pairing needs DEMO_FEDERATION_STATIC_IP, one "
+                 "private IPv4 address inside the compose network (for example 10.89.1.110)")
+    last = int(address) & 0xFF
+    if not address.is_private or address.is_loopback or address.is_link_local or last in (0, 1, 255):
+        sys.exit(f"DEMO_FEDERATION_STATIC_IP_INVALID: {raw} must be a private host address "
+                 "(not the network, gateway or broadcast address)")
+    return str(address)
 
 
 def public_origin():
@@ -550,20 +552,23 @@ def render_files(repo, state, owner):
             environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
             environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
         # Pairing HTTP is accepted only as TLS: the public reverse proxy terminates it and asserts
-        # X-Forwarded-Proto, which the federation trusts only from the exact peer addresses the
-        # operator measured behind the proxy (never a prefix, never a wildcard).
+        # X-Forwarded-Proto, which the federation trusts only from the one pinned address it has
+        # on the compose network (never a prefix, never a wildcard).
         origin = public_origin()
         if not origin.startswith("https://"):
             sys.exit("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN: DEMO_PUBLIC_ORIGIN must be an https origin")
         if federation_bind() != "127.0.0.1":
             sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_NEED_LOOPBACK: trusting proxy addresses requires "
                      "the federation HTTP port to be published on 127.0.0.1 only")
-        proxies = pairing_trusted_proxies()
+        static_ip = pairing_federation_ip()
         for service in ("router", "federation"):
             override["services"][f"ramflux-{service}"]["environment"][
                 "RAMFLUX_FEDERATION_PUBLIC_ORIGIN"] = origin
-        override["services"]["ramflux-federation"]["environment"][
-            "RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = proxies
+        federation = override["services"]["ramflux-federation"]
+        federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = static_ip
+        federation["networks"] = {"default": {"ipv4_address": static_ip}}
+        subnet = str(ipaddress.ip_network(f"{static_ip}/24", strict=False))
+        override["networks"]["default"]["ipam"] = {"config": [{"subnet": subnet}]}
         router = override["services"]["ramflux-router"]
         router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
         router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
