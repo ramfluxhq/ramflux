@@ -192,6 +192,46 @@ else:
                 result = self.pairing_override(True, proxies=value, success=False)
                 self.assertRegex(result.stdout + result.stderr, "DEMO_PAIRING_TRUSTED_PROXIES")
 
+    def test_public_origin_publishes_federation_port_on_loopback_only(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_PUBLIC_ORIGIN=https://demo.example.org\n")
+        self.run_script("up")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=127.0.0.1:59482", runtime)
+        self.assertNotIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0", runtime)
+        # Only the federation HTTP port moves; the other public ports keep DEMO_BIND_ADDR.
+        self.assertIn("RAMFLUX_GATEWAY_TCP_PORT=0.0.0.0:59443", runtime)
+
+    def test_public_origin_refuses_a_non_loopback_federation_bind(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_PUBLIC_ORIGIN=https://demo.example.org\n"
+                         "DEMO_FEDERATION_BIND_ADDR=0.0.0.0\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("DEMO_FEDERATION_BIND_REFUSED", result.stdout + result.stderr)
+        self.assertFalse((self.state / "runtime.env").exists())
+
+    def test_trusted_proxies_without_loopback_binding_are_refused(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_FEDERATION_BIND_ADDR=0.0.0.0\n")
+        result = self.pairing_override(True, success=False)
+        self.assertRegex(result.stdout + result.stderr,
+                         "DEMO_FEDERATION_BIND_REFUSED|DEMO_PAIRING_TRUSTED_PROXIES_NEED_LOOPBACK")
+
+    def test_pairing_trusted_proxy_rejects_what_the_backend_parser_rejects(self):
+        for value in ("fe80::1%eth0", "[::1]", "::1/128", "::1%1", "10.89.1.103:80", "010.1.1.1x"):
+            with self.subTest(proxies=value):
+                self.setUp()
+                result = self.pairing_override(True, proxies=value, success=False)
+                self.assertIn("DEMO_PAIRING_TRUSTED_PROXIES_INVALID", result.stdout + result.stderr)
+        for value in ("::1", "2001:db8::1", "10.89.1.103"):
+            with self.subTest(proxies=value):
+                self.setUp()
+                self.pairing_override(True, proxies=value)
+                services = json.loads((self.state / "demo-override.json").read_text())["services"]
+                self.assertEqual(
+                    services["ramflux-federation"]["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"],
+                    value)
+
     def test_pairing_requires_https_public_origin(self):
         result = self.pairing_override(True, origin=None, success=False)
         self.assertIn("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN", result.stdout + result.stderr)

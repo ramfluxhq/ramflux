@@ -35,6 +35,22 @@ class SnapshotError(Exception):
     """A snapshot cannot be safely captured or restored."""
 
 
+def federation_bind():
+    """Host address that publishes the federation HTTP port.
+
+    A configured public origin means a reverse proxy on this host fronts the node, so the port
+    is published on loopback only, always. A direct (origin-less) demo keeps DEMO_BIND_ADDR.
+    """
+    explicit = os.environ.get("DEMO_FEDERATION_BIND_ADDR", "")
+    if os.environ.get("DEMO_PUBLIC_ORIGIN", ""):
+        if explicit not in ("", "127.0.0.1"):
+            sys.exit("DEMO_FEDERATION_BIND_REFUSED: with DEMO_PUBLIC_ORIGIN the federation HTTP "
+                     "port is published on 127.0.0.1 only (DEMO_FEDERATION_BIND_ADDR must be unset "
+                     "or 127.0.0.1)")
+        return "127.0.0.1"
+    return explicit or os.environ.get("DEMO_BIND_ADDR", "0.0.0.0")
+
+
 def pairing_trusted_proxies():
     """Exact proxy peer IPs for pairing; refuses empty input, prefixes and wildcard addresses."""
     raw = os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", "")
@@ -43,6 +59,9 @@ def pairing_trusted_proxies():
         if not item:
             continue
         try:
+            # The backend parses a bare IpAddr: no scope id, no brackets, no prefix.
+            if "%" in item or "/" in item or item != item.strip() or not item.isascii():
+                raise ValueError(item)
             address = ipaddress.ip_address(item)
         except ValueError:
             sys.exit(f"DEMO_PAIRING_TRUSTED_PROXIES_INVALID: {item!r} is not a single IP address")
@@ -536,6 +555,9 @@ def render_files(repo, state, owner):
         origin = public_origin()
         if not origin.startswith("https://"):
             sys.exit("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN: DEMO_PUBLIC_ORIGIN must be an https origin")
+        if federation_bind() != "127.0.0.1":
+            sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_NEED_LOOPBACK: trusting proxy addresses requires "
+                     "the federation HTTP port to be published on 127.0.0.1 only")
         proxies = pairing_trusted_proxies()
         for service in ("router", "federation"):
             override["services"][f"ramflux-{service}"]["environment"][
@@ -798,6 +820,9 @@ def main():
     try:
         if action == "public-origin":
             print(public_origin())
+        elif action == "federation-bind":
+            public_origin()
+            print(federation_bind())
         elif action == "client-runtime":
             print(client_runtime(), end="")
         elif action == "check-pending":

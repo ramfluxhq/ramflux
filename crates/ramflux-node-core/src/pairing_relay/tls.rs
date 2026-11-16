@@ -120,6 +120,19 @@ mod tests {
     }
 
     #[test]
+    fn proxy_allowlist_accepts_bare_addresses_only() {
+        // Parser parity with deploy/scripts/demo-node-config.py (pairing_trusted_proxies).
+        for accepted in ["::1", "2001:db8::1", "10.89.1.103", "10.89.1.103, 10.89.1.104"] {
+            assert!(parse_trusted_proxies(accepted).is_ok(), "test: {accepted} must parse");
+        }
+        for refused in
+            ["fe80::1%eth0", "[::1]", "::1/128", "::1%1", "10.89.1.103:80", "proxy.example"]
+        {
+            assert!(parse_trusted_proxies(refused).is_err(), "test: {refused} must be refused");
+        }
+    }
+
+    #[test]
     fn trusted_proxy_https_uses_rightmost_untrusted_hop() -> TestResult {
         let proxy = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let client = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));

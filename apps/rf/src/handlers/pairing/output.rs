@@ -25,46 +25,73 @@ pub(super) fn outcome(result: &LocalResult) -> i32 {
         Outcome::Error { error } => code(Some(&error.code)),
     }
 }
-/// A short typed class for a failed pairing command, safe to print: a closed code name or an
-/// HTTP status. Everything else collapses to the error kind's name.
+/// Error codes the CLI may name. Anything else prints the fixed category `unknown`.
+const KNOWN_CODES: &[&str] = &[
+    "Busy",
+    "Expired",
+    "Retired",
+    "WrongRole",
+    "WrongContext",
+    "Replay",
+    "HeadChanged",
+    "PrimaryRequired",
+    "SasMismatch",
+    "PublicationPending",
+    "TransferFloorsTooLarge",
+    "TransferCapacity",
+    "UpdateRequired",
+    "VaultUnavailable",
+    "NotFound",
+    "InvalidInput",
+    "LeaseExpired",
+    "ChunkMismatch",
+    "SchemaMismatch",
+    "ManifestMismatch",
+    "local_bus_error",
+    "NetworkingPending",
+    "NoNodeSelected",
+    "AccountNotOpen",
+    "CustodyVaultUnavailable",
+    "CustodyExpired",
+    "CustodySetupInvalid",
+    "CustodyAccountConflict",
+    "DataRootInUse",
+    "GatewayWriterBusy",
+];
+/// The fixed category for a code outside the allowlist.
+const UNKNOWN: &str = "unknown";
+
+fn known(code: &str) -> &'static str {
+    KNOWN_CODES.iter().find(|candidate| **candidate == code).copied().unwrap_or(UNKNOWN)
+}
+
+/// A short typed class for a failed pairing command, safe to print: an allow-listed code name,
+/// or `HTTP <status>` for a pairing HTTPS refusal, else `unknown`. No received text is echoed.
 pub(super) fn class(error: &RfError) -> String {
     use ramflux_sdk::SdkError;
-    let name_of = |debug: String| -> String {
-        debug.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').take(48).collect()
-    };
     match error {
-        RfError::Sdk(SdkError::PairingCode(code)) => (*code).to_owned(),
-        RfError::Sdk(SdkError::PairingField(field)) => format!("PairingField {field}"),
+        RfError::Sdk(SdkError::PairingCode(code)) => known(code).to_owned(),
         RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
-        RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => {
-            let code = bounded(code);
-            match http_status(message) {
-                Some(status) => format!("{code}: pairing HTTPS status {status}"),
-                None => code,
-            }
-        }
-        RfError::Sdk(SdkError::LocalBus(message)) => http_status(message).map_or_else(
-            || "LocalBus".to_owned(),
-            |status| format!("pairing HTTPS status {status}"),
-        ),
-        RfError::Sdk(other) => name_of(format!("{other:?}")),
-        other => name_of(format!("{other:?}")),
+        RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => http_status(message)
+            .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),
+        RfError::Sdk(SdkError::LocalBus(message)) => http_status(message)
+            .map_or_else(|| UNKNOWN.to_owned(), |status| format!("HTTP {status}")),
+        _ => UNKNOWN.to_owned(),
     }
 }
-fn bounded(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-        .take(64)
-        .collect()
-}
-/// `"... pairing HTTPS status 400 Bad Request"` yields `"400 Bad Request"`; nothing else passes.
-fn http_status(message: &str) -> Option<String> {
+/// `"... pairing HTTPS status 400 <anything>"` yields 400. Exactly three digits, then end of
+/// text or a space, in 100..=599; the suffix is dropped.
+fn http_status(message: &str) -> Option<u16> {
     let rest = message.split("pairing HTTPS status ").nth(1)?;
-    let status: String =
-        rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == ' ').take(40).collect();
-    let digits = status.chars().take_while(char::is_ascii_digit).count();
-    (digits == 3).then_some(status.trim().to_owned())
+    let digits: String = rest.chars().take(3).collect();
+    let after = rest.chars().nth(3);
+    if digits.len() != 3 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !matches!(after, None | Some(' ')) {
+        return None;
+    }
+    digits.parse::<u16>().ok().filter(|status| (100..=599).contains(status))
 }
 pub(super) fn failure(error: RfError) -> RfError {
     if !matches!(error, RfError::PairingExit { .. }) {

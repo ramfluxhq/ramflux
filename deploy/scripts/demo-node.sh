@@ -613,6 +613,7 @@ case "$command" in
       chmod 644 "$state"/config/*.toml "$state"/secrets/gateway-v3/*.json "$state"/secrets/federation/*.json
     # Preserve daemon/helper inputs and supply the separate Compose interpolation names.
     # The keyring is read-only trust material; the relay owns its durable cache in relay-redb.
+      federation_bind=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" federation-bind) || exit 1
       runtime_pending="$state/.runtime.env.pending.$$"
       cat "$state/identity.env" > "$runtime_pending"
       cat >> "$runtime_pending" <<ENV
@@ -642,7 +643,7 @@ RAMFLUX_FEDERATION_PUBLIC_REQUEST_TIMEOUT_SECONDS=$RAMFLUX_FEDERATION_PUBLIC_REQ
 RAMFLUX_FEDERATION_ADMIN_MAX_HEADER_BYTES=$RAMFLUX_FEDERATION_ADMIN_MAX_HEADER_BYTES
 RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES=$RAMFLUX_FEDERATION_ADMIN_MAX_BODY_BYTES
 RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS=$RAMFLUX_FEDERATION_ADMIN_REQUEST_TIMEOUT_SECONDS
-RAMFLUX_FEDERATION_PUBLIC_PORT=$DEMO_BIND_ADDR:$DEMO_HTTP_PORT
+RAMFLUX_FEDERATION_PUBLIC_PORT=$federation_bind:$DEMO_HTTP_PORT
 RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=$DEMO_ADMIN_LOOPBACK_PORT
 RAMFLUX_ROUTER_ADMIN_ENABLED=$RAMFLUX_ROUTER_ADMIN_ENABLED
 RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS=$RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS
