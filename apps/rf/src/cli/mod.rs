@@ -15,6 +15,7 @@ mod contact;
 mod conversation_ops;
 mod daemon;
 mod device;
+mod diag;
 mod dm;
 mod grant;
 mod group;
@@ -38,6 +39,7 @@ pub(crate) use contact::*;
 pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
+pub(crate) use diag::*;
 mod pairing;
 mod transfer;
 pub(crate) use dm::*;
@@ -90,6 +92,8 @@ pub(crate) enum Command {
     /// Task drivers over the existing task.* bus methods.
     Task(TaskCommand),
     Admin(AdminCommand),
+    /// Plaintext residue diagnostics.
+    Diag(DiagCommand),
 }
 
 #[cfg(test)]

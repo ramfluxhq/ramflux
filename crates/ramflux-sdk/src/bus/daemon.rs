@@ -323,6 +323,9 @@ pub(crate) async fn dispatch_local_bus_request(
             dispatch_grant_bus_request(request, state, connection)
         }
         method if method.starts_with("daemon.") => dispatch_daemon_bus_request(request, state),
+        method if method.starts_with("diag.") => {
+            crate::bus::dispatch::residue::dispatch_residue(request, state)
+        }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
