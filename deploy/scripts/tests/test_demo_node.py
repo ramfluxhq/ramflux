@@ -971,6 +971,54 @@ class DemoNodeTests(unittest.TestCase):
         self.assertEqual(self.managed_state(), initial)
         self.assertEqual(self.compose_commands()[-1][-3:], ["up", "-d", "--no-build"])
 
+    def test_signed_capability_mismatch_keeps_the_pending_marker(self):
+        self.run_script("up")
+        initial = self.managed_state()
+        key = (self.state / "certs/node-identity/node-signing.key").read_bytes()
+        metadata = (self.state / "secrets/demo-identity.json").read_bytes()
+        with self.env_file.open("a") as output:
+            output.write("DEMO_VERSION=demo-v2\n")
+            output.write(
+                "DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1\n"
+            )
+        # A valid signature over the wrong capabilities must not commit, and
+        # recovery must judge the restored snapshot rather than this env file.
+        self.control.write_text(json.dumps({"public_client_capabilities": ["prekey"]}))
+        failed = self.run_script("upgrade", success=False)
+        self.assertIn(
+            "discovery capabilities do not match the applied deployment",
+            failed.stderr,
+        )
+        marker = self.state / "transaction.pending"
+        pending = marker.read_bytes()
+        self.assertEqual((self.state / "certs/node-identity/node-signing.key").read_bytes(), key)
+        self.assertEqual((self.state / "secrets/demo-identity.json").read_bytes(), metadata)
+        # The signed version is the operator's new value. The restored snapshot
+        # is still demo-test, so a version error means that snapshot was compared.
+        self.control.write_text(json.dumps({"public_version": "demo-v2"}))
+        failed_recovery = self.run_script("recover", success=False)
+        self.assertIn(
+            "discovery version does not match the applied deployment",
+            failed_recovery.stderr,
+        )
+        self.assertEqual(marker.read_bytes(), pending)
+        self.assertEqual(self.managed_state(), initial)
+        self.assertEqual((self.state / "certs/node-identity/node-signing.key").read_bytes(), key)
+        runtime = dict(
+            line.split("=", 1)
+            for line in (self.state / "runtime.env").read_text().splitlines()
+            if "=" in line
+        )
+        self.assertEqual(runtime["RAMFLUX_VERSION"], "demo-test")
+        env_text = self.env_file.read_text()
+        self.assertIn("DEMO_VERSION=demo-v2\n", env_text)
+        self.assertIn("DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1\n", env_text)
+        self.control.write_text("{}")
+        recovered = self.run_script("recover")
+        self.assertIn("recovered demo version demo-test", recovered.stdout)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.managed_state(), initial)
+
     def test_missing_snapshot_recovery_refuses_manual_path_without_locking_commands(self):
         self.run_script("up")
         previous_snapshot = self.current_snapshot()

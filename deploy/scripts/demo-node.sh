@@ -183,10 +183,15 @@ verify_published_discovery() {
     rm -f -- "$discovery_record"
     fail 'published discovery endpoint unhealthy'
   fi
-  if ! python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin"; then
+  if [ -n "${state-}" ] && [ -f "$state/runtime.env" ]; then
+    python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin" \
+      --deploy-state "$state"
+  else
+    python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin"
+  fi || {
     rm -f -- "$discovery_record"
     exit 1
-  fi
+  }
   rm -f -- "$discovery_record"
 }
 origin=$(python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" public-origin)
@@ -606,12 +611,14 @@ case "$command" in
   up|upgrade|rollback|recover)
     chmod 700 "$state"
     if [ "$command" != rollback ] && [ "$command" != recover ]; then
+      # Before issue-certs can create a key: an existing node without metadata
+      # must fail here, and a first init must own the discovery seed.
+      python3 "$script_dir/demo-node-trust.py" init "$state" "$DEMO_NODE_ID"
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/bootstrap-ca.sh"
       RAMFLUX_DEPLOY_DIR="$state" RAMFLUX_NODE_ID="$DEMO_NODE_ID" sh "$script_dir/issue-certs.sh"
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
-      python3 "$script_dir/demo-node-trust.py" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
       [ ! -e "$state/certs/federation/node-signing.key" ] || fail "obsolete layout: $state/certs/federation/node-signing.key; the node identity key lives only in certs/node-identity (no migration before v1; redeploy into a fresh data directory)"
       chmod 755 "$state/certs/node-identity"

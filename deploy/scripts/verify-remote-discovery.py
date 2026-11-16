@@ -6,6 +6,7 @@
 import base64
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,10 @@ STRING_FIELDS = {
 LIST_FIELDS = {"protocol_versions", "client_capabilities"}
 INTEGER_FIELDS = {"updated_at", "expires_at"}
 EXPECTED_FIELDS = STRING_FIELDS | LIST_FIELDS | INTEGER_FIELDS
+GATEWAY_CAPABILITY_ASSIGNMENT = re.compile(
+    r"(?m)^gateway_client_capabilities\s*=\s*\[(.*?)\]",
+    re.DOTALL,
+)
 
 
 def fail(message):
@@ -60,7 +65,53 @@ def canonical_signing_bytes(record):
     ).encode("utf-8")
 
 
-def verify(record_path, expected_key, now=None):
+def gateway_capability_names(text):
+    matches = list(GATEWAY_CAPABILITY_ASSIGNMENT.finditer(text))
+    if len(matches) != 1:
+        return None
+    return re.findall(r'"([^"]*)"', matches[0].group(1))
+
+
+def applied_deployment(state):
+    root = Path(state)
+    runtime_path = root / "runtime.env"
+    router_path = root / "config" / "router.toml"
+    federation_path = root / "config" / "federation.toml"
+    if not runtime_path.is_file() or not router_path.is_file() or not federation_path.is_file():
+        fail("applied deployment configuration is incomplete")
+    try:
+        runtime_text = runtime_path.read_text(encoding="utf-8")
+        router_names = gateway_capability_names(router_path.read_text(encoding="utf-8"))
+        federation_names = gateway_capability_names(federation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as error:
+        fail(f"applied deployment configuration is incomplete: {error}")
+    version = ""
+    for line in runtime_text.splitlines():
+        if line.startswith("RAMFLUX_VERSION="):
+            version = line.split("=", 1)[1]
+    if version.strip() == "":
+        fail("applied deployment configuration is incomplete")
+    if router_names is None or federation_names is None:
+        fail("applied deployment configuration is incomplete")
+    if any(name == "" for name in router_names + federation_names):
+        fail("applied deployment has an empty gateway capability")
+    if router_names != federation_names:
+        fail("applied router and federation gateway capabilities disagree")
+    return version, router_names
+
+
+def check_applied_deployment(record, deploy_state):
+    version, capabilities = applied_deployment(deploy_state)
+    advertised = [
+        name for name in record["client_capabilities"] if name.startswith("gateway.")
+    ]
+    if advertised != capabilities:
+        fail("discovery capabilities do not match the applied deployment")
+    if record["version"] != version:
+        fail("discovery version does not match the applied deployment")
+
+
+def verify(record_path, expected_key, now=None, deploy_state=None):
     version = subprocess.run(
         ["openssl", "version"], capture_output=True, text=True, check=False
     )
@@ -127,11 +178,26 @@ def verify(record_path, expected_key, now=None):
     node_id = record.get("node_id")
     if not isinstance(node_id, str) or not node_id:
         fail("discovery record has no node id")
+    if deploy_state is not None:
+        check_applied_deployment(record, deploy_state)
     print(f"discovery signature, freshness and operator pin: healthy ({node_id})")
     print(f"node public key: {expected_key}")
 
 
+def main(argv):
+    deploy_state = None
+    if len(argv) == 3:
+        record_path, expected_key = argv[1], argv[2]
+    elif len(argv) == 5 and argv[3] == "--deploy-state" and argv[4]:
+        record_path, expected_key = argv[1], argv[2]
+        deploy_state = argv[4]
+    else:
+        fail(
+            "usage: verify-remote-discovery.py RECORD EXPECTED_PUBLIC_KEY "
+            "[--deploy-state STATE]"
+        )
+    verify(record_path, expected_key, deploy_state=deploy_state)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        fail("usage: verify-remote-discovery.py RECORD EXPECTED_PUBLIC_KEY")
-    verify(sys.argv[1], sys.argv[2])
+    main(sys.argv)

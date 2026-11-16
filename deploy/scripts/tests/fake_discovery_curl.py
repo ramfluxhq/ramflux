@@ -4,6 +4,10 @@
 A version listed in control.json public_unhealthy_versions fails before any probe
 line is recorded. A successful fetch appends public-probes.jsonl and writes a
 record that verify-remote-discovery.py accepts with the real OpenSSL.
+
+The signed client_capabilities list is the federation base plus the gateway
+capabilities in the applied router and federation config. control.json may set
+public_client_capabilities or public_version to publish a different signed record.
 """
 import importlib.util
 import json
@@ -17,6 +21,45 @@ def load(name, path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+BASE_CLIENT_CAPABILITIES = ["opaque_delivery", "prekey", "object_relay"]
+
+
+def signed_client_capabilities(control, state, verify):
+    override = control.get("public_client_capabilities")
+    if override is not None:
+        if (
+            not isinstance(override, list)
+            or any(not isinstance(item, str) or item == "" for item in override)
+        ):
+            sys.exit("public_client_capabilities must be a list of non-empty strings")
+        return override
+    router = state / "config" / "router.toml"
+    federation = state / "config" / "federation.toml"
+    names = list(BASE_CLIENT_CAPABILITIES)
+    if not router.is_file() or not federation.is_file():
+        return names
+    try:
+        router_names = verify.gateway_capability_names(router.read_text(encoding="utf-8"))
+        federation_names = verify.gateway_capability_names(
+            federation.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"cannot read applied gateway capabilities: {error}")
+    if router_names is None or federation_names is None or router_names != federation_names:
+        sys.exit("applied router and federation gateway capabilities disagree")
+    names.extend(router_names)
+    return names
+
+
+def signed_version(control, runtime_version):
+    if "public_version" not in control:
+        return runtime_version or "demo"
+    version = control["public_version"]
+    if not isinstance(version, str) or not version.strip():
+        sys.exit("public_version must be a non-empty string")
+    return version
 
 
 def main():
@@ -76,8 +119,8 @@ def main():
         "prekey_http_url": origin,
         "signaling_turn_addr": "demo.example.org:59478",
         "protocol_versions": ["v1"],
-        "client_capabilities": ["prekey"],
-        "version": version or "demo",
+        "client_capabilities": signed_client_capabilities(control, state, verify),
+        "version": signed_version(control, version),
         "updated_at": now,
         "expires_at": now + 3600,
         "signature": "",

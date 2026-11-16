@@ -109,3 +109,55 @@ class DemoNodeTrustTests(unittest.TestCase):
         self.assertEqual(document["gateway_instance_id"], "ramflux-gateway")
         self.assertEqual(document["node_id"], "demo.invalid")
         self.assertIsNone(document["revoked_at"])
+
+    def reset_state(self):
+        for child in list(self.state.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+    def test_missing_metadata_refuses_each_existing_identity_asset(self):
+        assets = (
+            Path("identity.env"),
+            Path("certs/node-identity/node-signing.key"),
+            Path("secrets/gateway-v3/issuer-cert.json"),
+            Path("secrets/federation/provider-keyring.json"),
+            Path("secrets/federation/trust-snapshot.json"),
+        )
+        payload = b"existing-node-bytes\n"
+        for relative in assets:
+            with self.subTest(asset=str(relative)):
+                self.reset_state()
+                target = self.state / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+                result = self.init()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "demo identity metadata is missing for an existing node",
+                    result.stderr,
+                )
+                self.assertEqual(target.read_bytes(), payload)
+                self.assertFalse((self.state / "secrets" / "demo-identity.json").exists())
+                for other in assets:
+                    if other != relative:
+                        self.assertFalse((self.state / other).exists())
+
+    def test_first_init_of_an_empty_node_generates_identity(self):
+        self.assertTrue(shutil.which("openssl"), "openssl is required")
+        self.assertFalse((self.state / "secrets" / "demo-identity.json").exists())
+        result = self.init()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads((self.state / "secrets" / "demo-identity.json").read_text())
+        self.assertEqual(metadata["node_id"], "demo.invalid")
+        for field in (
+            "root_seed", "attestation_seed", "provider_seed", "offline_seed",
+            "discovery_seed", "service_seed",
+        ):
+            self.assertTrue(metadata[field])
+        self.assertTrue((self.state / "certs/node-identity/node-signing.key").is_file())
+        self.assertEqual(
+            (self.state / "certs/node-identity/node-signing.key").read_text().strip(),
+            metadata["discovery_seed"],
+        )

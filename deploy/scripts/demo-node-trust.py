@@ -35,6 +35,14 @@ NOT_BEFORE_SKEW_SECONDS = 60
 PRIVATE_KEY_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 PUBLIC_KEY_PREFIX = bytes.fromhex("302a300506032b6570032100")
 NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*")
+# An existing node keeps these. A missing metadata file must not replace them.
+IDENTITY_ASSETS = (
+    Path("identity.env"),
+    Path("certs/node-identity/node-signing.key"),
+    Path("secrets/gateway-v3/issuer-cert.json"),
+    Path("secrets/federation/provider-keyring.json"),
+    Path("secrets/federation/trust-snapshot.json"),
+)
 
 
 def fail(message):
@@ -323,6 +331,10 @@ def pretty(value):
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def existing_identity_assets(state):
+    return [asset for asset in IDENTITY_ASSETS if (state / asset).exists()]
+
+
 def init(state, node_id):
     if not isinstance(node_id, str) or NODE_ID_PATTERN.fullmatch(node_id) is None:
         fail("invalid DEMO_NODE_ID")
@@ -331,6 +343,10 @@ def init(state, node_id):
         fail("demo data directory does not exist")
     now = int(time.time())
     identity_path = state / "secrets" / "demo-identity.json"
+    # Fresh seeds are only for an empty node. Do not import or replace an
+    # existing key, pin, or trust document when the metadata file is gone.
+    if not identity_path.is_file() and existing_identity_assets(state):
+        fail("demo identity metadata is missing for an existing node")
     identity = load_identity(identity_path, node_id, now)
     material = build_trust(identity, node_id)
     atomic_write(identity_path, pretty(identity), 0o600)
