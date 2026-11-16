@@ -750,6 +750,27 @@ pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, true, None)
 }
+/// Like [`load_account`], but waits a bounded moment for an in-flight local head installation
+/// (the account's own layer renewal) to finish instead of reporting it as pending. A crashed
+/// installation never clears by waiting: it stays `PublicationPending` and unlock repairs it.
+pub(crate) fn load_account_settled(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<BornAccount, SdkError> {
+    const ATTEMPTS: u32 = 40;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut attempt = 0;
+    loop {
+        match load_account(root, id, now) {
+            Err(SdkError::PairingCode("PublicationPending")) if attempt < ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(PAUSE);
+            }
+            other => return other,
+        }
+    }
+}
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {

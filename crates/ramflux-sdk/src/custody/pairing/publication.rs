@@ -200,8 +200,14 @@ fn prepare_submission(
     write: &HeadWrite,
 ) -> Result<Publication, SdkError> {
     with_pending_head_fence(db, &write.account_id, &write.operation_id, || {
-        let mut head = prepare_candidate(db, root, vault, write)?;
-        let _lock = super::activate::authority_lock(root, &write.account_id)?;
+        // One authority-lock scope and one signing lease cover the prepared commit, the re-read
+        // and the submitted commit. Nothing is committed from a cached row after a reacquire.
+        let lock = super::activate::authority_lock(root, &write.account_id)?;
+        let (built, _lease) = prepare_candidate_leased(db, root, vault, write, &lock)?;
+        let mut head = journal(db, |db| db.pairing_head()?.ok_or(SdkError::PairingField("state")))?;
+        if head.operation_id != built.operation_id || head.candidate_hash != built.candidate_hash {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
         if head.state == "prepared" {
             validate_head_advance("prepared", "submitted", &write.publisher_ref, &write.local_ref)?;
             head.state = "submitted".into();
@@ -212,6 +218,24 @@ fn prepare_submission(
         }
         decode_candidate(&head.candidate)
     })
+}
+
+/// Discard a layer candidate that never left this device, serialized with the publication
+/// gate and the authority lock so it cannot interleave with a submission.
+pub(crate) fn discard_prepared_layer(
+    db: &AccountDb,
+    root: &Path,
+    account_id: &str,
+    operation_id: &str,
+    candidate_hash: &str,
+) -> Result<bool, SdkError> {
+    let gate = account_gate(account_id);
+    let _hold = match gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _lock = super::activate::authority_lock(root, account_id)?;
+    Ok(db.discard_prepared_layer_head(operation_id, candidate_hash)?)
 }
 
 /// Apply an exact own native observation after the network owner has released its work.
@@ -251,20 +275,23 @@ pub(crate) fn acknowledge_ceremony_in(
     })
 }
 
-fn prepare_candidate(
+/// The signing lease (when a candidate is built or resumed) is returned so the caller keeps one
+/// scope across the prepared and submitted commits. `_authority` proves the authority lock is held.
+fn prepare_candidate_leased(
     db: &impl Journal,
     root: &Path,
     vault: &dyn PrimaryVault,
     write: &HeadWrite,
-) -> Result<HeadRow, SdkError> {
+    _authority: &std::fs::File,
+) -> Result<(HeadRow, Option<crate::custody::PrimarySigningLease>), SdkError> {
+    let lease: Option<crate::custody::PrimarySigningLease>;
     let head = {
-        let _lock = super::activate::authority_lock(root, &write.account_id)?;
         refuse_foreign_head(db, &write.operation_id)?;
         if let Some(head) = journal(db, |db| Ok(db.pairing_head()?))? {
             if head.kind != kind_label(write.kind) {
                 return Err(SdkError::PairingCode("Busy"));
             }
-            require_resume_primary(root, vault, write, &head)?;
+            lease = Some(require_resume_primary(root, vault, write, &head)?);
             head
         } else {
             let account = load_account(root, &write.account_id, write.now)?;
@@ -317,10 +344,21 @@ fn prepare_candidate(
                 db.commit_pairing_head(&head)?;
                 Ok(())
             })?;
+            lease = Some(primary);
             head
         }
     };
-    Ok(head)
+    Ok((head, lease))
+}
+
+fn prepare_candidate(
+    db: &impl Journal,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<HeadRow, SdkError> {
+    let lock = super::activate::authority_lock(root, &write.account_id)?;
+    Ok(prepare_candidate_leased(db, root, vault, write, &lock)?.0)
 }
 
 fn require_resume_primary(
@@ -328,7 +366,7 @@ fn require_resume_primary(
     vault: &dyn PrimaryVault,
     write: &HeadWrite,
     head: &HeadRow,
-) -> Result<(), SdkError> {
+) -> Result<crate::custody::PrimarySigningLease, SdkError> {
     let publisher = decode_ref(&head.publisher_ref)?;
     if publisher != write.publisher_ref || publisher != write.local_ref {
         return Err(SdkError::PairingCode("PrimaryRequired"));
@@ -345,8 +383,7 @@ fn require_resume_primary(
     {
         return Err(SdkError::PairingCode("PrimaryRequired"));
     }
-    drop(account.group_primary(vault)?);
-    Ok(())
+    account.group_primary(vault)
 }
 
 fn submit_and_ack(

@@ -980,6 +980,12 @@ fn assert_layer_refusal(result: Result<(), SdkError>, required: u32) -> TestResu
 /// receive target in any scope.
 #[tokio::test]
 async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResult {
+    crate::client::native_test_support::watchdog::within(undeclared_device_scopes())
+        .await
+        .map_err(|_| "test: deadline exceeded")?
+}
+
+async fn undeclared_device_scopes() -> TestResult {
     let owner = Fixture::with_device("m4-owner", "owner").await?;
     let sender = Fixture::with_device("m4-sender", "sender").await?;
     let member = Fixture::with_device("m4-member", "member").await?;
@@ -1000,7 +1006,11 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
         &owner_m,
         KindId::KindMessage,
     )?)?;
-    assert_eq!(representation(&own_plan, "phone")?.selected_layer, PROFILE_FLOOR);
+    assert_eq!(
+        representation(&own_plan, "phone")?.selected_layer,
+        PROFILE_FLOOR,
+        "own-copy: an undeclared secondary must be isolated at the floor"
+    );
     assert_layer_refusal(require_layer(Some(own_plan), COMPILED_LAYER), COMPILED_LAYER)?;
 
     // DM scope toward the undeclared secondary device: floor only, refused.
@@ -1013,7 +1023,11 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
     to_phone.scope = FanoutScope::Dm;
     to_phone.targets.retain(|target| target.device_id() == "phone");
     let phone_plan = plan_of(&to_phone)?;
-    assert_eq!(representation(&phone_plan, "phone")?.selected_layer, PROFILE_FLOOR);
+    assert_eq!(
+        representation(&phone_plan, "phone")?.selected_layer,
+        PROFILE_FLOOR,
+        "dm: an undeclared secondary must be floor only"
+    );
     assert_layer_refusal(require_layer(Some(phone_plan), COMPILED_LAYER), COMPILED_LAYER)?;
 
     // DM to the declared primary: allowed although the SENDER has no declaration at all
@@ -1021,7 +1035,11 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
     let to_primary = dm_message(&sender, &owner, "dm-primary");
     let primary_plan =
         plan_of(&sender.client.dm_selection_request(&to_primary, KindId::KindMessage)?)?;
-    assert_eq!(primary_plan.fresh_cohort_layer, Some(COMPILED_LAYER));
+    assert_eq!(
+        primary_plan.fresh_cohort_layer,
+        Some(COMPILED_LAYER),
+        "dm: a declared primary is a layer-4 target even when the sender is undeclared"
+    );
     sender.client.require_dm_layer(&to_primary, Some(primary_plan), COMPILED_LAYER)?;
 
     // The undeclared secondary may itself send layer 4 to a fresh target.
@@ -1033,7 +1051,8 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
     )?)?;
     assert_eq!(
         representation(&from_phone, &owner.config.device_id)?.selected_layer,
-        COMPILED_LAYER
+        COMPILED_LAYER,
+        "an undeclared secondary may send layer 4 to a declared target"
     );
     require_layer(Some(from_phone), COMPILED_LAYER)?;
 
@@ -1051,8 +1070,16 @@ async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResu
         "group-media",
         KindId::KindMessage,
     )?)?;
-    assert_eq!(representation(&group, "member")?.selected_layer, COMPILED_LAYER);
-    assert_eq!(representation(&group, "undeclared")?.selected_layer, PROFILE_FLOOR);
+    assert_eq!(
+        representation(&group, "member")?.selected_layer,
+        COMPILED_LAYER,
+        "group: the declared member keeps layer 4"
+    );
+    assert_eq!(
+        representation(&group, "undeclared")?.selected_layer,
+        PROFILE_FLOOR,
+        "group: the undeclared member is isolated at the floor"
+    );
     assert_layer_refusal(require_layer(Some(group), COMPILED_LAYER), COMPILED_LAYER)?;
     Ok(())
 }

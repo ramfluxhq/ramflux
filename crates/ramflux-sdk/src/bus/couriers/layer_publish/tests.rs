@@ -166,6 +166,7 @@ async fn apply_installs_retires_and_renews_at_half_the_signed_validity() -> Test
         let view = status_view(
             account.client.born_v3_account.as_deref().ok_or("test: native account")?,
             custody::network_now()?,
+            None,
         );
         assert_eq!(view["state"], "fresh", "status must show the installed declaration");
         assert!(prepare(&mut account)?.is_none(), "a fresh declaration must not renew");
@@ -339,5 +340,135 @@ async fn held_publish_leaves_the_actor_free_and_cancel_loses_nothing() -> TestRe
         actor_task.abort();
         Ok(())
     }))
+    .await
+}
+
+/// A crash at every durable step of the local installation (pending marker, authority file,
+/// authority-durable marker, DB adoption) must not lock the account out: unlock repairs the exact
+/// acknowledged installation before admission. Real filesystem and real encrypted store.
+#[tokio::test]
+async fn crash_inside_local_installation_recovers_on_unlock() -> TestResult {
+    within(async {
+        for step in 1..=4_u8 {
+            let (mut account, _keep) = live_primary(&format!("layer-cut-{step}")).await?;
+            let config = account.gateway_config.custody.clone().ok_or("test: custody config")?;
+            let id = account.client.account_db()?.local_account_id.clone();
+            let plan = prepare(&mut account)?.ok_or("test: plan")?;
+            custody::pairing::activate::CUT.with(|cell| cell.set(step));
+            let crashed = apply(&mut account, &plan, plan.expected.clone());
+            assert!(
+                matches!(crashed, Err(SdkError::PairingCode("InjectedCut"))),
+                "step {step}: the injected cut must stop the installation: {crashed:?}"
+            );
+            drop(account);
+            // Process restart: a new client over the same files.
+            let mut client = crate::RamfluxClient::new();
+            client.open_account_index(&config.account_root)?;
+            client.unlock_account(&id, b"native fixture data passphrase")?;
+            assert!(
+                !custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+                "step {step}: the pending marker must hold admission until repaired"
+            );
+            repair_on_unlock(&mut client, &config.account_root, &id, config.vault.as_ref())?;
+            assert!(
+                custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+                "step {step}: unlock repair must restore admission"
+            );
+            assert!(client.account_db()?.pairing_head()?.is_none(), "step {step}: row retired");
+            let installed = client
+                .born_v3_account
+                .as_deref()
+                .and_then(|born| born.record().body.devices.first())
+                .and_then(|device| device.message_layer.as_ref());
+            assert!(installed.is_some(), "step {step}: the new declaration must be installed");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// The discard is serialized with the publication locks: a competing holder of the authority
+/// lock makes it refuse (Busy after its own bounded wait) and the row stays.
+#[tokio::test]
+async fn discard_waits_for_the_publication_lock_and_never_removes_a_submitted_row() -> TestResult {
+    within(async {
+        let (mut account, _keep) = live_primary("layer-discard-lock").await?;
+        let config = account.gateway_config.custody.clone().ok_or("test: custody config")?;
+        let id = account.client.account_db()?.local_account_id.clone();
+        let prepared = stage_prepared(&mut account)?;
+        let holder = custody::pairing::activate::authority_lock(&config.account_root, &id)?;
+        let blocked = custody::pairing::publication::discard_prepared_layer(
+            account.client.account_db()?,
+            &config.account_root,
+            &id,
+            &prepared.operation_id,
+            &prepared.candidate_hash,
+        );
+        assert!(
+            matches!(blocked, Err(SdkError::PairingCode("Busy"))),
+            "a competing lock holder must serialize the discard: {blocked:?}"
+        );
+        assert_eq!(head_state(&account)?, Some(("layer_update".into(), "prepared".into())));
+        drop(holder);
+        assert!(
+            custody::pairing::publication::discard_prepared_layer(
+                account.client.account_db()?,
+                &config.account_root,
+                &id,
+                &prepared.operation_id,
+                &prepared.candidate_hash,
+            )?,
+            "with the lock free the never-submitted row is discarded"
+        );
+        // Submission re-reads the row under one lock scope: a submitted row is never discarded.
+        let _plan = prepare(&mut account)?.ok_or("test: plan")?;
+        let submitted = account.client.account_db()?.pairing_head()?.ok_or("test: row")?;
+        assert!(
+            !custody::pairing::publication::discard_prepared_layer(
+                account.client.account_db()?,
+                &config.account_root,
+                &id,
+                &submitted.operation_id,
+                &submitted.candidate_hash,
+            )?,
+            "a submitted row must never be discarded"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// L1: the certificate cutoff is a typed, visible failure, not only a log line.
+#[tokio::test]
+async fn certificate_cutoff_is_reported_as_a_typed_status_error() -> TestResult {
+    within(async {
+        let (mut account, _keep) = live_primary("layer-cutoff").await?;
+        let born = account.client.born_v3_account.as_deref().ok_or("test: native")?;
+        let expiry = born.record().body.devices[0]
+            .branch_certificate
+            .as_ref()
+            .ok_or("test: certificate")?
+            .body
+            .expires_at;
+        let _clock = FixedClock::set(i64::try_from(expiry - 3_600)?);
+        assert!(prepare(&mut account)?.is_none(), "a certificate near expiry must not publish");
+        let stored = account
+            .client
+            .account_db()?
+            .load_actor_state::<Option<String>>(LAST_ERROR_KEY)?
+            .flatten();
+        assert_eq!(
+            stored.as_deref(),
+            Some("LayerRenewalBlocked"),
+            "the cutoff must be retained as a typed failure"
+        );
+        let view = status_view(
+            account.client.born_v3_account.as_deref().ok_or("test: native")?,
+            custody::network_now()?,
+            stored.as_deref(),
+        );
+        assert_eq!(view["last_error_code"], "LayerRenewalBlocked", "status must carry the code");
+        Ok(())
+    })
     .await
 }

@@ -474,3 +474,36 @@ async fn a_held_older_fetch_cannot_replace_a_newer_head_or_regain_freshness() ->
     })
     .await
 }
+
+#[tokio::test]
+async fn retry_of_an_accepted_contact_with_an_old_card_changes_no_provenance() -> TestResult {
+    within(async {
+        let peer = Fixture::new("card-pin-retry").await?;
+        let holder = Fixture::new("card-pin-retry-holder").await?;
+        let now = crate::custody::network_now()?;
+        let record = peer.manifest.custody.as_ref().ok_or("native")?.publication.record.clone();
+        let card = card_for(&peer, &record, now)?;
+        // The contact exists through lookup provenance, accepted, no card involved.
+        holder.client.persist_fetched_identity_directory(&peer.manifest)?;
+        holder.client.establish_friend_link(
+            "retry-link",
+            &holder.manifest.principal_commitment,
+            &peer.manifest.principal_commitment,
+        )?;
+        let principal = peer.manifest.principal_id.clone();
+        let before = holder.client.account_db()?.client_record("identity", &principal)?;
+        let _ = holder.client.accepted_contact_retry(&principal, Some(&card));
+        let mut after = holder.client.account_db()?.client_record("identity", &principal)?;
+        // The locally derived safety number is a repair of verified local material, not provenance.
+        if let Some(object) = after.as_mut().and_then(serde_json::Value::as_object_mut) {
+            object.remove("safety_number");
+            object.remove("safety_number_algorithm_version");
+        }
+        assert_eq!(
+            before, after,
+            "a retry carrying a card must not change locator, provenance or origin"
+        );
+        Ok(())
+    })
+    .await
+}

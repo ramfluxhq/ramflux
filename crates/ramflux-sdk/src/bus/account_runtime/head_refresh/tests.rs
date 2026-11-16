@@ -216,3 +216,49 @@ async fn stale_head_with_live_session_and_held_fetch_returns_networking_pending(
 async fn no_session_returns_networking_pending_from_the_gate() -> TestResult {
     tokio::task::LocalSet::new().run_until(Box::pin(case("offline"))).await
 }
+
+#[tokio::test]
+async fn new_dm_send_authorization_needs_a_fetch_made_after_the_command_began() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let peer = Fixture::new("fresh-peer").await?;
+        let holder = Fixture::new("fresh-holder").await?;
+        holder.client.persist_fetched_identity_directory(&peer.manifest)?;
+        let account = LocalBusAccountState::disconnected(
+            holder.client,
+            holder.config,
+            holder.manifest.principal_commitment.clone(),
+        );
+        let request = crate::LocalBusFrame::request(
+            "dm-send",
+            Some("sender".into()),
+            "message",
+            "message.submit",
+            json!({"recipient_principal_commitment": peer.manifest.principal_commitment}),
+        );
+        // An observation from before the command (still inside the 300 s window) is not enough.
+        let began = std::time::Instant::now();
+        let stale = stale_roots_since(&account, &request, Some(began))?;
+        assert!(
+            stale.contains(&peer.manifest.principal_commitment),
+            "a new DM authorization must not reuse an earlier observation: {stale:?}"
+        );
+        // A fetch that completes after the command began satisfies it.
+        account.client.persist_fetched_identity_directory(&peer.manifest)?;
+        assert!(
+            stale_roots_since(&account, &request, Some(began))?.is_empty(),
+            "a fetch made after the command began must authorize it"
+        );
+        // Methods that are not sends keep the process-wide window semantics.
+        let read = crate::LocalBusFrame::request(
+            "dm-read",
+            Some("sender".into()),
+            "message",
+            "message.read",
+            json!({}),
+        );
+        assert!(stale_roots_since(&account, &read, Some(began))?.is_empty(), "reads are not sends");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
+}

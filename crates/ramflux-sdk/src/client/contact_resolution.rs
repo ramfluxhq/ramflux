@@ -140,9 +140,9 @@ impl RamfluxClient {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(card) = card {
-            self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
-        }
+        // A retry of an already accepted contact is read-only for provenance: the card's locator
+        // and origin change only through a resolution that fetched and checked current authority
+        // (floor, certificate, pins). Replaying a still-valid old card changes nothing.
         if upgraded != identity {
             db.persist_client_record("identity", &principal, &upgraded)?;
         }

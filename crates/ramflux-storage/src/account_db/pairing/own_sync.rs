@@ -22,6 +22,8 @@ const CAPACITY: u64 = 128;
 pub struct PairingOwnSyncJob {
     pub operation_id: String,
     pub record_hash: String,
+    /// `device_set_epoch` of the enrollment head: the floor a later current head must meet.
+    pub record_epoch: u64,
     pub source_ref: DeviceRef,
     pub target_ref: DeviceRef,
 }
@@ -62,7 +64,9 @@ impl Stored {
     fn validate(&self, db: &AccountDb) -> Result<(), StorageError> {
         hash(&self.job.operation_id)?;
         hash(&self.job.record_hash)?;
-        if self.version != 1
+        if self.job.record_epoch == 0
+            || self.job.record_epoch > ramflux_protocol::MAX_SAFE_JSON_INTEGER
+            || self.version != 1
             || self.queued_at > ramflux_protocol::MAX_SAFE_JSON_INTEGER
             || self.job.source_ref == self.job.target_ref
             || self.result.as_ref().is_some_and(|value| value.len() > 64)
@@ -140,6 +144,7 @@ impl AccountDb {
         let job = PairingOwnSyncJob {
             operation_id: terminal.operation_id.clone(),
             record_hash: adoption.record_hash.clone(),
+            record_epoch: publication.record.body.device_set_epoch,
             source_ref: ramflux_protocol::parse_i_json(&adoption.local_ref)?,
             target_ref: ramflux_protocol::parse_i_json(target)?,
         };

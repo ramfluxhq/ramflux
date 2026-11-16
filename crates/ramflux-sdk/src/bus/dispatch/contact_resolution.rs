@@ -208,7 +208,7 @@ pub(super) fn export(
     let profile = account_home(state, id)?;
     if let Some(native) = &account.client.born_v3_account {
         let now = crate::custody::network_now()?;
-        let current = crate::custody::load_account(&state.config.data_root, id, now)?;
+        let current = crate::custody::load_account_settled(&state.config.data_root, id, now)?;
         if current.record() != native.record() || current.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }

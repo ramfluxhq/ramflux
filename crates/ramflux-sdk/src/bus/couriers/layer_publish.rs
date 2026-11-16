@@ -30,6 +30,8 @@ const MAX_VALIDITY_SECONDS: u64 = 24 * 60 * 60;
 const MIN_REMAINING_SECONDS: u64 = 2 * 60 * 60;
 const PUBLISH_DEADLINE: Duration = Duration::from_secs(30);
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
+/// Account-DB key of the last typed renewal failure; `rf account status` reads it.
+pub(crate) const LAST_ERROR_KEY: &str = "layer-publish/last-error";
 const BACKOFF_MAX: Duration = Duration::from_mins(15);
 
 /// Per-account retry scheduling. Lives on the writer; never crosses an await.
@@ -58,10 +60,24 @@ impl LayerPublishState {
     }
 }
 
-/// `rf status` view of the local device's declaration, derived from the verified record.
-/// Codes only; no key material.
+/// Persist (or clear) the typed failure code. Codes only; never key material.
+fn record_error(account: &LocalBusAccountState, code: Option<&str>) {
+    if let Ok(db) = account.client.account_db() {
+        let value = code.map(str::to_owned);
+        if db.persist_actor_state(LAST_ERROR_KEY, &value).is_err() {
+            tracing::debug!("layer declaration last error not persisted");
+        }
+    }
+}
+
+/// `rf status` view of the local device's declaration, derived from the verified record plus the
+/// last typed renewal failure. Codes only; no key material.
 #[must_use]
-pub(crate) fn status_view(account: &custody::BornAccount, now: u64) -> serde_json::Value {
+pub(crate) fn status_view(
+    account: &custody::BornAccount,
+    now: u64,
+    last_error: Option<&str>,
+) -> serde_json::Value {
     let declaration = account
         .local_device_id()
         .ok()
@@ -79,6 +95,7 @@ pub(crate) fn status_view(account: &custody::BornAccount, now: u64) -> serde_jso
         "state": state,
         "max_layer": declaration.map(|signed| signed.declaration.max_layer),
         "expires_at": declaration.map(|signed| signed.declaration.expires_at),
+        "last_error_code": last_error,
     })
 }
 
@@ -128,6 +145,22 @@ pub(crate) struct PublishInput {
     vault: Arc<dyn custody::PrimaryVault>,
 }
 
+#[cfg(test)]
+impl PublishInput {
+    /// The signed public candidate; no key, lock or database handle travels with it.
+    pub(crate) fn publication(&self) -> &Publication {
+        &self.publication
+    }
+}
+
+#[cfg(test)]
+impl Plan {
+    /// Hash of the submitted candidate.
+    pub(crate) fn expected(&self) -> &str {
+        &self.expected
+    }
+}
+
 /// One courier pass. Returns whether work was done (the runner then re-polls quickly).
 pub(crate) async fn pass(_context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
     pass_with(writer, publish).await
@@ -143,9 +176,11 @@ where
         Err(error) if not_ready(&error) => return Ok(false),
         Err(error) => {
             tracing::debug!(code = error_code(&error), "layer declaration prepare deferred");
+            let code = error_code(&error);
             let _ = writer
-                .apply(|account| {
+                .apply(move |account| {
                     account.layer_publish.failed();
+                    record_error(account, Some(code));
                     Ok(())
                 })
                 .await;
@@ -170,9 +205,11 @@ where
         Ok(()) => Ok(true),
         Err(error) => {
             tracing::debug!(code = error_code(&error), "layer declaration publish deferred");
+            let code = error_code(&error);
             let _ = writer
-                .apply(|account| {
+                .apply(move |account| {
                     account.layer_publish.failed();
+                    record_error(account, Some(code));
                     Ok(())
                 })
                 .await;
@@ -199,6 +236,11 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
         }
         return resume(account, &config, &head, now);
     }
+    // Enrollment history is bound to the head that enrolled the device and its fetch/persist
+    // steps refuse while another head is in flight: a fresh layer head waits for that job.
+    if account.client.account_db()?.next_pairing_own_sync()?.is_some() {
+        return Ok(None);
+    }
     let born = account.client.born_v3_account.as_deref().ok_or(SdkError::NetworkingPending)?;
     let record = born.record();
     let device = record
@@ -216,6 +258,7 @@ pub(crate) fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Box<P
     let expires_at = issued_at.saturating_add(MAX_VALIDITY_SECONDS).min(certificate_expiry);
     if expires_at < issued_at.saturating_add(MIN_REMAINING_SECONDS) {
         tracing::warn!("layer declaration renewal blocked: branch certificate too close to expiry");
+        record_error(account, Some("LayerRenewalBlocked"));
         return Ok(None);
     }
     let operation_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
@@ -301,10 +344,13 @@ fn resume(
         .map_or(0, |signed| signed.declaration.expires_at);
     if head.state == "prepared"
         && declared_expiry <= now
-        && account
-            .client
-            .account_db()?
-            .discard_prepared_layer_head(&head.operation_id, &head.candidate_hash)?
+        && custody::pairing::publication::discard_prepared_layer(
+            account.client.account_db()?,
+            &config.account_root,
+            &config.account_id,
+            &head.operation_id,
+            &head.candidate_hash,
+        )?
     {
         // A candidate that never left this device and is already expired is rebuilt next pass.
         return Ok(None);
@@ -319,6 +365,37 @@ fn resume(
     submit(account, config, write)
 }
 
+/// Unlock-time recovery (before admission and before any signing gate): complete the exact
+/// acknowledged local installation of a layer head that a crash interrupted, retire its row and
+/// reload the account so the installed authority is the one the runtime starts from.
+///
+/// # Errors
+/// Installation or storage errors leave the journal row and pending marker untouched for retry.
+pub(crate) fn repair_on_unlock(
+    client: &mut crate::RamfluxClient,
+    root: &std::path::Path,
+    account_id: &str,
+    vault: &dyn custody::PrimaryVault,
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    let Some(head) = db.pairing_head()? else { return Ok(()) };
+    if head.kind != "layer_update" || head.state != "acknowledged" {
+        return Ok(());
+    }
+    let publication = custody::pairing::publication::decode_head_candidate(&head.candidate)?;
+    let authority =
+        ramflux_protocol::custody::CustodyAuthority { publication, custodian_publication: None };
+    let now = custody::network_now()?;
+    custody::pairing::refresh_authority(root, db, vault, account_id, &authority, now)?;
+    let adoption = db.pairing_adoption()?.ok_or(SdkError::PairingField("record_hash"))?;
+    if adoption.operation_id == head.operation_id && adoption.record_hash == head.candidate_hash {
+        db.commit_ordinary_head_cleanup(&adoption)?;
+    }
+    client.born_v3_account =
+        Some(Box::new(custody::load_account(client.account_index()?.root(), account_id, now)?));
+    Ok(())
+}
+
 /// Called by another head writer before it would answer `Busy` on a pending layer head. A head
 /// that never left this device is discarded after an atomic recheck; an acknowledged head is
 /// completed locally. A submitted head stays: the node may hold it, so the layer courier
@@ -331,10 +408,13 @@ pub(crate) fn settle_for_other_writer(account: &mut LocalBusAccountState) -> Res
     }
     match head.state.as_str() {
         "prepared" => {
-            account
-                .client
-                .account_db()?
-                .discard_prepared_layer_head(&head.operation_id, &head.candidate_hash)?;
+            custody::pairing::publication::discard_prepared_layer(
+                account.client.account_db()?,
+                &config.account_root,
+                &config.account_id,
+                &head.operation_id,
+                &head.candidate_hash,
+            )?;
         }
         "acknowledged" => {
             let now = custody::network_now()?;
@@ -395,6 +475,7 @@ fn finish(
     let own = account.principal_commitment.clone();
     let _ = account.head_refresh.enqueue(own);
     account.layer_publish.succeeded();
+    record_error(account, None);
     Ok(())
 }
 

@@ -52,6 +52,15 @@ pub(super) fn unlock(
         client.account_db()?.persist_actor_state("sync/node-id", &Some(&node_id))?;
     }
     drop(passphrase);
+    // A crash inside a layer head's local installation is repaired before admission, so the
+    // pending marker never leaves the account locked out.
+    let repair_vault = super::custody_setup::primary_provider(&state.config);
+    crate::bus::couriers::layer_publish::repair_on_unlock(
+        &mut client,
+        &root,
+        id,
+        repair_vault.as_ref(),
+    )?;
     if !crate::custody::pairing::recipient::ordinary_session_admitted(&client, id)? {
         return Err(SdkError::PairingCode("PublicationPending"));
     }

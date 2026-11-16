@@ -43,9 +43,70 @@ pub(crate) fn pending(account: &LocalBusAccountState) -> SdkError {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn stale_roots(
     account: &LocalBusAccountState,
     request: &crate::LocalBusFrame,
+) -> Result<BTreeSet<String>, SdkError> {
+    stale_roots_since(account, request, None)
+}
+
+/// Roots whose authority a NEW send authorization must fetch afresh: the DM recipient, or every
+/// group member. A pure retry of an already authorized send is not asked again by this check.
+fn send_roots(
+    account: &LocalBusAccountState,
+    request: &crate::LocalBusFrame,
+) -> Result<BTreeSet<String>, SdkError> {
+    let body = &request.body;
+    match request.method.as_str() {
+        "message.submit" => Ok(body
+            .get("recipient_principal_commitment")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .into_iter()
+            .collect()),
+        "conversation.send" => {
+            let Some(id) = body.get("conversation_id").and_then(serde_json::Value::as_str) else {
+                return Ok(BTreeSet::new());
+            };
+            let Some(thread) = account.client.account_db()?.client_record("conversation", id)?
+            else {
+                return Ok(BTreeSet::new());
+            };
+            if let Some(group) = thread.get("group_id").and_then(serde_json::Value::as_str) {
+                return group_member_roots(account, group);
+            }
+            let principal = account
+                .client
+                .device_branch
+                .as_ref()
+                .map(|branch| branch.principal_id.clone())
+                .ok_or(SdkError::IdentityRootMissing)?;
+            let (_, root) =
+                crate::bus::dispatch::conversation_send::peer_root(account, &thread, &principal)?;
+            Ok(BTreeSet::from([root]))
+        }
+        _ => Ok(BTreeSet::new()),
+    }
+}
+
+fn group_member_roots(
+    account: &LocalBusAccountState,
+    group: &str,
+) -> Result<BTreeSet<String>, SdkError> {
+    let mut roots = BTreeSet::new();
+    if let Some(state) = account.client.account_db()?.shared_group_state(group)? {
+        roots.extend(state.view().members.iter().map(|m| m.identity.root_commitment.clone()));
+    }
+    Ok(roots)
+}
+
+/// `since` set: a root is stale unless its authority was fetched at or after that instant
+/// (per-authorization fetch). `None` keeps the process-wide observation window.
+pub(crate) fn stale_roots_since(
+    account: &LocalBusAccountState,
+    request: &crate::LocalBusFrame,
+    since: Option<std::time::Instant>,
 ) -> Result<BTreeSet<String>, SdkError> {
     // Read/receive must retain their existing inline peer fetch and first-pass admission.
     let method = request.method.as_str();
@@ -55,24 +116,30 @@ pub(crate) fn stale_roots(
             request.body.get("group_id").and_then(serde_json::Value::as_str).unwrap_or(""),
         );
     }
-    if account.client.born_v3_account.is_none()
-        || !(method == "group.send"
-            || method.starts_with("group.member.")
-            || method.starts_with("group.invite.")
-            || matches!(method, "group.name.set" | "group.owner.transfer" | "group.role.set"))
-    {
+    if account.client.born_v3_account.is_none() {
         return Ok(BTreeSet::new());
     }
-    let mut roots = BTreeSet::from([account.principal_commitment.clone()]);
-    if let Some(group) = request.body.get("group_id").and_then(serde_json::Value::as_str)
-        && let Some(state) = account.client.account_db()?.shared_group_state(group)?
+    let mut roots = if since.is_some() { send_roots(account, request)? } else { BTreeSet::new() };
+    if method == "group.send"
+        || method.starts_with("group.member.")
+        || method.starts_with("group.invite.")
+        || matches!(method, "group.name.set" | "group.owner.transfer" | "group.role.set")
     {
-        roots.extend(state.view().members.iter().map(|m| m.identity.root_commitment.clone()));
+        roots.insert(account.principal_commitment.clone());
+        if let Some(group) = request.body.get("group_id").and_then(serde_json::Value::as_str) {
+            roots.extend(group_member_roots(account, group)?);
+        }
     }
     let now = crate::custody::network_now()?;
     let mut stale = BTreeSet::new();
     for root in roots {
         if let Some(record) = account.client.current_custody_authority(&root, now)? {
+            if let Some(since) = since {
+                if !account.client.native_head_freshness.borrow().observed_since(&root, since) {
+                    stale.insert(root);
+                }
+                continue;
+            }
             match account.client.require_fresh_custody_head(
                 HeadUse::NewAuthorization,
                 &root,
@@ -95,6 +162,8 @@ impl AccountRuntime {
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
         let deadline = admitted_at + self.timeouts.network_wait;
+        // Every NEW send authorization needs an authority fetched after this command began.
+        let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
         if matches!(command.request.method.as_str(), "group.read" | "group.receive")
@@ -120,7 +189,7 @@ impl AccountRuntime {
             let Some(account) = self.state.accounts.get_mut(&self.id) else {
                 return Ok(());
             };
-            let roots = stale_roots(account, &command.request)?;
+            let roots = stale_roots_since(account, &command.request, Some(since))?;
             if roots.is_empty() {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());

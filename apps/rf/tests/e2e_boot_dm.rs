@@ -152,7 +152,10 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
             .ok_or("first node-assigned inbox sequence missing from submit result")?;
         let second = inbox_seq_from_read(second_sent, second_id)
             .ok_or("second node-assigned inbox sequence missing from submit result")?;
-        assert_eq!(second, first + 1, "B1 Deliver sequences must be consecutive");
+        // Background contact-control envelopes may legitimately interleave between two sends
+        // (each new send authorization now waits for a fresh authority fetch); the two message
+        // deliveries must still arrive in order, with no resume or page fetch (asserted above).
+        assert!(second > first, "B1 Deliver sequences must increase: {first} -> {second}");
         assert!(
             e2e::receive_counter(&after, "last_acked_seq")?
                 <= e2e::receive_counter(&after, "committed_cursor")?,

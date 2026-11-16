@@ -336,14 +336,18 @@ mod production;
 
 #[tokio::test]
 async fn client_demand_is_drained_into_the_bounded_queue_and_wakes_the_task() -> TestResult {
-    let (mut account, native, _io) = account().await?;
-    let root = native.manifest.principal_commitment.clone();
-    account.head_refresh.pending.clear();
-    account.client.manifest_demand.request(&root);
-    let requested = fence(&account)?;
-    let plan = prepare(&mut account, requested)?.ok_or("test: demand must yield a plan")?;
-    assert!(plan.roots.contains(&root), "a demanded eligible root must be fetched on demand");
-    assert!(account.client.manifest_demand.take().is_empty(), "demand must be drained once");
-    account.connection.take().ok_or("connection")?.stop().await;
-    Ok(())
+    crate::client::native_test_support::watchdog::within(async {
+        let (mut account, native, _io) = account().await?;
+        let root = native.manifest.principal_commitment.clone();
+        account.head_refresh.pending.clear();
+        account.client.manifest_demand.request(&root);
+        let requested = fence(&account)?;
+        let plan = prepare(&mut account, requested)?.ok_or("test: demand must yield a plan")?;
+        assert!(plan.roots.contains(&root), "a demanded eligible root must be fetched on demand");
+        assert!(account.client.manifest_demand.take().is_empty(), "demand must be drained once");
+        account.connection.take().ok_or("connection")?.stop().await;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
 }

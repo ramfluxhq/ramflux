@@ -18,6 +18,12 @@ impl NativeHeadFreshness {
     pub(crate) fn observation(&self, root: &str) -> Option<Instant> {
         self.heads.get(root).map(|(_, at)| *at)
     }
+    /// True when a completed network fetch of this root began at or after `since`. A new send
+    /// authorization asks for this, so an observation made before the command was admitted
+    /// (even seconds earlier) can never authorize it.
+    pub(crate) fn observed_since(&self, root: &str, since: Instant) -> bool {
+        self.heads.get(root).is_some_and(|(_, at)| *at >= since)
+    }
     fn remember(&mut self, root: &str, hash: String, at: Instant) {
         if self.heads.get(root).is_some_and(|(seen, observed)| seen == &hash && *observed > at) {
             return;
