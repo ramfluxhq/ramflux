@@ -215,6 +215,32 @@ jobs:
           tags: |
             type=raw,value=${{ inputs.tag || github.ref_name }}
 
+      # The pinned metadata action writes the raw tag into
+      # org.opencontainers.image.version and the full SHA into
+      # org.opencontainers.image.revision. Drop those two keys and append the
+      # workspace version plus the 12-hex revision last. The same values are
+      # the image build args, so the Dockerfile labels match.
+      - name: Product image contract
+        id: product
+        env:
+          METADATA_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+          version="$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-version)"
+          revision="$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-revision)"
+          labels="$(
+            printf '%s\n' "$METADATA_LABELS" \
+              | python3 deploy/scripts/demo-node-config.py \
+                  "$PWD" "$PWD" release-image-labels "$version" "$revision"
+          )"
+          {
+            echo "version=${version}"
+            echo "revision=${revision}"
+            echo "labels<<RAMFLUX_RELEASE_LABELS"
+            printf '%s\n' "$labels"
+            echo "RAMFLUX_RELEASE_LABELS"
+          } >> "${GITHUB_OUTPUT}"
+
       # Push only for real tag releases (refs/tags/*). workflow_dispatch keeps
       # push=false so a manual run still builds both platforms without touching GHCR.
       - name: Log in to GHCR
@@ -234,10 +260,12 @@ jobs:
           target: source-runtime
           build-args: |
             BIN=${{ matrix.bin }}
+            RAMFLUX_PRODUCT_VERSION=${{ steps.product.outputs.version }}
+            RAMFLUX_PRODUCT_REVISION=${{ steps.product.outputs.revision }}
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: ${{ steps.product.outputs.labels }}
           provenance: true
           sbom: true
 

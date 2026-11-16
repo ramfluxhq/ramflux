@@ -919,10 +919,45 @@ def product_sha(repo):
 PRODUCT_VERSION_LABEL = "org.opencontainers.image.version"
 PRODUCT_REVISION_LABEL = "org.opencontainers.image.revision"
 PRODUCT_SHA_EXACT = re.compile(r"[0-9a-f]{12}|unknown")
+RELEASE_REVISION_EXACT = re.compile(r"[0-9a-f]{12}")
 RUNTIME_PRODUCT_KEYS = (
     "RAMFLUX_EXPECTED_PRODUCT_VERSION",
     "RAMFLUX_EXPECTED_PRODUCT_SHA",
 )
+
+
+def label_assignments(text):
+    """Parse label lines. The last assignment of a key wins."""
+    labels = {}
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        key, separator, value = raw.strip().partition("=")
+        if separator != "=" or key == "":
+            sys.exit("release metadata label is missing a value")
+        labels[key] = value
+    return labels
+
+
+def release_image_labels(metadata_text, product_version, revision):
+    """Labels for a release image. Generic metadata cannot overwrite the contract.
+
+    The release tag and the full commit SHA are removed from
+    org.opencontainers.image.version and org.opencontainers.image.revision.
+    The workspace X.Y.Z version and the 12-hex revision are written last.
+    Other metadata labels stay. A release commit always has a sha, so
+    ``unknown`` is refused here.
+    """
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    if RELEASE_REVISION_EXACT.fullmatch(revision) is None:
+        sys.exit("release revision must be 12 lowercase hexadecimal characters")
+    labels = label_assignments(metadata_text)
+    labels.pop(PRODUCT_VERSION_LABEL, None)
+    labels.pop(PRODUCT_REVISION_LABEL, None)
+    labels[PRODUCT_VERSION_LABEL] = product_version
+    labels[PRODUCT_REVISION_LABEL] = revision
+    return "\n".join(f"{key}={value}" for key, value in labels.items())
 
 
 def image_name(service, version):
@@ -1067,6 +1102,13 @@ def main():
             print(workspace_product_version(repo / "Cargo.toml"))
         elif action == "product-revision":
             print(product_sha(repo))
+        elif action == "release-image-labels":
+            if len(sys.argv) != 6:
+                sys.exit(
+                    "usage: demo-node-config.py REPO STATE "
+                    "release-image-labels VERSION REVISION"
+                )
+            print(release_image_labels(sys.stdin.read(), sys.argv[4], sys.argv[5]))
         elif action == "image-product-identity":
             image_product_identity(sys.argv[4], sys.argv[5])
         elif action == "merge-runtime":
