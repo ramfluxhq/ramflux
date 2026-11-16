@@ -125,7 +125,12 @@ async fn watch_indicators(bus: &mut LocalBusClient, watch: &TypingWatch) -> Resu
         match tokio::time::timeout(remaining, bus.next_event()).await {
             Ok(Ok(event)) => {
                 if let Some(row) = indicator(&watch.conversation, &event, unix_ms()) {
+                    let active = watch.until_active
+                        && row.get("active").and_then(Value::as_bool) == Some(true);
                     indicators.push(row);
+                    if active {
+                        break;
+                    }
                 }
             }
             Ok(Err(error)) => return Err(error.into()),
