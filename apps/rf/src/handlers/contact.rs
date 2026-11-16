@@ -73,20 +73,21 @@ pub(crate) async fn handle_contact(
                 .await?,
         ),
         ContactAction::Verify(verify) => {
-            let method =
-                if verify.mark_verified { "contact.verify" } else { "contact.safety_number" };
-            let request = LocalBusContactSafetyRequest {
-                contact_identity_commitment: verify.selector.contact,
+            let (method, body) = match verify.expected_safety {
+                Some(expected) if verify.mark_verified => (
+                    "contact.verify",
+                    serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+                        expected: Some(expected),
+                    })?,
+                ),
+                _ => (
+                    "contact.safety_number",
+                    serde_json::to_value(LocalBusContactSafetyRequest {
+                        contact_identity_commitment: verify.selector.contact,
+                    })?,
+                ),
             };
-            print_json(
-                &bus.request(
-                    Some(verify.selector.account),
-                    "contact",
-                    method,
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
+            print_json(&bus.request(Some(verify.selector.account), "contact", method, body).await?)
         }
         ContactAction::SafetyNumber(selector) => {
             let request =
