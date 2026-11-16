@@ -88,21 +88,23 @@ class NodeSecretsTests(unittest.TestCase):
             self.assertEqual([path.read_bytes() for path in paths], original)
             self.assertFalse((root / "certs" / "federation" / "node-signing.key").exists())
 
-    def test_existing_identity_moves_out_of_the_mesh_directory(self):
+    def test_obsolete_federation_key_layout_is_refused_and_left_untouched(self):
         with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
             root = Path(directory)
             env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root))
             subprocess.run(["sh", str(SCRIPTS / "bootstrap-ca.sh")], env=env, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
             legacy = root / "certs" / "federation" / "node-signing.key"
             legacy.parent.mkdir(parents=True, exist_ok=True)
             legacy.write_text("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
             legacy.chmod(0o600)
-            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            moved = root / "certs" / "node-identity" / "node-signing.key"
-            self.assertEqual(moved.read_text(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
-            self.assertFalse(legacy.exists())
+            result = subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                    timeout=120)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("obsolete layout", result.stderr)
+            self.assertEqual(legacy.read_text(), "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
+            self.assertFalse((root / "certs" / "node-identity" / "node-signing.key").exists())
 
     def test_secret_group_defaults_to_the_operator_and_is_recorded_once(self):
         with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
@@ -153,28 +155,6 @@ class NodeSecretsTests(unittest.TestCase):
                 subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertEqual((root / ".env").read_text(), f"RAMFLUX_SECRET_GID={os.getgid()}\n")
-
-    def test_conflicting_signing_seeds_fail_closed_and_keep_both(self):
-        with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
-            root = Path(directory)
-            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root))
-            for script in ("bootstrap-ca.sh", "issue-certs.sh"):
-                subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            current = root / "certs" / "node-identity" / "node-signing.key"
-            legacy = root / "certs" / "federation" / "node-signing.key"
-            legacy.write_text("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA")
-            original = current.read_text()
-            result = subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("different node signing seeds", result.stderr)
-            self.assertTrue(legacy.exists())
-            self.assertEqual(current.read_text(), original)
-            legacy.write_text(original)
-            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.assertFalse(legacy.exists())
 
     def test_compose_uses_concrete_secret_paths(self):
         for filename in ("docker-compose.yml", "docker-compose.itest.yml"):

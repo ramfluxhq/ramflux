@@ -279,7 +279,7 @@ def validate_snapshot_overlays(state, reference):
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
         "RAMFLUX_ROUTER_ADMIN_ENABLED": router_enabled,
-        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) if router_enabled else "",
+        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") if router_enabled else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
@@ -459,7 +459,7 @@ def validate_selected_overlay_values(state):
     if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" and (
             not (state / "compose.router-admin.yml").is_file()
             or values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") != "1"
-            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
+            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
         sys.exit("router admin configuration was not applied by the last up; run up first")
 
 
@@ -609,11 +609,8 @@ def prepare(repo, state, command, validate_only=False):
         custody_inputs(state)
 
     previous_snapshot = owner.get("current_snapshot")
-    capture_legacy_snapshot = bool(
-        marker.exists() and not previous_snapshot and "snapshot_history" not in owner
-    )
-    if capture_legacy_snapshot:
-        previous_snapshot = new_snapshot_reference(owner["settings"]["DEMO_VERSION"])
+    if marker.exists() and not previous_snapshot and "snapshot_history" not in owner:
+        sys.exit("obsolete data directory layout (no snapshot history); no adoption before v1, redeploy into a fresh directory")
 
     if command == "upgrade":
         versions, snapshots = normalize_history(owner, previous_snapshot)
@@ -640,8 +637,6 @@ def prepare(repo, state, command, validate_only=False):
 
     if validate_only:
         return owner
-    if capture_legacy_snapshot:
-        capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
     transaction = {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
@@ -693,7 +688,7 @@ def router_admin_settings(state, command):
     values = snapshot_runtime_values(state, reference)
     source, _, _ = read_snapshot_manifest(state, reference)
     token = json.loads((source / "owner.json").read_text())["token"]
-    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488"))
+    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")
     admin = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
     voice = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "").rsplit(":", 1)[-1]
     print(values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0"), port or "-", admin or "-", voice or "-", token)

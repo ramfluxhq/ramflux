@@ -474,10 +474,10 @@ impl RouterHandle {
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
         }
-        if let Some(seed) = pairing_seed {
+        if let Some(secret) = pairing_seed {
             let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
                 .unwrap_or_else(|_| format!("https://{}", config.node_id));
-            service = service.with_pairing_relay_if_enabled(seed, origin)?;
+            service = service.with_pairing_relay_if_enabled(secret.guarded_seed(), origin)?;
         }
         let Self::Tokio(runtime) = self;
         let service = Arc::new(service);

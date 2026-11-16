@@ -45,14 +45,17 @@ impl std::fmt::Display for PairingKeyError {
 impl std::error::Error for PairingKeyError {}
 
 /// Loads the mounted key and verifies it against the trusted node identity public key.
-pub(crate) fn load(node_public_key: &str) -> Result<[u8; 32], PairingKeyError> {
+///
+/// The key stays inside `NodeSecret` (zeroized on drop, including on the mismatch path); the
+/// caller takes a guarded copy only at the allocator handoff.
+pub(crate) fn load(node_public_key: &str) -> Result<NodeSecret, PairingKeyError> {
     let path = ramflux_node_core::environment::var_os(PAIRING_KEY_FILE_ENV)
         .filter(|value| !value.is_empty())
         .ok_or(PairingKeyError::Missing)?;
     let secret = NodeSecret::from_file(path).map_err(|_| PairingKeyError::Malformed)?;
-    let seed = secret.with_bytes(|bytes| *bytes);
-    if ramflux_crypto::public_key_base64url_from_seed(seed) != node_public_key {
+    let public = secret.with_bytes(|bytes| ramflux_crypto::public_key_base64url_from_seed(*bytes));
+    if public != node_public_key {
         return Err(PairingKeyError::Mismatch);
     }
-    Ok(seed)
+    Ok(secret)
 }

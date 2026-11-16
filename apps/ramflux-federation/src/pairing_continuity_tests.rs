@@ -964,7 +964,7 @@ pub(super) fn native_issue_refused_when_disabled() -> TestResult {
             wall()?,
         )?
         .with_pairing_relay_if_enabled(
-            ramflux_crypto::fixture_signing_key().to_bytes(),
+            zeroize::Zeroizing::new(ramflux_crypto::fixture_signing_key().to_bytes()),
             "https://relay.example:443".into(),
         )?,
     );

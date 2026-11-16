@@ -58,8 +58,8 @@ done
 export DEMO_NODE_ID DEMO_GATEWAY_PORT DEMO_RELAY_PORT DEMO_HTTP_PORT DEMO_TURN_PORT
 export DEMO_MESH_PORT DEMO_BIND_ADDR DEMO_VERSION DEMO_PUBLIC_ORIGIN
 DEMO_ADMIN_LOOPBACK_PORT=${DEMO_ADMIN_LOOPBACK_PORT:-}
-# Keep the former demo-only spelling as an input alias for one release.
-RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-59488}}
+[ -z "${DEMO_ROUTER_ADMIN_LOOPBACK_PORT:-}" ] || fail 'DEMO_ROUTER_ADMIN_LOOPBACK_PORT is obsolete; use RAMFLUX_ROUTER_ADMIN_PORT'
+RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-59488}
 RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
 case "$RAMFLUX_ROUTER_ADMIN_ENABLED" in 0|1) ;; *) fail 'RAMFLUX_ROUTER_ADMIN_ENABLED must be 0 or 1' ;; esac
 export DEMO_ADMIN_LOOPBACK_PORT RAMFLUX_ROUTER_ADMIN_PORT RAMFLUX_ROUTER_ADMIN_ENABLED
@@ -539,9 +539,6 @@ load_applied_overlays() {
   RAMFLUX_DEMO_VOICE_UDP_PORT=$(sed -n 's/^RAMFLUX_RELAY_VOICE_UDP_PORT=.*://p' "$state/runtime.env" | tail -n 1)
   DEMO_ADMIN_LOOPBACK_PORT=$(sed -n 's/^RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
   RAMFLUX_ROUTER_ADMIN_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_PORT=//p' "$state/runtime.env" | tail -n 1)
-  if [ -z "$RAMFLUX_ROUTER_ADMIN_PORT" ]; then
-    RAMFLUX_ROUTER_ADMIN_PORT=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=//p' "$state/runtime.env" | tail -n 1)
-  fi
   RAMFLUX_ROUTER_ADMIN_PORT=${RAMFLUX_ROUTER_ADMIN_PORT:-59488}
   RAMFLUX_ROUTER_ADMIN_ENABLED=$(sed -n 's/^RAMFLUX_ROUTER_ADMIN_ENABLED=//p' "$state/runtime.env" | tail -n 1)
   RAMFLUX_ROUTER_ADMIN_ENABLED=${RAMFLUX_ROUTER_ADMIN_ENABLED:-0}
@@ -605,16 +602,8 @@ case "$command" in
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
       "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
-      legacy_seed="$state/certs/federation/node-signing.key"
+      [ ! -e "$state/certs/federation/node-signing.key" ] || fail "obsolete layout: $state/certs/federation/node-signing.key; the node identity key lives only in certs/node-identity (no migration before v1; redeploy into a fresh data directory)"
       seed="$state/certs/node-identity/node-signing.key"
-      if [ -e "$legacy_seed" ] && [ ! -e "$seed" ]; then
-      mkdir -p "$state/certs/node-identity"
-      mv "$legacy_seed" "$seed"
-      elif [ -e "$legacy_seed" ]; then
-      # Two different seeds: never guess which identity is real.
-      cmp -s "$legacy_seed" "$seed" || fail "$legacy_seed and $seed differ; keep the seed matching the identity pin"
-      rm -f "$legacy_seed"
-      fi
       chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
       chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"

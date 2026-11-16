@@ -11,6 +11,7 @@ import tempfile
 import sys
 import unittest
 
+SCRIPT_DEADLINE_SECONDS = 120
 SCRIPT = Path(__file__).resolve().parents[1] / "demo-node.sh"
 
 
@@ -103,7 +104,8 @@ else:
 
     def run_script(self, command, *flags, success=True, env_file=None):
         result = subprocess.run(["sh", str(SCRIPT), command, str(env_file or self.env_file), *flags],
-                                env=self.environment, text=True, capture_output=True, check=False)
+                                env=self.environment, text=True, capture_output=True, check=False,
+                                timeout=SCRIPT_DEADLINE_SECONDS)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -1034,25 +1036,28 @@ else:
     def test_router_admin_recover_checks_snapshot_port_before_restoring(self):
         self.router_admin_maintenance_refuses_occupied_snapshot_port("recover")
 
-    # Mutation: ignore RAMFLUX_ROUTER_ADMIN_PORT and always use the old alias/default.
-    def test_router_admin_canonical_port_and_legacy_input_alias(self):
-        with socket.socket() as legacy, socket.socket() as selected:
-            legacy.bind(("127.0.0.1", 0))
+    def test_router_admin_canonical_port_only_and_obsolete_alias_refused(self):
+        with socket.socket() as selected:
             selected.bind(("127.0.0.1", 0))
-            alias = legacy.getsockname()[1]
             canonical = selected.getsockname()[1]
-        self.assertNotEqual(alias, canonical)
         with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nDEMO_ROUTER_ADMIN_LOOPBACK_PORT={alias}\n")
-        self.run_script("up")
-        self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={alias}", (self.state / "runtime.env").read_text())
-        with self.env_file.open("a") as output:
-            output.write(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}\n")
+            output.write(f"RAMFLUX_ROUTER_ADMIN_ENABLED=1\nRAMFLUX_ROUTER_ADMIN_PORT={canonical}\n")
         self.run_script("up")
         runtime = (self.state / "runtime.env").read_text()
         self.assertIn(f"RAMFLUX_ROUTER_ADMIN_PORT={canonical}", runtime)
-        self.assertNotIn("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
-        self.assertNotIn("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT=", runtime)
+        self.assertNotIn("LOOPBACK_PORT=", runtime.replace("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT=", ""))
+        with self.env_file.open("a") as output:
+            output.write("DEMO_ROUTER_ADMIN_LOOPBACK_PORT=59999\n")
+        refused = self.run_script("up", success=False)
+        self.assertIn("DEMO_ROUTER_ADMIN_LOOPBACK_PORT is obsolete", refused.stdout + refused.stderr)
+
+    def test_obsolete_federation_signing_seed_layout_is_refused_not_migrated(self):
+        self.run_script("up")
+        legacy = self.state / "certs/federation/node-signing.key"
+        legacy.write_text("obsolete\n")
+        refused = self.run_script("up", success=False)
+        self.assertIn("obsolete layout", refused.stdout + refused.stderr)
+        self.assertTrue(legacy.exists(), "test: the obsolete file must not be moved or deleted")
 
     def test_router_admin_port_is_distinct_and_saved(self):
         with self.env_file.open("a") as output:

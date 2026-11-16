@@ -176,7 +176,7 @@ pub(crate) fn spawn_node_mesh_at(
             service.with_pairing_relay(Arc::new(Mutex::new(relay_store)))
         }
         None => service.with_pairing_relay_if_enabled(
-            ramflux_crypto::fixture_signing_key().to_bytes(),
+            zeroize::Zeroizing::new(ramflux_crypto::fixture_signing_key().to_bytes()),
             public_origin,
         )?,
     };

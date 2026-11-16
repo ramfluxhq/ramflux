@@ -891,13 +891,10 @@ client contract and `CHANGELOG.md` for the breaking development wire notice.
 
 Use `RAMFLUX_ROUTER_ADMIN_ENABLED=1` with `RAMFLUX_ROUTER_ADMIN_PORT` for the
 independent loopback router administration listener. The port defaults to 59488
-only when this listener is selected. The demo wrapper accepts the old
-`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` input alias for one release; an explicit
-`RAMFLUX_ROUTER_ADMIN_PORT` takes precedence. New runtime files save the canonical
-name, while immutable historical snapshots keep their original runtime keys and
-frozen Compose inputs. Direct Compose renames
-`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to `RAMFLUX_ROUTER_ADMIN_PORT` without an
-input alias.
+only when this listener is selected. The demo wrapper refuses the obsolete
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` name, and runtime files carry only the canonical
+name. Direct Compose renames `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to
+`RAMFLUX_ROUTER_ADMIN_PORT` without an input alias.
 
 `up`, `upgrade`, `rollback`, and `recover` share enabled-port validation and the
 same occupied-port refusal. Maintenance inspects the target snapshot read-only
