@@ -629,6 +629,11 @@ stricter), sets the switch on the router and federation only, and mounts that si
 read-only into the router (`RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE`, router supplementary
 group `RAMFLUX_SECRET_GID`). The router refuses to start when the key is missing, malformed or not
 the node identity key; there is no service-seed fallback and the key never enters env or logs.
+Pairing HTTP is accepted only as TLS asserted by the public reverse proxy, so the opt-in also
+requires `RAMFLUX_FEDERATION_TRUSTED_PROXIES` (1 to 4 exact IP addresses, no prefixes, no wildcard:
+the peer address the federation sees behind the proxy; measure it with `ss` inside the federation
+network namespace while sending a request) and an `https://` `DEMO_PUBLIC_ORIGIN`. Both are passed to
+the federation (the origin also to the router). A wrong address fails closed with `400 tls required`.
 It does not change discovery advertisement (compile-time release gate).
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses

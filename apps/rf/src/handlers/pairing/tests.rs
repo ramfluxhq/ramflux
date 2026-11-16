@@ -174,6 +174,36 @@ fn pairing_cli_outcome_exit_codes_preserve_retry_and_refusal_categories() {
     }
 }
 
+#[test]
+fn pairing_failure_class_names_the_typed_error_without_free_text() {
+    use ramflux_sdk::SdkError;
+    let refused = |message: &str| {
+        RfError::Sdk(SdkError::LocalBusRefused {
+            code: "local_bus_error".into(),
+            message: message.into(),
+            body: Box::new(serde_json::Value::Null),
+        })
+    };
+    for (error, expected) in [
+        (RfError::Sdk(SdkError::PairingCode("Busy")), "Busy".to_owned()),
+        (
+            refused("local bus error: pairing HTTPS status 400 Bad Request"),
+            "local_bus_error: pairing HTTPS status 400 Bad Request".to_owned(),
+        ),
+        (
+            RfError::Sdk(SdkError::LocalBus("pairing HTTPS status 400 Bad Request".into())),
+            "pairing HTTPS status 400 Bad Request".to_owned(),
+        ),
+        (refused("token=SECRET-VALUE /home/user/file"), "local_bus_error".to_owned()),
+        (RfError::Message("never display this input".into()), "Message".to_owned()),
+    ] {
+        let class = output::class(&error);
+        assert_eq!(class, expected, "test: failure class text");
+        assert!(!class.contains("SECRET"), "test: free-form text leaked into the class");
+        assert!(!class.contains("never display"), "test: free-form text leaked into the class");
+    }
+}
+
 #[tokio::test]
 async fn pairing_registry_fresh_process_helper() -> TestResult {
     deadline(async {

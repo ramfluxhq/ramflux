@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Closed CLI outcome categories; diagnostic text and identifiers never reach stderr.
+//! Closed CLI outcome categories. A failure prints one typed class line (an allow-listed code or
+//! an HTTP status); free-form diagnostic text, tokens and identifiers never reach stderr.
 use super::{LocalResult, Outcome, RfError};
 pub(super) fn code(value: Option<&str>) -> i32 {
     match value {
@@ -24,7 +25,51 @@ pub(super) fn outcome(result: &LocalResult) -> i32 {
         Outcome::Error { error } => code(Some(&error.code)),
     }
 }
+/// A short typed class for a failed pairing command, safe to print: a closed code name or an
+/// HTTP status. Everything else collapses to the error kind's name.
+pub(super) fn class(error: &RfError) -> String {
+    use ramflux_sdk::SdkError;
+    let name_of = |debug: String| -> String {
+        debug.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').take(48).collect()
+    };
+    match error {
+        RfError::Sdk(SdkError::PairingCode(code)) => (*code).to_owned(),
+        RfError::Sdk(SdkError::PairingField(field)) => format!("PairingField {field}"),
+        RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
+        RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => {
+            let code = bounded(code);
+            match http_status(message) {
+                Some(status) => format!("{code}: pairing HTTPS status {status}"),
+                None => code,
+            }
+        }
+        RfError::Sdk(SdkError::LocalBus(message)) => http_status(message).map_or_else(
+            || "LocalBus".to_owned(),
+            |status| format!("pairing HTTPS status {status}"),
+        ),
+        RfError::Sdk(other) => name_of(format!("{other:?}")),
+        other => name_of(format!("{other:?}")),
+    }
+}
+fn bounded(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .take(64)
+        .collect()
+}
+/// `"... pairing HTTPS status 400 Bad Request"` yields `"400 Bad Request"`; nothing else passes.
+fn http_status(message: &str) -> Option<String> {
+    let rest = message.split("pairing HTTPS status ").nth(1)?;
+    let status: String =
+        rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == ' ').take(40).collect();
+    let digits = status.chars().take_while(char::is_ascii_digit).count();
+    (digits == 3).then_some(status.trim().to_owned())
+}
 pub(super) fn failure(error: RfError) -> RfError {
+    if !matches!(error, RfError::PairingExit { .. }) {
+        eprintln!("Pairing error: {}", class(&error));
+    }
     let exit = match error {
         RfError::PairingExit { .. } => return error,
         RfError::Sdk(ramflux_sdk::SdkError::GatewayWriterBusy) => 3,

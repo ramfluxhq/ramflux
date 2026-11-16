@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate, render, snapshot, and restore an isolated production demo project."""
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,27 @@ MANUAL_RECOVERY = (
 
 class SnapshotError(Exception):
     """A snapshot cannot be safely captured or restored."""
+
+
+def pairing_trusted_proxies():
+    """Exact proxy peer IPs for pairing; refuses empty input, prefixes and wildcard addresses."""
+    raw = os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", "")
+    addresses = []
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        try:
+            address = ipaddress.ip_address(item)
+        except ValueError:
+            sys.exit(f"DEMO_PAIRING_TRUSTED_PROXIES_INVALID: {item!r} is not a single IP address")
+        if address.is_unspecified or address.is_multicast:
+            sys.exit(f"DEMO_PAIRING_TRUSTED_PROXIES_INVALID: {item} cannot be trusted")
+        if str(address) not in addresses:
+            addresses.append(str(address))
+    if not addresses or len(addresses) > 4:
+        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_REQUIRED: set RAMFLUX_FEDERATION_TRUSTED_PROXIES to "
+                 "the measured proxy peer address (1 to 4 exact IPs)")
+    return ",".join(addresses)
 
 
 def public_origin():
@@ -508,6 +530,18 @@ def render_files(repo, state, owner):
         for service in ("router", "federation"):
             environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
             environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
+        # Pairing HTTP is accepted only as TLS: the public reverse proxy terminates it and asserts
+        # X-Forwarded-Proto, which the federation trusts only from the exact peer addresses the
+        # operator measured behind the proxy (never a prefix, never a wildcard).
+        origin = public_origin()
+        if not origin.startswith("https://"):
+            sys.exit("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN: DEMO_PUBLIC_ORIGIN must be an https origin")
+        proxies = pairing_trusted_proxies()
+        for service in ("router", "federation"):
+            override["services"][f"ramflux-{service}"]["environment"][
+                "RAMFLUX_FEDERATION_PUBLIC_ORIGIN"] = origin
+        override["services"]["ramflux-federation"]["environment"][
+            "RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = proxies
         router = override["services"]["ramflux-router"]
         router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
         router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
