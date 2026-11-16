@@ -136,6 +136,7 @@ pub(super) fn forbidden(
 }
 
 pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str) -> TestResult {
+    let services = service_identities(db)?;
     let mut tables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let tables = tables.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
     let mut checked = 0;
@@ -176,6 +177,7 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                             | "runtime_actor_state"
                     )
                 });
+            let service_author = service_author_exempt(row, &names, &services, message)?;
             for (column, name) in names.iter().enumerate() {
                 let value = row.get_ref(column)?;
                 let (ValueRef::Text(bytes) | ValueRef::Blob(bytes)) = value else { continue };
@@ -207,6 +209,9 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
                         text.into_owned()
                     };
                 for secret in forbidden {
+                    if service_author.iter().any(|author| author == secret) {
+                        continue;
+                    }
                     assert!(
                         !rendered.contains(secret),
                         "residual in {table}.{name}: {secret}; row={:?}",
@@ -220,6 +225,65 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
     assert!(checked > 0);
     Ok(())
 }
+struct ServiceIdentity {
+    message_id: String,
+    exempt: Vec<String>,
+}
+
+fn service_identities(db: &Connection) -> Result<Vec<ServiceIdentity>, Box<dyn std::error::Error>> {
+    let mut found = Vec::new();
+    let mut stmt =
+        db.prepare("SELECT message_id, sender_id, encrypted_body FROM direct_message_projection")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let message_id: String = row.get(0)?;
+        let sender_id: String = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+        let body = row.get::<_, Option<Vec<u8>>>(2)?.unwrap_or_default();
+        let Ok((identity, content)) = crate::RamfluxClient::decode_generated_inner(&body) else {
+            continue;
+        };
+        if !matches!(content.value, Some(crate::message::content::Value::Service(_))) {
+            continue;
+        }
+        let Some(author) = identity.author else { continue };
+        let mut exempt = vec![sender_id, author.account_anchor, author.device_id];
+        exempt.retain(|value| !value.is_empty());
+        exempt.sort();
+        exempt.dedup();
+        found.push(ServiceIdentity { message_id, exempt });
+    }
+    Ok(found)
+}
+
+/// Author principal, root, and device on a service-event row are group history, not a copy of
+/// a different erased chat message. The erased id, its body, and its envelope stay forbidden.
+fn service_author_exempt(
+    row: &rusqlite::Row<'_>,
+    names: &[String],
+    services: &[ServiceIdentity],
+    erased: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if services.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut texts = Vec::new();
+    for index in 0..names.len() {
+        if let ValueRef::Text(bytes) | ValueRef::Blob(bytes) = row.get_ref(index)? {
+            texts.push(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+    if texts.iter().any(|text| text.contains(erased)) {
+        return Ok(Vec::new());
+    }
+    let mut exempt = Vec::new();
+    for service in services {
+        if texts.iter().any(|text| text.contains(&service.message_id)) {
+            exempt.extend(service.exempt.iter().cloned());
+        }
+    }
+    Ok(exempt)
+}
+
 fn strip_deleted_id(value: &mut serde_json::Value, message: &str) {
     match value {
         serde_json::Value::Object(fields) => {
@@ -288,6 +352,15 @@ fn strip_generated_tombstone(value: &mut serde_json::Value, message: &str) -> Te
     }
     let update: ramflux_protocol::message::MessageUpdate =
         serde_json::from_value(value["update"].clone())?;
+    let journal_id = update
+        .identity
+        .as_ref()
+        .map(|identity| ramflux_protocol::encode_base64url(&identity.id))
+        .ok_or("journal identity")?;
+    // A service-event journal is group history. Only the erased chat message must be a tombstone.
+    if journal_id != message {
+        return Ok(());
+    }
     assert!(
         matches!(
             update.state,

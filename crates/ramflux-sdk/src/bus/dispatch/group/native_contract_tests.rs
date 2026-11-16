@@ -357,7 +357,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
     let received = read_group(&mut state, "group.receive").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     assert_eq!(messages.len(), 1);
     assert_eq!(
         account
@@ -413,7 +413,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
         }
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
     assert_eq!(
         account
             .client
@@ -431,7 +431,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
 
 fn assert_retry_retained(account: &LocalBusAccountState, key: &str) -> TestResult {
     let db = account.client.account_db()?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 0);
     assert_eq!(db.unrouted_count()?, 0);
     assert!(db.has_inbox_retry(key)?);
     assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
@@ -443,7 +443,7 @@ async fn assert_first_pass_admitted(
     key: &str,
     at: i64,
 ) -> TestResult {
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     assert_eq!(messages.len(), 1, "served peer manifest must admit on the first pass");
     assert_eq!(
         account
@@ -460,7 +460,7 @@ async fn assert_first_pass_admitted(
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
     crate::bus::sync_driver::run_at(account, at + 1).await?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
     Ok(())
 }
 
@@ -574,7 +574,7 @@ async fn verify_refresh_redrive(
         2,
         "refresh/redrive must not consume an unrelated attempt"
     );
-    assert_eq!(account.client.direct_messages("thread")?.len(), count);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), count);
     assert!(!account.client.account_db()?.has_inbox_retry(key)?);
     assert_eq!(
         account.pending_deliveries.iter().map(|entry| entry.inbox_seq).collect::<Vec<_>>(),
@@ -585,13 +585,22 @@ async fn verify_refresh_redrive(
     Ok(())
 }
 
+fn chat_page(messages: &serde_json::Value) -> TestResult<Vec<&serde_json::Value>> {
+    let rows = messages.as_array().ok_or("messages")?;
+    Ok(rows.iter().filter(|row| row["kind"] != "service").collect())
+}
+
 async fn assert_wait_scope(state: &mut LocalBusDaemonState, opaque: bool) -> TestResult {
     for method in ["group.read", "group.receive"] {
         let result = read_group(state, method).await;
         if opaque {
             // A directory failure precedes private-route decoding. Opaque retries
             // remain background work and cannot hold an assumed group RPC.
-            assert_eq!(result?.response_body["messages"], json!([]));
+            let body = result?.response_body;
+            assert!(
+                chat_page(&body["messages"])?.is_empty(),
+                "opaque retry must not project a chat row"
+            );
         } else {
             let error = result.err().ok_or("known group dependency must remain pending")?;
             let wire = crate::bus::io::local_bus_error_body(&error);
@@ -697,7 +706,7 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
     let received = read_group(&mut state, "group.receive").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     assert_eq!(
-        state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
+        state.accounts.get("owner").ok_or("Alice")?.client.direct_chat_messages("thread")?.len(),
         count
     );
     if duplicate_redelivery {
@@ -815,7 +824,7 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
     assert!(handle.resync_needed());
     crate::bus::sync_driver::run_at(&mut account, at + 3).await?;
 
-    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(account.client.direct_chat_messages("thread")?.len(), 1);
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
     directory.abort();
     Ok(())
@@ -892,7 +901,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
     );
     for method in ["group.history", "group.read", "group.receive"] {
         let history = read_group(&mut state, method).await?.response_body;
-        let rows = history["messages"].as_array().ok_or("history rows")?;
+        let rows = chat_page(&history["messages"])?;
         let [row] = rows.as_slice() else {
             return Err("one admitted native history row".into());
         };
@@ -911,7 +920,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
         );
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    let messages = account.client.direct_messages("thread")?;
+    let messages = account.client.direct_chat_messages("thread")?;
     let [message] = messages.as_slice() else {
         return Err("admitted message".into());
     };
@@ -923,7 +932,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
     )?;
     for method in ["group.history", "group.read", "group.receive"] {
         let body = read_group(&mut state, method).await?.response_body;
-        let rows = body["messages"].as_array().ok_or("erased history rows")?;
+        let rows = chat_page(&body["messages"])?;
         let [row] = rows.as_slice() else {
             return Err("one content-free tombstone".into());
         };
@@ -987,7 +996,7 @@ async fn unidentified_group_rows_never_gain_native_origin_or_displace_admitted_h
         body,
         "account reader and bus dispatch must use one generated history contract"
     );
-    let rows = body["messages"].as_array().ok_or("generated message rows")?;
+    let rows = chat_page(&body["messages"])?;
     let [row] = rows.as_slice() else {
         return Err("only the admitted generated row may be projected".into());
     };

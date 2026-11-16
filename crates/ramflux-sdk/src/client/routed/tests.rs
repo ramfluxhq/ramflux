@@ -671,7 +671,7 @@ async fn group_control_and_message_route_without_conversation_hint_and_reject_co
     assert!(
         b.client.apply_routed_entry(&mut engine, &review::pool()?, &next, false).await.is_err()
     );
-    assert_eq!(b.client.direct_messages(conversation)?.len(), 1);
+    assert_eq!(b.client.direct_chat_messages(conversation)?.len(), 1);
     Ok(())
 }
 

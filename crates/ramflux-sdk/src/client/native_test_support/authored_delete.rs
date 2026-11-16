@@ -330,7 +330,8 @@ async fn closed_direct_contact_does_not_select_bootstrap_for_native_group_traffi
                         .client
                         .generated_message_view_page(&conversation, None, 10)?
                         .messages
-                        .is_empty(),
+                        .iter()
+                        .all(|row| row.kind == "service"),
                     "the blocked sender must create no group row",
                 );
             } else {

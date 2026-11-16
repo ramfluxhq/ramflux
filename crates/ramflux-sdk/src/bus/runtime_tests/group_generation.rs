@@ -93,7 +93,7 @@ async fn native_group_isolation() -> crate::client::native_test_support::TestRes
         Some("valid after rejected")
     );
     assert_eq!(
-        recipient.client.direct_messages("thread")?.len(),
+        recipient.client.direct_chat_messages("thread")?.len(),
         1,
         "only the authenticated generated Message is projected"
     );

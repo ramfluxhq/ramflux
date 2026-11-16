@@ -76,7 +76,7 @@ async fn check_group_decision(accept: bool) -> TestResult {
         assert_eq!(sibling.client.group_invitations()?["invitations"], json!([]));
         assert!(!sibling.client.local_is_group_member("group")?);
     }
-    assert_eq!(sibling.client.direct_messages("group-thread")?.len(), 0);
+    assert_eq!(sibling.client.direct_chat_messages("group-thread")?.len(), 0);
     directory.abort();
     drop((source, sibling, stranger, peer));
     std::fs::remove_dir_all(root)?;

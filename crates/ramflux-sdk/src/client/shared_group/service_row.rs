@@ -63,22 +63,22 @@ impl RamfluxClient {
 
     /// Project every signed change in `next`.
     ///
-    /// A later log must start with the log already accepted. Replay of the same bytes is a no-op.
-    /// A different body under the same derived id is `ReplayMismatch`.
+    /// Replay of the same bytes is a no-op. A shorter log that is a prefix of the accepted log
+    /// is refused, because that rewinds a stored change. A divergent log is a fork or a creator
+    /// repair: each of its events is stored, and rows the new log omits stay. A different body
+    /// under the same derived id is `ReplayMismatch`.
     ///
     /// # Errors
-    /// Rejects a rewritten log, an invalid signed event, or a storage conflict.
+    /// Rejects a rewound log, an invalid signed event, or a storage conflict.
     pub(crate) fn project_accepted_group_service(
         &self,
         previous: Option<&VerifiedGroupState>,
         next: &VerifiedGroupState,
     ) -> Result<(), SdkError> {
         if let Some(previous) = previous {
-            let old = &previous.snapshot().service_events;
-            let new = &next.snapshot().service_events;
-            if new.len() < old.len()
-                || new.iter().zip(old.iter()).any(|(next_event, old_event)| next_event != old_event)
-            {
+            let old = previous.snapshot().service_events.as_slice();
+            let new = next.snapshot().service_events.as_slice();
+            if rewinds_accepted_log(old, new) {
                 return Err(invalid("group service event log rewrote an accepted change"));
             }
         }
@@ -152,6 +152,34 @@ impl RamfluxClient {
             }
             self.journal_generated_receive_updates(exact)
         })
+    }
+}
+
+/// A strict shorter prefix drops an accepted change. An equal or longer divergent log does not.
+fn rewinds_accepted_log(old: &[GroupServiceEvent], new: &[GroupServiceEvent]) -> bool {
+    new.len() < old.len()
+        && new.iter().zip(old.iter()).all(|(next_event, old_event)| next_event == old_event)
+}
+
+#[cfg(test)]
+impl RamfluxClient {
+    /// Chat rows only. Service projections remain visible through [`Self::direct_messages`].
+    ///
+    /// # Errors
+    /// Returns an error when the conversation cannot be read.
+    pub(crate) fn direct_chat_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ramflux_storage::DirectMessageRecord>, SdkError> {
+        let rows = self.direct_messages(conversation_id)?;
+        Ok(rows.into_iter().filter(|row| !Self::body_is_service(&row.encrypted_body)).collect())
+    }
+
+    fn body_is_service(body: &[u8]) -> bool {
+        matches!(
+            Self::decode_generated_inner(body).ok().and_then(|(_, content)| content.value),
+            Some(g::content::Value::Service(_))
+        )
     }
 }
 

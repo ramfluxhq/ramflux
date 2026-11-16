@@ -328,7 +328,7 @@ async fn group_message_before_distribution_keeps_content_retryable() -> TestResu
             &source.client.owned_device_identity()?,
         )?;
         target.receive(envelope, 1).await?;
-        assert_eq!(target.client.direct_messages(THREAD)?.len(), 1);
+        assert_eq!(target.client.direct_chat_messages(THREAD)?.len(), 1);
         assert_eq!(
             target.client.persisted_pair_snapshot(
                 &target.client.owned_device_identity()?,

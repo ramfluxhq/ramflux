@@ -152,7 +152,7 @@ async fn native_restored_group_rotates_its_chain_and_preserves_delayed_old_messa
     );
     receive_generated(&mut bob, &fresh.entry).await?;
     assert_eq!(
-        bob.client.direct_messages(&fresh.conversation)?.len(),
+        bob.client.direct_chat_messages(&fresh.conversation)?.len(),
         3,
         "replay duplicated group history"
     );

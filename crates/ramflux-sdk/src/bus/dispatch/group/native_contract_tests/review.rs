@@ -114,7 +114,7 @@ pub(super) async fn assert_duplicate_after_refresh(
     install_gateway(account, vec![duplicate]);
     crate::bus::sync_driver::run_at(account, at + 1).await?;
     assert_eq!(
-        account.client.direct_messages("thread")?.len(),
+        account.client.direct_chat_messages("thread")?.len(),
         count,
         "duplicate gateway redelivery after refresh must not apply twice"
     );

@@ -100,7 +100,7 @@ async fn native_group_history_keeps_equal_device_labels_under_distinct_roots() -
         );
         let view = case.target.client.generated_message_detail(THREAD, &owner)?;
         assert_eq!(view.message.text.as_deref(), Some("historical group message"));
-        assert_eq!(case.target.client.direct_messages(THREAD)?.len(), 1);
+        assert_eq!(case.target.client.direct_chat_messages(THREAD)?.len(), 1);
         assert_eq!(
             case.target
                 .client
@@ -241,7 +241,7 @@ async fn own_device_history_import_skips_group_message_below_joined_epoch() -> T
         let refusal = target.receive(packet, 1).await;
         assert!(refusal.is_err(), "a group message below the joined epoch must be refused");
         assert!(target.client.account_db()?.message_content(&owner)?.is_none());
-        assert_eq!(target.client.direct_messages(THREAD)?.len(), 0);
+        assert_eq!(target.client.direct_chat_messages(THREAD)?.len(), 0);
         Ok(())
     })
     .await?

@@ -130,9 +130,10 @@ async fn assert_message(
     let page = result?;
     assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
     let rows = page["messages"].as_array().ok_or("test: durable message page")?;
-    assert_eq!(rows.len(), 1, "the receive must commit exactly one refreshed message");
+    let chats: Vec<_> = rows.iter().filter(|row| row["kind"] != "service").collect();
+    assert_eq!(chats.len(), 1, "the receive must commit exactly one refreshed message");
     assert_eq!(
-        rows.first().ok_or("test: refreshed row")?["text"],
+        chats.first().ok_or("test: refreshed row")?["text"],
         "after rename",
         "the durable reader must serve the message whose refresh the command waited for"
     );
@@ -188,7 +189,7 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
             assert_eq!(case.resumes.load(Ordering::SeqCst), 1);
             let account = case.runtime.state.accounts.get_mut("sender").ok_or("account")?;
             assert!(
-                account.client.direct_messages("thread")?.is_empty(),
+                account.client.direct_chat_messages("thread")?.is_empty(),
                 "cancelled dispatch must not apply the ready message"
             );
             *account.client.native_head_freshness.borrow_mut() =
