@@ -79,8 +79,9 @@ def verify_existing_network():
     only when the network exists. Nothing is mutated or adopted; the operator recreates it.
     """
     raw = os.environ.get("DEMO_EXISTING_NETWORK_INSPECT", "")
-    if not raw or os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") != "1":
-        return
+    if not raw or os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") != "1" \
+            or not os.environ.get("DEMO_FEDERATION_STATIC_IP"):
+        return  # a missing address is refused later by the generator's own input checks
     subnet, dynamic = pairing_network_ipam(pairing_federation_ip())
     first, last = ipaddress.ip_network(dynamic)[1], ipaddress.ip_network(dynamic)[-1]
     found = []
