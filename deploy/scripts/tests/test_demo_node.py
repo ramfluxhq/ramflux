@@ -122,7 +122,13 @@ else:
         with self.env_file.open("a") as output:
             output.write("DEMO_PREBUILT_IMAGES=1\n")
 
-    def pairing_override(self, enabled, with_record=True):
+    def pairing_override(self, enabled, with_record=True, node_key_mode=0o640):
+        if node_key_mode is not None:
+            identity = self.state / "certs/node-identity"
+            identity.mkdir(parents=True, exist_ok=True)
+            key = identity / "node-signing.key"
+            key.write_text("TEST-NODE-KEY-BYTES-SHOULD-NEVER-LEAK\n")
+            key.chmod(node_key_mode)
         with self.env_file.open("a") as output:
             if with_record:
                 record = self.root / "node-record.json"
@@ -149,12 +155,34 @@ else:
             self.assertEqual(services[name]["environment"]["RAMFLUX_DEVICE_PAIRING_ENABLED"], "1")
         self.assertNotIn("RAMFLUX_DEVICE_PAIRING_ENABLED", json.dumps(services["ramflux-gateway"]))
         router = services["ramflux-router"]
-        self.assertEqual(router["environment"]["RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL"],
-                         "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL}")
+        self.assertNotIn("RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL", router["environment"])
+        self.assertEqual(router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"],
+                         "/etc/ramflux/pairing/node-signing.key")
         self.assertEqual(router["environment"]["RAMFLUX_CUSTODY_NODE_RECORD_FILE"],
                          "${RF_COMPOSE_CUSTODY_NODE_RECORD_FILE}")
         self.assertIn("./secrets/custody:/etc/ramflux/custody:ro", router["volumes"])
-        self.assertNotIn("test-service-seed", text)
+        self.assertIn(
+            "./certs/node-identity/node-signing.key:/etc/ramflux/pairing/node-signing.key:ro",
+            router["volumes"])
+        self.assertEqual(router["group_add"], ["${RAMFLUX_SECRET_GID:-0}"])
+        for other in ("ramflux-gateway", "ramflux-federation", "ramflux-retention"):
+            self.assertNotIn("pairing/node-signing.key", json.dumps(services.get(other, {})))
+        self.assertNotIn("TEST-NODE-KEY-BYTES", text)
+
+    def test_pairing_off_adds_no_key_mount(self):
+        self.pairing_override(False)
+        router = json.loads((self.state / "demo-override.json").read_text())["services"]["ramflux-router"]
+        self.assertNotIn("RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE", router["environment"])
+        self.assertNotIn("pairing/node-signing.key", json.dumps(router))
+        self.assertNotIn("group_add", router)
+
+    def test_pairing_opt_in_without_node_key_is_refused(self):
+        result = self.pairing_override(True, node_key_mode=None)
+        self.assertIn("DEMO_PAIRING_REQUIRES_NODE_KEY", result.stdout + result.stderr)
+
+    def test_pairing_opt_in_with_permissive_node_key_is_refused(self):
+        result = self.pairing_override(True, node_key_mode=0o644)
+        self.assertIn("DEMO_PAIRING_NODE_KEY_MODE", result.stdout + result.stderr)
 
     def test_pairing_opt_in_without_custody_record_is_refused(self):
         result = self.pairing_override(True, with_record=False)

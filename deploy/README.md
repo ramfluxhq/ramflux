@@ -624,9 +624,12 @@ with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an inde
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
 Device pairing has its own opt-in, off by default: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
 (operator env, `0` or `1`) and run `up`. It requires the custody inputs
-(`RAMFLUX_CUSTODY_NODE_RECORD_FILE`), sets the switch on the router and federation only, and
-passes the node service signing seed to the router through `runtime.env` like the other
-services. It does not change discovery advertisement (compile-time release gate).
+(`RAMFLUX_CUSTODY_NODE_RECORD_FILE`) and `certs/node-identity/node-signing.key` (mode 0640 or
+stricter), sets the switch on the router and federation only, and mounts that single key file
+read-only into the router (`RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE`, router supplementary
+group `RAMFLUX_SECRET_GID`). The router refuses to start when the key is missing, malformed or not
+the node identity key; there is no service-seed fallback and the key never enters env or logs.
+It does not change discovery advertisement (compile-time release gate).
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing

@@ -17,6 +17,7 @@ SNAPSHOT_ROOT_FILES = (
     "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
     "identity.env", ".env",
 )
+PAIRING_KEY_PATH = "/etc/ramflux/pairing/node-signing.key"
 SNAPSHOT_DIRECTORIES = ("config", "certs", "secrets")
 SNAPSHOT_REQUIRED = {
     "compose.yml", "runtime.env", "owner.json", "demo-override.json",
@@ -496,14 +497,21 @@ def render_files(repo, state, owner):
     if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
         if record is None:
             sys.exit("DEMO_PAIRING_REQUIRES_CUSTODY: RAMFLUX_CUSTODY_NODE_RECORD_FILE is required")
-        # The router verifies the ticket key against the node identity record, so it needs the
-        # same node service signing seed the other services already receive from runtime.env.
+        # Tickets and invitations are signed by the pinned node identity key. The router gets
+        # that one file read-only, through the restricted secret group; the key bytes never
+        # enter the environment, this JSON or logs.
+        node_key = state / "certs/node-identity/node-signing.key"
+        if not node_key.is_file() or node_key.is_symlink():
+            sys.exit("DEMO_PAIRING_REQUIRES_NODE_KEY: certs/node-identity/node-signing.key is missing")
+        if node_key.stat().st_mode & 0o7137:
+            sys.exit("DEMO_PAIRING_NODE_KEY_MODE: node-signing.key must be 0640 or stricter")
         for service in ("router", "federation"):
             environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
             environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
-        override["services"]["ramflux-router"]["environment"][
-            "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL"] = (
-                "${RF_COMPOSE_NODE_SERVICE_SIGNING_SEED_B64URL}")
+        router = override["services"]["ramflux-router"]
+        router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
+        router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
+        router["group_add"] = ["${RAMFLUX_SECRET_GID:-0}"]
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (
