@@ -75,7 +75,7 @@ fn outbound_spool_accepted_before_commit_still_delivers_without_extra_hop()
         assert!(!forward.envelope.ext.ext.contains_key("home_node_migration_forward_count"));
         ramflux_node_core::verify_federated_envelope_forward(
             &forward,
-            &ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
         )?;
         // Peer delivery is injected at the existing spool transport seam.
         Ok("offline_queued".into())

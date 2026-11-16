@@ -330,7 +330,7 @@ fn native_voice_authority_rejects_wrong_kind_capability_anchor_and_master_key() 
 
     let mut wrong_master_endpoint = recipient;
     let mut wrong_master_manifest = recipient_manifest;
-    let replacement = ramflux_crypto::public_key_base64url_from_seed([0xb1; 32]);
+    let replacement = ramflux_crypto::public_key_base64url_from_seed(&[0xb1; 32]);
     wrong_master_endpoint.root_public_key = replacement.clone();
     wrong_master_manifest.root_public_key = replacement;
     assert!(
@@ -422,10 +422,11 @@ fn forged_replayed_or_revoked_device_consents_cannot_authorize_a_voice_lease() -
             0 => manifest.devices.clear(),
             1 => {
                 manifest.devices[0].branch_public_key =
-                    ramflux_crypto::public_key_base64url_from_seed([99; 32]);
+                    ramflux_crypto::public_key_base64url_from_seed(&[99; 32]);
             }
             _ => {
-                manifest.root_public_key = ramflux_crypto::public_key_base64url_from_seed([98; 32]);
+                manifest.root_public_key =
+                    ramflux_crypto::public_key_base64url_from_seed(&[98; 32]);
             }
         }
         assert!(

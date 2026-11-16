@@ -610,7 +610,7 @@ mod tests {
     }
 
     fn signing_public_key() -> String {
-        ramflux_crypto::public_key_base64url_from_seed(SEED)
+        ramflux_crypto::public_key_base64url_from_seed(&SEED)
     }
 
     fn sign_envelope(envelope: &mut Envelope) {
@@ -1448,7 +1448,7 @@ mod sender_hash_audit_tests {
         ))?;
         let mut envelope: Envelope = serde_json::from_value(fixture["envelope"].clone())?;
         let seed = [19; 32];
-        let public = ramflux_crypto::public_key_base64url_from_seed(seed);
+        let public = ramflux_crypto::public_key_base64url_from_seed(&seed);
         envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
             &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
             seed,

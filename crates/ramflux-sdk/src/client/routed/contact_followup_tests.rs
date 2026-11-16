@@ -20,7 +20,7 @@ fn card(fixture: &Fixture) -> Result<String, SdkError> {
             devices: record.body.devices.clone(),
             node_url: "https://node.example".into(),
             node_key_fingerprint: crate::contact_node_fingerprint(
-                &ramflux_crypto::public_key_base64url_from_seed([91; 32]),
+                &ramflux_crypto::public_key_base64url_from_seed(&[91; 32]),
             )?,
             display_name: record.body.profile.display_name.clone(),
             issued_at: now,
@@ -261,7 +261,7 @@ async fn contact_accept_retries_return_the_auto_accepted_contact_and_refuse_conf
     upgraded["node"] = json!({
         "url":"https://node.example",
         "key_fingerprint": crate::contact_node_fingerprint(
-            &ramflux_crypto::public_key_base64url_from_seed([91; 32]))?
+            &ramflux_crypto::public_key_base64url_from_seed(&[91; 32]))?
     });
     for _ in 0..2 {
         let retry = contact(&mut state, "bob", "contact.accept", json!({"card":valid})).await?;

@@ -464,7 +464,7 @@ fn bind_source_mismatch_and_bad_signature() -> TestResult {
         "alice",
         "shared",
         1,
-        ramflux_crypto::public_key_base64url_from_seed([2; 32]),
+        ramflux_crypto::public_key_base64url_from_seed(&[2; 32]),
         1,
     )?;
     let runtime = crate::GatewaySessionRuntime {

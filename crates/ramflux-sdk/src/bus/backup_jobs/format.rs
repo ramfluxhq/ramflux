@@ -83,7 +83,7 @@ impl Identity {
         {
             return Err(SdkError::LocalBus("invalid archive account".into()));
         }
-        let root = ramflux_crypto::public_key_base64url_from_seed(manifest.root_seed);
+        let root = ramflux_crypto::public_key_base64url_from_seed(&manifest.root_seed);
         if crate::prekey::identity_root_public_key_commitment(&root)?
             != manifest.principal_commitment
         {

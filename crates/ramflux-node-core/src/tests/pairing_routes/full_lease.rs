@@ -35,7 +35,7 @@ fn request(created: &Created, driver: &custody_sessions::Driver) -> TestResult<L
                     .body
                     .branch_signing_public_key
                     .clone(),
-                destination: ramflux_crypto::public_key_base64url_from_seed([37; 32]),
+                destination: ramflux_crypto::public_key_base64url_from_seed(&[37; 32]),
             },
             opaque_commitment: encode_base64url([32; 32]),
             expires_at: WALL + 604_800,

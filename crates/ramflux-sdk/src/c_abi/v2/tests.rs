@@ -360,7 +360,7 @@ fn subscription_cancel_is_dispatched_and_allows_replacement() {
 
 fn seed_node(root: &std::path::Path) {
     let profile: crate::NodeProfile = serde_json::from_value(json!({
-        "node_id":"test","node_public_key":ramflux_crypto::public_key_base64url_from_seed([7;32]),
+        "node_id":"test","node_public_key":ramflux_crypto::public_key_base64url_from_seed(&[7;32]),
         "pin_source":"tofu","ca_cert_pem":"test-only CA",
         "gateway":{"quic_addr":"node.example.invalid:443","tcp_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
         "relay":{"quic_addr":"node.example.invalid:443","server_name":"node.example.invalid"},

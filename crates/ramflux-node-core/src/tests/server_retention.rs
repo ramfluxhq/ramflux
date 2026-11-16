@@ -154,7 +154,7 @@ fn server_retention_push_routes_encrypt_rotate_and_revoke_on_current_authority()
     other.target_delivery_id = "another-target".into();
     assert!(store.register_authenticated_push_route(&other, &route).is_err());
     let mut substituted = authority.clone();
-    substituted.root_public_key = Some(ramflux_crypto::public_key_base64url_from_seed([31; 32]));
+    substituted.root_public_key = Some(ramflux_crypto::public_key_base64url_from_seed(&[31; 32]));
     assert!(store.register_authenticated_push_route(&substituted, &route).is_err());
     store.set_push_route_authorizer(|_| {
         Err(NodeCoreError::Unauthorized("authority unavailable".into()))

@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(refreshed.envelope.signed, request.envelope.signed);
         ramflux_node_core::verify_federated_envelope_forward(
             &refreshed,
-            &ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
         )?;
         assert!(
             refresh_spooled_forward(&request, &state, |_| Err(
@@ -1125,7 +1125,7 @@ mod tests {
         ramflux_node_core::sign_federated_envelope_forward(&mut request, [81; 32])?;
         ramflux_node_core::verify_federated_envelope_forward(
             &request,
-            &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[81; 32]),
         )?;
         let expected = serde_json::to_value(&request.migration_evidence)?;
         for (wire, accepted, outcome) in [

@@ -24,7 +24,7 @@ async fn isolated() -> Result {
         "custody::tests::schema_activation_ingress::activation_admits_new_classes_and_refuses_missing_binding",
         "--ignored", "--nocapture"])
         .env("RAMFLUX_TEST_ACTIVATION_CHILD", "1")
-        .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", ramflux_crypto::public_key_base64url_from_seed([8;32]))
+        .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", ramflux_crypto::public_key_base64url_from_seed(&[8;32]))
         .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", ramflux_protocol::encode_base64url([9;32]))
         .kill_on_drop(true);
     let status = tokio::time::timeout(Duration::from_secs(150), command.status()).await??;

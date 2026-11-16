@@ -12,7 +12,7 @@ impl FederationRedbStore {
     /// # Errors
     /// Rejects replacing a persisted node identity with a different mounted secret.
     pub fn verify_mounted_signing_identity(&self, seed: [u8; 32]) -> Result<(), NodeCoreError> {
-        let public = ramflux_crypto::public_key_base64url_from_seed(seed);
+        let public = ramflux_crypto::public_key_base64url_from_seed(&seed);
         let txn = self.db.begin_write().map_err(error)?;
         {
             let mut table = txn.open_table(super::FEDERATION_STATE_TABLE).map_err(error)?;

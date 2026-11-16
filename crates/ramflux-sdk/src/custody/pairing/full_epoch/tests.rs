@@ -40,7 +40,7 @@ fn sign(request: &FullResumeProofSigningRequest<'_>) -> Result<String, SdkError>
     let seed = if request.proof().role == "initiator" { 70 } else { 71 };
     assert_eq!(
         request.own_branch_key(),
-        ramflux_crypto::public_key_base64url_from_seed([seed; 32])
+        ramflux_crypto::public_key_base64url_from_seed(&[seed; 32])
     );
     Ok(ramflux_crypto::sign_canonical_bytes_with_seed(
         &request.proof().signing_bytes().map_err(|error| wire(&error))?,

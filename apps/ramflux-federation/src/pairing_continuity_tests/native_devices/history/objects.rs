@@ -29,7 +29,7 @@ pub(super) fn issuer(root: &std::path::Path) -> TestResult<(String, String)> {
         cert_id: "pairing-history-gateway".into(),
         node_id: "localhost".into(),
         gateway_instance_id: "pairing-history-gateway".into(),
-        attestation_public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+        attestation_public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
         attestation_key_id: "pairing-history-issuer".into(),
         not_before: now - 60,
         not_after: now + 3600,
@@ -70,7 +70,7 @@ impl Objects {
                 roots: vec![core::TrustedNodeRootKey {
                     node_id: "localhost".into(),
                     key_id: "localhost#root".into(),
-                    public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+                    public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
                     not_before: now - 60,
                     not_after: now + 3600,
                     pin_epoch: 1,

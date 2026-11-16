@@ -604,7 +604,7 @@ fn gateway_auth_rejects_fixture_signature_when_registered_branch_key_differs()
         principal_id: "alice".to_owned(),
         device_id: open.device_id.clone(),
         device_epoch: 1,
-        branch_public_key: ramflux_crypto::public_key_base64url_from_seed([0x42; 32]),
+        branch_public_key: ramflux_crypto::public_key_base64url_from_seed(&[0x42; 32]),
         target_delivery_id: open.target_delivery_id.clone(),
         revoked: false,
     };

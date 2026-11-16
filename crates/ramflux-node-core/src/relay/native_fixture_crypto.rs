@@ -29,7 +29,7 @@ pub(super) const V3_CERT_ID: &str = "cert-b-1";
 pub(super) const V3_ATTESTATION_KEY_ID: &str = "att-b-1";
 pub(super) const V3_ROOT_KEY_ID: &str = "node-b#root";
 pub(super) fn v3_pk(seed: [u8; 32]) -> String {
-    ramflux_crypto::public_key_base64url_from_seed(seed)
+    ramflux_crypto::public_key_base64url_from_seed(&seed)
 }
 pub(super) fn v3_requester_hash() -> String {
     ramflux_crypto::blake3_256_base64url(

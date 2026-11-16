@@ -50,7 +50,7 @@ impl Network {
             discovery_url: stack.discovery_url.clone(),
             node_id: "localhost".into(),
             node_public_key: ramflux_crypto::public_key_base64url_from_seed(
-                ramflux_crypto::blake3_256("ramflux.cli.e2e.node.v1", b"localhost"),
+                &(ramflux_crypto::blake3_256("ramflux.cli.e2e.node.v1", b"localhost")),
             ),
             pin_source: NodePinSource::Operator,
             ca_cert_pem: ca.clone(),

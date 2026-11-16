@@ -66,7 +66,7 @@ fn parse(vector: &Vector) -> TestResult<Parsed> {
 fn rfc8032_signing_and_strict_verification_match_fixed_bytes() -> TestResult {
     for vector in VECTORS {
         let value = parse(vector)?;
-        assert_eq!(public_key_bytes_from_seed(value.seed), value.public, "{}", vector.name);
+        assert_eq!(public_key_bytes_from_seed(&value.seed), value.public, "{}", vector.name);
         let signed = sign_canonical_bytes_with_seed(&value.message, value.seed);
         assert_eq!(decode_base64url(&signed)?, value.signature, "{}", vector.name);
         let public = encode_base64url(value.public);

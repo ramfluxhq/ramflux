@@ -37,7 +37,7 @@ fn fixture() -> Result<Fixture> {
     for (role, secret, branch) in [(&mut context.initiator, 7, 70), (&mut context.responder, 8, 71)]
     {
         role.sas_key = encode_base64url(X25519KeyPair::from_seed([secret; 32]).public);
-        role.branch_key = ramflux_crypto::public_key_base64url_from_seed([branch; 32]);
+        role.branch_key = ramflux_crypto::public_key_base64url_from_seed(&[branch; 32]);
         role.common.invitation_id = invitation.clone();
         role.common.transfer_id = Some(transfer.clone());
         role.common.expires_at = now + 300;

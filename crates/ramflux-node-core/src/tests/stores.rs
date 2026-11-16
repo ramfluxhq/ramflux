@@ -1271,7 +1271,7 @@ fn object_relay_tombstone_rejects_cross_owner() -> Result<(), Box<dyn std::error
         signed_at: now + 1,
         expires_at: now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS,
         owner_signing_key_id: DEVICE_B_OWNER_KEY_ID.into(),
-        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(DEVICE_B_OWNER_SEED),
+        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(&DEVICE_B_OWNER_SEED),
     };
     let result = state.apply_owner_session_tombstone(tombstone, now + 1);
     assert!(
@@ -2361,7 +2361,7 @@ fn relay_candidate_for_owner(
         chunk_cipher_hash: object_relay_chunk_cipher_hash("manifest_relay_1", 0, &encrypted_chunk),
         encrypted_chunk,
         owner_signing_key_id: owner_signing_key_id.into(),
-        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(owner_seed),
+        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(&owner_seed),
         stored_at: now,
         expires_at: now
             .checked_add(OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS)

@@ -40,7 +40,7 @@ pub(crate) const V3_CHUNK: &str = "chunk_v3";
 pub(crate) const V3_BODY_HASH: &str = "body_hash_v3";
 
 pub(crate) fn v3_pk(seed: [u8; 32]) -> String {
-    ramflux_crypto::public_key_base64url_from_seed(seed)
+    ramflux_crypto::public_key_base64url_from_seed(&seed)
 }
 
 pub(crate) fn v3_sign(bytes: &[u8], seed: [u8; 32]) -> String {

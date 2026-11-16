@@ -66,7 +66,7 @@ fn gateway_rejects_root_claim_and_committed_key_substitution_before_recording_re
     let open = gateway_open_frame("bob", "nonce");
     let auth = gateway_auth_frame(&open, "next-request", 1_760_000_000)?;
     let mut registered = gateway_registered_key(&open)?;
-    registered.branch_public_key = ramflux_crypto::public_key_base64url_from_seed([0xa2; 32]);
+    registered.branch_public_key = ramflux_crypto::public_key_base64url_from_seed(&[0xa2; 32]);
     assert!(registered.authenticated_device_identity().is_err());
     let mut registered = gateway_registered_key(&open)?;
     registered.signed_device_set.as_mut().ok_or("missing set")?.devices[0].device_epoch = 9;

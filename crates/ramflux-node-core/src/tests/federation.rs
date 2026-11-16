@@ -15,7 +15,7 @@ fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error
     let mut state = FederationTrustState::new();
     state.upsert_route(federation_route("node_b.example", FederationTrustStatus::Active));
     let node_b_seed = seed_from_nonce(0x41, 2);
-    let node_b_public_key = ramflux_crypto::public_key_base64url_from_seed(node_b_seed);
+    let node_b_public_key = ramflux_crypto::public_key_base64url_from_seed(&node_b_seed);
     let request = federation_discovery_request("node_b.example");
     let mut record = federation_server_record("node_b.example", "host.docker.internal:18482");
     record.node_public_key.clone_from(&node_b_public_key);
@@ -324,7 +324,7 @@ fn federation_discovery_verifies_well_known_and_rejects_pin_hijack()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut state = FederationTrustState::new();
     let node_b_seed = seed_from_nonce(0x41, 2);
-    let node_b_public_key = ramflux_crypto::public_key_base64url_from_seed(node_b_seed);
+    let node_b_public_key = ramflux_crypto::public_key_base64url_from_seed(&node_b_seed);
     let request = federation_discovery_request("node_b.example");
     let mut record = federation_server_record("node_b.example", "host.docker.internal:18482");
     record.node_public_key.clone_from(&node_b_public_key);
@@ -342,7 +342,7 @@ fn federation_discovery_verifies_well_known_and_rejects_pin_hijack()
 
     let forged_seed = [0x77; 32];
     let mut forged = federation_server_record("node_b.example", "host.docker.internal:18482");
-    forged.node_public_key = ramflux_crypto::public_key_base64url_from_seed(forged_seed);
+    forged.node_public_key = ramflux_crypto::public_key_base64url_from_seed(&forged_seed);
     sign_federation_server_record_with_seed(&mut forged, forged_seed)?;
     let rejected = state.resolve_discovery_result(&request, Some(&forged), None);
     assert!(rejected.is_err());
@@ -403,7 +403,7 @@ fn federation_basic_discovery_without_verified_key_does_not_pin_fixture_key() {
 fn federation_handshake_requires_pinned_invitation_key() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = FederationTrustState::new();
     let peer_seed = seed_from_nonce(0x51, 7);
-    let peer_public_key = ramflux_crypto::public_key_base64url_from_seed(peer_seed);
+    let peer_public_key = ramflux_crypto::public_key_base64url_from_seed(&peer_seed);
     let mut record = federation_server_record("node_pinned.example", "node-pinned:7443");
     record.node_public_key.clone_from(&peer_public_key);
     sign_federation_server_record_with_seed(&mut record, peer_seed)?;
@@ -544,8 +544,8 @@ fn assert_inner_delivery_classes(
 fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn std::error::Error>> {
     let source_seed = seed_from_nonce(0xa1, 4);
     let target_seed = seed_from_nonce(0xb2, 4);
-    let source_public_key = ramflux_crypto::public_key_base64url_from_seed(source_seed);
-    let target_public_key = ramflux_crypto::public_key_base64url_from_seed(target_seed);
+    let source_public_key = ramflux_crypto::public_key_base64url_from_seed(&source_seed);
+    let target_public_key = ramflux_crypto::public_key_base64url_from_seed(&target_seed);
 
     let mut source_state = FederationTrustState::new();
     let mut target_state = FederationTrustState::new();
@@ -635,7 +635,7 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
 
     assert_inner_delivery_classes(&target_state, &forward)?;
 
-    let wrong_key = ramflux_crypto::public_key_base64url_from_seed(seed_from_nonce(0xcc, 8));
+    let wrong_key = ramflux_crypto::public_key_base64url_from_seed(&(seed_from_nonce(0xcc, 8)));
     let rejected = verify_federated_envelope_forward(&forward, &wrong_key);
     assert!(rejected.is_err());
     Ok(())

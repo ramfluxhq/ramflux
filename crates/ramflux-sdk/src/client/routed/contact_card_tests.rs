@@ -38,7 +38,7 @@ impl Origin {
         let mut record = ramflux_protocol::WellKnownClientRecord {
             schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.into(),
             node_id: node_id.into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed([91; 32]),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[91; 32]),
             node_ca_cert_pem: std::fs::read_to_string(&directory.ca)?,
             gateway_quic_addr: directory.addr.to_string(),
             gateway_tcp_addr: directory.addr.to_string(),
