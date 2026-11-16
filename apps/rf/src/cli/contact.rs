@@ -61,11 +61,23 @@ pub(crate) struct ContactLink {
 }
 
 #[derive(Args)]
+#[command(group(
+    clap::ArgGroup::new("accept_selector")
+        .args(["principal", "request", "link", "root"])
+        .required(true)
+        .multiple(false)
+))]
 pub(crate) struct ContactAccept {
-    #[command(flatten)]
-    pub(crate) link: ContactLink,
-    #[command(flatten)]
-    pub(crate) federated: Option<ContactFederatedArgs>,
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) principal: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) request: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) link: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) root: Option<String>,
 }
 
 #[derive(Args)]

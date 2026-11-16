@@ -179,18 +179,46 @@ async fn handle_contact_accept(
     bus: &mut LocalBusClient,
     accept: ContactAccept,
 ) -> Result<(), RfError> {
-    let account = accept.link.account.clone();
-    if let Some(federated) = accept.federated {
-        let request = rf_contact_federated_request(accept.link, federated);
-        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
-    } else {
-        let request = LocalBusContactAddRequest {
-            link_id: accept.link.link,
-            requester_id: accept.link.requester,
-            target_id: accept.link.target,
-        };
-        print_json(&request_body(bus, Some(account), "contact", "contact.accept", request).await?)
+    let account = accept.account.clone();
+    let body = contact_accept_body(&accept)?;
+    let frame = ramflux_sdk::LocalBusFrame::request(
+        "rf-contact-accept",
+        Some(account),
+        "contact",
+        "contact.accept",
+        body,
+    );
+    let response = bus.request_frame_response(frame).await?;
+    if response.kind == ramflux_sdk::LocalBusFrameKind::Error {
+        let error = response
+            .error
+            .ok_or_else(|| ramflux_sdk::SdkError::LocalBus("contact error body missing".into()))?;
+        return Err(ramflux_sdk::SdkError::LocalBus(serde_json::to_string(&error)?).into());
     }
+    print_json(&response.body)
+}
+
+pub(crate) fn contact_accept_body(accept: &ContactAccept) -> Result<serde_json::Value, RfError> {
+    let (key, value) = match (
+        accept.principal.as_deref(),
+        accept.request.as_deref(),
+        accept.link.as_deref(),
+        accept.root.as_deref(),
+    ) {
+        (Some(value), None, None, None) => ("principal_id", value),
+        (None, Some(value), None, None) => ("request_id", value),
+        (None, None, Some(value), None) => ("link_id", value),
+        (None, None, None, Some(value)) => ("root_commitment", value),
+        _ => return Err(RfError::Message("contact accept requires one selector".into())),
+    };
+    if value.is_empty() || value.len() > 4096 {
+        return Err(RfError::Message(
+            "contact accept selector is empty or longer than 4096 bytes".into(),
+        ));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+    Ok(serde_json::Value::Object(body))
 }
 
 fn contact_add_body(add: &ContactAdd) -> serde_json::Value {
@@ -227,4 +255,80 @@ async fn contact_add_response(
         return Err(ramflux_sdk::SdkError::LocalBus(serde_json::to_string(&error)?).into());
     }
     print_json(&response.body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contact_accept_body;
+    use crate::cli::{Cli, Command, ContactAction};
+    use clap::Parser;
+
+    fn accept(args: &[&str]) -> ContactAction {
+        let cli = Cli::try_parse_from(args).expect("contact accept parses");
+        let Command::Contact(command) = cli.command else {
+            panic!("expected contact command");
+        };
+        command.action
+    }
+
+    #[test]
+    fn contact_accept_principal_sends_the_selector_without_a_federation_envelope() {
+        let ContactAction::Accept(parsed) =
+            accept(&["rf", "contact", "accept", "--account", "acct", "--principal", "peer"])
+        else {
+            panic!("expected accept");
+        };
+        let body = contact_accept_body(&parsed).expect("body");
+        assert_eq!(body["principal_id"], "peer");
+        assert!(body.get("requester_id").is_none());
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "contact",
+                "accept",
+                "--account",
+                "acct",
+                "--principal",
+                "peer",
+                "--envelope",
+                "env",
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["rf", "contact", "accept", "--account", "acct"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "contact",
+                "accept",
+                "--account",
+                "acct",
+                "--principal",
+                "peer",
+                "--request",
+                "request",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn contact_accept_rejects_an_empty_or_oversized_selector() {
+        let ContactAction::Accept(mut parsed) =
+            accept(&["rf", "contact", "accept", "--account", "acct", "--request", "request"])
+        else {
+            panic!("expected accept");
+        };
+        assert_eq!(contact_accept_body(&parsed).expect("request")["request_id"], "request");
+        parsed.request = Some(String::new());
+        assert!(contact_accept_body(&parsed).is_err());
+        parsed.request = None;
+        parsed.link = Some("link".to_owned());
+        assert_eq!(contact_accept_body(&parsed).expect("link")["link_id"], "link");
+        parsed.link = None;
+        parsed.root = Some("r".repeat(4097));
+        assert!(contact_accept_body(&parsed).is_err());
+        parsed.root = Some("root".to_owned());
+        assert_eq!(contact_accept_body(&parsed).expect("root")["root_commitment"], "root");
+    }
 }
