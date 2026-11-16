@@ -540,6 +540,18 @@ mod tests {
 
     #[tokio::test]
     async fn empty_display_name_names_the_check_and_starts_nothing() -> Result {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            empty_display_name_scenario(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("empty display name scenario exceeded its deadline".into()),
+        }
+    }
+
+    async fn empty_display_name_scenario() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
         config.custody_vault =
@@ -572,6 +584,15 @@ mod tests {
 
     #[tokio::test]
     async fn operation_id_on_create_names_the_check_and_starts_nothing() -> Result {
+        match tokio::time::timeout(std::time::Duration::from_secs(15), operation_id_scenario())
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("operation id scenario exceeded its deadline".into()),
+        }
+    }
+
+    async fn operation_id_scenario() -> Result {
         let root = crate::custody::tests::Root::new()?;
         let mut config = LocalBusConfig::new(root.0.join("bus.sock"), &root.0);
         config.custody_vault =

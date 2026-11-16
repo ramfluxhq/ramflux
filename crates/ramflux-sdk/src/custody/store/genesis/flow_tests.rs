@@ -244,10 +244,13 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
     }
     Ok(())
 }
+/// The link seam exists only in the Unix `fs` module. Windows selects `fs_windows`.
+#[cfg(unix)]
 fn deny_hard_link(_from: &Path, _to: &Path) -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(1))
 }
 
+#[cfg(unix)]
 #[test]
 fn hard_link_eperm_at_the_syscall_still_publishes_by_rename() -> Result {
     let root = Root::new()?;
