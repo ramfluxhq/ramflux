@@ -92,6 +92,7 @@ pub(super) fn context(
             protocol_versions: vec!["v1".into()],
             transport_backends: vec!["https_json".into()],
             node_capabilities: vec!["opaque_delivery".into()],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: None,
         },
         mesh_observability: Arc::new(crate::FederationMeshObservability::default()),

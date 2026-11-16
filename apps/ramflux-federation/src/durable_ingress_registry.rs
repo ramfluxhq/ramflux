@@ -386,6 +386,7 @@ fn dummy_discovery() -> crate::FederationDiscoverySurface {
         protocol_versions: vec!["s8".into()],
         transport_backends: vec!["quic".into()],
         node_capabilities: vec!["mesh".into()],
+        served_gateway_capabilities: Vec::new(),
         attachment_authority: None,
     }
 }

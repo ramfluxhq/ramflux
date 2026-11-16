@@ -90,6 +90,8 @@ pub(crate) struct FederationDiscoverySurface {
     pub(crate) protocol_versions: Vec<String>,
     pub(crate) transport_backends: Vec<String>,
     pub(crate) node_capabilities: Vec<String>,
+    /// Gateway client capabilities this node serves. Empty unless gateway and router are configured.
+    pub(crate) served_gateway_capabilities: Vec<String>,
     /// Set only when the attachment authority is configured (N6a).
     pub(crate) attachment_authority: Option<ramflux_node_core::FederationAttachmentAuthority>,
 }

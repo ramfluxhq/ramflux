@@ -39,6 +39,7 @@ pub(crate) fn federation_discovery_surface(
             "federation_relay".to_owned(),
             "friend_request".to_owned(),
         ],
+        served_gateway_capabilities: served_gateway_client_capabilities(config),
         attachment_authority: None,
     };
     surface.attachment_authority = attachment_authority_from(
@@ -56,6 +57,36 @@ pub(crate) fn federation_discovery_surface(
         surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
     surface
+}
+
+fn endpoint_configured(endpoints: &std::collections::BTreeMap<String, String>, name: &str) -> bool {
+    endpoints.get(name).is_some_and(|address| !address.trim().is_empty())
+}
+
+/// Session push is served only when this node is wired to both a gateway and a router.
+/// Ephemeral is that router's companion capability and is claimed only together with session push.
+fn served_gateway_client_capabilities(
+    config: &ramflux_node_core::NodeServiceConfig,
+) -> Vec<String> {
+    let endpoints = &config.mesh.endpoints;
+    if !endpoint_configured(endpoints, "gateway") || !endpoint_configured(endpoints, "router") {
+        return Vec::new();
+    }
+    vec![
+        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned(),
+        ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned(),
+    ]
+}
+
+fn base_client_capabilities(served_gateway: &[String]) -> Vec<String> {
+    let mut capabilities =
+        vec!["opaque_delivery".to_owned(), "prekey".to_owned(), "object_relay".to_owned()];
+    for capability in served_gateway {
+        if !capabilities.iter().any(|existing| existing == capability) {
+            capabilities.push(capability.clone());
+        }
+    }
+    capabilities
 }
 
 pub(crate) fn federation_node_signing_seed(
@@ -112,11 +143,7 @@ impl FederationDiscoverySurface {
             protocol_versions: ramflux_protocol::advertised_client_protocol_versions(
                 &self.protocol_versions,
             ),
-            client_capabilities: vec![
-                "opaque_delivery".to_owned(),
-                "prekey".to_owned(),
-                "object_relay".to_owned(),
-            ],
+            client_capabilities: base_client_capabilities(&self.served_gateway_capabilities),
             updated_at: now,
             expires_at: now.saturating_add(ramflux_protocol::DISCOVERY_MAX_CACHE_TTL_SECONDS),
             signature: String::new(),
@@ -207,6 +234,7 @@ mod tests {
                 "opaque_delivery".to_owned(),
                 ramflux_node_core::HOME_MIGRATION_CAPABILITY.into(),
             ],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: None,
         };
 
@@ -307,6 +335,7 @@ mod attachment_capability_tests {
                 "opaque_delivery".into(),
                 ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY.into(),
             ],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: authority,
         }
     }
@@ -347,5 +376,78 @@ mod attachment_capability_tests {
         assert!(attachment_authority_from(Some("0"), Some(&k)).is_none());
         assert!(attachment_authority_from(Some("x"), Some(&k)).is_none());
         assert!(attachment_authority_from(Some("3"), Some(&k[..42])).is_none());
+    }
+}
+
+#[cfg(test)]
+mod gateway_capability_tests {
+    fn config(
+        endpoints: &serde_json::Value,
+    ) -> Result<ramflux_node_core::NodeServiceConfig, Box<dyn std::error::Error>> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "node_id": "A",
+            "service_id": "ramflux-federation",
+            "redb_path": "unused.redb",
+            "mesh": {
+                "listen_addr": "127.0.0.1:0",
+                "ca_cert": "unused.pem",
+                "service_cert": "unused.pem",
+                "service_key": "unused.key",
+                "allowed_service_ids": [],
+                "endpoints": endpoints
+            }
+        }))?)
+    }
+
+    fn client_capabilities(
+        endpoints: &serde_json::Value,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut surface = super::federation_discovery_surface(&config(endpoints)?, [8; 32]);
+        surface.node_ca_cert_pem = "test-ca".into();
+        let client = surface.client_record()?;
+        let server = surface.well_known_record()?;
+        assert!(server.node_capabilities.iter().all(|capability| {
+            capability != ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+                && capability != ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY
+        }));
+        Ok(client.client_capabilities)
+    }
+
+    fn has(capabilities: &[String], name: &str) -> bool {
+        capabilities.iter().filter(|capability| capability.as_str() == name).count() == 1
+    }
+
+    #[test]
+    fn record_contains_gateway_capabilities_only_when_the_node_serves_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let push = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY;
+        let ephemeral = ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
+        let absent = client_capabilities(&serde_json::json!({}))?;
+        assert!(has(&absent, "opaque_delivery"));
+        assert!(has(&absent, "prekey"));
+        assert!(has(&absent, "object_relay"));
+        assert!(!absent.iter().any(|capability| capability == push || capability == ephemeral));
+        let gateway_only =
+            client_capabilities(&serde_json::json!({"gateway": "ramflux-gateway:7443"}))?;
+        assert!(
+            !gateway_only.iter().any(|capability| capability == push || capability == ephemeral)
+        );
+        let blank = client_capabilities(
+            &serde_json::json!({"gateway": "ramflux-gateway:7443", "router": "  "}),
+        )?;
+        assert!(!blank.iter().any(|capability| capability == push || capability == ephemeral));
+        let served = client_capabilities(&serde_json::json!({
+            "gateway": "ramflux-gateway:7443",
+            "router": "ramflux-router:7443"
+        }))?;
+        assert!(has(&served, "opaque_delivery"));
+        assert!(has(&served, "prekey"));
+        assert!(has(&served, "object_relay"));
+        assert!(has(&served, push));
+        assert!(has(&served, ephemeral));
+        let push_at = served.iter().position(|capability| capability == push);
+        let ephemeral_at = served.iter().position(|capability| capability == ephemeral);
+        assert!(push_at.is_some_and(|push_at| ephemeral_at.is_some_and(|at| push_at < at)));
+        Ok(())
     }
 }

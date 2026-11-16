@@ -285,3 +285,94 @@ fn normalized_node_profiles_remain_loadable_when_migration_writeback_fails() -> 
     assert_eq!(saved.profiles["node.example.com"].discovery_url, "https://NODE.example.com:443/");
     Ok(())
 }
+
+fn signed_record(capabilities: Vec<String>) -> Result<WellKnownClientRecord, SdkError> {
+    let now = super::now_unix_timestamp().unsigned_abs();
+    let mut discovered = record(4)?;
+    discovered.protocol_versions.push(ramflux_protocol::MESSAGE_SCHEMA_V1_PROFILE.to_owned());
+    discovered.client_capabilities = capabilities;
+    discovered.gateway_quic_addr = "127.0.0.1:1".to_owned();
+    discovered.gateway_tcp_addr = "127.0.0.1:1".to_owned();
+    discovered.relay_quic_addr = "127.0.0.1:1".to_owned();
+    discovered.prekey_http_url = "https://127.0.0.1:1".to_owned();
+    discovered.updated_at = now;
+    discovered.expires_at = now.saturating_add(3600);
+    discovered.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::client_discovery_signing_bytes(&discovered)?,
+        [4; 32],
+    );
+    Ok(discovered)
+}
+
+fn serve_record(body: &[u8]) -> Result<String, SdkError> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let payload = body.to_vec();
+    std::thread::spawn(move || {
+        let _ = listener.set_nonblocking(true);
+        let started = std::time::Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buffer = [0_u8; 2048];
+                    let _ = std::io::Read::read(&mut stream, &mut buffer);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, header.as_bytes());
+                    let _ = std::io::Write::write_all(&mut stream, &payload);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if started.elapsed() > std::time::Duration::from_secs(8) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(origin)
+}
+
+#[tokio::test]
+async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkError> {
+    let capabilities = vec![
+        "opaque_delivery".to_owned(),
+        "prekey".to_owned(),
+        "object_relay".to_owned(),
+        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned(),
+        ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned(),
+    ];
+    let discovered = signed_record(capabilities.clone())?;
+    let origin = serve_record(&serde_json::to_vec(&discovered)?)?;
+    let root = TestRoot::new()?;
+    let mut profile = NodeProfile::from_record(record(4)?, 1);
+    profile.discovery_url = origin;
+    profile.client_capabilities = vec!["stored-only".to_owned()];
+    let mut nodes = NodeStore::default();
+    nodes.profiles.insert(profile.node_id.clone(), profile);
+    let mut state = LocalBusDaemonState {
+        config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
+        account_index: None,
+        nodes,
+        accounts: std::collections::BTreeMap::new(),
+        active_account_id: None,
+        attended_accounts: std::collections::BTreeSet::new(),
+        subscribers: std::collections::BTreeMap::new(),
+    };
+    let request = LocalBusFrame::request(
+        "probe-caps",
+        None,
+        "rf",
+        "node.probe",
+        serde_json::json!({"node_id": "node.example.com"}),
+    );
+    let result = super::probe::dispatch_probe(&request, &mut state).await?;
+    assert_eq!(result.response_body["client_capabilities"], serde_json::json!(capabilities));
+    assert_ne!(result.response_body["client_capabilities"], serde_json::json!(["stored-only"]));
+    Ok(())
+}
