@@ -17,8 +17,10 @@ impl Drop for Draft {
 
 /// Publish `from` as `to` only when `to` is absent.
 ///
-/// Hard links fail with `EPERM` on private app directories. A non-replacing
-/// rename has the same result: an existing generation stays untouched.
+/// Private app directories reject hard links with `EPERM`. A non-replacing
+/// rename leaves an existing generation untouched. `rustix::fs` does not exist
+/// on Windows, where the link already has that same result.
+#[cfg(unix)]
 fn publish_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
@@ -28,6 +30,11 @@ fn publish_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
         rustix::fs::RenameFlags::NOREPLACE,
     )
     .map_err(std::io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn publish_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, to)
 }
 
 fn draft(parent: &Path) -> Result<(Draft, File), StorageError> {

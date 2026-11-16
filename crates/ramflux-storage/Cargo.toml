@@ -14,7 +14,6 @@ ramflux-crypto = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 fs2 = "0.4"
-rustix = { version = "1.1", features = ["fs"] }
 zeroize = "1.8"
 # Search pins Unicode 16 separately; existing protocol normalization stays unchanged.
 search-normalization = { package = "unicode-normalization", version = "=0.1.24", git = "https://github.com/unicode-rs/unicode-normalization", rev = "c9921309f09ebd05108920fda92efbf5f8124a7d" }
@@ -31,6 +30,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
 
 [features]
 # Opt-in counters for integration-test complexity proofs; disabled in production.
