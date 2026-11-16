@@ -38,7 +38,6 @@ esac
 : "${DEMO_HOST:?advertised DNS name or IPv4 address required}"
 : "${DEMO_PROJECT:?dedicated compose project required}"
 : "${DEMO_DATA_DIR:?absolute private data directory required}"
-DEMO_TOOL=${DEMO_TOOL:-}
 DEMO_NODE_ID=${DEMO_NODE_ID:-demo.invalid}
 DEMO_GATEWAY_PORT=${DEMO_GATEWAY_PORT:-59443}
 DEMO_RELAY_PORT=${DEMO_RELAY_PORT:-59447}
@@ -172,29 +171,31 @@ if [ "$RAMFLUX_ROUTER_ADMIN_ENABLED" = 1 ] && [ -n "$RAMFLUX_DEMO_VOICE_UDP_PORT
 fi
 export RAMFLUX_DEMO_VOICE_UDP_PORT
 case "$DEMO_DATA_DIR" in /*) ;; *) fail 'DEMO_DATA_DIR must be absolute' ;; esac
+verify_published_discovery() {
+  discovery_pin=$1
+  [ -n "$discovery_pin" ] || fail 'DEMO_EXPECTED_NODE_PUBLIC_KEY is required'
+  command -v curl >/dev/null 2>&1 || fail 'curl is required to verify published discovery'
+  command -v openssl >/dev/null 2>&1 || fail 'openssl is required to verify published discovery'
+  discovery_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create discovery temporary file'
+  if ! curl --fail --silent --show-error --max-time 10 \
+    --output "$discovery_record" "$origin/.well-known/ramflux/client"
+  then
+    rm -f -- "$discovery_record"
+    fail 'published discovery endpoint unhealthy'
+  fi
+  if ! python3 "$script_dir/verify-remote-discovery.py" "$discovery_record" "$discovery_pin"; then
+    rm -f -- "$discovery_record"
+    exit 1
+  fi
+  rm -f -- "$discovery_record"
+}
 origin=$(python3 "$script_dir/demo-node-config.py" "$repo" "$DEMO_DATA_DIR" public-origin)
 if [ "$flag" = --remote ]; then
   : "${DEMO_EXPECTED_NODE_PUBLIC_KEY:?copy the public pin from the QA identity.env over a trusted channel}"
-  if [ -n "$DEMO_TOOL" ]; then
-    case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
-    [ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
-    exec "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
-  fi
-  command -v curl >/dev/null 2>&1 || fail 'curl is required for tool-free remote status'
-  command -v openssl >/dev/null 2>&1 || fail 'openssl is required for tool-free remote status'
-  remote_record=$(mktemp "${TMPDIR:-/tmp}/ramflux-discovery.XXXXXX") || fail 'cannot create remote status temporary file'
-  trap 'rm -f -- "$remote_record"' EXIT
-  trap 'exit 1' HUP INT TERM
-  curl --fail --silent --show-error --max-time 10 \
-    --output "$remote_record" "$origin/.well-known/ramflux/client"
-  script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-  python3 "$script_dir/verify-remote-discovery.py" "$remote_record" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
-  printf '%s\n' 'gateway and relay application probes: skipped (set DEMO_TOOL to a matching demo-node-tool for full probes)'
+  verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
   exit 0
 fi
-[ -n "$DEMO_TOOL" ] || fail 'DEMO_TOOL must name an absolute executable demo-node-tool for local operations'
-case "$DEMO_TOOL" in /*) ;; *) fail 'DEMO_TOOL must be absolute' ;; esac
-[ -x "$DEMO_TOOL" ] || fail 'DEMO_TOOL must be an executable demo-node-tool'
+sh "$script_dir/provision-node.sh" --check
 
 # Canonicalize before checking ownership or allowing recursive deletion.
 case "$command" in
@@ -533,7 +534,7 @@ wait_for_services() {
 verify_public_endpoints() {
   # shellcheck disable=SC1091
   . "$state/identity.env"
-  "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+  verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
 }
 load_applied_overlays() {
   RAMFLUX_DEMO_VOICE_UDP_PORT=$(sed -n 's/^RAMFLUX_RELAY_VOICE_UDP_PORT=.*://p' "$state/runtime.env" | tail -n 1)
@@ -610,10 +611,9 @@ case "$command" in
       RAMFLUX_DEPLOY_DIR="$state" sh "$script_dir/provision-node.sh"
     # Service identities and certificate SPIFFE identities must use the same node id.
       python3 "$script_dir/demo-node-config.py" "$repo" "$state" set-node-id "$DEMO_NODE_ID"
-      "$DEMO_TOOL" init "$state" "$DEMO_NODE_ID"
+      python3 "$script_dir/demo-node-trust.py" init "$state" "$DEMO_NODE_ID"
     # The signing seed has its own mount, shared only by federation and retention.
       [ ! -e "$state/certs/federation/node-signing.key" ] || fail "obsolete layout: $state/certs/federation/node-signing.key; the node identity key lives only in certs/node-identity (no migration before v1; redeploy into a fresh data directory)"
-      seed="$state/certs/node-identity/node-signing.key"
       chmod 755 "$state/certs/node-identity"
     # Containers need to traverse their read-only mounts; the containing state directory stays private.
       chmod 755 "$state/certs" "$state/config" "$state/secrets" "$state/secrets/gateway-v3" "$state/secrets/federation"
@@ -737,7 +737,7 @@ PY
     if inspect_services; then :; else fail "$health_problem"; fi
     # shellcheck disable=SC1091
     . "$state/identity.env"
-    "$DEMO_TOOL" verify "$origin" "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
+    verify_published_discovery "$DEMO_EXPECTED_NODE_PUBLIC_KEY"
     ;;
   logs) compose logs ;;
   down)

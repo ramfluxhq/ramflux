@@ -46,52 +46,18 @@ class DemoNodeTests(unittest.TestCase):
             + "\nexit 0\n",
         )
         self.executable("rustup", "#!/bin/sh\nexit 1\n")
-        tool = '''#!/usr/bin/env python3
-from pathlib import Path
-import sys
-if sys.argv[1] == "init":
-    root = Path(sys.argv[2])
-    for name in ("gateway-v3", "federation"):
-        directory = root / "secrets" / name
-        directory.mkdir(parents=True, exist_ok=True)
-        files = ("issuer-cert.json",) if name == "gateway-v3" else ("provider-keyring.json", "trust-snapshot.json")
-        for filename in files:
-            (directory / filename).write_text("{}")
-    identity = {
-        "DEMO_EXPECTED_NODE_PUBLIC_KEY": "test-public-pin",
-        "RAMFLUX_FEDERATION_PROVIDER_OFFLINE_ROOT_PUBLIC_KEY": "test-offline-root",
-        "RAMFLUX_NODE_SERVICE_SIGNING_SEED_B64URL": "test-service-seed",
-        "RAMFLUX_GATEWAY_V3_ISSUER_SEED": "test-issuer-seed",
-        "RAMFLUX_FEDERATION_NODE_SIGNING_SEED_B64URL": "test-discovery-seed",
-        "RAMFLUX_ROUTER_ADMIN_TOKEN": "test-admin-token",
-        "RAMFLUX_FEDERATION_ADMIN_TOKEN": "test-admin-token",
-    }
-    (root / "identity.env").write_text("".join(f"{key}={value}\\n" for key, value in identity.items()))
-else:
-    assert sys.argv[3] == "test-public-pin"
-    import json
-    control = json.loads((Path(__file__).parent.parent / "control.json").read_text())
-    root = Path(__file__).parent.parent / "data"
-    runtime = root / "runtime.env"
-    values = dict(line.split("=", 1) for line in runtime.read_text().splitlines()
-                  if "=" in line) if runtime.exists() else {}
-    with (Path(__file__).parent.parent / "public-probes.jsonl").open("a") as output:
-        output.write(json.dumps({"origin": sys.argv[2], "version": values.get("RAMFLUX_VERSION"),
-                                 "compose": (root / "compose.yml").read_text()
-                                 if (root / "compose.yml").exists() else ""}) + "\\n")
-    if values.get("RAMFLUX_VERSION") in control.get("public_unhealthy_versions", []):
-        sys.exit("published discovery endpoint unhealthy")
-    if control.get("relay_quic_unhealthy"):
-        sys.exit("relay QUIC unhealthy")
-    print("mock discovery and QUIC verification")
-    print("node key fingerprint: test-public-fingerprint")
-    print("gateway pre-account health: healthy (quic=ok tcp=not_attempted session=requires_account)")
-    print("relay QUIC TLS/application health: healthy (demo.example.org:59447)")
-'''
-        self.tool = self.executable("demo-node-tool", tool)
+        discovery_curl = SCRIPT.parent / "tests/fake_discovery_curl.py"
+        self.executable(
+            "curl",
+            "#!/bin/sh\nexec "
+            + " ".join(shlex.quote(str(part)) for part in (
+                sys.executable, discovery_curl, "--fixture-root", self.root,
+            ))
+            + ' "$@"\n',
+        )
         self.env_file = self.root / "demo.env"
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
-                      DEMO_DATA_DIR=str(self.state), DEMO_TOOL=str(self.tool),
+                      DEMO_DATA_DIR=str(self.state),
                       DEMO_HEALTH_TIMEOUT_SECONDS="3", DEMO_HEALTH_POLL_SECONDS="1")
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
         self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", HOME=str(self.home))
@@ -463,7 +429,8 @@ else:
             warnings = [line for line in result.stderr.splitlines() if line.startswith("WARNING:")]
             self.assertEqual(warnings,
                              ["WARNING: custody is not configured; accounts remain networking_pending"])
-            self.assertIn("mock discovery and QUIC verification", result.stdout)
+            self.assertIn(
+                "discovery signature, freshness and operator pin: healthy", result.stdout)
         result = self.run_script("status")
         expected_warning = "" if self.PROVIDER == "docker" else (
             "warning: per-source federation limits disabled because rootless-bridge "
@@ -1388,15 +1355,34 @@ else:
         self.run_script("up")
         self.assertFalse(any("down" in args or "--volumes" in args for args in self.compose_commands()))
 
-    def test_status_reports_relay_quic_health_and_propagates_probe_failure(self):
+    def test_status_reports_discovery_health_and_propagates_probe_failure(self):
         self.run_script("up")
         result = self.run_script("status")
-        self.assertIn("relay QUIC TLS/application health: healthy", result.stdout)
-        self.assertIn("node key fingerprint: test-public-fingerprint", result.stdout)
-        self.assertIn("gateway pre-account health: healthy", result.stdout)
-        self.control.write_text('{"relay_quic_unhealthy": true}')
+        self.assertIn("discovery signature, freshness and operator pin: healthy", result.stdout)
+        pin = dict(line.split("=", 1) for line in (self.state / "identity.env").read_text().splitlines())
+        self.assertIn(f"node public key: {pin['DEMO_EXPECTED_NODE_PUBLIC_KEY']}", result.stdout)
+        self.control.write_text(json.dumps({"public_unhealthy_versions": ["demo-test"]}))
         result = self.run_script("status", success=False)
-        self.assertIn("relay QUIC unhealthy", result.stderr)
+        self.assertIn("published discovery endpoint unhealthy", result.stderr)
+
+    def test_unknown_gateway_capability_refuses_before_state(self):
+        with self.env_file.open("a") as output:
+            output.write("DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1,not-a-capability\n")
+        result = self.run_script("up", success=False)
+        self.assertIn("refuses unknown name: not-a-capability", result.stderr)
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
+    def test_generated_router_and_federation_publish_default_gateway_capabilities(self):
+        self.run_script("up")
+        for name in ("router.toml", "federation.toml"):
+            text = (self.state / "config" / name).read_text()
+            self.assertIn("gateway_client_capabilities = [", text)
+            self.assertLess(
+                text.index('"gateway.session_push.v1"'),
+                text.index('"gateway.ephemeral.v1"'),
+            )
+        self.assertNotIn("gateway_client_capabilities", (self.state / "config/gateway.toml").read_text())
 
     def test_refuses_foreign_containers_volumes_and_networks_even_on_purge(self):
         self.run_script("up")
@@ -1455,15 +1441,7 @@ else:
         self.run_script("up", success=False)
         self.assertTrue(lock.exists())
 
-    def test_remote_verification_requires_public_pin_and_needs_no_docker_or_state(self):
-        self.run_script("status", "--remote", success=False)
-        with self.env_file.open("a") as output:
-            output.write("DEMO_EXPECTED_NODE_PUBLIC_KEY=test-public-pin\n")
-        self.run_script("status", "--remote")
-        self.assertFalse(self.state.exists())
-        self.assertEqual(self.commands(), [])
-
-    def test_remote_status_without_demo_tool_verifies_downloaded_record(self):
+    def accept_remote_discovery(self):
         public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         signature = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         record = {
@@ -1501,9 +1479,19 @@ shutil.copyfile({str(record_file)!r}, output)
         values = dict(DEMO_HOST="demo.example.org", DEMO_PROJECT="demo-test",
                       DEMO_DATA_DIR=str(self.state), DEMO_EXPECTED_NODE_PUBLIC_KEY=public_key)
         self.env_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in values.items()))
-        result = self.run_script("status", "--remote")
+        return self.run_script("status", "--remote")
+
+    def test_remote_verification_requires_public_pin_and_needs_no_docker_or_state(self):
+        refused = self.run_script("status", "--remote", success=False)
+        self.assertIn("DEMO_EXPECTED_NODE_PUBLIC_KEY", refused.stderr)
+        self.accept_remote_discovery()
+        self.assertFalse(self.state.exists())
+        self.assertEqual(self.commands(), [])
+
+    def test_remote_status_verifies_downloaded_record(self):
+        result = self.accept_remote_discovery()
         self.assertIn("discovery signature, freshness and operator pin: healthy", result.stdout)
-        self.assertIn("gateway and relay application probes: skipped", result.stdout)
+        self.assertNotIn("demo-node-tool", result.stdout + result.stderr)
         self.assertFalse(self.state.exists())
         self.assertEqual(self.commands(), [])
 

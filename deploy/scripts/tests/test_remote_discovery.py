@@ -29,7 +29,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
         with mock.patch.object(VERIFY.subprocess, "run", return_value=version):
             with self.assertRaisesRegex(
                 SystemExit,
-                "openssl lacks Ed25519 — install OpenSSL 3 or use demo-node-tool",
+                "openssl lacks Ed25519 — install OpenSSL 3",
             ):
                 VERIFY.verify(Path("unused"), "unused")
 

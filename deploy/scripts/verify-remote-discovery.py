@@ -64,8 +64,11 @@ def verify(record_path, expected_key, now=None):
     version = subprocess.run(
         ["openssl", "version"], capture_output=True, text=True, check=False
     )
-    if version.returncode != 0 or not version.stdout.startswith("OpenSSL 3."):
-        fail("openssl lacks Ed25519 — install OpenSSL 3 or use demo-node-tool")
+    reported = version.stdout.split()
+    major = reported[1].split(".", 1)[0] if len(reported) > 1 else ""
+    # LibreSSL does not provide this Ed25519 CLI. OpenSSL 3 and newer do.
+    if version.returncode != 0 or reported[:1] != ["OpenSSL"] or not major.isdigit() or int(major) < 3:
+        fail("openssl lacks Ed25519 — install OpenSSL 3")
     try:
         record = json.loads(
             Path(record_path).read_text(encoding="utf-8"), object_pairs_hook=unique_object

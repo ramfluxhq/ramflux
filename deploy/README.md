@@ -59,13 +59,8 @@ COMPOSE_TEST_DOCKER_COMPOSE='docker compose' \
   python3 -m unittest discover -s deploy/scripts/tests -v
 ```
 
-For full remote gateway and relay application probes, build the trust/discovery
-helper from the matching `ramflux-itest` checkout once:
-
-```sh
-cd /path/to/ramflux-itest
-cargo build --locked --release --bin demo-node-tool
-```
+Published discovery is verified with `curl`, Python 3, and OpenSSL 3. LibreSSL
+lacks the required Ed25519 CLI support. No separate helper binary is required.
 
 Create an operator-only env file (replace the paths and advertised DNS name):
 
@@ -73,8 +68,10 @@ Create an operator-only env file (replace the paths and advertised DNS name):
 DEMO_HOST=demo.example.org
 DEMO_PROJECT=ramflux-demo
 DEMO_DATA_DIR=/srv/ramflux-demo
-DEMO_TOOL=/path/to/ramflux-itest/target/release/demo-node-tool
 # Optional defaults:
+# Gateway client capabilities written into router.toml and federation.toml.
+# Unknown names are refused. The default is the pair the gateway build serves:
+# DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1,gateway.ephemeral.v1
 # Public HTTPS reverse-proxy origin, with no path or trailing slash:
 # DEMO_PUBLIC_ORIGIN=https://demo.example.org
 DEMO_NODE_ID=demo.invalid
@@ -169,11 +166,9 @@ the wrapper inspects all seven exact `ghcr.io/ramfluxhq/ramflux-<service>:TAG`
 images in the detected engine. It lists every missing image and exits without
 starting the project if any image is absent. It never pulls or substitutes tags.
 
-`DEMO_TOOL` remains required for initialization, local `status`, and remote
-verification. A `demo-node-tool` binary may be copied from a build host only when
-it is statically compatible with the target: use the same CPU architecture and a
-compatible glibc (or an intentionally static build). Keep the tool executable and
-set its absolute target-host path as `DEMO_TOOL`.
+Initialization, local `status`, and remote verification use the product scripts
+in this repository (`demo-node-trust.py` and `verify-remote-discovery.py`) plus
+`curl` and OpenSSL 3. Nothing is copied from another repository.
 
 Federation header, body, timeout and connection limits are validated before every
 local command. An invalid value therefore also blocks `status`, `logs`, `down` and
@@ -284,18 +279,12 @@ The public federation HTTP listener exposes only client reads. Administration us
 a separate unpublished listener on the Compose network (port 18084). The demo HTTP
 port remains the upstream listener when a public HTTPS origin is configured. See [the route inventory](../docs/federation_http.md).
 
-`status` checks all seven container health states, then fetches the client record,
-verifies freshness, signature and the saved operator public key, and prints the
-node key fingerprint using the same discovery domain as `node.add`/`node.list`.
-It calls the SDK's pre-account gateway probe: verified QUIC first, then verified
-TCP-TLS fallback if needed, using the signed record's CA and server name. The
-first application frame is Heartbeat; only the protocol-constant
-`first gateway frame must be open` Nack counts as success. No Open or Auth frame
-is sent, and gateway session status remains `requires_account`. The relay check
-continues to use client-facing QUIC `/healthz` and requires status 200. The helper
-prints the selected gateway transport results and relay health; it exits nonzero
-on any failure. Health probes do not prove account creation, DM,
-attachments, or TURN behavior; those require the desktop/controller acceptance.
+`status` checks all seven container health states, then fetches
+`/.well-known/ramflux/client` and verifies its signature, freshness, node
+version, and the operator pin from `identity.env`. Remote `status` does the same
+fetch and does not need Docker or the host data directory. Neither mode probes
+gateway or relay transports, and neither confirms account creation, DM,
+attachments, or TURN behavior. Those require the desktop/controller acceptance.
 
 For a LAN check on another machine, use a local env file with the settings above
 and this additional public value copied over a trusted channel from the host's
@@ -309,13 +298,10 @@ DEMO_EXPECTED_NODE_PUBLIC_KEY=replace_with_public_pin
 sh deploy/scripts/demo-node.sh status /path/to/local-demo.env --remote
 ```
 
-Remote status needs no Docker or host data directory. When `DEMO_TOOL` is unset,
-it verifies the signed record with `curl`, Python 3's standard library and
-OpenSSL 3 (LibreSSL lacks the required Ed25519 CLI support), then prints an explicit notice that gateway and relay application probes
-were skipped. Set `DEMO_TOOL` to the matching executable for the existing
-signed-discovery plus gateway and relay application probes. Remote status cannot
-inspect container health. Neither status mode confirms or changes desktop trust
-pins.
+Remote status needs no Docker or host data directory. It verifies the signed
+record with `curl`, Python 3's standard library, and OpenSSL 3 (LibreSSL lacks
+the required Ed25519 CLI support). Remote status cannot inspect container health.
+Neither status mode confirms or changes desktop trust pins.
 
 All seven service images use an exec-form entrypoint, so the service binary is
 PID 1 and receives SIGTERM directly. Compose allows five seconds for shutdown;
@@ -875,20 +861,14 @@ policy. Apply configuration through the normal operator-managed deployment flow.
 
 Enable the private administration overlay as described above (`DEMO_ADMIN_LOOPBACK_PORT=59487`;
 router administration defaults to loopback TCP 59488), then inspect the router
-through its authenticated mesh admin listener:
-
-```sh
-# Load the private operator environment; never put the token in argv.
-set -a
-. "$DEMO_DATA_DIR/identity.env"
-set +a
-"$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
-```
+through its authenticated mesh admin listener. The route is `POST /admin/custody/budgets`.
+The JSON body carries `admin_token` set to `RAMFLUX_ROUTER_ADMIN_TOKEN` from
+`identity.env`, and the caller authenticates as the gateway mesh peer. Keep the
+token and the mesh certificate operator-only. Do not put the token on a command line.
 
 Use `RAMFLUX_ROUTER_ADMIN_PORT` instead of 59488 when configured.
-`DEMO_MESH_PORT` reaches federation and does not serve this router route. The tool
-uses the existing gateway mesh certificate and router admin token. Keep both
-operator-only. This path is not forwarded by the public gateway.
+`DEMO_MESH_PORT` reaches federation and does not serve this router route.
+This path is not forwarded by the public gateway.
 The JSON result includes `observed_at` and a row per durable daily/minute window,
 plus the global lifetime ceiling: `scope`, truncated node-keyed `prefix` hash,
 `budget`, `count`, `limit`, and `reset_at` (Unix seconds, UTC). A null reset is a
