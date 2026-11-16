@@ -72,23 +72,7 @@ pub(crate) async fn handle_contact(
             &bus.request(Some(selector.account), "contact", "contact.list", serde_json::json!({}))
                 .await?,
         ),
-        ContactAction::Verify(verify) => {
-            let (method, body) = match verify.expected_safety {
-                Some(expected) if verify.mark_verified => (
-                    "contact.verify",
-                    serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
-                        expected: Some(expected),
-                    })?,
-                ),
-                _ => (
-                    "contact.safety_number",
-                    serde_json::to_value(LocalBusContactSafetyRequest {
-                        contact_identity_commitment: verify.selector.contact,
-                    })?,
-                ),
-            };
-            print_json(&bus.request(Some(verify.selector.account), "contact", method, body).await?)
-        }
+        ContactAction::Verify(verify) => handle_contact_verify(&mut bus, verify).await,
         ContactAction::SafetyNumber(selector) => {
             let request =
                 LocalBusContactSafetyRequest { contact_identity_commitment: selector.contact };
@@ -107,6 +91,40 @@ pub(crate) async fn handle_contact(
             handle_contact_verification(&mut bus, command).await
         }
     }
+}
+
+async fn handle_contact_verify(
+    bus: &mut LocalBusClient,
+    verify: ContactVerify,
+) -> Result<(), RfError> {
+    let (method, body) = match verify.expected_safety {
+        Some(expected) if verify.mark_verified => {
+            // The SDK takes its target from the stamp; the selected contact must be it
+            // (or the provisional root the stamp explicitly replaces).
+            let selected = verify.selector.contact.as_str();
+            if expected.contact_identity_commitment != selected
+                && expected.replace_provisional_root.as_deref() != Some(selected)
+            {
+                return Err(ramflux_sdk::SdkError::from(
+                    ramflux_sdk::ContactReason::SafetyMaterialMismatch,
+                )
+                .into());
+            }
+            (
+                "contact.verify",
+                serde_json::to_value(ramflux_protocol::message::ContactSafetyVerifyRequest {
+                    expected: Some(expected),
+                })?,
+            )
+        }
+        _ => (
+            "contact.safety_number",
+            serde_json::to_value(LocalBusContactSafetyRequest {
+                contact_identity_commitment: verify.selector.contact,
+            })?,
+        ),
+    };
+    print_json(&bus.request(Some(verify.selector.account), "contact", method, body).await?)
 }
 
 async fn handle_contact_verification(
