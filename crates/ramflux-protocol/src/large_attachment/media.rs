@@ -17,6 +17,10 @@ pub struct MediaKeySlot {
     pub recipient: QualifiedDevice,
     pub encrypted_key: Vec<u8>,
     pub format: u32,
+    /// Tag 4. Empty on a pre-cutover slot; otherwise exactly 32 bytes.
+    pub grant_id: Vec<u8>,
+    /// Tag 5. The complete owner-signed grant plus source-signed receipt.
+    pub read_capability: Vec<u8>,
 }
 
 /// The S0 `MediaManifest` fields 1 through 12, in their original schema.
@@ -62,7 +66,12 @@ impl MediaManifest {
             {
                 return Err(FormatError("key slot"));
             }
-            Ok(size.saturating_add(slot.encrypted_key.len()).saturating_add(600))
+            let grant = if slot.grant_id.is_empty() { 0 } else { 32 };
+            Ok(size
+                .saturating_add(slot.encrypted_key.len())
+                .saturating_add(grant)
+                .saturating_add(slot.read_capability.len())
+                .saturating_add(600))
         })?;
         if slots > MAX_MANIFEST_BYTES {
             return Err(FormatError("inner manifest cap"));
@@ -82,7 +91,7 @@ impl MediaManifest {
             bytes(&mut out, 7, h);
         }
         for slot in &self.key_slots {
-            bytes(&mut out, 8, &slot.encode());
+            bytes(&mut out, 8, &slot.encode()?);
         }
         bytes(&mut out, 9, self.relay_origin.as_bytes());
         bytes(&mut out, 10, &self.read_capability);
@@ -139,7 +148,14 @@ impl MediaManifest {
 }
 
 impl MediaKeySlot {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        let paired = !self.grant_id.is_empty() || !self.read_capability.is_empty();
+        if paired && (self.grant_id.len() != 32 || self.read_capability.is_empty()) {
+            return Err(FormatError("key slot"));
+        }
+        if self.read_capability.len() > 8192 {
+            return Err(FormatError("key slot"));
+        }
         let mut q = Vec::new();
         bytes(&mut q, 1, self.recipient.account_anchor.as_bytes());
         bytes(&mut q, 2, self.recipient.device_id.as_bytes());
@@ -148,7 +164,9 @@ impl MediaKeySlot {
         bytes(&mut out, 1, &q);
         bytes(&mut out, 2, &self.encrypted_key);
         scalar(&mut out, 3, u64::from(self.format));
-        out
+        bytes(&mut out, 4, &self.grant_id);
+        bytes(&mut out, 5, &self.read_capability);
+        Ok(out)
     }
     fn decode(input: &[u8]) -> Result<Self, FormatError> {
         let mut s = Self::default();
@@ -168,10 +186,12 @@ impl MediaKeySlot {
                 }
                 2 => s.encrypted_key = f.data()?.to_vec(),
                 3 => s.format = narrow(f.number()?)?,
+                4 => s.grant_id = f.data()?.to_vec(),
+                5 => s.read_capability = f.data()?.to_vec(),
                 _ => return Err(FormatError("unknown slot field")),
             }
         }
-        if s.encode() != input {
+        if s.encode()? != input {
             return Err(FormatError("noncanonical slot"));
         }
         Ok(s)
@@ -268,7 +288,7 @@ impl MediaRef {
         bytes(&mut out, 3, self.mime_type.as_bytes());
         scalar(&mut out, 4, self.size);
         for slot in &self.key_slots {
-            bytes(&mut out, 5, &slot.encode());
+            bytes(&mut out, 5, &slot.encode()?);
         }
         if let Some(name) = &self.file_name {
             varint(&mut out, 6 << 3 | 2);
@@ -450,3 +470,5 @@ fn fields(input: &[u8]) -> Result<Fields<'_>, FormatError> {
 
 #[cfg(test)]
 mod refusal_tests;
+#[cfg(test)]
+mod slot_fields;

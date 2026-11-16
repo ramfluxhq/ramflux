@@ -13,6 +13,10 @@ pub struct MediaKeySlot {
     pub encrypted_key: ::prost::alloc::vec::Vec<u8>,
     #[prost(uint32, tag = "3")]
     pub format: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub grant_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub read_capability: ::prost::alloc::vec::Vec<u8>,
 }
 impl serde::Serialize for MediaKeySlot {
     #[allow(deprecated)]
@@ -31,6 +35,12 @@ impl serde::Serialize for MediaKeySlot {
         if self.format != 0 {
             len += 1;
         }
+        if !self.grant_id.is_empty() {
+            len += 1;
+        }
+        if !self.read_capability.is_empty() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.MediaKeySlot", len)?;
         if let Some(v) = self.recipient.as_ref() {
             struct_ser.serialize_field("recipient", v)?;
@@ -46,6 +56,22 @@ impl serde::Serialize for MediaKeySlot {
         if self.format != 0 {
             struct_ser.serialize_field("format", &self.format)?;
         }
+        if !self.grant_id.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "grantId",
+                pbjson::private::base64::encode(&self.grant_id).as_str(),
+            )?;
+        }
+        if !self.read_capability.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "readCapability",
+                pbjson::private::base64::encode(&self.read_capability).as_str(),
+            )?;
+        }
         struct_ser.end()
     }
 }
@@ -55,12 +81,23 @@ impl<'de> serde::Deserialize<'de> for MediaKeySlot {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["recipient", "encrypted_key", "encryptedKey", "format"];
+        const FIELDS: &[&str] = &[
+            "recipient",
+            "encrypted_key",
+            "encryptedKey",
+            "format",
+            "grant_id",
+            "grantId",
+            "read_capability",
+            "readCapability",
+        ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Recipient,
             EncryptedKey,
             Format,
+            GrantId,
+            ReadCapability,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -85,6 +122,10 @@ impl<'de> serde::Deserialize<'de> for MediaKeySlot {
                             "recipient" => Ok(GeneratedField::Recipient),
                             "encryptedKey" | "encrypted_key" => Ok(GeneratedField::EncryptedKey),
                             "format" => Ok(GeneratedField::Format),
+                            "grantId" | "grant_id" => Ok(GeneratedField::GrantId),
+                            "readCapability" | "read_capability" => {
+                                Ok(GeneratedField::ReadCapability)
+                            }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -105,6 +146,8 @@ impl<'de> serde::Deserialize<'de> for MediaKeySlot {
                 let mut recipient__ = None;
                 let mut encrypted_key__ = None;
                 let mut format__ = None;
+                let mut grant_id__ = None;
+                let mut read_capability__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -133,12 +176,30 @@ impl<'de> serde::Deserialize<'de> for MediaKeySlot {
                                 map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
                             );
                         }
+                        GeneratedField::GrantId => {
+                            if grant_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("grantId"));
+                            }
+                            grant_id__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::ReadCapability => {
+                            if read_capability__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("readCapability"));
+                            }
+                            read_capability__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
                     }
                 }
                 Ok(MediaKeySlot {
                     recipient: recipient__,
                     encrypted_key: encrypted_key__.unwrap_or_default(),
                     format: format__.unwrap_or_default(),
+                    grant_id: grant_id__.unwrap_or_default(),
+                    read_capability: read_capability__.unwrap_or_default(),
                 })
             }
         }

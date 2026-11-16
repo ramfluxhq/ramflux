@@ -1074,6 +1074,8 @@ fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkE
         },
         encrypted_key: format!("old-key-{index}-canary").into_bytes(),
         format: 1,
+        grant_id: Vec::new(),
+        read_capability: Vec::new(),
     }];
     let manifest = large::MediaManifest {
         manifest_id: [index + 1; 32],

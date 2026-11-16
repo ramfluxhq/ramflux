@@ -12,6 +12,11 @@ use ramflux_protocol::large_attachment::{
 };
 use zeroize::Zeroizing;
 
+mod key_slot;
+pub use key_slot::{
+    DeviceTarget, KeySlotBinding, KeySlotError, KeySlotParties, open_file_key, wrap_file_key,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentError {
     #[error(transparent)]
@@ -22,6 +27,8 @@ pub enum SegmentError {
     NonceReuse,
     #[error("random key generation failed")]
     Random,
+    #[error("persisted sealer identity rejected")]
+    Persisted,
 }
 
 /// Owns one fresh file key. Not cloneable or serializable. Validation errors
@@ -44,6 +51,22 @@ impl SegmentSealer {
         getrandom::fill(key.as_mut()).map_err(|_| SegmentError::Random)?;
         getrandom::fill(&mut object_id).map_err(|_| SegmentError::Random)?;
         Ok(Self { key, object_id, layout, next_index: 0 })
+    }
+
+    /// Opens a reservation that already named this key and object id.
+    /// The index starts at 0. This constructor reads no operating-system randomness.
+    /// # Errors
+    /// Rejects an all-zero key, an all-zero object id, or a layout that cannot be sealed.
+    pub fn from_persisted(
+        key: [u8; 32],
+        object_id: [u8; 32],
+        layout: SegmentLayout,
+    ) -> Result<Self, SegmentError> {
+        layout.dimensions()?;
+        if key == [0; 32] || object_id == [0; 32] {
+            return Err(SegmentError::Persisted);
+        }
+        Ok(Self { key: Zeroizing::new(key), object_id, layout, next_index: 0 })
     }
 
     #[must_use]
@@ -246,5 +269,7 @@ impl PlaintextVerifier {
     }
 }
 
+#[cfg(test)]
+mod persisted;
 #[cfg(test)]
 mod tests;

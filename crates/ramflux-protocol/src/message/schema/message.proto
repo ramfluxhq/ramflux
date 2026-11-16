@@ -118,6 +118,8 @@ message MediaKeySlot {
   QualifiedDevice recipient = 1;
   bytes encrypted_key = 2;
   uint32 format = 3;
+  bytes grant_id = 4;
+  bytes read_capability = 5;
 }
 message MediaManifest {
   bytes manifest_id = 1;

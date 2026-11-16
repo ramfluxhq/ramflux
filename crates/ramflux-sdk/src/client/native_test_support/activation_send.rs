@@ -610,6 +610,8 @@ pub(crate) mod tests {
             },
             encrypted_key: vec![7; 48],
             format: 1,
+            grant_id: Vec::new(),
+            read_capability: Vec::new(),
         }];
         let manifest = large::MediaManifest {
             manifest_id: [8; 32],
