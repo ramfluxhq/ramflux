@@ -159,7 +159,7 @@ async fn exercise_skewed_group(f: &native_group::GroupFixture, path: &str) -> Te
             ))
             .await?
             .into_bus();
-            f.human.persist_fetched_identity_directory(
+            f.human.persist_observed_identity_directory_now(
                 &newcomer.client.native_bus_fixture.as_ref().ok_or("newcomer material")?.manifest,
             )?;
             let state = f.human.fixture_group_change(

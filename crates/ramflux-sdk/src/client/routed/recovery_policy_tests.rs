@@ -254,7 +254,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
         .ok_or_else(|| invalid("test: native publication"))?
         .publication
         .record = primary.sign_record(next)?;
-    bob.client.persist_fetched_identity_directory(&current)?;
+    bob.client.persist_observed_identity_directory_now(&current)?;
     let mut partial = current;
     partial.devices.clear();
     partial.custody.as_mut().ok_or_else(|| invalid("test: native descriptor"))?.devices.clear();
@@ -262,7 +262,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?;
     let pending = bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(&bob)?)?;
     for (manifest, stale) in [(&partial, false), (&old, true)] {
-        let result = bob.client.persist_fetched_identity_directory(manifest);
+        let result = bob.client.persist_observed_identity_directory_now(manifest);
         if stale {
             assert!(result.is_err(), "a genuinely older native head must be refused");
         } else {

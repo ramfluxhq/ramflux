@@ -145,6 +145,9 @@ fn prepare_due_limit(
     if !fence.current(account) || account.head_refresh.active.upgrade().is_some() {
         return Ok(None);
     }
+    for root in account.client.manifest_demand.take() {
+        let _ = account.head_refresh.enqueue(root);
+    }
     if !periodic && account.head_refresh.pending.is_empty() {
         return Ok(None);
     }
@@ -287,6 +290,8 @@ fn apply_verified(
 pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
     match work {
         Work::Subscribe { reply } => {
+            // Client-side demand and the queue's own enqueues wake the same refresh task.
+            account.head_refresh.wake = account.client.manifest_demand.wake.clone();
             let _ = reply.send(account.head_refresh.wake.clone());
         }
         Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {

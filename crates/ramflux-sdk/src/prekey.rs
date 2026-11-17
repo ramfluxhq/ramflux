@@ -52,8 +52,8 @@ pub struct SdkPrekeyResponse {
 }
 
 mod manifest;
-pub(crate) use manifest::SdkDeviceManifestEntry;
 pub use manifest::SdkDeviceManifestResponse;
+pub(crate) use manifest::{FetchStamp, SdkDeviceManifestEntry};
 
 pub fn identity_root_public_key_commitment(root_public_key: &str) -> Result<String, SdkError> {
     let root_public_key_bytes = ramflux_protocol::decode_base64url(root_public_key)

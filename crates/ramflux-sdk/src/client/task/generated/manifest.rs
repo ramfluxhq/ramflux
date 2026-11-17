@@ -88,6 +88,7 @@ pub(crate) fn generated_manifest_fields(
         .map(|value| canonical::<ramflux_protocol::custody::CustodyManifest>(&value.canonical))
         .transpose()?;
     let native = SdkDeviceManifestResponse {
+        fetched_after: crate::prekey::FetchStamp::default(),
         custody: manifest
             .custody
             .as_ref()

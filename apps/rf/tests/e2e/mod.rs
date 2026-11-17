@@ -526,7 +526,7 @@ pub fn spawn_daemon_with_env(
         .arg(&data_root)
         .arg("--itest-memory-vault")
         .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
-        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug")
+        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug,ramflux_sdk::bus::couriers::layer_publish=debug")
         .envs(env.iter().copied());
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
@@ -645,8 +645,8 @@ pub fn wait_receive_settled(daemon: &Daemon, account: &Account) -> Result<Value>
 }
 
 pub fn exchange_contacts(a: &Daemon, alice: &Account, b: &Daemon, bob: &Account) -> Result<()> {
-    let alice_card = rf_json(&a.socket, &["contact", "card", "--account", &alice.id])?;
-    let bob_card = rf_json(&b.socket, &["contact", "card", "--account", &bob.id])?;
+    let alice_card = contact_card_json(a, &alice.id)?;
+    let bob_card = contact_card_json(b, &bob.id)?;
     let alice_text = required_str(&alice_card, "card")?;
     let bob_text = required_str(&bob_card, "card")?;
     rf_json(&b.socket, &["contact", "add", "--account", &bob.id, "--card", &alice_text])?;
@@ -1225,6 +1225,47 @@ pub fn assert_texts_once_in_order(value: &Value, expected: &[&str]) -> Result<()
         return Err(format!("expected {expected:?} once in order, got {texts:?}").into());
     }
     Ok(())
+}
+
+/// Exports a contact card, retrying only the typed retryable `PublicationPending` refusal (a
+/// layer install still in flight on a slow host) within a bounded deadline; any other refusal
+/// fails at once.
+pub fn contact_card_json(daemon: &Daemon, account_id: &str) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match rf_json(&daemon.socket, &["contact", "card", "--account", account_id]) {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.to_string().contains("PublicationPending")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(error) => {
+                return Err(format!("{error}; {}", pending_diagnostics(daemon, account_id)).into());
+            }
+        }
+    }
+}
+
+/// Failure evidence for a stuck install: the daemon log and every file under the account's
+/// `pairing-install` directory (pending rows and the installed marker; public refs and hashes only).
+fn pending_diagnostics(daemon: &Daemon, account_id: &str) -> String {
+    let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
+    let dir = daemon.data_root.join("custody_accounts").join(account_id).join("pairing-install");
+    let markers = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| {
+                let body = std::fs::read_to_string(entry.path())
+                    .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+                format!("{}={body}", entry.file_name().display())
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+        Err(error) => format!("<no pairing-install dir: {error}>"),
+    };
+    format!("pending_markers=[{markers}]; daemon_log={log}")
 }
 
 /// Poll one CLI command until `ready` accepts its JSON, within the shared poll budget.

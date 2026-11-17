@@ -95,6 +95,7 @@ pub(crate) fn ready_manifest(
     mut manifest: SdkDeviceManifestResponse,
     now: i64,
 ) -> SdkDeviceManifestResponse {
+    let fetched_after = manifest.fetched_after;
     if let Some(native) = &mut manifest.custody {
         let trusted_now = u64::try_from(now).unwrap_or_default();
         let evidence = ramflux_protocol::custody::CustodyAuthority {
@@ -105,9 +106,12 @@ pub(crate) fn ready_manifest(
             native.devices.retain(|device| {
                 authority.authorize(&device.device_ref, "message", trusted_now).is_ok()
             });
-            if let Ok(ready) =
+            if let Ok(mut ready) =
                 crate::prekey::SdkDeviceManifestResponse::from_native((**native).clone())
             {
+                // The native projection rebuilds the manifest; the fetch-start instant belongs
+                // to the network observation and must survive it.
+                ready.fetched_after = fetched_after;
                 return ready;
             }
         }

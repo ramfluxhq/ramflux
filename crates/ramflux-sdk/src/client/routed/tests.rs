@@ -97,7 +97,7 @@ impl Fixture {
         self.client.active_account_db = None;
         self.client.unlock_account(&self.id, b"native fixture data passphrase")?;
         self.client.initialize_born_v3_branch(&self.id, vault).await?;
-        self.client.persist_fetched_identity_directory(&self.manifest()?)?;
+        self.client.persist_observed_identity_directory_now(&self.manifest()?)?;
         Ok(())
     }
     fn create_shared_group(

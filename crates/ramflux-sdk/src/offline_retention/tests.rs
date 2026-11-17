@@ -40,8 +40,8 @@ fn prepare_retention_group(
     fixture: &Fixture,
     recipient: &Fixture,
 ) -> TestResult<(String, crate::prekey::SdkPrekeyResponse)> {
-    fixture.client.persist_fetched_identity_directory(&recipient.manifest)?;
-    recipient.client.persist_fetched_identity_directory(&fixture.manifest)?;
+    fixture.client.persist_observed_identity_directory_now(&recipient.manifest)?;
+    recipient.client.persist_observed_identity_directory_now(&fixture.manifest)?;
     let primary = fixture
         .client
         .born_v3_account

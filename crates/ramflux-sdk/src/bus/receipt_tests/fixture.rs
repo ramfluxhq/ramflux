@@ -68,14 +68,14 @@ impl Spec {
         }
         client.unlock_account(&self.principal, b"receipt-test")?;
         client.initialize_born_v3_branch_for_fixture(&self.device, self.vault.as_ref())?;
-        client.persist_fetched_identity_directory(&self.manifest(&client)?)?;
+        client.persist_observed_identity_directory_now(&self.manifest(&client)?)?;
         let directory = self
             .directory
             .lock()
             .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?;
         assert!(directory.len() <= 8, "bounded receipt live directory");
         for manifest in directory.values() {
-            client.persist_fetched_identity_directory(manifest)?;
+            client.persist_observed_identity_directory_now(manifest)?;
         }
         Ok(client)
     }
@@ -200,7 +200,7 @@ impl Spec {
             .lock()
             .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
             .insert(manifest.principal_commitment.clone(), manifest.clone());
-        client.persist_fetched_identity_directory(&manifest)?;
+        client.persist_observed_identity_directory_now(&manifest)?;
         let identity = other.identity()?;
         let db = client.account_db()?;
         let mut row = db.client_device_record(&identity)?.ok_or(SdkError::IdentityRootMissing)?;
@@ -277,8 +277,8 @@ impl Spec {
             self.manifest(&sibling)?.custody.ok_or("test: native sibling manifest")?.devices,
         );
         let full = crate::SdkDeviceManifestResponse::from_native(native)?;
-        source.persist_fetched_identity_directory(&full)?;
-        sibling.persist_fetched_identity_directory(&full)?;
+        source.persist_observed_identity_directory_now(&full)?;
+        sibling.persist_observed_identity_directory_now(&full)?;
         for spec in [primary, self] {
             spec.directory
                 .lock()

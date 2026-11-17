@@ -17,6 +17,9 @@ pub struct ContactCardV3 {
     pub master_public_key: String,
     pub master_certificate: Envelope<MasterCertificate>,
     pub authority_head_hash: String,
+    /// `device_set_epoch` of the issuing record. A required signed floor: acceptance needs a
+    /// current authority at or above it, and the exact head when the epochs are equal.
+    pub authority_epoch: u64,
     pub devices: Vec<Device>,
     pub node_url: String,
     pub node_key_fingerprint: String,

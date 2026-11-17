@@ -197,7 +197,7 @@ pub(crate) async fn receive_first_hand(
     source: &mut Fixture,
     peer: &Fixture,
 ) -> TestResult<(g::EventIdentity, g::HistoryItem, String)> {
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     peer.client.establish_friend_link(
         "native-origin-sender-link",
         &peer.client.own_account_anchor()?,

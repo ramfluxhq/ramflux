@@ -120,7 +120,7 @@ pub(super) async fn seeded(
         Box::pin(Fixture::with_principal_at(root.child(ACCOUNT), ACCOUNT, "device-alice", ACCOUNT))
             .await?;
     let peer = Box::pin(Fixture::new("receipt-peer")).await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own = source.client.owned_device_identity()?;
     let remote = peer.client.owned_device_identity()?;
     let conversation = g::dm_scope::derive(own.root_commitment(), remote.root_commitment())?;

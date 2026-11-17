@@ -154,6 +154,33 @@ impl AccountDb {
         Ok(())
     }
 
+    /// Discard a layer-declaration candidate that never left this device.
+    ///
+    /// The operation id, candidate hash, kind and `prepared` state are rechecked inside one
+    /// immediate transaction. A submitted or acknowledged head may already exist at the node and
+    /// is never discarded here. Returns whether a row was removed.
+    ///
+    /// # Errors
+    /// SQLite or field errors.
+    pub fn discard_prepared_layer_head(
+        &self,
+        operation_id: &str,
+        candidate_hash: &str,
+    ) -> Result<bool, StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        let Some(head) = self.pairing_head()? else { return Ok(false) };
+        if head.kind != "layer_update"
+            || head.state != "prepared"
+            || head.operation_id != operation_id
+            || head.candidate_hash != candidate_hash
+        {
+            return Ok(false);
+        }
+        self.delete_head(&head.account_id, &head.operation_id)?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     /// Retire an ordinary acknowledged head without fabricating an invitation/ceremony.
     ///
     /// # Errors
@@ -163,7 +190,7 @@ impl AccountDb {
         self.require_local(&adoption.account_id)?;
         let transaction = self.connection.immediate_transaction()?;
         let head = self.pairing_head()?.ok_or(field("state"))?;
-        require(matches!(head.kind.as_str(), "head_update" | "revoke"), "kind")?;
+        require(matches!(head.kind.as_str(), "head_update" | "layer_update" | "revoke"), "kind")?;
         require(head.operation_id == adoption.operation_id, "operation_id")?;
         require(head.candidate_hash == adoption.record_hash, "record_hash")?;
         require(head.state == "acknowledged", "state")?;

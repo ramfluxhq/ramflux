@@ -65,7 +65,7 @@ pub(super) fn install_native_directories(
 ) -> Result<(), SdkError> {
     for holder in accounts {
         for source in accounts {
-            holder.client.persist_fetched_identity_directory(&manifest_of(source)?)?;
+            holder.client.persist_observed_identity_directory_now(&manifest_of(source)?)?;
         }
     }
     Ok(())
@@ -163,7 +163,7 @@ fn r5_removed_requester_flood_is_not_stored_and_other_groups_keep_capacity() -> 
     let admin = native_person("admin", "phone")?;
     let victim = native_person("victim", "phone")?;
     for person in [&owner, &removed, &admin, &victim] {
-        owner.client.persist_fetched_identity_directory(&manifest_of(person)?)?;
+        owner.client.persist_observed_identity_directory_now(&manifest_of(person)?)?;
     }
     owner.client.fixture_group_create("g", "t", None, "phone")?;
     owner.client.fixture_group_change(

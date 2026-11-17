@@ -113,6 +113,7 @@ async fn deliver_plan(
         Ok(Some(manifest))
     } else {
         let path = format!("/mvp1/device-manifest/{}", plan.root);
+        let started = std::time::Instant::now();
         let fetch = crate::prekey::sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
             &plan.config,
             &path,
@@ -121,9 +122,11 @@ async fn deliver_plan(
             .await
             .map_err(|_| stopped())?
             .and_then(|manifest| {
-                manifest.ok_or_else(|| {
-                    SdkError::InboundPending("own-device manifest unavailable".into())
-                })
+                manifest
+                    .ok_or_else(|| {
+                        SdkError::InboundPending("own-device manifest unavailable".into())
+                    })
+                    .map(|manifest| manifest.fetched_from(started))
             })
             .map(Some)
     };

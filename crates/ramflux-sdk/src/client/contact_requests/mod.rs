@@ -268,6 +268,8 @@ impl RamfluxClient {
                     &body.target_root,
                 )?;
                 self.replicate_contact_acceptance(&request)?;
+                // The acceptor may have published after our cached manifest was fetched.
+                self.manifest_demand.request(&body.target_root);
                 self.promote_contact_request_cache(&request.contact_identity_commitment)?;
                 self.persist_native_accepted_contact_safety(
                     &request.principal_id,

@@ -82,7 +82,7 @@ async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_
     )
     .await?;
     let peer = crate::client::native_test_support::Fixture::new("bob").await?;
-    peer.client.persist_fetched_identity_directory(&agent.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&agent.manifest)?;
     let stored = peer.client.account_db()?.client_record("identity", "agent")?.ok_or("identity")?;
     assert!(stored.get("verified").is_none(), "stored identity rows do not carry verified");
     let row = crate::bus::read_model::row(&peer.client, "identity", "agent")?;

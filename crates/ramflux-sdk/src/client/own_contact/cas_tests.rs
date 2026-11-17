@@ -228,7 +228,7 @@ fn enroll_sibling(
         message_layer: None,
     });
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
-    own.client.persist_fetched_identity_directory(&fetched)?;
+    own.client.persist_observed_identity_directory_now(&fetched)?;
     Ok((qualified, native))
 }
 
@@ -251,7 +251,7 @@ fn revoke_sibling_sync(
     entry.branch_certificate = Some(primary.certify_branch(certificate)?);
     native.publication.record = primary.sign_record(body)?;
     let fetched = crate::prekey::SdkDeviceManifestResponse::from_native(native.clone())?;
-    own.client.persist_fetched_identity_directory(&fetched)?;
+    own.client.persist_observed_identity_directory_now(&fetched)?;
     Ok(())
 }
 
@@ -360,7 +360,7 @@ fn advance_peer_head(own: &Fixture, peer: &Fixture) -> TestResult {
 async fn verify_cas_sibling_evidence_is_context_bound() -> TestResult {
     let local = Fixture::new("cas-origin").await?;
     let peer = Fixture::new("cas-foreign").await?;
-    local.client.persist_fetched_identity_directory(&peer.manifest)?;
+    local.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let peer_root = peer.manifest.principal_commitment.clone();
     local.client.establish_friend_link(
         "cas-sibling-link",

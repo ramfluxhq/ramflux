@@ -36,7 +36,7 @@ async fn native_generated_receipt_opens_on_receipt_route_with_exact_inner() -> T
         },
     )?;
     let envelope = source.seal_inner_to(&target, &exact)?;
-    target.client.persist_fetched_identity_directory(&source.manifest)?;
+    target.client.persist_observed_identity_directory_now(&source.manifest)?;
     ramflux_node_core::check_entry_bound(&envelope)?;
     let entry = crate::GatewayInboxEntry {
         envelope,
@@ -85,8 +85,8 @@ async fn native_generated_group_key_imports_only_on_its_group_route_and_decrypts
 -> TestResult {
     let source = Fixture::with_device("typed-key-source", "source-device").await?;
     let mut target = Fixture::with_device("typed-key-target", "target-device").await?;
-    source.client.persist_fetched_identity_directory(&target.manifest)?;
-    target.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&target.manifest)?;
+    target.client.persist_observed_identity_directory_now(&source.manifest)?;
     let primary = source
         .client
         .born_v3_account

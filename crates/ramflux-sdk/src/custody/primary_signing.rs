@@ -143,7 +143,7 @@ pub(crate) fn retain_submitted(
         Ok(_) => return Err(wrong()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::platform::fs::create_owner_only_dir(&directory)?;
-            File::open(dir)?.sync_all()?;
+            crate::platform::fs::sync_path(dir)?;
         }
         Err(e) => return Err(e.into()),
     }
@@ -156,7 +156,7 @@ pub(crate) fn retain_submitted(
         file.write_all(&canonical_json_bytes(fence)?)?;
         file.sync_all()?;
         fs::rename(&temporary, path(dir))?;
-        File::open(&directory)?.sync_all()?;
+        crate::platform::fs::sync_path(&directory)?;
         Ok(())
     })();
     if result.is_err() {

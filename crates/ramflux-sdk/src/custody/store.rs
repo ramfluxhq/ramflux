@@ -249,6 +249,7 @@ impl BornAccount {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn require_unfenced_primary_snapshot(&self) -> Result<std::fs::File, SdkError> {
         self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
@@ -263,11 +264,48 @@ impl BornAccount {
         Ok(lock)
     }
     /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
-    /// The caller may publish the returned candidate only through an explicit later action.
+    /// The caller holds the primary signing barrier through `lease`; no second lock is taken, so
+    /// the same lease may stay held through the prepared-journal commit that follows.
     /// # Errors
     /// Rejects a mismatched primary/branch credential, invalid validity bounds, exhausted native
     /// revision, or any candidate that fails native authority verification.
-    pub fn candidate_message_layer_publication(
+    pub(crate) fn candidate_message_layer_publication_leased(
+        &self,
+        root: &Path,
+        lease: &super::PrimarySigningLease,
+        branch: &super::BranchCredentials,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        self.require_current_snapshot()?;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        self.candidate_message_layer_publication_with(
+            root,
+            branch,
+            lease,
+            ramflux_protocol::custody::MAX_MESSAGE_LAYER,
+            validity,
+        )
+    }
+
+    /// Fixture entry that takes the signing barrier itself. Product code uses the leased builder.
+    /// # Errors
+    /// As [`Self::candidate_message_layer_publication_leased`].
+    #[cfg(test)]
+    pub(crate) fn candidate_message_layer_publication(
+        &self,
+        root: &Path,
+        branch: &super::BranchCredentials,
+        primary: &ramflux_crypto::custody::SelfSigningKey,
+        max_layer: u32,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        let _signing = self.require_unfenced_primary_snapshot()?;
+        self.candidate_message_layer_publication_with(root, branch, primary, max_layer, validity)
+    }
+
+    fn candidate_message_layer_publication_with(
         &self,
         root: &Path,
         branch: &super::BranchCredentials,
@@ -276,7 +314,6 @@ impl BornAccount {
         validity: super::DeclarationValidity,
     ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
         use ramflux_protocol::custody::{decode_epoch, encode_epoch};
-        let _signing = self.require_unfenced_primary_snapshot()?;
         let now = validity.issued_at;
         let expires_at = validity.expires_at;
         require_current_authority(&self.stored.pins, &self.verified)?;
@@ -712,6 +749,34 @@ pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
 /// Rejects missing/corrupt records, bad signatures, changed modes or missing custodian evidence.
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
     read_account(root, id, now, true, None)
+}
+/// Like [`load_account`], but when a local head installation is in flight it awaits that
+/// installation's completion notification (bounded by 8 s, below the 15 s CLI subprocess
+/// timeout of the e2e harness) instead of reporting it as
+/// pending. A crashed installation never signals: the timeout elapses and the typed
+/// `PublicationPending` is returned, to be repaired at unlock.
+pub(crate) async fn load_account_after_install(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<BornAccount, SdkError> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        // Arm before reading so a completion between the read and the wait is not lost.
+        let settled = super::pairing::activate::INSTALL_SETTLED.notified();
+        tokio::pin!(settled);
+        settled.as_mut().enable();
+        match load_account(root, id, now) {
+            Err(SdkError::PairingCode("PublicationPending")) => {
+                if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                    // Still in flight: a typed, retryable refusal, never masked.
+                    return load_account(root, id, now);
+                }
+            }
+            other => return other,
+        }
+    }
 }
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.

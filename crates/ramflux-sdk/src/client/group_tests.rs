@@ -60,6 +60,7 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
     let commitment = root_for(principal);
     let now = now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        fetched_after: crate::prekey::FetchStamp::default(),
         custody: None,
         principal_id: principal.into(),
         principal_commitment: commitment.clone(),

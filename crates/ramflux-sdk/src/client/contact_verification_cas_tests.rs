@@ -26,7 +26,7 @@ impl Drop for ClearHooks {
 async fn linked() -> TestResult<(Fixture, Fixture, String)> {
     let local = Fixture::new("cas-local").await?;
     let peer = Fixture::new("cas-peer").await?;
-    local.client.persist_fetched_identity_directory(&peer.manifest)?;
+    local.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own = local.client.own_account_anchor()?;
     let peer_root = peer.manifest.principal_commitment.clone();
     local.client.establish_friend_link("cas-link", &own, &peer_root)?;

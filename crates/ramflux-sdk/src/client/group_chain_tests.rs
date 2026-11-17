@@ -11,8 +11,8 @@ async fn shared_pair() -> TestResult<(Fixture, Fixture)> {
     let a = Box::pin(Fixture::with_principal("chain-owner", "owner", "owner")).await?;
     let b = Box::pin(Fixture::with_principal("chain-peer", "peer", "peer")).await?;
     for manifest in [&a.manifest, &b.manifest] {
-        a.client.persist_fetched_identity_directory(manifest)?;
-        b.client.persist_fetched_identity_directory(manifest)?;
+        a.client.persist_observed_identity_directory_now(manifest)?;
+        b.client.persist_observed_identity_directory_now(manifest)?;
     }
     let primary = a
         .client

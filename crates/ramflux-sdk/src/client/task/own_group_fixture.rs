@@ -24,7 +24,7 @@ pub(super) async fn fixture(excluded_epoch: bool) -> TestResult<GroupFixture> {
     human.accept_peer(&native)?;
     agent = native.into_bus();
     let human = human.into_bus();
-    sibling.client.persist_fetched_identity_directory(
+    sibling.client.persist_observed_identity_directory_now(
         &human.client.native_bus_fixture.as_ref().ok_or("human material")?.manifest,
     )?;
     let genesis =
@@ -35,7 +35,7 @@ pub(super) async fn fixture(excluded_epoch: bool) -> TestResult<GroupFixture> {
             .await?
             .into_bus();
         for client in [&agent.client, &sibling.client] {
-            client.persist_fetched_identity_directory(
+            client.persist_observed_identity_directory_now(
                 &excluded.client.native_bus_fixture.as_ref().ok_or("excluded material")?.manifest,
             )?;
         }

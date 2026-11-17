@@ -59,7 +59,7 @@ fn prepare_current_edit(
     let own = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
     let conversation = g::dm_scope::derive(&own, &peer_root)?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     source.client.establish_friend_link("authored-link", &own, &peer_root)?;
     source
         .client

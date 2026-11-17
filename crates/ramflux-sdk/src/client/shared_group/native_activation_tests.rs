@@ -181,8 +181,8 @@ pub(super) async fn bootstrap_continuity() -> TestResult {
 pub(super) async fn three_devices() -> TestResult {
     let (mut source, mut peer, _) = Box::pin(pair()).await?;
     let mut sibling = source.enroll_sibling("group-convergence-sibling", "laptop").await?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
-    sibling.client.persist_fetched_identity_directory(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
+    sibling.client.persist_observed_identity_directory_now(&peer.manifest)?;
     sibling.accept_peer(&peer)?;
     let state = change(
         &source,
@@ -296,8 +296,8 @@ pub(super) async fn implicit_sibling_history() -> TestResult {
     peer.client.accept_shared_group_state(&state, &peer.config.target_delivery_id)?;
     let (original, _) = group_message(&source, "history before sibling enrollment")?;
     let mut sibling = source.enroll_sibling("group-implicit-sibling", "laptop").await?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
-    sibling.client.persist_fetched_identity_directory(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
+    sibling.client.persist_observed_identity_directory_now(&peer.manifest)?;
     sibling.client.accept_shared_group_state(&state, &sibling.config.target_delivery_id)?;
     let plan =
         source.client.prepare_authored_history(&source.config)?.ok_or("test: group history")?;
@@ -357,8 +357,8 @@ pub(super) async fn fork_ciphertext() -> TestResult {
     let receiver_right =
         receiver_left.enroll_sibling("group-fork-receiver", "fork-receiver").await?;
     for client in [&left, &right, &receiver_left, &receiver_right] {
-        client.client.persist_fetched_identity_directory(&left.manifest)?;
-        client.client.persist_fetched_identity_directory(&receiver_left.manifest)?;
+        client.client.persist_observed_identity_directory_now(&left.manifest)?;
+        client.client.persist_observed_identity_directory_now(&receiver_left.manifest)?;
     }
     right.client.accept_shared_group_state(&base, &right.config.target_delivery_id)?;
     let first = change(&left, GroupStateChange::SetName { name: "left".into() })?;

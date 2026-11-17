@@ -13,8 +13,8 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
 async fn peer_accepts_native_owner_snapshot_body() -> TestResult {
     let owner = Fixture::with_device("native-group-owner", "owner-device").await?;
     let mut peer = Fixture::with_device("native-group-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
 
     let owner_primary = owner
         .client

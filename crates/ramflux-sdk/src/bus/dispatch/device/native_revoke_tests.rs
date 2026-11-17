@@ -11,7 +11,7 @@ async fn externally_custodied_published_revoke_observer_retires_pairs_and_fences
     crate::bus::credentials::contract_tests::deadline(Box::pin(async {
         let owner = Fixture::externally_custodied("external-observer").await?;
         let peer = Fixture::new("observer-peer").await?;
-        owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+        owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
         let local = owner.client.owned_device_identity()?;
         let remote = peer.client.owned_device_identity()?;
         let bundle = peer.client.load_x3dh_private_state(&remote)?.bundle;

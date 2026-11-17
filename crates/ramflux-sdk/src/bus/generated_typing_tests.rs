@@ -233,7 +233,7 @@ async fn reopen_forgets_correlation(
     source.client.active_account_db = None;
     source.client.unlock_account("ephemeral-source", b"native fixture data passphrase")?;
     Box::pin(source.client.initialize_born_v3_branch("primary", vault)).await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let Some(g::message_request::Action::Send(body)) = send.action.as_ref() else {
         return Err("send".into());
     };

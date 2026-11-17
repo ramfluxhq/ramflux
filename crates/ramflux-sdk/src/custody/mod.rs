@@ -18,6 +18,7 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
+pub(crate) use store::load_account_after_install;
 pub(crate) use store::pairing::{
     matches_generation_install, matches_install, verify_generation_keys,
     verify_local as verify_pairing_local, write_authority as write_pairing_authority,

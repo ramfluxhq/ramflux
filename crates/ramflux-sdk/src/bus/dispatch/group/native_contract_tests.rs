@@ -215,8 +215,8 @@ pub(crate) async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, Gat
     use ramflux_protocol::group_state::GroupStateChange;
     let alice = Fixture::with_device("freshness-alice", "alice-device").await?;
     let bob = Fixture::with_device("freshness-bob", "bob-device").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let primary = bob
         .client
         .born_v3_account
@@ -382,7 +382,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
     // Isolate a stale local head: the stored projection authenticates Bob, not Alice.
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
-    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    account.client.persist_observed_identity_directory_now(&bob.manifest)?;
     assert_freshness_refusal(
         &account
             .client
@@ -400,7 +400,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
         *account.client.native_head_freshness.borrow_mut() =
             crate::client::identity_authority::NativeHeadFreshness::default();
         if local_fresh {
-            account.client.persist_fetched_identity_directory(&alice.manifest)?;
+            account.client.persist_observed_identity_directory_now(&alice.manifest)?;
         }
         assert_freshness_refusal(
             &account.client.committed_routing(HeadUse::NewAuthorization, &entry),
@@ -718,10 +718,10 @@ async fn admission_case(flags: (bool, bool, bool), duplicate_redelivery: bool) -
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
     if local_fresh {
-        account.client.persist_fetched_identity_directory(&alice.manifest)?;
+        account.client.persist_observed_identity_directory_now(&alice.manifest)?;
     }
     if peer_fresh {
-        account.client.persist_fetched_identity_directory(&bob.manifest)?;
+        account.client.persist_observed_identity_directory_now(&bob.manifest)?;
     }
     let service_pin = account.client.service_projection_pin("thread")?;
     assert!(
@@ -880,7 +880,7 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
     );
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
-    account.client.persist_fetched_identity_directory(&alice.manifest)?;
+    account.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let key = account.client.inbox_admission_key(&entry)?;
     let service_pin = account.client.service_projection_pin("thread")?;
     install_gateway(&mut account, vec![entry]);
@@ -893,7 +893,7 @@ async fn stale_head_new_inbound_stays_pending_until_verified_refresh_body() -> T
     account.client.persist_fetched_identity_directory_at(&bob.manifest, old)?;
     let mut invalid = bob.manifest.clone();
     invalid.principal_id = "invalid-authority".into();
-    assert!(account.client.persist_fetched_identity_directory(&invalid).is_err());
+    assert!(account.client.persist_observed_identity_directory_now(&invalid).is_err());
     crate::bus::sync_driver::run_at(&mut account, at + 2).await?;
     assert_retry_retained(&account, &key, &service_pin)?;
     let handle = account.connection.as_ref().ok_or("connection")?.clone();

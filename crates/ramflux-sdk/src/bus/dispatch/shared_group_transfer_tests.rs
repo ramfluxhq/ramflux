@@ -42,8 +42,8 @@ impl Rig {
             .load_actor_state(&format!("identity/manifest-root/{next_root}"))?
             .ok_or("next manifest")?;
         for client in [&phone.client, &laptop.client, &next.client] {
-            client.persist_fetched_identity_directory(&own)?;
-            client.persist_fetched_identity_directory(&remote)?;
+            client.persist_observed_identity_directory_now(&own)?;
+            client.persist_observed_identity_directory_now(&remote)?;
         }
         let (address, directory) = super::super::fixture::directory(
             &root,

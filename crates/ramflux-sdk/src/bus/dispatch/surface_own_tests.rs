@@ -77,7 +77,7 @@ async fn sibling_fixture_contacts(
     let sibling = Box::pin(bus::sibling(source, "sender", "device-sibling")).await?;
     let own = super::fixture::manifest(&source.client)?;
     let remote = super::fixture::manifest(&peer.peers.first().ok_or("peer")?.client)?;
-    sibling.client.persist_fetched_identity_directory(&remote)?;
+    sibling.client.persist_observed_identity_directory_now(&remote)?;
     let conversation = super::dm_tests::conversation(&source.client)?;
     let record = source
         .client
@@ -117,7 +117,7 @@ async fn sibling_fixture_contacts(
     receiver.server_name.clone_from(&config.server_name);
     receiver.ca_cert.clone_from(&config.ca_cert);
     for remote in &peer.peers {
-        remote.client.persist_fetched_identity_directory(&own)?;
+        remote.client.persist_observed_identity_directory_now(&own)?;
     }
     source.gateway_config = config.clone();
     Ok((sibling, config, receiver, directory, peer.peers.remove(0)))
@@ -829,7 +829,7 @@ fn advance_observed_custody(
     }
     let updated = crate::prekey::SdkDeviceManifestResponse::from_native(native)?;
     for client in observers {
-        client.persist_fetched_identity_directory(&updated)?;
+        client.persist_observed_identity_directory_now(&updated)?;
     }
     publish_served_manifest(&updated)?;
     Ok(updated)
@@ -1056,8 +1056,8 @@ pub(crate) async fn deliver_compared_safety_to_sibling_device() -> TestResult {
     let mut peer = Fixture::new("cas-sibling-peer").await?;
     let sibling = source.enroll_sibling("cas-sibling-device", "sibling").await?;
     let own_vault = std::sync::Arc::clone(&source.vault);
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    sibling.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    sibling.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let now = crate::custody::network_now()?;
     let own_native = source.manifest.custody.as_ref().ok_or("own custody")?.as_ref().clone();
     let own = own_native.publication.record.body.account_anchor.clone();

@@ -59,9 +59,9 @@ async fn group_surface_reaches_a_peer_sibling_only_after_its_device_joins()
     ))
     .await?;
     let second_target = joined.client.owned_device_identity()?.storage_key().to_owned();
-    source
-        .client
-        .persist_fetched_identity_directory(&super::fixture::manifest(&peer.peers[0].client)?)?;
+    source.client.persist_observed_identity_directory_now(&super::fixture::manifest(
+        &peer.peers[0].client,
+    )?)?;
     crate::client::native_test_support::bus::seed_pair(&source.client, &joined.client)?;
     // The directory now serves the enlarged roster; serving the old one would be a rollback.
     let updated_root = root.join("updated-directory");

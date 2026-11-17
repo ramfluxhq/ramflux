@@ -207,7 +207,7 @@ fn committed_account()
             .expect("test: peer");
         local
             .client
-            .persist_fetched_identity_directory(&peer.manifest)
+            .persist_observed_identity_directory_now(&peer.manifest)
             .expect("test: peer directory");
         let own = local.client.own_account_anchor().expect("test: anchor");
         let peer_root = peer.manifest.principal_commitment.clone();

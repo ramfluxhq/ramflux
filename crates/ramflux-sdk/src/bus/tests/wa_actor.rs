@@ -1052,7 +1052,7 @@ async fn routed_committed_covers_and_acks_case() -> Case {
                     .cloned()
                     .ok_or("fetched manifest")?,
             )?;
-            account.client.persist_fetched_identity_directory(&manifest)?;
+            account.client.persist_observed_identity_directory_now(&manifest)?;
         }
         let key = account.client.authenticated_committed_key(
             crate::client::identity_authority::HeadUse::NewAuthorization,

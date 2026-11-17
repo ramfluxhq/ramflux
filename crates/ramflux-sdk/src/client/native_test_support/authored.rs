@@ -19,7 +19,7 @@ impl Fixture {
             self.client.device_branch.as_ref().ok_or("reopened branch")?.clone(),
         ));
         self.config.source_identity = Some(self.client.owned_device_identity()?);
-        self.client.persist_fetched_identity_directory(&self.manifest)?;
+        self.client.persist_observed_identity_directory_now(&self.manifest)?;
         Ok(())
     }
 }
@@ -29,7 +29,7 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
 {
     let mut source = Fixture::new("authored-source").await?;
     let peer = Fixture::new("authored-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own_root = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
     let conversation = g::dm_scope::derive(&own_root, &peer_root)?;
@@ -60,7 +60,7 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
         .await
         .map_err(|error| format!("enroll third: {error}"))?;
     second.manifest = source.manifest.clone();
-    second.client.persist_fetched_identity_directory(&source.manifest)?;
+    second.client.persist_observed_identity_directory_now(&source.manifest)?;
     Box::pin(bootstrap_peer_contact(&source, &peer, &mut second, &mut third, &conversation))
         .await?;
     source

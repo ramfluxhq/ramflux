@@ -44,7 +44,13 @@ impl RamfluxClient {
             .ok_or(SdkError::PairingCode("UpdateRequired"))?;
         current.authorize(&job.source_ref, "sync", now)?;
         current.authorize(&job.target_ref, "sync", now)?;
-        if ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash {
+        // The enrollment head is a floor, not a snapshot: later heads (layer renewals, other
+        // enrollments) keep the job valid, while both devices must still be authorized above.
+        let epoch = current.envelope().body.device_set_epoch;
+        if epoch < job.record_epoch
+            || (epoch == job.record_epoch
+                && ramflux_protocol::custody::object_hash(current.envelope())? != job.record_hash)
+        {
             return Err(SdkError::PairingCode("HeadChanged"));
         }
         if target.principal_commitment != *root

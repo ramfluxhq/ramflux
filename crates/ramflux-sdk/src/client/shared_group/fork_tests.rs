@@ -389,7 +389,7 @@ fn offline_admin_removal_waits_for_owner_and_duplicate_has_one_result() -> Resul
         "owner",
         GroupStateChange::SetName { name: "new base".into() },
     )?;
-    owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+    owner.client.persist_observed_identity_directory_now(&manifest_of(&admin)?)?;
     owner.client.insert_group_request(&request, true)?;
     let primary = owner.client.fixture_primary()?;
     let result = owner.client.process_group_request_with_primary(
@@ -453,7 +453,7 @@ fn demoted_admin_pending_removal_gets_signed_refusal() -> Result<(), SdkError> {
             role: SharedGroupRole::Member,
         },
     )?;
-    owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+    owner.client.persist_observed_identity_directory_now(&manifest_of(&admin)?)?;
     owner.client.insert_group_request(&request, true)?;
     let primary = owner.client.fixture_primary()?;
     let result = owner.client.process_group_request_with_primary(
@@ -557,7 +557,7 @@ fn pending_requests_are_bounded_per_root_and_capacity_has_a_signed_result() -> R
             )?,
             request
         );
-        owner.client.persist_fetched_identity_directory(&manifest_of(&admin)?)?;
+        owner.client.persist_observed_identity_directory_now(&manifest_of(&admin)?)?;
         owner.client.insert_group_request(&request, true)?;
     }
     assert!(matches!(
@@ -626,7 +626,7 @@ fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_reques
     )?;
     let manifest = manifest_of(&admin)?;
     for (client, request) in [(&owner.client, &first), (&sibling.client, &second)] {
-        client.persist_fetched_identity_directory(&manifest)?;
+        client.persist_observed_identity_directory_now(&manifest)?;
         client.insert_group_request(request, true)?;
         let primary = client.fixture_primary()?;
         assert_eq!(
@@ -659,7 +659,7 @@ fn creator_conflict_rechecks_device_revocation_before_replaying_a_foreign_reques
     assert_eq!(applied.status, GroupChangeStatus::Applied);
     let held = hold_service(loser, "group", "thread")?;
     let revoked = primary_revoked_manifest(&admin, "admin")?;
-    loser.persist_fetched_identity_directory(&revoked)?;
+    loser.persist_observed_identity_directory_now(&revoked)?;
     assert!(
         !loser.fixture_accept_group_state(&winning, target)?,
         "a divergent foreign-name repair is refused"

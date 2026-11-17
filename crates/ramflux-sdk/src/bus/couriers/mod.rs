@@ -30,3 +30,4 @@ pub(crate) mod history;
 mod tests;
 
 pub(crate) mod head_refresh;
+pub(crate) mod layer_publish;

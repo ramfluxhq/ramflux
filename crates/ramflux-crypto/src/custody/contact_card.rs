@@ -25,6 +25,9 @@ pub fn verify_contact_card_v3(card: &Envelope<ContactCardV3>, now: u64) -> Resul
         certificate,
     )?;
     validate::bytes(&body.authority_head_hash, 32)?;
+    if body.authority_epoch == 0 {
+        return Err(validate::reject("invalid native contact card"));
+    }
     validate::time(body.issued_at)?;
     validate::time(body.expires_at)?;
     if body.version != 3
@@ -63,6 +66,7 @@ impl SelfSigningKey {
         let record = current.envelope();
         if body.master_certificate != record.body.master_certificate
             || body.authority_head_hash != object_hash(record)?
+            || body.authority_epoch != record.body.device_set_epoch
             || body.devices != record.body.devices
             || body.display_name != record.body.profile.display_name
             || self.public_key() != body.master_certificate.body.self_signing_public_key

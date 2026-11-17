@@ -373,7 +373,7 @@ async fn stranger_snapshot_waits_for_creator_consent_before_native_group_deliver
     watchdog::within(async {
         let source = Fixture::new("group-consent-source").await?;
         let mut target = Fixture::new("group-consent-target").await?;
-        source.client.persist_fetched_identity_directory(&target.manifest)?;
+        source.client.persist_observed_identity_directory_now(&target.manifest)?;
         {
             // The primary signing lease is exclusive; release it before `change` takes its own.
             let primary = source

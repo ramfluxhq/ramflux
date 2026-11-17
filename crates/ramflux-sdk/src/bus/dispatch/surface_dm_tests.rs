@@ -210,14 +210,14 @@ pub(super) async fn peer_fixture_devices(
     let peer_manifest = super::fixture::manifest(&peers.first().ok_or("peer")?.client)?;
     let own = native.manifest.clone();
     *source = native.into_bus();
-    source.client.persist_fetched_identity_directory(&peer_manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer_manifest)?;
     let conversation = ramflux_protocol::message::dm_scope::derive(
         &own.principal_commitment,
         &peer_manifest.principal_commitment,
     )?;
     for account in std::iter::once(&*source).chain(peers.iter()) {
-        account.client.persist_fetched_identity_directory(&own)?;
-        account.client.persist_fetched_identity_directory(&peer_manifest)?;
+        account.client.persist_observed_identity_directory_now(&own)?;
+        account.client.persist_observed_identity_directory_now(&peer_manifest)?;
         account.client.establish_friend_link(
             "surface-peer",
             &own.principal_commitment,
@@ -335,7 +335,7 @@ async fn assert_deliveries(
                 config.ca_cert = root.join("ca.pem");
                 // Already authenticated directory records isolate this receive from prekey discovery.
                 let own_manifest = super::fixture::manifest(source)?;
-                peer.client.persist_fetched_identity_directory(&own_manifest)?;
+                peer.client.persist_observed_identity_directory_now(&own_manifest)?;
                 let mut engine = GatewaySessionEngine::with_test_transport(
                     config,
                     Box::new(super::fixture::RecordingGateway::new(Arc::default())),

@@ -47,7 +47,22 @@ pub fn activate_recipient(
     install_exact(local, install, acknowledged_hash, &authority)
 }
 
+/// Signalled whenever a local head installation ends (success or failure), so readers that met
+/// the in-flight marker can wait for completion instead of polling.
+pub(crate) static INSTALL_SETTLED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub(crate) fn install_exact(
+    local: &Installation<'_>,
+    install: &Install,
+    acknowledged_hash: &str,
+    authority: &CustodyAuthority,
+) -> Result<(), SdkError> {
+    let outcome = install_exact_inner(local, install, acknowledged_hash, authority);
+    INSTALL_SETTLED.notify_waiters();
+    outcome
+}
+
+fn install_exact_inner(
     local: &Installation<'_>,
     install: &Install,
     acknowledged_hash: &str,
@@ -88,7 +103,9 @@ pub(crate) fn install_exact(
     custody::verify_pairing_local(&row, authority, vault, now)?;
     row.state = "adopt_prepared".into();
     install_store::write_pending(root, &row)?;
+    cut(1)?;
     custody::write_pairing_authority(root, &row, authority, vault, now)?;
+    cut(2)?;
     let account = custody::load_data_account(root, &row.account_id, now)?;
     if !custody::matches_install(&account, &row)? {
         return Err(SdkError::PairingCode("PublicationPending"));
@@ -96,10 +113,32 @@ pub(crate) fn install_exact(
     custody::verify_pairing_local(&row, authority, vault, now)?;
     row.state = "authority_durable".into();
     install_store::write_pending(root, &row)?;
+    cut(3)?;
     db.commit_pairing_install(&adoption)?;
+    cut(4)?;
     row.state = "installed".into();
     install_store::write_installed(root, &row)?;
     install_store::remove_pending(root, &row.account_id, &row.operation_id)?;
+    Ok(())
+}
+
+// Test seam: stop the installation after a numbered durable step, as a process death would.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CUT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn cut(step: u8) -> Result<(), SdkError> {
+    if CUT.with(|cell| cell.get() == step) {
+        CUT.with(|cell| cell.set(0));
+        return Err(SdkError::PairingCode("InjectedCut"));
+    }
+    Ok(())
+}
+#[cfg(not(test))]
+#[inline]
+#[allow(clippy::unnecessary_wraps)]
+fn cut(_step: u8) -> Result<(), SdkError> {
     Ok(())
 }
 

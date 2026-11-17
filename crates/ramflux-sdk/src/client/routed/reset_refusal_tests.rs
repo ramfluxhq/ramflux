@@ -57,7 +57,7 @@ async fn reopen(
     client.unlock_account("bob", b"native fixture data passphrase")?;
     let custody = config.custody.as_ref().ok_or("native custody config")?;
     client.initialize_born_v3_branch(&config.device_id, custody.vault.clone()).await?;
-    client.persist_fetched_identity_directory(&peer.manifest()?)?;
+    client.persist_observed_identity_directory_now(&peer.manifest()?)?;
     Ok(())
 }
 

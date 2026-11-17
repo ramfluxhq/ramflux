@@ -4,7 +4,7 @@
 //! Dormant pairing install-store and SDK coordinator. Default-off.
 /// Same-user local subscription topic carrying only closed public pairing display events.
 pub const PAIRING_EVENT_TOPIC: &str = "device.pairing.event";
-mod activate;
+pub(crate) mod activate;
 pub(crate) mod admission;
 mod coordinator;
 mod full_bootstrap;

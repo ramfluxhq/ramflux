@@ -218,7 +218,7 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
         .first()
         .cloned()
         .ok_or_else(|| invalid("source manifest"))?;
-    account(&state, "bob")?.persist_fetched_identity_directory(&manifest)?;
+    account(&state, "bob")?.persist_observed_identity_directory_now(&manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
     let control =
         account(&state, "bob")?.verify_contact_control(&entry, &opened.routing, &opened.body)?;
