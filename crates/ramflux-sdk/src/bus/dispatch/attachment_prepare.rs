@@ -362,7 +362,7 @@ impl Scope {
                 let root = text(row, "member_principal_commitment")?;
                 let member = text(row, "member_id")?;
                 let member_principal = text(row, "principal_id")?;
-                homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
+                homes.insert(root.clone(), home_of(&account.client, &member_principal, pin));
                 members.push((root, member));
             }
             let mut roots: Vec<_> = members.iter().map(|(root, _)| root.clone()).collect();
@@ -375,7 +375,7 @@ impl Scope {
             });
         }
         let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
-        homes.insert(root.clone(), home_of(&account.client, &peer)?);
+        homes.insert(root.clone(), home_of(&account.client, &peer, pin));
         Ok(Self {
             roots: vec![root.clone(), own_root],
             homes,
@@ -434,12 +434,18 @@ fn text(row: &Value, field: &str) -> Result<String, SdkError> {
         .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
 }
 
-fn home_of(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {
-    let row = client.account_db()?.client_record("identity", principal)?;
-    row.as_ref()
-        .and_then(|row| row.get("home_node_id"))
-        .and_then(Value::as_str)
-        .filter(|home| !home.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
+/// The home node of a principal: the one its identity record names, or the federation target
+/// when it is reached across nodes, and otherwise this account's own node, which is where every
+/// principal registered through the same gateway lives.
+fn home_of(client: &RamfluxClient, principal: &str, pin: &AuthorityPin) -> String {
+    let row = client.account_db().ok().and_then(|db| db.client_record("identity", principal).ok());
+    row.flatten()
+        .and_then(|row| {
+            row.get("home_node_id")
+                .or_else(|| row.get("federation").and_then(|route| route.get("target_node")))
+                .and_then(Value::as_str)
+                .filter(|home| !home.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| pin.home.clone())
 }
