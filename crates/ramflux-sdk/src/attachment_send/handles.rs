@@ -424,6 +424,21 @@ fn message_media(
         )
         .into());
     };
+    // A received group message keeps its wire wrapper in the Inner and the opened Message
+    // beside it; the opened bytes are the sender's Message and carry the media.
+    let message = if message.sealed_group.is_some() {
+        let opened = client
+            .account_db()?
+            .load_actor_state::<Vec<u8>>(&format!("routed/group-content/{message_id}"))?
+            .ok_or_else(|| {
+                Refusal::because_of(CODE_LAYOUT_INVALID, "the opened group message is not stored")
+            })?;
+        <ramflux_protocol::message::Message as prost::Message>::decode(opened.as_slice()).map_err(
+            |_| Refusal::because_of(CODE_LAYOUT_INVALID, "the opened group message is malformed"),
+        )?
+    } else {
+        message
+    };
     let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
     message.media.into_iter().nth(index).ok_or_else(|| {
         Refusal::because_of(CODE_LAYOUT_INVALID, "the message has no media entry at that index")
