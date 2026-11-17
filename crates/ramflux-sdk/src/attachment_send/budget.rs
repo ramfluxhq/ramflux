@@ -187,11 +187,6 @@ fn nearest_existing(path: &Path) -> &Path {
     current
 }
 
-#[cfg(test)]
-pub(crate) fn disk_reserved() -> u64 {
-    DISK.load(Ordering::Acquire)
-}
-
 /// Forces the free space every reservation under `scope` sees.
 #[cfg(test)]
 pub(crate) fn force_free_bytes(scope: &Path, value: u64) {

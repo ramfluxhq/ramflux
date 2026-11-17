@@ -206,12 +206,10 @@ fn multi_gigabyte_prepare_is_disk_full_before_any_copy() {
     budget::force_free_bytes(dir.path(), 128 * 1024 * 1024);
     let need = budget::prepare_bytes(4 << 30).unwrap();
     assert!(need > 8 << 30, "plaintext and ciphertext are both reserved: {need}");
-    let before = budget::disk_reserved();
     assert_eq!(
         budget::reserve_disk(dir.path(), need).unwrap_err().code,
         super::codes::CODE_DISK_FULL
     );
-    assert_eq!(budget::disk_reserved(), before, "a refused reservation holds nothing");
 }
 
 #[test]

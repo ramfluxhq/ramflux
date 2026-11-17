@@ -324,10 +324,14 @@ fn revoke_fences_an_open_import_handle_and_removes_its_staging_file() {
     let (row, media) = fixture.send("send", &[&a]);
     let sent = [Sent { prepare_id: &row.prepare_id, media: &media }];
     retire::bind_message(&fixture.ctx(), "m4", &sent, &fixture.source(), fixture.now).unwrap();
-    let staging = fixture.dir.path().join("staging-m4.bin");
-    std::fs::write(&staging, b"plaintext in flight").unwrap();
+    let staging = fixture.dir.path().join("import-m4").join("body.bin");
+    let other = fixture.dir.path().join("import-other").join("body.bin");
+    for path in [&staging, &other] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"plaintext in flight").unwrap();
+    }
     handles::test_register_job("import-m4", "human", "m4", staging.clone());
-    handles::test_register_job("import-other", "human", "other-message", staging.clone());
+    handles::test_register_job("import-other", "human", "other-message", other);
     retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m4", &fixture.source(), fixture.now)
         .unwrap();
     assert!(handles::test_job_cancelled("import-m4"), "the open handle is fenced");
