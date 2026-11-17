@@ -71,8 +71,12 @@ fn send_fresh(
             Ok(value) => return Ok(value),
             Err(error) if Instant::now() >= deadline => {
                 refusals.push(error.to_string());
-                let all: Vec<String> =
-                    refusals.iter().map(|text| text.chars().take(400).collect()).collect();
+                let all: Vec<String> = refusals
+                    .iter()
+                    .map(|text| {
+                        text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect()
+                    })
+                    .collect();
                 return Err(format!("send never succeeded; refusals: {all:#?}").into());
             }
             Err(error) => {
