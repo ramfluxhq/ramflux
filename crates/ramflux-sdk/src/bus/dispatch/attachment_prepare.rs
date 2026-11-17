@@ -361,7 +361,26 @@ impl Scope {
             for row in &rows {
                 let root = text(row, "member_principal_commitment")?;
                 let member = text(row, "member_id")?;
-                let member_principal = text(row, "principal_id")?;
+                // The route row carries the principal only once its device set was observed; the
+                // contact commitment record, written when the contact's root was pinned, names it
+                // for every root this account holds a contact for.
+                let member_principal = match text(row, "principal_id") {
+                    Ok(principal) => principal,
+                    Err(_) => account
+                        .client
+                        .account_db()?
+                        .client_record("commitment", &root)?
+                        .as_ref()
+                        .and_then(|record| record.get("principal_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            crate::attachment_send::because(
+                                CODE_AUTHORITY_UNAVAILABLE,
+                                "a group member's principal is not known",
+                            )
+                        })?,
+                };
                 homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
                 members.push((root, member));
             }
