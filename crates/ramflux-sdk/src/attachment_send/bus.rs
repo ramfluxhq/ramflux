@@ -238,13 +238,25 @@ fn renew(
     Ok(local_bus_ok(progress(&store.renew(&body.prepare_id, body.generation, unix_now()?)?)))
 }
 
+/// The unlocked account's own data directory: the folder that holds its database.
+/// # Errors
+/// Returns `AccountDbNotUnlocked` when no database is open.
+pub(crate) fn account_dir(client: &crate::RamfluxClient) -> Result<std::path::PathBuf, SdkError> {
+    client
+        .account_db()?
+        .path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or(SdkError::AccountDbNotUnlocked)
+}
+
 pub(crate) fn open_store(
     client: &crate::RamfluxClient,
     account_id: &str,
 ) -> Result<Store, SdkError> {
-    let root = client.reader_account_root.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?;
+    let root = account_dir(client)?;
     let secret = client.vault_secret_source()?.vault_secret(account_id)?;
-    let store = Store::open(root, account_id, secret)?;
+    let store = Store::open(&root, account_id, secret)?;
     store.recover_once(unix_now()?)?;
     Ok(store)
 }

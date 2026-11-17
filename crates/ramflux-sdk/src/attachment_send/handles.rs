@@ -114,7 +114,7 @@ pub(crate) fn begin(
     let length = source.length();
     let scheduler_large = length >= scheduler::LARGE_BYTES;
     let import_id = fresh_id()?;
-    let root = account.client.reader_account_root.clone().ok_or(SdkError::AccountDbNotUnlocked)?;
+    let root = bus::account_dir(&account.client)?;
     let dir = root.join("attachment-imports").join(&import_id);
     let reserve = budget::import_bytes(length)?;
     count_ok(&id)?;
