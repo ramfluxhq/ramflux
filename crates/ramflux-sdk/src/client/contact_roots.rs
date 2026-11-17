@@ -64,6 +64,26 @@ impl RamfluxClient {
         Ok(())
     }
 
+    /// Pins the home node a contact card was verified against. Attachment grants name the
+    /// grantee's home, so this is the only source of it; a different value later is a conflict,
+    /// never an overwrite.
+    /// # Errors
+    /// Returns `RootConflict` when another home is already pinned for the contact.
+    pub(crate) fn pin_contact_home(&self, principal: &str, home: &str) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let Some(mut identity) = db.client_record("identity", principal)? else {
+            return Err(ContactReason::UnknownPrincipal.into());
+        };
+        match identity.get("home_node_id").and_then(Value::as_str) {
+            Some(existing) if existing == home => return Ok(()),
+            Some(_) => return Err(ContactReason::RootConflict.into()),
+            None => {}
+        }
+        identity["home_node_id"] = json!(home);
+        db.persist_client_record("identity", principal, &identity)?;
+        Ok(())
+    }
+
     pub(crate) fn contact_root_source(
         &self,
         identity: &Value,

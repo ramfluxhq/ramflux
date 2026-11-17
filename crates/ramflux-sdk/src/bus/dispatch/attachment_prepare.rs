@@ -362,7 +362,7 @@ impl Scope {
                 let root = text(row, "member_principal_commitment")?;
                 let member = text(row, "member_id")?;
                 let member_principal = text(row, "principal_id")?;
-                homes.insert(root.clone(), home_of(&account.client, &member_principal, pin));
+                homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
                 members.push((root, member));
             }
             let mut roots: Vec<_> = members.iter().map(|(root, _)| root.clone()).collect();
@@ -375,7 +375,7 @@ impl Scope {
             });
         }
         let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
-        homes.insert(root.clone(), home_of(&account.client, &peer, pin));
+        homes.insert(root.clone(), home_of(&account.client, &peer)?);
         Ok(Self {
             roots: vec![root.clone(), own_root],
             homes,
@@ -434,18 +434,53 @@ fn text(row: &Value, field: &str) -> Result<String, SdkError> {
         .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
 }
 
-/// The home node of a principal: the one its identity record names, or the federation target
-/// when it is reached across nodes, and otherwise this account's own node, which is where every
-/// principal registered through the same gateway lives.
-fn home_of(client: &RamfluxClient, principal: &str, pin: &AuthorityPin) -> String {
-    let row = client.account_db().ok().and_then(|db| db.client_record("identity", principal).ok());
-    row.flatten()
-        .and_then(|row| {
-            row.get("home_node_id")
-                .or_else(|| row.get("federation").and_then(|route| route.get("target_node")))
-                .and_then(Value::as_str)
-                .filter(|home| !home.is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| pin.home.clone())
+/// The home node pinned for a contact when its card was accepted. Nothing else names it: a
+/// contact with no pinned home is `authority_unavailable`, never this node by assumption.
+fn home_of(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {
+    let row = client.account_db()?.client_record("identity", principal)?;
+    row.as_ref()
+        .and_then(|row| row.get("home_node_id"))
+        .and_then(Value::as_str)
+        .filter(|home| !home.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn account() -> Result<(tempfile::TempDir, LocalBusAccountState), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let account = crate::bus::runtime_tests::account(
+            root.path(),
+            "sender",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        Ok((root, account))
+    }
+
+    #[test]
+    fn a_peer_with_no_pinned_home_is_refused_and_a_pinned_home_is_used()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_root, account) = account()?;
+        let db = account.client.account_db()?;
+        db.persist_client_record("identity", "peer", &json!({"principal_id": "peer"}))?;
+        let refused = home_of(&account.client, "peer").unwrap_err();
+        assert!(
+            refused.to_string().contains("authority_unavailable"),
+            "a contact without a pinned home is a typed refusal, got {refused}"
+        );
+        assert!(home_of(&account.client, "unknown").is_err(), "an unknown principal has no home");
+        account.client.pin_contact_home("peer", "node-a")?;
+        assert_eq!(home_of(&account.client, "peer")?, "node-a");
+        account.client.pin_contact_home("peer", "node-a")?;
+        assert!(
+            account.client.pin_contact_home("peer", "node-b").is_err(),
+            "a pinned home is never overwritten by another one"
+        );
+        assert_eq!(home_of(&account.client, "peer")?, "node-a", "the pin is unchanged");
+        Ok(())
+    }
 }
