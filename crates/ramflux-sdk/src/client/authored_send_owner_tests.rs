@@ -27,6 +27,8 @@ fn media_ref(object_id: &str) -> Result<g::MediaRef, SdkError> {
             },
             encrypted_key: vec![4; 32],
             format: 1,
+            grant_id: Vec::new(),
+            read_capability: Vec::new(),
         }],
         relay_origin: "https://relay.example".into(),
         read_capability: vec![5; 32],
