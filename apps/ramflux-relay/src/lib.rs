@@ -4,9 +4,9 @@
 //! Relay process composition and authenticated object operations.
 
 pub mod attachment_authority;
-mod attachment_service;
 pub mod attachment_publication;
 pub mod attachment_s3;
+mod attachment_service;
 
 use crate::config::{
     RELAY_CLIENT_QUIC_ADDR_ENV, mesh_tls_config, now_unix_seconds, trust_snapshot_refresh_interval,
