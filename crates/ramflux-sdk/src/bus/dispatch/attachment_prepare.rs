@@ -381,7 +381,11 @@ impl Scope {
                             )
                         })?,
                 };
-                homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
+                // This account's own home is the one its pin names; every other root needs the
+                // home pinned when that contact's card was accepted.
+                if root != own_root {
+                    homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
+                }
                 members.push((root, member));
             }
             let mut roots: Vec<_> = members.iter().map(|(root, _)| root.clone()).collect();
