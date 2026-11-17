@@ -158,7 +158,18 @@ impl RamfluxClient {
                 if self.friend_rejection_reason(principal)?.is_some() {
                     return Err(invalid("surface peer is not an accepted contact"));
                 }
-                self.account_db()?.persist_client_record("conversation",conversation,&json!({"id":conversation,"kind":"direct","group_id":null,"title":null,"participants":[local.principal_id,principal]}))?;
+                let mut record = json!({"id":conversation,"kind":"direct","group_id":null,"title":null,"participants":[local.principal_id,principal]});
+                if let Some(identity) = self.account_db()?.client_record("identity", principal)?
+                    && let Some(root) = identity["contact_identity_commitment"].as_str()
+                {
+                    let own = self.own_account_anchor()?;
+                    if ramflux_protocol::message::dm_scope::derive(&own, root).ok().as_deref()
+                        == Some(conversation)
+                    {
+                        record["participant_roots"] = json!([own, root]);
+                    }
+                }
+                self.account_db()?.persist_client_record("conversation", conversation, &record)?;
             }
         }
         Ok(())

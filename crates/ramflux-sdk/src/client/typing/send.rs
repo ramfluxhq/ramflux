@@ -18,6 +18,28 @@ fn refused(code: GeneratedErrorCode, reason: &str) -> SdkError {
     AdapterError::new(code, reason).into()
 }
 
+fn bound_direct_peer(
+    row: &serde_json::Value,
+    conversation: &str,
+    own: &str,
+) -> Result<String, SdkError> {
+    let roots = row["participant_roots"]
+        .as_array()
+        .ok_or_else(|| refused(GeneratedErrorCode::NotAuthorized, "direct root binding absent"))?;
+    let peer = roots
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|root| *root != own)
+        .ok_or_else(|| refused(GeneratedErrorCode::NotAuthorized, "direct peer absent"))?;
+    if roots.len() != 2
+        || !roots.iter().any(|root| root.as_str() == Some(own))
+        || g::dm_scope::validate_direct(conversation, own, peer).is_err()
+    {
+        return Err(refused(GeneratedErrorCode::NotAuthorized, "direct root binding mismatch"));
+    }
+    Ok(peer.into())
+}
+
 impl RamfluxClient {
     /// Set the frontend's focused conversation in this unlocked account generation.
     /// Returns the previous conversation so the host can issue its best-effort clear.
@@ -178,22 +200,40 @@ impl RamfluxClient {
         if row["kind"] != "direct" || !row["group_id"].is_null() {
             return Err(refused(GeneratedErrorCode::InvalidArgument, "Typing is DM only"));
         }
-        let own = self.own_account_anchor()?;
-        let roots = row["participant_roots"].as_array().ok_or_else(|| {
-            refused(GeneratedErrorCode::NotAuthorized, "direct root binding absent")
-        })?;
-        let peer = roots
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .find(|root| *root != own)
-            .ok_or_else(|| refused(GeneratedErrorCode::NotAuthorized, "direct peer absent"))?;
-        if roots.len() != 2
-            || !roots.iter().any(|root| root.as_str() == Some(own.as_str()))
-            || g::dm_scope::validate_direct(conversation, &own, peer).is_err()
-        {
-            return Err(refused(GeneratedErrorCode::NotAuthorized, "direct root binding mismatch"));
+        let mut refused_binding = None;
+        for own in self.direct_local_anchors()? {
+            match bound_direct_peer(&row, conversation, &own) {
+                Ok(peer) => return Ok(peer),
+                Err(error) => refused_binding = Some(error),
+            }
         }
-        Ok(peer.into())
+        // A direct send authorizes from the participant identity, not from participant_roots.
+        // Use that same commitment when the stored roots were omitted or written for another anchor.
+        if let Some(peer) = self.direct_participant_root(&row)? {
+            for own in self.direct_local_anchors()? {
+                if g::dm_scope::validate_direct(conversation, &own, &peer).is_err() {
+                    continue;
+                }
+                if !self.repair_unbound_direct_roots(conversation, &own, &peer)? {
+                    break;
+                }
+                return Ok(peer);
+            }
+        }
+        Err(refused_binding.unwrap_or_else(|| {
+            refused(GeneratedErrorCode::NotAuthorized, "direct root binding absent")
+        }))
+    }
+    fn direct_local_anchors(&self) -> Result<Vec<String>, SdkError> {
+        let mut anchors = Vec::with_capacity(2);
+        anchors.push(self.own_account_anchor()?);
+        if let Ok(device) = self.owned_device_identity() {
+            let root = device.root_commitment();
+            if !anchors.iter().any(|anchor| anchor == root) {
+                anchors.push(root.to_owned());
+            }
+        }
+        Ok(anchors)
     }
     fn typing_targets(
         &self,

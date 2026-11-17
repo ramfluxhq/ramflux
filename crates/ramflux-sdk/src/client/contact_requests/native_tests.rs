@@ -570,6 +570,58 @@ async fn accepting_a_request_lists_an_empty_direct_conversation_with_bound_roots
 }
 
 #[tokio::test]
+async fn accept_and_first_send_keep_one_direct_and_typing_uses_that_binding() -> TestResult {
+    let (sender, target, request) = pending_pair("direct-one-pair").await?;
+    let id = direct_id(&sender, &target)?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?, vec![id.clone()]);
+    let own = target.client.owned_device_identity()?;
+    let message = GatewayDirectMessage {
+        conversation_id: id.clone(),
+        message_id: "op".into(),
+        envelope_id: "env".into(),
+        source_principal_id: target.config.principal_id.clone(),
+        sender_id: own.device_id().into(),
+        recipient_device_id: None,
+        recipient_principal_commitment: Some(sender.manifest.principal_commitment.clone()),
+        target_delivery_id: String::new(),
+        encrypted_body: Vec::new(),
+        created_at: 0,
+        ttl: 0,
+    };
+    drop_direct_roots(&target, &id)?;
+    target.client.ensure_authored_direct_context(&message, &own)?;
+    assert_eq!(root_count(&target, &id)?, 2, "the first send binds the accept conversation");
+    assert_eq!(directory_ids(&target)?, vec![id.clone()]);
+    drop_direct_roots(&target, &id)?;
+    let again = target.client.ensure_direct_conversation(
+        &sender.manifest.principal_commitment,
+        &sender.manifest.principal_id,
+    )?;
+    assert_eq!(again.as_deref(), Some(id.as_str()));
+    assert_eq!(root_count(&target, &id)?, 2, "accept again fills the same row");
+    drop_direct_roots(&target, &id)?;
+    target.client.set_typing_focus(Some(&id))?;
+    assert_eq!(root_count(&target, &id)?, 2, "typing uses the same root pair as the direct send");
+    assert_eq!(directory_ids(&target)?, vec![id]);
+    target.client.set_typing_focus(None)?;
+    Ok(())
+}
+
+fn drop_direct_roots(fixture: &Fixture, id: &str) -> TestResult<()> {
+    let db = fixture.client.account_db()?;
+    let mut row = db.client_record("conversation", id)?.ok_or("row")?;
+    row.as_object_mut().ok_or("conversation object")?.remove("participant_roots");
+    db.persist_client_record("conversation", id, &row)?;
+    Ok(())
+}
+
+fn root_count(fixture: &Fixture, id: &str) -> TestResult<usize> {
+    let row = fixture.client.account_db()?.client_record("conversation", id)?.ok_or("row")?;
+    Ok(row["participant_roots"].as_array().ok_or("roots")?.len())
+}
+
+#[tokio::test]
 async fn accepted_retry_keeps_the_existing_row_history_and_title() -> TestResult {
     let (sender, target, request) = pending_pair("default-retry").await?;
     let id = direct_id(&sender, &target)?;
