@@ -157,14 +157,14 @@ impl Plane for Listener {
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         let registered = self
             .registry
-            .register_attested(
-                &self.requester,
-                call.upload_id,
-                &native,
-                &grant,
-                &self.authority,
-                self.now(),
-            )
+            .register_attested(&ramflux_node_core::AttestedRegistration {
+                requester: &self.requester,
+                upload_id: call.upload_id,
+                native: &native,
+                grant: &grant,
+                signer: &self.authority,
+                now: self.now(),
+            })
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         let raw = ramflux_protocol::decode_base64url(&registered.capability)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;

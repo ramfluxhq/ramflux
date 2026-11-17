@@ -86,7 +86,6 @@ fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Job>>> {
 
 /// Fences every open handle of `message_id`: no new byte is copied out, the staging file is
 /// removed, and the reservation is returned. Called when the message is retired or deleted.
-#[allow(dead_code)] // called by the retirement owner
 pub(crate) fn fence_message(message_id: &str) {
     let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for job in table.values().filter(|job| job.message_id == message_id) {
@@ -501,16 +500,6 @@ fn view(
     })
 }
 
-/// `relay_erased` is reported only after a confirmed cleanup ACK.
-#[must_use]
-pub(crate) fn revoke_state(existing: Option<&Value>) -> &'static str {
-    if existing.and_then(|row| row.get("relay_erased")).and_then(Value::as_bool) == Some(true) {
-        "relay_erased"
-    } else {
-        "retirement_pending"
-    }
-}
-
 fn bound(client: &crate::RamfluxClient, operation_id: &str) -> Result<Option<String>, SdkError> {
     let row = client.account_db()?.client_record(BINDING, operation_id)?;
     Ok(row.and_then(|value| value.get("import_id").and_then(Value::as_str).map(str::to_owned)))
@@ -572,11 +561,14 @@ pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str
         generation: 1,
         length: 0,
         expires_at: u64::MAX,
+        dir: path.parent().map(Path::to_path_buf).unwrap_or_default(),
         path,
+        reserved: AtomicU64::new(0),
         ready: AtomicBool::new(true),
         failed: Mutex::new(None),
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
+        meter: budget::Meter::default(),
     });
     jobs()
         .lock()

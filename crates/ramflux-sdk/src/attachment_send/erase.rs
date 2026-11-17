@@ -44,7 +44,7 @@ impl Store {
         let mut row = self.load(prepare_id)?;
         if !matches!(row.phase, Phase::Cleaning | Phase::Fenced) {
             row.phase = Phase::Cleaning;
-            budget::release(row.charged);
+            budget::release_disk(row.charged);
             row.charged = 0;
             self.save(&row)?;
         }

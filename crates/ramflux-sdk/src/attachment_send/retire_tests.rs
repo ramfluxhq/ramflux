@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 use super::codes::{CODE_ATTACHMENT_DELETED, CODE_NOT_GRANTEE, CODE_RETIREMENT_PENDING};
 use super::handles::{self, RETIREMENT, TOMBSTONE};
-use super::import_job::{self, Importer, SourcePin};
+use super::import_job::{Importer, SourcePin};
 use super::listener::Listener;
 use super::meta::{Intent, Phase, Recipient, Row};
 use super::publish::{self, PublishInput};
@@ -188,7 +188,7 @@ impl Fixture {
             public_key: &self.authority,
             now: self.now,
         };
-        import_job::import_entry(
+        super::section10::import_all(
             &self.listener,
             media,
             &Importer {
