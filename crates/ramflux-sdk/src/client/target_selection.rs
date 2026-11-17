@@ -510,7 +510,10 @@ impl RamfluxClient {
     }
 
     /// A refused cache is stale for that member's layer plan.
-    fn cached_roster(&self, root: &str) -> Result<Option<VerifiedLayerRoster>, SdkError> {
+    pub(crate) fn cached_roster(
+        &self,
+        root: &str,
+    ) -> Result<Option<VerifiedLayerRoster>, SdkError> {
         roster_from_authority_result(self.current_custody_authority(root, unix_now()?))
     }
 

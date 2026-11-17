@@ -16,6 +16,7 @@ struct Add {
     replace_provisional_root: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn add(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -74,10 +75,15 @@ pub(super) async fn add(
     {
         return Err(ContactReason::AlreadyContact.into());
     }
+    let mut verified_home = None;
     let gateway = match card.as_ref() {
         Some(card) => {
             let home = account_home(state, account_id)?;
-            card_gateway(card, &own, &state.config.data_root, &home).await?
+            let gateway = card_gateway(card, &own, &state.config.data_root, &home).await?;
+            // `card_gateway` proved the card's node is this node: same origin, same key
+            // fingerprint, same node id from its signed client record.
+            verified_home = Some(home.node_id.clone());
+            gateway
         }
         None => own.clone(),
     };
@@ -109,6 +115,9 @@ pub(super) async fn add(
         .await;
     account.apply_session_metadata(engine);
     let contact = result?;
+    if let (Some(home), Some(principal)) = (verified_home, contact["principal_id"].as_str()) {
+        account.client.pin_contact_home(principal, &home)?;
+    }
     #[cfg(test)]
     if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
         tracing::debug!(%error,"contact request queued for retry");

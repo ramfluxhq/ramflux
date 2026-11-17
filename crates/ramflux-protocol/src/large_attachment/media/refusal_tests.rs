@@ -65,7 +65,7 @@ fn media_nested_messages_refuse_unknown_duplicate_and_oversized_fields() {
         assert!(MediaRef::decode(&mutate(&valid, 5, suffix)).is_err());
     }
     for suffix in [&unknown, &duplicate_q] {
-        let slot = manifest.key_slots[0].encode();
+        let slot = manifest.key_slots[0].encode().unwrap();
         let changed_slot = mutate(&slot, 1, suffix);
         let mut encoded = Vec::new();
         for field in fields(&valid).unwrap() {

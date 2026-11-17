@@ -1074,6 +1074,8 @@ fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkE
         },
         encrypted_key: format!("old-key-{index}-canary").into_bytes(),
         format: 1,
+        grant_id: vec![6; 32],
+        read_capability: b"capability".to_vec(),
     }];
     let manifest = large::MediaManifest {
         manifest_id: [index + 1; 32],
@@ -1085,7 +1087,7 @@ fn edit_media_reference(target: &Fixture, index: u8) -> Result<g::MediaRef, SdkE
         segment_digests: vec![[8; 32]],
         key_slots: slots.clone(),
         relay_origin: "https://relay.example".into(),
-        read_capability: vec![7; 32],
+        read_capability: Vec::new(),
         expires_at: 4_000_000_000,
         retention_class: "relay_retained.v1".into(),
     };

@@ -98,8 +98,16 @@ async fn recovery() -> Case {
     let mut started = Box::pin(start(fixture)).await?;
     tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
     controls(&started.actor).await?;
-    assert_eq!(gateway.lock().map_err(|_| "gateway")?.sent.len(), 0);
-    assert_eq!(gateway.lock().map_err(|_| "gateway")?.acked.len(), 0);
+    let peer_target = started.peer().client.owned_device_identity()?.storage_key().to_owned();
+    {
+        let state = gateway.lock().map_err(|_| "gateway")?;
+        // The account sibling can receive its own copy without the peer prekey.
+        assert!(
+            state.sent.iter().all(|envelope| envelope.target_delivery_id != peer_target),
+            "pair reset reached the gateway while its prekey fetch was held"
+        );
+        assert!(state.acked.is_empty(), "inbound was acked while its prekey fetch was held");
+    }
     hold.release.notify_one();
     let envelope =
         submitted(&gateway, started.peer().client.owned_device_identity()?.storage_key()).await?;

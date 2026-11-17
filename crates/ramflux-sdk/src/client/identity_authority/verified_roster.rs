@@ -60,8 +60,58 @@ impl VerifiedLayerRoster {
             .collect()
     }
 
+    /// Every device that holds a current `message` lease in this record, with the keys the
+    /// signed branch certificate names and the layer its own fresh declaration grants.
+    /// A device whose declaration is absent or outside its window has layer 0, so a stale
+    /// declaration never counts toward layer 4.
+    #[must_use]
+    pub(crate) fn media_devices(&self, now: u64) -> Vec<VerifiedMediaDevice> {
+        let body = &self.record.envelope().body;
+        body.devices
+            .iter()
+            .filter_map(|entry| {
+                let reference = ramflux_protocol::custody::DeviceRef {
+                    account_anchor: body.account_anchor.clone(),
+                    device_id: entry.device_id.clone(),
+                    device_epoch: entry.device_epoch,
+                };
+                let certificate = self.record.authorize(&reference, "message", now).ok()?;
+                let layer = entry
+                    .message_layer
+                    .as_ref()
+                    .filter(|signed| {
+                        signed.declaration.issued_at <= now && now <= signed.declaration.expires_at
+                    })
+                    .map_or(0, |signed| signed.declaration.max_layer);
+                Some(VerifiedMediaDevice {
+                    account_anchor: body.account_anchor.clone(),
+                    device_id: entry.device_id.clone(),
+                    device_epoch: entry.device_epoch,
+                    signing_public: decode_key(&certificate.branch_signing_public_key)?,
+                    agreement_public: decode_key(&certificate.agreement_identity_public_key)?,
+                    layer,
+                })
+            })
+            .collect()
+    }
+
     #[must_use]
     pub(crate) fn device(&self, device_id: &str) -> Option<&Device> {
         self.record.envelope().body.devices.iter().find(|row| row.device_id == device_id)
     }
+}
+
+/// One device of a verified record that may be a media target.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedMediaDevice {
+    pub account_anchor: String,
+    pub device_id: String,
+    pub device_epoch: u64,
+    pub signing_public: [u8; 32],
+    pub agreement_public: [u8; 32],
+    pub layer: u32,
+}
+
+fn decode_key(text: &str) -> Option<[u8; 32]> {
+    ramflux_protocol::decode_base64url(text).ok()?.try_into().ok()
 }

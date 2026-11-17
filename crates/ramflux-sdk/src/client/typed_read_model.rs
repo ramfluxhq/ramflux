@@ -176,13 +176,22 @@ fn erasure_view(delete: &g::Delete) -> ErasureView {
 /// stay with the object reader, which alone opens media for the local device.
 fn strip_media_keys(message: &mut g::Message) {
     for media in &mut message.media {
-        media.key_slots.clear();
+        wipe_slots(&mut media.key_slots);
         if let Some(manifest) = media.large_manifest.as_mut() {
-            manifest.key_slots.clear();
+            wipe_slots(&mut manifest.key_slots);
             manifest.read_capability.fill(0);
             manifest.read_capability.clear();
         }
     }
+}
+
+fn wipe_slots(slots: &mut Vec<g::MediaKeySlot>) {
+    for slot in slots.iter_mut() {
+        slot.encrypted_key.fill(0);
+        slot.grant_id.fill(0);
+        slot.read_capability.fill(0);
+    }
+    slots.clear();
 }
 
 fn strip_content_media_keys(content: &mut g::Content) {
@@ -515,6 +524,8 @@ mod tests {
             recipient: None,
             encrypted_key: b"slot-key-material".to_vec(),
             format: 1,
+            grant_id: b"grant-id-must-stay-out".to_vec(),
+            read_capability: b"slot-capability-must-stay-out".to_vec(),
         };
         let message = g::Message {
             text: "caption".into(),
@@ -557,6 +568,12 @@ mod tests {
             assert_eq!(manifest.key_slots.len(), 0);
             assert_eq!(manifest.read_capability.len(), 0);
             assert_eq!(manifest.relay_origin, "relay");
+            let rendered =
+                serde_json::to_string(&stripped).map_err(|_| SdkError::PayloadTooLarge)?;
+            assert!(!rendered.contains("slot-key-material"), "{rendered}");
+            assert!(!rendered.contains("grant-id-must-stay-out"), "{rendered}");
+            assert!(!rendered.contains("slot-capability-must-stay-out"), "{rendered}");
+            assert!(!rendered.contains("read-capability-secret"), "{rendered}");
         }
         Ok(())
     }

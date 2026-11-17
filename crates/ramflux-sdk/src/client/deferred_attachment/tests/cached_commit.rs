@@ -188,10 +188,12 @@ async fn revocation_before_first_import_blocks_relay_import()
 #[tokio::test]
 async fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let f = Fixture::new().await?;
+    // One capture: a second revoke in a later unix second is a different payload.
+    let entry = revocation_entry(&f)?;
     let error = f
         .client
         .project_contact_control(
-            &revocation_entry(&f)?,
+            &entry,
             &json!({"type":"object.revoke_access","object_id":"unknown-object"}),
         )
         .err()
@@ -207,8 +209,8 @@ async fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std
     assert!(
         f.client
             .project_contact_control(
-                &revocation_entry(&f)?,
-                &json!({"type":"object.revoke_access","object_id":"remote-object"})
+                &entry,
+                &json!({"type":"object.revoke_access","object_id":"remote-object"}),
             )
             .is_err()
     );

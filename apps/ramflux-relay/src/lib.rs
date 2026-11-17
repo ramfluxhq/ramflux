@@ -6,6 +6,7 @@
 pub mod attachment_authority;
 pub mod attachment_publication;
 pub mod attachment_s3;
+mod attachment_service;
 
 use crate::config::{
     RELAY_CLIENT_QUIC_ADDR_ENV, mesh_tls_config, now_unix_seconds, trust_snapshot_refresh_interval,
@@ -105,6 +106,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
                 Arc::clone(&trust_snapshot_cache),
             )?;
         }
+        attachment_service::start(&config, &store, &redb_path)?;
         start_expire_scheduler(Arc::clone(&store), Arc::clone(&state));
         #[cfg(feature = "itest-redb-cache-probe")]
         start_cache_probe(&store);

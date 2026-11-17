@@ -327,6 +327,123 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.enable",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.chunk",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.renew",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "bot",
       "key_export": false,
       "name": "bot.install",
@@ -609,9 +726,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5",
+      "message_descriptor_blake3": "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc",
       "name": "contact.verify",
-      "product_pin": "77724f895764191b4482d82068bc32dc2e4207b2",
+      "product_pin": "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,

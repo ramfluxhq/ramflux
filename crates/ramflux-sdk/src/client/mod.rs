@@ -5,6 +5,7 @@ pub mod a2i;
 pub mod account;
 mod account_authority;
 pub(crate) mod attachment_diagnostics;
+pub(crate) mod attachment_roster;
 mod backup_activation;
 mod backup_contacts;
 pub(crate) mod call;
@@ -138,6 +139,10 @@ pub struct RamfluxClient {
     pub(crate) vault_secret_source_is_custom: bool,
     pub(crate) active_account_db: Option<AccountDb>,
     pub(crate) object_store: ObjectStore,
+    /// Production stays `None`. A send with prepares then returns `authority_unavailable`.
+    pub(crate) attachment_plane: Option<std::sync::Arc<dyn crate::attachment_send::Plane>>,
+    /// Set only while one attachment message is being authored; binds its grants to the id.
+    pub(crate) attachment_binding: Option<crate::attachment_send::Binding>,
     pub(crate) mcp_registry: McpRegistry,
     pub(crate) federation_mesh: FederationMesh,
     #[cfg(test)]
@@ -175,6 +180,8 @@ impl Default for RamfluxClient {
             vault_secret_source_is_custom: false,
             active_account_db: None,
             object_store: ObjectStore::new(),
+            attachment_plane: None,
+            attachment_binding: None,
             mcp_registry: McpRegistry::new(),
             federation_mesh: FederationMesh::new(),
         }

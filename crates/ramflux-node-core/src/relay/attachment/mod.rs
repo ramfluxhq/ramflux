@@ -94,6 +94,9 @@ pub struct AttachmentReservation {
     pub network_chunk_bytes: u32,
     pub size: u64,
     pub manifest_hash: Option<[u8; 32]>,
+    /// Signed content-manifest container, stored at bind. Empty until then.
+    #[serde(default)]
+    pub manifest_bytes: Vec<u8>,
     pub state: AttachmentReservationState,
     pub lease_until: u64,
     pub lease_hard_until: u64,
@@ -313,6 +316,7 @@ mod format_guards {
             network_chunk_bytes: 524_288,
             size: 16,
             manifest_hash: None,
+            manifest_bytes: Vec::new(),
             state: super::AttachmentReservationState::Pending,
             lease_until: 100,
             lease_hard_until: 200,

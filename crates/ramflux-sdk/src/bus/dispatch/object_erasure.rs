@@ -345,6 +345,8 @@ mod tests {
             },
             encrypted_key: vec![4; 32],
             format: 1,
+            grant_id: vec![6; 32],
+            read_capability: b"capability".to_vec(),
         }];
         let manifest = large::MediaManifest {
             manifest_id: [1; 32],
@@ -356,7 +358,7 @@ mod tests {
             segment_digests: vec![[3; 32]],
             key_slots: slots.clone(),
             relay_origin: "https://relay.example".into(),
-            read_capability: vec![5; 32],
+            read_capability: Vec::new(),
             expires_at: 4_000_000_000,
             retention_class: "relay_retained.v1".into(),
         };

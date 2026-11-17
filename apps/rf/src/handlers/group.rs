@@ -74,6 +74,15 @@ pub(crate) fn rf_group_member_add_federation_route(
 }
 
 pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Result<(), RfError> {
+    if let GroupAction::Send(send) = &command.action {
+        super::attachment::refuse_retired(
+            send.relay_url.is_some(),
+            send.attachment_chunk_size.is_some(),
+        )?;
+        if !send.attach.is_empty() && !send.media_ref.is_empty() {
+            return Err(RfError::Message("content".into()));
+        }
+    }
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         GroupAction::Create(create) => {
@@ -114,6 +123,9 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
             print_json(&value)
         }
         GroupAction::Rename(rename) => handle_group_rename(&mut bus, rename).await,
+        GroupAction::Send(send) if !send.attach.is_empty() => {
+            super::attachment::send_group(&mut bus, send).await
+        }
         GroupAction::Send(send) => {
             let federation = rf_group_send_federation_route(&send)?;
             let content = crate::utils::media_content(&send.body, &send.media_ref)?;

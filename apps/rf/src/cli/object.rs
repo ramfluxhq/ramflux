@@ -131,24 +131,42 @@ pub(crate) struct ObjectThumbnail {
 pub(crate) struct ObjectRevoke {
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) object: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) conversation: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) recipient: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) link: String,
-    #[arg(long)]
-    pub(crate) effective_at: i64,
+    /// Retire the attachment grants recorded for one sent message.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        conflicts_with_all = [
+            "object",
+            "conversation",
+            "recipient",
+            "link",
+            "effective_at",
+            "reason",
+            "recipient_device",
+            "recipient_principal_commitment",
+            "target",
+            "sender",
+        ]
+    )]
+    pub(crate) message: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) object: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) conversation: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) recipient: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) link: Option<String>,
+    #[arg(long, required_unless_present = "message")]
+    pub(crate) effective_at: Option<i64>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) reason: Option<String>,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) recipient_device: String,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) recipient_device: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) recipient_principal_commitment: Option<String>,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) target: String,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) target: Option<String>,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) sender: Option<String>,
 }

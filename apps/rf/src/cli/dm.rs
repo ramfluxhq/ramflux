@@ -74,6 +74,15 @@ pub(crate) struct DmSend {
     /// Prepared r4 `MediaRef` JSON, including `large_manifest`. Repeat for multiple attachments.
     #[arg(long)]
     pub(crate) media_ref: Vec<PathBuf>,
+    /// File to send. Repeat at most 16 times. Each file is its own prepare.
+    #[arg(long)]
+    pub(crate) attach: Vec<PathBuf>,
+    /// Retired. Present means a content refusal. The value is not read.
+    #[arg(long)]
+    pub(crate) relay_url: Option<String>,
+    /// Retired. Present means a content refusal. The value is not read.
+    #[arg(long)]
+    pub(crate) attachment_chunk_size: Option<u64>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]

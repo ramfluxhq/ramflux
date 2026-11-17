@@ -54,6 +54,8 @@ Thumbnail	encoded_image	4	1
 MediaKeySlot	recipient	1	1
 MediaKeySlot	encrypted_key	2	1
 MediaKeySlot	format	3	1
+MediaKeySlot	grant_id	4	4
+MediaKeySlot	read_capability	5	4
 MediaManifest	manifest_id	1	4
 MediaManifest	plaintext_digest	2	4
 MediaManifest	plaintext_length	3	4

@@ -308,6 +308,9 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("object.") => {
             Box::pin(dispatch_object_bus_request(request, state)).await
         }
+        method if method.starts_with("attachment.") => {
+            crate::attachment_send::dispatch(request, state).await
+        }
         method if method.starts_with("call.") => {
             super::dispatch::call::dispatch(request, state).await
         }

@@ -65,6 +65,19 @@ policies! {
     "account.status" => ("account", false, true, false, false),
     "account.switch" => ("account", true, true, false, false),
     "account.unlock" => ("account", true, true, false, false),
+    "attachment.enable" => ("account", true, true, false, false),
+    "attachment.import.begin" => ("account", true, true, false, false),
+    "attachment.import.cancel" => ("account", true, true, false, false),
+    "attachment.import.finish" => ("account", true, true, false, false),
+    "attachment.import.read" => ("account", true, true, false, false),
+    "attachment.import.status" => ("account", false, true, false, false),
+    "attachment.prepare.begin" => ("account", true, true, false, false),
+    "attachment.prepare.cancel" => ("account", true, true, false, false),
+    "attachment.prepare.chunk" => ("account", true, true, false, false),
+    "attachment.prepare.finish" => ("account", true, true, false, false),
+    "attachment.prepare.renew" => ("account", true, true, false, false),
+    "attachment.prepare.status" => ("account", false, true, false, false),
+    "attachment.revoke" => ("account", true, true, false, false),
     "bot.install" => ("bot", true, true, false, false),
     "bot.list" => ("bot", false, true, false, false),
     "bot.revoke" => ("bot", true, true, false, false),
@@ -269,9 +282,9 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
+    "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "77724f895764191b4482d82068bc32dc2e4207b2";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -287,7 +300,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "77724f895764191b4482d82068bc32dc2e4207b2"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08"
 }
 
 #[cfg(test)]

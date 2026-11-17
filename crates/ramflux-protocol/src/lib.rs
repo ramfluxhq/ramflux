@@ -3,6 +3,7 @@
 
 //! Ramflux C1 protocol types, canonical JSON, and fixture helpers.
 pub mod agent_profile;
+pub mod attachment_wire;
 
 mod canonical_json;
 pub mod client_discovery;
