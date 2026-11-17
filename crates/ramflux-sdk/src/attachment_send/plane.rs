@@ -21,6 +21,7 @@ pub(crate) struct RegisterCall<'a> {
 }
 
 /// One signed `AttachmentRetirement`: canonical bytes plus the 64-byte owner signature.
+#[cfg_attr(not(test), allow(dead_code, reason = "read by the production gateway plane"))]
 pub(crate) struct RetireCall<'a> {
     pub retirement: &'a [u8],
     pub signature: &'a [u8; 64],
