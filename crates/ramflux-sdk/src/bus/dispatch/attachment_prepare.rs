@@ -431,7 +431,12 @@ fn text(row: &Value, field: &str) -> Result<String, SdkError> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
+        .ok_or_else(|| {
+            crate::attachment_send::because(
+                CODE_AUTHORITY_UNAVAILABLE,
+                &format!("a group member row has no {field}"),
+            )
+        })
 }
 
 /// The home node pinned for a contact when its card was accepted. Nothing else names it: a
