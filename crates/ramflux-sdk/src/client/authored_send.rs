@@ -192,7 +192,7 @@ impl RamfluxClient {
         Ok((operation, transport))
     }
 
-    fn ensure_authored_direct_context(
+    pub(crate) fn ensure_authored_direct_context(
         &self,
         message: &GatewayDirectMessage,
         own: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -200,16 +200,20 @@ impl RamfluxClient {
         let Some(peer_root) = message.recipient_principal_commitment.as_deref() else {
             return Err(refused("recipient root missing"));
         };
-        if peer_root == own.root_commitment() {
+        let own_anchor = self.own_account_anchor()?;
+        if peer_root == own_anchor || peer_root == own.root_commitment() {
             return Ok(());
         }
-        let canonical = g::dm_scope::derive(own.root_commitment(), peer_root)
+        let canonical = g::dm_scope::derive(&own_anchor, peer_root)
             .map_err(|_| refused("invalid authored root pair"))?;
         if canonical != message.conversation_id {
             return Err(refused("authored conversation scope differs"));
         }
         let db = self.account_db()?;
         if db.client_record("conversation", &canonical)?.is_some() {
+            if !self.repair_unbound_direct_roots(&canonical, &own_anchor, peer_root)? {
+                return Err(refused("direct root binding mismatch"));
+            }
             return Ok(());
         }
         let peer = self.device_identity(&Self::qualified_recipient(message)?)?;
@@ -227,7 +231,7 @@ impl RamfluxClient {
             &serde_json::json!({
                 "id": canonical, "kind":"direct", "group_id":null,
                 "participants":[local.principal_id, principal],
-                "participant_roots":[own.root_commitment(), peer_root],
+                "participant_roots":[own_anchor, peer_root],
             }),
         )?;
         Ok(())
