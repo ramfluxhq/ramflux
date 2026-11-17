@@ -1128,6 +1128,12 @@ async fn reorder_and_gap_case() -> Case {
     Ok(())
 }
 
+/// Real-time failure bound for each phase of the gap catch-up: the Resume request, then the
+/// completed receive pass. The gap deadline and the pass work run on the real clock (only the
+/// timer wake is virtual), so a CPU-starved shared runner needs seconds, not the idle ~1 s. Both
+/// waits return the moment their condition holds; the bound only limits a genuine failure.
+const GAP_PHASE_WALL: Duration = Duration::from_secs(10);
+
 #[tokio::test(flavor = "current_thread")]
 async fn gap_timer() -> Case {
     watch(25, gap_timer_case()).await
@@ -1163,7 +1169,7 @@ async fn gap_timer_case() -> Case {
     tokio::time::advance(Duration::from_millis(1)).await;
     handle.notify_receive_wake();
     let gateway_gap = Arc::clone(&gateway);
-    pump_until(&mut runtime, Duration::from_secs(2), || {
+    pump_until(&mut runtime, GAP_PHASE_WALL, || {
         gateway_gap.lock().is_ok_and(|g| g.resumes.len() > connected)
     })
     .await?;
@@ -1176,14 +1182,16 @@ async fn gap_timer_case() -> Case {
     // A recorded Resume request precedes response intake and actor ApplyPage work.
     // Wait for the completed receive pass, rather than a fixed number of idle yields.
     let completion = handle.clone();
-    pump_until(&mut runtime, Duration::from_secs(2), || {
+    pump_until(&mut runtime, GAP_PHASE_WALL, || {
         completion.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline
     })
     .await?;
     assert!(
         handle.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline,
-        "gap receive pass must finish before the cursor oracle: {:?}",
-        handle.test_receive_trace()
+        "gap receive pass must finish within {GAP_PHASE_WALL:?} before the cursor oracle: \
+         trace={:?} err={:?}",
+        handle.test_receive_trace(),
+        handle.test_receive_last_error()
     );
     assert_eq!(snap(&runtime)?.cursor, 2, "gap catch-up covers the hole");
     runtime.stop_connection().await;
