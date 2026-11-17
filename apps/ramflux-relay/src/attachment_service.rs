@@ -59,8 +59,9 @@ pub(crate) struct AttachmentService {
 pub(crate) fn start(
     config: &NodeServiceConfig,
     store: &Arc<RelayRedbStore>,
-    state_dir: &Path,
+    redb_path: &Path,
 ) -> anyhow::Result<()> {
+    let state_dir = redb_path.parent().unwrap_or_else(|| Path::new("."));
     let Some(addr) = ramflux_node_core::environment::var(ADDR_ENV)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -326,7 +327,7 @@ impl AttachmentService {
             Ok(lease) => lease,
             Err(error) => return replay_code(&error),
         };
-        let segment = match self.segment(registry, &grant, range.index) {
+        let segment = match Self::segment(registry, &grant, range.index) {
             Ok(segment) => segment,
             Err(code) => return refuse(code),
         };
@@ -344,7 +345,6 @@ impl AttachmentService {
 
     /// The manifest comes from the committed ledger row, never from process memory.
     fn segment(
-        &self,
         registry: &ScopedGrantRegistry,
         grant: &ramflux_protocol::large_attachment::VerifiedScopedGrant,
         index: u64,

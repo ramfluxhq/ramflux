@@ -372,7 +372,7 @@ fn register(
         AttachmentCall::Register {
             upload_id: up.upload.to_vec().into(),
             manifest: up.signed.clone().into(),
-            grant: signed,
+            grant: signed.into(),
         },
     )?;
     expect_ok(&reply, "register");
