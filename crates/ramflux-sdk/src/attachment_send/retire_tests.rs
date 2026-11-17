@@ -201,8 +201,8 @@ impl Fixture {
         )
     }
 
-    fn plane(&self) -> Option<&dyn super::plane::Plane> {
-        Some(&self.listener)
+    fn plane(&self) -> &dyn super::plane::Plane {
+        &self.listener
     }
 
     fn erased(&self, message: &str) -> bool {
@@ -227,7 +227,7 @@ fn revoke_refuses_later_reads_wipes_keys_and_is_erased_only_with_the_source_answ
     assert!(secret_present(&fixture, &row), "the sender still holds the key before revoke");
 
     let state =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m1", &fixture.source(), fixture.now)
+        retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m1", &fixture.source(), fixture.now)
             .unwrap();
     assert_eq!(state, "relay_erased", "both grants retired and the source erased the object");
     assert_eq!(fixture.listener.retires(), 2, "one retirement per grant");
@@ -255,7 +255,7 @@ fn an_unreachable_source_is_retirement_pending_until_a_sweep_delivers() {
     retire::bind_message(&fixture.ctx(), "m2", &sent, &fixture.source(), fixture.now).unwrap();
     fixture.listener.set_unreachable(true);
     let state =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+        retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m2", &fixture.source(), fixture.now)
             .unwrap();
     assert_eq!(state, "retirement_pending", "a timeout is never success");
     assert_eq!(fixture.listener.retires(), 0);
@@ -270,17 +270,18 @@ fn an_unreachable_source_is_retirement_pending_until_a_sweep_delivers() {
     );
     // A second revoke while still unreachable stays pending and queues nothing twice.
     let again =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+        retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m2", &fixture.source(), fixture.now)
             .unwrap();
     assert_eq!(again, "retirement_pending");
 
     fixture.listener.set_unreachable(false);
     let swept =
-        retire::sweep(&fixture.ctx(), fixture.plane(), &fixture.source(), fixture.now).unwrap();
+        retire::sweep(&fixture.ctx(), Some(fixture.plane()), &fixture.source(), fixture.now)
+            .unwrap();
     assert_eq!(swept.retired, 1);
     assert!(fixture.erased("m2"), "the retried delivery reaches relay_erased");
     let repeated =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+        retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m2", &fixture.source(), fixture.now)
             .unwrap();
     assert_eq!(repeated, "relay_erased");
 }
@@ -299,7 +300,7 @@ fn retiring_one_grant_leaves_the_other_recipient_readable() {
     let only: [u8; 32] = first.grant_id.as_slice().try_into().unwrap();
     let outcome = retire::retire_grants(
         &fixture.ctx(),
-        fixture.plane(),
+        Some(fixture.plane()),
         &retire::Subset { message_id: "unadmitted:m3", files: &sent, only: &[only] },
         &fixture.source(),
         fixture.now,
@@ -327,7 +328,8 @@ fn revoke_fences_an_open_import_handle_and_removes_its_staging_file() {
     std::fs::write(&staging, b"plaintext in flight").unwrap();
     handles::test_register_job("import-m4", "human", "m4", staging.clone());
     handles::test_register_job("import-other", "human", "other-message", staging.clone());
-    retire::revoke(&fixture.ctx(), fixture.plane(), "m4", &fixture.source(), fixture.now).unwrap();
+    retire::revoke(&fixture.ctx(), Some(fixture.plane()), "m4", &fixture.source(), fixture.now)
+        .unwrap();
     assert!(handles::test_job_cancelled("import-m4"), "the open handle is fenced");
     assert!(!handles::test_job_cancelled("import-other"), "another message is untouched");
     assert!(!staging.exists(), "the staging file is removed");
@@ -403,7 +405,7 @@ fn cancel_after_commit_retires_registered_grants_of_the_unadmitted_prepare() {
     assert!(!secret_present(&fixture, &row), "cancel wipes the sealed key");
     let outcome = retire::cancel_registered(
         &fixture.ctx(),
-        fixture.plane(),
+        Some(fixture.plane()),
         &row.prepare_id,
         &fixture.source(),
         fixture.now,
