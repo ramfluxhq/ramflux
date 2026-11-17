@@ -49,7 +49,7 @@ impl RamfluxClient {
             g::dm_scope::derive(&own, peer_root).map_err(|_| invalid("direct DM scope"))?;
         let roots = BTreeSet::from([own, peer_root.to_owned()]);
         db.write_transaction(|| -> Result<(), SdkError> {
-            if let Some(old) = db.client_record("conversation", &conversation)? {
+            if let Some(mut old) = db.client_record("conversation", &conversation)? {
                 let bound = old["participant_roots"].as_array().map(|values| {
                     values
                         .iter()
@@ -57,10 +57,19 @@ impl RamfluxClient {
                         .map(str::to_owned)
                         .collect::<BTreeSet<_>>()
                 });
-                if old["kind"] != "direct" || !old["group_id"].is_null() || bound != Some(roots) {
+                if old["kind"] != "direct" || !old["group_id"].is_null() {
                     return Err(invalid("direct conversation conflicts with bound roots"));
                 }
-                return Ok(());
+                if bound.as_ref() == Some(&roots) {
+                    return Ok(());
+                }
+                // A row created without roots is the same pair, not a second conversation.
+                if bound.is_none() {
+                    old["participant_roots"] = serde_json::json!(roots);
+                    db.persist_client_record("conversation", &conversation, &old)?;
+                    return Ok(());
+                }
+                return Err(invalid("direct conversation conflicts with bound roots"));
             }
             db.persist_client_record(
                 "conversation",
@@ -83,6 +92,83 @@ impl RamfluxClient {
         }
         let account = self.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         Ok(account.record().body.principal_id.clone())
+    }
+
+    /// Peer root a direct send already trusts: the other participant's identity commitment,
+    /// with an accepted friend link on that principal or on the commitment.
+    pub(crate) fn direct_participant_root(
+        &self,
+        row: &serde_json::Value,
+    ) -> Result<Option<String>, SdkError> {
+        let local = self.direct_local_principal()?;
+        let Some(ids) = row.get("participants").and_then(serde_json::Value::as_array) else {
+            return Ok(None);
+        };
+        let mut peer = None;
+        for id in ids {
+            let Some(value) = id.as_str() else { continue };
+            if value == local {
+                continue;
+            }
+            if peer.is_some() {
+                return Ok(None);
+            }
+            peer = Some(value);
+        }
+        let Some(peer) = peer else { return Ok(None) };
+        let Some(identity) = self.account_db()?.client_record("identity", peer)? else {
+            return Ok(None);
+        };
+        let Some(root) =
+            identity.get("contact_identity_commitment").and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        if !self.friend_link_peer_is_accepted(peer)? && !self.friend_link_peer_is_accepted(root)? {
+            return Ok(None);
+        }
+        Ok(Some(root.to_owned()))
+    }
+
+    /// Fill `participant_roots` when this id has no binding yet.
+    ///
+    /// A pair that already validates the conversation id is left as it is. Returns false when
+    /// that stored pair is a different one, so the caller does not overwrite it.
+    pub(crate) fn repair_unbound_direct_roots(
+        &self,
+        conversation: &str,
+        own: &str,
+        peer: &str,
+    ) -> Result<bool, SdkError> {
+        let db = self.account_db()?;
+        db.join_write(|| {
+            let Some(mut row) = db.client_record("conversation", conversation)? else {
+                return Ok(false);
+            };
+            if row["kind"] != "direct" || !row["group_id"].is_null() {
+                return Err(invalid("direct conversation conflicts with bound roots"));
+            }
+            let bound = row["participant_roots"].as_array().map(|values| {
+                values.iter().filter_map(serde_json::Value::as_str).collect::<BTreeSet<_>>()
+            });
+            if bound.as_ref().is_some_and(|roots| *roots == BTreeSet::from([own, peer])) {
+                return Ok(true);
+            }
+            let stored = bound.is_some_and(|roots| {
+                roots.len() == 2
+                    && roots.contains(own)
+                    && roots.iter().any(|root| {
+                        *root != own
+                            && g::dm_scope::validate_direct(conversation, own, root).is_ok()
+                    })
+            });
+            if stored {
+                return Ok(false);
+            }
+            row["participant_roots"] = serde_json::json!([own, peer]);
+            db.persist_client_record("conversation", conversation, &row)?;
+            Ok(true)
+        })
     }
 
     /// Project the direct conversation for every already-accepted contact.
