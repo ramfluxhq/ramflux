@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use ramflux_node_core::{AttachmentCall, AttachmentFrame, WireBytes};
+use ramflux_protocol::attachment_wire::{AttachmentCall, AttachmentFrame, WireBytes};
 use tokio::runtime::Handle;
 
 use super::connection_manager::{ConnectionHandle, NetworkingState, SessionClient};
@@ -50,8 +50,7 @@ impl GatewayPlane {
     /// Runs one call and returns the reply body, or the stable code the relay answered with.
     fn call(&self, call: AttachmentCall) -> Result<Vec<u8>, Refusal> {
         let request_id = request_id()?;
-        let mut session =
-            self.session().map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
+        let mut session = self.session().map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
         let reply = self
             .runtime
             .block_on(session.attachment_call(AttachmentFrame { request_id, call }))
@@ -61,7 +60,6 @@ impl GatewayPlane {
             Some(code) => Err(crate::attachment_send::refusal_for(&code)),
         }
     }
-
 }
 
 fn request_id() -> Result<String, Refusal> {

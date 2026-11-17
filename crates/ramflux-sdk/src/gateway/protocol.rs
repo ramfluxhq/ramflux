@@ -533,7 +533,7 @@ pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<super::GatewayPushRouteFrame> },
     PushRouteDeregister { request: Box<super::GatewayPushRouteDeregistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
-    Attachment { request: Box<ramflux_node_core::AttachmentFrame> },
+    Attachment { request: Box<ramflux_protocol::attachment_wire::AttachmentFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
     Submit { submit: GatewaySubmitFrame },
@@ -574,7 +574,7 @@ pub enum GatewayServerFrame {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,
     },
     Attachment {
-        response: Box<ramflux_node_core::AttachmentReplyFrame>,
+        response: Box<ramflux_protocol::attachment_wire::AttachmentReplyFrame>,
     },
     SessionEstablished {
         session: GatewaySessionEstablishedFrame,

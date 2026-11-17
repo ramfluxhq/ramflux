@@ -24,8 +24,12 @@ mod path_admit;
 mod plane;
 mod preflight;
 mod publish;
-mod seal;
+#[cfg(test)]
+mod r2_import_tests;
+#[cfg(test)]
+mod r2_store_tests;
 mod scheduler;
+mod seal;
 mod seal_job;
 #[cfg(test)]
 mod section10;
@@ -38,11 +42,13 @@ pub(crate) use codes::{
     CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal, refusal_for,
 };
 pub use digest::PlaintextDigester;
-pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
-pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
-pub(crate) use publish::{PublishInput, publish_all, upload_all, wrap_all};
 pub(crate) use grant_wrap::{load as grants_of, stored_media};
 pub(crate) use handles::remember_sent;
+pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
+pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
+#[cfg(test)]
+pub(crate) use publish::publish_all;
+pub(crate) use publish::{PublishInput, upload_all, wrap_all};
 pub(crate) use store::Store;
 pub(crate) use targets::{MediaDevice, MediaScope, choose_targets};
 

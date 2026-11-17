@@ -95,8 +95,8 @@ impl SessionClient {
     /// One attachment-plane call through the host. The reply echoes the request id.
     pub(crate) fn attachment_call(
         &mut self,
-        request: ramflux_node_core::AttachmentFrame,
-    ) -> GatewayCallFuture<'_, ramflux_node_core::AttachmentReplyFrame> {
+        request: ramflux_protocol::attachment_wire::AttachmentFrame,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::attachment_wire::AttachmentReplyFrame> {
         Box::pin(self.handle.call_generation(
             move |engine| Box::pin(async move { engine.attachment_call(request).await }),
             self.deadline,

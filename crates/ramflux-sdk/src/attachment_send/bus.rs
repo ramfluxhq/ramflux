@@ -154,8 +154,8 @@ async fn enable(
     let row = if body.from_node {
         let plane = plane_for(account)?;
         let reply = tokio::task::spawn_blocking(move || plane_authority(plane.as_ref()))
-        .await
-        .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))??;
+            .await
+            .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))??;
         let key = ramflux_protocol::decode_base64url(&reply.signing_public_key)
             .ok()
             .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
@@ -196,7 +196,7 @@ async fn enable(
 /// The one place the Authority call is made from a plane. A test plane answers it too.
 fn plane_authority(
     plane: &dyn super::plane::Plane,
-) -> Result<ramflux_node_core::AttachmentAuthorityReply, Refusal> {
+) -> Result<ramflux_protocol::attachment_wire::AttachmentAuthorityReply, Refusal> {
     let bytes = plane.authority()?;
     serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
 }

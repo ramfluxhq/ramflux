@@ -12,7 +12,8 @@ use ramflux_protocol::large_attachment::QualifiedOwner;
 
 use serde_json::json;
 
-use super::budget::{self, charged, staging_bytes};
+use super::budget;
+use super::codes::Refusal;
 use super::codes::{
     CODE_DIGEST_MISMATCH, CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_MANIFEST_TOO_LARGE,
     CODE_NOT_GRANTEE, CODE_PEER_UPGRADE, CODE_RECIPIENT_EMPTY, CODE_RECIPIENT_LIMIT,
@@ -26,7 +27,20 @@ use super::publish::{self, PublishInput};
 use super::store::Store;
 use super::targets::{self, MediaDevice, MediaScope};
 
-fn owner_pair() -> (SigningKey, QualifiedOwner) {
+/// Opens the entry and streams the whole body into memory through the real streaming path.
+pub(super) fn import_all(
+    plane: &dyn Plane,
+    media: &ramflux_protocol::message::MediaRef,
+    importer: &Importer<'_>,
+    pin: &SourcePin<'_>,
+) -> Result<Vec<u8>, Refusal> {
+    let opened = import_job::open_entry(media, importer, pin)?;
+    let mut sink = Vec::new();
+    import_job::stream_remote(plane, &opened, &mut sink, &|| false, &budget::Meter::default())?;
+    Ok(sink)
+}
+
+pub(super) fn owner_pair() -> (SigningKey, QualifiedOwner) {
     let key = SigningKey::from_bytes(&ramflux_node_core::fixture::owner_signing_seed());
     let owner = QualifiedOwner {
         account_anchor: "owner-anchor".into(),
@@ -38,7 +52,7 @@ fn owner_pair() -> (SigningKey, QualifiedOwner) {
     (key, owner)
 }
 
-fn device(anchor: &str, id: &str, epoch: u64, layer: u32, mark: u8) -> MediaDevice {
+pub(super) fn device(anchor: &str, id: &str, epoch: u64, layer: u32, mark: u8) -> MediaDevice {
     let mut seed = [4_u8; 32];
     seed[0] = mark;
     let signing = SigningKey::from_bytes(&seed);
@@ -54,7 +68,7 @@ fn device(anchor: &str, id: &str, epoch: u64, layer: u32, mark: u8) -> MediaDevi
     }
 }
 
-fn peer() -> (MediaDevice, [u8; 32], QualifiedOwner) {
+pub(super) fn peer() -> (MediaDevice, [u8; 32], QualifiedOwner) {
     let seed = [9_u8; 32];
     let hpke = X25519KeyPair::from_seed(seed);
     let signing = SigningKey::from_bytes(&[4; 32]);
@@ -78,7 +92,7 @@ fn peer() -> (MediaDevice, [u8; 32], QualifiedOwner) {
     (device, seed, reader)
 }
 
-fn accept(store: &Store, operation: &str, bytes: &[u8]) -> super::meta::Row {
+pub(super) fn accept(store: &Store, operation: &str, bytes: &[u8]) -> super::meta::Row {
     let row = store
         .begin(
             Intent {
@@ -187,12 +201,17 @@ fn roster_rules_refuse_empty_group_downgrade_and_direct_upgrade() {
 }
 
 #[test]
-fn multi_gigabyte_charge_stays_inside_the_budget() {
-    let before = charged();
-    let need = staging_bytes(4 << 30).unwrap();
-    assert!(need > 64 * 1024 * 1024);
-    assert!(budget::charge(need).is_err());
-    assert_eq!(charged(), before);
+fn multi_gigabyte_prepare_is_disk_full_before_any_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    budget::force_free_bytes(dir.path(), 128 * 1024 * 1024);
+    let need = budget::prepare_bytes(4 << 30).unwrap();
+    assert!(need > 8 << 30, "plaintext and ciphertext are both reserved: {need}");
+    let before = budget::disk_reserved();
+    assert_eq!(
+        budget::reserve_disk(dir.path(), need).unwrap_err().code,
+        super::codes::CODE_DISK_FULL
+    );
+    assert_eq!(budget::disk_reserved(), before, "a refused reservation holds nothing");
 }
 
 #[test]
@@ -291,7 +310,7 @@ fn cancel_after_commit_admits_nothing_and_a_bound_row_keeps_its_upload() {
         now: NOW,
         caption: "",
     };
-    let error = publish::publish_one(&input, &committed.prepare_id).unwrap_err();
+    let error = publish::upload_one(&input, &committed.prepare_id).unwrap_err();
     assert_eq!(error.code, super::codes::CODE_CANCELLED);
     assert_eq!(listener.reserves(), 0);
     assert_eq!(store.load(&committed.prepare_id).unwrap().phase, Phase::Cleaning);
@@ -301,7 +320,7 @@ fn cancel_after_commit_admits_nothing_and_a_bound_row_keeps_its_upload() {
     let upload = reserved.upload_id.unwrap();
     let object = reserved.object_id.unwrap();
     store.mark(reserved, Phase::Bound).unwrap();
-    let _ = publish::publish_one(&input, &bound.prepare_id);
+    let _ = publish::upload_one(&input, &bound.prepare_id);
     let kept = store.load(&bound.prepare_id).unwrap();
     assert_eq!(kept.upload_id, Some(upload));
     assert_eq!(kept.object_id, Some(object));
@@ -350,7 +369,7 @@ fn one_entry_imports_only_its_grantee_and_a_copy_sends_no_get() {
     assert_eq!(listener.reserves(), 1);
     let authority = SigningKey::from_bytes(&[77; 32]).verifying_key().to_bytes();
     let pin = SourcePin { source: "node-a", generation: 4, public_key: &authority, now: NOW };
-    let missing = import_job::import_entry(
+    let missing = import_all(
         &listener,
         &wrapped[0].media,
         &Importer {
@@ -364,7 +383,7 @@ fn one_entry_imports_only_its_grantee_and_a_copy_sends_no_get() {
     .unwrap_err();
     assert_eq!(missing.code, CODE_NOT_GRANTEE);
     assert_eq!(listener.reads(), 0);
-    let opened = import_job::import_entry(
+    let opened = import_all(
         &listener,
         &wrapped[0].media,
         &Importer {
@@ -379,7 +398,10 @@ fn one_entry_imports_only_its_grantee_and_a_copy_sends_no_get() {
     assert_eq!(opened, body);
     assert_eq!(listener.reads(), 1);
     let slot = &wrapped[0].media.key_slots[0];
-    let object = super::owner_wire::decode_hex(&wrapped[0].media.object_id).unwrap();
+    let object: [u8; 32] = ramflux_protocol::decode_base64url(&wrapped[0].media.object_id)
+        .unwrap()
+        .try_into()
+        .unwrap();
     let manifest = wrapped[0].media.large_manifest.as_ref().unwrap();
     let hash: [u8; 32] = manifest.manifest_id.as_slice().try_into().unwrap();
     listener.set_reader(owner);
@@ -397,7 +419,7 @@ fn one_entry_imports_only_its_grantee_and_a_copy_sends_no_get() {
     assert_eq!(listener.reads(), 1);
     let mut media = wrapped[0].media.clone();
     media.large_manifest.as_mut().unwrap().read_capability = vec![1];
-    let layout = import_job::import_entry(
+    let layout = import_all(
         &listener,
         &media,
         &Importer {
@@ -422,7 +444,7 @@ fn relay_erased_follows_only_the_cleanup_ack() {
     assert_eq!(super::handles::revoke_state(Some(&acked)), "relay_erased");
 }
 
-fn wide(index: u64) -> MediaDevice {
+pub(super) fn wide(index: u64) -> MediaDevice {
     let mut seed = [8_u8; 32];
     seed[0] = u8::try_from(index).unwrap_or(1);
     let hpke = X25519KeyPair::from_seed(seed);
@@ -441,7 +463,7 @@ fn wide(index: u64) -> MediaDevice {
     }
 }
 
-fn publish_input<'a>(
+pub(super) fn publish_input<'a>(
     store: &'a Store,
     listener: &'a Listener,
     owner: &'a QualifiedOwner,
@@ -587,7 +609,7 @@ fn three_devices_import_only_their_entry_and_a_retry_does_not_reserve_again() {
                 .signing_public,
             home_node_id: "node-a".into(),
         });
-        let opened = import_job::import_entry(
+        let opened = import_all(
             &listener,
             &wrapped[0].media,
             &Importer { account_anchor: anchor, device_id: id, device_epoch: 1, secret: seed },
@@ -597,7 +619,7 @@ fn three_devices_import_only_their_entry_and_a_retry_does_not_reserve_again() {
         assert_eq!(opened, body);
     }
     assert_eq!(listener.reads(), 3);
-    let missing = import_job::import_entry(
+    let missing = import_all(
         &listener,
         &wrapped[0].media,
         &Importer {
@@ -624,7 +646,7 @@ fn three_devices_import_only_their_entry_and_a_retry_does_not_reserve_again() {
         signing_public_key: targets[0].signing_public,
         home_node_id: "node-a".into(),
     });
-    let still = import_job::import_entry(
+    let still = import_all(
         &listener,
         &wrapped[0].media,
         &Importer {

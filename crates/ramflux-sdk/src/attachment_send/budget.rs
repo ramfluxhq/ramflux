@@ -27,24 +27,54 @@ static DISK: AtomicU64 = AtomicU64::new(0);
 static FREE_OVERRIDE: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Buffer bytes held by one worker step. Dropping the permit releases exactly what it took.
-#[derive(Debug)]
-pub(crate) struct MemoryPermit {
-    bytes: u64,
+/// Per-job record of the buffer bytes held and the most ever held at once, so a test can
+/// prove the working set does not grow with the file.
+#[derive(Debug, Default)]
+pub(crate) struct Meter {
+    held: AtomicU64,
+    peak: AtomicU64,
 }
 
-impl Drop for MemoryPermit {
+impl Meter {
+    /// Largest buffer total this job held at one time.
+    #[must_use]
+    pub(crate) fn peak(&self) -> u64 {
+        self.peak.load(Ordering::Acquire)
+    }
+}
+
+/// Buffer bytes held by one worker step. Dropping the permit releases exactly what it took.
+#[derive(Debug)]
+pub(crate) struct MemoryPermit<'a> {
+    bytes: u64,
+    meter: Option<&'a Meter>,
+}
+
+impl Drop for MemoryPermit<'_> {
     fn drop(&mut self) {
         sub(&MEMORY, self.bytes);
+        if let Some(meter) = self.meter {
+            sub(&meter.held, self.bytes);
+        }
     }
 }
 
 /// Charges `bytes` of buffer memory before the allocation.
 /// # Errors
 /// Returns `disk_full` (the scheduler's backpressure code) when the 64 MiB budget is held.
-pub(crate) fn memory(bytes: u64) -> Result<MemoryPermit, Refusal> {
+pub(crate) fn memory(bytes: u64) -> Result<MemoryPermit<'static>, Refusal> {
     add(&MEMORY, bytes, MEMORY_CAP)?;
-    Ok(MemoryPermit { bytes })
+    Ok(MemoryPermit { bytes, meter: None })
+}
+
+/// As [`memory`], and records the hold on `meter`.
+/// # Errors
+/// Returns `disk_full` when the 64 MiB budget is held.
+pub(crate) fn memory_metered(bytes: u64, meter: &Meter) -> Result<MemoryPermit<'_>, Refusal> {
+    add(&MEMORY, bytes, MEMORY_CAP)?;
+    let now = meter.held.fetch_add(bytes, Ordering::AcqRel).saturating_add(bytes);
+    meter.peak.fetch_max(now, Ordering::AcqRel);
+    Ok(MemoryPermit { bytes, meter: Some(meter) })
 }
 
 /// Reserves `bytes` of disk for one prepare or import against the free space under `root`.

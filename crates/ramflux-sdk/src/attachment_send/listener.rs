@@ -35,6 +35,8 @@ pub(super) struct Listener {
     authority: SigningKey,
     now: u64,
     reserves: AtomicU64,
+    owner_calls: AtomicU64,
+    registers: AtomicU64,
     reads: AtomicU64,
     reader: Mutex<QualifiedOwner>,
     manifests: Mutex<HashMap<[u8; 32], Vec<u8>>>,
@@ -65,6 +67,8 @@ impl Listener {
             authority,
             now: NOW,
             reserves: AtomicU64::new(0),
+            owner_calls: AtomicU64::new(0),
+            registers: AtomicU64::new(0),
             reads: AtomicU64::new(0),
             manifests: Mutex::new(HashMap::new()),
         })
@@ -78,6 +82,16 @@ impl Listener {
         self.reserves.load(Ordering::Relaxed)
     }
 
+    /// Every owner operation that reached the relay ledger.
+    pub(super) fn owner_calls(&self) -> u64 {
+        self.owner_calls.load(Ordering::Relaxed)
+    }
+
+    /// Every registration call that reached the relay ledger, repeated ones included.
+    pub(super) fn registers(&self) -> u64 {
+        self.registers.load(Ordering::Relaxed)
+    }
+
     pub(super) fn reads(&self) -> u64 {
         self.reads.load(Ordering::Relaxed)
     }
@@ -89,6 +103,7 @@ impl Listener {
 
 impl Plane for Listener {
     fn owner(&self, call: &OwnerCall<'_>) -> Result<Vec<u8>, Refusal> {
+        self.owner_calls.fetch_add(1, Ordering::Relaxed);
         if OwnerAttachmentOperation::decode(call.operation).is_ok_and(|op| op.op == 9) {
             self.reserves.fetch_add(1, Ordering::Relaxed);
         }
@@ -116,6 +131,7 @@ impl Plane for Listener {
     }
 
     fn register(&self, call: &RegisterCall<'_>) -> Result<Vec<u8>, Refusal> {
+        self.registers.fetch_add(1, Ordering::Relaxed);
         let native = ContentManifest::decode_signed(call.manifest)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         let grant = ScopedAttachmentGrant::decode_signed(call.grant)

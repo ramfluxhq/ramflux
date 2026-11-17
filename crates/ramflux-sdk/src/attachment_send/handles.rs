@@ -24,9 +24,9 @@ use crate::bus::protocol::LocalBusFrame;
 use super::budget;
 use super::bus;
 use super::codes::{
-    CODE_ATTACHMENT_DELETED, CODE_CANCELLED, CODE_DISK_FULL,
-    CODE_DUPLICATE, CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER,
-    CODE_NOT_READY, CODE_SEAL_FAILED, CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
+    CODE_ATTACHMENT_DELETED, CODE_CANCELLED, CODE_DISK_FULL, CODE_DUPLICATE, CODE_EXPIRED,
+    CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER, CODE_NOT_READY, CODE_SEAL_FAILED,
+    CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
 };
 use super::import_job::{self, Importer, Opened, SourcePin};
 use super::meta::CHUNK;
@@ -35,6 +35,7 @@ use super::scheduler;
 use super::store::Store;
 
 const BINDING: &str = "attachment-import";
+pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const SENT: &str = "attachment-send";
 /// Open handles one account may hold, and the whole process.
 const HANDLES_ACCOUNT: usize = 16;
@@ -54,8 +55,7 @@ struct Job {
     failed: Mutex<Option<&'static str>>,
     cancelled: AtomicBool,
     finished: AtomicBool,
-    /// Largest buffer total this job's worker held at once.
-    peak_memory: AtomicU64,
+    meter: budget::Meter,
 }
 
 impl Job {
@@ -85,6 +85,7 @@ fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Job>>> {
 
 /// Fences every open handle of `message_id`: no new byte is copied out, the staging file is
 /// removed, and the reservation is returned. Called when the message is retired or deleted.
+#[allow(dead_code)] // called by the retirement owner
 pub(crate) fn fence_message(message_id: &str) {
     let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for job in table.values().filter(|job| job.message_id == message_id) {
@@ -132,13 +133,13 @@ pub(crate) fn begin(
         failed: Mutex::new(None),
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
-        peak_memory: AtomicU64::new(0),
+        meter: budget::Meter::default(),
     });
     jobs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(import_id.clone(), Arc::clone(&job));
-    let task = Task { job: Arc::clone(&job), source, plane, import_id: import_id.clone() };
+    let task = Task { job: Arc::clone(&job), source, plane };
     if let Err(refusal) = scheduler::submit(&id, scheduler_large, move || task.run()) {
         remove(&import_id, &job);
         return Err(refusal.into());
@@ -210,12 +211,11 @@ struct Task {
     job: Arc<Job>,
     source: Source,
     plane: Arc<dyn Plane>,
-    import_id: String,
 }
 
 impl Task {
     fn run(self) {
-        let Self { job, source, plane, import_id: _ } = self;
+        let Self { job, source, plane } = self;
         let result = stream(&job, &source, plane.as_ref());
         match result {
             Ok(()) => job.ready.store(true, Ordering::Release),
@@ -237,9 +237,11 @@ fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> 
     let fenced = || job.cancelled.load(Ordering::Acquire);
     match source {
         Source::Remote { opened, .. } => {
-            import_job::stream_remote(plane, opened, &mut sink, &fenced)?;
+            import_job::stream_remote(plane, opened, &mut sink, &fenced, &job.meter)?;
         }
-        Source::Owned { store, row, .. } => import_job::stream_owned(store, row, &mut sink, &fenced)?,
+        Source::Owned { store, row, .. } => {
+            import_job::stream_owned(store, row, &mut sink, &fenced, &job.meter)?
+        }
     }
     sink.flush().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     let file = sink.into_inner().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -341,6 +343,16 @@ pub(crate) fn cancel(
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "cancelled"})))
 }
 
+/// `relay_erased` is reported only after a confirmed cleanup ACK.
+#[must_use]
+pub(crate) fn revoke_state(existing: Option<&Value>) -> &'static str {
+    if existing.and_then(|row| row.get("relay_erased")).and_then(Value::as_bool) == Some(true) {
+        "relay_erased"
+    } else {
+        "retirement_pending"
+    }
+}
+
 fn remove(import_id: &str, job: &Job) {
     job.invalidate();
     jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(import_id);
@@ -438,7 +450,11 @@ pub(crate) fn remember_sent(
     message_id: &str,
     prepares: &[String],
 ) -> Result<(), SdkError> {
-    client.account_db()?.persist_client_record(SENT, message_id, &json!({ "prepares": prepares }))?;
+    client.account_db()?.persist_client_record(
+        SENT,
+        message_id,
+        &json!({ "prepares": prepares }),
+    )?;
     Ok(())
 }
 

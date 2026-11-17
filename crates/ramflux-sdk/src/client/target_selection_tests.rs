@@ -1083,3 +1083,43 @@ async fn undeclared_device_scopes() -> TestResult {
     assert_layer_refusal(require_layer(Some(group), COMPILED_LAYER), COMPILED_LAYER)?;
     Ok(())
 }
+
+/// ATTACH-SEND-01 r1 M2: a media target's layer counts only inside its own signed window, and
+/// its keys are the ones the verified branch certificate names.
+#[tokio::test]
+async fn media_devices_count_a_declaration_only_inside_its_window() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let own = Fixture::with_device("r2-window", "owner").await?;
+        let issued = wall_now()? + 1;
+        let manifest = layer4_roster(&own, None, issued)?;
+        let roster = VerifiedLayerRoster::verify(&manifest, issued + 1)?;
+        let layer_of = |now: u64| -> TestResult<u32> {
+            roster
+                .media_devices(now)
+                .into_iter()
+                .find(|device| device.device_id == own.config.device_id)
+                .map(|device| device.layer)
+                .ok_or_else(|| "the device is not a message device".into())
+        };
+        assert_eq!(layer_of(issued + 1)?, COMPILED_LAYER, "inside the window the layer counts");
+        assert_eq!(layer_of(issued + 3_700)?, 0, "an expired declaration is not layer 4");
+        let device = roster
+            .media_devices(issued + 1)
+            .into_iter()
+            .find(|device| device.device_id == own.config.device_id)
+            .ok_or("device")?;
+        let entry = manifest
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == own.config.device_id)
+            .ok_or("manifest entry")?;
+        assert_eq!(
+            ramflux_protocol::encode_base64url(device.signing_public),
+            entry.branch_public_key,
+            "the signing key comes from the verified branch certificate"
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
+}

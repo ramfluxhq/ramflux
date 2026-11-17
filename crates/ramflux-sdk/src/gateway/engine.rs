@@ -1002,8 +1002,8 @@ impl GatewaySessionEngine {
     /// Rejects transport failures, a mismatched reply, or a gateway refusal.
     pub async fn attachment_call(
         &mut self,
-        request: ramflux_node_core::AttachmentFrame,
-    ) -> Result<ramflux_node_core::AttachmentReplyFrame, SdkError> {
+        request: ramflux_protocol::attachment_wire::AttachmentFrame,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentReplyFrame, SdkError> {
         let id = request.request_id.clone();
         self.write_frame(&GatewayClientFrame::Attachment { request: Box::new(request) }).await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::Attachment).await? {

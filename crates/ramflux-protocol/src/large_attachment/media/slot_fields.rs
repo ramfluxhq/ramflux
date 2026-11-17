@@ -53,7 +53,10 @@ fn manifest(slots: Vec<MediaKeySlot>, shared: Vec<u8>) -> super::MediaManifest {
 #[test]
 fn the_shared_manifest_capability_and_unpaired_slot_counts_are_refused() {
     let one = slot(vec![3; 32], b"capability".to_vec());
-    assert!(manifest(vec![one.clone()], Vec::new()).canonical_bytes().is_ok(), "one entry is legal");
+    assert!(
+        manifest(vec![one.clone()], Vec::new()).canonical_bytes().is_ok(),
+        "one entry is legal"
+    );
     assert_eq!(
         manifest(vec![one.clone()], b"shared".to_vec()).canonical_bytes(),
         Err(FormatError("manifest capability")),

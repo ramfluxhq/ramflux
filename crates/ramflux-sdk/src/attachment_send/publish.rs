@@ -67,6 +67,7 @@ pub(crate) fn wrap_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<Wra
 /// Both phases in order, for callers that hold one fixed roster.
 /// # Errors
 /// Returns a stable refusal and does not reserve when the roster does not fit.
+#[cfg(test)]
 pub(crate) fn publish_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<Wrapped>, Refusal> {
     let rows = upload_all(input, rows)?;
     wrap_all(input, &rows)
@@ -116,6 +117,7 @@ pub(crate) fn upload_one(input: &PublishInput<'_>, prepare_id: &str) -> Result<R
         row = recover_sealing(input, &row)?;
     }
     if row.phase == Phase::Accepted {
+        row = retire_abandoned(input, row)?;
         bound_one(input, &row)?;
         input.store.verify_snapshot(&mut row)?;
         row = input.store.draw(prepare_id, input.now)?;
@@ -165,10 +167,23 @@ fn bound_one(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
 }
 
 fn recover_sealing(input: &PublishInput<'_>, row: &Row) -> Result<Row, Refusal> {
-    if let (Some(upload), Some(object)) = (row.upload_id, row.object_id) {
-        let _ = retire(input, upload, object);
-    }
     input.store.resume(&row.prepare_id, input.now)
+}
+
+/// Sends the relay Retire for every abandoned reservation not yet confirmed. A refusal keeps
+/// the entry pending; the predecessor's charge stays held until the relay acknowledges it.
+fn retire_abandoned(input: &PublishInput<'_>, mut row: Row) -> Result<Row, Refusal> {
+    if row.pending_abandon.is_empty() {
+        return Ok(row);
+    }
+    let pending = std::mem::take(&mut row.pending_abandon);
+    for (upload, object) in pending {
+        if retire(input, upload, object).is_err() {
+            row.pending_abandon.push((upload, object));
+        }
+    }
+    input.store.save_row(&row)?;
+    Ok(row)
 }
 
 fn reserve_and_seal(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> {

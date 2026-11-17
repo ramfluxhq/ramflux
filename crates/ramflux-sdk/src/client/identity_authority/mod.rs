@@ -33,7 +33,7 @@ mod verified_roster;
 mod verify;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::{PrincipalKind, SignedDeviceSetRecord};
-pub(crate) use verified_roster::{VerifiedLayerRoster, VerifiedMediaDevice};
+pub(crate) use verified_roster::VerifiedLayerRoster;
 pub(crate) use verify::{ready_manifest, verify_manifest, verify_manifest_authority};
 pub(crate) fn invalid(reason: &str) -> SdkError {
     SdkError::InboundRejected(format!("identity authority: {reason}"))

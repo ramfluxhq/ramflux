@@ -53,21 +53,12 @@ pub(crate) struct Opened {
     manifest: MediaManifest,
 }
 
-impl Opened {
-    #[must_use]
-    pub(crate) fn plaintext_length(&self) -> u64 {
-        self.manifest.plaintext_length
-    }
-}
-
 /// Decodes the canonical reference. This runs the codec's binding rules: entries equal the
 /// manifest's, the manifest digest and size match, entries are unique, and no manifest-level
 /// capability is present.
 /// # Errors
 /// Returns `layout_invalid` for any non-canonical or inconsistent reference.
-pub(crate) fn canonical(
-    media: &ramflux_protocol::message::MediaRef,
-) -> Result<MediaRef, Refusal> {
+pub(crate) fn canonical(media: &ramflux_protocol::message::MediaRef) -> Result<MediaRef, Refusal> {
     MediaRef::decode(&media.encode_to_vec()).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))
 }
 
@@ -143,7 +134,8 @@ pub(crate) fn open_entry(
     {
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
     }
-    if manifest.network_chunk_bytes != NETWORK_CHUNK || manifest.encrypted_segment_bytes != SEGMENT_BYTES
+    if manifest.network_chunk_bytes != NETWORK_CHUNK
+        || manifest.encrypted_segment_bytes != SEGMENT_BYTES
     {
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
     }
@@ -184,6 +176,7 @@ pub(crate) fn stream_remote(
     opened: &Opened,
     sink: &mut dyn Write,
     fenced: &dyn Fn() -> bool,
+    meter: &budget::Meter,
 ) -> Result<(), Refusal> {
     let (count, _) = opened.layout.dimensions().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
     if opened.manifest.segment_digests.len() != count as usize {
@@ -195,14 +188,15 @@ pub(crate) fn stream_remote(
         if fenced() {
             return Err(Refusal::new(CODE_CANCELLED));
         }
-        let _held = budget::memory(2 * u64::from(SEGMENT_BYTES))?;
+        let _held = budget::memory_metered(2 * u64::from(SEGMENT_BYTES), meter)?;
         let cipher = fetch_segment(plane, opened, index)?;
         let expected = opened.manifest.segment_digests[index as usize];
         if segment_digest(&cipher).map_err(|_| Refusal::new(CODE_SEAL_FAILED))? != expected {
             return Err(Refusal::new(CODE_SEAL_FAILED));
         }
-        let plain = open_segment(&opened.key, &opened.object_id, opened.layout, u64::from(index), &cipher)
-            .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        let plain =
+            open_segment(&opened.key, &opened.object_id, opened.layout, u64::from(index), &cipher)
+                .map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         let bytes = plain.as_staging_bytes();
         plain_digest.update(bytes);
         sink.write_all(bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -259,6 +253,7 @@ pub(crate) fn stream_owned(
     row: &Row,
     sink: &mut dyn Write,
     fenced: &dyn Fn() -> bool,
+    meter: &budget::Meter,
 ) -> Result<(), Refusal> {
     let (key, object_id) = store.open_secret(row)?;
     let length = row.plaintext_length.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
@@ -274,7 +269,7 @@ pub(crate) fn stream_owned(
         if fenced() {
             return Err(Refusal::new(CODE_CANCELLED));
         }
-        let _held = budget::memory(2 * u64::from(SEGMENT_BYTES))?;
+        let _held = budget::memory_metered(2 * u64::from(SEGMENT_BYTES), meter)?;
         let cipher = store.read_named(&row.prepare_id, &segment_name_of(index))?;
         if segment_digest(&cipher).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?
             != row.segment_digests[index as usize]

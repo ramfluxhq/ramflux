@@ -66,10 +66,16 @@ fn write_segments(
     let mut digests = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
     for index in 0..count {
         // Plaintext window, ciphertext and the AEAD working copy of one segment.
-        let _held = super::budget::memory(3 * u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES))?;
+        let _held = super::budget::memory(
+            3 * u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES),
+        )?;
         let cipher = seal_index(store, prepare_id, sealer, layout, index)?;
         let name = segment_name(index)?;
         store.write_named(prepare_id, &name, &cipher)?;
+        #[cfg(test)]
+        if crash_after(index) {
+            return Err(Refusal::new(CODE_SEAL_FAILED));
+        }
         digests.push(segment_digest(&cipher).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?);
     }
     Ok(digests)
@@ -106,4 +112,21 @@ fn segment_name(index: u32) -> Result<String, Refusal> {
 #[must_use]
 pub(crate) fn segment_name_of(index: u32) -> String {
     format!("segment-{index}.bin")
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CRASH_AFTER_SEGMENT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam: end the seal after segment `index` was written, as a process crash would, leaving
+/// the row in `Sealing` with a partial set of segment files.
+#[cfg(test)]
+pub(super) fn crash_after_segment(index: Option<u32>) {
+    CRASH_AFTER_SEGMENT.with(|cell| cell.set(index));
+}
+
+#[cfg(test)]
+fn crash_after(index: u32) -> bool {
+    CRASH_AFTER_SEGMENT.with(|cell| cell.get() == Some(index))
 }

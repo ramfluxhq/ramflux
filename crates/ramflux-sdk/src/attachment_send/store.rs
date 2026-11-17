@@ -219,11 +219,7 @@ impl Store {
         if row.phase == Phase::Sealing {
             self.remove_segments(prepare_id)?;
             self.destroy_secret(&row)?;
-            if let Some(upload) = row.upload_id {
-                row.abandoned.push(upload);
-            }
-            row.upload_id = None;
-            row.object_id = None;
+            Self::abandon(&mut row);
             row.segment_digests.clear();
             row.generation = row.generation.saturating_add(1);
             row.phase = if now < row.hard_deadline && row.plaintext_digest.is_some() {
@@ -264,10 +260,7 @@ impl Store {
         }
         self.destroy_secret(row)?;
         self.remove_segments(&row.prepare_id)?;
-        if let Some(upload) = row.upload_id.take() {
-            row.abandoned.push(upload);
-        }
-        row.object_id = None;
+        Self::abandon(row);
         chunks::remove_plain(&self.dir(&row.prepare_id));
         row.phase = Phase::Fenced;
         Self::release_charge(row);
@@ -482,11 +475,7 @@ impl Store {
     /// Returns `seal_failed` when the row cannot be rewritten.
     pub(crate) fn fence_secret(&self, mut row: Row) -> Result<Row, Refusal> {
         self.destroy_secret(&row)?;
-        if let Some(upload) = row.upload_id {
-            row.abandoned.push(upload);
-        }
-        row.upload_id = None;
-        row.object_id = None;
+        Self::abandon(&mut row);
         row.phase = Phase::Fenced;
         Self::release_charge(&mut row);
         self.save(&row)?;
@@ -527,6 +516,17 @@ impl Store {
             fs::remove_file(&path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         }
         Ok(())
+    }
+
+    /// Records the reservation as abandoned. Its Retire to the relay is retried until confirmed.
+    fn abandon(row: &mut Row) {
+        if let Some(upload) = row.upload_id.take() {
+            row.abandoned.push(upload);
+            if let Some(object) = row.object_id {
+                row.pending_abandon.push((upload, object));
+            }
+        }
+        row.object_id = None;
     }
 
     pub(super) fn release_charge(row: &mut Row) {
@@ -655,9 +655,7 @@ pub(super) fn sync_parent(path: &Path) -> Result<(), Refusal> {
 
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Path) -> Result<(), Refusal> {
-    File::open(dir)
-        .and_then(|handle| handle.sync_all())
-        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))
+    File::open(dir).and_then(|handle| handle.sync_all()).map_err(|_| Refusal::new(CODE_SEAL_FAILED))
 }
 
 /// Windows has no directory fsync; a completed rename is the durable boundary there.

@@ -61,6 +61,9 @@ pub(crate) struct Row {
     pub retired: bool,
     #[serde(default)]
     pub abandoned: Vec<[u8; 32]>,
+    /// `(upload_id, object_id)` of abandoned reservations whose relay Retire is not yet confirmed.
+    #[serde(default)]
+    pub pending_abandon: Vec<([u8; 32], [u8; 32])>,
 }
 
 impl Row {
@@ -90,6 +93,7 @@ impl Row {
             charged: 0,
             retired: false,
             abandoned: Vec::new(),
+            pending_abandon: Vec::new(),
         }
     }
 }
@@ -143,7 +147,9 @@ mod b64 {
         serializer.serialize_str(&ramflux_protocol::encode_base64url(bytes))
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(deserializer)?;
         ramflux_protocol::decode_base64url(&text).map_err(serde::de::Error::custom)
     }

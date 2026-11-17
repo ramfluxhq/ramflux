@@ -109,20 +109,14 @@ pub(crate) fn wrap(input: &WrapInput<'_>) -> Result<Wrapped, Refusal> {
 /// Returns `seal_failed` when the file is unreadable.
 pub(crate) fn load(store: &Store, prepare_id: &str) -> Result<Vec<GrantRecord>, Refusal> {
     match store.read_named(prepare_id, GRANTS) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))
-        }
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED)),
         Err(_) => Ok(Vec::new()),
     }
 }
 
 /// # Errors
 /// Returns `seal_failed` when the file cannot be written durably.
-pub(crate) fn save(
-    store: &Store,
-    prepare_id: &str,
-    grants: &[GrantRecord],
-) -> Result<(), Refusal> {
+pub(crate) fn save(store: &Store, prepare_id: &str, grants: &[GrantRecord]) -> Result<(), Refusal> {
     let bytes = serde_json::to_vec(grants).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     store.write_named(prepare_id, GRANTS, &bytes)
 }
@@ -204,7 +198,8 @@ fn new_grant(
 
 fn register(input: &WrapInput<'_>, grant: &mut GrantRecord) -> Result<(), Refusal> {
     let upload = input.row.upload_id.ok_or(Refusal::new(CODE_SEAL_FAILED))?;
-    let call = RegisterCall { upload_id: &upload, manifest: input.manifest, grant: &grant.signed_grant };
+    let call =
+        RegisterCall { upload_id: &upload, manifest: input.manifest, grant: &grant.signed_grant };
     plane::register_ready(&call)?;
     let capability = input.plane.register(&call)?;
     if capability.is_empty() || capability.len() > 8192 {
@@ -278,7 +273,9 @@ fn prost_slot(slot: &MediaKeySlot) -> ramflux_protocol::message::MediaKeySlot {
     }
 }
 
-fn from_prost_slot(slot: &ramflux_protocol::message::MediaKeySlot) -> Result<MediaKeySlot, Refusal> {
+fn from_prost_slot(
+    slot: &ramflux_protocol::message::MediaKeySlot,
+) -> Result<MediaKeySlot, Refusal> {
     let recipient = slot.recipient.as_ref().ok_or(Refusal::new(CODE_SEAL_FAILED))?;
     Ok(MediaKeySlot {
         recipient: QualifiedDevice {

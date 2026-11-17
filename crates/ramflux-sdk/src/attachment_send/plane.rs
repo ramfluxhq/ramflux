@@ -21,6 +21,7 @@ pub(crate) struct RegisterCall<'a> {
 }
 
 /// One signed `AttachmentRetirement`: its canonical bytes and the owner's 64-byte signature.
+#[allow(dead_code)] // constructed by the retirement owner
 pub(crate) struct RetireCall<'a> {
     pub retirement: &'a [u8],
     pub signature: &'a [u8; 64],
@@ -101,5 +102,6 @@ pub(crate) trait Plane: Send + Sync {
 
     /// # Errors
     /// Returns a stable refusal. The bytes are the JSON `{"state":"retired"|"pending","object_erased":bool}`.
+    #[allow(dead_code)]
     fn retire(&self, call: &RetireCall<'_>) -> Result<Vec<u8>, Refusal>;
 }
