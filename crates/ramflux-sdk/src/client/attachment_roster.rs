@@ -11,9 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::RamfluxClient;
 use crate::SdkError;
-use crate::attachment_send::{
-    CODE_AUTHORITY_UNAVAILABLE, MediaDevice, MediaScope, Refusal, choose_targets,
-};
+use crate::attachment_send::{CODE_AUTHORITY_UNAVAILABLE, MediaDevice, MediaScope, choose_targets};
 
 /// What the roster is for. Group members are `(root commitment, device id)` pairs taken from
 /// the verified group state.
