@@ -408,6 +408,132 @@ async fn crash_inside_local_installation_recovers_on_unlock() -> TestResult {
     .await
 }
 
+/// Reopen the files in a fresh client, as a restart after the process died.
+fn reopen(
+    config: &crate::gateway::GatewayCustodyConfig,
+    id: &str,
+) -> TestResult<crate::RamfluxClient> {
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(&config.account_root)?;
+    client.unlock_account(id, b"native fixture data passphrase")?;
+    Ok(client)
+}
+
+/// An observation of the own native head installs through the same ordered steps as a head the
+/// device published, but owns no journal row. A process death at any durable step leaves only
+/// the pending marker, which fences admission: unlock must settle it, never answer
+/// `PublicationPending`. Real filesystem and real encrypted store.
+#[tokio::test]
+async fn crash_inside_an_own_head_observation_recovers_on_unlock() -> TestResult {
+    within(async {
+        for step in 1..=4_u8 {
+            let (mut account, _keep) = live_primary(&format!("observe-cut-{step}")).await?;
+            let config = account.gateway_config.custody.clone().ok_or("test: custody config")?;
+            let id = account.client.account_db()?.local_account_id.clone();
+            let plan = prepare(&mut account)?.ok_or("test: plan")?;
+            apply(&mut account, &plan, plan.expected.clone())?;
+            assert!(
+                account.client.account_db()?.pairing_head()?.is_none(),
+                "step {step}: the published head must be retired before the observation"
+            );
+            let now = custody::network_now()?;
+            let born = account.client.born_v3_account.as_deref().ok_or("test: native")?;
+            let authority = ramflux_protocol::custody::CustodyAuthority {
+                publication: born.publication(),
+                custodian_publication: born.custodian_publication(&config.account_root, now)?,
+            };
+            let before = object_hash(&authority.publication.record)?;
+            custody::pairing::activate::CUT.with(|cell| cell.set(step));
+            let crashed = custody::pairing::refresh_authority(
+                &config.account_root,
+                account.client.account_db()?,
+                config.vault.as_ref(),
+                &id,
+                &authority,
+                now,
+            );
+            assert!(
+                matches!(crashed, Err(SdkError::PairingCode("InjectedCut"))),
+                "step {step}: the injected cut must stop the observation install: {crashed:?}"
+            );
+            drop(account);
+            let mut client = reopen(&config, &id)?;
+            assert!(
+                !custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+                "step {step}: the pending marker must hold admission until settled"
+            );
+            repair_on_unlock(&mut client, &config.account_root, &id, config.vault.as_ref())?;
+            assert!(
+                custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+                "step {step}: unlock must settle the interrupted observation"
+            );
+            assert!(
+                custody::pairing::install_store::list_pending(&config.account_root, &id)?
+                    .is_empty(),
+                "step {step}: no pending marker may remain"
+            );
+            let after = client
+                .born_v3_account
+                .as_deref()
+                .map(|born| object_hash(born.record()))
+                .ok_or("test: native")??;
+            assert_eq!(after, before, "step {step}: the observed head must stay the installed one");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// A marker whose new authority never became durable fenced an attempt that changed no owner:
+/// unlock removes it and keeps the installed authority, instead of refusing the account.
+#[tokio::test]
+async fn an_unwritten_refresh_marker_is_removed_on_unlock() -> TestResult {
+    within(async {
+        let (mut account, _keep) = live_primary("observe-orphan").await?;
+        let (other, _other_keep) = live_primary("observe-orphan-other").await?;
+        let config = account.gateway_config.custody.clone().ok_or("test: custody config")?;
+        let id = account.client.account_db()?.local_account_id.clone();
+        let plan = prepare(&mut account)?.ok_or("test: plan")?;
+        apply(&mut account, &plan, plan.expected.clone())?;
+        let installed = custody::pairing::install_store::read_installed(&config.account_root, &id)?
+            .ok_or("test: installed marker")?;
+        let installed_hash = installed.record_hash.clone().ok_or("test: installed hash")?;
+        let foreign_hash = object_hash(
+            &other.client.born_v3_account.as_deref().ok_or("test: other native")?.record(),
+        )?;
+        assert_ne!(foreign_hash, installed_hash, "test: the marker must name another authority");
+        let mut orphan = installed;
+        orphan.operation_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        orphan.install_purpose = "authority_refresh".into();
+        orphan.state = "adopt_prepared".into();
+        orphan.record_hash = Some(foreign_hash);
+        custody::pairing::install_store::write_pending(&config.account_root, &orphan)?;
+        drop(account);
+        let mut client = reopen(&config, &id)?;
+        assert!(
+            !custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+            "the unwritten marker must fence admission until settled"
+        );
+        repair_on_unlock(&mut client, &config.account_root, &id, config.vault.as_ref())?;
+        assert!(
+            custody::pairing::recipient::ordinary_session_admitted(&client, &id)?,
+            "unlock must not refuse an account over an attempt that changed nothing"
+        );
+        assert!(
+            custody::pairing::install_store::list_pending(&config.account_root, &id)?.is_empty(),
+            "the unwritten marker must be removed"
+        );
+        let after = client
+            .born_v3_account
+            .as_deref()
+            .map(|born| object_hash(born.record()))
+            .ok_or("test: native")??;
+        assert_eq!(after, installed_hash, "the installed authority must be unchanged");
+        Ok(())
+    })
+    .await
+}
+
 /// The discard is serialized with the publication locks: a competing holder of the authority
 /// lock makes it refuse (Busy after its own bounded wait) and the row stays.
 #[tokio::test]

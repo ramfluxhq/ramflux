@@ -366,8 +366,9 @@ fn resume(
 }
 
 /// Unlock-time recovery (before admission and before any signing gate): complete the exact
-/// acknowledged local installation of a layer head that a crash interrupted, retire its row and
-/// reload the account so the installed authority is the one the runtime starts from.
+/// acknowledged local installation of a layer head that a crash interrupted, retire its row,
+/// settle any other interrupted authority refresh marker, and reload the account so the
+/// installed authority is the one the runtime starts from.
 ///
 /// # Errors
 /// Installation or storage errors leave the journal row and pending marker untouched for retry.
@@ -378,21 +379,32 @@ pub(crate) fn repair_on_unlock(
     vault: &dyn custody::PrimaryVault,
 ) -> Result<(), SdkError> {
     let db = client.account_db()?;
-    let Some(head) = db.pairing_head()? else { return Ok(()) };
-    if head.kind != "layer_update" || head.state != "acknowledged" {
-        return Ok(());
-    }
-    let publication = custody::pairing::publication::decode_head_candidate(&head.candidate)?;
-    let authority =
-        ramflux_protocol::custody::CustodyAuthority { publication, custodian_publication: None };
     let now = custody::network_now()?;
-    custody::pairing::refresh_authority(root, db, vault, account_id, &authority, now)?;
-    let adoption = db.pairing_adoption()?.ok_or(SdkError::PairingField("record_hash"))?;
-    if adoption.operation_id == head.operation_id && adoption.record_hash == head.candidate_hash {
-        db.commit_ordinary_head_cleanup(&adoption)?;
+    let mut repaired = false;
+    if let Some(head) = db.pairing_head()?
+        && head.kind == "layer_update"
+        && head.state == "acknowledged"
+    {
+        let publication = custody::pairing::publication::decode_head_candidate(&head.candidate)?;
+        let authority = ramflux_protocol::custody::CustodyAuthority {
+            publication,
+            custodian_publication: None,
+        };
+        custody::pairing::refresh_authority(root, db, vault, account_id, &authority, now)?;
+        let adoption = db.pairing_adoption()?.ok_or(SdkError::PairingField("record_hash"))?;
+        if adoption.operation_id == head.operation_id && adoption.record_hash == head.candidate_hash
+        {
+            db.commit_ordinary_head_cleanup(&adoption)?;
+        }
+        repaired = true;
     }
-    client.born_v3_account =
-        Some(Box::new(custody::load_account(client.account_index()?.root(), account_id, now)?));
+    // An own-head observation that was cut short owns no journal row, only its marker.
+    repaired |=
+        custody::pairing::activate::settle_interrupted_refresh(root, db, vault, account_id, now)?;
+    if repaired {
+        client.born_v3_account =
+            Some(Box::new(custody::load_account(client.account_index()?.root(), account_id, now)?));
+    }
     Ok(())
 }
 
