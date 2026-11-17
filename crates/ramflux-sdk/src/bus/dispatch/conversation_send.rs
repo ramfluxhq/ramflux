@@ -87,22 +87,16 @@ pub(in crate::bus) async fn send_account(
         )
         .await?
     };
-    let deliveries = if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-        send_group(account, &intent, &message_id, &sender, group, &content).await?
-    } else {
-        Box::pin(send_direct(
-            account,
-            &intent,
-            &DirectSend {
-                message: &message_id,
-                principal: &principal,
-                sender: &sender,
-                thread: &thread,
-                content: &content,
-            },
-        ))
-        .await?
-    };
+    if !intent.prepares.is_empty() {
+        let pin = crate::attachment_send::authority(&account.client)?;
+        account.client.attachment_binding =
+            Some(crate::attachment_send::Binding::of(account, &pin)?);
+    }
+    let sent =
+        Box::pin(deliver(account, &intent, &message_id, &principal, &sender, &thread, &content))
+            .await;
+    account.client.attachment_binding = None;
+    let deliveries = sent?;
     let submitted =
         deliveries.iter().all(|delivery| delivery.get("state") == Some(&json!("submitted")));
     if submitted {
@@ -156,6 +150,27 @@ fn admit_prepares(intent: &Intent, account: &LocalBusAccountState) -> Result<(),
         .into());
     }
     Ok(())
+}
+
+async fn deliver(
+    account: &mut LocalBusAccountState,
+    intent: &Intent,
+    message_id: &str,
+    principal: &str,
+    sender: &str,
+    thread: &Value,
+    content: &ramflux_protocol::message::Content,
+) -> Result<Vec<Value>, SdkError> {
+    if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
+        send_group(account, intent, message_id, sender, group, content).await
+    } else {
+        Box::pin(send_direct(
+            account,
+            intent,
+            &DirectSend { message: message_id, principal, sender, thread, content },
+        ))
+        .await
+    }
 }
 
 async fn send_group(

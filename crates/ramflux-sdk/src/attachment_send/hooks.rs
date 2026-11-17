@@ -1,32 +1,132 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! The send path's calls into retirement. Kept in one place so the lifecycle owner
-//! (`retire.rs`) and the send owner (`publish`, `attachment_prepare`) meet at three fns.
+//! Where the send path meets retirement: binding at authoring, and retiring grants of devices
+//! that stopped being targets before admission.
+
+use ramflux_protocol::message::{MediaKeySlot, MediaRef, QualifiedDevice};
 
 use super::bus::AuthorityPin;
 use super::meta::GrantRecord;
+use super::plane::Plane;
+use super::retire::{self, Sent, Source, Subset};
+use crate::bus::state::LocalBusAccountState;
+use crate::gateway::GatewayCustodyConfig;
 use crate::{RamfluxClient, SdkError};
 
-/// Retires grants of devices that stopped being targets before the Inner was admitted.
-/// # Errors
-/// Returns the retirement refusal. The grants stay recorded and are retried by the sweep.
-pub(crate) fn retire_excluded(
-    client: &RamfluxClient,
-    account_id: &str,
-    pin: &AuthorityPin,
-    grants: &[GrantRecord],
-) -> Result<(), SdkError> {
-    let _ = (client, account_id, pin, grants);
-    Ok(())
+/// What the authoring step needs to bind grants to the actual message id.
+#[derive(Clone)]
+pub(crate) struct Binding {
+    pub custody: GatewayCustodyConfig,
+    pub source: String,
+    pub generation: u64,
+    pub public_key: [u8; 32],
 }
 
-/// Refuses an import step for a retired, deleted or fenced message.
-/// # Errors
-/// Returns `attachment_deleted`, `retirement_pending` or `cancelled`.
-pub(crate) fn barrier(client: &RamfluxClient, message_id: &str) -> Result<(), SdkError> {
-    if client.account_db()?.client_record("attachment-tombstone", message_id)?.is_some() {
-        return Err(super::Refusal::new(super::codes::CODE_ATTACHMENT_DELETED).into());
+impl Binding {
+    pub(crate) fn of(account: &LocalBusAccountState, pin: &AuthorityPin) -> Result<Self, SdkError> {
+        Ok(Self {
+            custody: account.gateway_config.custody.clone().ok_or(SdkError::NetworkingPending)?,
+            source: pin.source.clone(),
+            generation: pin.generation,
+            public_key: pin.public_key,
+        })
     }
-    Ok(())
+}
+
+/// Called from the authored-message capture, before the first envelope leaves: binds every
+/// grant of every large attachment of this message to the actual message id.
+/// # Errors
+/// Returns the retirement refusal; the message is then not submitted.
+pub(crate) fn bind_authored(
+    client: &RamfluxClient,
+    message_id: &str,
+    media: &[MediaRef],
+) -> Result<(), SdkError> {
+    let Some(binding) = client.attachment_binding.as_ref() else {
+        return Ok(());
+    };
+    let db = client.account_db()?;
+    let mut prepares = Vec::new();
+    for reference in media.iter().filter(|reference| reference.large_manifest.is_some()) {
+        let Some(row) = db.client_record("attachment-object", &reference.object_id)? else {
+            continue;
+        };
+        let prepare = row
+            .get("prepare_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or(SdkError::ReplayMismatch)?;
+        prepares.push((prepare, reference));
+    }
+    if prepares.is_empty() {
+        return Ok(());
+    }
+    let files: Vec<Sent<'_>> =
+        prepares.iter().map(|(prepare_id, media)| Sent { prepare_id, media }).collect();
+    let source = Source {
+        authority: &binding.source,
+        generation: binding.generation,
+        public_key: &binding.public_key,
+    };
+    let now = super::unix_now()?;
+    retire::with_client_ctx(client, &binding.custody, |ctx| {
+        retire::bind_message(ctx, message_id, &files, &source, now)
+    })
+}
+
+/// Retires registered grants of devices that left the roster. The grants are bound under the
+/// unadmitted name of the prepare, signed, queued and delivered; a failed delivery stays queued
+/// for the sweep.
+/// # Errors
+/// Returns the retirement refusal.
+pub(crate) fn retire_excluded(
+    account: &LocalBusAccountState,
+    pin: &AuthorityPin,
+    plane: &dyn Plane,
+    prepare_id: &str,
+    base: &MediaRef,
+    grants: &[GrantRecord],
+) -> Result<(), SdkError> {
+    let slots: Vec<MediaKeySlot> = grants
+        .iter()
+        .filter_map(|grant| {
+            Some(MediaKeySlot {
+                recipient: Some(QualifiedDevice {
+                    account_anchor: grant.account_anchor.clone(),
+                    device_id: grant.device_id.clone(),
+                    device_epoch: grant.device_epoch,
+                }),
+                encrypted_key: Vec::new(),
+                format: 1,
+                grant_id: grant.grant_id.to_vec(),
+                read_capability: grant.capability.clone()?,
+            })
+        })
+        .collect();
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let only: Vec<[u8; 32]> = grants
+        .iter()
+        .filter(|grant| grant.capability.is_some())
+        .map(|grant| grant.grant_id)
+        .collect();
+    let mut media = base.clone();
+    media.key_slots = slots;
+    let message_id = format!("unadmitted:{prepare_id}");
+    let files = [Sent { prepare_id, media: &media }];
+    let source =
+        Source { authority: &pin.source, generation: pin.generation, public_key: &pin.public_key };
+    let now = super::unix_now()?;
+    retire::with_ctx(account, |ctx| {
+        retire::retire_grants(
+            ctx,
+            Some(plane),
+            &Subset { message_id: &message_id, files: &files, only: &only },
+            &source,
+            now,
+        )
+    })
+    .map(|_| ())
 }

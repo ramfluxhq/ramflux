@@ -12,6 +12,7 @@ mod bus;
 mod chunks;
 mod codes;
 mod digest;
+mod erase;
 mod grant_wrap;
 mod handles;
 pub(crate) mod hooks;
@@ -28,6 +29,9 @@ mod publish;
 mod r2_import_tests;
 #[cfg(test)]
 mod r2_store_tests;
+mod retire;
+#[cfg(test)]
+mod retire_tests;
 mod scheduler;
 mod seal;
 mod seal_job;
@@ -44,6 +48,7 @@ pub(crate) use codes::{
 pub use digest::PlaintextDigester;
 pub(crate) use grant_wrap::{load as grants_of, stored_media};
 pub(crate) use handles::remember_sent;
+pub(crate) use hooks::Binding;
 pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
 pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 pub(crate) use publish::{PublishInput, upload_all, wrap_all};

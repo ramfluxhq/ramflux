@@ -20,8 +20,8 @@ pub(crate) struct RegisterCall<'a> {
     pub grant: &'a [u8],
 }
 
-/// One signed `AttachmentRetirement`: its canonical bytes and the owner's 64-byte signature.
-#[allow(dead_code)] // constructed by the retirement owner
+/// One signed `AttachmentRetirement`: canonical bytes plus the 64-byte owner signature.
+#[cfg_attr(not(test), allow(dead_code, reason = "read by the production gateway plane"))]
 pub(crate) struct RetireCall<'a> {
     pub retirement: &'a [u8],
     pub signature: &'a [u8; 64],
@@ -76,7 +76,8 @@ pub(crate) fn read_bounded(call: &ReadCall<'_>) -> Result<(), Refusal> {
     }
     if call.length == 0
         || call.length > 524_288
-        || call.offset.saturating_add(call.length) > u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES)
+        || call.offset.saturating_add(call.length)
+            > u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES)
     {
         return Err(Refusal::new(CODE_STREAM_OFFSET));
     }
@@ -103,8 +104,9 @@ pub(crate) trait Plane: Send + Sync {
         Err(Refusal::new(super::codes::CODE_AUTHORITY_UNAVAILABLE))
     }
 
+    /// Delivers one signed retirement. The reply body is JSON
+    /// `{"state":"retired"|"pending","object_erased":bool}`.
     /// # Errors
-    /// Returns a stable refusal. The bytes are the JSON `{"state":"retired"|"pending","object_erased":bool}`.
-    #[allow(dead_code)]
+    /// Returns a stable refusal when the source is unreachable or refuses the request.
     fn retire(&self, call: &RetireCall<'_>) -> Result<Vec<u8>, Refusal>;
 }

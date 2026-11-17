@@ -21,9 +21,12 @@ impl RamfluxClient {
     /// zeroizing buffer and never written to disk by the attachment code.
     /// # Errors
     /// Returns an error when the private prekeys are missing or do not match the owned root.
-    pub(crate) fn attachment_device_secret(&self) -> Result<zeroize::Zeroizing<[u8; 32]>, SdkError> {
+    pub(crate) fn attachment_device_secret(
+        &self,
+    ) -> Result<zeroize::Zeroizing<[u8; 32]>, SdkError> {
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let state = self.load_x3dh_private_state(&self.local_device_identity(&branch.device_id)?)?;
+        let state =
+            self.load_x3dh_private_state(&self.local_device_identity(&branch.device_id)?)?;
         let pair = X25519KeyPair::from_seed(state.identity_seed);
         Ok(zeroize::Zeroizing::new(pair.secret.to_bytes()))
     }

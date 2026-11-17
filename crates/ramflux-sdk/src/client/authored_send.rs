@@ -496,6 +496,7 @@ impl RamfluxClient {
         let Some(g::content::Value::Message(body)) = content.value else {
             return Ok(());
         };
+        crate::attachment_send::hooks::bind_authored(self, message_id, &body.media)?;
         let db = self.account_db()?;
         #[cfg(test)]
         let mut bound = 0_usize;

@@ -34,6 +34,7 @@ use super::plane::Plane;
 use super::scheduler;
 use super::store::Store;
 
+pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
 const BINDING: &str = "attachment-import";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const SENT: &str = "attachment-send";
@@ -101,7 +102,7 @@ pub(crate) fn begin(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: BeginBody = serde_json::from_value(request.body.clone())?;
     let id = request_account_id(request)?.to_owned();
-    super::hooks::barrier(&account.client, &body.message_id)?;
+    super::retire::barrier(&account.client, &body.message_id)?;
     let now = bus::unix_now()?;
     reap(now);
     if let Some(existing) = bound(&account.client, &body.operation_id)? {
@@ -468,7 +469,7 @@ fn lookup(import_id: &str, account: &str) -> Result<Arc<Job>, Refusal> {
 }
 
 fn gate(client: &crate::RamfluxClient, job: &Job) -> Result<(), SdkError> {
-    super::hooks::barrier(client, &job.message_id)?;
+    super::retire::barrier(client, &job.message_id)?;
     if job.cancelled.load(Ordering::Acquire) || job.finished.load(Ordering::Acquire) {
         return Err(Refusal::new(CODE_CANCELLED).into());
     }
@@ -498,6 +499,16 @@ fn view(
         "plaintext_length": length,
         "expires_at": expires,
     })
+}
+
+/// `relay_erased` is reported only after a confirmed cleanup ACK.
+#[must_use]
+pub(crate) fn revoke_state(existing: Option<&Value>) -> &'static str {
+    if existing.and_then(|row| row.get("relay_erased")).and_then(Value::as_bool) == Some(true) {
+        "relay_erased"
+    } else {
+        "retirement_pending"
+    }
 }
 
 fn bound(client: &crate::RamfluxClient, operation_id: &str) -> Result<Option<String>, SdkError> {
@@ -549,4 +560,36 @@ struct ReadBody {
 #[derive(Deserialize)]
 struct IdBody {
     import_id: String,
+}
+
+/// Test seam: registers an open import handle so a fence can be observed.
+#[cfg(test)]
+pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str, path: PathBuf) {
+    let job = Arc::new(Job {
+        account: account.to_owned(),
+        message_id: message_id.to_owned(),
+        index: 0,
+        generation: 1,
+        length: 0,
+        expires_at: u64::MAX,
+        path,
+        ready: AtomicBool::new(true),
+        failed: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+    jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(import_id.to_owned(), job);
+}
+
+/// Test seam: whether the registered handle was cancelled.
+#[cfg(test)]
+pub(crate) fn test_job_cancelled(import_id: &str) -> bool {
+    jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(import_id)
+        .is_some_and(|job| job.cancelled.load(Ordering::Acquire))
 }

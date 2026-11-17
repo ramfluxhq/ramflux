@@ -125,12 +125,14 @@ pub(in crate::bus) async fn publish_prepares(
         move || wrap_all(&job.input(&targets), &rows)
     })
     .await?;
-    for item in &wrapped {
+    for (item, prepare) in wrapped.iter().zip(prepares) {
         if !item.excluded.is_empty() {
             crate::attachment_send::hooks::retire_excluded(
-                &account.client,
-                account_id,
+                account,
                 &job.pin,
+                job.plane.as_ref(),
+                prepare,
+                &item.media,
                 &item.excluded,
             )?;
         }
@@ -143,7 +145,7 @@ pub(in crate::bus) async fn publish_prepares(
     let departed: Vec<_> =
         granted.iter().filter(|key| !last.keys().contains(key)).cloned().collect();
     if !departed.is_empty() {
-        retire_departed(account, &job, account_id, prepares, &departed)?;
+        retire_departed(account, &job, prepares, &media, &departed)?;
         return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into());
     }
 
@@ -233,20 +235,31 @@ fn entry_keys(media: &[ramflux_protocol::message::MediaRef]) -> Vec<(String, Str
 fn retire_departed(
     account: &LocalBusAccountState,
     job: &Job,
-    account_id: &str,
     prepares: &[String],
+    media: &[ramflux_protocol::message::MediaRef],
     departed: &[(String, String, u64)],
 ) -> Result<(), SdkError> {
-    let mut gone = Vec::new();
-    for prepare in prepares {
-        for grant in crate::attachment_send::grants_of(&job.store, prepare)? {
-            let key = (grant.account_anchor.clone(), grant.device_id.clone(), grant.device_epoch);
-            if departed.contains(&key) {
-                gone.push(grant);
-            }
-        }
+    for (prepare, reference) in prepares.iter().zip(media) {
+        let gone: Vec<_> = crate::attachment_send::grants_of(&job.store, prepare)?
+            .into_iter()
+            .filter(|grant| {
+                departed.contains(&(
+                    grant.account_anchor.clone(),
+                    grant.device_id.clone(),
+                    grant.device_epoch,
+                ))
+            })
+            .collect();
+        crate::attachment_send::hooks::retire_excluded(
+            account,
+            &job.pin,
+            job.plane.as_ref(),
+            prepare,
+            reference,
+            &gone,
+        )?;
     }
-    crate::attachment_send::hooks::retire_excluded(&account.client, account_id, &job.pin, &gone)
+    Ok(())
 }
 
 fn remember_roster(
@@ -362,7 +375,11 @@ impl Scope {
         }
         let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
         homes.insert(root.clone(), home_of(&account.client, &peer)?);
-        Ok(Self { roots: vec![root.clone(), own_root], homes, kind: ScopeKind::Dm { peer_root: root } })
+        Ok(Self {
+            roots: vec![root.clone(), own_root],
+            homes,
+            kind: ScopeKind::Dm { peer_root: root },
+        })
     }
 
     /// Refreshes every manifest, then plans from the verified cache. The two reads are one
@@ -389,11 +406,9 @@ impl Scope {
             return Err(error);
         }
         match &self.kind {
-            ScopeKind::Dm { peer_root } => account.client.plan_media_roster(
-                &RosterScope::Dm { peer_root },
-                &self.homes,
-                0,
-            ),
+            ScopeKind::Dm { peer_root } => {
+                account.client.plan_media_roster(&RosterScope::Dm { peer_root }, &self.homes, 0)
+            }
             ScopeKind::Group { group_id, members } => {
                 let epoch = account
                     .client

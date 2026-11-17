@@ -132,8 +132,12 @@ async fn revoke_object(bus: &mut LocalBusClient, revoke: ObjectRevoke) -> Result
             )
             .await?;
         let state = response.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
-        if state == "relay_erased" || state == "retirement_pending" {
+        if state == "relay_erased" {
             print_json(&response)
+        } else if state == "retirement_pending" {
+            // A pending retirement is not success: the bytes may still be readable at the source.
+            print_json(&response)?;
+            Err(RfError::Message("retirement_pending".to_owned()))
         } else {
             Err(RfError::Message(state.to_owned()))
         }

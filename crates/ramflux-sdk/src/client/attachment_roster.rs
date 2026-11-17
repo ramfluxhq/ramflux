@@ -9,8 +9,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::SdkError;
 use crate::RamfluxClient;
+use crate::SdkError;
 use crate::attachment_send::{
     CODE_AUTHORITY_UNAVAILABLE, MediaDevice, MediaScope, Refusal, choose_targets,
 };
