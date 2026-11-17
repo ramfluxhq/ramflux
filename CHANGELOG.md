@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1] - 2026-11-17
+
+- Send a file in a direct message or a group.
+- Local search.
+- 15-character passphrase policy.
+- Residue scan: `rf diag residue`.
+- Layer-4 declaration.
+
 ## [0.2.0] - 2026-11-16
 
 First version under the shared product version line (all Ramflux repos move together).
