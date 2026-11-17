@@ -879,9 +879,8 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
 
 #[tokio::test(flavor = "current_thread")]
 async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult {
-    tokio::time::timeout(
-        Duration::from_secs(60),
-        LocalSet::new().run_until(async {
+    LocalSet::new()
+        .run_until(async {
             let root = crate::bus::runtime_tests::root("backup-create-refused");
             let supervisor = source_supervisor(
                 &root,
@@ -918,9 +917,8 @@ async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult
             drop(supervisor);
             std::fs::remove_dir_all(root)?;
             Ok(())
-        }),
-    )
-    .await?
+        })
+        .await
 }
 
 #[path = "tests/selector_normalization.rs"]

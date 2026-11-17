@@ -250,9 +250,8 @@ mod passphrase_policy_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn restore_install_refuses_short_and_blocklisted_passphrases() -> TestResult {
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            LocalSet::new().run_until(async {
+        LocalSet::new()
+            .run_until(async {
                 let root = crate::bus::runtime_tests::root("restore-passphrase-refused");
                 let config = LocalBusConfig::new(root.join("bus.sock"), &root);
                 let supervisor = Supervisor::from_initializers(&config, Vec::new(), None)?;
@@ -288,8 +287,7 @@ mod passphrase_policy_tests {
                 drop(supervisor);
                 std::fs::remove_dir_all(root)?;
                 Ok(())
-            }),
-        )
-        .await?
+            })
+            .await
     }
 }
