@@ -50,11 +50,17 @@ impl GatewayPlane {
     /// Runs one call and returns the reply body, or the stable code the relay answered with.
     fn call(&self, call: AttachmentCall) -> Result<Vec<u8>, Refusal> {
         let request_id = request_id()?;
-        let mut session = self.session().map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
+        let mut session = self.session().map_err(|error| {
+            tracing::warn!(%error, "attachment plane has no live gateway session");
+            Refusal::new(CODE_AUTHORITY_UNAVAILABLE)
+        })?;
         let reply = self
             .runtime
             .block_on(session.attachment_call(AttachmentFrame { request_id, call }))
-            .map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
+            .map_err(|error| {
+                tracing::warn!(%error, "attachment call over the gateway session failed");
+                Refusal::new(CODE_AUTHORITY_UNAVAILABLE)
+            })?;
         match reply.code {
             None => Ok(reply.body.0),
             Some(code) => Err(crate::attachment_send::refusal_for(&code)),
