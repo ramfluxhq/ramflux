@@ -410,8 +410,12 @@ async fn native_status_reads_persisted_revocation_while_the_actor_is_still_unloc
     let mut ceremony = CreationCeremony::begin(&root.0, input("revoked-status"), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
-    let born =
-        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, b"data")?;
+    let born = ceremony.confirm_with_passphrase(
+        &words(&phrase, positions)?,
+        &vault,
+        now,
+        b"status data passphrase",
+    )?;
     let primary = vault.primary_for_public_key(
         &born.record().body.master_certificate.body.self_signing_public_key,
     )?;
@@ -425,7 +429,7 @@ async fn native_status_reads_persisted_revocation_while_the_actor_is_still_unloc
             Some("revoked-status".into()),
             "account",
             "account.unlock",
-            json!({"passphrase":"data"}),
+            json!({"passphrase":"status data passphrase"}),
         )
         .await?;
         let before = bus
@@ -532,7 +536,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         let failed = ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
         let error = ceremony
-            .confirm(&wrong, &Zeroizing::new("discard secret".into()))
+            .confirm(&wrong, &Zeroizing::new("discarded data secret".into()))
             .await
             .expect_err("wrong words must be rejected");
         assert!(
@@ -905,7 +909,7 @@ fn create_refusal_account(
         &words(&phrase, positions)?,
         vault,
         now,
-        format!("{id}-secret").as_bytes(),
+        format!("{id}-data-passphrase").as_bytes(),
     )?;
     Ok(())
 }
@@ -943,7 +947,7 @@ async fn refuse_open_custodians(root: &std::path::Path, socket: &std::path::Path
             Some(id.into()),
             "account",
             "account.unlock",
-            json!({"passphrase":format!("{id}-secret")}),
+            json!({"passphrase":format!("{id}-data-passphrase")}),
         )
         .await?;
     }
@@ -1188,7 +1192,7 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
                 Some(id.into()),
                 "account",
                 "account.unlock",
-                json!({"passphrase":format!("{id}-secret")}),
+                json!({"passphrase":format!("{id}-data-passphrase")}),
             )
             .await?;
         }
@@ -1220,7 +1224,7 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
         let bundle: crate::custody::AgentProvisioningBundle =
             serde_json::from_slice(&std::fs::read(path)?)?;
         assert_eq!(bundle.account_id, "agent");
-        assert_eq!(bundle.data_passphrase, "agent-secret");
+        assert_eq!(bundle.data_passphrase, "agent-data-passphrase");
         let listed = bus.request(None, "account", "account.list", json!({})).await?;
         assert_eq!(listed["active_account_id"], "agent", "export must not switch accounts");
         Ok::<_, Box<dyn std::error::Error>>(())

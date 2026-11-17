@@ -240,6 +240,51 @@ pub fn refresh_authority(
     install_exact(&Installation { root, db, vault, now }, &row, &hash, authority)
 }
 
+/// Unlock-time recovery of ordinary authority refreshes a process death interrupted. A refresh
+/// that is not owned by a head journal row (an observation of the own native head) leaves only
+/// its pending marker; the marker fences admission, so it must be settled before the session is
+/// admitted. Two outcomes, decided by what is already durable:
+/// - the new authority file is durable (its hash is the marker's): the exact installation is
+///   completed from that file, through the same ordered steps;
+/// - it is not: no owner has changed, the marker only fenced an attempt that never took effect,
+///   so it is removed and the next observation repeats the refresh.
+///
+/// Markers owned by a head journal row are left to that head's recovery.
+///
+/// Returns whether any marker was settled.
+///
+/// # Errors
+/// Storage, verification or installation errors leave the marker in place for a retry.
+pub(crate) fn settle_interrupted_refresh(
+    root: &Path,
+    db: &AccountDb,
+    vault: &dyn custody::PrimaryVault,
+    account_id: &str,
+    now: u64,
+) -> Result<bool, SdkError> {
+    let head = db.pairing_head()?;
+    let mut settled = false;
+    for row in install_store::list_pending(root, account_id)? {
+        if row.install_purpose != "authority_refresh"
+            || head.as_ref().is_some_and(|head| head.operation_id == row.operation_id)
+        {
+            continue;
+        }
+        let account = custody::load_data_account(root, account_id, now)?;
+        if row.record_hash.as_deref() == Some(object_hash(account.record())?.as_str()) {
+            let authority = CustodyAuthority {
+                publication: account.publication(),
+                custodian_publication: account.custodian_publication(root, now)?,
+            };
+            refresh_authority(root, db, vault, account_id, &authority, now)?;
+        } else {
+            install_store::remove_pending(root, account_id, &row.operation_id)?;
+        }
+        settled = true;
+    }
+    Ok(settled)
+}
+
 /// Account-scoped process fence. Never held over a network request.
 pub(crate) fn authority_lock(root: &Path, id: &str) -> Result<fs::File, SdkError> {
     super::super::valid_id(id)?;

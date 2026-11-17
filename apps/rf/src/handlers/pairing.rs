@@ -398,6 +398,10 @@ impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider
                 _ => return Ok(CredentialOutcome::Refused),
             };
             let pass = terminal.line(prompt, true)?;
+            if request.action == "setup" {
+                ramflux_sdk::check_new_passphrase(&pass)
+                    .map_err(|error| RfError::Sdk(error.into()))?;
+            }
             let confirmation = if request.action == "setup" {
                 let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
                 Some(SecretUtf8::from_bytes(repeated.as_bytes())?)
@@ -410,6 +414,11 @@ impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider
             })
         };
         // UI refusal/EOF/unavailable controlling terminal never falls back to stdin or env.
-        Ok(read().unwrap_or(CredentialOutcome::Refused))
+        // A passphrase-policy refusal is the typed rule, not a terminal refusal.
+        match read() {
+            Ok(outcome) => Ok(outcome),
+            Err(RfError::Sdk(error @ ramflux_sdk::SdkError::PassphrasePolicy(_))) => Err(error),
+            Err(_) => Ok(CredentialOutcome::Refused),
+        }
     }
 }

@@ -138,8 +138,28 @@ fn derive_recovery_secret_bytes(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 3
     if passphrase.len() < MIN_RECOVERY_SECRET_BYTES {
         return Err(CryptoError::WeakRecoverySecret);
     }
-    // Recovery protects offline root restoration, so prefer a memory-hard cost over fast UX.
-    // 256 MiB keeps local recovery practical while materially raising brute-force cost.
+    argon2id_recovery(passphrase, salt)
+}
+
+/// Derives a backup wrapping key with the recovery Argon2id parameters.
+///
+/// The 16-byte recovery-secret floor does not apply. Callers that accept a
+/// user-chosen passphrase enforce that policy before calling this function.
+/// Parameters match [`derive_recovery_secret`]: Argon2id version 0x13, 262144 KiB,
+/// time cost 3, parallelism 1, and a 32-byte output.
+///
+/// # Errors
+/// Returns an error if the Argon2id parameter set or KDF invocation fails.
+pub fn derive_backup_passphrase_key(
+    passphrase: &[u8],
+    salt: &[u8],
+) -> Result<RecoverySecret, CryptoError> {
+    Ok(RecoverySecret::new(argon2id_recovery(passphrase, salt)?))
+}
+
+fn argon2id_recovery(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], CryptoError> {
+    // Recovery and backup wrapping share this memory-hard cost. 256 MiB keeps
+    // local use practical while materially raising brute-force cost.
     let params = Params::new(
         RECOVERY_ARGON2_MEMORY_KIB,
         RECOVERY_ARGON2_TIME_COST,

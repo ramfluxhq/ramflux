@@ -229,6 +229,16 @@ fn pairing_failure_class_is_allow_listed_and_never_echoes_received_text() {
         (RfError::Sdk(SdkError::LocalBus("pairing HTTPS status 502".into())), "HTTP 502"),
         (RfError::Sdk(SdkError::LocalBus("SECRET-TOKEN".into())), "unknown"),
         (RfError::Message("never display this input SECRET-TOKEN".into()), "unknown"),
+        (
+            RfError::Sdk(SdkError::PassphrasePolicy(
+                ramflux_sdk::PassphrasePolicyError::TooShort { scalars: 14 },
+            )),
+            "1 more characters needed. The data passphrase must be at least 15 characters.",
+        ),
+        (
+            RfError::Sdk(SdkError::PassphrasePolicy(ramflux_sdk::PassphrasePolicyError::TooCommon)),
+            "This passphrase is too common or has appeared in a data breach. Choose a different one.",
+        ),
     ] {
         let class = output::class(&error);
         assert_eq!(class, expected, "test: failure class for {error:?}");

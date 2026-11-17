@@ -86,6 +86,8 @@ pub enum CustodyConfirmReason {
     PassphraseEmpty,
     PassphraseTooLong,
     PassphraseNotUtf8,
+    PassphraseTooShort,
+    PassphraseTooCommon,
     /// 1-based recovery-phrase position. The expected word is not part of the reason.
     WordMismatch {
         position: u8,
@@ -103,6 +105,8 @@ impl CustodyConfirmReason {
             Self::PassphraseEmpty
             | Self::PassphraseTooLong
             | Self::PassphraseNotUtf8
+            | Self::PassphraseTooShort
+            | Self::PassphraseTooCommon
             | Self::DisplayName
             | Self::OperationId => "CustodySetupInvalid",
         }
@@ -115,6 +119,8 @@ impl CustodyConfirmReason {
             Self::PassphraseEmpty => "passphrase_empty",
             Self::PassphraseTooLong => "passphrase_too_long",
             Self::PassphraseNotUtf8 => "passphrase_not_utf8",
+            Self::PassphraseTooShort => "too_short",
+            Self::PassphraseTooCommon => "too_common",
             Self::DisplayName => "display_name",
             Self::OperationId => "operation_id",
             Self::WordMismatch { position } => word_reason(position),
@@ -128,6 +134,8 @@ impl CustodyConfirmReason {
             "passphrase_empty" => Self::PassphraseEmpty,
             "passphrase_too_long" => Self::PassphraseTooLong,
             "passphrase_not_utf8" => Self::PassphraseNotUtf8,
+            "too_short" => Self::PassphraseTooShort,
+            "too_common" => Self::PassphraseTooCommon,
             "display_name" => Self::DisplayName,
             "operation_id" => Self::OperationId,
             _ => return word_from_token(token),
@@ -185,6 +193,8 @@ pub enum SdkError {
     EditConflict { target: String, expected: u64, received: u64 },
     #[error("offline retention {0} is outside 3600..=604800 seconds")]
     InvalidOfflineRetention(u64),
+    #[error(transparent)]
+    PassphrasePolicy(#[from] crate::passphrase::PassphrasePolicyError),
     #[error(transparent)]
     LifecycleShared(std::sync::Arc<SdkError>),
     #[error("operation requires reconciliation: {0}")]

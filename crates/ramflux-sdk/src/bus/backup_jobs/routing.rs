@@ -38,6 +38,7 @@ impl Supervisor {
                     .ok_or_else(|| refused("not_writable"))?
                     .to_owned();
                 let secret = take_secret(&mut request)?;
+                crate::passphrase::admit_new_passphrase(secret.as_bytes())?;
                 let allow = request
                     .body
                     .get("allow_missing_attachments")
@@ -119,6 +120,7 @@ impl Supervisor {
         let serde_json::Value::String(secret) = value.take() else {
             return Err(SdkError::CustodySetupInvalid);
         };
+        crate::passphrase::admit_new_passphrase(secret.as_bytes())?;
         Ok(Some(super::NativeRestoreSetup {
             vault: super::super::custody_setup::primary_provider(&self.config),
             passphrase: zeroize::Zeroizing::new(secret),
@@ -228,10 +230,64 @@ impl Supervisor {
         Ok(())
     }
 }
+
 fn take_secret(request: &mut LocalBusFrame) -> Result<zeroize::Zeroizing<String>, SdkError> {
     let mut value =
         request.body.get_mut("passphrase").ok_or_else(|| refused("wrong_passphrase"))?.take();
     let secret = value.as_str().ok_or_else(|| refused("wrong_passphrase"))?.to_owned();
     crate::bus::secrets::wipe(&mut value);
     Ok(zeroize::Zeroizing::new(secret))
+}
+
+#[cfg(test)]
+mod passphrase_policy_tests {
+    use super::Supervisor;
+    use crate::prelude::*;
+    use serde_json::json;
+    use tokio::task::LocalSet;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restore_install_refuses_short_and_blocklisted_passphrases() -> TestResult {
+        LocalSet::new()
+            .run_until(async {
+                let root = crate::bus::runtime_tests::root("restore-passphrase-refused");
+                let config = LocalBusConfig::new(root.join("bus.sock"), &root);
+                let supervisor = Supervisor::from_initializers(&config, Vec::new(), None)?;
+                for (passphrase, expected) in [
+                    ("aaaaaaaaaaaaaa", crate::PassphrasePolicyError::TooShort { scalars: 14 }),
+                    ("films+pic+galeries", crate::PassphrasePolicyError::TooCommon),
+                ] {
+                    let mut request = LocalBusFrame::request(
+                        "restore-policy",
+                        None,
+                        "account",
+                        "account.restore.install",
+                        json!({"job_id": "absent", "passphrase": passphrase}),
+                    );
+                    let Err(error) = supervisor.native_restore_setup(&mut request) else {
+                        return Err("test: restore passphrase was accepted".into());
+                    };
+                    assert!(
+                        matches!(error, SdkError::PassphrasePolicy(got) if got == expected),
+                        "test: restore refusal was {error}, expected {expected:?}"
+                    );
+                }
+                assert_eq!(
+                    supervisor.backup_jobs.jobs()?["jobs"],
+                    json!([]),
+                    "test: a refused restore wrote a job row"
+                );
+                assert!(
+                    supervisor.installing.borrow().is_empty(),
+                    "test: a refused restore marked an account installing"
+                );
+                supervisor.shutdown().await?;
+                drop(supervisor);
+                std::fs::remove_dir_all(root)?;
+                Ok(())
+            })
+            .await
+    }
 }

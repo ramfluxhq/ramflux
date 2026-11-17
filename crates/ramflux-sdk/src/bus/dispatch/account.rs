@@ -384,10 +384,11 @@ fn encrypt_account_backup(
     contacts: Vec<String>,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupFile, SdkError> {
+    crate::passphrase::admit_new_passphrase(passphrase.as_bytes())?;
     let salt = ramflux_crypto::random_32()?;
     let nonce_seed = ramflux_crypto::random_32()?;
     let nonce = &nonce_seed[..12];
-    let key = ramflux_crypto::derive_recovery_secret(passphrase.as_bytes(), &salt)?;
+    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
     passphrase.zeroize();
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
@@ -445,7 +446,7 @@ fn decrypt_account_backup_state(
         ramflux_protocol::decode_base64url(&backup.ciphertext_base64url).map_err(|error| {
             SdkError::LocalBus(format!("invalid account backup ciphertext: {error}"))
         })?;
-    let key = ramflux_crypto::derive_recovery_secret(passphrase.as_bytes(), &salt)?;
+    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
     passphrase.zeroize();
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
