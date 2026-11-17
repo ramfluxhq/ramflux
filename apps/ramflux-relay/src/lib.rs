@@ -4,6 +4,7 @@
 //! Relay process composition and authenticated object operations.
 
 pub mod attachment_authority;
+mod attachment_service;
 pub mod attachment_publication;
 pub mod attachment_s3;
 
@@ -105,6 +106,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
                 Arc::clone(&trust_snapshot_cache),
             )?;
         }
+        attachment_service::start(
+            &config,
+            &store,
+            redb_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
+        )?;
         start_expire_scheduler(Arc::clone(&store), Arc::clone(&state));
         #[cfg(feature = "itest-redb-cache-probe")]
         start_cache_probe(&store);

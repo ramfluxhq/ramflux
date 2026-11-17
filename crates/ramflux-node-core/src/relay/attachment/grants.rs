@@ -371,6 +371,18 @@ impl ScopedGrantRegistry {
             })
             .transpose()
     }
+    /// The upload's ledger record, for a serving path that reads the signed manifest and
+    /// the committed generation from durable state.
+    /// # Errors
+    /// Refuses unknown uploads and corrupt storage.
+    pub fn ledger_reservation(
+        &self,
+        owner: &AttachmentOwner,
+        upload_id: &[u8; 32],
+    ) -> Result<AttachmentReservation, AttachmentLedgerError> {
+        self.ledger.reservation(owner, upload_id)
+    }
+
     /// After a grant is retired, deletes the object's ciphertext once no Active or Retiring
     /// grant remains on that upload, then releases the charge. `Ok(true)` means the relay
     /// bytes are gone and the charge is released; `Ok(false)` means another grant still reads

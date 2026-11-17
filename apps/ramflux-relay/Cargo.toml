@@ -48,6 +48,7 @@ itest-redb-cache-probe = ["ramflux-node-core/itest-redb-cache-probe"]
 
 [dependencies]
 ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
 # itest-alloc-prof only (default-off). Absent from the default/production dependency graph.
 dhat = { version = "0.3", optional = true }
 libc = { version = "0.2", optional = true }
