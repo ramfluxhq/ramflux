@@ -93,7 +93,7 @@ async fn dispatch_message_submit_request(
     submit_message(account, body).await
 }
 
-pub(super) async fn submit_conversation_message(
+pub(crate) async fn submit_conversation_message(
     account: &mut LocalBusAccountState,
     body: LocalBusMessageSubmitRequest,
 ) -> Result<LocalBusDispatchResult, SdkError> {

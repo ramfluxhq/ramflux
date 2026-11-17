@@ -87,7 +87,7 @@ async fn native_public_tls_refresh_updates_local_head_without_accessing_branch_v
             .require_current_device_authorization(&fixture.client.owned_device_identity()?)
             .is_err()
     );
-    fixture.client.persist_fetched_identity_directory(
+    fixture.client.persist_observed_identity_directory_now(
         &crate::prekey::SdkDeviceManifestResponse::from_native(*native)?,
     )?;
     fixture

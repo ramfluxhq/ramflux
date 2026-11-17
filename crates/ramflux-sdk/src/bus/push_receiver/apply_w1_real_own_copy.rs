@@ -109,7 +109,7 @@ async fn build_peer_authored(
     )?;
     // Only the peer knows both directories; the receiver has an accepted relationship and the
     // pair session, but no cached authority for the sender's root.
-    peer.client.persist_fetched_identity_directory(&own)?;
+    peer.client.persist_observed_identity_directory_now(&own)?;
     for local in [&source, &peer] {
         local.client.account_db()?.establish_friend_link(
             "test-friend",
@@ -201,8 +201,8 @@ async fn build(
         &remote.principal_commitment,
     )?;
     for local in [&source, &peer, &sibling] {
-        local.client.persist_fetched_identity_directory(&own)?;
-        local.client.persist_fetched_identity_directory(&remote)?;
+        local.client.persist_observed_identity_directory_now(&own)?;
+        local.client.persist_observed_identity_directory_now(&remote)?;
         local.client.account_db()?.establish_friend_link(
             "test-friend",
             &own.principal_commitment,

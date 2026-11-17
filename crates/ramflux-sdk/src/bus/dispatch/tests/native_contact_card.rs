@@ -33,7 +33,7 @@ async fn native_ordinary_card_export_and_import_selector_keep_the_master_anchor(
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    let response = export(&state, "native-card")?.response_body;
+    let response = export(&state, "native-card").await?.response_body;
     let text = response["card"].as_str().ok_or("card")?;
     let parsed = crate::parse_contact_card(text, i64::try_from(now)?)?;
     assert_eq!(parsed.root_commitment, anchor);

@@ -32,7 +32,7 @@ async fn a_second_account_device_accepts_the_peer_only_after_an_authenticated_co
         alice.accept_peer(&primary)?;
         primary.accept_peer(&alice)?;
         let mut receiver = primary.enroll_sibling("recipient-copy-target", "sibling").await?;
-        alice.client.persist_fetched_identity_directory(&primary.manifest)?;
+        alice.client.persist_observed_identity_directory_now(&primary.manifest)?;
         let directory = crate::client::native_test_support::directory::Directory::new(vec![
             primary.manifest.clone(),
             alice.manifest.clone(),
@@ -121,7 +121,7 @@ async fn a_peer_cannot_preclaim_a_future_own_copy_row_id()
             &primary, &mut peer, &conversation, "original-owned-operation"
         ).await?;
         let mut receiver = primary.enroll_sibling("own-preclaim-target", "sibling").await?;
-        peer.client.persist_fetched_identity_directory(&primary.manifest)?;
+        peer.client.persist_observed_identity_directory_now(&primary.manifest)?;
         let directory = crate::client::native_test_support::directory::Directory::new(vec![primary.manifest.clone(), peer.manifest.clone()]).await?;
         directory.configure(&mut receiver);
         sibling_erasure::contact(&primary, &peer, &mut receiver, &conversation).await?;

@@ -15,7 +15,7 @@ async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distrib
 async fn exercise() -> TestResult {
     let source = Fixture::new("bootstrap-retry-source").await?;
     let mut target = Fixture::new("bootstrap-retry-target").await?;
-    source.client.persist_fetched_identity_directory(&target.manifest)?;
+    source.client.persist_observed_identity_directory_now(&target.manifest)?;
     let primary = source
         .client
         .born_v3_account

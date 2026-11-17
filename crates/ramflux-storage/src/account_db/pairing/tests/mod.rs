@@ -42,6 +42,7 @@ fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::er
     codec::live_binds_descriptor_ids()?;
     codec::head_binds_candidate_hash_and_ack()?;
     codec::head_candidate_is_immutable()?;
+    codec::layer_update_head_is_closed_to_pairing_columns_and_discards_only_when_prepared()?;
     codec::head_one_account_forward_only()?;
     codec::put_refuses_foreign_account_and_anchor()?;
     codec::floor_decrease_exact_errors()?;

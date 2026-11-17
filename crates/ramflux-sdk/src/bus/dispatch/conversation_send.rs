@@ -115,7 +115,7 @@ async fn send_group(
     Ok(vec![delivery(group, outcome)])
 }
 
-pub(super) fn peer_root(
+pub(in crate::bus) fn peer_root(
     account: &LocalBusAccountState,
     thread: &Value,
     principal: &str,

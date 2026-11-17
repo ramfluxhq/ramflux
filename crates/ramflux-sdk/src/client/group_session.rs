@@ -668,8 +668,8 @@ mod tests {
             use crate::client::native_test_support::Fixture;
             let owner = Fixture::with_device("epoch-floor-owner", "owner").await?;
             let peer = Fixture::with_device("epoch-floor-peer", "peer").await?;
-            owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-            peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+            owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+            peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
             let primary = owner
                 .client
                 .born_v3_account

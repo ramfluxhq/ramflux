@@ -172,7 +172,7 @@ async fn updated_directory(
 ) -> TestResult<(SocketAddr, tokio::task::JoinHandle<()>, PathBuf)> {
     // The creator's own account now publishes the enlarged certified roster.
     let manifest = super::fixture::manifest(creator)?;
-    creator.persist_fetched_identity_directory(&manifest)?;
+    creator.persist_observed_identity_directory_now(&manifest)?;
     // The peer has the previous manifest until receipt of the authenticated hint.
     assert_eq!(peer.group_state("group")?.members.len(), 3);
     let own = super::fixture::manifest(peer)?;

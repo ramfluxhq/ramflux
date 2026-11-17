@@ -14,12 +14,14 @@ pub(crate) async fn fetch(
     class: crate::bus::connection_manager::CallClass,
 ) -> Result<SendMaterial, SdkError> {
     let manifest = if let Some(root) = request.root {
+        let started = std::time::Instant::now();
         let response = crate::prekey::sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
             config,
             &format!("/mvp1/device-manifest/{root}"),
         )
         .await?
-        .ok_or_else(|| SdkError::InboundPending("recipient authority unavailable".into()))?;
+        .ok_or_else(|| SdkError::InboundPending("recipient authority unavailable".into()))?
+        .fetched_from(started);
         Some((root, response))
     } else {
         None

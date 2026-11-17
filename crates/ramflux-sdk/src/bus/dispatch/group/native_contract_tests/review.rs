@@ -46,9 +46,9 @@ async fn unrelated_case(direct: bool, peer_fresh: bool) -> TestResult {
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
     if peer_fresh {
-        account.client.persist_fetched_identity_directory(&bob.manifest)?;
+        account.client.persist_observed_identity_directory_now(&bob.manifest)?;
     } else {
-        account.client.persist_fetched_identity_directory(&alice.manifest)?;
+        account.client.persist_observed_identity_directory_now(&alice.manifest)?;
     }
     let key = account.client.inbox_admission_key(&entry)?;
     install_gateway(&mut account, vec![entry]);

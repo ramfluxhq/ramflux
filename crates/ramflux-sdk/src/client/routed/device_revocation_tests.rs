@@ -39,7 +39,7 @@ async fn revoking_an_own_device_via_the_production_method_erases_pair_work_and_r
             "test: native revoke retained private pair sessions"
         );
         assert!(
-            bob.client.persist_fetched_identity_directory(&stale).is_err(),
+            bob.client.persist_observed_identity_directory_now(&stale).is_err(),
             "test: replayed pre-revocation directory was accepted"
         );
         assert!(
@@ -145,7 +145,7 @@ async fn externally_custodied_revoke_refuses_non_primary_before_publication() ->
     crate::bus::credentials::contract_tests::deadline(Box::pin(async {
         let mut owner = Fixture::externally_custodied("external-agent").await?;
         let peer = Fixture::new("external-peer").await?;
-        owner.client.persist_fetched_identity_directory(&peer.manifest)?;
+        owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
         seed_pair(&owner, &peer)?;
         let before =
             owner.client.born_v3_account.as_ref().ok_or("test: external account")?.record().clone();
@@ -270,7 +270,7 @@ mod published_authority {
             assert!(local.client.active_pair(&own, &remote)?.is_none());
             assert_eq!(local.client.persisted_pair_snapshot(&own, &unaffected)?, other_before);
             assert!(
-                local.client.persist_fetched_identity_directory(&peer.manifest).is_err(),
+                local.client.persist_observed_identity_directory_now(&peer.manifest).is_err(),
                 "old native authority replaced a revocation"
             );
             assert!(local.client.trusted_device(HeadUse::NewAuthorization, &remote).is_err());

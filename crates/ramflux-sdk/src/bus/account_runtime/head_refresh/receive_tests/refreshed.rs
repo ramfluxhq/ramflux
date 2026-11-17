@@ -63,7 +63,7 @@ async fn setup_refreshed() -> TestResult<Case> {
     .await?;
     *alice.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
     let mut config = alice.config;
     config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
     config.gateway_addr = address;
@@ -205,7 +205,7 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
             );
             *account.client.native_head_freshness.borrow_mut() =
                 crate::client::identity_authority::NativeHeadFreshness::default();
-            account.client.persist_fetched_identity_directory(&case.bob.manifest)?;
+            account.client.persist_observed_identity_directory_now(&case.bob.manifest)?;
             let before = case.resumes.load(Ordering::SeqCst);
             let response = receive(&mut case.runtime).await?;
             assert_message(&case.runtime, &response).await?;

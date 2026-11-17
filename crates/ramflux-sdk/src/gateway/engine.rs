@@ -897,6 +897,7 @@ impl GatewaySessionEngine {
         &mut self,
         principal: &str,
     ) -> Result<Option<SdkDeviceManifestResponse>, SdkError> {
+        let started = std::time::Instant::now();
         self.write_frame(&GatewayClientFrame::PrincipalManifestFetch {
             principal_id: principal.to_owned(),
         })
@@ -916,7 +917,12 @@ impl GatewaySessionEngine {
                         ),
                     });
                 }
-                response.manifest.map(serde_json::from_value).transpose().map_err(SdkError::from)
+                response
+                    .manifest
+                    .map(serde_json::from_value::<SdkDeviceManifestResponse>)
+                    .transpose()
+                    .map(|manifest| manifest.map(|manifest| manifest.fetched_from(started)))
+                    .map_err(SdkError::from)
             }
             GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(

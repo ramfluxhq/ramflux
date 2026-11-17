@@ -376,7 +376,10 @@ impl HeadRow {
         integer(self.generation, "generation")?;
         require(self.generation >= 1, "generation")?;
         require(
-            matches!(self.kind.as_str(), "enroll" | "transfer" | "revoke" | "head_update"),
+            matches!(
+                self.kind.as_str(),
+                "enroll" | "transfer" | "revoke" | "head_update" | "layer_update"
+            ),
             "kind",
         )?;
         b32(&self.base_record_hash, "base_record_hash")?;
@@ -403,7 +406,7 @@ impl HeadRow {
                     "recipient_ref",
                 )?;
             }
-            "head_update" => {
+            "head_update" | "layer_update" => {
                 require(self.invitation_id.is_none(), "invitation_id")?;
                 require(self.recipient_ref.is_none(), "recipient_ref")?;
                 require(self.revoked_ref.is_none(), "revoked_ref")?;

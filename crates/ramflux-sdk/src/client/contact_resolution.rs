@@ -46,6 +46,11 @@ pub(crate) fn manifest_failure(error: SdkError) -> SdkError {
         _ => ContactReason::ManifestInvalid.into(),
     }
 }
+/// A native card is an account introduction, not a snapshot: the fetched, fully verified current
+/// authority must carry the card's account and master certificate, and must be at or above the
+/// card's signed issuance epoch (the exact signed head when the epochs are equal). Later roster
+/// and layer changes therefore keep the card valid, a replayed older head does not, and the card's
+/// own device list is never an input to recipient selection.
 pub(crate) fn verify_native_card_head(
     card: Option<&crate::ContactCardBody>,
     manifest: &SdkDeviceManifestResponse,
@@ -56,12 +61,18 @@ pub(crate) fn verify_native_card_head(
         }
         let authority = manifest.custody.as_ref().ok_or(ContactReason::ManifestInvalid)?;
         let chain = card.native_authority.as_ref().ok_or(ContactReason::ManifestInvalid)?;
-        if ramflux_protocol::custody::object_hash(&authority.publication.record)? != chain.head_hash
-            || ramflux_protocol::custody::object_hash(
-                &authority.publication.record.body.master_certificate,
-            )? != chain.master_certificate_hash
+        let record = &authority.publication.record;
+        if ramflux_protocol::custody::object_hash(&record.body.master_certificate)?
+            != chain.master_certificate_hash
         {
             return Err(ContactReason::ManifestInvalid.into());
+        }
+        let epoch = record.body.device_set_epoch;
+        if epoch < chain.epoch
+            || (epoch == chain.epoch
+                && ramflux_protocol::custody::object_hash(record)? != chain.head_hash)
+        {
+            return Err(ContactReason::AuthorityStale.into());
         }
     }
     Ok(())
@@ -129,9 +140,9 @@ impl RamfluxClient {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(card) = card {
-            self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
-        }
+        // A retry of an already accepted contact is read-only for provenance: the card's locator
+        // and origin change only through a resolution that fetched and checked current authority
+        // (floor, certificate, pins). Replaying a still-valid old card changes nothing.
         if upgraded != identity {
             db.persist_client_record("identity", &principal, &upgraded)?;
         }
@@ -170,6 +181,7 @@ impl RamfluxClient {
         }
         let cached = self.account_db()?.client_record("identity", selector)?;
         let root_hint = resolution_root(selector, expected_root, cached.as_ref(), allow_commitment);
+        let started = std::time::Instant::now();
         let manifest: Option<SdkDeviceManifestResponse> = if let Some(root) = root_hint {
             sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
                 .await
@@ -177,7 +189,7 @@ impl RamfluxClient {
         } else {
             engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
         };
-        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
         verify_native_card_head(card, &manifest)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)
@@ -348,3 +360,7 @@ pub(crate) struct ContactResolution<'a> {
     pub replace_provisional_root: Option<&'a str>,
     pub verification: Option<&'a SdkContactSafetyNumber>,
 }
+
+#[cfg(test)]
+#[path = "contact_card_authority_tests.rs"]
+mod authority_tests;

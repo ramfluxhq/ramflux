@@ -52,6 +52,15 @@ pub(super) fn unlock(
         client.account_db()?.persist_actor_state("sync/node-id", &Some(&node_id))?;
     }
     drop(passphrase);
+    // A crash inside a layer head's local installation is repaired before admission, so the
+    // pending marker never leaves the account locked out.
+    let repair_vault = super::custody_setup::primary_provider(&state.config);
+    crate::bus::couriers::layer_publish::repair_on_unlock(
+        &mut client,
+        &root,
+        id,
+        repair_vault.as_ref(),
+    )?;
     if !crate::custody::pairing::recipient::ordinary_session_admitted(&client, id)? {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
@@ -282,13 +291,14 @@ pub(super) async fn refresh_public_authority(
         .require_fresh_custody_head(HeadUse::NewAuthorization, &anchor, native.record())
         .is_err()
     {
+        let started = std::time::Instant::now();
         let manifest = crate::prekey::sdk_gateway_get_json::<
             Option<crate::prekey::SdkDeviceManifestResponse>,
         >(
             &account.gateway_config, &format!("/mvp1/device-manifest/{anchor}")
         )
         .await?;
-        if let Some(manifest) = manifest {
+        if let Some(manifest) = manifest.map(|manifest| manifest.fetched_from(started)) {
             if manifest.principal_commitment != anchor || manifest.custody.is_none() {
                 return Err(SdkError::CustodyModeDowngrade);
             }

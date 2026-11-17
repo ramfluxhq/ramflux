@@ -220,7 +220,7 @@ pub(in crate::bus::dispatch) fn manifest(
     }
     crate::client::identity_authority::test_support::public_manifest(client)
 }
-pub(in crate::bus) async fn directory(
+pub(crate) async fn directory(
     root: &Path,
     manifests: BTreeMap<String, serde_json::Value>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {

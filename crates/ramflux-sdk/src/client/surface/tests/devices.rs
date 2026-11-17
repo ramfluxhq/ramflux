@@ -28,7 +28,7 @@ impl Terminals {
         let mut clients = Vec::new();
         for fixture in &mut fixtures {
             for manifest in &manifests {
-                fixture.client.persist_fetched_identity_directory(manifest)?;
+                fixture.client.persist_observed_identity_directory_now(manifest)?;
             }
             fixture.client.account_db()?.persist_client_record(
                 "conversation",

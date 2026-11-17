@@ -14,6 +14,10 @@ use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_bi
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Fixed local retry hint for a layer refusal. It reveals nothing about the peer and promises
+/// no completion deadline.
+pub(crate) const RETRY_AFTER_MS: u64 = 1000;
+
 /// Send fan-out that applies the same fresh-cohort rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FanoutScope {
@@ -302,7 +306,7 @@ pub(crate) fn require_layer(plan: Option<SelectionPlan>, required: u32) -> Resul
         message: format!(
             "content requires a verified message layer {required}; no representation fallback is permitted"
         ),
-        body: Box::new(json!({"required_layer":required})),
+        body: Box::new(json!({"required_layer":required,"retry_after_ms":RETRY_AFTER_MS})),
     })
 }
 
@@ -386,6 +390,24 @@ impl RamfluxClient {
         build: impl Fn() -> Result<SelectionRequest, SdkError>,
     ) -> Result<Option<SelectionPlan>, SdkError> {
         Ok(Some(select_with_current_membership(build)?))
+    }
+
+    /// DM layer gate. A refusal also asks for the recipient's current manifest, so a declaration
+    /// published after the cached copy was fetched becomes visible without a send-time fetch.
+    pub(crate) fn require_dm_layer(
+        &self,
+        message: &crate::GatewayDirectMessage,
+        plan: Option<SelectionPlan>,
+        required: u32,
+    ) -> Result<(), SdkError> {
+        let result = require_layer(plan, required);
+        if result.is_err()
+            && let Ok(recipient) = Self::qualified_recipient(message)
+            && let Ok(Some((root, _))) = ramflux_protocol::parse_qualified_device_id(&recipient)
+        {
+            self.manifest_demand.request(&root);
+        }
+        result
     }
 
     pub(crate) fn dm_selection_request(

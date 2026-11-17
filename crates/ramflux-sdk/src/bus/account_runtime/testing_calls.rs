@@ -165,7 +165,7 @@ impl NativeCallAccount {
                 message_layer: None,
             }],
         })?;
-        client.persist_fetched_identity_directory(&manifest)?;
+        client.persist_observed_identity_directory_now(&manifest)?;
         let endpoint = crate::GatewayQuicEndpointConfig {
             bind_addr: ([127, 0, 0, 1], 0).into(),
             gateway_addr: ([127, 0, 0, 1], 1).into(),
@@ -289,7 +289,7 @@ impl NativeCallAccount {
     /// Returns real identity validation or account-store failures.
     pub fn prepare_call_peer(&mut self, manifest: serde_json::Value) -> Result<(), SdkError> {
         let manifest: crate::SdkDeviceManifestResponse = serde_json::from_value(manifest)?;
-        self.client.persist_fetched_identity_directory(&manifest)?;
+        self.client.persist_observed_identity_directory_now(&manifest)?;
         self.client.establish_friend_link(
             "calls-fixture",
             &self.client.surface_local_root_commitment()?,

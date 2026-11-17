@@ -13,7 +13,7 @@ async fn contact_verification_status_is_a_local_read_with_stored_authority_disti
 -> Result<(), Box<dyn std::error::Error>> {
     let own = Box::pin(Fixture::new("local-safety")).await?;
     let peer = Box::pin(Fixture::new("peer-safety")).await?;
-    own.client.persist_fetched_identity_directory(&peer.manifest)?;
+    own.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own_root = own.manifest.principal_commitment.clone();
     let peer_root = peer.manifest.principal_commitment.clone();
     own.client.establish_friend_link("safety-link", &own_root, &peer_root)?;
@@ -211,7 +211,7 @@ async fn changed_blocked_and_restore(
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "changed");
     client.account_db()?.remove_actor_state(&format!("identity/custody/{peer_root}"))?;
     assert!(matches!(read_view(pool, peer_root).await, Err(crate::SdkError::NetworkingPending)));
-    client.persist_fetched_identity_directory(&peer.manifest)?;
+    client.persist_observed_identity_directory_now(&peer.manifest)?;
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "changed");
     client.block_friend_link("cas-views-link")?;
     assert_eq!(read_view(pool, peer_root).await?["verification_state"], "blocked_by_policy");
@@ -242,7 +242,7 @@ async fn changed_blocked_and_restore(
 async fn verify_cas_reverification_updates_all_views() -> Result<(), Box<dyn std::error::Error>> {
     let mut own = Box::pin(Fixture::new("cas-views")).await?;
     let mut peer = Box::pin(Fixture::new("cas-views-peer")).await?;
-    own.client.persist_fetched_identity_directory(&peer.manifest)?;
+    own.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own_root = own.client.own_account_anchor()?;
     let peer_root = peer.manifest.principal_commitment.clone();
     own.client.establish_friend_link("cas-views-link", &own_root, &peer_root)?;
@@ -269,8 +269,8 @@ async fn verify_cas_reverification_updates_all_views() -> Result<(), Box<dyn std
     reopened.open_account_index(&root)?;
     reopened.unlock_account("cas-views", b"native fixture data passphrase")?;
     reopened.initialize_born_v3_branch(&device, vault).await?;
-    reopened.persist_fetched_identity_directory(&manifest)?;
-    reopened.persist_fetched_identity_directory(&peer.manifest)?;
+    reopened.persist_observed_identity_directory_now(&manifest)?;
+    reopened.persist_observed_identity_directory_now(&peer.manifest)?;
     assert_eq!(reopened.contact_safety_number(&peer_root)?.verification_state, "changed");
     let reverified =
         crate::client::contact_verification_cas::verify_linked_contact(&reopened, &peer_root)?;

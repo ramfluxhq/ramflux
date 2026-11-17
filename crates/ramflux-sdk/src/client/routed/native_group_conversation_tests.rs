@@ -84,8 +84,8 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
 -> TestResult {
     let owner = Fixture::with_device("route-owner", "owner-device").await?;
     let mut peer = Fixture::with_device("route-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
     peer.client.establish_friend_link(
         "consent",
         &owner.manifest.principal_commitment,

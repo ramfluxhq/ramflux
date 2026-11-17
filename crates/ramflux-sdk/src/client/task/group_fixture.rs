@@ -26,7 +26,7 @@ pub(super) async fn fixture(with_other: bool, name: &str) -> TestResult<GroupFix
     }
     for local in [&human, &agent, &other] {
         for peer in [&human, &agent, &other] {
-            local.client.persist_fetched_identity_directory(&peer.manifest)?;
+            local.client.persist_observed_identity_directory_now(&peer.manifest)?;
         }
     }
     let human = human.into_bus();

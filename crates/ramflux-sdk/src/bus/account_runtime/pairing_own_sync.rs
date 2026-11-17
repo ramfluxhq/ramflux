@@ -38,7 +38,12 @@ impl AccountRuntime {
             }
         };
         account.apply_session_metadata(engine);
-        if matches!(result, Ok(PairingHistoryProgress::Pending)) {
+        // A head publication (for example this account's own layer renewal) that is mid
+        // installation is transient: the durable transfer resumes once it settles.
+        if matches!(
+            result,
+            Ok(PairingHistoryProgress::Pending) | Err(SdkError::PairingCode("PublicationPending"))
+        ) {
             // The history courier continues the durable transfer; check again on a later pass.
             account.client.account_db()?.requeue_pairing_own_sync(&job)?;
             return Ok(true);

@@ -79,8 +79,8 @@ impl NativeCallAccount {
         // The receiver verifies the sender through its own directory and friend consent.
         let sender: crate::SdkDeviceManifestResponse =
             serde_json::from_value(self.manifest.clone())?;
-        target.persist_fetched_identity_directory(&manifest)?;
-        target.persist_fetched_identity_directory(&sender)?;
+        target.persist_observed_identity_directory_now(&manifest)?;
+        target.persist_observed_identity_directory_now(&sender)?;
         let own = target.own_account_anchor()?;
         let peer = self.client.own_account_anchor()?;
         target.establish_friend_link("history-sender-link", &own, &peer)?;
@@ -95,7 +95,7 @@ impl NativeCallAccount {
         manifest: crate::SdkDeviceManifestResponse,
         content: &g::Message,
     ) -> Result<(String, String), SdkError> {
-        self.client.persist_fetched_identity_directory(&manifest)?;
+        self.client.persist_observed_identity_directory_now(&manifest)?;
         let reference = target_client.owned_device_identity()?;
         let mut message = GatewayDirectMessage {
             conversation_id: self.client.generated_direct_conversation_id(&reference)?,

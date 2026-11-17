@@ -42,7 +42,7 @@ pub(crate) async fn request_entry(
     sender: &Fixture,
     target: &crate::prekey::SdkDeviceManifestResponse,
 ) -> TestResult<GatewayInboxEntry> {
-    sender.client.persist_fetched_identity_directory(target)?;
+    sender.client.persist_observed_identity_directory_now(target)?;
     let mut intent = intent_for(sender, &target.principal_commitment)?;
     let body = super::native_delivery::approve(
         &sender.client,
@@ -145,7 +145,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
 {
     let sender = Fixture::new("native-consent-sender").await?;
     let target = Fixture::new("native-consent-target").await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
     let (entry, route) = transport(&sender, &target, &bytes)?;
     let original = sender.manifest.custody.as_ref().ok_or("native")?.publication.clone();
@@ -160,7 +160,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let renamed = primary.sign_record(body)?;
     let mut manifest = sender.manifest.clone();
     manifest.custody.as_mut().ok_or("native")?.publication.record = renamed;
-    target.client.persist_fetched_identity_directory(&manifest)?;
+    target.client.persist_observed_identity_directory_now(&manifest)?;
     assert!(matches!(
         target.client.verify_contact_control(&entry, &route, &bytes),
         Err(SdkError::ContactUnavailable(_))
@@ -192,7 +192,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let mut native = manifest.custody.ok_or("native")?;
     native.publication.record = revoked;
     native.devices.clear();
-    target.client.persist_fetched_identity_directory(
+    target.client.persist_observed_identity_directory_now(
         &crate::prekey::SdkDeviceManifestResponse::from_native(*native)?,
     )?;
     assert!(target.client.verify_contact_control(&entry, &route, &bytes).is_err());
@@ -294,7 +294,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
 async fn native_inbound_accept_persists_safety_before_the_first_directory_read() -> TestResult {
     let sender = Fixture::new("native-safety-sender").await?;
     let target = Fixture::new("native-safety-target").await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
     let (entry, route) = transport(&sender, &target, &bytes)?;
     let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
@@ -386,7 +386,7 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let sender = Fixture::new("native-preview-sender").await?;
         let target = Fixture::new("native-preview-target").await?;
-        target.client.persist_fetched_identity_directory(&sender.manifest)?;
+        target.client.persist_observed_identity_directory_now(&sender.manifest)?;
         let bytes = approve_request(&sender, &target).await?;
         let (entry, route) = transport(&sender, &target, &bytes)?;
         let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
@@ -411,7 +411,7 @@ async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity()
     use ramflux_protocol::message as g;
     let sender = Box::pin(Fixture::new("generated-native-contact-sender")).await?;
     let target = Box::pin(Fixture::new("generated-native-contact-target")).await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let mut pending = intent(&sender, &target)?;
     let bytes = super::native_delivery::approve(
         &sender.client,
@@ -504,7 +504,7 @@ async fn pending_pair(
 ) -> TestResult<(Fixture, Fixture, ramflux_storage::ContactRequestRecord)> {
     let sender = Box::pin(Fixture::new(&format!("{label}-sender"))).await?;
     let target = Box::pin(Fixture::new(&format!("{label}-target"))).await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
     let (entry, route) = transport(&sender, &target, &bytes)?;
     let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
@@ -644,7 +644,7 @@ async fn accepted_retry_keeps_the_existing_row_history_and_title() -> TestResult
 async fn backfill_on_open_projects_contacts_accepted_before_the_row_existed() -> TestResult {
     let mut one = Box::pin(Fixture::new("default-backfill-one")).await?;
     let two = Box::pin(Fixture::new("default-backfill-two")).await?;
-    one.client.persist_fetched_identity_directory(&two.manifest)?;
+    one.client.persist_observed_identity_directory_now(&two.manifest)?;
     one.client.establish_friend_link(
         "default-backfill-link",
         &one.manifest.principal_commitment,

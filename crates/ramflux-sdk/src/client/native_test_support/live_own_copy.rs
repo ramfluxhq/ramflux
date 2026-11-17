@@ -23,7 +23,7 @@ pub(crate) async fn exercise_order(erase: bool, history_first: bool) -> TestResu
         &source.client.own_account_anchor()?,
         &peer.client.own_account_anchor()?,
     )?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     source.client.establish_friend_link(
         "authored-link",
         &source.client.own_account_anchor()?,

@@ -101,7 +101,7 @@ pub(crate) mod tests {
             .initialize_born_v3_branch(&fixture.config.device_id, fixture.vault.clone())
             .await
             .map_err(|error| format!("layer declaration reload: {error:?}"))?;
-        fixture.client.persist_fetched_identity_directory(&fixture.manifest)?;
+        fixture.client.persist_observed_identity_directory_now(&fixture.manifest)?;
         fixture.config = fixture.config.clone().with_account_identity(&fixture.client)?;
         fixture.config.device_branch = Some(std::sync::Arc::new(
             fixture.client.device_branch.as_ref().ok_or("published branch")?.clone(),
@@ -115,7 +115,7 @@ pub(crate) mod tests {
         super::super::watchdog::within(async {
             let mut source = Fixture::new("retired-attachment-source").await?;
             let target = Fixture::new("retired-attachment-target").await?;
-            source.client.persist_fetched_identity_directory(&target.manifest)?;
+            source.client.persist_observed_identity_directory_now(&target.manifest)?;
             let mut engine = crate::GatewaySessionEngine::with_test_transport(
                 source.config.clone(), Box::new(super::super::sibling::NoNetwork),
             );
@@ -180,8 +180,8 @@ pub(crate) mod tests {
         );
         publish_layer_four(&mut source).await?;
         publish_layer_four(&mut target).await?;
-        source.client.persist_fetched_identity_directory(&target.manifest)?;
-        target.client.persist_fetched_identity_directory(&source.manifest)?;
+        source.client.persist_observed_identity_directory_now(&target.manifest)?;
+        target.client.persist_observed_identity_directory_now(&source.manifest)?;
         Ok((source, target, content))
     }
 
@@ -646,7 +646,7 @@ pub(crate) mod tests {
         let mut sibling = source.enroll_sibling("activation-history-one", "history-one").await?;
         let _other = source.enroll_sibling("activation-history-other", "history-other").await?;
         sibling.manifest = source.manifest.clone();
-        sibling.client.persist_fetched_identity_directory(&source.manifest)?;
+        sibling.client.persist_observed_identity_directory_now(&source.manifest)?;
         let target = sibling.client.owned_device_identity()?;
         let audience = g::QualifiedDevice {
             account_anchor: target.root_commitment().into(),

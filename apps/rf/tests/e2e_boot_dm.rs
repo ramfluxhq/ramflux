@@ -152,7 +152,10 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
             .ok_or("first node-assigned inbox sequence missing from submit result")?;
         let second = inbox_seq_from_read(second_sent, second_id)
             .ok_or("second node-assigned inbox sequence missing from submit result")?;
-        assert_eq!(second, first + 1, "B1 Deliver sequences must be consecutive");
+        // Background contact-control envelopes may legitimately interleave between two sends
+        // (each new send authorization now waits for a fresh authority fetch); the two message
+        // deliveries must still arrive in order, with no resume or page fetch (asserted above).
+        assert!(second > first, "B1 Deliver sequences must increase: {first} -> {second}");
         assert!(
             e2e::receive_counter(&after, "last_acked_seq")?
                 <= e2e::receive_counter(&after, "committed_cursor")?,
@@ -261,7 +264,21 @@ fn install_received_reference(
     use ramflux_storage::VaultSecretSource as _;
     const OBJECT_ID: &str = "demo-b-b4-object";
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let authority = ramflux_sdk::custody::load_account(alice_root, &alice.id, now)?;
+    // A layer install may still be in flight on a slow host; PublicationPending is the typed
+    // retryable refusal, so retry only that within a bounded deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let authority = loop {
+        match ramflux_sdk::custody::load_account(alice_root, &alice.id, now) {
+            Ok(authority) => break authority,
+            Err(error)
+                if format!("{error:?}").contains("PublicationPending")
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let body = &authority.record().body;
     let device = body
         .devices

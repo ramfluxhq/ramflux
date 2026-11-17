@@ -149,16 +149,18 @@ async fn safety_pass(
         .map_err(|_| stopped())?;
     response.await.map_err(|_| stopped())?
 }
-pub(super) async fn fetch(
+pub(crate) async fn fetch(
     config: &GatewaySessionConfig,
     root: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
     tokio::time::timeout(ATTEMPT, async {
         crate::prekey::sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
             config,
             &format!("/mvp1/device-manifest/{root}"),
         )
         .await?
+        .map(|manifest| manifest.fetched_from(started))
         .ok_or_else(|| SdkError::InboundPending("directory response unavailable".into()))
     })
     .await

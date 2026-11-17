@@ -539,3 +539,7 @@ async fn wait_pairing_signal(signal: Option<std::sync::Arc<tokio::sync::Notify>>
         None => std::future::pending().await,
     }
 }
+
+#[cfg(test)]
+#[path = "account_runtime/layer_publish_tests.rs"]
+mod layer_publish_tests;

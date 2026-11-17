@@ -276,4 +276,4 @@ pub(crate) fn account_known_devices(
 #[path = "tests/native_device.rs"]
 mod native_tests;
 
-mod native_revoke;
+pub(crate) mod native_revoke;

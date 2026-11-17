@@ -47,7 +47,7 @@ pub(super) fn generated_task_native_custody_manifest_round_trips_without_install
     client.unlock_account("human", b"generated-manifest-test")?;
     // The candidate decoder requires an already pinned root; fixture setup owns
     // this authenticated directory admission before the read-only adapter runs.
-    client.persist_fetched_identity_directory(&manifest)?;
+    client.persist_observed_identity_directory_now(&manifest)?;
     let before = client.account_db()?.client_record("identity", &manifest.principal_id)?;
     let bytes = client.encode_generated_task_manifest(&manifest)?;
     assert_eq!(client.decode_generated_task_manifest(&bytes, &manifest.principal_id)?, manifest);

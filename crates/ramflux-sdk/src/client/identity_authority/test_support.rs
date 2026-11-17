@@ -61,6 +61,7 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
     let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
     let now = crate::prelude::now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        fetched_after: crate::prekey::FetchStamp::default(),
         custody: None,
         signed_device_set: None,
         principal_id: device.principal_id.clone(),
@@ -143,6 +144,7 @@ pub(crate) fn remote_manifest(
     let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
     let now = crate::prelude::now_unix_timestamp();
     let mut manifest = SdkDeviceManifestResponse {
+        fetched_after: crate::prekey::FetchStamp::default(),
         custody: None,
         principal_id: principal.into(),
         principal_commitment: commitment.clone(),

@@ -71,6 +71,8 @@ pub use protocol::*;
 
 #[cfg(test)]
 pub(crate) mod runtime_tests;
+#[cfg(test)]
+pub(crate) mod test_gateway;
 
 mod task_courier;
 mod task_courier_apply;

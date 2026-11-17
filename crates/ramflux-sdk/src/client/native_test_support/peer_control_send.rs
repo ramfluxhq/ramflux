@@ -160,7 +160,7 @@ async fn native_guardian_send_retries_capture_and_requires_explicit_local_accept
     let mut owner = Fixture::new("native-recovery-owner").await?;
     let mut guardian = Fixture::new("native-recovery-guardian").await?;
     for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
-        local.client.persist_fetched_identity_directory(&remote.manifest)?;
+        local.client.persist_observed_identity_directory_now(&remote.manifest)?;
         local.client.establish_friend_link(
             "recovery-link",
             &owner.client.own_account_anchor()?,
@@ -334,7 +334,7 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     let expires_at;
     {
         for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
-            local.client.persist_fetched_identity_directory(&remote.manifest)?;
+            local.client.persist_observed_identity_directory_now(&remote.manifest)?;
             local.client.establish_friend_link(
                 "pending-invite-link",
                 &owner.client.own_account_anchor()?,
@@ -388,8 +388,8 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
     use ramflux_protocol::message as g;
     let source = Fixture::new("conversation-event-source").await?;
     let mut peer = Fixture::new("conversation-event-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     let source_root = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
     source.client.establish_friend_link("conversation-peer-link", &source_root, &peer_root)?;
@@ -489,8 +489,8 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
     use ramflux_protocol::message as g;
     let source = Fixture::new("conversation-group-source").await?;
     let mut peer = Fixture::with_device("conversation-group-peer", "peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     prepare_conversation_group(&source, &peer)?;
     let state =
         source.client.account_db()?.shared_group_state("conversation-group")?.ok_or("group")?;
@@ -659,8 +659,8 @@ async fn durable_edit_retry() -> TestResult {
     let mut first = Fixture::new("durable-edit-peer").await?;
     let mut second = first.enroll_sibling("durable-edit-second", "second").await?;
     for peer in [&first, &second] {
-        source.client.persist_fetched_identity_directory(&peer.manifest)?;
-        peer.client.persist_fetched_identity_directory(&source.manifest)?;
+        source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+        peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     }
     let own = source.client.own_account_anchor()?;
     let remote = first.client.own_account_anchor()?;
@@ -705,7 +705,7 @@ async fn durable_edit_retry() -> TestResult {
     drop(prepared);
     drop(wire);
     source.restart_authored_source().await?;
-    source.client.persist_fetched_identity_directory(&first.manifest)?;
+    source.client.persist_observed_identity_directory_now(&first.manifest)?;
     let prepared = mutation::prepare(&source.client, &request)?;
     assert_eq!(prepared.identity.id, event, "lost reply cannot allocate another mutation identity");
     assert_eq!(
@@ -844,7 +844,7 @@ async fn finish_durable_edit_retry(case: EditRetry) -> TestResult {
     drop(refused);
     drop(retry);
     source.restart_authored_source().await?;
-    source.client.persist_fetched_identity_directory(&first.manifest)?;
+    source.client.persist_observed_identity_directory_now(&first.manifest)?;
     let config = engine(&source, &first, false)?;
     let client = std::mem::replace(&mut source.client, RamfluxClient::new());
     let mut account = crate::prelude::LocalBusAccountState::new(client, config, own);

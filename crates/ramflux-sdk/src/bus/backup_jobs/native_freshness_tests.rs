@@ -46,7 +46,7 @@ async fn restored_account_has_empty_freshness_and_refreshes_on_connect() -> Test
             let initializer: AccountInitializer = Box::new(move |index| {
                 let account = initialize(&source_root, index)?;
                 for manifest in source_manifests {
-                    account.client.persist_fetched_identity_directory(&manifest)?;
+                    account.client.persist_observed_identity_directory_now(&manifest)?;
                     account.client.require_fresh_custody_head(
                         HeadUse::NewAuthorization,
                         &manifest.principal_commitment,
@@ -174,4 +174,65 @@ async fn refresh_on_connect(
     handle.stop().await;
     server.abort();
     Ok(())
+}
+
+/// A restore over an existing account merges an archive that holds an OLDER peer pin: the live,
+/// newer pin must survive (a restore can never roll authority back) and observed freshness is not
+/// restored either. Real encrypted archive, real install.
+#[tokio::test(flavor = "current_thread")]
+async fn restore_over_a_live_account_cannot_roll_back_a_peer_pin() -> TestResult {
+    crate::client::native_test_support::watchdog::within(LocalSet::new().run_until(Box::pin(
+        async {
+            let root = Root::new()?;
+            let vault = TestVault::default();
+            let native = create(&root.0, "account", &vault, crate::custody::network_now()?)?;
+            let own_commitment = native.record().body.account_anchor.clone();
+            let mut peer =
+                crate::client::native_test_support::Fixture::new("rollback-peer").await?;
+            let older = peer.manifest.clone();
+            crate::client::native_test_support::activation_send::tests::publish_layer_four(
+                &mut peer,
+            )
+            .await?;
+            let newer = peer.manifest.clone();
+            let peer_root = newer.principal_commitment.clone();
+            let mut data = RamfluxClient::new();
+            data.open_account_index(&root.0)?;
+            data.seal_new_account_data("account", &own_commitment, LOCAL_SECRET.as_bytes())?;
+            data.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+            // The archive is made while the pin is at the older head.
+            data.persist_observed_identity_directory_now(&older)?;
+            drop(data);
+            let source = supervisor(&root.0)?;
+            let archive = root.0.join("older-pin.rfb");
+            make_archive(&source, &archive).await?;
+            source.shutdown().await?;
+            // The live account then advances its pin to the newer head.
+            let live = initialize(&root.0, AccountIndex::open(&root.0)?)?;
+            live.client.persist_observed_identity_directory_now(&newer)?;
+            drop(live);
+            let target = supervisor(&root.0)?;
+            let id = verify(&target, &archive).await?;
+            call(&target, "account.restore.install", None, json!({"job_id":id})).await?;
+            finished(&target, &id, crate::backup::BackupJobState::Done).await?;
+            target.shutdown().await?;
+            let restored = initialize(&root.0, AccountIndex::open(&root.0)?)?;
+            assert!(
+                restored.client.persist_observed_identity_directory_now(&older).is_err(),
+                "a restored archive must not roll the live peer pin back to the older head"
+            );
+            let record =
+                newer.custody.as_ref().ok_or("test: native peer")?.publication.record.clone();
+            assert!(
+                restored
+                    .client
+                    .require_fresh_custody_head(HeadUse::NewAuthorization, &peer_root, &record)
+                    .is_err(),
+                "a restore must not restore an observation of the newer head"
+            );
+            Ok(())
+        },
+    )))
+    .await
+    .map_err(|_| "test: deadline exceeded")?
 }

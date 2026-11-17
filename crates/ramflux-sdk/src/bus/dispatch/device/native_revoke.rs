@@ -18,6 +18,8 @@ pub(super) async fn dispatch(
     if account.client.account_db()?.local_account_id != id {
         return Err(SdkError::PairingCode("WrongContext"));
     }
+    // A pending layer-declaration head would answer Busy; settle it once first.
+    crate::bus::couriers::layer_publish::settle_for_other_writer(account)?;
     let pending = account.client.account_db()?.pairing_head()?;
     let authority = if pending.is_none() {
         let anchor = account
@@ -86,7 +88,7 @@ pub(super) async fn dispatch(
     ))
 }
 
-fn observe_published(
+pub(crate) fn observe_published(
     account: &LocalBusAccountState,
     root: &std::path::Path,
     published: &custody::pairing::PublishedHead,
@@ -115,9 +117,9 @@ fn observe_published(
 
 // This adapter exists only after the real native proof has returned Published. It can
 // acknowledge only the exact candidate that was submitted, including on a journal retry.
-struct NativeAck {
-    expected: String,
-    acknowledged: String,
+pub(crate) struct NativeAck {
+    pub(crate) expected: String,
+    pub(crate) acknowledged: String,
 }
 impl NodeHeadPersist for NativeAck {
     fn persist_head(&self, publication: &Publication, _now: u64) -> Result<String, SdkError> {
@@ -129,7 +131,7 @@ impl NodeHeadPersist for NativeAck {
     }
 }
 
-fn with_db<T>(
+pub(crate) fn with_db<T>(
     account: &mut LocalBusAccountState,
     action: impl FnOnce(&Mutex<ramflux_storage::AccountDb>) -> Result<T, SdkError>,
 ) -> Result<T, SdkError> {

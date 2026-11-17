@@ -12,7 +12,7 @@ pub(super) fn pair(alice: u8, bob: u8) -> PairFuture {
         let a = Box::pin(Fixture::native("alice", alice)).await?;
         let b = Box::pin(Fixture::native("bob", bob)).await?;
         for (local, peer) in [(&a, &b), (&b, &a)] {
-            local.client.persist_fetched_identity_directory(&peer.manifest()?)?;
+            local.client.persist_observed_identity_directory_now(&peer.manifest()?)?;
             local.client.establish_friend_link(
                 "link",
                 &local.client.own_account_anchor()?,
@@ -725,7 +725,7 @@ async fn group_authority_case(change: &str) -> Result<(), SdkError> {
     for client in [&a.client, &b.client] {
         for peer in [&a, &b] {
             let manifest = peer.manifest()?;
-            client.persist_fetched_identity_directory(&manifest)?;
+            client.persist_observed_identity_directory_now(&manifest)?;
         }
     }
     b.create_shared_group("generated-group", "c")?;
@@ -1318,7 +1318,7 @@ async fn moderator_group_fixture() -> Result<(Fixture, Fixture, Fixture, u64), S
     for client in [&a.client, &b.client, &c.client] {
         for peer in [&a, &b, &c] {
             let manifest = peer.manifest()?;
-            client.persist_fetched_identity_directory(&manifest)?;
+            client.persist_observed_identity_directory_now(&manifest)?;
         }
     }
     b.create_shared_group("moderator-group", "c")?;

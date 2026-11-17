@@ -267,7 +267,7 @@ impl AccountSessionHarness {
             .accounts
             .get_mut(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
-        account.client.persist_fetched_identity_directory(&manifest)?;
+        account.client.persist_observed_identity_directory_now(&manifest)?;
         account.client.establish_friend_link(
             "calls-fixture",
             &account.principal_commitment,

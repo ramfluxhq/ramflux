@@ -70,6 +70,10 @@ pub enum ContactReason {
     /// A presented safety field does not equal the authenticated material at commit.
     #[error("safety_material_mismatch")]
     SafetyMaterialMismatch,
+    /// The current authority is older than the card's signed issuance epoch, or forks it at the
+    /// same epoch. The directory may be replaying a superseded head.
+    #[error("authority_stale")]
+    AuthorityStale,
 }
 
 /// A home-node locator authenticated by the card's root signature.
@@ -102,6 +106,7 @@ pub struct ContactCardBody {
 #[serde(deny_unknown_fields)]
 pub struct ContactCardAuthority {
     pub head_hash: String,
+    pub epoch: u64,
     pub master_certificate_hash: String,
 }
 

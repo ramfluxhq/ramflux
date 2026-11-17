@@ -187,7 +187,7 @@ fn write_verified_authority(
     let result = (|| {
         super::create_private_temp(&temp, &bytes)?;
         fs::rename(&temp, dir.join("authority.json"))?;
-        fs::File::open(&dir)?.sync_all()?;
+        crate::platform::fs::sync_path(&dir)?;
         Ok::<_, SdkError>(())
     })();
     if result.is_err() {

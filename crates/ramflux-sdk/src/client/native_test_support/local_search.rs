@@ -98,8 +98,8 @@ async fn local_search_live_versions_and_scope() -> TestResult {
             // Real media needs an endorsed layer-4 publication on both native devices.
             super::activation_send::tests::publish_layer_four(&mut source).await?;
             super::activation_send::tests::publish_layer_four(&mut target).await?;
-            source.client.persist_fetched_identity_directory(&target.manifest)?;
-            target.client.persist_fetched_identity_directory(&source.manifest)?;
+            source.client.persist_observed_identity_directory_now(&target.manifest)?;
+            target.client.persist_observed_identity_directory_now(&source.manifest)?;
             let source_anchor = source.client.own_account_anchor()?;
             let target_anchor = target.client.own_account_anchor()?;
             let conversation = g::dm_scope::derive(&source_anchor, &target_anchor)?;
