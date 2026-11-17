@@ -300,9 +300,7 @@ fn retiring_one_grant_leaves_the_other_recipient_readable() {
     let outcome = retire::retire_grants(
         &fixture.ctx(),
         fixture.plane(),
-        "unadmitted:m3",
-        &sent,
-        &[only],
+        &retire::Subset { message_id: "unadmitted:m3", files: &sent, only: &[only] },
         &fixture.source(),
         fixture.now,
     )

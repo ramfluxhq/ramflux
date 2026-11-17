@@ -6,6 +6,13 @@
 //! report `relay_erased` only after every grant is retired and the source erased the bytes.
 //! Retiring one grant never touches another recipient's grant.
 
+// The bind, sweep and subset entry points are called from the send path in
+// bus/dispatch/attachment_prepare.rs and from account unlock; remove this once both callers land.
+#![cfg_attr(
+    not(test),
+    allow(dead_code, reason = "bind/sweep/subset callers are wired by the send path")
+)]
+
 use prost::Message as _;
 use ramflux_protocol::large_attachment::AttachmentRegistrationReceipt;
 use ramflux_protocol::message::MediaRef;
@@ -45,6 +52,13 @@ pub(crate) struct Source<'a> {
 pub(crate) struct Sent<'a> {
     pub prepare_id: &'a str,
     pub media: &'a MediaRef,
+}
+
+/// The grants to retire before admission: `only` names a subset of the files' grants.
+pub(crate) struct Subset<'a> {
+    pub message_id: &'a str,
+    pub files: &'a [Sent<'a>],
+    pub only: &'a [[u8; 32]],
 }
 
 /// Everything retirement needs from the account.
@@ -139,14 +153,12 @@ pub(crate) fn bind_message(
 pub(crate) fn retire_grants(
     ctx: &RetireCtx<'_>,
     plane: Option<&dyn Plane>,
-    message_id: &str,
-    files: &[Sent<'_>],
-    only: &[[u8; 32]],
+    subset: &Subset<'_>,
     source: &Source<'_>,
     now: u64,
 ) -> Result<Delivery, SdkError> {
-    let record = bind(ctx, message_id, files, source, now, Some(only))?;
-    begin_all(ctx, &record, Some(only), now)?;
+    let record = bind(ctx, subset.message_id, subset.files, source, now, Some(subset.only))?;
+    begin_all(ctx, &record, Some(subset.only), now)?;
     deliver(ctx, plane, source, now)
 }
 
@@ -169,7 +181,13 @@ pub(crate) fn cancel_registered(
     let message_id = format!("unadmitted:{prepare_id}");
     let files = [Sent { prepare_id, media: &media }];
     let ids = grant_ids(&media)?;
-    retire_grants(ctx, plane, &message_id, &files, &ids, source, now)
+    retire_grants(
+        ctx,
+        plane,
+        &Subset { message_id: &message_id, files: &files, only: &ids },
+        source,
+        now,
+    )
 }
 
 /// Revokes a sent message. The retirement intent and the terminal tombstone are durable before
@@ -301,18 +319,19 @@ fn bind(
                 metadata: &json!({}),
             },
         )?;
-        let at = match record.files.iter().position(|file| file.prepare_id == sent.prepare_id) {
-            Some(at) => at,
-            None => {
-                record.files.push(FileRecord {
-                    prepare_id: sent.prepare_id.to_owned(),
-                    object_id: object_hex.clone(),
-                    reference_hash: reference_hash.clone(),
-                    grants: Vec::new(),
-                    erased: false,
-                });
-                record.files.len() - 1
-            }
+        let at = if let Some(at) =
+            record.files.iter().position(|file| file.prepare_id == sent.prepare_id)
+        {
+            at
+        } else {
+            record.files.push(FileRecord {
+                prepare_id: sent.prepare_id.to_owned(),
+                object_id: object_hex.clone(),
+                reference_hash: reference_hash.clone(),
+                grants: Vec::new(),
+                erased: false,
+            });
+            record.files.len() - 1
         };
         for slot in &sent.media.key_slots {
             let grant_id = hash32(&slot.grant_id)?;

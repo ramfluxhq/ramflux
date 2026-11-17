@@ -72,7 +72,8 @@ impl Store {
         for entry in entries {
             let path = entry.map_err(|_| Refusal::new(CODE_SEAL_FAILED))?.path();
             let name = path.file_name().and_then(|item| item.to_str()).unwrap_or_default();
-            if name.starts_with("segment-") || name.ends_with(".tmp") {
+            let temporary = path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"));
+            if name.starts_with("segment-") || temporary {
                 zero_then_remove(&path)?;
             }
         }
@@ -94,6 +95,7 @@ impl Store {
     /// Startup sweep: completes the wipe of every prepare that was cancelled or fenced.
     /// # Errors
     /// Returns `seal_failed` when the directory or a prepare cannot be read.
+    #[cfg_attr(not(test), allow(dead_code, reason = "called by retire::sweep at account unlock"))]
     pub(crate) fn cleanup_cancelled(&self) -> Result<usize, Refusal> {
         let entries = fs::read_dir(&self.root).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         let mut done = 0_usize;
