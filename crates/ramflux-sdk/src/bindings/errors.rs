@@ -228,7 +228,8 @@ impl AdapterError {
             | SdkError::Transport(_) => GeneratedErrorCode::NotConnected,
             SdkError::LocalBus(_)
             | SdkError::InvalidOfflineRetention(_)
-            | SdkError::CustodyConfirmRejected(_) => GeneratedErrorCode::InvalidArgument,
+            | SdkError::CustodyConfirmRejected(_)
+            | SdkError::PassphrasePolicy(_) => GeneratedErrorCode::InvalidArgument,
             _ => GeneratedErrorCode::Internal,
         };
         Self::new(code, error.to_string())

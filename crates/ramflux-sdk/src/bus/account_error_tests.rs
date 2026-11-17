@@ -111,7 +111,7 @@ async fn check_account_surfaces(fault: Fault) -> TestResult {
             Some("acct".into()),
             "account",
             "account.passphrase.rotate",
-            serde_json::json!({"old_passphrase":old,"new_passphrase":"next-secret"}),
+            serde_json::json!({"old_passphrase":old,"new_passphrase":"next-data-secret"}),
         );
         let Err(error) =
             super::dispatch::account::dispatch_account_bus_request(&rotate, &mut daemon).await

@@ -163,8 +163,8 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
             if error.to_string() == "wrong passphrase or damaged local key"
     ));
 
-    restored.rekey_active_account("acct_a", b"new-secret")?;
-    let rewrapped_key_a = wrapped_db_key(&root, "acct_a", b"new-secret")?;
+    restored.rekey_active_account("acct_a", b"new-data-secret")?;
+    let rewrapped_key_a = wrapped_db_key(&root, "acct_a", b"new-data-secret")?;
     assert_eq!(rewrapped_key_a, key_a);
     let mut old_secret_after_rekey = RamfluxClient::new();
     old_secret_after_rekey.open_account_index(&root)?;
@@ -174,17 +174,46 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
     ));
     let mut new_secret_after_rekey = RamfluxClient::new();
     new_secret_after_rekey.open_account_index(&root)?;
-    new_secret_after_rekey.unlock_account("acct_a", b"new-secret")?;
+    new_secret_after_rekey.unlock_account("acct_a", b"new-data-secret")?;
     assert_eq!(new_secret_after_rekey.event_body("evt_a_1")?, Some(b"persisted".to_vec()));
 
     std::fs::remove_file(FileVaultSecretSource::new(&root).vault_secret_path("acct_a"))?;
     let mut missing_vault_secret = RamfluxClient::new();
     missing_vault_secret.open_account_index(&root)?;
     assert!(matches!(
-        missing_vault_secret.unlock_account("acct_a", b"new-secret"),
+        missing_vault_secret.unlock_account("acct_a", b"new-data-secret"),
         Err(SdkError::Storage(StorageError::Integrity(_)))
     ));
 
+    Ok(())
+}
+
+#[test]
+fn rekey_refuses_short_and_blocklisted_passphrases_without_rewrapping() -> Result<(), SdkError> {
+    let root = temp_root("rekey-policy");
+    let mut client = RamfluxClient::new();
+    client.open_account_index(&root)?;
+    client.create_account("acct", "principal")?;
+    let old = b"account data passphrase";
+    client.unlock_account("acct", old)?;
+    let before = wrapped_db_key(&root, "acct", old)?;
+    for (secret, expected) in [
+        (&[b'a'; 14][..], crate::PassphrasePolicyError::TooShort { scalars: 14 }),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+    ] {
+        let error = client
+            .rekey_active_account("acct", secret)
+            .expect_err("test: refused data passphrase was accepted");
+        assert!(
+            matches!(error, SdkError::PassphrasePolicy(got) if got == expected),
+            "test: rotate refusal was {error}, expected {expected:?}"
+        );
+    }
+    let after = wrapped_db_key(&root, "acct", old)?;
+    assert_eq!(after, before, "test: a refused rotate rewrapped the account key");
+    let mut still = RamfluxClient::new();
+    still.open_account_index(&root)?;
+    still.unlock_account("acct", old)?;
     Ok(())
 }
 

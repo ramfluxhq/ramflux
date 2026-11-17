@@ -343,6 +343,7 @@ fn commit_vault_and_db(
     client: &mut crate::RamfluxClient,
     generation: u64,
 ) -> Result<(), SdkError> {
+    crate::passphrase::admit_new_passphrase(passphrase)?;
     request.vault.preflight()?;
     let mut written = false;
     let outcome = (|| {

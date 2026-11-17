@@ -466,6 +466,40 @@ async fn existing_open_leg() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn pairing_setup_refuses_short_and_blocklisted_passphrases() -> TestResult {
+    for (bytes, expected) in [
+        (b"aaaaaaaaaaaaaa".as_slice(), crate::PassphrasePolicyError::TooShort { scalars: 14 }),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+    ] {
+        let root = tempfile::tempdir()?;
+        let vault_dir = root.path().join("disk-vault");
+        let vault = DiskVault::open(&vault_dir)?;
+        let invite = invitation("new", 9, None)?;
+        let Err(error) = stage_new(&StageNew {
+            root: root.path(),
+            account_id: "acct-policy",
+            invitation: &invite,
+            vault: &vault,
+            provider: &Phrase::setup(bytes),
+            frontend_generation: 1,
+        }) else {
+            return Err("test: refused pairing passphrase was accepted".into());
+        };
+        assert!(
+            matches!(error, SdkError::PassphrasePolicy(got) if got == expected),
+            "test: pairing setup refusal was {error}, expected {expected:?}"
+        );
+        let written = fs::read_dir(&vault_dir)?.count();
+        assert_eq!(written, 0, "test: a refused pairing setup wrote a vault file");
+        assert!(
+            !root.path().join("vault").join("acct-policy.key").is_file(),
+            "test: a refused pairing setup wrote the account key"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn pairing_recipient_stages_own_keys_without_primary() -> TestResult {
     let root = tempfile::tempdir()?;

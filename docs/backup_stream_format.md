@@ -13,11 +13,11 @@ time, per-category totals and database_bytes, 65536-byte chunk size, cipher `xch
 nonce and random 15-byte stream prefix. Unsupported parameters are rejected
 before expensive KDF work. Account IDs are nonempty and at most 1024 UTF-8 bytes.
 
-The wrapping key is the existing recovery-secret derivation: Argon2id version
-0x13, 262144 KiB memory, time cost 3, parallelism 1 and 32-byte output. The existing
-minimum input length of 16 bytes applies; that length check is not an entropy
-estimator. Generate high-entropy recovery material. Salt and nonces come from the
-operating-system CSPRNG.
+The wrapping key uses the recovery Argon2id parameters: version 0x13, 262144 KiB
+memory, time cost 3, parallelism 1 and 32-byte output. Backup passphrase wrapping
+does not apply the 16-byte recovery-secret floor. That floor remains on
+`derive_recovery_secret` and is not an entropy estimator. User-chosen passphrase
+admission is a separate policy. Salt and nonces come from the operating-system CSPRNG.
 
 A separate random 32-byte file key is wrapped with XChaCha20-Poly1305 under that
 wrapping key. Associated data is the exact magic, encoded length and JSON header.

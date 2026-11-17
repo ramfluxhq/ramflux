@@ -409,6 +409,18 @@ fn confirm_reasons_survive_native_error_projection() {
             1,
         ),
         (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooShort),
+            "CustodySetupInvalid",
+            "too_short",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooCommon),
+            "CustodySetupInvalid",
+            "too_common",
+            1,
+        ),
+        (
             SdkError::CustodyConfirmRejected(CustodyConfirmReason::DisplayName),
             "CustodySetupInvalid",
             "display_name",
