@@ -256,7 +256,7 @@ impl Drop for World {
     }
 }
 
-struct Upload {
+struct Staged {
     upload: [u8; 32],
     object: [u8; 32],
     hash: [u8; 32],
@@ -273,7 +273,7 @@ fn upload(
     owner: &QualifiedOwner,
     key: &SigningKey,
     id: u8,
-) -> Result<Upload, Box<dyn std::error::Error>> {
+) -> Result<Staged, Box<dyn std::error::Error>> {
     let object = [id; 32];
     let upload = [id.wrapping_add(100); 32];
     let layout = SegmentLayout { plaintext_length: 0, network_chunk_bytes: 524_288 };
@@ -332,7 +332,7 @@ fn upload(
     expect_ok(&retry, "commit retry");
     let state: serde_json::Value = serde_json::from_slice(&retry.body.0)?;
     assert_eq!(state["state"], "committed", "a committed retry is idempotent: {state}");
-    Ok(Upload { upload, object, hash, signed, native })
+    Ok(Staged { upload, object, hash, signed, native })
 }
 
 struct Registered {
@@ -344,7 +344,7 @@ fn register(
     world: &World,
     owner: &QualifiedOwner,
     key: &SigningKey,
-    up: &Upload,
+    up: &Staged,
     grantee: &QualifiedOwner,
     grant_byte: u8,
 ) -> Result<Registered, Box<dyn std::error::Error>> {
@@ -382,7 +382,7 @@ fn register(
 fn read(
     world: &World,
     reader: &QualifiedOwner,
-    up: &Upload,
+    up: &Staged,
     capability: &[u8],
 ) -> Result<AttachmentMeshReply, Box<dyn std::error::Error>> {
     world.call(
