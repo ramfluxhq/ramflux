@@ -264,7 +264,21 @@ fn install_received_reference(
     use ramflux_storage::VaultSecretSource as _;
     const OBJECT_ID: &str = "demo-b-b4-object";
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let authority = ramflux_sdk::custody::load_account(alice_root, &alice.id, now)?;
+    // A layer install may still be in flight on a slow host; PublicationPending is the typed
+    // retryable refusal, so retry only that within a bounded deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let authority = loop {
+        match ramflux_sdk::custody::load_account(alice_root, &alice.id, now) {
+            Ok(authority) => break authority,
+            Err(error)
+                if format!("{error:?}").contains("PublicationPending")
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let body = &authority.record().body;
     let device = body
         .devices
