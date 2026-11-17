@@ -205,6 +205,7 @@ impl RamfluxClient {
         local_account_id: &str,
         new_secret: &[u8],
     ) -> Result<(), SdkError> {
+        crate::passphrase::admit_new_passphrase(new_secret)?;
         let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
         let vault_secret =
             zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);

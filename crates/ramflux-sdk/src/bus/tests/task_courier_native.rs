@@ -20,7 +20,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 &words(&phrase, positions)?,
                 vault.as_ref(),
                 now,
-                b"passphrase",
+                b"courier data passphrase",
             )?;
             let (_commands, receiver) = mpsc::channel(1);
             let (_stop, shutdown) = watch::channel(false);

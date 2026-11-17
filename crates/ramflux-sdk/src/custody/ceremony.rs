@@ -247,7 +247,8 @@ impl CreationCeremony {
     /// Complete attended creation and seal this device's data with its own local password.
     /// The password is borrowed only for this call and never enters a pairing DTO or native publication.
     /// # Errors
-    /// Rejects empty/non-UTF-8/overlong passwords, bad confirmation, expiry or vault/storage failure.
+    /// Rejects empty, non-UTF-8, overlong, too-short and blocklisted passwords,
+    /// plus bad confirmation, expiry or vault/storage failure.
     pub fn confirm_with_passphrase(
         self,
         words: &[Zeroizing<String>; 3],
@@ -255,16 +256,23 @@ impl CreationCeremony {
         now: u64,
         passphrase: &[u8],
     ) -> Result<BornAccount, SdkError> {
-        let reason = if passphrase.is_empty() {
-            Some(crate::CustodyConfirmReason::PassphraseEmpty)
-        } else if passphrase.len() > 1024 {
-            Some(crate::CustodyConfirmReason::PassphraseTooLong)
-        } else if std::str::from_utf8(passphrase).is_err() {
-            Some(crate::CustodyConfirmReason::PassphraseNotUtf8)
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
+        if passphrase.is_empty() {
+            return Err(rejected(crate::CustodyConfirmReason::PassphraseEmpty));
+        }
+        if passphrase.len() > 1024 {
+            return Err(rejected(crate::CustodyConfirmReason::PassphraseTooLong));
+        }
+        let text = std::str::from_utf8(passphrase)
+            .map_err(|_| rejected(crate::CustodyConfirmReason::PassphraseNotUtf8))?;
+        if let Err(error) = crate::check_new_passphrase(text) {
+            let reason = match error {
+                crate::PassphrasePolicyError::TooShort => {
+                    crate::CustodyConfirmReason::PassphraseTooShort
+                }
+                crate::PassphrasePolicyError::TooCommon => {
+                    crate::CustodyConfirmReason::PassphraseTooCommon
+                }
+            };
             return Err(rejected(reason));
         }
         self.complete(words, vault, now, Some(passphrase))
@@ -416,6 +424,16 @@ mod tests {
     fn non_utf8_passphrase_names_its_rule_and_writes_nothing()
     -> Result<(), Box<dyn std::error::Error>> {
         reject_passphrase(&[255], crate::CustodyConfirmReason::PassphraseNotUtf8)
+    }
+    #[test]
+    fn fourteen_scalar_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(&[b'a'; 14], crate::CustodyConfirmReason::PassphraseTooShort)
+    }
+    #[test]
+    fn blocklisted_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(b"films+pic+galeries", crate::CustodyConfirmReason::PassphraseTooCommon)
     }
 
     #[test]

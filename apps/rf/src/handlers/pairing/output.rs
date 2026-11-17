@@ -87,6 +87,7 @@ pub(super) fn class(error: &RfError) -> String {
     use ramflux_sdk::SdkError;
     match error {
         RfError::Sdk(SdkError::PairingCode(code)) => known(code).to_owned(),
+        RfError::Sdk(SdkError::PassphrasePolicy(error)) => error.code().to_owned(),
         RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
         RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => http_status(message)
             .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),

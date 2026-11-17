@@ -65,6 +65,11 @@ mod dm;
 mod ephemeral;
 mod error;
 mod error_policy;
+mod passphrase;
+pub use passphrase::{
+    MIN_ACCEPTED_PASSPHRASE_SCALARS, MIN_PASSPHRASE_SCALARS, PassphrasePolicyError,
+    check_new_passphrase,
+};
 mod federation;
 mod gateway;
 mod group;

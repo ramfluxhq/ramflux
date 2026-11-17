@@ -38,6 +38,7 @@ impl Supervisor {
                     .ok_or_else(|| refused("not_writable"))?
                     .to_owned();
                 let secret = take_secret(&mut request)?;
+                crate::passphrase::admit_new_passphrase(secret.as_bytes())?;
                 let allow = request
                     .body
                     .get("allow_missing_attachments")
@@ -119,6 +120,7 @@ impl Supervisor {
         let serde_json::Value::String(secret) = value.take() else {
             return Err(SdkError::CustodySetupInvalid);
         };
+        crate::passphrase::admit_new_passphrase(secret.as_bytes())?;
         Ok(Some(super::NativeRestoreSetup {
             vault: super::super::custody_setup::primary_provider(&self.config),
             passphrase: zeroize::Zeroizing::new(secret),

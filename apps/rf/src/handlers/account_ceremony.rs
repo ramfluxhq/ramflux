@@ -312,6 +312,8 @@ async fn create_human_confirm(
         return Err(RfError::Message("Local data passphrases did not match.".into()));
     }
     drop(repeated);
+    ramflux_sdk::check_new_passphrase(&passphrase)
+        .map_err(|error| RfError::Message(error.code().to_owned()))?;
     Ok(client.confirm(&words, &passphrase).await?)
 }
 

@@ -906,11 +906,14 @@ fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
         crate::CustodyConfirmReason::PassphraseEmpty
         | crate::CustodyConfirmReason::PassphraseTooLong
         | crate::CustodyConfirmReason::PassphraseNotUtf8
+        | crate::CustodyConfirmReason::PassphraseTooShort
+        | crate::CustodyConfirmReason::PassphraseTooCommon
         | crate::CustodyConfirmReason::DisplayName
         | crate::CustodyConfirmReason::OperationId => RamfluxErrorCode::InvalidArgument,
     }
 }
 
+// `Search` stays unsupported: legacy entrypoints do not expose local search.
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
         SdkError::CustodyConfirmRejected(reason) => confirm_abi_code(*reason),
@@ -922,7 +925,6 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
-        // Legacy entrypoints do not expose local search; v2 owns its status policy.
         SdkError::Search(_)
         | SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
@@ -963,9 +965,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::GatewaySessionRejected(_)
         | SdkError::GatewaySessionNotEstablished
         | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
-        SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => {
-            RamfluxErrorCode::InvalidCanonicalJson
-        }
+        #[rustfmt::skip]
+        SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => RamfluxErrorCode::InvalidCanonicalJson,
         SdkError::PriorityWriterAccess | SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::CustodyVaultUnavailable
         | SdkError::CustodyVault(_)
@@ -1006,6 +1007,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::PayloadTooLarge
         | SdkError::ReplayMismatch
         | SdkError::InvalidOfflineRetention(_)
+        | SdkError::PassphrasePolicy(_)
         | SdkError::InboundPending(_)
         | SdkError::SenderManifestRequired { .. }
         | SdkError::FreshHeadRequired { .. }
