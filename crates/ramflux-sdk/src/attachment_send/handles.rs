@@ -25,7 +25,7 @@ use super::bus;
 use super::codes::{
     CODE_ATTACHMENT_DELETED, CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE,
     CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER, CODE_NOT_READY,
-    CODE_RETIREMENT_PENDING, CODE_SEAL_FAILED, CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
+    CODE_SEAL_FAILED, CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
 };
 use super::import_job::{self, Importer, SourcePin};
 use super::meta::CHUNK;
@@ -90,9 +90,8 @@ pub(crate) fn begin(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: BeginBody = serde_json::from_value(request.body.clone())?;
     let id = request_account_id(request)?.to_owned();
-    if tombstone(&account.client, &body.message_id)? {
-        return Err(Refusal::new(CODE_ATTACHMENT_DELETED).into());
-    }
+    // HOOK(retire): a tombstoned or revoking message allocates no handle.
+    super::retire::barrier(&account.client, &body.message_id)?;
     let now = bus::unix_now()?;
     if let Some(existing) = bound(&account.client, &body.operation_id)? {
         return resume_existing(&id, &existing, &body);
@@ -373,12 +372,8 @@ fn lookup(import_id: &str, account: &str) -> Result<Arc<Job>, Refusal> {
 }
 
 fn gate(client: &crate::RamfluxClient, job: &Job) -> Result<(), SdkError> {
-    if tombstone(client, &job.message_id)? {
-        return Err(Refusal::new(CODE_ATTACHMENT_DELETED).into());
-    }
-    if retirement_pending(client, &job.message_id)? {
-        return Err(Refusal::new(CODE_RETIREMENT_PENDING).into());
-    }
+    // HOOK(retire): tombstone and in-flight revoke barrier.
+    super::retire::barrier(client, &job.message_id)?;
     if job.cancelled.load(Ordering::Acquire) {
         return Err(Refusal::new(CODE_CANCELLED).into());
     }
@@ -412,17 +407,6 @@ fn view(
         "plaintext_length": length,
         "expires_at": expires,
     })
-}
-
-fn tombstone(client: &crate::RamfluxClient, message_id: &str) -> Result<bool, SdkError> {
-    Ok(client.account_db()?.client_record(TOMBSTONE, message_id)?.is_some())
-}
-
-fn retirement_pending(client: &crate::RamfluxClient, message_id: &str) -> Result<bool, SdkError> {
-    let Some(row) = client.account_db()?.client_record(RETIREMENT, message_id)? else {
-        return Ok(false);
-    };
-    Ok(revoke_state(Some(&row)) != "relay_erased")
 }
 
 /// `relay_erased` is reported only after a confirmed cleanup ACK.

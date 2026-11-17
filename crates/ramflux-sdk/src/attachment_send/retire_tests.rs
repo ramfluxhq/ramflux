@@ -365,3 +365,25 @@ fn a_fenced_generation_and_a_pending_revoke_have_stable_barrier_codes() {
         CODE_RETIREMENT_PENDING
     );
 }
+
+#[test]
+fn cancel_after_commit_retires_registered_grants_of_the_unadmitted_prepare() {
+    let fixture = Fixture::new();
+    let a = peer(1);
+    let (row, media) = fixture.send("send", &[&a]);
+    assert_eq!(fixture.import(&a, &media).unwrap(), BODY);
+    let current = fixture.store.load(&row.prepare_id).unwrap();
+    let cancelled = fixture.store.cancel(&row.prepare_id, current.generation).unwrap();
+    assert_eq!(cancelled.phase, Phase::Cleaning, "a granted prepare cancels to Cleaning");
+    assert!(!secret_present(&fixture, &row), "cancel wipes the sealed key");
+    let outcome = retire::cancel_registered(
+        &fixture.ctx(),
+        fixture.plane(),
+        &row.prepare_id,
+        &fixture.source(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(outcome.retired, 1, "the registered grant is retired");
+    assert_eq!(fixture.import(&a, &media).unwrap_err().code, CODE_NOT_GRANTEE);
+}
