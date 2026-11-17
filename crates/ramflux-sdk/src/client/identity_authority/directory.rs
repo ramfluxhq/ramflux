@@ -255,7 +255,7 @@ impl RamfluxClient {
         // Root provenance (and a card's signed home-node locator) describes how this root was
         // pinned, not the device set. A newer publication of the same root must not erase it.
         if old["contact_identity_commitment"].as_str() == Some(&manifest.principal_commitment) {
-            for field in ["root_source", "node"] {
+            for field in ["root_source", "node", "home_node_id"] {
                 if let Some(value) = old.get(field).filter(|v| !v.is_null()) {
                     row[field] = value.clone();
                 }
