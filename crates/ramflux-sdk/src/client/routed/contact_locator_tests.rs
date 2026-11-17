@@ -21,7 +21,7 @@ async fn cf02_lan_http_card_export_and_import_resolve_with_a_pinned_key_and_reje
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|error| SdkError::LocalBus(error.to_string()))?;
-    crate::node::DISCOVERY_CLIENT.scope(client, lan_round_trip(&bind)).await
+    crate::node::DISCOVERY_CLIENT.scope(client, Box::pin(lan_round_trip(&bind))).await
 }
 async fn lan_round_trip(bind: &str) -> Result<(), SdkError> {
     let mut a = crate::client::native_test_support::Fixture::named("alice", "alice", "alice")
