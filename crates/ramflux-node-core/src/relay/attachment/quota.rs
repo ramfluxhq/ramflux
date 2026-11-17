@@ -160,6 +160,27 @@ impl AttachmentLedger {
         Self::change_on(tx, owner, id, |record, _| apply_abandon(record))
     }
 
+    /// Fences a committed upload for cleanup once no grant can read it. Idempotent for
+    /// work already in cleanup.
+    /// # Errors
+    /// Refuses pending or unknown work.
+    pub(super) fn fence_committed(
+        &self,
+        owner: &AttachmentOwner,
+        id: &[u8; 32],
+    ) -> Result<AttachmentReservation, AttachmentLedgerError> {
+        self.change(owner, id, |record, _| match record.state {
+            AttachmentReservationState::Committed => {
+                record.state = AttachmentReservationState::DebtCommitted;
+                Ok(())
+            }
+            AttachmentReservationState::DebtCommitted | AttachmentReservationState::Released => {
+                Ok(())
+            }
+            _ => Err(AttachmentLedgerError::State),
+        })
+    }
+
     pub(super) fn change(
         &self,
         owner: &AttachmentOwner,
