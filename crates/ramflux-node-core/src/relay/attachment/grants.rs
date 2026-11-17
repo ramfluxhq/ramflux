@@ -73,6 +73,15 @@ pub struct ScopedGrantRegistry {
     /// Bounds every write-lock wait of the calls made through this handle.
     deadline: Option<super::WriteDeadline>,
 }
+/// One registration for a requester the local gateway authenticated from the live session.
+pub struct AttestedRegistration<'a> {
+    pub requester: &'a ramflux_protocol::large_attachment::QualifiedOwner,
+    pub upload_id: &'a [u8; 32],
+    pub native: &'a VerifiedContentManifest,
+    pub grant: &'a VerifiedScopedGrant,
+    pub signer: &'a SigningKey,
+    pub now: u64,
+}
 /// Existing gateway-attested owner-session verification, with a pinned cache.
 /// This is not native operation `PoP` admission or a substitute for the replay ledger.
 pub struct ScopedRegistrationAuth<'a> {
@@ -224,7 +233,38 @@ impl ScopedGrantRegistry {
         signer: &SigningKey,
     ) -> Result<RegisteredAttachmentGrant, AttachmentLedgerError> {
         self.authenticate(grant, native, auth)?;
-        let now = auth.invocation.now;
+        self.register_checked(upload_id, native, grant, auth.invocation.now, signer)
+    }
+
+    /// Registers for a requester the local gateway authenticated from the live session and
+    /// forwarded over the mutually authenticated mesh. The requester must be the grant owner;
+    /// every other check is the one `register` makes.
+    /// # Errors
+    /// Refuses a requester that is not the grant owner, plus the `register` refusals.
+    pub fn register_attested(
+        &self,
+        attested: &AttestedRegistration<'_>,
+    ) -> Result<RegisteredAttachmentGrant, AttachmentLedgerError> {
+        if &attested.grant.grant().owner != attested.requester {
+            return Err(AttachmentLedgerError::Conflict);
+        }
+        self.register_checked(
+            attested.upload_id,
+            attested.native,
+            attested.grant,
+            attested.now,
+            attested.signer,
+        )
+    }
+
+    fn register_checked(
+        &self,
+        upload_id: &[u8; 32],
+        native: &VerifiedContentManifest,
+        grant: &VerifiedScopedGrant,
+        now: u64,
+        signer: &SigningKey,
+    ) -> Result<RegisteredAttachmentGrant, AttachmentLedgerError> {
         let g = grant.grant();
         let m = native.manifest();
         if signer.verifying_key().to_bytes() != self.authority.signing_public_key
@@ -341,6 +381,84 @@ impl ScopedGrantRegistry {
             })
             .transpose()
     }
+    /// The upload's ledger record, for a serving path that reads the signed manifest and
+    /// the committed generation from durable state.
+    /// # Errors
+    /// Refuses unknown uploads and corrupt storage.
+    pub fn ledger_reservation(
+        &self,
+        owner: &AttachmentOwner,
+        upload_id: &[u8; 32],
+    ) -> Result<AttachmentReservation, AttachmentLedgerError> {
+        self.ledger.reservation(owner, upload_id)
+    }
+
+    /// After a grant is retired, deletes the object's ciphertext once no Active or Retiring
+    /// grant remains on that upload, then releases the charge. `Ok(true)` means the relay
+    /// bytes are gone and the charge is released; `Ok(false)` means another grant still reads
+    /// the object or the grant is not yet Retired.
+    /// # Errors
+    /// Refuses unknown grants and corrupt storage. A backend failure keeps the cleanup debt.
+    pub fn erase_unreferenced(
+        &self,
+        grant_id: &[u8; 32],
+        backend: &dyn super::backend::AttachmentBackend,
+    ) -> Result<bool, AttachmentLedgerError> {
+        let row = self.lookup(grant_id)?.ok_or(AttachmentLedgerError::State)?;
+        if row.state != ScopedGrantState::Retired {
+            return Ok(false);
+        }
+        let grant = self.stored_grant(&row)?;
+        let owner =
+            AttachmentOwner::from_authenticated_session(&grant.grant().owner.account_anchor)?;
+        if self.upload_has_live_grant(&row.upload_id)? {
+            return Ok(false);
+        }
+        let record = match self.ledger.reservation(&owner, &row.upload_id) {
+            Ok(record) => record,
+            Err(AttachmentLedgerError::Conflict) => return Ok(true),
+            Err(error) => return Err(error),
+        };
+        if record.state == AttachmentReservationState::Released {
+            return Ok(true);
+        }
+        self.ledger.fence_committed(&owner, &row.upload_id)?;
+        self.ledger.reclaim(&owner, &row.upload_id, |record| {
+            let manifest = ramflux_protocol::large_attachment::ContentManifest::decode_signed(
+                &record.manifest_bytes,
+            )
+            .map_err(invalid)?;
+            let count = manifest.manifest().layout.dimensions().map_err(invalid)?.0;
+            for index in 0..count {
+                let spec = super::backend::BackendSegment::from_manifest(
+                    &manifest,
+                    record.pending_generation,
+                    index,
+                )
+                .map_err(|_| AttachmentLedgerError::State)?;
+                backend.delete(&spec).map_err(|_| AttachmentLedgerError::State)?;
+            }
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    fn upload_has_live_grant(&self, upload: &[u8; 32]) -> Result<bool, AttachmentLedgerError> {
+        let tx = self.ledger.db.begin_read().map_err(store)?;
+        let table = tx.open_table(GRANTS).map_err(store)?;
+        for item in table.iter().map_err(store)? {
+            let (_, value) = item.map_err(store)?;
+            if value.value().len() > 32 * 1024 {
+                return Err(AttachmentLedgerError::State);
+            }
+            let row: RegisteredAttachmentGrant = decode(value.value())?;
+            if row.upload_id == *upload && row.state != ScopedGrantState::Retired {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Expires registration evidence only after all grant/token authority has expired.
     /// # Errors
     /// Refuses unbounded work and corrupt storage.

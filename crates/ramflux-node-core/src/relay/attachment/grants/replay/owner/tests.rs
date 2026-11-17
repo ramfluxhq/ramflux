@@ -321,3 +321,165 @@ fn reader_head() -> AttachmentOperation {
         body_digest: body_digest(&[]),
     }
 }
+
+struct CountingBackend<'a> {
+    inner: &'a crate::relay::attachment::backend::LocalAttachmentBackend,
+    commits: std::sync::atomic::AtomicUsize,
+}
+
+impl AttachmentBackend for CountingBackend<'_> {
+    fn write_chunk(
+        &self,
+        spec: &BackendSegment,
+        offset: u64,
+        input: &mut dyn std::io::Read,
+    ) -> Result<(), crate::relay::attachment::backend::BackendError> {
+        self.inner.write_chunk(spec, offset, input)
+    }
+    fn commit(
+        &self,
+        spec: &BackendSegment,
+    ) -> Result<
+        crate::relay::attachment::backend::BackendCommit,
+        crate::relay::attachment::backend::BackendError,
+    > {
+        self.commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.commit(spec)
+    }
+    fn read_range(
+        &self,
+        spec: &BackendSegment,
+        offset: u64,
+        length: u64,
+        output: &mut dyn std::io::Write,
+    ) -> Result<(), crate::relay::attachment::backend::BackendError> {
+        self.inner.read_range(spec, offset, length, output)
+    }
+    fn enumerate(
+        &self,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::relay::attachment::backend::BackendEntry>,
+        crate::relay::attachment::backend::BackendError,
+    > {
+        self.inner.enumerate(after, limit)
+    }
+    fn reconcile(
+        &self,
+        spec: &BackendSegment,
+    ) -> Result<(), crate::relay::attachment::backend::BackendError> {
+        self.inner.reconcile(spec)
+    }
+    fn delete(
+        &self,
+        spec: &BackendSegment,
+    ) -> Result<(), crate::relay::attachment::backend::BackendError> {
+        self.inner.delete(spec)
+    }
+}
+
+fn admit_counted(
+    world: &World,
+    backend: &CountingBackend<'_>,
+    op: &OwnerAttachmentOperation,
+    nonce: u8,
+) -> Result<Vec<u8>, OwnerAdmissionError> {
+    let bytes = op.canonical_bytes().unwrap();
+    let (proof, signature) = prove(world, op, nonce);
+    world.registry.admit_owner_operation_after_authentication(
+        &OwnerAdmission {
+            operation: &bytes,
+            body: &[],
+            proof: &proof,
+            proof_signature: &signature,
+            requester: &world.requester,
+            now: world.now,
+        },
+        backend,
+    )
+}
+
+fn staged_upload(world: &World, upload: [u8; 32]) -> Sealed {
+    let sealed = seal(&world.requester, &world.signer);
+    let (reserved, body) = reserve_op(upload, sealed.object, world.now + 1000);
+    admit(world, &reserved, &body, 1).unwrap();
+    let bind = OwnerAttachmentOperation::bind(&OwnerBind {
+        audience: "node-a",
+        object_id: sealed.object,
+        manifest_hash: sealed.hash,
+        authority_generation: 4,
+        operation_id: upload,
+        payload_generation: 1,
+        body: &sealed.signed,
+    })
+    .unwrap();
+    admit(world, &bind, &sealed.signed, 2).unwrap();
+    let put = OwnerAttachmentOperation::put(&OwnerPut {
+        audience: "node-a",
+        object_id: sealed.object,
+        manifest_hash: sealed.hash,
+        authority_generation: 4,
+        operation_id: upload,
+        payload_generation: 1,
+        segment_index: 0,
+        offset: 0,
+        body: &sealed.cipher,
+    })
+    .unwrap();
+    admit(world, &put, &sealed.cipher, 3).unwrap();
+    sealed
+}
+
+#[test]
+fn a_replayed_commit_proof_publishes_nothing() {
+    let world = world();
+    let upload = [11; 32];
+    let sealed = staged_upload(&world, upload);
+    let backend =
+        CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
+    let commit =
+        OwnerAttachmentOperation::commit("node-a", sealed.object, sealed.hash, 4, upload, 1)
+            .unwrap();
+    // Nonce 3 was consumed by the PUT: the commit proof is a replay.
+    let error = admit_counted(&world, &backend, &commit, 3).unwrap_err();
+    assert!(
+        matches!(error, OwnerAdmissionError::Replay(AttachmentReplayError::Replay)),
+        "replayed commit proof must be refused: {error:?}"
+    );
+    assert_eq!(
+        backend.commits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no backend publish before the proof is consumed"
+    );
+    assert_eq!(record(&world, &upload).state, AttachmentReservationState::Pending);
+}
+
+#[test]
+fn a_committed_commit_retry_returns_the_stored_record_and_charges_once() {
+    let world = world();
+    let upload = [12; 32];
+    let sealed = staged_upload(&world, upload);
+    let backend =
+        CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
+    let commit =
+        OwnerAttachmentOperation::commit("node-a", sealed.object, sealed.hash, 4, upload, 1)
+            .unwrap();
+    let first = json_kind(&admit_counted(&world, &backend, &commit, 4).unwrap());
+    assert_eq!(first["state"], "committed");
+    let owner = AttachmentOwner::from_authenticated_session("owner-anchor").unwrap();
+    let before = world.registry.ledger.usage(&owner).unwrap();
+    let published = backend.commits.load(std::sync::atomic::Ordering::SeqCst);
+    let again = json_kind(&admit_counted(&world, &backend, &commit, 5).unwrap());
+    assert_eq!(again["state"], "committed", "a committed retry is idempotent");
+    let after = world.registry.ledger.usage(&owner).unwrap();
+    assert_eq!(after.used, before.used, "a retry is not charged twice");
+    assert_eq!(after.reserved, before.reserved);
+    assert_eq!(
+        backend.commits.load(std::sync::atomic::Ordering::SeqCst),
+        published,
+        "a committed retry publishes nothing"
+    );
+    let replay = admit_counted(&world, &backend, &commit, 5).unwrap_err();
+    assert!(matches!(replay, OwnerAdmissionError::Replay(AttachmentReplayError::Replay)));
+}

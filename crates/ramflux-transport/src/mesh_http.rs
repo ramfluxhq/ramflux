@@ -907,6 +907,17 @@ where
 pub fn read_mesh_http_request<R: Read>(
     reader: &mut R,
 ) -> Result<Option<MeshHttpRequest>, TransportError> {
+    read_mesh_http_request_limited(reader, usize::MAX)
+}
+
+/// As [`read_mesh_http_request`], refusing a declared body above `max_body` before allocating.
+/// # Errors
+/// Returns an error when the stream cannot be read, the request is malformed, or the body is
+/// larger than `max_body`.
+pub fn read_mesh_http_request_limited<R: Read>(
+    reader: &mut R,
+    max_body: usize,
+) -> Result<Option<MeshHttpRequest>, TransportError> {
     let mut reader = BufReader::new(reader);
     let mut request_line = String::new();
     let bytes = reader.read_line(&mut request_line)?;
@@ -932,6 +943,9 @@ pub fn read_mesh_http_request<R: Read>(
                 .parse()
                 .map_err(|source| TransportError::Http(format!("bad content length: {source}")))?;
         }
+    }
+    if content_length > max_body {
+        return Err(TransportError::Http("request body too large".to_owned()));
     }
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;

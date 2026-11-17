@@ -260,22 +260,41 @@ impl super::super::ScopedGrantRegistry {
             return Err(OwnerAdmissionError::Refused);
         }
         let _lease = self.acquire_upload(checked.op.operation_id, false)?;
-        let record = self.ledger.reservation(&checked.owner, &checked.op.operation_id)?;
-        if checked.op.payload_generation != record.pending_generation
-            || record.manifest_hash != Some(checked.op.manifest_hash)
-        {
-            return Err(AttachmentLedgerError::Conflict.into());
-        }
-        crate::relay::attachment::quota::pending(&record, request.now)?;
-        publish_segments(backend, &record)?;
-        let again = self.ledger.reservation(&checked.owner, &checked.op.operation_id)?;
-        if again.state != AttachmentReservationState::Pending
-            || again.manifest_hash != record.manifest_hash
-        {
-            return Err(AttachmentLedgerError::State.into());
-        }
-        self.transact(|tx| {
+        // One transaction consumes the proof and validates the reservation. Nothing is
+        // published before this commits, so a replayed or stale proof publishes nothing.
+        let (record, committed) = self.transact(|tx| {
             consume_owner(self, tx, request, checked)?;
+            let record = load_tx(tx, &checked.owner, &checked.op.operation_id)?;
+            if checked.op.payload_generation != record.pending_generation
+                || record.manifest_hash != Some(checked.op.manifest_hash)
+                || record.object_id != checked.op.object_id
+            {
+                return Err(AttachmentLedgerError::Conflict.into());
+            }
+            if record.state == AttachmentReservationState::Committed {
+                // An already-Committed retry returns the stored record and charges nothing.
+                if record.expires_at.is_none_or(|expiry| request.now >= expiry) {
+                    return Err(AttachmentLedgerError::Expired.into());
+                }
+                record.require_bound_generation()?;
+                return Ok((record, true));
+            }
+            crate::relay::attachment::quota::pending(&record, request.now)?;
+            Ok((record, false))
+        })?;
+        if committed {
+            return Ok(record);
+        }
+        publish_segments(backend, &record)?;
+        // The lease stays held. Re-read the reservation before the Committed transition.
+        self.transact(|tx| {
+            let again = load_tx(tx, &checked.owner, &checked.op.operation_id)?;
+            if again.state != AttachmentReservationState::Pending
+                || again.manifest_hash != record.manifest_hash
+                || again.pending_generation != record.pending_generation
+            {
+                return Err(AttachmentLedgerError::State.into());
+            }
             Ok(crate::relay::attachment::AttachmentLedger::commit_on(
                 tx,
                 &checked.owner,
