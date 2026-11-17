@@ -125,8 +125,10 @@ async fn cancel(
     let before = store.load(&body.prepare_id)?;
     let row = store.cancel(&body.prepare_id, body.generation)?;
     // A cancel after commit retires every grant it registered, off the actor.
-    if matches!(before.phase, Phase::Committed | Phase::Granted) {
-        if let Ok(pin) = authority(&account.client) {
+    if matches!(before.phase, Phase::Committed | Phase::Granted)
+        && let Ok(pin) = authority(&account.client)
+    {
+        {
             let source = super::retire::Source {
                 authority: &pin.source,
                 generation: pin.generation,

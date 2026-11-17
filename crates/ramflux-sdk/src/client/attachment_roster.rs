@@ -69,14 +69,14 @@ impl RamfluxClient {
         let mut devices = Vec::new();
         let media_scope = match scope {
             RosterScope::Dm { peer_root } => {
-                self.collect(peer_root, None, homes, now, false, &mut devices)?;
-                self.collect(&own_root, None, homes, now, true, &mut devices)?;
+                self.collect((peer_root, None, false), homes, now, &mut devices)?;
+                self.collect((&own_root, None, true), homes, now, &mut devices)?;
                 MediaScope::Dm
             }
             RosterScope::Group { members } => {
                 for (root, device) in *members {
                     let own = root == &own_root;
-                    self.collect(root, Some(device), homes, now, own, &mut devices)?;
+                    self.collect((root, Some(device), own), homes, now, &mut devices)?;
                 }
                 MediaScope::Group
             }
@@ -92,11 +92,9 @@ impl RamfluxClient {
 
     fn collect(
         &self,
-        root: &str,
-        only: Option<&String>,
+        (root, only, own): (&str, Option<&String>, bool),
         homes: &BTreeMap<String, String>,
         now: u64,
-        own: bool,
         out: &mut Vec<MediaDevice>,
     ) -> Result<(), SdkError> {
         let roster = self

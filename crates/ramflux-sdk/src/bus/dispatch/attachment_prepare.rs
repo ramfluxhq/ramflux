@@ -103,7 +103,7 @@ pub(in crate::bus) async fn publish_prepares(
     };
     let key = branch.signing_key.clone();
     let job = Arc::new(Job { store, plane, owner, key, pin, caption: caption.to_owned() });
-    let scope = Scope::of(account, thread, principal, &job.pin).await?;
+    let scope = Scope::of(account, thread, principal, &job.pin)?;
 
     let planned = scope.plan(account, &job.pin).await?;
     remember_roster(&account.client, message_id, &planned)?;
@@ -347,7 +347,7 @@ enum ScopeKind {
 }
 
 impl Scope {
-    async fn of(
+    fn of(
         account: &mut LocalBusAccountState,
         thread: &Value,
         principal: &str,

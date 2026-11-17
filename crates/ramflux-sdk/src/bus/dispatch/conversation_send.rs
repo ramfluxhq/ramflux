@@ -155,21 +155,13 @@ fn admit_prepares(intent: &Intent, account: &LocalBusAccountState) -> Result<(),
 async fn deliver(
     account: &mut LocalBusAccountState,
     intent: &Intent,
-    message_id: &str,
-    principal: &str,
-    sender: &str,
-    thread: &Value,
-    content: &ramflux_protocol::message::Content,
+    send: &DirectSend<'_>,
 ) -> Result<Vec<Value>, SdkError> {
+    let DirectSend { message: message_id, sender, thread, content, .. } = *send;
     if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
         send_group(account, intent, message_id, sender, group, content).await
     } else {
-        Box::pin(send_direct(
-            account,
-            intent,
-            &DirectSend { message: message_id, principal, sender, thread, content },
-        ))
-        .await
+        Box::pin(send_direct(account, intent, send)).await
     }
 }
 

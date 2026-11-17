@@ -75,7 +75,7 @@ impl Job {
         self.cancelled.load(Ordering::Acquire)
             || self.finished.load(Ordering::Acquire)
             || now >= self.expires_at
-            || self.failed.lock().map(|code| code.is_some()).unwrap_or(true)
+            || self.failed.lock().map_or(true, |code| code.is_some())
     }
 }
 
@@ -104,10 +104,10 @@ pub(crate) fn begin(
     super::retire::barrier(&account.client, &body.message_id)?;
     let now = bus::unix_now()?;
     reap(now);
-    if let Some(existing) = bound(&account.client, &body.operation_id)? {
-        if let Ok(view) = resume_existing(&id, &existing, &body) {
-            return Ok(view);
-        }
+    if let Some(existing) = bound(&account.client, &body.operation_id)?
+        && let Ok(view) = resume_existing(&id, &existing, &body)
+    {
+        return Ok(view);
     }
     let source = Source::find(&account.client, &id, &body)?;
     let plane = bus::plane_for(account)?;
@@ -154,7 +154,7 @@ pub(crate) fn begin(
 /// What the worker streams from.
 enum Source {
     /// A reference this device holds an entry in.
-    Remote { opened: Opened, length: u64 },
+    Remote { opened: Box<Opened>, length: u64 },
     /// A file this account sealed: its own prepare row and account-sealed key.
     Owned { store: Store, row: Box<super::meta::Row>, length: u64 },
 }
@@ -203,7 +203,7 @@ impl Source {
                 now: bus::unix_now()?,
             },
         )?;
-        Ok(Self::Remote { opened, length })
+        Ok(Self::Remote { opened: Box::new(opened), length })
     }
 }
 
@@ -240,7 +240,7 @@ fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> 
             import_job::stream_remote(plane, opened, &mut sink, &fenced, &job.meter)?;
         }
         Source::Owned { store, row, .. } => {
-            import_job::stream_owned(store, row, &mut sink, &fenced, &job.meter)?
+            import_job::stream_owned(store, row, &mut sink, &fenced, &job.meter)?;
         }
     }
     sink.flush().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;

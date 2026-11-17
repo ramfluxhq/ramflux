@@ -158,6 +158,7 @@ mod b64 {
 mod b64_opt {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[allow(clippy::ref_option)] // the shape serde's `with` requires
     pub(super) fn serialize<S: Serializer>(
         bytes: &Option<Vec<u8>>,
         serializer: S,

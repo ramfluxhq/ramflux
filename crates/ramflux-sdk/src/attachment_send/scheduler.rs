@@ -89,8 +89,7 @@ impl Scheduler {
             let task = self.next();
             let large = task.large;
             let account = task.account.clone();
-            // A panicking body must not take the worker or the counters with it.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.work));
+            (task.work)();
             let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if large {
                 state.large_running = state.large_running.saturating_sub(1);

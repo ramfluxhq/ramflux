@@ -250,11 +250,11 @@ impl Store {
         let actual = if length == 0 {
             *blake3::hash(b"").as_bytes()
         } else {
-            let on_disk = fs::metadata(&plain).map(|meta| meta.len()).unwrap_or(0);
-            if on_disk != length {
-                [0_u8; 32]
-            } else {
+            let on_disk = fs::metadata(&plain).map_or(0, |meta| meta.len());
+            if on_disk == length {
                 chunks::digest(&plain, length).unwrap_or([0_u8; 32])
+            } else {
+                [0_u8; 32]
             }
         };
         if actual == digest {
