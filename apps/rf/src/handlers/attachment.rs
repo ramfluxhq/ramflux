@@ -535,7 +535,14 @@ async fn send(call: &mut Call<'_>) -> Result<Value, RfError> {
     frame.operation_id = Some(call.operation.to_owned());
     match call.bus.request_frame_structured(frame).await {
         Ok(value) => Ok(value),
-        Err(SdkError::LocalBusRefused { code, .. }) => Err(RfError::Message(code)),
+        Err(SdkError::LocalBusRefused { code, message, .. }) => {
+            // Stable codes stand alone; any other refusal keeps its local explanation.
+            Err(RfError::Message(if message == code || message.is_empty() {
+                code
+            } else {
+                format!("{code}: {message}")
+            }))
+        }
         Err(other) => Err(other.into()),
     }
 }
