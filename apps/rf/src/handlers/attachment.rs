@@ -126,6 +126,7 @@ async fn send_files(outgoing: Outgoing<'_>) -> Result<(), RfError> {
         Route { api: "conversation", method: "conversation.send", operation: message },
         json!({
             "conversation_id": conversation,
+            "group_id": match &kind { Kind::Group { group } => Some(*group), Kind::Dm { .. } => None },
             "text": caption,
             "prepares": prepares.iter().map(|id| json!({"prepare_id": id})).collect::<Vec<_>>(),
         }),

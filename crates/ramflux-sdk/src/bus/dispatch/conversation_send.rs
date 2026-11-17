@@ -18,6 +18,9 @@ struct Intent {
     media: Vec<ramflux_protocol::message::MediaRef>,
     #[serde(default)]
     prepares: Vec<PrepareId>,
+    /// Names the group when its conversation record has not been captured yet.
+    #[serde(default)]
+    group_id: Option<String>,
 }
 #[derive(Deserialize)]
 struct PrepareId {
@@ -60,11 +63,14 @@ pub(in crate::bus) async fn send_account(
         "ramflux.conversation.send.v1",
         &ramflux_protocol::canonical_json_bytes(&(account_id, operation))?,
     );
-    let thread = account
+    let thread = match account
         .client
         .account_db()?
         .client_record("conversation", &intent.conversation_id)?
-        .ok_or_else(|| invalid("conversation absent"))?;
+    {
+        Some(thread) => thread,
+        None => group_thread(account, &intent)?,
+    };
     let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = local.principal_id.clone();
     let sender = local.device_id.clone();
@@ -136,6 +142,25 @@ pub(in crate::bus) async fn send_account(
         body["progress"] = json!(progress);
     }
     Ok(local_bus_ok(body))
+}
+
+/// A group that exists but has not sent yet has no conversation record. It is created from the
+/// verified group, never from the caller's word alone.
+fn group_thread(account: &LocalBusAccountState, intent: &Intent) -> Result<Value, SdkError> {
+    let group = intent.group_id.as_deref().ok_or_else(|| invalid("conversation absent"))?;
+    if super::super::group_delivery::directory(&account.client, group)?.is_empty() {
+        return Err(invalid("group absent"));
+    }
+    let record = json!({
+        "title": null, "direct_route": null, "kind": "group",
+        "group_id": group, "participants": [],
+    });
+    account.client.account_db()?.persist_client_record(
+        "conversation",
+        &intent.conversation_id,
+        &record,
+    )?;
+    Ok(record)
 }
 
 fn admit_prepares(intent: &Intent, account: &LocalBusAccountState) -> Result<(), SdkError> {
