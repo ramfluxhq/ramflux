@@ -99,11 +99,17 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let roster = self
             .cached_roster(root)?
-            .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
+            .ok_or_else(|| {
+                tracing::warn!(root, "no verified authority record is cached for this root");
+                SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
+            })?;
         let home = homes
             .get(root)
             .filter(|home| !home.is_empty())
-            .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
+            .ok_or_else(|| {
+                tracing::warn!(root, "no home node is known for this root");
+                SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
+            })?;
         for device in roster.media_devices(now) {
             if only.is_some_and(|wanted| wanted != &device.device_id) {
                 continue;

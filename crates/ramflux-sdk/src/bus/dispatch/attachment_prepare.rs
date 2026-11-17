@@ -443,7 +443,10 @@ fn home_of(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> 
         .and_then(Value::as_str)
         .filter(|home| !home.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
+        .ok_or_else(|| {
+            tracing::warn!(principal, "no home node is pinned for this contact");
+            Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into()
+        })
 }
 
 #[cfg(test)]
