@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use e2e::{
     Account, Daemon, boot_stack_with_relay, configure_node, create_account, dm_conversation,
     dump_logs, exchange_contacts, group_create, rf_json_timeout, rf_output_with_timeout,
-    start_daemon, unique, wait_dm_texts, wait_group_texts,
+    start_daemon, unique, wait_dm_texts, wait_group_texts, wait_json,
 };
 use serde_json::Value;
 
@@ -52,6 +52,42 @@ fn until_ok(daemon: &Daemon, args: &[&str]) -> e2e::Result<Value> {
             }
         }
     }
+}
+
+/// Sends with a fresh operation id per attempt: a refused send leaves its operation pending
+/// by design, so a retry of the same id is a reconciliation, not a resend.
+fn send_fresh(
+    daemon: &Daemon,
+    prefix: &str,
+    build: impl Fn(&str) -> Vec<String>,
+) -> e2e::Result<Value> {
+    let deadline = Instant::now() + STEP;
+    let mut refusals = Vec::new();
+    loop {
+        let message = unique(prefix);
+        let owned = build(&message);
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+        match rf_json_timeout(&daemon.socket, &args, CALL) {
+            Ok(value) => return Ok(value),
+            Err(error) if Instant::now() >= deadline => {
+                refusals.push(error.to_string());
+                let all: Vec<String> =
+                    refusals.iter().map(|text| text.chars().take(400).collect()).collect();
+                return Err(format!("send never succeeded; refusals: {all:#?}").into());
+            }
+            Err(error) => {
+                refusals.push(error.to_string());
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+fn declared(daemon: &Daemon, account: &Account) -> e2e::Result<()> {
+    wait_json(daemon, &["account", "status", "--account", &account.id], |value| {
+        value["layer_declaration"]["state"] == "fresh"
+    })?;
+    Ok(())
 }
 
 fn enable(daemon: &Daemon, account: &Account) -> e2e::Result<()> {
@@ -146,11 +182,11 @@ fn a_file_is_sent_received_imported_revoked_and_then_refused() -> e2e::Result<()
     let original = file_bytes(5 * 1024 * 1024, 7);
     std::fs::write(&source, &original)?;
     let source_text = source.to_string_lossy().into_owned();
-    let message = unique("attach");
+    declared(&alice_d, &alice)?;
+    declared(&bob_d, &bob)?;
     let caption = "a real file over the real wire";
-    let sent = until_ok(
-        &alice_d,
-        &[
+    let sent = send_fresh(&alice_d, "attach", |message| {
+        [
             "dm",
             "send",
             "--account",
@@ -158,9 +194,9 @@ fn a_file_is_sent_received_imported_revoked_and_then_refused() -> e2e::Result<()
             "--conversation",
             &conversation,
             "--message",
-            &message,
+            message,
             "--envelope",
-            &message,
+            message,
             "--source-principal",
             &alice.principal_id,
             "--sender",
@@ -175,8 +211,10 @@ fn a_file_is_sent_received_imported_revoked_and_then_refused() -> e2e::Result<()
             caption,
             "--attach",
             &source_text,
-        ],
-    )
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    })
     .map_err(|error| format!("{error}; logs={}", logs()))?;
     assert_eq!(sent["delivery_state"], "submitted", "the send reached every device: {sent}");
     let sent_id = sent["message_id"].as_str().ok_or("sent message id")?.to_owned();
@@ -252,11 +290,12 @@ fn a_file_in_a_group_of_three_reaches_both_members() -> e2e::Result<()> {
     let original = file_bytes(1_200_000, 31);
     std::fs::write(&source, &original)?;
     let source_text = source.to_string_lossy().into_owned();
-    let message = unique("group-attach");
+    for (daemon, account) in [(&alice_d, &alice), (&bob_d, &bob), (&carol_d, &carol)] {
+        declared(daemon, account)?;
+    }
     let caption = "a file for the whole group";
-    let sent = until_ok(
-        &alice_d,
-        &[
+    let sent = send_fresh(&alice_d, "group-attach", |message| {
+        [
             "group",
             "send",
             "--account",
@@ -266,15 +305,17 @@ fn a_file_in_a_group_of_three_reaches_both_members() -> e2e::Result<()> {
             "--conversation",
             &group,
             "--message",
-            &message,
+            message,
             "--sender",
             &alice.device_id,
             "--body",
             caption,
             "--attach",
             &source_text,
-        ],
-    )
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    })
     .map_err(|error| format!("{error}; logs={}", logs()))?;
     assert_eq!(sent["delivery_state"], "submitted", "the group send was admitted: {sent}");
 
