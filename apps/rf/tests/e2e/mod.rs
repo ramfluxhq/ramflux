@@ -80,6 +80,8 @@ pub struct Stack {
     pub router_mesh: String,
     pub node_id: String,
     pub admin_url: String,
+    /// Mesh address of the relay attachment surface; present only when booted with a relay.
+    pub relay_attachment: Option<String>,
     _servers: Vec<ChildGuard>,
     pub root: ramflux_test_support::TestPath,
 }
@@ -171,7 +173,35 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     boot_stack_once_with_env(node_id, wal, &[])
 }
 
+/// Boot the ordinary stack plus a real `ramflux-relay` serving the native attachment plane.
+/// The gateway forwards attachment calls to it over the mesh; no client QUIC object surface
+/// and no keyring provider are started.
+/// # Errors
+/// Returns configuration, child-process or readiness failures.
+pub fn boot_stack_with_relay() -> Result<Stack> {
+    let mut last = None;
+    for attempt in 1..=BOOT_ATTEMPTS {
+        match boot_stack_core(NODE_ID, true, &[], true) {
+            Ok(stack) => return Ok(stack),
+            Err(error) if attempt < BOOT_ATTEMPTS && is_addr_in_use(&error) => {
+                last = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| "boot stack retries exhausted".into()))
+}
+
 fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) -> Result<Stack> {
+    boot_stack_core(node_id, wal, extra, false)
+}
+
+fn boot_stack_core(
+    node_id: &str,
+    wal: bool,
+    extra: &[(&str, &str)],
+    with_relay: bool,
+) -> Result<Stack> {
     // The owning directory is already unique. Keep socket paths short under CI TMPDIR.
     let root = ramflux_test_support::TestPath::new()?.child("s");
     let mut guard = RootGuard { path: root.clone(), keep: false };
@@ -179,8 +209,12 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
     std::fs::create_dir_all(root.join("state"))?;
     std::fs::create_dir_all(root.join("certs"))?;
     create_ca(&root)?;
-    let services = ["ramflux-federation", "ramflux-router", "ramflux-retention", "ramflux-gateway"];
-    for service in services {
+    let mut services =
+        vec!["ramflux-federation", "ramflux-router", "ramflux-retention", "ramflux-gateway"];
+    if with_relay {
+        services.push("ramflux-relay");
+    }
+    for service in services.iter().copied() {
         issue_service_cert(&root, service, node_id)?;
     }
     let mesh: Vec<String> =
@@ -201,11 +235,12 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
     #[cfg(windows)]
     let custody = init_custody_record(&root, node_id, seed)?;
     let router_async = free_udp_addr()?;
+    let relay_attachment = if with_relay { mesh.get(4).cloned() } else { None };
     for (service, mesh_addr) in services.iter().zip(mesh.iter()) {
         write_service_toml(&root, service, mesh_addr, &mesh, &gateway_tcp, node_id)?;
     }
     let mut servers = Vec::new();
-    let order = startup_order();
+    let order = startup_order(with_relay);
     let ca_pem = root.join("certs").join("ca.pem");
     for (service, markers) in order {
         let mut command = Command::new(sibling_bin(service)?);
@@ -244,6 +279,11 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
             .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
             .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
             .envs(extra.iter().copied());
+        if let Some(relay) = relay_attachment.as_deref() {
+            command
+                .env("RAMFLUX_RELAY_ATTACHMENT_ADDR", relay)
+                .env("RAMFLUX_RELAY_ATTACHMENT_ENDPOINT", relay);
+        }
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -270,26 +310,28 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
         router_mesh,
         node_id,
         admin_url,
+        relay_attachment,
         _servers: servers,
     })
 }
 
-fn startup_order() -> [(&'static str, &'static [&'static str]); 4] {
-    [
+fn startup_order(with_relay: bool) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut order: Vec<(&'static str, &'static [&'static str])> = vec![
         ("ramflux-federation", federation_ready()),
         (
             "ramflux-router",
             &["router mesh mTLS surface listening", "router async QUIC ingress listening"][..],
         ),
         ("ramflux-retention", &["retention mesh mTLS surface listening"][..]),
-        (
-            "ramflux-gateway",
-            &[
-                "gateway QUIC session surface listening",
-                "gateway TCP-TLS session surface listening",
-            ][..],
-        ),
-    ]
+    ];
+    if with_relay {
+        order.push(("ramflux-relay", &["relay attachment surface listening"][..]));
+    }
+    order.push((
+        "ramflux-gateway",
+        &["gateway QUIC session surface listening", "gateway TCP-TLS session surface listening"][..],
+    ));
+    order
 }
 
 fn validate_discovery(
@@ -1921,7 +1963,13 @@ fn write_service_toml(
     }
     let endpoints = format!(
         "gateway = \"{}\"\nrouter = \"{}\"\nnotify = \"{}\"\nfederation = \"{}\"\nrelay = \"{}\"\nsignaling = \"{}\"\nretention = \"{}\"",
-        mesh[3], mesh[1], mesh[1], mesh[0], mesh[1], mesh[1], mesh[2]
+        mesh[3],
+        mesh[1],
+        mesh[1],
+        mesh[0],
+        mesh.get(4).unwrap_or(&mesh[1]),
+        mesh[1],
+        mesh[2]
     );
     std::fs::write(
         certs.join(format!("{service}.toml")),

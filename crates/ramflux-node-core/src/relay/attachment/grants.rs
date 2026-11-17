@@ -73,6 +73,15 @@ pub struct ScopedGrantRegistry {
     /// Bounds every write-lock wait of the calls made through this handle.
     deadline: Option<super::WriteDeadline>,
 }
+/// One registration for a requester the local gateway authenticated from the live session.
+pub struct AttestedRegistration<'a> {
+    pub requester: &'a ramflux_protocol::large_attachment::QualifiedOwner,
+    pub upload_id: &'a [u8; 32],
+    pub native: &'a VerifiedContentManifest,
+    pub grant: &'a VerifiedScopedGrant,
+    pub signer: &'a SigningKey,
+    pub now: u64,
+}
 /// Existing gateway-attested owner-session verification, with a pinned cache.
 /// This is not native operation `PoP` admission or a substitute for the replay ledger.
 pub struct ScopedRegistrationAuth<'a> {
@@ -234,17 +243,18 @@ impl ScopedGrantRegistry {
     /// Refuses a requester that is not the grant owner, plus the `register` refusals.
     pub fn register_attested(
         &self,
-        requester: &ramflux_protocol::large_attachment::QualifiedOwner,
-        upload_id: &[u8; 32],
-        native: &VerifiedContentManifest,
-        grant: &VerifiedScopedGrant,
-        signer: &SigningKey,
-        now: u64,
+        attested: &AttestedRegistration<'_>,
     ) -> Result<RegisteredAttachmentGrant, AttachmentLedgerError> {
-        if &grant.grant().owner != requester {
+        if &attested.grant.grant().owner != attested.requester {
             return Err(AttachmentLedgerError::Conflict);
         }
-        self.register_checked(upload_id, native, grant, now, signer)
+        self.register_checked(
+            attested.upload_id,
+            attested.native,
+            attested.grant,
+            attested.now,
+            attested.signer,
+        )
     }
 
     fn register_checked(

@@ -16,7 +16,7 @@ use ramflux_node_core::{
     ATTACHMENT_CALL_BODY_MAX, ATTACHMENT_MESH_PATH, AttachmentAuthority, AttachmentAuthorityReply,
     AttachmentCall, AttachmentLedgerError, AttachmentMeshReply, AttachmentMeshRequest,
     AttachmentOwner, AttachmentPolicy, AttachmentReplayError, AttachmentReplayProof,
-    NodeServiceConfig, OwnerAdmission, OwnerAdmissionError, RelayRedbStore, RequesterWire,
+    AttestedRegistration, NodeServiceConfig, OwnerAdmission, OwnerAdmissionError, RelayRedbStore, RequesterWire,
     RetirementOutcome, ScopedGrantRegistry, WireBytes,
 };
 use ramflux_protocol::large_attachment::{
@@ -68,7 +68,7 @@ pub(crate) fn start(
     else {
         return Ok(());
     };
-    let service = Arc::new(AttachmentService::open(config, store, state_dir)?);
+    let service = Arc::new(AttachmentService::open(&config.node_id, store, state_dir)?);
     let server =
         ramflux_transport::MeshTlsServer::bind(&addr, &crate::config::mesh_tls_config(config))?;
     server.set_nonblocking(true)?;
@@ -89,7 +89,7 @@ pub(crate) fn start(
     Ok(())
 }
 
-fn serve_one(
+pub(crate) fn serve_one(
     server: &ramflux_transport::MeshTlsServer,
     service: &AttachmentService,
     node: &str,
@@ -158,7 +158,7 @@ fn ok(body: Vec<u8>) -> AttachmentMeshReply {
 
 impl AttachmentService {
     pub(crate) fn open(
-        config: &NodeServiceConfig,
+        node_id: &str,
         store: &RelayRedbStore,
         state_dir: &Path,
     ) -> anyhow::Result<Self> {
@@ -166,7 +166,7 @@ impl AttachmentService {
         let source = ramflux_node_core::environment::var(SOURCE_ENV)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| config.node_id.clone());
+            .unwrap_or_else(|| node_id.to_owned());
         let generation = match ramflux_node_core::environment::var(GENERATION_ENV) {
             Ok(text) => text
                 .trim()
@@ -191,7 +191,7 @@ impl AttachmentService {
         let backend = store
             .local_attachment_backend(namespace, state_dir.join("attachment-objects"))
             .map_err(|error| anyhow::anyhow!("attachment backend: {error}"))?;
-        Ok(Self { registry, backend, signer, source, generation, home: config.node_id.clone() })
+        Ok(Self { registry, backend, signer, source, generation, home: node_id.to_owned() })
     }
 
     /// Serves one call for an authenticated requester.
@@ -256,8 +256,14 @@ impl AttachmentService {
         else {
             return refuse(CODE_LAYOUT);
         };
-        match registry.register_attested(requester, &upload_id, &native, &grant, &self.signer, now)
-        {
+        match registry.register_attested(&AttestedRegistration {
+            requester,
+            upload_id: &upload_id,
+            native: &native,
+            grant: &grant,
+            signer: &self.signer,
+            now,
+        }) {
             Ok(row) => match ramflux_protocol::decode_base64url(&row.capability) {
                 Ok(bytes) => ok(bytes),
                 Err(_) => refuse(CODE_UNAVAILABLE),
@@ -480,3 +486,6 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     file.sync_all()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
