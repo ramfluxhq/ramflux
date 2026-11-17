@@ -212,6 +212,20 @@ pub(crate) fn revoke(
     source: &Source<'_>,
     now: u64,
 ) -> Result<&'static str, SdkError> {
+    revoke_local(ctx, message_id, now)?;
+    deliver(ctx, plane, source, now)?;
+    revoke_state_of(ctx, message_id)
+}
+
+/// The durable half of a revoke: intent, tombstone, fence, wipe, and signed queued
+/// retirements. Nothing here touches the network.
+/// # Errors
+/// `not_owner` for a message this account did not send, or a storage failure.
+pub(crate) fn revoke_local(
+    ctx: &RetireCtx<'_>,
+    message_id: &str,
+    now: u64,
+) -> Result<(), SdkError> {
     let mut record = load_record(ctx.db, message_id)?
         .ok_or_else(|| SdkError::from(Refusal::new(CODE_NOT_OWNER)))?;
     if !record.revoked {
@@ -232,8 +246,16 @@ pub(crate) fn revoke(
     for file in &record.files {
         ctx.store.retire_and_wipe(&file.prepare_id)?;
     }
-    begin_all(ctx, &record, None, now)?;
-    deliver(ctx, plane, source, now)?;
+    begin_all(ctx, &record, None, now)
+}
+
+/// `relay_erased` or `retirement_pending` for a message.
+/// # Errors
+/// Returns a storage failure.
+pub(crate) fn revoke_state_of(
+    ctx: &RetireCtx<'_>,
+    message_id: &str,
+) -> Result<&'static str, SdkError> {
     let row = ctx.db.client_record(RETIREMENT, message_id)?;
     Ok(handles::revoke_state(row.as_ref()))
 }
@@ -409,61 +431,90 @@ fn deliver(
     source: &Source<'_>,
     now: u64,
 ) -> Result<Delivery, SdkError> {
-    let outbox = AttachmentRetirementOutbox::new(ctx.db, ctx.index, ctx.account)?;
-    let retirement_source = RetirementSource {
-        authority: source.authority,
-        generation: source.generation,
-        signing_public_key: source.public_key,
-    };
     let mut out = Delivery::default();
     let mut after: Option<[u8; 32]> = None;
     loop {
-        let page = outbox.pending(after.as_ref(), 64, ctx.vault, now)?;
+        let page = pending_page(ctx, after.as_ref(), now)?;
         let Some(last) = page.last() else { break };
         after = Some(last.signed.request().operation_id);
         for item in &page {
-            let request = item.signed.request();
-            let Some(plane) = plane else {
-                out.pending = out.pending.saturating_add(1);
-                out.unreachable = true;
-                continue;
-            };
-            let canonical =
-                request.canonical_bytes().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-            let reply = plane
-                .retire(&RetireCall { retirement: &canonical, signature: item.signed.signature() });
-            let parsed =
-                reply.ok().and_then(|bytes| serde_json::from_slice::<RetireReply>(&bytes).ok());
-            let Some(parsed) = parsed else {
-                out.pending = out.pending.saturating_add(1);
-                out.unreachable = true;
-                continue;
-            };
-            if parsed.state == "retired" {
-                let message = ctx.db.native_reference_message(&request.reference_id)?;
-                outbox.apply_authenticated_response(
-                    request,
-                    &retirement_source,
-                    RetirementDeliveryStatus::Retired,
-                )?;
-                if let Some(message) = message {
-                    note_retired(ctx, &message, &request.grant_id, parsed.object_erased)?;
-                }
-                out.retired = out.retired.saturating_add(1);
-            } else {
-                outbox.apply_authenticated_response(
-                    request,
-                    &retirement_source,
-                    RetirementDeliveryStatus::RevocationPending,
-                )?;
-                out.pending = out.pending.saturating_add(1);
-            }
+            let reply = plane.map(|plane| call_retire(plane, item));
+            settle(ctx, source, item, reply, &mut out)?;
         }
         if page.len() < 64 {
             break;
         }
     }
     Ok(out)
+}
+
+/// One page of queued retirements, re-signed with the current device key when needed.
+/// # Errors
+/// Returns a storage or signing failure.
+pub(crate) fn pending_page(
+    ctx: &RetireCtx<'_>,
+    after: Option<&[u8; 32]>,
+    now: u64,
+) -> Result<Vec<ramflux_storage::PendingAttachmentRetirement>, SdkError> {
+    let outbox = AttachmentRetirementOutbox::new(ctx.db, ctx.index, ctx.account)?;
+    outbox.pending(after, 64, ctx.vault, now)
+}
+
+/// Sends one queued retirement through a plane.
+pub(crate) fn call_retire(
+    plane: &dyn Plane,
+    item: &ramflux_storage::PendingAttachmentRetirement,
+) -> Result<Vec<u8>, Refusal> {
+    let canonical =
+        item.signed.request().canonical_bytes().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
+    plane.retire(&RetireCall { retirement: &canonical, signature: item.signed.signature() })
+}
+
+/// Applies one reply. `None` or an unparsable reply leaves the work queued as unreachable.
+/// # Errors
+/// Returns a storage failure.
+pub(crate) fn settle(
+    ctx: &RetireCtx<'_>,
+    source: &Source<'_>,
+    item: &ramflux_storage::PendingAttachmentRetirement,
+    reply: Option<Result<Vec<u8>, Refusal>>,
+    out: &mut Delivery,
+) -> Result<(), SdkError> {
+    let outbox = AttachmentRetirementOutbox::new(ctx.db, ctx.index, ctx.account)?;
+    let retirement_source = RetirementSource {
+        authority: source.authority,
+        generation: source.generation,
+        signing_public_key: source.public_key,
+    };
+    let request = item.signed.request();
+    let parsed = reply
+        .and_then(Result::ok)
+        .and_then(|bytes| serde_json::from_slice::<RetireReply>(&bytes).ok());
+    let Some(parsed) = parsed else {
+        out.pending = out.pending.saturating_add(1);
+        out.unreachable = true;
+        return Ok(());
+    };
+    if parsed.state == "retired" {
+        let message = ctx.db.native_reference_message(&request.reference_id)?;
+        outbox.apply_authenticated_response(
+            request,
+            &retirement_source,
+            RetirementDeliveryStatus::Retired,
+        )?;
+        if let Some(message) = message {
+            note_retired(ctx, &message, &request.grant_id, parsed.object_erased)?;
+        }
+        out.retired = out.retired.saturating_add(1);
+    } else {
+        outbox.apply_authenticated_response(
+            request,
+            &retirement_source,
+            RetirementDeliveryStatus::RevocationPending,
+        )?;
+        out.pending = out.pending.saturating_add(1);
+    }
+    Ok(())
 }
 
 fn note_retired(

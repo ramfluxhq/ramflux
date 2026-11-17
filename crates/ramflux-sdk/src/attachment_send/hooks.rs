@@ -130,3 +130,49 @@ pub(crate) fn retire_excluded(
     })
     .map(|_| ())
 }
+
+/// Delivers every queued retirement through `plane`, one blocking call at a time on a worker,
+/// never on the account actor. An unreachable relay leaves the work queued.
+/// # Errors
+/// Returns a storage or signing failure; delivery failures are not errors.
+pub(crate) async fn deliver_pending(
+    account: &LocalBusAccountState,
+    plane: std::sync::Arc<dyn Plane>,
+    pin: &AuthorityPin,
+) -> Result<retire::Delivery, SdkError> {
+    let source =
+        Source { authority: &pin.source, generation: pin.generation, public_key: &pin.public_key };
+    let mut out = retire::Delivery::default();
+    let mut after: Option<[u8; 32]> = None;
+    loop {
+        let now = super::unix_now()?;
+        let page = retire::with_ctx(account, |ctx| retire::pending_page(ctx, after.as_ref(), now))?;
+        let Some(last) = page.last() else { break };
+        after = Some(last.signed.request().operation_id);
+        let full = page.len() >= 64;
+        for item in page {
+            let worker = std::sync::Arc::clone(&plane);
+            let (item, reply) = tokio::task::spawn_blocking(move || {
+                let reply = retire::call_retire(worker.as_ref(), &item);
+                (item, reply)
+            })
+            .await
+            .map_err(|_| SdkError::GatewaySessionNotEstablished)?;
+            retire::with_ctx(account, |ctx| {
+                retire::settle(ctx, &source, &item, Some(reply), &mut out)
+            })?;
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Startup and send-time sweep: finishes interrupted wipes and redelivers queued retirements.
+/// Best effort; a failure is retried at the next call.
+pub(crate) async fn sweep(account: &LocalBusAccountState, pin: &AuthorityPin) {
+    let Ok(plane) = super::plane_for(account) else { return };
+    let _ = retire::with_ctx(account, |ctx| ctx.store.cleanup_cancelled().map_err(SdkError::from));
+    let _ = deliver_pending(account, plane, pin).await;
+}

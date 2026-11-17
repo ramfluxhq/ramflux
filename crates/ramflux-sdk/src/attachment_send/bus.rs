@@ -16,7 +16,7 @@ use super::codes::{
     CODE_AUTHORITY_UNAVAILABLE, CODE_DISABLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID, Refusal,
 };
 use super::handles;
-use super::meta::{CHUNK, Intent, Recipient, Row};
+use super::meta::{CHUNK, Intent, Phase, Recipient, Row};
 use super::owner_wire::decode_hex;
 use super::store::Store;
 use super::{CONFIG_DIRECTORY, CONFIG_ID, enabled_value};
@@ -33,14 +33,14 @@ pub(crate) async fn dispatch(
         "attachment.prepare.chunk" => chunk(account, request),
         "attachment.prepare.finish" => finish(account, request),
         "attachment.prepare.status" => status(account, request),
-        "attachment.prepare.cancel" => cancel(account, request),
+        "attachment.prepare.cancel" => cancel(account, request).await,
         "attachment.prepare.renew" => renew(account, request),
         "attachment.import.begin" => handles::begin(account, request),
         "attachment.import.status" => handles::status(account, request),
         "attachment.import.read" => handles::read(account, request),
         "attachment.import.finish" => handles::finish(account, request),
         "attachment.import.cancel" => handles::cancel(account, request),
-        "attachment.revoke" => revoke(account, request),
+        "attachment.revoke" => revoke(account, request).await,
         "attachment.enable" => enable(account, request).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {}", request.method))),
     }
@@ -116,16 +116,35 @@ fn status(
     Ok(local_bus_ok(progress(&store.status(&body.prepare_id)?)))
 }
 
-fn cancel(
+async fn cancel(
     account: &mut crate::bus::state::LocalBusAccountState,
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: GenerationBody = serde_json::from_value(request.body.clone())?;
     let store = open_store(&account.client, request_account_id(request)?)?;
-    Ok(local_bus_ok(progress(&store.cancel(&body.prepare_id, body.generation)?)))
+    let before = store.load(&body.prepare_id)?;
+    let row = store.cancel(&body.prepare_id, body.generation)?;
+    // A cancel after commit retires every grant it registered, off the actor.
+    if matches!(before.phase, Phase::Committed | Phase::Granted) {
+        if let Ok(pin) = authority(&account.client) {
+            let source = super::retire::Source {
+                authority: &pin.source,
+                generation: pin.generation,
+                public_key: &pin.public_key,
+            };
+            let now = unix_now()?;
+            super::retire::with_ctx(account, |ctx| {
+                super::retire::cancel_registered(ctx, None, &body.prepare_id, &source, now)
+            })?;
+            if let Ok(plane) = plane_for(account) {
+                let _ = super::hooks::deliver_pending(account, plane, &pin).await;
+            }
+        }
+    }
+    Ok(local_bus_ok(progress(&row)))
 }
 
-fn revoke(
+async fn revoke(
     account: &mut crate::bus::state::LocalBusAccountState,
     request: &LocalBusFrame,
 ) -> Result<LocalBusDispatchResult, SdkError> {
@@ -134,15 +153,17 @@ fn revoke(
         return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
     }
     let pin = authority(&account.client)?;
-    let source = super::retire::Source {
-        authority: &pin.source,
-        generation: pin.generation,
-        public_key: &pin.public_key,
-    };
-    let plane = account.client.attachment_plane.clone();
     let now = unix_now()?;
+    super::retire::with_ctx(account, |ctx| {
+        super::retire::revoke_local(ctx, &body.message_id, now)
+    })?;
+    // Delivery runs on workers; an unreachable relay leaves the retirement queued and the
+    // answer `retirement_pending`.
+    if let Ok(plane) = plane_for(account) {
+        let _ = super::hooks::deliver_pending(account, plane, &pin).await;
+    }
     let state = super::retire::with_ctx(account, |ctx| {
-        super::retire::revoke(ctx, plane.as_deref(), &body.message_id, &source, now)
+        super::retire::revoke_state_of(ctx, &body.message_id)
     })?;
     Ok(local_bus_ok(json!({ "message_id": body.message_id, "state": state })))
 }

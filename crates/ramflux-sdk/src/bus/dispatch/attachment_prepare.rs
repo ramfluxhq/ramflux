@@ -84,6 +84,7 @@ pub(in crate::bus) async fn publish_prepares(
         return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
     }
     let pin = authority(&account.client)?;
+    crate::attachment_send::hooks::sweep(account, &pin).await;
     let store = open_store(&account.client, account_id)?;
     let rows = load_rows(&store, prepares, thread, principal, conversation_id)?;
     // A retry of a send that already reached admission replays what it left behind and
