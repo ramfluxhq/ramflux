@@ -32,7 +32,7 @@ use super::meta::CHUNK;
 use super::plane::Plane;
 
 const DIRECTORY: &str = "attachment-inner";
-const TOMBSTONE: &str = "attachment-tombstone";
+pub(crate) const TOMBSTONE: &str = "attachment-tombstone";
 pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const BINDING: &str = "attachment-import";
 
@@ -53,6 +53,17 @@ struct Job {
 fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Job>>> {
     static JOBS: OnceLock<Mutex<BTreeMap<String, Arc<Job>>>> = OnceLock::new();
     JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// HOOK(handles): fences every open import of `message_id`. Each handle is cancelled and its
+/// staging file removed, so no further byte leaves it. Called by `retire::revoke` after the
+/// durable tombstone.
+pub(crate) fn fence_message(message_id: &str) {
+    let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for job in table.values().filter(|job| job.message_id == message_id) {
+        job.cancelled.store(true, Ordering::Release);
+        let _ = fs::remove_file(&job.path);
+    }
 }
 
 /// # Errors
@@ -505,4 +516,36 @@ struct ReadBody {
 #[derive(Deserialize)]
 struct IdBody {
     import_id: String,
+}
+
+/// Test seam: registers an open import handle so a fence can be observed.
+#[cfg(test)]
+pub(crate) fn test_register_job(import_id: &str, account: &str, message_id: &str, path: PathBuf) {
+    let job = Arc::new(Job {
+        account: account.to_owned(),
+        message_id: message_id.to_owned(),
+        index: 0,
+        generation: 1,
+        length: 0,
+        expires_at: u64::MAX,
+        path,
+        ready: AtomicBool::new(true),
+        failed: Mutex::new(None),
+        cancelled: AtomicBool::new(false),
+        finished: AtomicBool::new(false),
+    });
+    jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(import_id.to_owned(), job);
+}
+
+/// Test seam: whether the registered handle was cancelled.
+#[cfg(test)]
+pub(crate) fn test_job_cancelled(import_id: &str) -> bool {
+    jobs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(import_id)
+        .is_some_and(|job| job.cancelled.load(Ordering::Acquire))
 }

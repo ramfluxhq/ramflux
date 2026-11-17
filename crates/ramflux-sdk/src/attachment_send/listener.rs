@@ -17,14 +17,15 @@ use ramflux_node_core::{
     OwnerAdmission, OwnerAdmissionError, RelayRedbStore,
 };
 use ramflux_protocol::large_attachment::{
-    AttachmentRegistrationReceipt, ContentManifest, OwnerAttachmentOperation, QualifiedOwner,
-    ScopedAttachmentGrant,
+    AttachmentRegistrationReceipt, AttachmentRetirement, ContentManifest, OwnerAttachmentOperation,
+    QualifiedOwner, ScopedAttachmentGrant,
 };
 
 use super::codes::{
-    CODE_EXPIRED, CODE_NOT_GRANTEE, CODE_QUOTA_EXCEEDED, CODE_UPLOAD_REJECTED, Refusal,
+    CODE_AUTHORITY_UNAVAILABLE, CODE_EXPIRED, CODE_NOT_GRANTEE, CODE_QUOTA_EXCEEDED,
+    CODE_UPLOAD_REJECTED, Refusal,
 };
-use super::plane::{OwnerCall, Plane, ReadCall, RegisterCall};
+use super::plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 
 pub(super) const NOW: u64 = 2_000_000_000;
 
@@ -36,6 +37,8 @@ pub(super) struct Listener {
     now: u64,
     reserves: AtomicU64,
     reads: AtomicU64,
+    retires: AtomicU64,
+    unreachable: std::sync::atomic::AtomicBool,
     reader: Mutex<QualifiedOwner>,
     manifests: Mutex<HashMap<[u8; 32], Vec<u8>>>,
 }
@@ -66,6 +69,8 @@ impl Listener {
             now: NOW,
             reserves: AtomicU64::new(0),
             reads: AtomicU64::new(0),
+            retires: AtomicU64::new(0),
+            unreachable: std::sync::atomic::AtomicBool::new(false),
             manifests: Mutex::new(HashMap::new()),
         })
     }
@@ -76,6 +81,15 @@ impl Listener {
 
     pub(super) fn reserves(&self) -> u64 {
         self.reserves.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn retires(&self) -> u64 {
+        self.retires.load(Ordering::Relaxed)
+    }
+
+    /// Simulates a relay that cannot be reached; later calls succeed again after `false`.
+    pub(super) fn set_unreachable(&self, down: bool) {
+        self.unreachable.store(down, Ordering::Relaxed);
     }
 
     pub(super) fn reads(&self) -> u64 {
@@ -120,15 +134,17 @@ impl Plane for Listener {
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         let grant = ScopedAttachmentGrant::decode_signed(call.grant)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
-        let registered = ramflux_node_core::fixture::register_prepared(
-            &self.registry,
-            call.upload_id,
-            &native,
-            &grant,
-            &self.authority,
-            self.now(),
-        )
-        .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
+        let registered = self
+            .registry
+            .register_attested(
+                &self.requester,
+                call.upload_id,
+                &native,
+                &grant,
+                &self.authority,
+                self.now(),
+            )
+            .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         let raw = ramflux_protocol::decode_base64url(&registered.capability)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         self.manifests
@@ -181,5 +197,33 @@ impl Plane for Listener {
             .read_range(&spec, call.offset, call.length, &mut output)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         Ok(output)
+    }
+
+    fn retire(&self, call: &RetireCall<'_>) -> Result<Vec<u8>, Refusal> {
+        if self.unreachable.load(Ordering::Relaxed) {
+            return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE));
+        }
+        let signed = AttachmentRetirement::verify(
+            call.retirement,
+            call.signature,
+            &self.requester.signing_public_key,
+        )
+        .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
+        let outcome = self
+            .registry
+            .retire_attested(&self.requester, &signed, self.now())
+            .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
+        self.retires.fetch_add(1, Ordering::Relaxed);
+        let retired = matches!(outcome, ramflux_node_core::RetirementOutcome::Retired);
+        let erased = retired
+            && self
+                .registry
+                .erase_unreferenced(&signed.request().grant_id, &self.backend)
+                .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
+        serde_json::to_vec(&serde_json::json!({
+            "state": if retired { "retired" } else { "pending" },
+            "object_erased": erased,
+        }))
+        .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))
     }
 }

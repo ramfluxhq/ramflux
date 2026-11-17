@@ -21,7 +21,7 @@ use super::path_admit::open_anchored;
 use super::seal::{self, seal_key};
 
 pub(crate) struct Store {
-    root: PathBuf,
+    pub(super) root: PathBuf,
     account: String,
     account_secret: [u8; 32],
 }
@@ -166,6 +166,8 @@ impl Store {
         };
         Self::release_charge(&mut row);
         self.save(&row)?;
+        // HOOK(erase): the Cleaning or Fenced record above is the fence that authorizes the wipe.
+        self.wipe_after_cancel(&row)?;
         Ok(row)
     }
 
@@ -440,11 +442,11 @@ impl Store {
         seal_key(&self.account_secret, prepare_id)
     }
 
-    fn dir(&self, prepare_id: &str) -> PathBuf {
+    pub(super) fn dir(&self, prepare_id: &str) -> PathBuf {
         self.root.join(prepare_id)
     }
 
-    fn save(&self, row: &Row) -> Result<(), Refusal> {
+    pub(super) fn save(&self, row: &Row) -> Result<(), Refusal> {
         let bytes = serde_json::to_vec(row).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         write_atomic(&self.dir(&row.prepare_id).join("meta.json"), &bytes)
     }

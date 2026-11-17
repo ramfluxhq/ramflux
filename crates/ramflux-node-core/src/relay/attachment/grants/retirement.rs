@@ -262,7 +262,8 @@ impl ScopedGrantRegistry {
         let r = signed.request();
         let now = auth.invocation.now;
         let g = self.retirement_grant(signed, now)?;
-        if ramflux_protocol::encode_base64url(signed.signer()) != auth.invocation.token.owner_public_key
+        if ramflux_protocol::encode_base64url(signed.signer())
+            != auth.invocation.token.owner_public_key
         {
             return Err(AttachmentLedgerError::Conflict);
         }

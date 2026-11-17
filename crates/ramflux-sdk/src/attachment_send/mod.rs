@@ -12,6 +12,7 @@ mod bus;
 mod chunks;
 mod codes;
 mod digest;
+mod erase;
 mod grant_wrap;
 mod handles;
 mod import_job;
@@ -23,6 +24,9 @@ mod path_admit;
 mod plane;
 mod preflight;
 mod publish;
+mod retire;
+#[cfg(test)]
+mod retire_tests;
 mod seal;
 mod seal_job;
 #[cfg(test)]

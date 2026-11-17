@@ -126,16 +126,17 @@ fn revoke(
     if body.message_id.is_empty() || body.message_id.len() > 256 {
         return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
     }
-    let db = account.client.account_db()?;
-    let existing = db.client_record(handles::RETIREMENT, &body.message_id)?;
-    let state = handles::revoke_state(existing.as_ref());
-    if state != "relay_erased" {
-        db.persist_client_record(
-            handles::RETIREMENT,
-            &body.message_id,
-            &json!({ "relay_erased": false }),
-        )?;
-    }
+    let pin = authority(&account.client)?;
+    let source = super::retire::Source {
+        authority: &pin.source,
+        generation: pin.generation,
+        public_key: &pin.public_key,
+    };
+    let plane = account.client.attachment_plane.clone();
+    let now = unix_now()?;
+    let state = super::retire::with_ctx(account, |ctx| {
+        super::retire::revoke(ctx, plane.as_deref(), &body.message_id, &source, now)
+    })?;
     Ok(local_bus_ok(json!({ "message_id": body.message_id, "state": state })))
 }
 
