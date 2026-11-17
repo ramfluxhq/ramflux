@@ -16,6 +16,7 @@ struct Add {
     replace_provisional_root: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn add(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
