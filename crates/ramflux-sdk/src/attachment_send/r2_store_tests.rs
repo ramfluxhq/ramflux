@@ -326,7 +326,7 @@ fn disk_full_leaves_the_log_unchanged_and_a_retry_succeeds_once_space_returns() 
     assert_eq!(store.load(&begun.prepare_id).unwrap().accepted_through, 0, "nothing was copied");
     assert!(!store.plain_path(&begun.prepare_id).exists(), "no plaintext file was created");
 
-    budget::force_free_bytes(dir.path(), 1 << 20);
+    budget::force_free_bytes(dir.path(), 1 << 30);
     store.chunk(&begun.prepare_id, 1, 0, b"hello attachment", NOW).unwrap();
     // The ciphertext, workspace and margin do not fit in what is left.
     budget::force_free_bytes(dir.path(), 64);

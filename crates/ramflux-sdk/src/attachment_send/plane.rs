@@ -74,7 +74,10 @@ pub(crate) fn read_bounded(call: &ReadCall<'_>) -> Result<(), Refusal> {
     {
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
     }
-    if call.length == 0 || call.offset > call.length {
+    if call.length == 0
+        || call.length > 524_288
+        || call.offset.saturating_add(call.length) > u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES)
+    {
         return Err(Refusal::new(CODE_STREAM_OFFSET));
     }
     Ok(())

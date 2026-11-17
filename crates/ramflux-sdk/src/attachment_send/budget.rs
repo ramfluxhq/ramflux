@@ -227,10 +227,12 @@ mod tests {
 
     #[test]
     fn a_dropped_permit_returns_its_bytes() -> Result<(), Refusal> {
-        let before = memory_held();
-        let permit = memory(1024)?;
-        assert!(memory_held() >= before + 1024 - 1024 * 64, "the permit is counted");
+        let meter = Meter::default();
+        let permit = memory_metered(1024, &meter)?;
+        assert_eq!(meter.held.load(Ordering::Acquire), 1024, "the permit is counted");
         drop(permit);
+        assert_eq!(meter.held.load(Ordering::Acquire), 0, "dropping returns exactly what it took");
+        assert_eq!(meter.peak(), 1024);
         Ok(())
     }
 
