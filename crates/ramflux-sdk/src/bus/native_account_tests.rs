@@ -536,7 +536,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         let failed = ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
         let error = ceremony
-            .confirm(&wrong, &Zeroizing::new("discard secret".into()))
+            .confirm(&wrong, &Zeroizing::new("discarded data secret".into()))
             .await
             .expect_err("wrong words must be rejected");
         assert!(

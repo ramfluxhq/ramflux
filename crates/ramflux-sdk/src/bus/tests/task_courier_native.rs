@@ -112,7 +112,7 @@ async fn private_unlock(runtime: &mut AccountRuntime) -> Case {
     let command = AccountCommand {
         admission: None,
         private: Some(crate::bus::actor::PrivateCommand::NativeUnlock {
-            passphrase: zeroize::Zeroizing::new("passphrase".into()),
+            passphrase: zeroize::Zeroizing::new("courier data passphrase".into()),
             home_node_id: None,
             reply,
         }),
