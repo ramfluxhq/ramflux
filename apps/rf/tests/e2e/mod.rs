@@ -196,6 +196,7 @@ fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) ->
     boot_stack_core(node_id, wal, extra, false)
 }
 
+#[allow(clippy::too_many_lines)]
 fn boot_stack_core(
     node_id: &str,
     wal: bool,

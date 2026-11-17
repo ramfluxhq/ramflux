@@ -133,7 +133,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn a_full_account_queue_is_backpressure_not_a_new_thread() -> Result<(), Refusal> {
+    fn a_full_account_queue_is_backpressure_not_a_new_thread() {
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let account = "rf-scheduler-backpressure";
         let mut accepted = 0_usize;
@@ -159,7 +159,6 @@ mod tests {
         let (lock, cv) = &*gate;
         *lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
         cv.notify_all();
-        Ok(())
     }
 
     #[test]

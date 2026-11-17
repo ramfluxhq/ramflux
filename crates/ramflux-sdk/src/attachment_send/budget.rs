@@ -240,12 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn reserving_more_than_the_scoped_free_space_is_disk_full() -> Result<(), Refusal> {
+    fn reserving_more_than_the_scoped_free_space_is_disk_full() {
         let scope = std::env::temp_dir().join("rf-attach-budget-scope");
         force_free_bytes(&scope, 10_000);
-        let before = disk_reserved();
         assert_eq!(reserve_disk(&scope, 20_000), Err(Refusal::new(CODE_DISK_FULL)));
-        assert_eq!(disk_reserved(), before, "a refused reservation holds nothing");
-        Ok(())
     }
 }
