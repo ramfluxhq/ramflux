@@ -10,7 +10,8 @@
 //!
 //! The blocklist is `Passwords/Common-Credentials/10k-most-common.txt` from
 //! <https://github.com/danielmiessler/SecLists> at commit
-//! `913b327317496d062bcc7cace524aaad8a693be2` (2026-09-08), MIT licensed.
+//! `913b327317496d062bcc7cace524aaad8a693be2` (2026-09-08). The MIT licence
+//! text ships beside the list as `common-passwords.LICENSE`.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -31,7 +32,10 @@ pub const MIN_ACCEPTED_PASSPHRASE_SCALARS: usize = 64;
 pub enum PassphrasePolicyError {
     /// Fewer than [`MIN_PASSPHRASE_SCALARS`] Unicode scalar values after NFC.
     #[error("too_short")]
-    TooShort,
+    TooShort {
+        /// NFC scalar count of the refused passphrase.
+        scalars: usize,
+    },
     /// The NFC, case-folded passphrase is on the common-password blocklist.
     #[error("too_common")]
     TooCommon,
@@ -42,8 +46,22 @@ impl PassphrasePolicyError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
-            Self::TooShort => "too_short",
+            Self::TooShort { .. } => "too_short",
             Self::TooCommon => "too_common",
+        }
+    }
+
+    /// Sentence shown by `rf` for this rule. The wire [`Self::code`] stays unchanged.
+    #[must_use]
+    pub fn user_message(self) -> String {
+        match self {
+            Self::TooShort { scalars } => {
+                let missing = MIN_PASSPHRASE_SCALARS.saturating_sub(scalars);
+                format!(
+                    "{missing} more characters needed. The data passphrase must be at least {MIN_PASSPHRASE_SCALARS} characters."
+                )
+            }
+            Self::TooCommon => "This passphrase is too common or has appeared in a data breach. Choose a different one.".to_owned(),
         }
     }
 }
@@ -54,8 +72,9 @@ impl PassphrasePolicyError {
 /// Returns [`PassphrasePolicyError::TooShort`] or [`PassphrasePolicyError::TooCommon`].
 pub fn check_new_passphrase(passphrase: &str) -> Result<(), PassphrasePolicyError> {
     let normalized = Zeroizing::new(passphrase.nfc().collect::<String>());
-    if normalized.chars().count() < MIN_PASSPHRASE_SCALARS {
-        return Err(PassphrasePolicyError::TooShort);
+    let scalars = normalized.chars().count();
+    if scalars < MIN_PASSPHRASE_SCALARS {
+        return Err(PassphrasePolicyError::TooShort { scalars });
     }
     let folded = Zeroizing::new(normalized.to_lowercase());
     if common_passphrases().contains(folded.as_str()) {
@@ -97,44 +116,123 @@ mod tests {
     fn fourteen_scalars_are_too_short_and_fifteen_are_admitted() {
         assert_eq!(
             check_new_passphrase(&"a".repeat(MIN_PASSPHRASE_SCALARS - 1)),
-            Err(PassphrasePolicyError::TooShort)
+            Err(PassphrasePolicyError::TooShort { scalars: MIN_PASSPHRASE_SCALARS - 1 }),
+            "test: 14 scalars were admitted"
         );
-        assert_eq!(check_new_passphrase(&"a".repeat(MIN_PASSPHRASE_SCALARS)), Ok(()));
+        assert_eq!(
+            check_new_passphrase(&"a".repeat(MIN_PASSPHRASE_SCALARS)),
+            Ok(()),
+            "test: 15 scalars were refused"
+        );
+        assert_eq!(
+            PassphrasePolicyError::TooShort { scalars: MIN_PASSPHRASE_SCALARS - 1 }.user_message(),
+            "1 more characters needed. The data passphrase must be at least 15 characters.",
+            "test: too_short sentence dropped the missing count"
+        );
     }
 
     #[test]
     fn sixty_four_scalars_and_longer_passphrases_are_admitted() {
-        assert_eq!(check_new_passphrase(&"q".repeat(MIN_ACCEPTED_PASSPHRASE_SCALARS)), Ok(()));
-        assert_eq!(check_new_passphrase(&"q".repeat(MIN_ACCEPTED_PASSPHRASE_SCALARS + 1)), Ok(()));
-        assert_eq!(check_new_passphrase(&"q".repeat(128)), Ok(()));
+        assert_eq!(
+            check_new_passphrase(&"q".repeat(MIN_ACCEPTED_PASSPHRASE_SCALARS)),
+            Ok(()),
+            "test: 64 scalars were refused"
+        );
+        assert_eq!(
+            check_new_passphrase(&"q".repeat(MIN_ACCEPTED_PASSPHRASE_SCALARS + 1)),
+            Ok(()),
+            "test: 65 scalars were refused"
+        );
+        assert_eq!(
+            check_new_passphrase(&"q".repeat(128)),
+            Ok(()),
+            "test: 128 scalars were refused"
+        );
     }
 
     #[test]
     fn nfc_collapses_a_decomposed_scalar_below_the_minimum() {
         let decomposed = format!("{}e\u{0301}", "n".repeat(MIN_PASSPHRASE_SCALARS - 2));
-        assert_eq!(decomposed.chars().count(), MIN_PASSPHRASE_SCALARS);
-        assert_eq!(check_new_passphrase(&decomposed), Err(PassphrasePolicyError::TooShort));
+        assert_eq!(
+            decomposed.chars().count(),
+            MIN_PASSPHRASE_SCALARS,
+            "test: decomposed fixture is not 15 scalars before NFC"
+        );
+        assert_eq!(
+            check_new_passphrase(&decomposed),
+            Err(PassphrasePolicyError::TooShort { scalars: MIN_PASSPHRASE_SCALARS - 1 }),
+            "test: NFC did not collapse the decomposed scalar below the minimum"
+        );
         let composed: String = decomposed.nfc().collect();
-        assert_eq!(composed.chars().count(), MIN_PASSPHRASE_SCALARS - 1);
+        assert_eq!(
+            composed.chars().count(),
+            MIN_PASSPHRASE_SCALARS - 1,
+            "test: NFC did not collapse the decomposed scalar"
+        );
         let admitted = format!("{}é", "n".repeat(MIN_PASSPHRASE_SCALARS - 1));
-        assert_eq!(admitted.chars().count(), MIN_PASSPHRASE_SCALARS);
-        assert_eq!(check_new_passphrase(&admitted), Ok(()));
+        assert_eq!(
+            admitted.chars().count(),
+            MIN_PASSPHRASE_SCALARS,
+            "test: composed fixture is not 15 scalars"
+        );
+        assert_eq!(
+            check_new_passphrase(&admitted),
+            Ok(()),
+            "test: 15 composed scalars were refused"
+        );
     }
 
     #[test]
     fn blocklist_hits_are_too_common_without_a_composition_rule() {
         assert_eq!(
             check_new_passphrase("films+pic+galeries"),
-            Err(PassphrasePolicyError::TooCommon)
+            Err(PassphrasePolicyError::TooCommon),
+            "test: blocklist entry was admitted"
         );
         assert_eq!(
             check_new_passphrase("Films+Pic+Galeries"),
-            Err(PassphrasePolicyError::TooCommon)
+            Err(PassphrasePolicyError::TooCommon),
+            "test: case-folded blocklist entry was admitted"
         );
-        assert_eq!(check_new_passphrase(&"7".repeat(MIN_PASSPHRASE_SCALARS)), Ok(()));
-        assert_eq!(PassphrasePolicyError::TooShort.code(), "too_short");
-        assert_eq!(PassphrasePolicyError::TooCommon.code(), "too_common");
-        assert_eq!(PassphrasePolicyError::TooShort.to_string(), "too_short");
-        assert_eq!(PassphrasePolicyError::TooCommon.to_string(), "too_common");
+        assert_eq!(
+            check_new_passphrase(&"7".repeat(MIN_PASSPHRASE_SCALARS)),
+            Ok(()),
+            "test: a repeated digit was refused by a composition rule"
+        );
+        let short = PassphrasePolicyError::TooShort { scalars: 14 };
+        assert_eq!(short.code(), "too_short", "test: too_short wire code changed");
+        assert_eq!(
+            PassphrasePolicyError::TooCommon.code(),
+            "too_common",
+            "test: too_common wire code changed"
+        );
+        assert_eq!(short.to_string(), "too_short", "test: too_short display changed");
+        assert_eq!(
+            PassphrasePolicyError::TooCommon.to_string(),
+            "too_common",
+            "test: too_common display changed"
+        );
+        assert_eq!(
+            PassphrasePolicyError::TooCommon.user_message(),
+            "This passphrase is too common or has appeared in a data breach. Choose a different one.",
+            "test: too_common sentence changed"
+        );
+    }
+
+    #[test]
+    fn shipped_blocklist_license_is_the_pinned_mit_notice() {
+        let license = include_str!("common-passwords.LICENSE");
+        assert!(
+            license.contains("MIT License"),
+            "test: shipped blocklist licence is missing the MIT heading"
+        );
+        assert!(
+            license.contains("Copyright (c) 2018 Daniel Miessler"),
+            "test: shipped blocklist licence is missing the copyright notice"
+        );
+        assert!(
+            license.contains("Permission is hereby granted"),
+            "test: shipped blocklist licence is missing the permission notice"
+        );
     }
 }

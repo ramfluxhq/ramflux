@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Closed CLI outcome categories. A failure prints one typed class line (an allow-listed code or
-//! an HTTP status); free-form diagnostic text, tokens and identifiers never reach stderr.
+//! Closed CLI outcome categories. A failure prints one typed class line (an allow-listed code,
+//! a fixed passphrase-policy sentence, or an HTTP status). Free-form diagnostic text, tokens
+//! and identifiers never reach stderr. The passphrase sentence never includes the passphrase.
 use super::{LocalResult, Outcome, RfError};
 pub(super) fn code(value: Option<&str>) -> i32 {
     match value {
@@ -82,12 +83,13 @@ fn known(code: &str) -> &'static str {
 }
 
 /// A short typed class for a failed pairing command, safe to print: an allow-listed code name,
-/// or `HTTP <status>` for a pairing HTTPS refusal, else `unknown`. No received text is echoed.
+/// the fixed passphrase-policy sentence, or `HTTP <status>` for a pairing HTTPS refusal, else
+/// `unknown`. No received text is echoed.
 pub(super) fn class(error: &RfError) -> String {
     use ramflux_sdk::SdkError;
     match error {
         RfError::Sdk(SdkError::PairingCode(code)) => known(code).to_owned(),
-        RfError::Sdk(SdkError::PassphrasePolicy(error)) => error.code().to_owned(),
+        RfError::Sdk(SdkError::PassphrasePolicy(error)) => error.user_message(),
         RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
         RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => http_status(message)
             .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),

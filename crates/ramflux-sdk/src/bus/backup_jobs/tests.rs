@@ -877,5 +877,51 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
     })).await
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        LocalSet::new().run_until(async {
+            let root = crate::bus::runtime_tests::root("backup-create-refused");
+            let supervisor = source_supervisor(
+                &root,
+                Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
+            )?;
+            let archive = root.join("refused.rfb");
+            for (passphrase, code) in
+                [("aaaaaaaaaaaaaa", "too_short"), ("films+pic+galeries", "too_common")]
+            {
+                let Err(error) = call(
+                    &supervisor,
+                    "account.backup.create",
+                    Some("alice"),
+                    json!({"output_path": &archive, "passphrase": passphrase}),
+                )
+                .await
+                else {
+                    return Err("test: refused backup passphrase was accepted".into());
+                };
+                let body = crate::bus::io::local_bus_error_body(&error);
+                assert_eq!(body.code, code, "test: backup create refusal code was {}", body.code);
+                assert!(
+                    body.reason_code.is_none(),
+                    "test: backup create refusal carried a reason code"
+                );
+                assert!(!archive.exists(), "test: a refused backup created an archive");
+            }
+            assert_eq!(
+                supervisor.backup_jobs.jobs()?["jobs"],
+                json!([]),
+                "test: a refused backup wrote a job row"
+            );
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        }),
+    )
+    .await?
+}
+
 #[path = "tests/selector_normalization.rs"]
 pub(super) mod selector_normalization_tests;

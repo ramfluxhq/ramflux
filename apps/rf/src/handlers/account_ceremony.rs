@@ -313,7 +313,7 @@ async fn create_human_confirm(
     }
     drop(repeated);
     ramflux_sdk::check_new_passphrase(&passphrase)
-        .map_err(|error| RfError::Message(error.code().to_owned()))?;
+        .map_err(|error| RfError::Message(error.user_message()))?;
     Ok(client.confirm(&words, &passphrase).await?)
 }
 

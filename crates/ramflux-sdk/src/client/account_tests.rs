@@ -189,6 +189,35 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
 }
 
 #[test]
+fn rekey_refuses_short_and_blocklisted_passphrases_without_rewrapping() -> Result<(), SdkError> {
+    let root = temp_root("rekey-policy");
+    let mut client = RamfluxClient::new();
+    client.open_account_index(&root)?;
+    client.create_account("acct", "principal")?;
+    let old = b"account data passphrase";
+    client.unlock_account("acct", old)?;
+    let before = wrapped_db_key(&root, "acct", old)?;
+    for (secret, expected) in [
+        (&[b'a'; 14][..], crate::PassphrasePolicyError::TooShort { scalars: 14 }),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+    ] {
+        let error = client
+            .rekey_active_account("acct", secret)
+            .expect_err("test: refused data passphrase was accepted");
+        assert!(
+            matches!(error, SdkError::PassphrasePolicy(got) if got == expected),
+            "test: rotate refusal was {error}, expected {expected:?}"
+        );
+    }
+    let after = wrapped_db_key(&root, "acct", old)?;
+    assert_eq!(after, before, "test: a refused rotate rewrapped the account key");
+    let mut still = RamfluxClient::new();
+    still.open_account_index(&root)?;
+    still.unlock_account("acct", old)?;
+    Ok(())
+}
+
+#[test]
 fn concurrent_account_writers_avoid_deferred_upgrade_locks_for_fifty_cycles() -> Result<(), SdkError>
 {
     let root = temp_root("concurrent-writers");

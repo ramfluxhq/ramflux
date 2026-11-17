@@ -266,7 +266,7 @@ impl CreationCeremony {
             .map_err(|_| rejected(crate::CustodyConfirmReason::PassphraseNotUtf8))?;
         if let Err(error) = crate::check_new_passphrase(text) {
             let reason = match error {
-                crate::PassphrasePolicyError::TooShort => {
+                crate::PassphrasePolicyError::TooShort { .. } => {
                     crate::CustodyConfirmReason::PassphraseTooShort
                 }
                 crate::PassphrasePolicyError::TooCommon => {
@@ -397,8 +397,15 @@ mod tests {
             .expect_err("test: invalid data password was accepted");
         assert!(matches!(error, SdkError::CustodyConfirmRejected(got) if got == reason), "{error}");
         let body = crate::bus::io::local_bus_error_body(&error);
-        assert_eq!(body.code, "CustodySetupInvalid");
-        assert_eq!(body.reason_code.as_deref(), Some(reason.token()));
+        assert_eq!(
+            body.code, "CustodySetupInvalid",
+            "test: passphrase refusal changed the custody error family"
+        );
+        assert_eq!(
+            body.reason_code.as_deref(),
+            Some(reason.token()),
+            "test: passphrase refusal dropped its reason token"
+        );
         assert!(!body.message.contains(reason.token()), "bus message echoes the check token");
         assert!(
             super::super::load_account(root.path(), "invalid-data-password", 100).is_err(),
