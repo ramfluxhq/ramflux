@@ -175,7 +175,7 @@ where
         Ok(plan) => plan,
         Err(error) if not_ready(&error) => return Ok(false),
         Err(error) => {
-            tracing::debug!(code = error_code(&error), "layer declaration prepare deferred");
+            tracing::debug!(code = error_code(&error), detail = %error, "layer declaration prepare deferred");
             let code = error_code(&error);
             let _ = writer
                 .apply(move |account| {
@@ -204,7 +204,7 @@ where
     match result {
         Ok(()) => Ok(true),
         Err(error) => {
-            tracing::debug!(code = error_code(&error), "layer declaration publish deferred");
+            tracing::debug!(code = error_code(&error), detail = %error, "layer declaration publish deferred");
             let code = error_code(&error);
             let _ = writer
                 .apply(move |account| {

@@ -526,7 +526,7 @@ pub fn spawn_daemon_with_env(
         .arg(&data_root)
         .arg("--itest-memory-vault")
         .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
-        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug")
+        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug,ramflux_sdk::bus::couriers::layer_publish=debug")
         .envs(env.iter().copied());
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
@@ -1241,9 +1241,30 @@ pub fn contact_card_json(daemon: &Daemon, account_id: &str) -> Result<Value> {
             {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(format!("{error}; {}", pending_diagnostics(daemon, account_id)).into());
+            }
         }
     }
+}
+
+/// Failure evidence for a stuck install: the daemon log and every file under the account's
+/// `pairing-install` directory (pending rows and the installed marker; public refs and hashes only).
+fn pending_diagnostics(daemon: &Daemon, account_id: &str) -> String {
+    let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
+    let dir = daemon.data_root.join("custody_accounts").join(account_id).join("pairing-install");
+    let mut markers = String::new();
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let body = std::fs::read_to_string(entry.path())
+                    .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+                markers.push_str(&format!("{:?}={body}; ", entry.file_name()));
+            }
+        }
+        Err(error) => markers.push_str(&format!("<no pairing-install dir: {error}>")),
+    }
+    format!("pending_markers=[{markers}]; daemon_log={log}")
 }
 
 /// Poll one CLI command until `ready` accepts its JSON, within the shared poll budget.
