@@ -1253,17 +1253,18 @@ pub fn contact_card_json(daemon: &Daemon, account_id: &str) -> Result<Value> {
 fn pending_diagnostics(daemon: &Daemon, account_id: &str) -> String {
     let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
     let dir = daemon.data_root.join("custody_accounts").join(account_id).join("pairing-install");
-    let mut markers = String::new();
-    match std::fs::read_dir(&dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
+    let markers = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| {
                 let body = std::fs::read_to_string(entry.path())
                     .unwrap_or_else(|error| format!("<unreadable: {error}>"));
-                markers.push_str(&format!("{:?}={body}; ", entry.file_name()));
-            }
-        }
-        Err(error) => markers.push_str(&format!("<no pairing-install dir: {error}>")),
-    }
+                format!("{}={body}", entry.file_name().display())
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+        Err(error) => format!("<no pairing-install dir: {error}>"),
+    };
     format!("pending_markers=[{markers}]; daemon_log={log}")
 }
 
