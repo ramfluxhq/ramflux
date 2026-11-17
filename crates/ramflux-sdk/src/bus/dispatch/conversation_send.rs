@@ -92,9 +92,18 @@ pub(in crate::bus) async fn send_account(
         account.client.attachment_binding =
             Some(crate::attachment_send::Binding::of(account, &pin)?);
     }
-    let sent =
-        Box::pin(deliver(account, &intent, &message_id, &principal, &sender, &thread, &content))
-            .await;
+    let sent = Box::pin(deliver(
+        account,
+        &intent,
+        &DirectSend {
+            message: &message_id,
+            principal: &principal,
+            sender: &sender,
+            thread: &thread,
+            content: &content,
+        },
+    ))
+    .await;
     account.client.attachment_binding = None;
     let deliveries = sent?;
     let submitted =
