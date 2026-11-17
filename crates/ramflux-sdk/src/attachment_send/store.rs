@@ -284,7 +284,7 @@ impl Store {
                     touched += 1;
                     held = held.saturating_add(row.charged);
                 }
-                Err(Refusal { code: CODE_DIGEST_MISMATCH }) => touched += 1,
+                Err(Refusal { code: CODE_DIGEST_MISMATCH, .. }) => touched += 1,
                 Err(error) => {
                     tracing::debug!(code = error.code, "attachment prepare did not recover");
                 }

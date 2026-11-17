@@ -418,10 +418,17 @@ fn message_media(
         .ok_or_else(|| SdkError::from(Refusal::new(CODE_ATTACHMENT_DELETED)))?;
     let (_, content) = crate::RamfluxClient::decode_generated_inner(&exact)?;
     let Some(ramflux_protocol::message::content::Value::Message(message)) = content.value else {
-        return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
+        return Err(Refusal::because_of(
+            CODE_LAYOUT_INVALID,
+            "the stored content is not a message",
+        )
+        .into());
     };
     let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-    message.media.into_iter().nth(index).ok_or_else(|| Refusal::new(CODE_LAYOUT_INVALID).into())
+    message.media.into_iter().nth(index).ok_or_else(|| {
+        Refusal::because_of(CODE_LAYOUT_INVALID, "the message has no media entry at that index")
+            .into()
+    })
 }
 
 /// The prepare behind entry `index` of a message this account sent.

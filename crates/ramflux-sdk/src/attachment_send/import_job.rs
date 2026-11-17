@@ -59,10 +59,8 @@ pub(crate) struct Opened {
 /// # Errors
 /// Returns `layout_invalid` for any non-canonical or inconsistent reference.
 pub(crate) fn canonical(media: &ramflux_protocol::message::MediaRef) -> Result<MediaRef, Refusal> {
-    MediaRef::decode(&media.encode_to_vec()).map_err(|error| {
-        tracing::warn!(%error, "an attachment reference is not canonical");
-        Refusal::new(CODE_LAYOUT_INVALID)
-    })
+    MediaRef::decode(&media.encode_to_vec())
+        .map_err(|_| Refusal::because_of(CODE_LAYOUT_INVALID, "the reference is not canonical"))
 }
 
 /// Finds this device's one entry. Zero matches is `not_grantee`; the caller reads nothing.
@@ -79,7 +77,7 @@ pub(crate) fn select<'a>(
     });
     let slot = found.next().ok_or(Refusal::new(CODE_NOT_GRANTEE))?;
     if found.next().is_some() {
-        return Err(Refusal::new(CODE_LAYOUT_INVALID));
+        return Err(Refusal::because_of(CODE_LAYOUT_INVALID, "two entries name this device"));
     }
     Ok(slot)
 }
@@ -135,17 +133,22 @@ pub(crate) fn open_entry(
         || grantee != device
         || recipient != device
     {
-        tracing::warn!(
-            grant = g.grant_id == grant_id,
-            object = g.object_id == object_id,
-            manifest = g.manifest_hash == manifest.manifest_id,
-            reference = g.reference_id == expected_reference,
-            rights = g.rights == READER_RIGHTS,
-            grantee = grantee == device,
-            recipient = recipient == device,
-            "an attachment entry does not match its reference"
-        );
-        return Err(Refusal::new(CODE_LAYOUT_INVALID));
+        let why = if g.grant_id != grant_id {
+            "grant id differs from the entry"
+        } else if g.object_id != object_id {
+            "grant object differs from the reference"
+        } else if g.manifest_hash != manifest.manifest_id {
+            "grant manifest differs from the reference"
+        } else if g.reference_id != expected_reference {
+            "grant reference id is not derived from object and grant"
+        } else if g.rights != READER_RIGHTS {
+            "grant rights are not the reader set"
+        } else if grantee != device {
+            "grant grantee is not this device"
+        } else {
+            "entry recipient is not this device"
+        };
+        return Err(Refusal::because_of(CODE_LAYOUT_INVALID, why));
     }
     if manifest.network_chunk_bytes != NETWORK_CHUNK
         || manifest.encrypted_segment_bytes != SEGMENT_BYTES

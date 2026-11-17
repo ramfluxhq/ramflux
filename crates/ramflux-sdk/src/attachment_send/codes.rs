@@ -31,15 +31,31 @@ pub(crate) const CODE_ATTACHMENT_DELETED: &str = "attachment_deleted";
 pub(crate) const CODE_RETIREMENT_PENDING: &str = "retirement_pending";
 pub(crate) const CODE_DISABLED: &str = "large_attachments";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A stable code plus an optional local explanation. Equality is by code alone.
+#[derive(Clone, Debug)]
 pub(crate) struct Refusal {
     pub code: &'static str,
+    pub why: &'static str,
 }
+
+impl PartialEq for Refusal {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code
+    }
+}
+
+impl Eq for Refusal {}
 
 impl Refusal {
     #[must_use]
     pub(crate) const fn new(code: &'static str) -> Self {
-        Self { code }
+        Self { code, why: "" }
+    }
+
+    /// The same code, with the check that refused named for the operator.
+    #[must_use]
+    pub(crate) const fn because_of(code: &'static str, why: &'static str) -> Self {
+        Self { code, why }
     }
 }
 
@@ -94,9 +110,14 @@ pub(crate) fn owner_result_code(code: Option<&str>) -> Result<(), Refusal> {
 
 impl From<Refusal> for SdkError {
     fn from(refusal: Refusal) -> Self {
+        let message = if refusal.why.is_empty() {
+            refusal.code.to_owned()
+        } else {
+            format!("{}: {}", refusal.code, refusal.why)
+        };
         SdkError::LocalBusRefused {
             code: refusal.code.to_owned(),
-            message: refusal.code.to_owned(),
+            message,
             body: Box::new(serde_json::json!({ "code": refusal.code })),
         }
     }
