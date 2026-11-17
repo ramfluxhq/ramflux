@@ -52,7 +52,7 @@ pub(in crate::bus) async fn send_account(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let intent: Intent = serde_json::from_value(request.body.clone())?;
-    admit_prepares(&intent, account)?;
+    admit_prepares(&intent)?;
     let account_id = request_account_id(request)?;
     let operation = request
         .operation_id
@@ -163,19 +163,13 @@ fn group_thread(account: &LocalBusAccountState, intent: &Intent) -> Result<Value
     Ok(record)
 }
 
-fn admit_prepares(intent: &Intent, account: &LocalBusAccountState) -> Result<(), SdkError> {
+fn admit_prepares(intent: &Intent) -> Result<(), SdkError> {
     if !intent.attachments.is_empty() {
         return Err(SdkError::GeneratedRefused {
             code: crate::GeneratedRefusalCode::Content,
             reason: "retired conversation attachment input; use media with r4 large_manifest"
                 .into(),
         });
-    }
-    if !intent.prepares.is_empty() && account.client.attachment_plane.is_none() {
-        return Err(crate::attachment_send::Refusal::new(
-            crate::attachment_send::CODE_AUTHORITY_UNAVAILABLE,
-        )
-        .into());
     }
     if !intent.prepares.is_empty() && !intent.media.is_empty() {
         return Err(crate::attachment_send::Refusal::new(
