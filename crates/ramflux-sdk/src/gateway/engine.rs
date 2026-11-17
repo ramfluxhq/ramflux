@@ -996,6 +996,25 @@ impl GatewaySessionEngine {
         decode_voice_reply(self.read_reply(super::frame_dispatch::ExpectedReply::VoiceLease).await?)
     }
 
+    /// One call to the home relay's attachment plane over the authenticated live session. The
+    /// gateway names the requester from this session; the frame carries no identity.
+    /// # Errors
+    /// Rejects transport failures, a mismatched reply, or a gateway refusal.
+    pub async fn attachment_call(
+        &mut self,
+        request: ramflux_node_core::AttachmentFrame,
+    ) -> Result<ramflux_node_core::AttachmentReplyFrame, SdkError> {
+        let id = request.request_id.clone();
+        self.write_frame(&GatewayClientFrame::Attachment { request: Box::new(request) }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Attachment).await? {
+            GatewayServerFrame::Attachment { response } if response.request_id == id => {
+                Ok(*response)
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
+            _ => Err(SdkError::GatewaySessionRejected("expected attachment reply".into())),
+        }
+    }
+
     /// # Errors
     /// Returns an error when the close frame cannot be written.
     pub async fn close(&mut self, reason: &str) -> Result<(), SdkError> {

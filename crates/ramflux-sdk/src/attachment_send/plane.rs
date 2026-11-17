@@ -20,6 +20,12 @@ pub(crate) struct RegisterCall<'a> {
     pub grant: &'a [u8],
 }
 
+/// One signed `AttachmentRetirement`: its canonical bytes and the owner's 64-byte signature.
+pub(crate) struct RetireCall<'a> {
+    pub retirement: &'a [u8],
+    pub signature: &'a [u8; 64],
+}
+
 /// One ciphertext range. The caller already checked that it is the grantee.
 pub(crate) struct ReadCall<'a> {
     pub capability: &'a [u8],
@@ -86,4 +92,14 @@ pub(crate) trait Plane: Send + Sync {
     /// # Errors
     /// Returns `not_grantee` before any read when the session is not the grantee.
     fn read(&self, call: &ReadCall<'_>) -> Result<Vec<u8>, Refusal>;
+
+    /// # Errors
+    /// Returns a stable refusal. The bytes are the JSON `AttachmentAuthorityReply`.
+    fn authority(&self) -> Result<Vec<u8>, Refusal> {
+        Err(Refusal::new(super::codes::CODE_AUTHORITY_UNAVAILABLE))
+    }
+
+    /// # Errors
+    /// Returns a stable refusal. The bytes are the JSON `{"state":"retired"|"pending","object_erased":bool}`.
+    fn retire(&self, call: &RetireCall<'_>) -> Result<Vec<u8>, Refusal>;
 }

@@ -14,6 +14,7 @@ mod codes;
 mod digest;
 mod grant_wrap;
 mod handles;
+pub(crate) mod hooks;
 mod import_job;
 #[cfg(test)]
 mod listener;
@@ -24,22 +25,24 @@ mod plane;
 mod preflight;
 mod publish;
 mod seal;
+mod scheduler;
 mod seal_job;
 #[cfg(test)]
 mod section10;
 mod store;
 mod targets;
 
-pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, unix_now};
+pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, plane_for, unix_now};
 pub(crate) use codes::{
     CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,
-    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal,
+    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal, refusal_for,
 };
 pub use digest::PlaintextDigester;
-pub(crate) use handles::remember_inner;
 pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
-pub(crate) use plane::Plane;
-pub(crate) use publish::{PublishInput, publish_all};
+pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
+pub(crate) use publish::{PublishInput, publish_all, upload_all, wrap_all};
+pub(crate) use grant_wrap::{load as grants_of, stored_media};
+pub(crate) use handles::remember_sent;
 pub(crate) use store::Store;
 pub(crate) use targets::{MediaDevice, MediaScope, choose_targets};
 

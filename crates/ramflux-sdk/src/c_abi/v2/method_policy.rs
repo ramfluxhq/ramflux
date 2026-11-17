@@ -65,6 +65,7 @@ policies! {
     "account.status" => ("account", false, true, false, false),
     "account.switch" => ("account", true, true, false, false),
     "account.unlock" => ("account", true, true, false, false),
+    "attachment.enable" => ("account", true, true, false, false),
     "attachment.import.begin" => ("account", true, true, false, false),
     "attachment.import.cancel" => ("account", true, true, false, false),
     "attachment.import.finish" => ("account", true, true, false, false),
@@ -281,7 +282,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "8e1a7cc8be8a98c3c7fce27308fe0cd78616f18dcf9189965e42d93c2efd7ee5";
+    "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
 pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "77724f895764191b4482d82068bc32dc2e4207b2";
 

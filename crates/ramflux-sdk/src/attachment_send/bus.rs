@@ -12,7 +12,9 @@ use crate::bus::dispatch::{local_bus_account_mut, local_bus_ok};
 use crate::bus::io::request_account_id;
 use crate::bus::protocol::LocalBusFrame;
 
-use super::codes::{CODE_AUTHORITY_UNAVAILABLE, CODE_DISABLED, CODE_LAYOUT_INVALID, Refusal};
+use super::codes::{
+    CODE_AUTHORITY_UNAVAILABLE, CODE_DISABLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID, Refusal,
+};
 use super::handles;
 use super::meta::{CHUNK, Intent, Recipient, Row};
 use super::owner_wire::decode_hex;
@@ -39,6 +41,7 @@ pub(crate) async fn dispatch(
         "attachment.import.finish" => handles::finish(account, request),
         "attachment.import.cancel" => handles::cancel(account, request),
         "attachment.revoke" => revoke(account, request),
+        "attachment.enable" => enable(account, request).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {}", request.method))),
     }
 }
@@ -139,6 +142,65 @@ fn revoke(
     Ok(local_bus_ok(json!({ "message_id": body.message_id, "state": state })))
 }
 
+/// Turns the feature on for this account by pinning one source authority. With `from_node`
+/// the pin is read from the home relay through the gateway; otherwise the caller supplies
+/// source, generation and the 64-hex public key. The pin is explicit account state: nothing
+/// else ever writes it, and a later pin must equal it.
+async fn enable(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    request: &LocalBusFrame,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let body: EnableBody = serde_json::from_value(request.body.clone())?;
+    let row = if body.from_node {
+        let plane = plane_for(account)?;
+        let reply = tokio::task::spawn_blocking(move || plane_authority(plane.as_ref()))
+        .await
+        .map_err(|_| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))??;
+        let key = ramflux_protocol::decode_base64url(&reply.signing_public_key)
+            .ok()
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
+        json!({
+            "enabled": true,
+            "source": reply.source,
+            "authority_generation": reply.generation,
+            "authority_public_key": super::owner_wire::encode_hex(&key),
+            "home_node_id": reply.home_node_id,
+        })
+    } else {
+        let key = decode_hex(body.public_key_hex.as_deref().unwrap_or_default())
+            .map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
+        json!({
+            "enabled": true,
+            "source": body.source.unwrap_or_default(),
+            "authority_generation": body.generation.unwrap_or(0),
+            "authority_public_key": super::owner_wire::encode_hex(&key),
+            "home_node_id": body.home_node_id.unwrap_or_default(),
+        })
+    };
+    let db = account.client.account_db()?;
+    if let Some(existing) = db.client_record(CONFIG_DIRECTORY, CONFIG_ID)?
+        && enabled_value(Some(&existing))
+        && existing != row
+    {
+        return Err(Refusal::new(CODE_DUPLICATE).into());
+    }
+    db.persist_client_record(CONFIG_DIRECTORY, CONFIG_ID, &row)?;
+    Ok(local_bus_ok(json!({
+        "enabled": true,
+        "source": row["source"],
+        "authority_generation": row["authority_generation"],
+    })))
+}
+
+/// The one place the Authority call is made from a plane. A test plane answers it too.
+fn plane_authority(
+    plane: &dyn super::plane::Plane,
+) -> Result<ramflux_node_core::AttachmentAuthorityReply, Refusal> {
+    let bytes = plane.authority()?;
+    serde_json::from_slice(&bytes).map_err(|_| Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
+}
+
 fn renew(
     account: &mut crate::bus::state::LocalBusAccountState,
     request: &LocalBusFrame,
@@ -154,7 +216,9 @@ pub(crate) fn open_store(
 ) -> Result<Store, SdkError> {
     let root = client.reader_account_root.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?;
     let secret = client.vault_secret_source()?.vault_secret(account_id)?;
-    Ok(Store::open(root, account_id, secret)?)
+    let store = Store::open(root, account_id, secret)?;
+    store.recover_once(unix_now()?)?;
+    Ok(store)
 }
 
 pub(crate) fn flag(client: &crate::RamfluxClient) -> Result<bool, SdkError> {
@@ -202,6 +266,25 @@ fn text(row: &Value, field: &str) -> Result<String, SdkError> {
         .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))
 }
 
+/// The production plane rides the account's live gateway session; a test installs its own.
+/// # Errors
+/// Returns `authority_unavailable` when no plane and no live connection exist.
+pub(crate) fn plane_for(
+    account: &crate::bus::state::LocalBusAccountState,
+) -> Result<std::sync::Arc<dyn super::plane::Plane>, SdkError> {
+    if let Some(plane) = account.client.attachment_plane.clone() {
+        return Ok(plane);
+    }
+    let handle = account
+        .connection
+        .clone()
+        .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
+    Ok(std::sync::Arc::new(crate::bus::attachment_plane::GatewayPlane::new(
+        handle,
+        tokio::runtime::Handle::current(),
+    )))
+}
+
 pub(crate) fn unix_now() -> Result<u64, SdkError> {
     u64::try_from(crate::time::now_unix_timestamp()).map_err(|_| SdkError::LocalBus("clock".into()))
 }
@@ -245,6 +328,20 @@ fn phase_name(phase: &super::meta::Phase) -> &'static str {
         Cleaning => "cleaning",
         Fenced => "fenced",
     }
+}
+
+#[derive(Deserialize)]
+struct EnableBody {
+    #[serde(default)]
+    from_node: bool,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    generation: Option<u64>,
+    #[serde(default)]
+    public_key_hex: Option<String>,
+    #[serde(default)]
+    home_node_id: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -65,6 +65,8 @@ fn write_segments(
 ) -> Result<Vec<[u8; 32]>, Refusal> {
     let mut digests = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
     for index in 0..count {
+        // Plaintext window, ciphertext and the AEAD working copy of one segment.
+        let _held = super::budget::memory(3 * u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES))?;
         let cipher = seal_index(store, prepare_id, sealer, layout, index)?;
         let name = segment_name(index)?;
         store.write_named(prepare_id, &name, &cipher)?;

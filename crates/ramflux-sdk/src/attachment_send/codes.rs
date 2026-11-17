@@ -43,6 +43,32 @@ impl Refusal {
     }
 }
 
+/// Maps a relay code to its stable refusal. An unknown code is an upload refusal, never a
+/// pass-through of relay text.
+#[must_use]
+pub(crate) fn refusal_for(code: &str) -> Refusal {
+    const KNOWN: [&str; 14] = [
+        CODE_QUOTA_EXCEEDED,
+        CODE_RETIREMENT_PENDING,
+        CODE_EXPIRED,
+        CODE_NOT_GRANTEE,
+        CODE_AUTHORITY_UNAVAILABLE,
+        CODE_LAYOUT_INVALID,
+        CODE_UPLOAD_REJECTED,
+        CODE_ATTACHMENT_DELETED,
+        CODE_STALE_GENERATION,
+        CODE_NOT_READY,
+        CODE_CANCELLED,
+        CODE_MANIFEST_TOO_LARGE,
+        CODE_STREAM_OFFSET,
+        CODE_SEAL_FAILED,
+    ];
+    KNOWN
+        .iter()
+        .find(|known| **known == code)
+        .map_or(Refusal::new(CODE_UPLOAD_REJECTED), |known| Refusal::new(known))
+}
+
 /// # Errors
 /// Returns the stable code carried by an owner result. A missing code is a normal result.
 pub(crate) fn owner_result_code(code: Option<&str>) -> Result<(), Refusal> {

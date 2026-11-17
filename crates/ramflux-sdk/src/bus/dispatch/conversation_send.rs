@@ -107,11 +107,6 @@ pub(in crate::bus) async fn send_account(
         deliveries.iter().all(|delivery| delivery.get("state") == Some(&json!("submitted")));
     if submitted {
         complete_intent(&account.client, operation)?;
-        if !intent.prepares.is_empty() {
-            let ids: Vec<String> =
-                intent.prepares.iter().map(|item| item.prepare_id.clone()).collect();
-            super::attachment_prepare::note_admitted(&account.client, account_id, &ids)?;
-        }
     }
     let event_id =
         deliveries.iter().find_map(|delivery| delivery.get("message_id").and_then(Value::as_str));
@@ -121,6 +116,12 @@ pub(in crate::bus) async fn send_account(
         .any(|id| Some(id) != event_id)
     {
         return Err(SdkError::ReplayMismatch);
+    }
+    if submitted && !intent.prepares.is_empty() {
+        // The actual message id exists only now; every record the importer reads is keyed by it.
+        let ids: Vec<String> = intent.prepares.iter().map(|item| item.prepare_id.clone()).collect();
+        let actual = event_id.ok_or(SdkError::ReplayMismatch)?;
+        super::attachment_prepare::note_admitted(&account.client, account_id, &ids, actual)?;
     }
     let mut body = json!({"message_id":event_id,"client_message_id":message_id,"conversation_id":intent.conversation_id,
         "delivery_state":if submitted {"submitted"} else {"failed"},"deliveries":deliveries});

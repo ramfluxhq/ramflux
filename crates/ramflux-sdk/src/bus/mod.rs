@@ -11,6 +11,7 @@ pub(crate) mod backup_jobs;
 pub mod client;
 mod command_admission;
 mod connection;
+pub(crate) mod attachment_plane;
 pub(crate) mod connection_manager;
 mod control_state;
 pub(crate) mod couriers;

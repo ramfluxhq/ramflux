@@ -91,6 +91,18 @@ impl SessionClient {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// One attachment-plane call through the host. The reply echoes the request id.
+    pub(crate) fn attachment_call(
+        &mut self,
+        request: ramflux_node_core::AttachmentFrame,
+    ) -> GatewayCallFuture<'_, ramflux_node_core::AttachmentReplyFrame> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.attachment_call(request).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
 }
 
 impl crate::gateway::access::ClassifiedSubmit for SessionClient {

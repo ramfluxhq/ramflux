@@ -2,6 +2,16 @@
 // Copyright (c) 2026 Span Brain
 
 //! One authored Inner for an ordered prepare list. Card devices are not targets.
+//!
+//! The send runs in four steps. Upload (reserve, seal, bind, PUT, commit) needs no roster
+//! identity beyond a size bound. Before any key is wrapped the roster is read again from the
+//! verified cache, so a recipient that changed while the bytes were uploading is replanned
+//! rather than granted. Wrapping registers the grants. A last read just before admission
+//! retires the grant of any device that stopped being a target and refuses the message.
+//! Blocking relay calls run on a blocking worker, never on the account actor.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use prost::Message as _;
 use ramflux_protocol::large_attachment::QualifiedOwner;
@@ -9,12 +19,11 @@ use ramflux_protocol::message::outer::{MAX_INNER_BYTES, MAX_UNPADDED_PLAINTEXT_B
 use serde_json::{Value, json};
 
 use crate::attachment_send::{
-    AuthorityPin, CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,
-    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, MAX_ATTACHMENTS, MediaDevice, MediaScope, Phase,
-    PublishInput, Recipient, Refusal, Row, Store, authority, choose_targets, open_store,
-    publish_all, remember_inner, unix_now,
+    AuthorityPin, CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_LAYOUT_INVALID,
+    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, MAX_ATTACHMENTS, Phase, Plane, PublishInput,
+    Recipient, Refusal, Row, Store, authority, open_store, unix_now, upload_all, wrap_all,
 };
-use crate::prekey::SdkDeviceManifestEntry;
+use crate::client::attachment_roster::{MediaRoster, RosterScope};
 use crate::prelude::*;
 
 pub(in crate::bus) struct PrepareSend<'a> {
@@ -25,6 +34,33 @@ pub(in crate::bus) struct PrepareSend<'a> {
     pub principal: &'a str,
     pub account_id: &'a str,
     pub conversation_id: &'a str,
+}
+
+/// What the account actor owns and a blocking worker needs, copied out before the await.
+struct Job {
+    store: Store,
+    plane: Arc<dyn Plane>,
+    owner: QualifiedOwner,
+    key: ed25519_dalek::SigningKey,
+    pin: AuthorityPin,
+    caption: String,
+}
+
+impl Job {
+    fn input<'a>(&'a self, targets: &'a [crate::attachment_send::MediaDevice]) -> PublishInput<'a> {
+        PublishInput {
+            store: &self.store,
+            plane: self.plane.as_ref(),
+            owner: &self.owner,
+            owner_key: &self.key,
+            targets,
+            audience: &self.pin.source,
+            authority_generation: self.pin.generation,
+            source: &self.pin.source,
+            now: unix_now().unwrap_or(0),
+            caption: &self.caption,
+        }
+    }
 }
 
 /// Publishes every prepare and returns the one content body.
@@ -50,42 +86,67 @@ pub(in crate::bus) async fn publish_prepares(
     let pin = authority(&account.client)?;
     let store = open_store(&account.client, account_id)?;
     let rows = load_rows(&store, prepares, thread, principal, conversation_id)?;
-    let targets = roster(account, thread, principal, &pin).await?;
-    let scope = if thread.get("group_id").is_some() { MediaScope::Group } else { MediaScope::Dm };
-    let targets = choose_targets(scope, &targets)?;
-    remember_roster(&account.client, message_id, &targets)?;
+    // A retry of a send that already reached admission replays what it left behind and
+    // touches neither the relay nor the roster.
+    if let Some(media) = retained(&store, &rows)? {
+        return RamfluxClient::attachment_message_content(caption, &media);
+    }
+    let plane = crate::attachment_send::plane_for(account)?;
     let branch = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let anchor = account.client.own_account_anchor()?;
     let owner = QualifiedOwner {
-        account_anchor: anchor,
+        account_anchor: account.client.own_account_anchor()?,
         device_id: branch.device_id.clone(),
         device_epoch: branch.device_epoch,
         signing_public_key: branch.signing_key.verifying_key().to_bytes(),
         home_node_id: pin.home.clone(),
     };
     let key = branch.signing_key.clone();
-    let now = unix_now()?;
-    let plane = account
-        .client
-        .attachment_plane
-        .as_deref()
-        .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
-    let wrapped = publish_all(
-        &PublishInput {
-            store: &store,
-            plane,
-            owner: &owner,
-            owner_key: &key,
-            targets: &targets,
-            audience: &pin.source,
-            authority_generation: pin.generation,
-            source: &pin.source,
-            now,
-            caption,
-        },
-        &rows,
-    )?;
-    let media: Vec<_> = wrapped.into_iter().map(|item| item.media).collect();
+    let job = Arc::new(Job { store, plane, owner, key, pin, caption: caption.to_owned() });
+    let scope = Scope::of(account, thread, principal, &job.pin).await?;
+
+    let planned = scope.plan(account, &job.pin).await?;
+    remember_roster(&account.client, message_id, &planned)?;
+    let rows = blocking({
+        let job = Arc::clone(&job);
+        let targets = planned.targets.clone();
+        let rows = rows.clone();
+        move || upload_all(&job.input(&targets), &rows)
+    })
+    .await?;
+
+    // The upload may have taken long enough for a device to join, leave or lose its layer.
+    let current = scope.plan(account, &job.pin).await?;
+    if current.keys() != planned.keys() {
+        remember_roster(&account.client, message_id, &current)?;
+    }
+    let wrapped = blocking({
+        let job = Arc::clone(&job);
+        let targets = current.targets.clone();
+        move || wrap_all(&job.input(&targets), &rows)
+    })
+    .await?;
+    for item in &wrapped {
+        if !item.excluded.is_empty() {
+            crate::attachment_send::hooks::retire_excluded(
+                &account.client,
+                account_id,
+                &job.pin,
+                &item.excluded,
+            )?;
+        }
+    }
+    let media: Vec<_> = wrapped.iter().map(|item| item.media.clone()).collect();
+
+    // The last read before admission compares against the entries actually in the Inner.
+    let last = scope.plan(account, &job.pin).await?;
+    let granted = entry_keys(&media);
+    let departed: Vec<_> =
+        granted.iter().filter(|key| !last.keys().contains(key)).cloned().collect();
+    if !departed.is_empty() {
+        retire_departed(account, &job, account_id, prepares, &departed)?;
+        return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into());
+    }
+
     let inner = ramflux_protocol::message::Message {
         text: caption.to_owned(),
         media: media.clone(),
@@ -97,12 +158,12 @@ pub(in crate::bus) async fn publish_prepares(
     {
         return Err(Refusal::new(CODE_MANIFEST_TOO_LARGE).into());
     }
-    remember_inner(&account.client, message_id, &inner, prepares)?;
-    for reference in &media {
-        account.client.account_db()?.persist_client_record(
+    let db = account.client.account_db()?;
+    for (reference, prepare) in media.iter().zip(prepares) {
+        db.persist_client_record(
             "attachment-object",
             &reference.object_id,
-            &serde_json::json!({ "message_id": message_id }),
+            &json!({ "message_id": message_id, "prepare_id": prepare }),
         )?;
     }
     RamfluxClient::attachment_message_content(caption, &media)
@@ -114,29 +175,91 @@ pub(in crate::bus) fn note_admitted(
     client: &RamfluxClient,
     account_id: &str,
     prepares: &[String],
+    message_id: &str,
 ) -> Result<(), SdkError> {
     let store = open_store(client, account_id)?;
-    Ok(store.admit_granted(prepares)?)
+    store.admit_granted(prepares, message_id)?;
+    crate::attachment_send::remember_sent(client, message_id, prepares)
+}
+
+async fn blocking<T, F>(work: F) -> Result<T, SdkError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, Refusal> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result.map_err(SdkError::from),
+        Err(_) => Err(Refusal::new(CODE_CANCELLED).into()),
+    }
+}
+
+fn retained(
+    store: &Store,
+    rows: &[Row],
+) -> Result<Option<Vec<ramflux_protocol::message::MediaRef>>, SdkError> {
+    if !rows.iter().all(|row| row.phase == Phase::Admitted) {
+        return Ok(None);
+    }
+    let mut media = Vec::with_capacity(rows.len());
+    for row in rows {
+        match crate::attachment_send::stored_media(store, &row.prepare_id)? {
+            Some(reference) => media.push(reference),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(media))
+}
+
+fn entry_keys(media: &[ramflux_protocol::message::MediaRef]) -> Vec<(String, String, u64)> {
+    let mut keys: Vec<_> = media
+        .first()
+        .map(|reference| {
+            reference
+                .key_slots
+                .iter()
+                .filter_map(|slot| slot.recipient.as_ref())
+                .map(|device| {
+                    (device.account_anchor.clone(), device.device_id.clone(), device.device_epoch)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+/// Retires the grants of devices that left the roster after the Inner was built. The Inner is
+/// not admitted; the caller sends again under a new operation id.
+fn retire_departed(
+    account: &LocalBusAccountState,
+    job: &Job,
+    account_id: &str,
+    prepares: &[String],
+    departed: &[(String, String, u64)],
+) -> Result<(), SdkError> {
+    let mut gone = Vec::new();
+    for prepare in prepares {
+        for grant in crate::attachment_send::grants_of(&job.store, prepare)? {
+            let key = (grant.account_anchor.clone(), grant.device_id.clone(), grant.device_epoch);
+            if departed.contains(&key) {
+                gone.push(grant);
+            }
+        }
+    }
+    crate::attachment_send::hooks::retire_excluded(&account.client, account_id, &job.pin, &gone)
 }
 
 fn remember_roster(
     client: &RamfluxClient,
     message_id: &str,
-    targets: &[MediaDevice],
+    roster: &MediaRoster,
 ) -> Result<(), SdkError> {
-    let devices: Vec<_> = targets
-        .iter()
-        .map(|device| json!([device.account_anchor, device.device_id, device.device_epoch]))
-        .collect();
-    let row = json!({ "devices": devices });
-    let db = client.account_db()?;
-    if let Some(stored) = db.client_record("attachment-roster", message_id)? {
-        if stored.get("devices") != row.get("devices") {
-            return Err(Refusal::new(CODE_DUPLICATE).into());
-        }
-        return Ok(());
-    }
-    db.persist_client_record("attachment-roster", message_id, &row)?;
+    let devices: Vec<_> = roster.keys().iter().map(|(a, d, e)| json!([a, d, e])).collect();
+    client.account_db()?.persist_client_record(
+        "attachment-roster",
+        message_id,
+        &json!({ "devices": devices, "epoch": roster.epoch }),
+    )?;
     Ok(())
 }
 
@@ -197,122 +320,102 @@ fn recipient_ok(
     }
 }
 
-async fn roster(
-    account: &mut LocalBusAccountState,
-    thread: &Value,
-    principal: &str,
-    pin: &AuthorityPin,
-) -> Result<Vec<MediaDevice>, SdkError> {
-    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let sender = (local.device_id.clone(), local.device_epoch);
-    if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
-        return group_roster(account, group).await;
-    }
-    let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
-    let peer_home = home_of(&account.client, &peer)?;
-    let own_root = account.client.own_account_anchor()?;
-    let engine = account.session_client().await?;
-    let peers =
-        account.client.cache_verified_device_manifest(engine.config(), &root, "attachment_peer");
-    let own =
-        account.client.cache_verified_device_manifest(engine.config(), &own_root, "attachment_own");
-    let (peers, own) = (peers.await, own.await);
-    account.apply_session_metadata(engine);
-    let mut devices = devices_of(&peers?, &peer_home, false, None)?;
-    devices.extend(devices_of(&own?, &pin.home, true, Some(&sender))?);
-    Ok(devices)
+/// Where the roster comes from: the roots to refresh, the homes, and the membership.
+struct Scope {
+    roots: Vec<String>,
+    homes: BTreeMap<String, String>,
+    kind: ScopeKind,
 }
 
-async fn group_roster(
-    account: &mut LocalBusAccountState,
-    group: &str,
-) -> Result<Vec<MediaDevice>, SdkError> {
-    let rows = super::super::group_delivery::directory(&account.client, group)?;
-    let engine = account.session_client().await?;
-    let mut devices = Vec::new();
-    let mut failure = None;
-    for row in &rows {
-        let Some(root) = row.get("member_principal_commitment").and_then(Value::as_str) else {
-            failure = Some(SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)));
-            break;
-        };
-        let Some(member_principal) = row.get("principal_id").and_then(Value::as_str) else {
-            failure = Some(SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)));
-            break;
-        };
-        let Some(member) = row.get("member_id").and_then(Value::as_str) else {
-            failure = Some(SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)));
-            break;
-        };
-        let home = match home_of(&account.client, member_principal) {
-            Ok(home) => home,
-            Err(error) => {
-                failure = Some(error);
-                break;
+enum ScopeKind {
+    Dm { peer_root: String },
+    Group { group_id: String, members: Vec<(String, String)> },
+}
+
+impl Scope {
+    async fn of(
+        account: &mut LocalBusAccountState,
+        thread: &Value,
+        principal: &str,
+        pin: &AuthorityPin,
+    ) -> Result<Self, SdkError> {
+        let own_root = account.client.own_account_anchor()?;
+        let mut homes = BTreeMap::from([(own_root.clone(), pin.home.clone())]);
+        if let Some(group) = thread.get("group_id").and_then(Value::as_str) {
+            let rows = super::super::group_delivery::directory(&account.client, group)?;
+            let mut members = Vec::new();
+            for row in &rows {
+                let root = text(row, "member_principal_commitment")?;
+                let member = text(row, "member_id")?;
+                let member_principal = text(row, "principal_id")?;
+                homes.insert(root.clone(), home_of(&account.client, &member_principal)?);
+                members.push((root, member));
             }
-        };
-        match account
-            .client
-            .cache_verified_device_manifest(engine.config(), root, "attachment_group")
-            .await
-        {
-            Ok(manifest) => match devices_of(&manifest, &home, false, None) {
-                Ok(found) => {
-                    devices.extend(found.into_iter().filter(|device| device.device_id == member));
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
-            },
-            Err(error) => {
+            let mut roots: Vec<_> = members.iter().map(|(root, _)| root.clone()).collect();
+            roots.sort();
+            roots.dedup();
+            return Ok(Self {
+                roots,
+                homes,
+                kind: ScopeKind::Group { group_id: group.to_owned(), members },
+            });
+        }
+        let (peer, root) = super::conversation_send::peer_root(account, thread, principal)?;
+        homes.insert(root.clone(), home_of(&account.client, &peer)?);
+        Ok(Self { roots: vec![root.clone(), own_root], homes, kind: ScopeKind::Dm { peer_root: root } })
+    }
+
+    /// Refreshes every manifest, then plans from the verified cache. The two reads are one
+    /// step so a plan is never made from an older roster than the one just fetched.
+    async fn plan(
+        &self,
+        account: &mut LocalBusAccountState,
+        _pin: &AuthorityPin,
+    ) -> Result<MediaRoster, SdkError> {
+        let engine = account.session_client().await?;
+        let mut failure = None;
+        for root in &self.roots {
+            if let Err(error) = account
+                .client
+                .cache_verified_device_manifest(engine.config(), root, "attachment_roster")
+                .await
+            {
                 failure = Some(error);
                 break;
             }
         }
-    }
-    account.apply_session_metadata(engine);
-    failure.map_or(Ok(devices), Err)
-}
-
-fn devices_of(
-    manifest: &crate::prekey::SdkDeviceManifestResponse,
-    home: &str,
-    own: bool,
-    skip: Option<&(String, u64)>,
-) -> Result<Vec<MediaDevice>, SdkError> {
-    let mut devices = Vec::new();
-    for entry in &manifest.devices {
-        if skip.is_some_and(|(id, epoch)| entry.device_id == *id && entry.device_epoch == *epoch) {
-            continue;
+        account.apply_session_metadata(engine);
+        if let Some(error) = failure {
+            return Err(error);
         }
-        devices.push(one_device(entry, home, own)?);
+        match &self.kind {
+            ScopeKind::Dm { peer_root } => account.client.plan_media_roster(
+                &RosterScope::Dm { peer_root },
+                &self.homes,
+                0,
+            ),
+            ScopeKind::Group { group_id, members } => {
+                let epoch = account
+                    .client
+                    .account_db()?
+                    .shared_group_state(group_id)?
+                    .map_or(0, |state| state.view().epoch);
+                account.client.plan_media_roster(
+                    &RosterScope::Group { members },
+                    &self.homes,
+                    epoch,
+                )
+            }
+        }
     }
-    Ok(devices)
 }
 
-fn one_device(
-    entry: &SdkDeviceManifestEntry,
-    home: &str,
-    own: bool,
-) -> Result<MediaDevice, SdkError> {
-    let bytes = ramflux_protocol::decode_base64url(&entry.branch_public_key)
-        .map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-    let signing_public: [u8; 32] =
-        bytes.try_into().map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-    if home.is_empty() {
-        return Err(Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into());
-    }
-    Ok(MediaDevice {
-        account_anchor: entry.principal_commitment.clone(),
-        device_id: entry.device_id.clone(),
-        device_epoch: entry.device_epoch,
-        signing_public,
-        home_node_id: home.to_owned(),
-        hpke_public: entry.prekey_bundle.device_agreement_x25519_public,
-        layer: entry.message_layer.as_ref().map_or(0, |signed| signed.declaration.max_layer),
-        own,
-    })
+fn text(row: &Value, field: &str) -> Result<String, SdkError> {
+    row.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Refusal::new(CODE_AUTHORITY_UNAVAILABLE).into())
 }
 
 fn home_of(client: &RamfluxClient, principal: &str) -> Result<String, SdkError> {

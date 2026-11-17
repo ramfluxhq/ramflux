@@ -5,6 +5,9 @@ use super::{
     FormatError, MAX_MANIFEST_BYTES, SEGMENT_BYTES, SegmentLayout, VerifiedContentManifest, digest,
 };
 
+/// Largest entry count one `MediaRef` carries.
+pub const MAX_KEY_SLOTS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct QualifiedDevice {
     pub account_anchor: String,
@@ -17,9 +20,9 @@ pub struct MediaKeySlot {
     pub recipient: QualifiedDevice,
     pub encrypted_key: Vec<u8>,
     pub format: u32,
-    /// Tag 4. Empty on a pre-cutover slot; otherwise exactly 32 bytes.
+    /// Tag 4. Exactly 32 bytes: the grant this entry reads under.
     pub grant_id: Vec<u8>,
-    /// Tag 5. The complete owner-signed grant plus source-signed receipt.
+    /// Tag 5. The complete owner-signed grant plus source-signed receipt, 1..=8192 bytes.
     pub read_capability: Vec<u8>,
 }
 
@@ -54,7 +57,18 @@ impl MediaManifest {
         if self.retention_class != "relay_retained.v1" {
             return Err(FormatError("unsupported retention"));
         }
-        let variable = self.relay_origin.len().saturating_add(self.read_capability.len());
+        if !self.read_capability.is_empty() {
+            return Err(FormatError("manifest capability"));
+        }
+        if self.key_slots.is_empty() || self.key_slots.len() > MAX_KEY_SLOTS {
+            return Err(FormatError("key slot count"));
+        }
+        for (index, slot) in self.key_slots.iter().enumerate() {
+            if self.key_slots[index + 1..].iter().any(|other| other.recipient == slot.recipient) {
+                return Err(FormatError("duplicate key slot"));
+            }
+        }
+        let variable = self.relay_origin.len();
         let slots = self.key_slots.iter().try_fold(variable, |size, slot| {
             if slot.recipient.account_anchor.is_empty()
                 || slot.recipient.account_anchor.len() > 256
@@ -66,10 +80,9 @@ impl MediaManifest {
             {
                 return Err(FormatError("key slot"));
             }
-            let grant = if slot.grant_id.is_empty() { 0 } else { 32 };
             Ok(size
                 .saturating_add(slot.encrypted_key.len())
-                .saturating_add(grant)
+                .saturating_add(32)
                 .saturating_add(slot.read_capability.len())
                 .saturating_add(600))
         })?;
@@ -94,7 +107,6 @@ impl MediaManifest {
             bytes(&mut out, 8, &slot.encode()?);
         }
         bytes(&mut out, 9, self.relay_origin.as_bytes());
-        bytes(&mut out, 10, &self.read_capability);
         scalar(&mut out, 11, self.expires_at);
         bytes(&mut out, 12, self.retention_class.as_bytes());
         if out.len() > MAX_MANIFEST_BYTES {
@@ -149,11 +161,10 @@ impl MediaManifest {
 
 impl MediaKeySlot {
     fn encode(&self) -> Result<Vec<u8>, FormatError> {
-        let paired = !self.grant_id.is_empty() || !self.read_capability.is_empty();
-        if paired && (self.grant_id.len() != 32 || self.read_capability.is_empty()) {
-            return Err(FormatError("key slot"));
-        }
-        if self.read_capability.len() > 8192 {
+        if self.grant_id.len() != 32
+            || self.read_capability.is_empty()
+            || self.read_capability.len() > 8192
+        {
             return Err(FormatError("key slot"));
         }
         let mut q = Vec::new();

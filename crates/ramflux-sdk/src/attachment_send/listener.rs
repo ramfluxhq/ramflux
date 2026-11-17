@@ -24,7 +24,7 @@ use ramflux_protocol::large_attachment::{
 use super::codes::{
     CODE_EXPIRED, CODE_NOT_GRANTEE, CODE_QUOTA_EXCEEDED, CODE_UPLOAD_REJECTED, Refusal,
 };
-use super::plane::{OwnerCall, Plane, ReadCall, RegisterCall};
+use super::plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
 
 pub(super) const NOW: u64 = 2_000_000_000;
 
@@ -181,5 +181,9 @@ impl Plane for Listener {
             .read_range(&spec, call.offset, call.length, &mut output)
             .map_err(|_| Refusal::new(CODE_UPLOAD_REJECTED))?;
         Ok(output)
+    }
+
+    fn retire(&self, _call: &RetireCall<'_>) -> Result<Vec<u8>, Refusal> {
+        Err(Refusal::new(CODE_UPLOAD_REJECTED))
     }
 }

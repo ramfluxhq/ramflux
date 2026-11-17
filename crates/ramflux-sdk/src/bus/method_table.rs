@@ -60,6 +60,7 @@ methods! {
         "a2i.acknowledge",
         "a2ui.action",
         "a2ui.render",
+        "attachment.enable",
         "attachment.import.begin",
         "attachment.import.cancel",
         "attachment.import.finish",

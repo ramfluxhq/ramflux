@@ -11,7 +11,9 @@ use ramflux_sdk::{LocalBusClient, LocalBusFrame, PlaintextDigester, SdkError};
 use serde_json::{Value, json};
 
 use crate::RfError;
-use crate::cli::{AttachmentAction, AttachmentCommand, AttachmentImport, DmSend, GroupSend};
+use crate::cli::{
+    AttachmentAction, AttachmentCommand, AttachmentEnable, AttachmentImport, DmSend, GroupSend,
+};
 use crate::utils::print_json;
 
 const CHUNK: usize = 524_288;
@@ -22,7 +24,33 @@ pub(crate) async fn handle(socket: PathBuf, command: AttachmentCommand) -> Resul
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         AttachmentAction::Import(import_command) => import(&mut bus, import_command).await,
+        AttachmentAction::Enable(enable_command) => enable(&mut bus, enable_command).await,
     }
+}
+
+/// Pins the attachment authority for one account.
+/// # Errors
+/// Returns the stable refusal code.
+pub(crate) async fn enable(
+    bus: &mut LocalBusClient,
+    command: AttachmentEnable,
+) -> Result<(), RfError> {
+    let mut seq = 0_u64;
+    let response = ask(
+        bus,
+        &command.account,
+        &mut seq,
+        Route { api: "attachment", method: "attachment.enable", operation: "attachment-enable" },
+        json!({
+            "from_node": command.from_node,
+            "source": command.source,
+            "generation": command.generation,
+            "public_key_hex": command.public_key_hex,
+            "home_node_id": command.home_node_id,
+        }),
+    )
+    .await?;
+    print_json(&response)
 }
 
 /// Retired flags are a content refusal and are not read.
@@ -201,7 +229,8 @@ async fn stream_file(
 }
 
 /// # Errors
-/// Returns the stable code and removes a partial output file.
+/// Returns the stable code. A failed import removes only its own temporary file and never
+/// touches an existing `--output`.
 pub(crate) async fn import(
     bus: &mut LocalBusClient,
     command: AttachmentImport,
@@ -219,25 +248,138 @@ pub(crate) async fn import(
     let import_id = text(&begun, "import_id")?;
     let generation = number(&begun, "generation")?;
     let expires = number(&begun, "expires_at")?;
-    if let Err(error) = wait_ready(bus, &command.account, &mut seq, &import_id, expires).await {
-        let _ = std::fs::remove_file(&command.output);
-        return Err(error);
+    let result = stage_and_copy(
+        bus,
+        &command,
+        &mut seq,
+        &Handle { id: &import_id, generation, expires, operation: &operation },
+    )
+    .await;
+    match result {
+        Ok(staged) => staged.publish(),
+        Err(error) => {
+            // Best effort: free the daemon-side handle. The temporary file is already gone.
+            let _ = ask(
+                bus,
+                &command.account,
+                &mut seq,
+                Route { api: "attachment", method: "attachment.import.cancel", operation: &operation },
+                json!({"import_id": import_id}),
+            )
+            .await;
+            Err(error)
+        }
     }
-    if let Err(error) =
-        copy_out(bus, &command.account, &mut seq, &import_id, generation, &command.output).await
-    {
-        let _ = std::fs::remove_file(&command.output);
-        return Err(error);
-    }
+}
+
+struct Handle<'a> {
+    id: &'a str,
+    generation: u64,
+    expires: u64,
+    operation: &'a str,
+}
+
+async fn stage_and_copy(
+    bus: &mut LocalBusClient,
+    command: &AttachmentImport,
+    seq: &mut u64,
+    handle: &Handle<'_>,
+) -> Result<StagedOutput, RfError> {
+    wait_ready(bus, &command.account, seq, handle.id, handle.expires).await?;
+    let staged = StagedOutput::create(&command.output)?;
+    let staged = copy_out(bus, &command.account, seq, handle.id, handle.generation, staged).await?;
     ask(
         bus,
         &command.account,
-        &mut seq,
-        Route { api: "attachment", method: "attachment.import.finish", operation: &operation },
-        json!({"import_id": import_id}),
+        seq,
+        Route {
+            api: "attachment",
+            method: "attachment.import.finish",
+            operation: handle.operation,
+        },
+        json!({"import_id": handle.id}),
     )
     .await?;
-    Ok(())
+    Ok(staged)
+}
+
+/// An owned temporary file beside the requested output. Only a finished import renames it
+/// over `--output`; every failure removes this file and nothing else.
+struct StagedOutput {
+    file: Option<std::fs::File>,
+    temp: PathBuf,
+    target: PathBuf,
+}
+
+impl StagedOutput {
+    fn create(target: &Path) -> Result<Self, RfError> {
+        let parent = match target.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        std::fs::create_dir_all(&parent)?;
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| RfError::Message("path_refused".into()))?;
+        let mut attempt = 0_u32;
+        loop {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| RfError::Message("expired".into()))?
+                .subsec_nanos();
+            let temp = parent.join(format!(".{name}.{}.{nanos}.{attempt}.rf-import", std::process::id()));
+            match open_new(&temp) {
+                Ok(file) => {
+                    return Ok(Self { file: Some(file), temp, target: target.to_path_buf() });
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 =>
+                {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), RfError> {
+        let file = self.file.as_mut().ok_or_else(|| RfError::Message("seal_failed".into()))?;
+        std::io::Write::write_all(file, bytes)?;
+        Ok(())
+    }
+
+    fn publish(mut self) -> Result<(), RfError> {
+        let file = self.file.take().ok_or_else(|| RfError::Message("seal_failed".into()))?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&self.temp, &self.target)?;
+        if let Some(parent) = self.target.parent().filter(|parent| !parent.as_os_str().is_empty())
+            && let Ok(directory) = std::fs::File::open(parent)
+        {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedOutput {
+    fn drop(&mut self) {
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_new(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+#[cfg(not(unix))]
+fn open_new(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 async fn wait_ready(
@@ -272,12 +414,8 @@ async fn copy_out(
     seq: &mut u64,
     import_id: &str,
     generation: u64,
-    output: &Path,
-) -> Result<(), RfError> {
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::File::create(output)?;
+    mut staged: StagedOutput,
+) -> Result<StagedOutput, RfError> {
     let mut offset = 0_u64;
     loop {
         let body = ask(
@@ -296,14 +434,12 @@ async fn copy_out(
         let encoded = text(&body, "bytes")?;
         let bytes = ramflux_protocol::decode_base64url(&encoded)
             .map_err(|_| RfError::Message("seal_failed".into()))?;
-        std::io::Write::write_all(&mut file, &bytes)?;
+        staged.write(&bytes)?;
         offset = offset.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         if body.get("eof").and_then(Value::as_bool).unwrap_or(false) {
-            break;
+            return Ok(staged);
         }
     }
-    file.sync_all()?;
-    Ok(())
 }
 
 struct Route<'a> {
@@ -414,12 +550,58 @@ fn unix_now() -> Result<u64, RfError> {
 
 #[cfg(test)]
 mod tests {
-    use super::refuse_retired;
+    use super::{StagedOutput, refuse_retired};
 
     #[test]
     fn retired_attach_flags_are_content_refusals() {
         assert!(refuse_retired(true, false).is_err());
         assert!(refuse_retired(false, true).is_err());
         assert!(refuse_retired(false, false).is_ok());
+    }
+
+    #[test]
+    fn a_failed_import_keeps_the_existing_output() -> Result<(), Box<dyn std::error::Error>> {
+        let root = ramflux_test_support::TestPath::new()?.child("keep");
+        std::fs::create_dir_all(&root)?;
+        let target = root.join("report.bin");
+        std::fs::write(&target, b"earlier file")?;
+        let mut staged = StagedOutput::create(&target)?;
+        staged.write(b"partial plaintext")?;
+        drop(staged);
+        assert_eq!(
+            std::fs::read(&target)?,
+            b"earlier file",
+            "a failed import must not touch the earlier output"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&root)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".rf-import"))
+            .collect();
+        assert!(leftovers.is_empty(), "the temporary file is removed: {leftovers:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failure_before_any_output_creates_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        let root = ramflux_test_support::TestPath::new()?.child("absent");
+        std::fs::create_dir_all(&root)?;
+        let target = root.join("never.bin");
+        drop(StagedOutput::create(&target)?);
+        assert!(!target.exists(), "no output file exists after a failed import");
+        Ok(())
+    }
+
+    #[test]
+    fn a_finished_import_replaces_the_output_atomically() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = ramflux_test_support::TestPath::new()?.child("done");
+        std::fs::create_dir_all(&root)?;
+        let target = root.join("report.bin");
+        std::fs::write(&target, b"older")?;
+        let mut staged = StagedOutput::create(&target)?;
+        staged.write(b"new bytes")?;
+        staged.publish()?;
+        assert_eq!(std::fs::read(&target)?, b"new bytes", "the finished import is published");
+        Ok(())
     }
 }

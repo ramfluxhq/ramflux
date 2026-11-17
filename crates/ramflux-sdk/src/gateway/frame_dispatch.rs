@@ -11,6 +11,7 @@ pub(crate) enum FrameKind {
     PushRouteRefused,
     PushRouteDeregistered,
     VoiceLease,
+    Attachment,
     SessionEstablished,
     Deliver,
     ForwardAck,
@@ -53,6 +54,7 @@ impl FrameKind {
             GatewayServerFrame::PushRouteRefused { .. } => Self::PushRouteRefused,
             GatewayServerFrame::PushRouteDeregistered { .. } => Self::PushRouteDeregistered,
             GatewayServerFrame::VoiceLease { .. } => Self::VoiceLease,
+            GatewayServerFrame::Attachment { .. } => Self::Attachment,
             GatewayServerFrame::SessionEstablished { .. } => Self::SessionEstablished,
             GatewayServerFrame::Deliver { .. } => Self::Deliver,
             GatewayServerFrame::ForwardAck { .. } => Self::ForwardAck,
@@ -101,6 +103,7 @@ impl FrameKind {
             Self::Drain | Self::Close => FrameClass::Terminal,
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease
+            | Self::Attachment
             | Self::ForwardAck
             | Self::OwnDeviceFanout
             | Self::IdentityRegistered
@@ -136,6 +139,7 @@ pub(crate) enum ExpectedReply {
 
     RelayTokenV3,
     VoiceLease,
+    Attachment,
     PushRoute,
 }
 
@@ -162,6 +166,7 @@ impl ExpectedReply {
 
             Self::RelayTokenV3 => matches!(kind, FrameKind::RelayTokenV3Issued),
             Self::VoiceLease => matches!(kind, FrameKind::VoiceLease),
+            Self::Attachment => matches!(kind, FrameKind::Attachment),
             Self::PushRoute => matches!(
                 kind,
                 FrameKind::PushRouteRegistered

@@ -37,9 +37,42 @@ pub(crate) struct PublishInput<'a> {
     pub caption: &'a str,
 }
 
+/// Reserve, seal, bind, upload and commit every file. Nothing is granted or wrapped here, so
+/// the recipient set may still change; wrapping runs after `wrap_all`'s fresh roster check.
+/// # Errors
+/// Returns a stable refusal and does not reserve when the roster does not fit.
+pub(crate) fn upload_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<Row>, Refusal> {
+    check_roster(input, rows)?;
+    let mut done = Vec::with_capacity(rows.len());
+    for row in rows {
+        done.push(upload_one(input, &row.prepare_id)?);
+    }
+    Ok(done)
+}
+
+/// Registers one grant per target, wraps the file key, and returns the finished references.
+/// The roster in `input` is the one that applies now; a grant planned for a device that left
+/// it is reported in `Wrapped::excluded` and is in no entry.
+/// # Errors
+/// Returns a stable refusal when a grant, the Inner, or the group frame does not fit.
+pub(crate) fn wrap_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<Wrapped>, Refusal> {
+    check_roster(input, rows)?;
+    let mut wrapped = Vec::with_capacity(rows.len());
+    for row in rows {
+        wrapped.push(wrap_one(input, &row.prepare_id)?);
+    }
+    Ok(wrapped)
+}
+
+/// Both phases in order, for callers that hold one fixed roster.
 /// # Errors
 /// Returns a stable refusal and does not reserve when the roster does not fit.
 pub(crate) fn publish_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<Wrapped>, Refusal> {
+    let rows = upload_all(input, rows)?;
+    wrap_all(input, &rows)
+}
+
+fn check_roster(input: &PublishInput<'_>, rows: &[Row]) -> Result<(), Refusal> {
     if input.targets.is_empty() {
         return Err(Refusal::new(CODE_RECIPIENT_EMPTY));
     }
@@ -65,26 +98,26 @@ pub(crate) fn publish_all(input: &PublishInput<'_>, rows: &[Row]) -> Result<Vec<
             home: &input.owner.home_node_id,
         },
         input.source,
-    )?;
-    let mut wrapped = Vec::with_capacity(rows.len());
-    for row in rows {
-        wrapped.push(publish_one(input, &row.prepare_id)?);
-    }
-    Ok(wrapped)
+    )
 }
 
 /// # Errors
 /// Returns a stable refusal. A mismatched reservation is fenced and not sealed.
-pub(crate) fn publish_one(input: &PublishInput<'_>, prepare_id: &str) -> Result<Wrapped, Refusal> {
+pub(crate) fn upload_one(input: &PublishInput<'_>, prepare_id: &str) -> Result<Row, Refusal> {
     let mut row = input.store.load(prepare_id)?;
     if row.phase == Phase::Cleaning || row.phase == Phase::Fenced {
         return Err(Refusal::new(CODE_CANCELLED));
+    }
+    // A retry of a send that already reached the grants finds the result it left behind.
+    if matches!(row.phase, Phase::Committed | Phase::Granted | Phase::Admitted) {
+        return Ok(row);
     }
     if row.phase == Phase::Sealing {
         row = recover_sealing(input, &row)?;
     }
     if row.phase == Phase::Accepted {
         bound_one(input, &row)?;
+        input.store.verify_snapshot(&mut row)?;
         row = input.store.draw(prepare_id, input.now)?;
     }
     if row.phase == Phase::Reserved {
@@ -96,10 +129,21 @@ pub(crate) fn publish_one(input: &PublishInput<'_>, prepare_id: &str) -> Result<
     if row.phase == Phase::Uploading {
         row = upload_remote(input, row)?;
     }
-    if row.phase == Phase::Committed || row.phase == Phase::Granted {
-        return finish_grant(input, row);
+    if row.phase == Phase::Committed {
+        return Ok(row);
     }
     Err(Refusal::new(CODE_SEAL_FAILED))
+}
+
+/// # Errors
+/// Returns a stable refusal. A finished wrap is returned unchanged, also after admission.
+pub(crate) fn wrap_one(input: &PublishInput<'_>, prepare_id: &str) -> Result<Wrapped, Refusal> {
+    let row = input.store.load(prepare_id)?;
+    match row.phase {
+        Phase::Cleaning | Phase::Fenced => Err(Refusal::new(CODE_CANCELLED)),
+        Phase::Committed | Phase::Granted | Phase::Admitted => finish_grant(input, row),
+        _ => Err(Refusal::new(CODE_SEAL_FAILED)),
+    }
 }
 
 fn bound_one(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
@@ -150,6 +194,8 @@ fn reserve_and_seal(input: &PublishInput<'_>, row: Row) -> Result<Row, Refusal> 
         input.store.fence_secret(row)?;
         return Err(Refusal::new(CODE_SEAL_FAILED));
     }
+    let mut row = row;
+    input.store.verify_snapshot(&mut row)?;
     let row = input.store.mark(row, Phase::Sealing)?;
     let sealed = seal_job::seal_persisted(input.store, &row, input.owner, input.owner_key)?;
     if sealed.object_id != object {
@@ -200,6 +246,9 @@ fn put_segments(input: &PublishInput<'_>, row: &Row) -> Result<(), Refusal> {
     for (index, _) in row.segment_digests.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
         let name = segment_name_of(index);
+        let _held = super::budget::memory(
+            u64::from(ramflux_protocol::large_attachment::SEGMENT_BYTES) + u64::from(NETWORK_CHUNK),
+        )?;
         let cipher = input.store.read_named(&row.prepare_id, &name)?;
         put_slices(input, row, u64::from(index), &cipher)?;
     }
@@ -251,7 +300,9 @@ fn finish_grant(input: &PublishInput<'_>, row: Row) -> Result<Wrapped, Refusal> 
         now: input.now,
         caption: input.caption,
     })?;
-    input.store.mark(row, Phase::Granted)?;
+    if row.phase == Phase::Committed {
+        input.store.mark(row, Phase::Granted)?;
+    }
     Ok(wrapped)
 }
 

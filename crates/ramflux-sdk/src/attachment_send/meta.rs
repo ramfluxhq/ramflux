@@ -112,3 +112,61 @@ pub(crate) struct IndexEntry {
     pub mime: String,
     pub digest: Option<[u8; 32]>,
 }
+
+/// One grantee of one prepare. Written durably, with the exact signed grant bytes, BEFORE
+/// registration, so a lost response or a crash retries the same grant id and the relay keeps
+/// one receipt. The capability and the wrapped slot are filled in as each step completes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GrantRecord {
+    pub account_anchor: String,
+    pub device_id: String,
+    pub device_epoch: u64,
+    pub grant_id: [u8; 32],
+    pub reference_id: [u8; 32],
+    #[serde(with = "b64")]
+    pub signed_grant: Vec<u8>,
+    #[serde(default, with = "b64_opt")]
+    pub capability: Option<Vec<u8>>,
+    /// Prost encoding of the finished `MediaKeySlot`.
+    #[serde(default, with = "b64_opt")]
+    pub slot: Option<Vec<u8>>,
+    /// The device stopped being a target after this grant was planned. It is never placed
+    /// in the Inner and its grant is retired.
+    #[serde(default)]
+    pub excluded: bool,
+}
+
+mod b64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&ramflux_protocol::encode_base64url(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        ramflux_protocol::decode_base64url(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+mod b64_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        bytes: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => serializer.serialize_some(&ramflux_protocol::encode_base64url(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| ramflux_protocol::decode_base64url(&text).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}

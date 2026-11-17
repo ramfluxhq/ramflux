@@ -51,6 +51,7 @@ pub(crate) fn read_range(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>
 }
 
 fn append(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
+    let created = !path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -58,6 +59,9 @@ fn append(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
         .map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
     file.write_all(bytes).map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
     file.sync_all().map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
+    if created {
+        super::store::sync_parent(path)?;
+    }
     Ok(())
 }
 

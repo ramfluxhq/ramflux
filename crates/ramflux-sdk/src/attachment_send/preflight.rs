@@ -147,7 +147,7 @@ fn one_ref(file: &FileBound<'_>, slots: &[MediaKeySlot]) -> Result<MediaRef, Ref
         mime_type: file.mime.to_owned(),
         file_name: Some(file.name.to_owned()),
         inline_thumbnail: None,
-        object_id: "00".repeat(32),
+        object_id: ramflux_protocol::encode_base64url([0_u8; 32]),
         manifest_digest: digest,
         size: file.plaintext_length,
         key_slots: slots.to_vec(),

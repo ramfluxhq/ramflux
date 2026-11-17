@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Import handles. `begin` returns before the body worker finishes.
+//! Import handles. `begin` runs the local checks, reserves disk, and returns while a bounded
+//! worker streams the body to a staging file. Nothing is readable until the worker has
+//! checked every segment digest and the plaintext digest.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 
-use prost::Message as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -21,20 +21,24 @@ use crate::bus::dispatch::local_bus_ok;
 use crate::bus::io::request_account_id;
 use crate::bus::protocol::LocalBusFrame;
 
+use super::budget;
 use super::bus;
 use super::codes::{
-    CODE_ATTACHMENT_DELETED, CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE,
-    CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER, CODE_NOT_READY,
-    CODE_RETIREMENT_PENDING, CODE_SEAL_FAILED, CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
+    CODE_ATTACHMENT_DELETED, CODE_CANCELLED, CODE_DISK_FULL,
+    CODE_DUPLICATE, CODE_EXPIRED, CODE_LAYOUT_INVALID, CODE_NOT_GRANTEE, CODE_NOT_OWNER,
+    CODE_NOT_READY, CODE_SEAL_FAILED, CODE_STALE_GENERATION, CODE_STREAM_OFFSET, Refusal,
 };
-use super::import_job::{self, Importer, SourcePin};
+use super::import_job::{self, Importer, Opened, SourcePin};
 use super::meta::CHUNK;
 use super::plane::Plane;
+use super::scheduler;
+use super::store::Store;
 
-const DIRECTORY: &str = "attachment-inner";
-const TOMBSTONE: &str = "attachment-tombstone";
-pub(crate) const RETIREMENT: &str = "attachment-retirement";
 const BINDING: &str = "attachment-import";
+const SENT: &str = "attachment-send";
+/// Open handles one account may hold, and the whole process.
+const HANDLES_ACCOUNT: usize = 16;
+const HANDLES_PROCESS: usize = 64;
 
 struct Job {
     account: String,
@@ -43,11 +47,35 @@ struct Job {
     generation: u64,
     length: u64,
     expires_at: u64,
+    dir: PathBuf,
     path: PathBuf,
+    reserved: AtomicU64,
     ready: AtomicBool,
     failed: Mutex<Option<&'static str>>,
     cancelled: AtomicBool,
     finished: AtomicBool,
+    /// Largest buffer total this job's worker held at once.
+    peak_memory: AtomicU64,
+}
+
+impl Job {
+    fn release(&self) {
+        budget::release_disk(self.reserved.swap(0, Ordering::AcqRel));
+    }
+
+    /// Stops the handle: marks it fenced, drops the staging directory and the reservation.
+    fn invalidate(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = fs::remove_dir_all(&self.dir);
+        self.release();
+    }
+
+    fn dead(&self, now: u64) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+            || self.finished.load(Ordering::Acquire)
+            || now >= self.expires_at
+            || self.failed.lock().map(|code| code.is_some()).unwrap_or(true)
+    }
 }
 
 fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Job>>> {
@@ -55,20 +83,13 @@ fn jobs() -> &'static Mutex<BTreeMap<String, Arc<Job>>> {
     JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// # Errors
-/// Returns a storage error when the inner record cannot be saved.
-pub(crate) fn remember_inner(
-    client: &crate::RamfluxClient,
-    message_id: &str,
-    inner: &[u8],
-    prepares: &[String],
-) -> Result<(), SdkError> {
-    let row = json!({
-        "inner_base64": ramflux_protocol::encode_base64url(inner),
-        "prepares": prepares,
-    });
-    client.account_db()?.persist_client_record(DIRECTORY, message_id, &row)?;
-    Ok(())
+/// Fences every open handle of `message_id`: no new byte is copied out, the staging file is
+/// removed, and the reservation is returned. Called when the message is retired or deleted.
+pub(crate) fn fence_message(message_id: &str) {
+    let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for job in table.values().filter(|job| job.message_id == message_id) {
+        job.invalidate();
+    }
 }
 
 /// # Errors
@@ -79,40 +100,24 @@ pub(crate) fn begin(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let body: BeginBody = serde_json::from_value(request.body.clone())?;
     let id = request_account_id(request)?.to_owned();
-    if tombstone(&account.client, &body.message_id)? {
-        return Err(Refusal::new(CODE_ATTACHMENT_DELETED).into());
-    }
+    super::hooks::barrier(&account.client, &body.message_id)?;
     let now = bus::unix_now()?;
+    reap(now);
     if let Some(existing) = bound(&account.client, &body.operation_id)? {
-        return resume_existing(&id, &existing, &body);
+        if let Ok(view) = resume_existing(&id, &existing, &body) {
+            return Ok(view);
+        }
     }
-    let record = inner_record(&account.client, &body.message_id)?;
-    let message = decode_message(&record)?;
-    let media =
-        message.media.get(usize_index(body.index)?).ok_or(Refusal::new(CODE_LAYOUT_INVALID))?;
-    let length = media
-        .large_manifest
-        .as_ref()
-        .map(|item| item.plaintext_length)
-        .ok_or(Refusal::new(CODE_LAYOUT_INVALID))?;
-    let prepare_id = prepare_at(&record, body.index);
-    let anchor = account.client.own_account_anchor()?;
-    let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    if prepare_id.is_none() {
-        let importer = Importer {
-            account_anchor: &anchor,
-            device_id: &local.device_id,
-            device_epoch: local.device_epoch,
-            secret: &[0; 32],
-        };
-        import_job::select(media, &importer)?;
-    }
-    let pin = if prepare_id.is_none() { Some(owned_pin(&account.client)?) } else { None };
-    let device_id = local.device_id.clone();
-    let device_epoch = local.device_epoch;
+    let source = Source::find(&account.client, &id, &body)?;
+    let plane = bus::plane_for(account)?;
+    let length = source.length();
+    let scheduler_large = length >= scheduler::LARGE_BYTES;
     let import_id = fresh_id()?;
     let root = account.client.reader_account_root.clone().ok_or(SdkError::AccountDbNotUnlocked)?;
-    let path = root.join("attachment-imports").join(&import_id).join("body.bin");
+    let dir = root.join("attachment-imports").join(&import_id);
+    let reserve = budget::import_bytes(length)?;
+    count_ok(&id)?;
+    budget::reserve_disk(&root, reserve)?;
     let job = Arc::new(Job {
         account: id.clone(),
         message_id: body.message_id.clone(),
@@ -120,127 +125,131 @@ pub(crate) fn begin(
         generation: 1,
         length,
         expires_at: now.saturating_add(super::meta::LEASE),
-        path: path.clone(),
+        path: dir.join("body.bin"),
+        dir,
+        reserved: AtomicU64::new(reserve),
         ready: AtomicBool::new(false),
         failed: Mutex::new(None),
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
+        peak_memory: AtomicU64::new(0),
     });
     jobs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(import_id.clone(), Arc::clone(&job));
-    save_binding(&account.client, &body.operation_id, &import_id, &body)?;
-    spawn_worker(WorkerIn {
-        job,
-        media: media.clone(),
-        prepare_id,
-        plane: account.client.attachment_plane.clone(),
-        root: Some(root),
-        secret: account
-            .client
-            .vault_secret_source()
-            .ok()
-            .and_then(|source| source.vault_secret(&id).ok()),
-        anchor,
-        device_id,
-        device_epoch,
-        pin,
-    });
-    Ok(local_bus_ok(view(
-        &import_id,
-        1,
-        "pending",
-        0,
-        length,
-        now.saturating_add(super::meta::LEASE),
-    )))
+    let task = Task { job: Arc::clone(&job), source, plane, import_id: import_id.clone() };
+    if let Err(refusal) = scheduler::submit(&id, scheduler_large, move || task.run()) {
+        remove(&import_id, &job);
+        return Err(refusal.into());
+    }
+    if let Err(error) = save_binding(&account.client, &body.operation_id, &import_id, &body) {
+        job.invalidate();
+        return Err(error);
+    }
+    Ok(local_bus_ok(view(&import_id, 1, "pending", 0, length, job.expires_at)))
 }
 
-struct OwnedPin {
-    source: String,
-    generation: u64,
-    public_key: [u8; 32],
+/// What the worker streams from.
+enum Source {
+    /// A reference this device holds an entry in.
+    Remote { opened: Opened, length: u64 },
+    /// A file this account sealed: its own prepare row and account-sealed key.
+    Owned { store: Store, row: Box<super::meta::Row>, length: u64 },
 }
 
-struct WorkerIn {
-    job: Arc<Job>,
-    media: ramflux_protocol::message::MediaRef,
-    prepare_id: Option<String>,
-    plane: Option<Arc<dyn Plane>>,
-    root: Option<PathBuf>,
-    secret: Option<[u8; 32]>,
-    anchor: String,
-    device_id: String,
-    device_epoch: u64,
-    pin: Option<OwnedPin>,
+impl Source {
+    fn length(&self) -> u64 {
+        match self {
+            Self::Remote { length, .. } | Self::Owned { length, .. } => *length,
+        }
+    }
 }
 
-fn spawn_worker(input: WorkerIn) {
-    thread::spawn(move || worker(&input));
-}
-
-fn worker(input: &WorkerIn) {
-    let result = match super::budget::staging_bytes(input.job.length) {
-        Ok(cost) => match super::budget::charge(cost) {
-            Ok(()) => {
-                let fetched = fetch_body(input);
-                super::budget::release(cost);
-                fetched
+impl Source {
+    fn find(
+        client: &crate::RamfluxClient,
+        account_id: &str,
+        body: &BeginBody,
+    ) -> Result<Self, SdkError> {
+        let media = message_media(client, &body.message_id, body.index)?;
+        let reference = import_job::canonical(&media)?;
+        let length = reference.large_manifest.plaintext_length;
+        if let Some(prepare_id) = prepare_at(client, &body.message_id, body.index)? {
+            let store = bus::open_store(client, account_id)?;
+            let row = store.load(&prepare_id)?;
+            if row.plaintext_length != Some(length) {
+                return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
             }
-            Err(refusal) => Err(refusal),
-        },
-        Err(refusal) => Err(refusal),
-    };
-    match result {
-        Ok(bytes) => {
-            if write_body(&input.job.path, &bytes).is_ok() {
-                input.job.ready.store(true, Ordering::Release);
-            } else {
-                fail(&input.job, CODE_SEAL_FAILED);
+            return Ok(Self::Owned { store, row: Box::new(row), length });
+        }
+        let anchor = client.own_account_anchor()?;
+        let local = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let secret = client.attachment_device_secret()?;
+        let pin = bus::authority(client)?;
+        let opened = import_job::open_entry(
+            &media,
+            &Importer {
+                account_anchor: &anchor,
+                device_id: &local.device_id,
+                device_epoch: local.device_epoch,
+                secret: &secret,
+            },
+            &SourcePin {
+                source: &pin.source,
+                generation: pin.generation,
+                public_key: &pin.public_key,
+                now: bus::unix_now()?,
+            },
+        )?;
+        Ok(Self::Remote { opened, length })
+    }
+}
+
+struct Task {
+    job: Arc<Job>,
+    source: Source,
+    plane: Arc<dyn Plane>,
+    import_id: String,
+}
+
+impl Task {
+    fn run(self) {
+        let Self { job, source, plane, import_id: _ } = self;
+        let result = stream(&job, &source, plane.as_ref());
+        match result {
+            Ok(()) => job.ready.store(true, Ordering::Release),
+            Err(refusal) => {
+                fail(&job, refusal.code);
+                // A failed import never leaves bytes behind and returns what it reserved.
+                let _ = fs::remove_dir_all(&job.dir);
+                job.release();
             }
         }
-        Err(refusal) => fail(&input.job, refusal.code),
     }
 }
 
-fn fetch_body(input: &WorkerIn) -> Result<Vec<u8>, Refusal> {
-    if input.job.cancelled.load(Ordering::Acquire) {
+fn stream(job: &Job, source: &Source, plane: &dyn Plane) -> Result<(), Refusal> {
+    fs::create_dir_all(&job.dir).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    let part = job.dir.join("body.part");
+    let file = File::create(&part).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    let mut sink = BufWriter::with_capacity(256 * 1024, file);
+    let fenced = || job.cancelled.load(Ordering::Acquire);
+    match source {
+        Source::Remote { opened, .. } => {
+            import_job::stream_remote(plane, opened, &mut sink, &fenced)?;
+        }
+        Source::Owned { store, row, .. } => import_job::stream_owned(store, row, &mut sink, &fenced)?,
+    }
+    sink.flush().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    let file = sink.into_inner().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    file.sync_all().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    drop(file);
+    if fenced() {
         return Err(Refusal::new(CODE_CANCELLED));
     }
-    if let Some(prepare_id) = input.prepare_id.as_deref() {
-        let root = input.root.as_deref().ok_or(Refusal::new(CODE_NOT_GRANTEE))?;
-        let secret = input.secret.ok_or(Refusal::new(CODE_NOT_GRANTEE))?;
-        let store = super::store::Store::open(root, &input.job.account, secret)?;
-        return import_job::import_owned(&store, &store.load(prepare_id)?);
-    }
-    let plane = input.plane.as_deref().ok_or(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
-    let file_secret = device_secret(input.root.as_deref())?;
-    let pin = input.pin.as_ref().ok_or(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))?;
-    let importer = Importer {
-        account_anchor: &input.anchor,
-        device_id: &input.device_id,
-        device_epoch: input.device_epoch,
-        secret: &file_secret,
-    };
-    let source = SourcePin {
-        source: &pin.source,
-        generation: pin.generation,
-        public_key: &pin.public_key,
-        now: bus::unix_now().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?,
-    };
-    import_job::import_entry(plane, &input.media, &importer, &source)
-}
-
-fn fail(job: &Job, code: &'static str) {
-    if let Ok(mut failed) = job.failed.lock() {
-        *failed = Some(code);
-    }
-}
-
-fn owned_pin(client: &crate::RamfluxClient) -> Result<OwnedPin, SdkError> {
-    let pin = bus::authority(client)?;
-    Ok(OwnedPin { source: pin.source, generation: pin.generation, public_key: pin.public_key })
+    fs::rename(&part, &job.path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    Ok(())
 }
 
 /// # Errors
@@ -258,12 +267,7 @@ pub(crate) fn read(
         return Err(Refusal::new(CODE_STALE_GENERATION).into());
     }
     gate(&account.client, &job)?;
-    if !job.ready.load(Ordering::Acquire) {
-        if let Some(code) = failed_code(&job) {
-            return Err(Refusal::new(code).into());
-        }
-        return Err(Refusal::new(CODE_NOT_READY).into());
-    }
+    ready_or_refuse(&job)?;
     if body.offset > job.length {
         return Err(Refusal::new(CODE_STREAM_OFFSET).into());
     }
@@ -277,6 +281,16 @@ pub(crate) fn read(
     })))
 }
 
+fn ready_or_refuse(job: &Job) -> Result<(), SdkError> {
+    if job.ready.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if let Some(code) = failed_code(job) {
+        return Err(Refusal::new(code).into());
+    }
+    Err(Refusal::new(CODE_NOT_READY).into())
+}
+
 /// # Errors
 /// Returns `not_owner` when the handle belongs to another account.
 pub(crate) fn status(
@@ -286,12 +300,15 @@ pub(crate) fn status(
     let body: IdBody = serde_json::from_value(request.body.clone())?;
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     gate(&account.client, &job)?;
-    let state = if job.ready.load(Ordering::Acquire) { "ready" } else { "pending" };
-    let through = if job.ready.load(Ordering::Acquire) { job.length } else { 0 };
+    if let Some(code) = failed_code(&job) {
+        return Err(Refusal::new(code).into());
+    }
+    let ready = job.ready.load(Ordering::Acquire);
+    let through = if ready { job.length } else { 0 };
     Ok(local_bus_ok(view(
         &body.import_id,
         job.generation,
-        state,
+        if ready { "ready" } else { "pending" },
         through,
         job.length,
         job.expires_at,
@@ -307,7 +324,7 @@ pub(crate) fn finish(
     let body: IdBody = serde_json::from_value(request.body.clone())?;
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     job.finished.store(true, Ordering::Release);
-    let _ = fs::remove_file(&job.path);
+    remove(&body.import_id, &job);
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "finished"})))
 }
 
@@ -320,8 +337,34 @@ pub(crate) fn cancel(
     let body: IdBody = serde_json::from_value(request.body.clone())?;
     let job = lookup(&body.import_id, request_account_id(request)?)?;
     job.cancelled.store(true, Ordering::Release);
-    let _ = fs::remove_file(&job.path);
+    remove(&body.import_id, &job);
     Ok(local_bus_ok(json!({"import_id": body.import_id, "state": "cancelled"})))
+}
+
+fn remove(import_id: &str, job: &Job) {
+    job.invalidate();
+    jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(import_id);
+}
+
+/// Drops every handle that is finished, cancelled, failed or past its lease.
+fn reap(now: u64) {
+    let mut table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dead: Vec<String> =
+        table.iter().filter(|(_, job)| job.dead(now)).map(|(id, _)| id.clone()).collect();
+    for id in dead {
+        if let Some(job) = table.remove(&id) {
+            job.invalidate();
+        }
+    }
+}
+
+fn count_ok(account: &str) -> Result<(), Refusal> {
+    let table = jobs().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mine = table.values().filter(|job| job.account == account).count();
+    if table.len() >= HANDLES_PROCESS || mine >= HANDLES_ACCOUNT {
+        return Err(Refusal::new(CODE_DISK_FULL));
+    }
+    Ok(())
 }
 
 fn resume_existing(
@@ -333,23 +376,70 @@ fn resume_existing(
     if job.message_id != body.message_id || job.index != body.index {
         return Err(Refusal::new(CODE_DUPLICATE).into());
     }
-    let state = if job.ready.load(Ordering::Acquire) { "ready" } else { "pending" };
-    Ok(local_bus_ok(view(import_id, job.generation, state, 0, job.length, job.expires_at)))
+    let ready = job.ready.load(Ordering::Acquire);
+    Ok(local_bus_ok(view(
+        import_id,
+        job.generation,
+        if ready { "ready" } else { "pending" },
+        if ready { job.length } else { 0 },
+        job.length,
+        job.expires_at,
+    )))
 }
 
-fn device_secret(root: Option<&Path>) -> Result<[u8; 32], Refusal> {
-    let root = root.ok_or(Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    let bytes = fs::read(root.join("attachment-device.key"))
-        .map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    let secret: [u8; 32] =
-        bytes.try_into().map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    Ok(secret)
+fn fail(job: &Job, code: &'static str) {
+    if let Ok(mut failed) = job.failed.lock() {
+        *failed = Some(code);
+    }
 }
 
-fn prepare_at(record: &Value, index: u64) -> Option<String> {
-    let rows = record.get("prepares")?.as_array()?;
-    let index = usize::try_from(index).ok()?;
-    rows.get(index)?.as_str().map(str::to_owned)
+/// The message's media entry, read from the stored Inner of the message, which is the sender's
+/// exact Message on both sides.
+fn message_media(
+    client: &crate::RamfluxClient,
+    message_id: &str,
+    index: u64,
+) -> Result<ramflux_protocol::message::MediaRef, SdkError> {
+    let exact = client
+        .account_db()?
+        .message_content(message_id)?
+        .ok_or_else(|| SdkError::from(Refusal::new(CODE_ATTACHMENT_DELETED)))?;
+    let (_, content) = crate::RamfluxClient::decode_generated_inner(&exact)?;
+    let Some(ramflux_protocol::message::content::Value::Message(message)) = content.value else {
+        return Err(Refusal::new(CODE_LAYOUT_INVALID).into());
+    };
+    let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
+    message.media.into_iter().nth(index).ok_or_else(|| Refusal::new(CODE_LAYOUT_INVALID).into())
+}
+
+/// The prepare behind entry `index` of a message this account sent.
+fn prepare_at(
+    client: &crate::RamfluxClient,
+    message_id: &str,
+    index: u64,
+) -> Result<Option<String>, SdkError> {
+    let Some(record) = client.account_db()?.client_record(SENT, message_id)? else {
+        return Ok(None);
+    };
+    let index = usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
+    Ok(record
+        .get("prepares")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.get(index))
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
+/// Records which prepares a sent message carries, so the sender can import its own file.
+/// # Errors
+/// Returns a storage error when the record cannot be saved.
+pub(crate) fn remember_sent(
+    client: &crate::RamfluxClient,
+    message_id: &str,
+    prepares: &[String],
+) -> Result<(), SdkError> {
+    client.account_db()?.persist_client_record(SENT, message_id, &json!({ "prepares": prepares }))?;
+    Ok(())
 }
 
 fn lookup(import_id: &str, account: &str) -> Result<Arc<Job>, Refusal> {
@@ -362,20 +452,11 @@ fn lookup(import_id: &str, account: &str) -> Result<Arc<Job>, Refusal> {
 }
 
 fn gate(client: &crate::RamfluxClient, job: &Job) -> Result<(), SdkError> {
-    if tombstone(client, &job.message_id)? {
-        return Err(Refusal::new(CODE_ATTACHMENT_DELETED).into());
-    }
-    if retirement_pending(client, &job.message_id)? {
-        return Err(Refusal::new(CODE_RETIREMENT_PENDING).into());
-    }
-    if job.cancelled.load(Ordering::Acquire) {
+    super::hooks::barrier(client, &job.message_id)?;
+    if job.cancelled.load(Ordering::Acquire) || job.finished.load(Ordering::Acquire) {
         return Err(Refusal::new(CODE_CANCELLED).into());
     }
-    if job.finished.load(Ordering::Acquire) {
-        return Err(Refusal::new(CODE_CANCELLED).into());
-    }
-    let now = bus::unix_now()?;
-    if now >= job.expires_at {
+    if bus::unix_now()? >= job.expires_at {
         return Err(Refusal::new(CODE_EXPIRED).into());
     }
     Ok(())
@@ -403,34 +484,6 @@ fn view(
     })
 }
 
-fn tombstone(client: &crate::RamfluxClient, message_id: &str) -> Result<bool, SdkError> {
-    Ok(client.account_db()?.client_record(TOMBSTONE, message_id)?.is_some())
-}
-
-fn retirement_pending(client: &crate::RamfluxClient, message_id: &str) -> Result<bool, SdkError> {
-    let Some(row) = client.account_db()?.client_record(RETIREMENT, message_id)? else {
-        return Ok(false);
-    };
-    Ok(revoke_state(Some(&row)) != "relay_erased")
-}
-
-/// `relay_erased` is reported only after a confirmed cleanup ACK.
-#[must_use]
-pub(crate) fn revoke_state(existing: Option<&Value>) -> &'static str {
-    if existing.and_then(|row| row.get("relay_erased")).and_then(Value::as_bool) == Some(true) {
-        "relay_erased"
-    } else {
-        "retirement_pending"
-    }
-}
-
-fn inner_record(client: &crate::RamfluxClient, message_id: &str) -> Result<Value, SdkError> {
-    client
-        .account_db()?
-        .client_record(DIRECTORY, message_id)?
-        .ok_or_else(|| SdkError::from(Refusal::new(CODE_ATTACHMENT_DELETED)))
-}
-
 fn bound(client: &crate::RamfluxClient, operation_id: &str) -> Result<Option<String>, SdkError> {
     let row = client.account_db()?.client_record(BINDING, operation_id)?;
     Ok(row.and_then(|value| value.get("import_id").and_then(Value::as_str).map(str::to_owned)))
@@ -447,43 +500,18 @@ fn save_binding(
     Ok(())
 }
 
-fn decode_message(record: &Value) -> Result<ramflux_protocol::message::Message, Refusal> {
-    let text = record
-        .get("inner_base64")
-        .and_then(Value::as_str)
-        .ok_or(Refusal::new(CODE_LAYOUT_INVALID))?;
-    let bytes =
-        ramflux_protocol::decode_base64url(text).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))?;
-    ramflux_protocol::message::Message::decode(bytes.as_slice())
-        .map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))
-}
-
-fn usize_index(index: u64) -> Result<usize, Refusal> {
-    usize::try_from(index).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))
-}
-
-fn write_body(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    }
-    let mut file = File::create(path).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    file.write_all(bytes).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    file.sync_all().map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
-    Ok(())
-}
-
 fn read_at(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, Refusal> {
-    let mut file = File::open(path).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
+    let mut file = File::open(path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     file.seek(SeekFrom::Start(offset)).map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
     let len = usize::try_from(len).map_err(|_| Refusal::new(CODE_STREAM_OFFSET))?;
     let mut bytes = vec![0; len];
-    file.read_exact(&mut bytes).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
+    file.read_exact(&mut bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     Ok(bytes)
 }
 
 fn fresh_id() -> Result<String, Refusal> {
     let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).map_err(|_| Refusal::new(super::codes::CODE_SEAL_FAILED))?;
+    getrandom::fill(&mut bytes).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     Ok(ramflux_protocol::encode_base64url(bytes))
 }
 

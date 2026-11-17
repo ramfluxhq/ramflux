@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::budget::{self, staging_bytes};
+use super::budget;
 use super::chunks::{self, accept};
 use super::codes::{
     CODE_CANCELLED, CODE_DIGEST_MISMATCH, CODE_DISABLED, CODE_DUPLICATE, CODE_EXPIRED,
@@ -20,6 +20,7 @@ use super::meta::{CHUNK, IndexEntry, Intent, MAX_PLAINTEXT, Phase, Recipient, Ro
 use super::path_admit::open_anchored;
 use super::seal::{self, seal_key};
 
+#[derive(Clone)]
 pub(crate) struct Store {
     root: PathBuf,
     account: String,
@@ -59,6 +60,7 @@ impl Store {
         let mut row = Row::fresh(intent, prepare_id, now);
         let dir = self.dir(&row.prepare_id);
         fs::create_dir_all(&dir).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+        sync_dir(&self.root)?;
         if let Some(relative) = path {
             self.copy_path(&mut row, relative)?;
         }
@@ -83,18 +85,15 @@ impl Store {
             return Err(Refusal::new(CODE_STREAM_OFFSET));
         }
         let end = offset.saturating_add(len);
-        let extra = if offset == row.accepted_through {
-            budget::growth(row.accepted_through, end)?
-        } else {
-            0
-        };
+        // Only a chunk that appends grows the log; a replayed prefix writes and charges nothing.
+        let extra = if offset == row.accepted_through { end - offset } else { 0 };
         if extra > 0 {
-            budget::charge(extra)?;
+            budget::reserve_disk(&self.root, extra)?;
             row.charged = row.charged.saturating_add(extra);
         }
         if let Err(error) = accept(&self.dir(prepare_id), &mut row, offset, bytes) {
             if extra > 0 {
-                budget::release(extra);
+                budget::release_disk(extra);
                 row.charged = row.charged.saturating_sub(extra);
             }
             self.save(&row)?;
@@ -137,11 +136,18 @@ impl Store {
             self.fence(&mut row)?;
             return Err(Refusal::new(CODE_DIGEST_MISMATCH));
         }
+        // The ciphertext, the thumbnail workspace and the margin are reserved now that the
+        // length is known. A refusal leaves the row open so the same finish can be retried.
+        let need = budget::prepare_bytes(length)?.saturating_sub(row.charged);
+        budget::reserve_disk(&self.root, need)?;
+        row.charged = row.charged.saturating_add(need);
         row.plaintext_length = Some(length);
         row.plaintext_digest = Some(digest);
         row.phase = Phase::Accepted;
-        self.save(&row)?;
-        self.remember(&row)?;
+        if let Err(error) = self.save(&row).and_then(|()| self.remember(&row)) {
+            budget::release_disk(need);
+            return Err(error);
+        }
         Ok(row)
     }
 
@@ -196,13 +202,15 @@ impl Store {
         Ok(row)
     }
 
-    /// Restart. A `Sealing` row is fenced even when no segment file exists.
+    /// Restart. A `Sealing` row is fenced even when no segment file exists, and a finished
+    /// snapshot is hashed again against the finish digest before it may be sealed.
     /// # Errors
-    /// Returns `seal_failed` when the row cannot be rewritten.
+    /// Returns `seal_failed` when the row cannot be rewritten, and `digest_mismatch` when the
+    /// durable snapshot no longer equals the finish digest (the generation is fenced).
     pub(crate) fn resume(&self, prepare_id: &str, now: u64) -> Result<Row, Refusal> {
         let mut row = self.load(prepare_id)?;
         let plain = self.dir(prepare_id).join("plain.bin");
-        if plain.exists() {
+        if plain.exists() && row.phase == Phase::Accepting {
             let len = fs::metadata(&plain).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?.len();
             if len > row.accepted_through {
                 chunks::truncate(&plain, row.accepted_through)?;
@@ -224,8 +232,88 @@ impl Store {
                 Phase::Fenced
             };
         }
+        if matches!(row.phase, Phase::Accepted | Phase::Reserved) {
+            self.verify_snapshot(&mut row)?;
+        }
         self.save(&row)?;
         Ok(row)
+    }
+
+    /// Hashes the durable accepted log against the finish length and digest. A corrupt or
+    /// short snapshot is never sealed: the generation is fenced, its key destroyed, and the
+    /// plaintext removed.
+    /// # Errors
+    /// Returns `digest_mismatch` after fencing.
+    pub(crate) fn verify_snapshot(&self, row: &mut Row) -> Result<(), Refusal> {
+        let (Some(length), Some(digest)) = (row.plaintext_length, row.plaintext_digest) else {
+            return Ok(());
+        };
+        let plain = self.dir(&row.prepare_id).join("plain.bin");
+        let actual = if length == 0 {
+            *blake3::hash(b"").as_bytes()
+        } else {
+            let on_disk = fs::metadata(&plain).map(|meta| meta.len()).unwrap_or(0);
+            if on_disk != length {
+                [0_u8; 32]
+            } else {
+                chunks::digest(&plain, length).unwrap_or([0_u8; 32])
+            }
+        };
+        if actual == digest {
+            return Ok(());
+        }
+        self.destroy_secret(row)?;
+        self.remove_segments(&row.prepare_id)?;
+        if let Some(upload) = row.upload_id.take() {
+            row.abandoned.push(upload);
+        }
+        row.object_id = None;
+        chunks::remove_plain(&self.dir(&row.prepare_id));
+        row.phase = Phase::Fenced;
+        Self::release_charge(row);
+        self.save(row)?;
+        Err(Refusal::new(CODE_DIGEST_MISMATCH))
+    }
+
+    /// Startup sweep over every prepare of this account: truncates unacknowledged tails,
+    /// fences `Sealing`, and re-verifies finished snapshots. A prepare that fails stays
+    /// fenced and is reported by its state, so one bad row never blocks the others.
+    /// # Errors
+    /// Returns `seal_failed` when the index cannot be read.
+    pub(crate) fn recover_all(&self, now: u64) -> Result<usize, Refusal> {
+        let mut touched = 0_usize;
+        let mut held = 0_u64;
+        for entry in self.index()? {
+            match self.resume(&entry.prepare_id, now) {
+                Ok(row) => {
+                    touched += 1;
+                    held = held.saturating_add(row.charged);
+                }
+                Err(Refusal { code: CODE_DIGEST_MISMATCH }) => touched += 1,
+                Err(error) => {
+                    tracing::debug!(code = error.code, "attachment prepare did not recover");
+                }
+            }
+        }
+        if first_recovery(&self.root) {
+            budget::adopt_disk(held);
+        }
+        Ok(touched)
+    }
+
+    /// Runs the startup sweep the first time this process opens the account's prepares.
+    /// # Errors
+    /// Returns `seal_failed` when the index cannot be read.
+    pub(crate) fn recover_once(&self, now: u64) -> Result<(), Refusal> {
+        static DONE: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+        {
+            let mut done = DONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if done.iter().any(|path| path == &self.root) {
+                return Ok(());
+            }
+            done.push(self.root.clone());
+        }
+        self.recover_all(now).map(|_| ())
     }
 
     /// Draw a key and object id and store them before Reserve. Only from `Accepted` or a retry of `Reserved`.
@@ -275,14 +363,24 @@ impl Store {
         Ok((key, object))
     }
 
-    /// Marks granted prepares admitted after the one message is submitted.
+    /// Marks granted prepares admitted after the one message is submitted, and binds each row
+    /// to the actual message id. A repeat with the same id is a no-op.
     /// # Errors
-    /// Returns `seal_failed` when a row cannot be rewritten.
-    pub(crate) fn admit_granted(&self, ids: &[String]) -> Result<(), Refusal> {
+    /// Returns `seal_failed` when a row cannot be rewritten, `duplicate_operation` when a row
+    /// already belongs to another message.
+    pub(crate) fn admit_granted(&self, ids: &[String], message_id: &str) -> Result<(), Refusal> {
         for id in ids {
-            let row = self.load(id)?;
-            if row.phase == Phase::Granted {
-                self.mark(row, Phase::Admitted)?;
+            let mut row = self.load(id)?;
+            match row.message_id.as_deref() {
+                Some(existing) if existing != message_id => {
+                    return Err(Refusal::new(CODE_DUPLICATE));
+                }
+                _ => {}
+            }
+            if row.phase == Phase::Granted || row.phase == Phase::Admitted {
+                row.message_id = Some(message_id.to_owned());
+                row.phase = Phase::Admitted;
+                self.save(&row)?;
             }
         }
         Ok(())
@@ -323,8 +421,8 @@ impl Store {
         if len > MAX_PLAINTEXT {
             return Err(Refusal::new(CODE_FILE_TOO_LARGE));
         }
-        let need = staging_bytes(len)?;
-        budget::charge(need)?;
+        let need = budget::prepare_bytes(len)?;
+        budget::reserve_disk(&self.root, need)?;
         row.charged = need;
         if let Err(error) = self.copy_body(row, &mut file) {
             Self::release_charge(row);
@@ -431,8 +529,8 @@ impl Store {
         Ok(())
     }
 
-    fn release_charge(row: &mut Row) {
-        budget::release(row.charged);
+    pub(super) fn release_charge(row: &mut Row) {
+        budget::release_disk(row.charged);
         row.charged = 0;
     }
 
@@ -492,6 +590,18 @@ impl Store {
     }
 }
 
+/// True the first time this process recovers `root`, so a restart rebuilds the disk
+/// reservation from the durable rows exactly once.
+fn first_recovery(root: &Path) -> bool {
+    static SEEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.iter().any(|path| path == root) {
+        return false;
+    }
+    seen.push(root.to_path_buf());
+    true
+}
+
 fn check_intent(intent: &Intent<'_>) -> Result<(), Refusal> {
     if intent.operation_id.is_empty() || intent.operation_id.len() > 256 {
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
@@ -524,7 +634,9 @@ fn fresh_id() -> Result<String, Refusal> {
     Ok(out)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
+/// Writes `bytes` so a power loss leaves either the old file or the new one: data and the
+/// rename are both fsynced, the rename through its parent directory.
+pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
     let tmp = path.with_extension("tmp");
     {
         let mut file = File::create(&tmp).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
@@ -532,5 +644,24 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
         file.sync_all().map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
     }
     fs::rename(&tmp, path).map_err(|_| Refusal::new(CODE_SEAL_FAILED))?;
+    sync_parent(path)
+}
+
+/// Makes the directory entry of `path` durable.
+pub(super) fn sync_parent(path: &Path) -> Result<(), Refusal> {
+    let parent = path.parent().ok_or(Refusal::new(CODE_SEAL_FAILED))?;
+    sync_dir(parent)
+}
+
+#[cfg(unix)]
+pub(super) fn sync_dir(dir: &Path) -> Result<(), Refusal> {
+    File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .map_err(|_| Refusal::new(CODE_SEAL_FAILED))
+}
+
+/// Windows has no directory fsync; a completed rename is the durable boundary there.
+#[cfg(not(unix))]
+pub(super) fn sync_dir(_dir: &Path) -> Result<(), Refusal> {
     Ok(())
 }
