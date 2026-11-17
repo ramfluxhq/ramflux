@@ -149,7 +149,7 @@ impl AccountDb {
         let rows = query
             .query_map(params![message_id], |r| r.get::<_, Vec<u8>>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        if rows.len() > MAX_GRANTS as usize {
+        if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_GRANTS {
             return Err(StorageError::AuthorizationRejected);
         }
         rows.into_iter().map(|bytes| bytes.try_into().map_err(invalid)).collect()
