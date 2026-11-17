@@ -261,6 +261,39 @@ impl ScopedGrantRegistry {
     ) -> Result<RetirementOutcome, AttachmentLedgerError> {
         let r = signed.request();
         let now = auth.invocation.now;
+        let g = self.retirement_grant(signed, now)?;
+        if ramflux_protocol::encode_base64url(signed.signer()) != auth.invocation.token.owner_public_key
+        {
+            return Err(AttachmentLedgerError::Conflict);
+        }
+        let body = hex(blake3::hash(&r.signing_bytes().map_err(invalid)?).as_bytes());
+        self.authenticate_owner(g.grant(), ObjectRelayCapability::Tombstone, &body, auth)?;
+        self.retire_checked(signed, now)
+    }
+
+    /// Retires for a requester the local gateway authenticated from the live session.
+    /// # Errors
+    /// Refuses a requester that is not the grant owner or not the request signer, plus the
+    /// `retire` refusals.
+    pub fn retire_attested(
+        &self,
+        requester: &ramflux_protocol::large_attachment::QualifiedOwner,
+        signed: &VerifiedAttachmentRetirement,
+        now: u64,
+    ) -> Result<RetirementOutcome, AttachmentLedgerError> {
+        let g = self.retirement_grant(signed, now)?;
+        if &g.grant().owner != requester || signed.signer() != &requester.signing_public_key {
+            return Err(AttachmentLedgerError::Conflict);
+        }
+        self.retire_checked(signed, now)
+    }
+
+    fn retirement_grant(
+        &self,
+        signed: &VerifiedAttachmentRetirement,
+        now: u64,
+    ) -> Result<VerifiedScopedGrant, AttachmentLedgerError> {
+        let r = signed.request();
         let row = self.lookup(&r.grant_id)?.ok_or(AttachmentLedgerError::State)?;
         let grant = self.stored_grant(&row)?;
         let g: &ScopedAttachmentGrant = grant.grant();
@@ -269,14 +302,19 @@ impl ScopedGrantRegistry {
             || r.grant_epoch != g.epoch
             || r.source_authority != self.authority.source
             || r.authority_generation != self.authority.generation
-            || ramflux_protocol::encode_base64url(signed.signer())
-                != auth.invocation.token.owner_public_key
             || now.saturating_add(5) < r.issued_at
         {
             return Err(AttachmentLedgerError::Conflict);
         }
-        let body = hex(blake3::hash(&r.signing_bytes().map_err(invalid)?).as_bytes());
-        self.authenticate_owner(g, ObjectRelayCapability::Tombstone, &body, auth)?;
+        Ok(grant)
+    }
+
+    fn retire_checked(
+        &self,
+        signed: &VerifiedAttachmentRetirement,
+        now: u64,
+    ) -> Result<RetirementOutcome, AttachmentLedgerError> {
+        let r = signed.request();
         let leases = self.leases.lock()?;
         let tx = self.ledger.db.begin_write().map_err(store)?;
         clock(&tx, now)?;
