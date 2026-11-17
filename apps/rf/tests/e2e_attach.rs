@@ -37,8 +37,12 @@ fn until_ok(daemon: &Daemon, args: &[&str]) -> e2e::Result<Value> {
         match rf_json_timeout(&daemon.socket, args, CALL) {
             Ok(value) => return Ok(value),
             Err(error) if Instant::now() >= deadline => {
+                let log = std::fs::read_to_string(daemon.data_root.join("daemon.log"))
+                    .unwrap_or_default();
+                let tail: String =
+                    log.chars().rev().take(6000).collect::<Vec<_>>().into_iter().rev().collect();
                 return Err(format!(
-                    "{args:?} never succeeded: {error}; first refusal: {first:?}"
+                    "{args:?} never succeeded: {error}; first refusal: {first:?}; daemon_log_tail={tail}"
                 )
                 .into());
             }
