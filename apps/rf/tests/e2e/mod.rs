@@ -1416,6 +1416,15 @@ pub(crate) fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::pr
     rf_output_env(socket, args, &[])
 }
 
+/// One CLI call with the caller's deadline; the exit status and stderr stay inspectable.
+pub fn rf_output_with_timeout(
+    socket: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    rf_output_env_timeout(socket, args, &[], timeout)
+}
+
 fn rf_output_timeout(
     socket: &Path,
     args: &[&str],

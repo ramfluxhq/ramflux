@@ -70,6 +70,10 @@ fn begin(
         "generation": row.generation,
         "max_chunk": CHUNK,
         "expires_at": row.expires_at,
+        "state": phase_name(&row.phase),
+        "accepted_through": row.accepted_through,
+        "plaintext_length": row.plaintext_length,
+        "plaintext_digest": row.plaintext_digest.map(|digest| super::owner_wire::encode_hex(&digest)),
     })))
 }
 

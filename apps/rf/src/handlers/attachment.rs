@@ -174,6 +174,19 @@ async fn prepare_one(
     .await?;
     let prepare_id = text(&begun, "prepare_id")?;
     let generation = number(&begun, "generation")?;
+    if begun.get("state").and_then(Value::as_str) != Some("accepting") {
+        // A retry of a send whose file the daemon already holds: the bytes must be the same
+        // file, and nothing is streamed or finished a second time.
+        let (length, digest) = digest_file(path)?;
+        let same = begun.get("plaintext_length").and_then(Value::as_u64) == Some(length)
+            && begun.get("plaintext_digest").and_then(Value::as_str)
+                == Some(hex_bytes(&digest).as_str());
+        return if same {
+            Ok(prepare_id)
+        } else {
+            Err(RfError::Message("duplicate_operation".into()))
+        };
+    }
     let (length, digest) = stream_file(bus, account, seq, &prepare_id, generation, path).await?;
     ask(
         bus,
@@ -189,6 +202,22 @@ async fn prepare_one(
     )
     .await?;
     Ok(prepare_id)
+}
+
+/// Length and digest of a local file, read in bounded chunks.
+fn digest_file(path: &Path) -> Result<(u64, [u8; 32]), RfError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digester = PlaintextDigester::new();
+    let mut total = 0_u64;
+    let mut buf = vec![0_u8; CHUNK];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf)?;
+        if read == 0 {
+            return Ok((total, digester.finalize()));
+        }
+        digester.update(&buf[..read]);
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+    }
 }
 
 async fn stream_file(
@@ -263,7 +292,11 @@ pub(crate) async fn import(
                 bus,
                 &command.account,
                 &mut seq,
-                Route { api: "attachment", method: "attachment.import.cancel", operation: &operation },
+                Route {
+                    api: "attachment",
+                    method: "attachment.import.cancel",
+                    operation: &operation,
+                },
                 json!({"import_id": import_id}),
             )
             .await;
@@ -328,14 +361,13 @@ impl StagedOutput {
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| RfError::Message("expired".into()))?
                 .subsec_nanos();
-            let temp = parent.join(format!(".{name}.{}.{nanos}.{attempt}.rf-import", std::process::id()));
+            let temp =
+                parent.join(format!(".{name}.{}.{nanos}.{attempt}.rf-import", std::process::id()));
             match open_new(&temp) {
                 Ok(file) => {
                     return Ok(Self { file: Some(file), temp, target: target.to_path_buf() });
                 }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 =>
-                {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => {
                     attempt += 1;
                 }
                 Err(error) => return Err(error.into()),
