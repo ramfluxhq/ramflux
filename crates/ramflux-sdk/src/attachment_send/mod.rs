@@ -46,8 +46,6 @@ pub(crate) use grant_wrap::{load as grants_of, stored_media};
 pub(crate) use handles::remember_sent;
 pub(crate) use meta::{MAX_ATTACHMENTS, Phase, Recipient, Row};
 pub(crate) use plane::{OwnerCall, Plane, ReadCall, RegisterCall, RetireCall};
-#[cfg(test)]
-pub(crate) use publish::publish_all;
 pub(crate) use publish::{PublishInput, upload_all, wrap_all};
 pub(crate) use store::Store;
 pub(crate) use targets::{MediaDevice, MediaScope, choose_targets};

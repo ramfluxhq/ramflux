@@ -37,6 +37,7 @@ pub(crate) struct Meter {
 
 impl Meter {
     /// Largest buffer total this job held at one time.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn peak(&self) -> u64 {
         self.peak.load(Ordering::Acquire)
