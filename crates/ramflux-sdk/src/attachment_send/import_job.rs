@@ -59,7 +59,10 @@ pub(crate) struct Opened {
 /// # Errors
 /// Returns `layout_invalid` for any non-canonical or inconsistent reference.
 pub(crate) fn canonical(media: &ramflux_protocol::message::MediaRef) -> Result<MediaRef, Refusal> {
-    MediaRef::decode(&media.encode_to_vec()).map_err(|_| Refusal::new(CODE_LAYOUT_INVALID))
+    MediaRef::decode(&media.encode_to_vec()).map_err(|error| {
+        tracing::warn!(%error, "an attachment reference is not canonical");
+        Refusal::new(CODE_LAYOUT_INVALID)
+    })
 }
 
 /// Finds this device's one entry. Zero matches is `not_grantee`; the caller reads nothing.
@@ -132,6 +135,16 @@ pub(crate) fn open_entry(
         || grantee != device
         || recipient != device
     {
+        tracing::warn!(
+            grant = g.grant_id == grant_id,
+            object = g.object_id == object_id,
+            manifest = g.manifest_hash == manifest.manifest_id,
+            reference = g.reference_id == expected_reference,
+            rights = g.rights == READER_RIGHTS,
+            grantee = grantee == device,
+            recipient = recipient == device,
+            "an attachment entry does not match its reference"
+        );
         return Err(Refusal::new(CODE_LAYOUT_INVALID));
     }
     if manifest.network_chunk_bytes != NETWORK_CHUNK

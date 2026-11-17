@@ -147,8 +147,12 @@ fn import_ok(
             return Ok(std::fs::read(output)?);
         }
         if Instant::now() >= deadline {
+            let log =
+                std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
+            let tail: String =
+                log.chars().rev().take(3000).collect::<Vec<_>>().into_iter().rev().collect();
             return Err(format!(
-                "import of {message} never succeeded: {}",
+                "import of {message} never succeeded: {}; daemon_log_tail={tail}",
                 String::from_utf8_lossy(&result.stderr)
             )
             .into());
