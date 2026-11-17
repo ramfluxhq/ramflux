@@ -512,21 +512,29 @@ async fn attachment_scope(
         request.include_snippets = true;
         request
     };
+    // Receive records each media object under its own wire so revocation can
+    // tombstone a never-imported object. That record authorizes the filename.
+    rebuild(runtime, &target.client).await?;
+    assert_one_report_hit(
+        runtime,
+        &target.client,
+        &search_wire,
+        "received media must be searchable under its own wire before any other reference",
+    )
+    .await?;
     for (wire, reference) in
         [(other_wire.as_str(), "other-reference"), (search_wire.as_str(), "search-reference")]
     {
         admit_attachment_reference(target, &message, wire, &manifest, reference)?;
         rebuild(runtime, &target.client).await?;
         if wire == other_wire {
-            assert!(
-                runtime
-                    .query(&target.client, 1, &query("reportcanary.pdf"))
-                    .await?
-                    .take()?
-                    .items
-                    .is_empty(),
-                "an unrelated admitted attachment must not authorize the requested wire/manifest"
-            );
+            assert_one_report_hit(
+                runtime,
+                &target.client,
+                &search_wire,
+                "an unrelated admitted attachment must not authorize the requested wire/manifest",
+            )
+            .await?;
         }
     }
     let page = runtime.query(&target.client, 1, &query("reportcanary.pdf")).await?.take()?;
@@ -566,6 +574,22 @@ async fn attachment_scope(
         1,
         "revoking one attachment must preserve an independently admitted survivor in the same message"
     );
+    Ok(())
+}
+
+async fn assert_one_report_hit(
+    runtime: &LocalSearch,
+    client: &RamfluxClient,
+    search_wire: &str,
+    reason: &str,
+) -> TestResult {
+    let mut request = SearchQuery::new("attachment-query", "reportcanary.pdf");
+    request.kinds = vec![SearchKind::Attachment];
+    request.include_snippets = true;
+    let page = runtime.query(client, 1, &request).await?.take()?;
+    let item = page.items.first().ok_or("received media filename")?;
+    assert_eq!(page.items.len(), 1, "{reason}");
+    assert!(item.id.expose().ends_with(&format!("/{search_wire}/0")), "{reason}");
     Ok(())
 }
 
