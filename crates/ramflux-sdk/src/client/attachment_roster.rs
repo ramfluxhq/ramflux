@@ -97,19 +97,18 @@ impl RamfluxClient {
         now: u64,
         out: &mut Vec<MediaDevice>,
     ) -> Result<(), SdkError> {
-        let roster = self
-            .cached_roster(root)?
-            .ok_or_else(|| {
-                tracing::warn!(root, "no verified authority record is cached for this root");
-                SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
-            })?;
-        let home = homes
-            .get(root)
-            .filter(|home| !home.is_empty())
-            .ok_or_else(|| {
-                tracing::warn!(root, "no home node is known for this root");
-                SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE))
-            })?;
+        let roster = self.cached_roster(root)?.ok_or_else(|| {
+            crate::attachment_send::because(
+                CODE_AUTHORITY_UNAVAILABLE,
+                "no verified authority record is cached for a recipient root",
+            )
+        })?;
+        let home = homes.get(root).filter(|home| !home.is_empty()).ok_or_else(|| {
+            crate::attachment_send::because(
+                CODE_AUTHORITY_UNAVAILABLE,
+                "no home node is pinned for a recipient root",
+            )
+        })?;
         for device in roster.media_devices(now) {
             if only.is_some_and(|wanted| wanted != &device.device_id) {
                 continue;

@@ -43,7 +43,7 @@ mod targets;
 pub(crate) use bus::{AuthorityPin, authority, dispatch, open_store, plane_for, unix_now};
 pub(crate) use codes::{
     CODE_AUTHORITY_UNAVAILABLE, CODE_CANCELLED, CODE_DUPLICATE, CODE_LAYOUT_INVALID,
-    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal, refusal_for,
+    CODE_MANIFEST_TOO_LARGE, CODE_STREAM_CLOSED, Refusal, because, refusal_for,
 };
 pub use digest::PlaintextDigester;
 pub(crate) use grant_wrap::{load as grants_of, stored_media};

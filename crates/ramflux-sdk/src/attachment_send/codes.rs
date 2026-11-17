@@ -69,6 +69,17 @@ pub(crate) fn refusal_for(code: &str) -> Refusal {
         .map_or(Refusal::new(CODE_UPLOAD_REJECTED), |known| Refusal::new(known))
 }
 
+/// A stable refusal with a local explanation. Callers match the code; the text is for the
+/// operator and never carries key material.
+#[must_use]
+pub(crate) fn because(code: &'static str, why: &str) -> SdkError {
+    SdkError::LocalBusRefused {
+        code: code.to_owned(),
+        message: format!("{code}: {why}"),
+        body: Box::new(serde_json::json!({ "code": code })),
+    }
+}
+
 /// # Errors
 /// Returns the stable code carried by an owner result. A missing code is a normal result.
 pub(crate) fn owner_result_code(code: Option<&str>) -> Result<(), Refusal> {

@@ -315,10 +315,9 @@ pub(crate) fn plane_for(
     if let Some(plane) = account.client.attachment_plane.clone() {
         return Ok(plane);
     }
-    let handle = account
-        .connection
-        .clone()
-        .ok_or_else(|| SdkError::from(Refusal::new(CODE_AUTHORITY_UNAVAILABLE)))?;
+    let handle = account.connection.clone().ok_or_else(|| {
+        super::because(CODE_AUTHORITY_UNAVAILABLE, "the account has no live gateway connection")
+    })?;
     Ok(std::sync::Arc::new(crate::bus::attachment_plane::GatewayPlane::new(
         handle,
         tokio::runtime::Handle::current(),
