@@ -436,7 +436,8 @@ fn a_replayed_commit_proof_publishes_nothing() {
     let world = world();
     let upload = [11; 32];
     let sealed = staged_upload(&world, upload);
-    let backend = CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
+    let backend =
+        CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
     let commit =
         OwnerAttachmentOperation::commit("node-a", sealed.object, sealed.hash, 4, upload, 1)
             .unwrap();
@@ -459,7 +460,8 @@ fn a_committed_commit_retry_returns_the_stored_record_and_charges_once() {
     let world = world();
     let upload = [12; 32];
     let sealed = staged_upload(&world, upload);
-    let backend = CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
+    let backend =
+        CountingBackend { inner: &world.backend, commits: std::sync::atomic::AtomicUsize::new(0) };
     let commit =
         OwnerAttachmentOperation::commit("node-a", sealed.object, sealed.hash, 4, upload, 1)
             .unwrap();

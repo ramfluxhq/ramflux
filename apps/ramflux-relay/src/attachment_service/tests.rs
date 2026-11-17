@@ -15,9 +15,9 @@ use ramflux_node_core::{
     AttachmentMeshRequest, RelayRedbStore, RequesterWire,
 };
 use ramflux_protocol::large_attachment::{
-    AttachmentRegistrationReceipt, AttachmentRetirement, ContentManifest,
-    OwnerAttachmentOperation, OwnerBind, OwnerPut, OwnerReserve, QualifiedOwner, RequesterPop,
-    ScopedAttachmentGrant, SegmentLayout, digest, requester_digest,
+    AttachmentRegistrationReceipt, AttachmentRetirement, ContentManifest, OwnerAttachmentOperation,
+    OwnerBind, OwnerPut, OwnerReserve, QualifiedOwner, RequesterPop, ScopedAttachmentGrant,
+    SegmentLayout, digest, requester_digest,
 };
 
 use super::{AttachmentService, serve_one};
@@ -135,7 +135,13 @@ fn certs(root: &std::path::Path) -> Result<Certs, Box<dyn std::error::Error>> {
             "ramflux-gateway",
             "spiffe://localhost/ramflux-gateway/ramflux-gateway",
         )?,
-        other: issue(root, &ca_cert, &ca_key, "ramflux-router", "spiffe://localhost/ramflux-router")?,
+        other: issue(
+            root,
+            &ca_cert,
+            &ca_key,
+            "ramflux-router",
+            "spiffe://localhost/ramflux-router",
+        )?,
     })
 }
 

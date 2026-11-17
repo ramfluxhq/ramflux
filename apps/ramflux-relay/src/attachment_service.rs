@@ -16,8 +16,8 @@ use ramflux_node_core::{
     ATTACHMENT_CALL_BODY_MAX, ATTACHMENT_MESH_PATH, AttachmentAuthority, AttachmentAuthorityReply,
     AttachmentCall, AttachmentLedgerError, AttachmentMeshReply, AttachmentMeshRequest,
     AttachmentOwner, AttachmentPolicy, AttachmentReplayError, AttachmentReplayProof,
-    AttestedRegistration, NodeServiceConfig, OwnerAdmission, OwnerAdmissionError, RelayRedbStore, RequesterWire,
-    RetirementOutcome, ScopedGrantRegistry, WireBytes,
+    AttestedRegistration, NodeServiceConfig, OwnerAdmission, OwnerAdmissionError, RelayRedbStore,
+    RequesterWire, RetirementOutcome, ScopedGrantRegistry, WireBytes,
 };
 use ramflux_protocol::large_attachment::{
     AttachmentRegistrationReceipt, AttachmentRetirement, ContentManifest, QualifiedOwner,
@@ -204,13 +204,25 @@ impl AttachmentService {
         let registry = self.registry.with_deadline(Some(Instant::now() + REQUEST_BUDGET));
         match call {
             AttachmentCall::Authority => self.authority(),
-            AttachmentCall::Owner { operation, body, proof, signature } => {
-                owner(&registry, &self.backend, requester, [&operation.0, &body.0, &proof.0], &signature.0, now)
-            }
+            AttachmentCall::Owner { operation, body, proof, signature } => owner(
+                &registry,
+                &self.backend,
+                requester,
+                [&operation.0, &body.0, &proof.0],
+                &signature.0,
+                now,
+            ),
             AttachmentCall::Register { upload_id, manifest, grant } => {
                 self.register(&registry, requester, [&upload_id.0, &manifest.0, &grant.0], now)
             }
-            AttachmentCall::Read { capability, object_id, manifest_hash, index, offset, length } => {
+            AttachmentCall::Read {
+                capability,
+                object_id,
+                manifest_hash,
+                index,
+                offset,
+                length,
+            } => {
                 let range = ReadRange { index, offset, length };
                 self.read(
                     &registry,
@@ -306,10 +318,11 @@ impl AttachmentService {
         if getrandom::fill(&mut nonce).is_err() {
             return refuse(CODE_UNAVAILABLE);
         }
-        let proof = AttachmentReplayProof { nonce, issued_at: now, expires_at: now.saturating_add(30) };
-        let lease = match registry.admit_reader_after_authentication(
-            requester, &grant, RIGHT_GET, &proof, now,
-        ) {
+        let proof =
+            AttachmentReplayProof { nonce, issued_at: now, expires_at: now.saturating_add(30) };
+        let lease = match registry
+            .admit_reader_after_authentication(requester, &grant, RIGHT_GET, &proof, now)
+        {
             Ok(lease) => lease,
             Err(error) => return replay_code(&error),
         };
@@ -340,13 +353,14 @@ impl AttachmentService {
             .lookup(&grant.grant().grant_id)
             .map_err(|_| CODE_UNAVAILABLE)?
             .ok_or(CODE_NOT_GRANTEE)?;
-        let owner = AttachmentOwner::from_authenticated_session(&grant.grant().owner.account_anchor)
-            .map_err(|_| CODE_LAYOUT)?;
-        let record = registry
-            .ledger_reservation(&owner, &row.upload_id)
-            .map_err(|_| CODE_UNAVAILABLE)?;
+        let owner =
+            AttachmentOwner::from_authenticated_session(&grant.grant().owner.account_anchor)
+                .map_err(|_| CODE_LAYOUT)?;
+        let record =
+            registry.ledger_reservation(&owner, &row.upload_id).map_err(|_| CODE_UNAVAILABLE)?;
         let generation = record.committed_generation.ok_or(CODE_UNAVAILABLE)?;
-        let native = ContentManifest::decode_signed(&record.manifest_bytes).map_err(|_| CODE_UNAVAILABLE)?;
+        let native =
+            ContentManifest::decode_signed(&record.manifest_bytes).map_err(|_| CODE_UNAVAILABLE)?;
         let index = u32::try_from(index).map_err(|_| CODE_LAYOUT)?;
         BackendSegment::from_manifest(&native, generation, index).map_err(|_| CODE_LAYOUT)
     }
@@ -370,10 +384,11 @@ impl AttachmentService {
         let grant_id = signed.request().grant_id;
         let (state, erased) = match registry.retire_attested(requester, &signed, now) {
             Ok(RetirementOutcome::Retired) => {
-                let erased = registry.erase_unreferenced(&grant_id, &self.backend).unwrap_or_else(|error| {
-                    tracing::warn!(%error, "attachment erase deferred");
-                    false
-                });
+                let erased =
+                    registry.erase_unreferenced(&grant_id, &self.backend).unwrap_or_else(|error| {
+                        tracing::warn!(%error, "attachment erase deferred");
+                        false
+                    });
                 ("retired", erased)
             }
             Ok(RetirementOutcome::RevocationPending) => ("retirement_pending", false),
@@ -407,14 +422,7 @@ fn owner(
         return refuse(CODE_LAYOUT);
     }
     let admitted = registry.admit_owner_operation_after_authentication(
-        &OwnerAdmission {
-            operation,
-            body,
-            proof,
-            proof_signature: &signature,
-            requester,
-            now,
-        },
+        &OwnerAdmission { operation, body, proof, proof_signature: &signature, requester, now },
         backend,
     );
     match admitted {

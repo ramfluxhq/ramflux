@@ -63,7 +63,8 @@ pub use loopback::transport_submit_result;
 pub use mesh_http::{
     MeshHttpClient, RawMeshPost, RawMeshResponse, close_mesh_server_stream, mesh_http_get_json,
     mesh_http_post_json, mesh_http_post_json_with_peer_ca_pems, mesh_http_post_status_body,
-    read_mesh_http_request, read_mesh_http_request_limited, write_mesh_json_response, write_mesh_text_response,
+    read_mesh_http_request, read_mesh_http_request_limited, write_mesh_json_response,
+    write_mesh_text_response,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use mesh_quic::mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async;

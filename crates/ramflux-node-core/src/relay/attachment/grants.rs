@@ -409,9 +409,8 @@ impl ScopedGrantRegistry {
             return Ok(false);
         }
         let grant = self.stored_grant(&row)?;
-        let owner = AttachmentOwner::from_authenticated_session(
-            &grant.grant().owner.account_anchor,
-        )?;
+        let owner =
+            AttachmentOwner::from_authenticated_session(&grant.grant().owner.account_anchor)?;
         if self.upload_has_live_grant(&row.upload_id)? {
             return Ok(false);
         }
