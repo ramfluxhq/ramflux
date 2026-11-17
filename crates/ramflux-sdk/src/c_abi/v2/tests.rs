@@ -811,6 +811,74 @@ fn native_clients_cannot_submit_raw_routing_without_explicit_capability() {
     assert_eq!(operation, 0, "refused raw routing cannot allocate an operation");
 }
 
+#[test]
+fn typing_submit_is_admitted_without_the_raw_message_capability() {
+    let fixture = Fixture::open();
+    let admit = |body: Value| {
+        let request = serde_json::to_vec(&json!({
+            "sdk_api": "message",
+            "method": "message.submit",
+            "body": body,
+            "deadline_ms": deadline(),
+        }))
+        .expect("test: request");
+        let mut operation = 99;
+        let code =
+            ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation);
+        (code, operation)
+    };
+    let typing = json!({
+        "requestId": "op",
+        "accountId": "acct",
+        "send": {
+            "conversationId": "dm",
+            "operationId": "op",
+            "content": {"typing": {"active": true}}
+        }
+    });
+    let (code, operation) = admit(typing);
+    assert_eq!(code, 0, "typing is not a raw plaintext submit");
+    assert_ne!(operation, 0, "an admitted typing submit owns an operation");
+    assert_eq!(ramflux_v2_operation_cancel(fixture.handle, operation), 0, "cancel the waiter");
+    let mixed = json!({
+        "send": {"content": {"typing": {"active": true}, "message": {"text": "hidden"}}}
+    });
+    let (code, operation) = admit(mixed);
+    assert_eq!(code, 12, "a message beside typing stays a raw submit");
+    assert_eq!(operation, 0, "a mixed submit cannot allocate an operation");
+    let disguised = json!({
+        "typing": true,
+        "send": {"content": {"message": {"text": "hidden"}}}
+    });
+    let (code, operation) = admit(disguised);
+    assert_eq!(code, 12, "a top-level typing flag cannot carry plaintext");
+    assert_eq!(operation, 0);
+    let rooted = tempfile::tempdir().expect("test: isolated data root");
+    let config = serde_json::to_vec(&json!({
+        "data_root": rooted.path(),
+        "allow_raw_messages": true,
+    }))
+    .expect("test: config");
+    let mut handle = 0;
+    assert_eq!(ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle), 0);
+    let raw = serde_json::to_vec(&json!({
+        "sdk_api": "message",
+        "method": "message.submit",
+        "body": {},
+        "deadline_ms": deadline(),
+    }))
+    .expect("test: raw request");
+    let mut operation = 0;
+    assert_eq!(
+        ramflux_v2_execute(handle, raw.as_ptr(), raw.len(), &raw mut operation),
+        0,
+        "the explicit capability still admits a raw submit"
+    );
+    assert_ne!(operation, 0);
+    assert_eq!(ramflux_v2_operation_cancel(handle, operation), 0);
+    assert_eq!(ramflux_v2_client_close(handle), 0);
+}
+
 #[cfg(feature = "card-runtime")]
 #[test]
 fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dyn std::error::Error>>
