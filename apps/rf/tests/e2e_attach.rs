@@ -32,13 +32,20 @@ fn file_bytes(length: usize, seed: u8) -> Vec<u8> {
 /// peer's layer declaration is published.
 fn until_ok(daemon: &Daemon, args: &[&str]) -> e2e::Result<Value> {
     let deadline = Instant::now() + STEP;
+    let mut first = None;
     loop {
         match rf_json_timeout(&daemon.socket, args, CALL) {
             Ok(value) => return Ok(value),
             Err(error) if Instant::now() >= deadline => {
-                return Err(format!("{args:?} never succeeded: {error}").into());
+                return Err(format!(
+                    "{args:?} never succeeded: {error}; first refusal: {first:?}"
+                )
+                .into());
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+            Err(error) => {
+                first.get_or_insert_with(|| error.to_string());
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
     }
 }
