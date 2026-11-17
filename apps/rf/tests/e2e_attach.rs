@@ -77,7 +77,14 @@ fn send_fresh(
                         text.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect()
                     })
                     .collect();
-                return Err(format!("send never succeeded; refusals: {all:#?}").into());
+                let log = std::fs::read_to_string(daemon.data_root.join("daemon.log"))
+                    .unwrap_or_default();
+                let tail: String =
+                    log.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
+                return Err(format!(
+                    "send never succeeded; refusals: {all:#?}; daemon_log_tail={tail}"
+                )
+                .into());
             }
             Err(error) => {
                 refusals.push(error.to_string());
