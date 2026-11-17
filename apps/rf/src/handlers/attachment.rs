@@ -532,7 +532,11 @@ async fn send(call: &mut Call<'_>) -> Result<Value, RfError> {
         call.method,
         body,
     );
-    frame.operation_id = Some(call.operation.to_owned());
+    // Only the send is journaled by operation id. Prepare and import calls are idempotent in
+    // the daemon by their own ids, and a journaled retry would replay a stale answer.
+    if call.method == "conversation.send" {
+        frame.operation_id = Some(call.operation.to_owned());
+    }
     match call.bus.request_frame_structured(frame).await {
         Ok(value) => Ok(value),
         Err(SdkError::LocalBusRefused { code, message, .. }) => {
