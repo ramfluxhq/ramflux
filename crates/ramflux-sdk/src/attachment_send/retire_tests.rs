@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use super::codes::{CODE_ATTACHMENT_DELETED, CODE_NOT_GRANTEE, CODE_RETIREMENT_PENDING};
 use super::handles::{self, RETIREMENT, TOMBSTONE};
 use super::import_job::{self, Importer, SourcePin};
-use super::listener::{Listener, NOW};
+use super::listener::Listener;
 use super::meta::{Intent, Phase, Recipient, Row};
 use super::publish::{self, PublishInput};
 use super::retire::{self, RetireCtx, Sent, Source};
@@ -78,17 +78,22 @@ struct Fixture {
     owner: QualifiedOwner,
     key: SigningKey,
     authority: [u8; 32],
+    now: u64,
 }
 
 impl Fixture {
     fn new() -> Self {
         let root = Root::new().unwrap();
         let vault = MemoryPrimaryVault::default();
-        let account = create(&root.0, "human", &vault, NOW).unwrap();
+        let now = crate::custody::network_now().unwrap();
+        let account = create(&root.0, "human", &vault, now).unwrap();
         let index = AccountIndex::open(&root.0).unwrap();
         let db_key = AccountDbKey::generate().unwrap();
         let db = AccountDb::open(&index, "human", &db_key).unwrap();
-        let (actor, credentials) = account.credentials(&vault, "primary", NOW).unwrap();
+        let (actor, credentials) = account
+            .credentials(&vault, "primary", now)
+            .map_err(|error| format!("credentials: {error:?}"))
+            .unwrap();
         let key = credentials.signing.signing_key.clone();
         let owner = QualifiedOwner {
             account_anchor: actor.account_anchor,
@@ -99,9 +104,22 @@ impl Fixture {
         };
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), "human", [3; 32]).unwrap();
-        let listener = Listener::open(dir.path(), owner.clone()).unwrap();
+        let listener = Listener::open_at(dir.path(), owner.clone(), now).unwrap();
         let authority = SigningKey::from_bytes(&[77; 32]).verifying_key().to_bytes();
-        Self { _root: root, dir, vault, account, index, db, store, listener, owner, key, authority }
+        Self {
+            _root: root,
+            dir,
+            vault,
+            account,
+            index,
+            db,
+            store,
+            listener,
+            owner,
+            key,
+            authority,
+            now,
+        }
     }
 
     fn ctx(&self) -> RetireCtx<'_> {
@@ -130,14 +148,14 @@ impl Fixture {
                     mime: "application/octet-stream",
                 },
                 true,
-                NOW,
+                self.now,
                 None,
             )
             .unwrap();
-        self.store.chunk(&row.prepare_id, row.generation, 0, BODY, NOW).unwrap();
+        self.store.chunk(&row.prepare_id, row.generation, 0, BODY, self.now).unwrap();
         let digest = *blake3::hash(BODY).as_bytes();
         let len = u64::try_from(BODY.len()).unwrap();
-        self.store.finish(&row.prepare_id, row.generation, len, digest, NOW).unwrap()
+        self.store.finish(&row.prepare_id, row.generation, len, digest, self.now).unwrap()
     }
 
     fn send(&self, operation: &str, peers: &[&Peer]) -> (Row, MediaRef) {
@@ -153,7 +171,7 @@ impl Fixture {
                 audience: "node-a",
                 authority_generation: 4,
                 source: "node-a",
-                now: NOW,
+                now: self.now,
                 caption: "",
             },
             std::slice::from_ref(&row),
@@ -164,8 +182,12 @@ impl Fixture {
 
     fn import(&self, who: &Peer, media: &MediaRef) -> Result<Vec<u8>, super::codes::Refusal> {
         self.listener.set_reader(who.reader.clone());
-        let pin =
-            SourcePin { source: "node-a", generation: 4, public_key: &self.authority, now: NOW };
+        let pin = SourcePin {
+            source: "node-a",
+            generation: 4,
+            public_key: &self.authority,
+            now: self.now,
+        };
         import_job::import_entry(
             &self.listener,
             media,
@@ -199,13 +221,14 @@ fn revoke_refuses_later_reads_wipes_keys_and_is_erased_only_with_the_source_answ
     let (a, b) = (peer(1), peer(2));
     let (row, media) = fixture.send("send", &[&a, &b]);
     let sent = [Sent { prepare_id: &row.prepare_id, media: &media }];
-    retire::bind_message(&fixture.ctx(), "m1", &sent, &fixture.source(), NOW).unwrap();
+    retire::bind_message(&fixture.ctx(), "m1", &sent, &fixture.source(), fixture.now).unwrap();
     retire::barrier_db(&fixture.db, "m1").unwrap();
     assert_eq!(fixture.import(&a, &media).unwrap(), BODY, "readable before revoke");
     assert!(secret_present(&fixture, &row), "the sender still holds the key before revoke");
 
     let state =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m1", &fixture.source(), NOW).unwrap();
+        retire::revoke(&fixture.ctx(), fixture.plane(), "m1", &fixture.source(), fixture.now)
+            .unwrap();
     assert_eq!(state, "relay_erased", "both grants retired and the source erased the object");
     assert_eq!(fixture.listener.retires(), 2, "one retirement per grant");
     assert!(fixture.erased("m1"));
@@ -229,10 +252,11 @@ fn an_unreachable_source_is_retirement_pending_until_a_sweep_delivers() {
     let a = peer(1);
     let (row, media) = fixture.send("send", &[&a]);
     let sent = [Sent { prepare_id: &row.prepare_id, media: &media }];
-    retire::bind_message(&fixture.ctx(), "m2", &sent, &fixture.source(), NOW).unwrap();
+    retire::bind_message(&fixture.ctx(), "m2", &sent, &fixture.source(), fixture.now).unwrap();
     fixture.listener.set_unreachable(true);
     let state =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), NOW).unwrap();
+        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+            .unwrap();
     assert_eq!(state, "retirement_pending", "a timeout is never success");
     assert_eq!(fixture.listener.retires(), 0);
     assert!(!fixture.erased("m2"));
@@ -246,15 +270,18 @@ fn an_unreachable_source_is_retirement_pending_until_a_sweep_delivers() {
     );
     // A second revoke while still unreachable stays pending and queues nothing twice.
     let again =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), NOW).unwrap();
+        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+            .unwrap();
     assert_eq!(again, "retirement_pending");
 
     fixture.listener.set_unreachable(false);
-    let swept = retire::sweep(&fixture.ctx(), fixture.plane(), &fixture.source(), NOW).unwrap();
+    let swept =
+        retire::sweep(&fixture.ctx(), fixture.plane(), &fixture.source(), fixture.now).unwrap();
     assert_eq!(swept.retired, 1);
     assert!(fixture.erased("m2"), "the retried delivery reaches relay_erased");
     let repeated =
-        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), NOW).unwrap();
+        retire::revoke(&fixture.ctx(), fixture.plane(), "m2", &fixture.source(), fixture.now)
+            .unwrap();
     assert_eq!(repeated, "relay_erased");
 }
 
@@ -277,7 +304,7 @@ fn retiring_one_grant_leaves_the_other_recipient_readable() {
         &sent,
         &[only],
         &fixture.source(),
-        NOW,
+        fixture.now,
     )
     .unwrap();
     assert_eq!(outcome.retired, 1);
@@ -297,12 +324,12 @@ fn revoke_fences_an_open_import_handle_and_removes_its_staging_file() {
     let a = peer(1);
     let (row, media) = fixture.send("send", &[&a]);
     let sent = [Sent { prepare_id: &row.prepare_id, media: &media }];
-    retire::bind_message(&fixture.ctx(), "m4", &sent, &fixture.source(), NOW).unwrap();
+    retire::bind_message(&fixture.ctx(), "m4", &sent, &fixture.source(), fixture.now).unwrap();
     let staging = fixture.dir.path().join("staging-m4.bin");
     std::fs::write(&staging, b"plaintext in flight").unwrap();
     handles::test_register_job("import-m4", "human", "m4", staging.clone());
     handles::test_register_job("import-other", "human", "other-message", staging.clone());
-    retire::revoke(&fixture.ctx(), fixture.plane(), "m4", &fixture.source(), NOW).unwrap();
+    retire::revoke(&fixture.ctx(), fixture.plane(), "m4", &fixture.source(), fixture.now).unwrap();
     assert!(handles::test_job_cancelled("import-m4"), "the open handle is fenced");
     assert!(!handles::test_job_cancelled("import-other"), "another message is untouched");
     assert!(!staging.exists(), "the staging file is removed");
@@ -312,7 +339,7 @@ fn revoke_fences_an_open_import_handle_and_removes_its_staging_file() {
 fn cancel_wipes_the_key_and_snapshot_and_a_missing_record_blocks_the_wipe() {
     let fixture = Fixture::new();
     let row = fixture.accept("cancel");
-    let drawn = fixture.store.draw(&row.prepare_id, NOW).unwrap();
+    let drawn = fixture.store.draw(&row.prepare_id, fixture.now).unwrap();
     fixture.store.mark(drawn.clone(), Phase::Committed).unwrap();
     assert!(secret_present(&fixture, &row));
     // No durable fence record: the wipe must fail and keep the key.
@@ -381,7 +408,7 @@ fn cancel_after_commit_retires_registered_grants_of_the_unadmitted_prepare() {
         fixture.plane(),
         &row.prepare_id,
         &fixture.source(),
-        NOW,
+        fixture.now,
     )
     .unwrap();
     assert_eq!(outcome.retired, 1, "the registered grant is retired");

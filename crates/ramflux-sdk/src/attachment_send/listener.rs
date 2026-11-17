@@ -45,6 +45,11 @@ pub(super) struct Listener {
 
 impl Listener {
     pub(super) fn open(dir: &Path, requester: QualifiedOwner) -> Result<Self, String> {
+        Self::open_at(dir, requester, NOW)
+    }
+
+    /// A listener whose ledger clock is `now`, for callers whose account clock is the real one.
+    pub(super) fn open_at(dir: &Path, requester: QualifiedOwner, now: u64) -> Result<Self, String> {
         let store =
             RelayRedbStore::open(dir.join("relay.redb")).map_err(|error| error.to_string())?;
         let authority = SigningKey::from_bytes(&[77; 32]);
@@ -66,7 +71,7 @@ impl Listener {
             reader: Mutex::new(requester.clone()),
             requester,
             authority,
-            now: NOW,
+            now,
             reserves: AtomicU64::new(0),
             reads: AtomicU64::new(0),
             retires: AtomicU64::new(0),
