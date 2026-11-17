@@ -23,6 +23,8 @@ pub(crate) enum RfError {
     #[cfg(not(unix))]
     #[error("{command} is unsupported on this platform.")]
     UnsupportedPlatform { command: &'static str },
+    #[error("{code}: {message}")]
+    Refused { code: &'static str, message: String },
     #[error("{0}")]
     Message(String),
     #[error("SDK error: {0}")]
@@ -78,5 +80,6 @@ async fn run() -> Result<(), RfError> {
         Command::Surface(command) => handlers::surface::handle_surface(cli.socket, command).await,
         Command::Task(command) => handlers::task::handle_task(cli.socket, command).await,
         Command::Admin(command) => handlers::admin::handle_admin(command),
+        Command::Diag(command) => handlers::diag::handle(cli.socket, command).await,
     }
 }

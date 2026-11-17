@@ -526,8 +526,8 @@ pub fn spawn_daemon_with_env(
         .arg(&data_root)
         .arg("--itest-memory-vault")
         .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
-        .envs(env.iter().copied())
-        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug");
+        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug")
+        .envs(env.iter().copied());
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
     let deadline = Instant::now() + SOCKET_TIMEOUT;

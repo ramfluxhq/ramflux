@@ -683,6 +683,15 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "diag",
+      "key_export": false,
+      "name": "diag.residue",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
       "name": "device.authorize",
@@ -1569,6 +1578,15 @@
       "key_export": false,
       "name": "object.put.status",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "object",
+      "key_export": false,
+      "name": "object.revoke",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },

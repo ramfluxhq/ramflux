@@ -521,6 +521,8 @@ crates/ramflux-sdk/src/bus/dispatch/object.rs | prepare_finish_job | 1 | E | exc
 crates/ramflux-sdk/src/bus/dispatch/object.rs | prepare_local_first_network | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/object.rs | prepare_local_first_network | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/object.rs | rehydrate_one_object_put_spool | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/object_revoke.rs | dispatch | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/object_revoke.rs | dispatch | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/object_status.rs | upload_status | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | dispatch_surface_inner | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | request_resync | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -544,6 +546,7 @@ crates/ramflux-sdk/src/bus/generated_typing.rs | execute | 1 | E | excluded=loca
 crates/ramflux-sdk/src/bus/group_delivery.rs | resolve | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/io.rs | read_local_bus_frame | 1 | A | strict=parse_i_json_secret; admission=original local bus frame before nested typed pairing admission
 crates/ramflux-sdk/src/bus/lifecycle.rs | import_account_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/push_receiver/apply_w1.rs | admitted_work_entry | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/read_model/approvals.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/read_model/capture.rs | capture | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/read_model/capture.rs | object_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

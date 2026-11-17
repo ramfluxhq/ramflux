@@ -573,24 +573,19 @@ The demo wrapper retains these inputs across upgrades and snapshot rollback and
 passes them only to the router. Omitted inputs stay absent, preserving the unset
 policy. Apply configuration through the normal operator-managed deployment flow.
 
-Inspect the running router through the existing authenticated mesh admin listener:
-
-```sh
-# Load the private operator environment; never put the token in argv.
-set -a
-. "$DEMO_DATA_DIR/identity.env"
-set +a
-"$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
-```
+Inspect the running router through the existing authenticated mesh admin listener.
+The route is `POST /admin/custody/budgets`. The JSON body carries `admin_token`
+set to `RAMFLUX_ROUTER_ADMIN_TOKEN` from `identity.env`, and the caller
+authenticates as the gateway mesh peer. Keep the token and the mesh certificate
+operator-only. Do not put the token on a command line.
 
 Enable the independent router administration opt-in first: set
 `RAMFLUX_ROUTER_ADMIN_ENABLED=1` for the demo wrapper, or explicitly select
 `docker-compose.router-admin.yml` with `RAMFLUX_ROUTER_ADMIN_PORT`
 for direct Compose. The federation admin overlay does not publish this port. The router listener
 uses loopback TCP 59488 (`RAMFLUX_ROUTER_ADMIN_PORT`). `DEMO_MESH_PORT` reaches
-federation and does not serve this router route. The tool
-uses the existing gateway mesh certificate and router admin token. Keep both
-operator-only. This path is not forwarded by the public gateway.
+federation and does not serve this router route.
+This path is not forwarded by the public gateway.
 The JSON result includes `observed_at` and a row per durable daily/minute window,
 plus the global lifetime ceiling: `scope`, truncated node-keyed `prefix` hash,
 `budget`, `count`, `limit`, and `reset_at` (Unix seconds, UTC). A null reset is a

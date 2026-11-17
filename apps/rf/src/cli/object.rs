@@ -23,6 +23,8 @@ pub(crate) enum ObjectAction {
     Import(ObjectImport),
     List(AccountSelector),
     Share(ObjectShare),
+    Thumbnail(ObjectThumbnail),
+    Revoke(ObjectRevoke),
     Delete(ObjectDelete),
 }
 
@@ -111,6 +113,44 @@ pub(crate) struct ObjectShare {
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) out_package: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct ObjectThumbnail {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct ObjectRevoke {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) object: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) recipient: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) link: String,
+    #[arg(long)]
+    pub(crate) effective_at: i64,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) reason: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) recipient_device: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) recipient_principal_commitment: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) target: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) sender: Option<String>,
 }
 
 #[derive(Args)]

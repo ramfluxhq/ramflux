@@ -244,7 +244,7 @@ fn observe_typing(world: &mut World<'_>) -> e2e::Result<TypingObservation> {
 fn explicit_stop(world: &World<'_>) -> e2e::Result<Vec<String>> {
     let start_op = unique("live-typing-start");
     let stop_op = unique("live-typing-stop");
-    let watched = watch_ready(world, 8, &start_op, Some(&stop_op))?;
+    let watched = watch_ready(world, 8, &start_op, Some(&stop_op), false)?;
     assert_typing_cleared(&watched)?;
     Ok(vec![start_op, stop_op])
 }
@@ -253,14 +253,16 @@ fn explicit_stop(world: &World<'_>) -> e2e::Result<Vec<String>> {
 /// within 5s of its `expires_at`. Silence after the active row fails.
 fn unforced_expiry(world: &World<'_>) -> e2e::Result<String> {
     let operation = unique("live-typing-expire");
-    let watched = watch_ready(world, 8, &operation, None)?;
+    let watched = watch_ready(world, 8, &operation, None, false)?;
     assert_unforced_expiry(&watched, 8)?;
     Ok(operation)
 }
 
 fn replay_while_live(world: &mut World<'_>) -> e2e::Result<String> {
     let operation = unique("live-typing-replay");
-    let seen = watch_ready(world, 1, &operation, None)?;
+    // 15s is the deadline for cadence and admission. The watch returns on the
+    // active frame, so reconnect still starts inside that frame.
+    let seen = watch_ready(world, 15, &operation, None, true)?;
     reconnect_bob(world)?;
     let again = watch(world, 1)?;
     expect_empty_watch(&again)?;
@@ -371,6 +373,7 @@ fn watch_ready(
     secs: u64,
     start_op: &str,
     stop_op: Option<&str>,
+    until_active: bool,
 ) -> e2e::Result<Value> {
     let daemon = world.bob_daemon()?;
     let socket = daemon.socket.clone();
@@ -380,8 +383,15 @@ fn watch_ready(
     let ready_for_child = ready.clone();
     let watched_account = account.clone();
     let worker = std::thread::spawn(move || {
-        watch_at(&socket, &watched_account, &conversation, secs, Some(ready_for_child.as_path()))
-            .map_err(|error| error.to_string())
+        watch_at(
+            &socket,
+            &watched_account,
+            &conversation,
+            secs,
+            Some(ready_for_child.as_path()),
+            until_active,
+        )
+        .map_err(|error| error.to_string())
     });
     if let Err(error) =
         wait_json(daemon, &["account", "status", "--account", &account], |_| ready.exists())
@@ -520,7 +530,7 @@ fn assert_typing_absent(world: &World<'_>, typing: &TypingObservation) -> e2e::R
         let changes = read_model(world, author, &["--after-seq", "0", "--limit", "100"])?;
         reject_typing_document(&changes, &typing.ids)?;
     }
-    let after = capture_stores(world)?;
+    let after = settled_stores(world)?;
     assert_same_stores(&typing.before, &after)?;
     let mut needles = vec!["message.transient".to_owned()];
     needles.extend(typing.ids.iter().cloned());
@@ -571,8 +581,8 @@ fn value_rows<'a>(value: &'a Value, key: &str) -> Vec<&'a Value> {
     value.get(key).and_then(Value::as_array).map(|rows| rows.iter().collect()).unwrap_or_default()
 }
 
-/// Earlier sends and reads still produce asynchronous receipts and acknowledgements. Take the
-/// baseline only once consecutive captures agree, inside the bounded poll budget.
+/// Earlier sends still publish delivery-receipt outbox rows. The baseline is ready only after
+/// those rows are gone and consecutive captures agree. The poll budget is the deadline.
 fn settled_stores(world: &World<'_>) -> e2e::Result<Persistence> {
     const AGREEING_CAPTURES: u32 = 4;
     let last = std::cell::RefCell::new(None::<Persistence>);
@@ -582,15 +592,27 @@ fn settled_stores(world: &World<'_>) -> e2e::Result<Persistence> {
             agreeing.set(0);
             return false;
         };
-        let same = last
-            .borrow()
-            .as_ref()
-            .is_some_and(|previous| assert_same_stores(previous, &now).is_ok());
+        let same = !delivery_receipt_pending(&now)
+            && last
+                .borrow()
+                .as_ref()
+                .is_some_and(|previous| assert_same_stores(previous, &now).is_ok());
         agreeing.set(if same { agreeing.get() + 1 } else { 0 });
         *last.borrow_mut() = Some(now);
         agreeing.get() >= AGREEING_CAPTURES
     })?;
     last.into_inner().ok_or_else(|| "no settled store capture".into())
+}
+
+fn delivery_receipt_pending(snapshot: &Persistence) -> bool {
+    snapshot.client.values().any(|tables| {
+        tables.get("runtime_outbox").is_some_and(|rows| {
+            rows.iter().any(|row| {
+                field(row, 0) == "runtime_actor_state"
+                    && field(row, 2).starts_with("delivery-receipt/")
+            })
+        })
+    })
 }
 
 fn capture_stores(world: &World<'_>) -> e2e::Result<Persistence> {
@@ -934,7 +956,7 @@ fn expect_empty_watch(value: &Value) -> e2e::Result<()> {
 }
 
 fn watch(world: &World<'_>, secs: u64) -> e2e::Result<Value> {
-    watch_at(&world.bob_daemon()?.socket, &world.bob.id, world.conversation, secs, None)
+    watch_at(&world.bob_daemon()?.socket, &world.bob.id, world.conversation, secs, None, false)
 }
 
 fn watch_at(
@@ -943,6 +965,7 @@ fn watch_at(
     conversation: &str,
     secs: u64,
     ready: Option<&std::path::Path>,
+    until_active: bool,
 ) -> e2e::Result<Value> {
     let mut args = vec![
         "conversation".to_owned(),
@@ -958,6 +981,9 @@ fn watch_at(
     if let Some(path) = ready {
         args.push("--ready-file".to_owned());
         args.push(path.display().to_string());
+    }
+    if until_active {
+        args.push("--until-active".to_owned());
     }
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     rf_json_timeout(socket, &refs, Duration::from_secs(secs.saturating_add(8)))
@@ -1105,6 +1131,40 @@ fn only_listed_client_rows_are_exempt() {
     ] {
         assert!(!exempt_client_row(table, row), "test: {table} row `{row}` must be compared");
     }
+}
+
+fn client_snapshot(account: &str, table: &str, rows: &[&str]) -> Persistence {
+    let tables = BTreeMap::from([(
+        table.to_owned(),
+        rows.iter().map(|row| (*row).to_owned()).collect::<Vec<_>>(),
+    )]);
+    Persistence {
+        client: BTreeMap::from([(account.to_owned(), tables)]),
+        node: BTreeMap::new(),
+        wal: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+#[test]
+fn delivery_receipt_outbox_rows_are_not_a_settled_baseline() {
+    let pending = client_snapshot(
+        "bob",
+        "runtime_outbox",
+        &["runtime_actor_state\tupdate\tdelivery-receipt/msg-1\t{}"],
+    );
+    assert!(
+        delivery_receipt_pending(&pending),
+        "test: a delivery-receipt outbox row is still pending"
+    );
+    let cleared = client_snapshot("bob", "runtime_outbox", &[]);
+    assert!(!delivery_receipt_pending(&cleared), "test: an empty outbox is not pending");
+    let other = client_snapshot(
+        "bob",
+        "runtime_outbox",
+        &["runtime_actor_state\tupdate\tdm-pair/session/abc\t{}"],
+    );
+    assert!(!delivery_receipt_pending(&other), "test: a non-receipt outbox row is not this wait");
 }
 
 fn node_snapshot(service: &str, table: &str, rows: &[&str]) -> Persistence {

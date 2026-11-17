@@ -51,7 +51,7 @@ methods! {
     LocalRead(Always) => Reader: ["search.query", "search.index.status"];
     LocalRead(Always) => Supervisor: ["search.cancel", "search.cursor.close", "search.index.rebuild.cancel"];
     LocalMutation(Always) => Actor: ["search.index.rebuild"];
-    LocalRead(Always) => Actor: ["account.config.get"];
+    LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
     LocalRead(Always) => Actor: ["a2i.list_pending", "device.pair.status", "device.transfer.status"];
@@ -219,6 +219,7 @@ methods! {
         "conversation.delete",
         "object.fetch",
         "object.import",
+        "object.revoke",
         "object.share",
         "object.transfer.resume",
         "surface.action",

@@ -5,6 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 mod list;
+#[path = "object_thumbnail.rs"]
+mod thumbnail;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Result<(), RfError> {
@@ -96,6 +98,30 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
                 std::fs::write(out_package, serde_json::to_vec_pretty(package)?)?;
             }
             print_json(&response)
+        }
+        ObjectAction::Thumbnail(thumbnail) => thumbnail::print(&mut bus, thumbnail).await,
+        ObjectAction::Revoke(revoke) => {
+            let request = LocalBusObjectRevokeRequest {
+                object_id: revoke.object,
+                conversation_id: revoke.conversation,
+                recipient_principal_id: revoke.recipient,
+                link_id: revoke.link,
+                reason: revoke.reason,
+                effective_at: revoke.effective_at,
+                recipient_device_id: revoke.recipient_device,
+                recipient_principal_commitment: revoke.recipient_principal_commitment,
+                target_delivery_id: revoke.target,
+                sender_id: revoke.sender,
+            };
+            print_json(
+                &bus.request(
+                    Some(revoke.account),
+                    "object",
+                    "object.revoke",
+                    serde_json::to_value(request)?,
+                )
+                .await?,
+            )
         }
         ObjectAction::Delete(delete) => {
             let request = LocalBusObjectDeleteRequest {

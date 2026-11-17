@@ -610,6 +610,7 @@ impl RamfluxClient {
             frame.bytes,
             frame.metadata,
         )?;
+        self.record_received_media_objects(frame, message)?;
         self.retain_direct_message_origin(
             frame.opened,
             frame.entry,
@@ -617,6 +618,63 @@ impl RamfluxClient {
             frame.identity.as_ref(),
         )?;
         Ok(())
+    }
+
+    /// The revoke authorizer needs the admitted message, and a never-imported object
+    /// tombstones only when a retention reference supplies its manifest.
+    fn record_received_media_objects(
+        &self,
+        frame: &GeneratedCommit<'_>,
+        message: &g::Message,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let message_id = &frame.opened.routing.message_id;
+        let conversation_id = &frame.opened.routing.conversation_id;
+        db.write_transaction(|| {
+            for media in &message.media {
+                if media.object_id.is_empty() || media.manifest_digest.is_empty() {
+                    continue;
+                }
+                let existing = db.client_record("object", &media.object_id)?;
+                let bound = existing.as_ref().is_some_and(|record| {
+                    record
+                        .get("message_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                });
+                if !bound {
+                    db.persist_client_record(
+                        "object",
+                        &media.object_id,
+                        &serde_json::json!({
+                            "object_id": media.object_id,
+                            "message_id": message_id,
+                            "conversation_id": conversation_id,
+                        }),
+                    )?;
+                }
+                let manifest_hash = ramflux_protocol::encode_base64url(&media.manifest_digest);
+                let reference_hash = ramflux_crypto::blake3_256_base64url(
+                    "ramflux.object.received_media.v1",
+                    &ramflux_protocol::canonical_json_bytes(&(message_id, &media.object_id))?,
+                );
+                let reference = serde_json::json!({});
+                let metadata = serde_json::json!({});
+                db.register_object_reference(
+                    ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+                    &ramflux_storage::ObjectReferenceOwner {
+                        reference_hash: &reference_hash,
+                        wire_id: &media.object_id,
+                        manifest_hash: &manifest_hash,
+                        selector: &media.object_id,
+                        message_id,
+                        reference: &reference,
+                        metadata: &metadata,
+                    },
+                )?;
+            }
+            Ok::<(), SdkError>(())
+        })
     }
 
     fn project_generated_application(

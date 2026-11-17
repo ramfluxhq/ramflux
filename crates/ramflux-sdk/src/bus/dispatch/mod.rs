@@ -27,7 +27,10 @@ pub mod message;
 mod message_delete;
 pub mod node;
 pub mod object;
+mod object_erasure;
+mod object_revoke;
 pub(in crate::bus) mod object_status;
+pub(crate) mod residue;
 pub(crate) mod surface;
 
 pub(crate) use a2i_a2ui::*;

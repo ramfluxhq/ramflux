@@ -92,7 +92,7 @@ pub(crate) async fn apply_page(
     account: &mut LocalBusAccountState,
     turn: &ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
-    prepared: ReceiveEntry,
+    mut prepared: ReceiveEntry,
     source: PreparedSource,
     mut backpressure: Box<Backpressure>,
 ) -> Result<ReceiveApplied, SdkError> {
@@ -125,7 +125,7 @@ pub(crate) async fn apply_page(
             account,
             &mut turn,
             handle_generation,
-            &prepared,
+            &mut prepared,
             &mut source,
             &mut backpressure,
         ))
@@ -159,18 +159,24 @@ async fn apply_once(
     account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
-    prepared: &ReceiveEntry,
+    prepared: &mut ReceiveEntry,
     source: &mut Option<crate::client::routed::PreparedInbound>,
     backpressure: &mut Backpressure,
 ) -> Result<Option<Envelope>, SdkError> {
     #[cfg(test)]
     cross_await().await;
-    let entry = &prepared.entry;
-    let sequence = entry.inbox_seq;
-    let cover = admit_open(account, turn, handle_generation(), prepared)?;
+    let sequence = prepared.entry.inbox_seq;
+    let opened = admit_open(account, turn, handle_generation(), prepared)?;
+    if opened.retained {
+        // `source` was prepared from the conflicting network copy. W1 must
+        // decode the admitted work row, not that copy.
+        *source = None;
+    }
+    let cover = opened.cover;
     if !cover && !open_already_covered(account, turn, handle_generation, prepared, backpressure)? {
         return Ok(None);
     }
+    let entry = &prepared.entry;
     #[cfg(test)]
     if take_manifest_wait() {
         manifest_await().await;
@@ -755,6 +761,12 @@ fn failure_of(
     Ok(None)
 }
 
+/// Whether W1 should run, and whether the admitted work row replaced the network copy.
+struct Opened {
+    cover: bool,
+    retained: bool,
+}
+
 /// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
 /// after any gap-prefix cover. `Covered`/`AlreadyCovered` with C >= seq skip W1.
 /// A cover that leaves C behind seq is a plan bug.
@@ -762,8 +774,8 @@ fn admit_open(
     account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
     generation: u64,
-    prepared: &ReceiveEntry,
-) -> Result<bool, SdkError> {
+    prepared: &mut ReceiveEntry,
+) -> Result<Opened, SdkError> {
     let sequence = prepared.entry.inbox_seq;
     match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
         ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
@@ -782,12 +794,12 @@ fn admit_open(
                 },
                 sequence,
             )?;
-            Ok(false)
+            Ok(Opened { cover: false, retained: false })
         }
         ApplyOutcome::NeedPoint { .. } | ApplyOutcome::NeedFetch { .. } => Err(SdkError::Storage(
             StorageError::Integrity("receive admission cannot fetch a point from reconcile"),
         )),
-        ApplyOutcome::Paused { .. } => Ok(false),
+        ApplyOutcome::Paused { .. } => Ok(Opened { cover: false, retained: false }),
     }
 }
 
@@ -1031,37 +1043,96 @@ fn stage_open(
     account: &LocalBusAccountState,
     turn: &ReceiveTurn,
     generation: u64,
-    prepared: &ReceiveEntry,
-) -> Result<bool, SdkError> {
+    prepared: &mut ReceiveEntry,
+) -> Result<Opened, SdkError> {
     let json = serde_json::to_vec(&prepared.entry)?;
     let key = match &prepared.retry_key {
         Some(key) => key.clone(),
         None => account.client.inbox_admission_key(&prepared.entry)?,
     };
+    let sequence = prepared.entry.inbox_seq;
+    let incoming = prepared.entry.clone();
     let retain_until = now_unix_timestamp() + 300;
     let first_seen = now_unix_timestamp();
-    run_fenced(account.client.account_db()?, generation, turn, |tx, expected| {
-        match tx.stage(ReceiveStage {
-            target: expected.target,
-            incarnation: expected.incarnation,
-            sequence: prepared.entry.inbox_seq,
-            entry_json: &json,
-            admission_key: &key,
-            retain_until,
-            first_seen,
-        })? {
-            ReceiveStageResult::Staged | ReceiveStageResult::Existing => Ok(true),
-            ReceiveStageResult::Erased => Ok(false),
-            ReceiveStageResult::Conflict { .. } => {
-                Err(SdkError::InboundRejected("receive stage conflict".into()))
+    let opened =
+        run_fenced(account.client.account_db()?, generation, turn, |tx, expected| {
+            match tx.stage(ReceiveStage {
+                target: expected.target,
+                incarnation: expected.incarnation,
+                sequence,
+                entry_json: &json,
+                admission_key: &key,
+                retain_until,
+                first_seen,
+            })? {
+                ReceiveStageResult::Staged | ReceiveStageResult::Existing => {
+                    Ok(StageOpen::Continue(Opened { cover: true, retained: false }))
+                }
+                ReceiveStageResult::Erased => {
+                    Ok(StageOpen::Continue(Opened { cover: false, retained: false }))
+                }
+                ReceiveStageResult::Conflict { .. } => {
+                    let admitted = admitted_work_entry(tx, sequence)?;
+                    if authority_stamp_only(&admitted, &incoming)? {
+                        Ok(StageOpen::Retain(Box::new(admitted)))
+                    } else {
+                        Err(SdkError::InboundRejected("receive stage conflict".into()))
+                    }
+                }
+                ReceiveStageResult::PausedWork
+                | ReceiveStageResult::PausedBytes
+                | ReceiveStageResult::PausedIntents => {
+                    Err(SdkError::InboundRejected("receive stage paused".into()))
+                }
             }
-            ReceiveStageResult::PausedWork
-            | ReceiveStageResult::PausedBytes
-            | ReceiveStageResult::PausedIntents => {
-                Err(SdkError::InboundRejected("receive stage paused".into()))
-            }
+        })?;
+    match opened {
+        StageOpen::Continue(opened) => Ok(opened),
+        StageOpen::Retain(entry) => {
+            prepared.entry = *entry;
+            Ok(Opened { cover: true, retained: true })
         }
-    })
+    }
+}
+
+/// Resume may stamp `source_device_authority` onto a second encoding of an inbox
+/// sequence that W0 already admitted. The stored copy stays the input.
+/// Any other difference is a typed conflict: the admitted bytes stay, and the
+/// caller must not settle that coordinate from the conflicting copy.
+fn authority_stamp_only(
+    stored: &GatewayInboxEntry,
+    incoming: &GatewayInboxEntry,
+) -> Result<bool, SdkError> {
+    let mut admitted = stored.clone();
+    let mut presented = incoming.clone();
+    admitted.envelope.ext.ext.remove("source_device_authority");
+    presented.envelope.ext.ext.remove("source_device_authority");
+    let left = ramflux_protocol::canonical_json_bytes(&admitted)
+        .map_err(|_| SdkError::InboundRejected("receive stage conflict".into()))?;
+    let right = ramflux_protocol::canonical_json_bytes(&presented)
+        .map_err(|_| SdkError::InboundRejected("receive stage conflict".into()))?;
+    Ok(left == right)
+}
+
+fn admitted_work_entry(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let inputs = tx.recovery_inputs()?;
+    let Some(input) = inputs.into_iter().find(|row| row.sequence == sequence) else {
+        return Err(SdkError::InboundRejected("receive stage conflict".into()));
+    };
+    let entry: GatewayInboxEntry = serde_json::from_slice(&input.entry_json)
+        .map_err(|_| SdkError::InboundRejected("receive stage conflict".into()))?;
+    if entry.inbox_seq != sequence {
+        return Err(SdkError::InboundRejected("receive stage conflict".into()));
+    }
+    Ok(entry)
+}
+
+enum StageOpen {
+    Continue(Opened),
+    Retain(Box<GatewayInboxEntry>),
 }
 
 fn recover_own_copy(

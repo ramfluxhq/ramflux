@@ -28,6 +28,7 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+pub mod diag;
 mod platform;
 /// Default data root on Windows: `%LOCALAPPDATA%\ramflux\<profile>`, resolved with the Known
 /// Folder API. `None` selects the profile `default`. The roaming folder is never used.
@@ -121,7 +122,7 @@ pub use bus::{
     LocalBusObjectGetReadRequest, LocalBusObjectGetRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
     LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
