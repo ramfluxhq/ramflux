@@ -3,9 +3,16 @@
 
 //! Integration fixture. `Default` is process-local. `persist_at` keeps wrapping
 //! keys across a test process restart. Not a production vault or production file fallback.
-use super::{BranchCredentials, PrimaryVault};
+use super::vault::agent_master_item::{decode as decode_item, encode as encode_item};
+use super::vault::{AGENT_MASTER_PREFIX, agent_key_unavailable};
+use super::{AgentDecisionSigning, BranchCredentials, PrimaryVault, require_vault_reference};
 use crate::SdkError;
-use ramflux_crypto::custody::SelfSigningKey;
+use ramflux_crypto::custody::{
+    AgentMasterRequest, MasterKey, SelfSigningKey, certify_agent_master, sign_register_decision,
+};
+use ramflux_protocol::custody::{
+    Envelope, MasterCertificate, RegisterDecision, register_decision_body,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -21,10 +28,17 @@ struct MigrationApprovals {
     pending: Option<MigrationApproval>,
     consumed: BTreeSet<(String, String)>,
 }
+/// One armed registration decision, keyed by the plan hash it may sign. Consumed on use.
+#[derive(Default)]
+struct AgentDecisionApprovals {
+    pending: Option<String>,
+    consumed: BTreeSet<String>,
+}
 #[derive(Default)]
 pub struct MemoryPrimaryVault {
     entries: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     migration_approval: Mutex<MigrationApprovals>,
+    agent_decision_approval: Mutex<AgentDecisionApprovals>,
     persist: Option<PathBuf>,
 }
 impl MemoryPrimaryVault {
@@ -38,6 +52,7 @@ impl MemoryPrimaryVault {
         Ok(Self {
             entries: Mutex::new(load_persisted(&path)?),
             migration_approval: Mutex::new(MigrationApprovals::default()),
+            agent_decision_approval: Mutex::new(AgentDecisionApprovals::default()),
             persist: Some(path),
         })
     }
@@ -71,6 +86,55 @@ impl MemoryPrimaryVault {
         }
         approval.pending =
             Some(MigrationApproval { account: account.into(), request_id: request_id.into() });
+        Ok(())
+    }
+    /// Arm one signature for the exact plan hash in the default-off integration fixture only.
+    /// The next `sign_agent_register_decision` for that plan consumes the approval.
+    /// # Errors
+    /// Refuses an already-armed approval or a plan hash that was already consumed.
+    pub fn approve_agent_decision_once_for_test(&self, plan_hash: &str) -> Result<(), SdkError> {
+        let mut approval =
+            self.agent_decision_approval.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        if approval.consumed.contains(plan_hash) {
+            return Err(SdkError::LocalBusRefused {
+                code: "AgentDecisionApprovalConsumed".into(),
+                message: "this agent decision fixture approval was already consumed".into(),
+                body: Box::new(serde_json::json!({
+                    "reason_code": "agent_decision_approval_consumed"
+                })),
+            });
+        }
+        if approval.pending.is_some() {
+            return Err(SdkError::LocalBusRefused {
+                code: "AgentDecisionApprovalAlreadyArmed".into(),
+                message: "an agent decision fixture approval is already armed".into(),
+                body: Box::new(serde_json::json!({
+                    "reason_code": "agent_decision_approval_already_armed"
+                })),
+            });
+        }
+        approval.pending = Some(plan_hash.into());
+        Ok(())
+    }
+    /// Replace an existing item, restoring the previous bytes when the flush fails.
+    fn replace_locked(
+        &self,
+        entries: &mut BTreeMap<String, Zeroizing<Vec<u8>>>,
+        reference: &str,
+        bytes: &[u8],
+    ) -> Result<(), SdkError> {
+        let previous = entries.insert(reference.into(), Zeroizing::new(bytes.to_vec()));
+        if let Err(error) = self.flush_locked(entries) {
+            match previous {
+                Some(old) => {
+                    entries.insert(reference.into(), old);
+                }
+                None => {
+                    entries.remove(reference);
+                }
+            }
+            return Err(error);
+        }
         Ok(())
     }
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
@@ -184,6 +248,57 @@ impl PrimaryVault for MemoryPrimaryVault {
     }
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError> {
         self.put(reference, &**seeds)
+    }
+    fn store_agent_master(&self, reference: &str, master: &MasterKey) -> Result<(), SdkError> {
+        require_vault_reference(reference, AGENT_MASTER_PREFIX)?;
+        let item = encode_item(master, None)?;
+        self.put(reference, &item)
+    }
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: AgentMasterRequest,
+    ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        require_vault_reference(reference, AGENT_MASTER_PREFIX)?;
+        let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let stored = entries.get(reference).ok_or_else(agent_key_unavailable)?;
+        let item = decode_item(stored)?;
+        let (certificate, hash) =
+            certify_agent_master(&item, request).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let rewritten = encode_item(&item.master, Some(&hash))?;
+        self.replace_locked(&mut entries, reference, &rewritten)?;
+        Ok(certificate)
+    }
+    fn sign_agent_register_decision(
+        &self,
+        request: AgentDecisionSigning<'_>,
+    ) -> Result<RegisterDecision, SdkError> {
+        require_vault_reference(request.branch_reference, "branch:")?;
+        // Bind the body to the exact plan first: a refused plan never consumes the approval.
+        let body =
+            register_decision_body(request.request).map_err(|_| SdkError::CustodySetupInvalid)?;
+        let primary = self.load_primary(request.primary_reference)?;
+        if primary.public_key() != request.expected_primary_public_key {
+            return Err(agent_key_unavailable());
+        }
+        {
+            let mut approval = self
+                .agent_decision_approval
+                .lock()
+                .map_err(|_| SdkError::CustodyVaultUnavailable)?;
+            let armed = approval.pending.as_deref() == Some(request.request.plan_hash.as_str());
+            if !armed {
+                return Err(agent_key_unavailable());
+            }
+            approval.pending = None;
+            approval.consumed.insert(request.request.plan_hash.clone());
+        }
+        let branch = self.load_branch(
+            request.branch_reference,
+            request.principal_id,
+            &request.request.signer,
+        )?;
+        sign_register_decision(&branch.signing, body).map_err(|_| agent_key_unavailable())
     }
     fn load_branch(
         &self,

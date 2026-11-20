@@ -8,6 +8,10 @@ pub(super) mod linux;
 mod reason;
 pub use reason::CustodyVaultReason;
 
+// The codec is used by the fixture vault only until the platform vaults implement the operation.
+#[cfg(any(test, feature = "itest-memory-vault"))]
+pub(crate) mod agent_master_item;
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -15,7 +19,10 @@ pub use windows::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};
 
 use super::HomeAuthorizationRequest;
 use crate::SdkError;
-use ramflux_crypto::custody::SelfSigningKey;
+use ramflux_crypto::custody::{AgentMasterRequest, MasterKey, SelfSigningKey};
+use ramflux_protocol::custody::{
+    AgentDecisionRequest, Envelope, MasterCertificate, RegisterDecision,
+};
 use zeroize::Zeroizing;
 
 /// Production vault-ref grammar used by Linux, macOS and test vaults.
@@ -123,6 +130,55 @@ pub trait PrimaryVault: Send + Sync {
     fn load_provisioning_secret(&self, _reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         Err(SdkError::CustodyVaultUnavailable)
     }
+    /// Store the agent master seed under `agent-master:<id>` with an empty certificate history.
+    /// Refuses an existing entry.
+    /// # Errors
+    /// The default refuses with `custody_key_unavailable`; providers without the operation keep it.
+    fn store_agent_master(&self, _reference: &str, _master: &MasterKey) -> Result<(), SdkError> {
+        Err(agent_key_unavailable())
+    }
+    /// Issue one master certificate for a genesis or a rebind, then record its hash in the item.
+    /// The item is rewritten before the certificate is returned; a failed write refuses.
+    /// # Errors
+    /// The default refuses with `custody_key_unavailable`.
+    fn certify_agent_master(
+        &self,
+        _reference: &str,
+        _request: AgentMasterRequest,
+    ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        Err(agent_key_unavailable())
+    }
+    /// Sign a registration decision with the primary branch after user presence. The provider
+    /// signs only the exact plan named by the request and only for its human primary.
+    /// # Errors
+    /// The default refuses with `custody_key_unavailable`; no presence means no signature.
+    fn sign_agent_register_decision(
+        &self,
+        _request: AgentDecisionSigning<'_>,
+    ) -> Result<RegisterDecision, SdkError> {
+        Err(agent_key_unavailable())
+    }
+}
+
+/// Vault-reference prefix of the agent master item (seed plus last certificate hash).
+pub(crate) const AGENT_MASTER_PREFIX: &str = "agent-master:";
+
+/// Refusal for an agent custody operation the provider cannot perform.
+#[must_use]
+pub(crate) fn agent_key_unavailable() -> SdkError {
+    SdkError::CustodyVault(CustodyVaultReason::KeyUnavailable)
+}
+
+/// Inputs for one primary-branch registration decision signature.
+pub struct AgentDecisionSigning<'a> {
+    /// Primary self-signing item whose presence the provider checks.
+    pub primary_reference: &'a str,
+    /// Public key the primary item must still hold (checked before any signature).
+    pub expected_primary_public_key: &'a str,
+    /// Primary branch item (`branch:<id>`) that signs the decision.
+    pub branch_reference: &'a str,
+    pub principal_id: &'a str,
+    pub request: &'a AgentDecisionRequest,
 }
 /// Data-protection keychain (or another reviewed protected OS store) without synchronization.
 pub const VAULT_CLASS_PROTECTED: &str = "software_os_credential_non_synchronizing";

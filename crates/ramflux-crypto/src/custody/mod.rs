@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Born-v3 account authority. Legacy v1/v2 signing functions remain separate.
+mod agent_master;
 mod cooperative_transfer;
 mod genesis;
 mod keys;
@@ -24,6 +25,10 @@ mod anchor;
 mod validate;
 pub use anchor::validate_native_account_anchor;
 mod verify;
+pub use agent_master::{
+    AgentMasterItem, AgentMasterPurpose, AgentMasterRequest, certify_agent_master, master_anchor,
+    sign_register_decision, sign_register_decision_request, verify_register_decision,
+};
 pub use keys::{MasterKey, SelfSigningKey};
 pub use phrase::RecoveryPhrase;
 pub(crate) use verify::verify_group_native_authority;

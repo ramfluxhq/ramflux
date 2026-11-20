@@ -25,9 +25,12 @@ pub enum CustodyVaultReason {
     PrimaryUnavailable,
     /// The requested mode or role is not supported by this selection.
     ModeMismatch,
+    /// The provider holds no usable key for this agent custody operation (no presence, no
+    /// entry, or an operation the provider does not implement).
+    KeyUnavailable,
 }
 impl CustodyVaultReason {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Missing,
         Self::InitPending,
         Self::ImportPending,
@@ -37,6 +40,7 @@ impl CustodyVaultReason {
         Self::Busy,
         Self::PrimaryUnavailable,
         Self::ModeMismatch,
+        Self::KeyUnavailable,
     ];
     /// Stable wire `reason_code`.
     #[must_use]
@@ -51,6 +55,7 @@ impl CustodyVaultReason {
             Self::Busy => "vault_busy",
             Self::PrimaryUnavailable => "vault_primary_unavailable",
             Self::ModeMismatch => "vault_mode_mismatch",
+            Self::KeyUnavailable => "custody_key_unavailable",
         }
     }
     /// The bus error `code` that carries this reason.

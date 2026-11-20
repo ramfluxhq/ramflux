@@ -36,7 +36,7 @@ pub(crate) use store::{
 pub(crate) use store::{finish_recovery, pending_restore};
 pub(crate) use vault::require_vault_reference;
 pub use vault::{
-    BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
+    AgentDecisionSigning, BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
 #[cfg(windows)]
@@ -104,6 +104,8 @@ impl crate::RamfluxClient {
 
 #[cfg(test)]
 pub(crate) mod observer;
+#[cfg(test)]
+mod seam_guard_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 

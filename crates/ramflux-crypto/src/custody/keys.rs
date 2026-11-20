@@ -27,12 +27,16 @@ impl MasterKey {
         Ok(Self(SigningKey::from_bytes(&seed)))
     }
     /// Rebuild a master from a provider-owned zeroizing seed (vault load path only).
+    #[doc(hidden)]
+    // vault implementations only; the source guard test enforces this scope.
     #[must_use]
     pub fn from_vault_seed(seed: &Zeroizing<[u8; 32]>) -> Self {
         Self(SigningKey::from_bytes(seed))
     }
     /// Transfer the seed directly into a primary-only vault provider. Never expose it on a bus
     /// method, C ABI export, log, report or sync payload.
+    #[doc(hidden)]
+    // vault implementations only; the source guard test enforces this scope.
     #[must_use]
     pub fn vault_seed(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.0.to_bytes())

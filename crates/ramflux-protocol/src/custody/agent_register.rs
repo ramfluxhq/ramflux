@@ -149,6 +149,52 @@ pub fn decision_signing_bytes(body: &RegisterDecisionBody) -> Result<Vec<u8>, Pr
     signing_bytes(REGISTER_AUTHORIZATION_SCHEMA, body)
 }
 
+/// Inputs for one decision over the exact canonical bytes of a stored plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentDecisionRequest {
+    /// Canonical bytes of the plan, exactly as stored and sent.
+    pub plan_bytes: Vec<u8>,
+    /// Hash of the plan that [`register_plan_hash`] computes over `plan_bytes`.
+    pub plan_hash: String,
+    pub decision: RegisterOutcome,
+    /// Must equal the plan's `human_primary`.
+    pub signer: DeviceRef,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+/// Bind a decision to the exact plan: decode the canonical plan, recompute its hash, require the
+/// signer to be the plan's human primary and build the body that the primary branch signs.
+/// # Errors
+/// Refuses non-canonical plan bytes, a plan-hash mismatch, a signer other than the plan's human
+/// primary, and a decision that outlives the plan.
+pub fn register_decision_body(
+    request: &AgentDecisionRequest,
+) -> Result<RegisterDecisionBody, ProtocolError> {
+    let plan = decode_register_plan(&request.plan_bytes)?;
+    if register_plan_hash(&plan)? != request.plan_hash {
+        return Err(invalid("register decision plan hash mismatch"));
+    }
+    if request.signer != plan.human_primary {
+        return Err(invalid("register decision signer is not the plan human primary"));
+    }
+    if request.expires_at > plan.expires_at {
+        return Err(invalid("register decision outlives its plan"));
+    }
+    let body = RegisterDecisionBody {
+        schema: REGISTER_AUTHORIZATION_SCHEMA.into(),
+        version: AGENT_REGISTER_VERSION,
+        request_id: plan.request_id.clone(),
+        request_hash: request.plan_hash.clone(),
+        decision: request.decision,
+        signer: request.signer.clone(),
+        issued_at: request.issued_at,
+        expires_at: request.expires_at,
+    };
+    validate_register_decision_body(&body)?;
+    Ok(body)
+}
+
 /// Encode a validated plan as its canonical bytes.
 /// # Errors
 /// Refuses invalid plans and oversized output.
