@@ -76,6 +76,10 @@ pub enum NodeCoreError {
     CustodyDailyCapacity(ramflux_protocol::custody::CapacityHint),
     #[error("principal_id_taken")]
     PrincipalIdTaken,
+    #[error("agent_authorization_required")]
+    AgentAuthorizationRequired,
+    #[error("agent_publish_refused")]
+    AgentPublishRefused(ramflux_protocol::custody::CustodyRefusal),
     #[error("device_id_taken")]
     DeviceIdTaken,
     #[error("--config requires a path")]

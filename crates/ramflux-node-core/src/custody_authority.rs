@@ -10,6 +10,8 @@ use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
+mod agent_publish;
+pub(crate) use agent_publish::AgentPublishInput;
 mod directory;
 mod forwarded;
 
@@ -211,6 +213,16 @@ impl RouterCore {
             &body.principal_id,
             &body.master_certificate.body.master_public_key,
         )?;
+        // A headless first birth or a changed custodian primary needs `AgentPublish`.
+        if body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi {
+            let changed = registry.custody.records.get(anchor).is_none_or(|old| {
+                old.record.body.master_certificate.body.primary_device_ref
+                    != body.master_certificate.body.primary_device_ref
+            });
+            if changed {
+                return Err(NodeCoreError::AgentAuthorizationRequired);
+            }
+        }
         let expected =
             registry.custody.records.get(anchor).map(|publication| CustodyAccountState {
                 publication: publication.clone(),

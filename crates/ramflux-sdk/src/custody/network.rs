@@ -657,6 +657,7 @@ fn proof_action_name(action: &CustodyProofAction) -> &'static str {
         CustodyProofAction::HomeMigration { .. } => "home_migration",
         CustodyProofAction::PrekeyStatus { .. } => "prekey_status",
         CustodyProofAction::RegisterUpdate { .. } => "register_update",
+        CustodyProofAction::AgentPublish { .. } => "agent_publish",
     }
 }
 

@@ -120,6 +120,8 @@ pub const GATEWAY_FIRST_FRAME_NACK_REASON: &str = "first gateway frame must be o
 pub const GATEWAY_SESSION_PUSH_CAPABILITY: &str = "gateway.session_push.v1";
 /// Device-proof capability requesting typed forwarding acknowledgement.
 pub const GATEWAY_FORWARD_ACK_CAPABILITY: &str = "gateway.forward_ack";
+/// Custody capability: the node admits `AgentPublish` (agent birth and primary rebind).
+pub const AGENT_CUSTODY_AUTHORIZATION_CAPABILITY: &str = "agent_custody_authorization_v1";
 /// Legacy submit response emitted to clients that do not request typed forward acknowledgements.
 pub const GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON: &str = "forwarded_home_node_migrated";
 

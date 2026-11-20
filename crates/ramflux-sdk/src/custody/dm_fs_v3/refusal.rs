@@ -131,7 +131,8 @@ impl TryFrom<&CustodyRefusal> for DmFsV3Refusal {
             | CustodyRefusal::CapacityRetryAfter { .. }
             | CustodyRefusal::IdempotencyConflict
             | CustodyRefusal::PayloadTooLarge
-            | CustodyRefusal::FrameLimit => Err(value.clone()),
+            | CustodyRefusal::FrameLimit
+            | CustodyRefusal::AgentAuthorizationRequired => Err(value.clone()),
         }
     }
 }
