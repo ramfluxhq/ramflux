@@ -4,6 +4,8 @@
 //! Born-v3 custody wire primitives. These do not reinterpret legacy flat records.
 mod contact;
 pub use contact::*;
+mod agent_register;
+pub use agent_register::*;
 mod contact_card;
 pub use contact_card::*;
 mod network;
