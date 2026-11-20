@@ -255,6 +255,7 @@ enum ControlOperation {
   CONTROL_OWN_GROUP_CONSENT = 14;
   CONTROL_OWN_MESSAGE_COPY = 15;
   CONTROL_FRIEND = 16;
+  CONTROL_AGENT_SYNC = 17;
 }
 message Control {
   ControlOperation operation = 1;
@@ -278,6 +279,29 @@ message Control {
     OwnGroupConsent own_group_consent = 29;
     OwnMessageCopy own_message_copy = 30;
     FriendControl friend = 31;
+    AgentHostPacket agent_sync = 32;
+  }
+}
+// Agent creation custody traffic between the paired Human's own devices (AGENT-IDENTITY-01).
+message AgentHostPacket {
+  string owner_anchor = 1;
+  QualifiedDevice source = 2;
+  QualifiedDevice recipient = 3;
+  string correlation_id = 4;
+  // Body tags 5-9, 11, 12 and 10 belong to other agent-host stages; they stay reserved by
+  // number and name so no other meaning can take them.
+  reserved 5 to 12;
+  reserved "request", "result", "feed", "snapshot", "error", "metadata", "group_head", "mirror";
+  oneof body {
+    AgentCustodyPacket custody = 13;
+  }
+}
+message AgentCustodyPacket {
+  oneof value {
+    bytes request_json = 1;
+    bytes decision_json = 2;
+    bytes cancel_json = 3;
+    bytes receipt_json = 4;
   }
 }
 message PairReset { uint64 rejected_bootstrap_floor = 1; }

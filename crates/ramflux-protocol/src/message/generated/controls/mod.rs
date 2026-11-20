@@ -11,6 +11,12 @@ pub use a2i_control_event_type_types::*;
 #[path = "a2i_control_event_type_control.rs"]
 mod a2i_control_event_type_control_types;
 pub use a2i_control_event_type_control_types::*;
+#[path = "agent_custody_packet.rs"]
+mod agent_custody_packet_types;
+pub use agent_custody_packet_types::*;
+#[path = "agent_host_packet.rs"]
+mod agent_host_packet_types;
+pub use agent_host_packet_types::*;
 #[path = "contact_control.rs"]
 mod contact_control_types;
 pub use contact_control_types::*;

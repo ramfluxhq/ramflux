@@ -29,6 +29,7 @@ fn payload_operation_and_tag(payload: &g::control::Payload) -> (u32, u32) {
         g::control::Payload::OwnGroupConsent(_) => (14, 29),
         g::control::Payload::OwnMessageCopy(_) => (15, 30),
         g::control::Payload::Friend(_) => (16, 31),
+        g::control::Payload::AgentSync(_) => (17, 32),
     }
 }
 
@@ -107,6 +108,7 @@ pub fn validate_control_native(control: &g::Control) -> Result<(), SdkError> {
         Some(g::control::Payload::OwnGroupConsent(body)) => validate_own_group_consent(body),
         Some(g::control::Payload::OwnMessageCopy(body)) => validate_own_message_copy(body),
         Some(g::control::Payload::Friend(body)) => validate_friend(body),
+        Some(g::control::Payload::AgentSync(body)) => validate_agent_sync(body),
         None => Err(operation_mismatch()),
     }
 }
@@ -353,6 +355,23 @@ fn validate_friend(body: &g::FriendControl) -> Result<(), SdkError> {
         || (body.capability_revoked_at.is_some() && !matches!(body.action, 3 | 4))
     {
         return Err(refused("friend control requires action 1-5 and link identities"));
+    }
+    Ok(())
+}
+
+/// The packet names its owner, both endpoints and exactly one custody body.
+fn validate_agent_sync(packet: &g::AgentHostPacket) -> Result<(), SdkError> {
+    let custody_present = match packet.body.as_ref() {
+        Some(g::agent_host_packet::Body::Custody(custody)) => custody.value.is_some(),
+        None => false,
+    };
+    if packet.owner_anchor.is_empty()
+        || packet.source.is_none()
+        || packet.recipient.is_none()
+        || packet.correlation_id.is_empty()
+        || !custody_present
+    {
+        return Err(refused("agent sync requires owner, endpoints, correlation and custody body"));
     }
     Ok(())
 }

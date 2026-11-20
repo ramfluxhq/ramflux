@@ -25,6 +25,7 @@ pub enum ControlOperation {
     ControlOwnGroupConsent = 14,
     ControlOwnMessageCopy = 15,
     ControlFriend = 16,
+    ControlAgentSync = 17,
 }
 impl ControlOperation {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -50,6 +51,7 @@ impl ControlOperation {
             Self::ControlOwnGroupConsent => "CONTROL_OWN_GROUP_CONSENT",
             Self::ControlOwnMessageCopy => "CONTROL_OWN_MESSAGE_COPY",
             Self::ControlFriend => "CONTROL_FRIEND",
+            Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -72,6 +74,7 @@ impl ControlOperation {
             "CONTROL_OWN_GROUP_CONSENT" => Some(Self::ControlOwnGroupConsent),
             "CONTROL_OWN_MESSAGE_COPY" => Some(Self::ControlOwnMessageCopy),
             "CONTROL_FRIEND" => Some(Self::ControlFriend),
+            "CONTROL_AGENT_SYNC" => Some(Self::ControlAgentSync),
             _ => None,
         }
     }
@@ -100,6 +103,7 @@ impl serde::Serialize for ControlOperation {
             Self::ControlOwnGroupConsent => "CONTROL_OWN_GROUP_CONSENT",
             Self::ControlOwnMessageCopy => "CONTROL_OWN_MESSAGE_COPY",
             Self::ControlFriend => "CONTROL_FRIEND",
+            Self::ControlAgentSync => "CONTROL_AGENT_SYNC",
         };
         serializer.serialize_str(variant)
     }
@@ -128,6 +132,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
             "CONTROL_OWN_GROUP_CONSENT",
             "CONTROL_OWN_MESSAGE_COPY",
             "CONTROL_FRIEND",
+            "CONTROL_AGENT_SYNC",
         ];
         struct GeneratedVisitor;
         impl serde::de::Visitor<'_> for GeneratedVisitor {
@@ -175,6 +180,7 @@ impl<'de> serde::Deserialize<'de> for ControlOperation {
                     "CONTROL_OWN_GROUP_CONSENT" => Ok(ControlOperation::ControlOwnGroupConsent),
                     "CONTROL_OWN_MESSAGE_COPY" => Ok(ControlOperation::ControlOwnMessageCopy),
                     "CONTROL_FRIEND" => Ok(ControlOperation::ControlFriend),
+                    "CONTROL_AGENT_SYNC" => Ok(ControlOperation::ControlAgentSync),
                     _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
                 }
             }

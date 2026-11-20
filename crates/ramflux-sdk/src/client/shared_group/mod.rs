@@ -384,6 +384,6 @@ fn group_actor_matches_manifest(
 #[cfg(test)]
 mod native_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use requests::RequestRecord;

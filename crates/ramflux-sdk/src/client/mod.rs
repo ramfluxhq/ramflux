@@ -20,6 +20,7 @@ pub(crate) mod conversation_projection;
 mod deferred_attachment;
 pub(crate) mod manifest_demand;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
+pub(crate) mod agent_custody;
 pub(crate) mod application_outbox;
 mod authored_delete;
 mod authored_send;

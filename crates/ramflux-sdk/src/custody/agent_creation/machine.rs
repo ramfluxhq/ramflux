@@ -17,6 +17,7 @@ use ramflux_protocol::custody::{
     REGISTER_TTL_SECONDS, RegisterCancel, RegisterOutcome, RegisterPlan, RegisterPurpose,
     decode_register_cancel, decode_register_decision, decode_register_plan,
     encode_register_decision, encode_register_plan, register_decision_body, register_plan_hash,
+    validate_register_plan,
 };
 use ramflux_protocol::{encode_base64url, normalize_profile_display_name};
 use zeroize::Zeroizing;
@@ -184,6 +185,47 @@ pub fn apply_decision(
             Some(AgentFailure::AuthorizationRefused),
         ),
     }
+}
+
+/// Phone side: store a plan received over the own-device channel as an authorization-pending
+/// request. It holds no secret; the phone keeps only the decision it later signs. An exact
+/// replay returns the saved record. The same request id with a different plan refuses.
+/// # Errors
+/// `CustodyExpired` when `now` is before the plan issue time or at/after its expiry;
+/// `CustodySetupInvalid` for a plan that fails validation or conflicts with the saved plan.
+pub fn receive_plan(
+    store: &AgentCreationStore,
+    plan_bytes: &[u8],
+    now: u64,
+) -> Result<AgentCreationRecord, SdkError> {
+    let plan = decode_register_plan(plan_bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+    validate_register_plan(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
+    valid_id(&plan.request_id)?;
+    let hash = register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
+    if let Some(existing) = store.load(&plan.request_id)? {
+        return if existing.request_hash == hash {
+            Ok(existing)
+        } else {
+            Err(SdkError::CustodySetupInvalid)
+        };
+    }
+    if now < plan.issued_at || now >= plan.expires_at {
+        return Err(SdkError::CustodyExpired);
+    }
+    let record = AgentCreationRecord {
+        request_id: plan.request_id.clone(),
+        request_hash: hash,
+        plan_b64: encode_base64url(plan_bytes),
+        state: AgentCreationState::AuthorizationPending,
+        issued_at: plan.issued_at,
+        expires_at: plan.expires_at,
+        vault_refs: Vec::new(),
+        intended: None,
+        failure: None,
+        decision_b64: None,
+    };
+    store.save(&record)?;
+    Ok(record)
 }
 
 /// Apply a cancel from the initiating desktop. It closes pending intent and never touches a

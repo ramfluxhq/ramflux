@@ -468,6 +468,8 @@ impl RamfluxClient {
             self.apply_generated_a2i(opened, entry, identity, event, bytes)?;
         } else if let Some(g::control::Payload::ObjectRevoke(revoke)) = control.payload.as_ref() {
             self.apply_generated_object_revoke(opened, entry, identity, revoke, bytes)?;
+        } else if let Some(g::control::Payload::AgentSync(packet)) = control.payload.as_ref() {
+            self.apply_generated_agent_sync(opened, entry, packet)?;
         } else if matches!(control.operation, 8 | 10) {
             return Err(SdkError::GeneratedRefused {
                 code: crate::error::GeneratedRefusalCode::Content,
@@ -900,7 +902,7 @@ impl RamfluxClient {
         if control.operation == 11 {
             Self::require_a2i_binding_authority()?;
         }
-        if (1..=16).contains(&control.operation)
+        if (1..=17).contains(&control.operation)
             && crate::client::generated_control::validate_control_operation(&control).is_err()
         {
             return Err(SdkError::GeneratedRefused {
@@ -909,7 +911,7 @@ impl RamfluxClient {
             });
         }
 
-        if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
+        if matches!(control.operation, 6 | 7 | 13 | 14 | 15 | 17) {
             if source.root_commitment() != self.own_account_anchor()? {
                 return Err(SdkError::InboundRejected("own control requires same root".into()));
             }
@@ -962,6 +964,9 @@ impl RamfluxClient {
         }
         if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
             self.authorize_generated_own_message_copy(opened, entry, copy)?;
+        }
+        if let Some(g::control::Payload::AgentSync(packet)) = control.payload.as_ref() {
+            self.authorize_generated_agent_sync(opened, entry, packet)?;
         }
         Ok(())
     }

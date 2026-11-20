@@ -52,6 +52,8 @@ fn category(name: &str) -> &'static str {
         || name.starts_with("FriendControl")
         || name.starts_with("A2i")
         || name == "LivePresence"
+        || name.starts_with("AgentHost")
+        || name.starts_with("AgentCustody")
     {
         "controls"
     } else if matches!(

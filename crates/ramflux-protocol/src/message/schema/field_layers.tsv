@@ -145,6 +145,16 @@ Control	own_contact_tombstone	28	1
 Control	own_group_consent	29	1
 Control	own_message_copy	30	1
 Control	friend	31	1
+Control	agent_sync	32	1
+AgentHostPacket	owner_anchor	1	1
+AgentHostPacket	source	2	1
+AgentHostPacket	recipient	3	1
+AgentHostPacket	correlation_id	4	1
+AgentHostPacket	custody	13	1
+AgentCustodyPacket	request_json	1	1
+AgentCustodyPacket	decision_json	2	1
+AgentCustodyPacket	cancel_json	3	1
+AgentCustodyPacket	receipt_json	4	1
 PairReset	rejected_bootstrap_floor	1	1
 PairResetAck	rejected_bootstrap_floor	1	1
 ContactControl	consent	1	1

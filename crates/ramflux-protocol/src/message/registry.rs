@@ -96,7 +96,7 @@ pub struct ControlBinding {
     pub body: &'static str,
 }
 /// Exact section 3.2 operation/payload map, all first introduced at layer 1.
-pub const CONTROLS: [ControlBinding; 16] = [
+pub const CONTROLS: [ControlBinding; 17] = [
     ControlBinding { operation: 1, tag: 16, body: "PairReset" },
     ControlBinding { operation: 2, tag: 17, body: "PairResetAck" },
     ControlBinding { operation: 3, tag: 18, body: "ContactControl" },
@@ -113,6 +113,7 @@ pub const CONTROLS: [ControlBinding; 16] = [
     ControlBinding { operation: 14, tag: 29, body: "OwnGroupConsent" },
     ControlBinding { operation: 15, tag: 30, body: "OwnMessageCopy" },
     ControlBinding { operation: 16, tag: 31, body: "FriendControl" },
+    ControlBinding { operation: 17, tag: 32, body: "AgentHostPacket" },
 ];
 
 /// Immutable descriptor shared by scanners and operation/field consumers.

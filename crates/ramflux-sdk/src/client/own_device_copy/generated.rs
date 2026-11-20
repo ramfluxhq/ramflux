@@ -110,7 +110,7 @@ impl RamfluxClient {
                     .map_err(|_| invalid("invalid own Control"))?;
                 let control =
                     g::Control::decode(body).map_err(|_| invalid("invalid own Control"))?;
-                if !matches!(control.operation, 6 | 13 | 14) {
+                if !matches!(control.operation, 6 | 13 | 14 | 17) {
                     return Err(invalid("own control operation mismatch"));
                 }
                 return Self::encode_generated_inner(

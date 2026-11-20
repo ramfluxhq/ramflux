@@ -5,7 +5,8 @@
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
 use super::{
     AgentCreationState, AgentCreationStore, AgentFailure, BeginInput, PrimarySigning,
-    apply_decision, begin, cancel, primary_sign_decision, resume_request,
+    apply_decision, begin, cancel, check_received_request, check_sender, expected_scope,
+    primary_sign_decision, receive_plan, resume_request,
 };
 use crate::SdkError;
 use crate::custody::vault::agent_master_item::AgentMasterCells;
@@ -17,7 +18,7 @@ use ramflux_crypto::custody::{
 };
 use ramflux_protocol::custody::{
     AgentRegisterProfile, DeviceRef, RegisterCancel, RegisterOutcome, decode_register_decision,
-    encode_register_cancel, object_hash,
+    decode_register_plan, encode_register_cancel, encode_register_plan, object_hash,
 };
 use ramflux_protocol::encode_base64url;
 use tempfile::TempDir;
@@ -621,5 +622,147 @@ fn delete_agent_master_removes_the_seed_and_every_certificate_item() -> TestResu
     }
     let after = fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW)?;
     assert!(vault.certify_agent_master(&reference, after).is_err(), "a deleted master refuses");
+    Ok(())
+}
+
+/// Desktop-side request for the custody receive tests.
+fn custody_request(
+    dir: &TempDir,
+    id: &str,
+    phone: &Phone,
+) -> Result<(AgentCreationStore, MemoryPrimaryVault, super::BeginOutcome), SdkError> {
+    let (store, desk) = desktop(dir)?;
+    let outcome = begin(
+        &store,
+        &desk,
+        &begin_input(id, &owner_anchor(), &phone.primary_device, NOW + 9_000),
+        NOW,
+    )?;
+    Ok((store, desk, outcome))
+}
+
+#[test]
+fn custody_scope_is_the_derived_owner_agent_scope_only() -> TestResult {
+    let dir = TempDir::new()?;
+    let phone = phone(&owner_anchor())?;
+    let (_store, _desk, outcome) = custody_request(&dir, "req-scope", &phone)?;
+    let owner = owner_anchor();
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    let right = expected_scope(&owner, &plan.agent_anchor)?;
+    let accepted = check_received_request(
+        &outcome.plan_bytes,
+        &right,
+        &owner,
+        &owner,
+        DESKTOP_DEVICE,
+        PRIMARY_DEVICE,
+    )?;
+    assert_eq!(accepted.request_id, "req-scope", "the matching scope admits the plan");
+    let other_agent = encode_base64url([8_u8; 32]);
+    let wrong = expected_scope(&owner, &other_agent)?;
+    assert!(
+        check_received_request(
+            &outcome.plan_bytes,
+            &wrong,
+            &owner,
+            &owner,
+            DESKTOP_DEVICE,
+            PRIMARY_DEVICE
+        )
+        .is_err(),
+        "a scope derived for another agent must refuse"
+    );
+    assert!(
+        check_received_request(
+            &outcome.plan_bytes,
+            &owner,
+            &owner,
+            &owner,
+            DESKTOP_DEVICE,
+            PRIMARY_DEVICE
+        )
+        .is_err(),
+        "the bare owner anchor is not a conversation scope"
+    );
+    assert!(expected_scope(&owner, &owner).is_err(), "equal roots never derive a self scope");
+    Ok(())
+}
+
+#[test]
+fn custody_packet_refuses_non_sibling_sources_and_a_secondary_as_primary() -> TestResult {
+    let dir = TempDir::new()?;
+    let phone = phone(&owner_anchor())?;
+    let (_store, _desk, outcome) = custody_request(&dir, "req-sibling", &phone)?;
+    let owner = owner_anchor();
+    let agent = decode_register_plan(&outcome.plan_bytes)?.agent_anchor;
+    let scope = expected_scope(&owner, &agent)?;
+    let foreign_root = encode_base64url([8_u8; 32]);
+    let refuse = |source_root: &str, source: &str, local: &str| {
+        check_received_request(&outcome.plan_bytes, &scope, &owner, source_root, source, local)
+            .is_err()
+    };
+    assert!(refuse(&foreign_root, DESKTOP_DEVICE, PRIMARY_DEVICE), "another root is not a sibling");
+    assert!(refuse(&owner, PRIMARY_DEVICE, PRIMARY_DEVICE), "a device cannot send to itself");
+    assert!(refuse(&owner, "other-desktop", PRIMARY_DEVICE), "the plan names one desktop only");
+    assert!(refuse(&owner, DESKTOP_DEVICE, "secondary-laptop"), "a secondary is not the primary");
+    assert!(check_sender(&owner, &owner, DESKTOP_DEVICE, PRIMARY_DEVICE).is_ok());
+    assert!(check_sender(&owner, &foreign_root, DESKTOP_DEVICE, PRIMARY_DEVICE).is_err());
+    Ok(())
+}
+
+#[test]
+fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() -> TestResult {
+    let dir = TempDir::new()?;
+    let phone = phone(&owner_anchor())?;
+    let (store, desk, outcome) = custody_request(&dir, "req-replay", &phone)?;
+    let phone_dir = TempDir::new()?;
+    let phone_store = AgentCreationStore::open(phone_dir.path().join("phone"))?;
+    let first = receive_plan(&phone_store, &outcome.plan_bytes, NOW + 1)?;
+    assert_eq!(first.state, AgentCreationState::AuthorizationPending);
+    let replay = receive_plan(&phone_store, &outcome.plan_bytes, NOW + 2)?;
+    assert_eq!(replay.request_hash, first.request_hash, "an exact replay returns the saved plan");
+    let mut altered = decode_register_plan(&outcome.plan_bytes)?;
+    altered.display_name = "Support agent two".into();
+    let altered_bytes = encode_register_plan(&altered)?;
+    assert!(
+        receive_plan(&phone_store, &altered_bytes, NOW + 2).is_err(),
+        "the same request id with another plan must refuse"
+    );
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    let late_dir = TempDir::new()?;
+    let late = AgentCreationStore::open(late_dir.path().join("phone"))?;
+    assert!(
+        matches!(
+            receive_plan(&late, &outcome.plan_bytes, plan.expires_at),
+            Err(SdkError::CustodyExpired)
+        ),
+        "a plan received at its expiry is expired"
+    );
+
+    phone.vault.approve_agent_decision_once_for_test(&outcome.request_hash)?;
+    let approve = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &phone.primary_device),
+        &outcome.plan_bytes,
+        RegisterOutcome::Approve,
+        NOW + 3,
+    )?;
+    let authorized =
+        apply_decision(&store, &desk, "req-replay", &approve, &phone.branch_public, NOW + 3)?;
+    assert_eq!(authorized.state, AgentCreationState::Authorized);
+    let again =
+        apply_decision(&store, &desk, "req-replay", &approve, &phone.branch_public, NOW + 4)?;
+    assert_eq!(again.state, AgentCreationState::Authorized, "an exact replay changes nothing");
+
+    // The vault consumes the approval for this plan hash once: a second decision for the same
+    // plan cannot be signed at all, so no differing decision can reach the desktop.
+    let second = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &phone.primary_device),
+        &outcome.plan_bytes,
+        RegisterOutcome::Deny,
+        NOW + 4,
+    );
+    assert!(second.is_err(), "a consumed plan approval must not sign a second decision");
     Ok(())
 }
