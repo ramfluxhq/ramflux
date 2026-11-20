@@ -182,7 +182,7 @@ fn assert_header_negatives(
         (0, 0, Error::Magic),
         (8, 1, Error::Version),
         (10, 4, Error::Realm),
-        (11, 5, Error::Kind),
+        (11, 7, Error::Kind),
         (10, 1, Error::Combination),
         (11, 4, Error::Authentication),
         (12, 255, Error::Authentication),
@@ -214,7 +214,7 @@ fn assert_header_negatives(
         record[10] = realm;
         assert_error(binding, key, &record, Error::Realm);
     }
-    for kind in [0, 5, 255] {
+    for kind in [0, 7, 255] {
         let mut record = original.to_vec();
         record[11] = kind;
         assert_error(binding, key, &record, Error::Kind);
@@ -440,5 +440,33 @@ fn linux_vault_reference_rules_are_isolated_per_kind() -> TestResult {
     let kind3 = format!("agent-provisioning:{full}");
     rule_seal(3, 3, RULE_ACCOUNT, &kind3, 1)?;
     rule_seal(3, 3, RULE_ACCOUNT, &kind3, MAX_PLAINTEXT)?;
+    Ok(())
+}
+
+#[test]
+fn linux_vault_agent_master_references_follow_their_grammar() -> TestResult {
+    let canonical = ramflux_protocol::encode_base64url([0x5a_u8; 32]);
+    let seed = format!("agent-master:{canonical}");
+    let (record, key) = rule_seal(1, 5, RULE_ACCOUNT, &seed, 32)?;
+    assert!(open(rule_binding(1, 5, RULE_ACCOUNT, &seed), &key, &record).is_ok());
+    let cert = format!("agent-master-cert:{canonical}:2");
+    let (record, key) = rule_seal(1, 6, RULE_ACCOUNT, &cert, 32)?;
+    assert!(open(rule_binding(1, 6, RULE_ACCOUNT, &cert), &key, &record).is_ok());
+    let past_max = format!("agent-master-cert:{canonical}:{}", 1_u64 << 21);
+    for (kind, reference) in [
+        (5, format!("agent-master:{}", &canonical[..42])),
+        (5, cert.clone()),
+        (6, format!("agent-master-cert:{canonical}:02")),
+        (6, format!("agent-master-cert:{canonical}:0")),
+        (6, past_max),
+        (6, format!("agent-master-cert:{canonical}")),
+        (6, seed.clone()),
+    ] {
+        assert_eq!(
+            open(rule_binding(1, kind, RULE_ACCOUNT, &reference), &key, &record).err(),
+            Some(Error::Reference),
+            "kind {kind}: {reference}"
+        );
+    }
     Ok(())
 }

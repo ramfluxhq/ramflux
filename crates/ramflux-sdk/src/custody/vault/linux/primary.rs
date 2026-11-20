@@ -12,10 +12,16 @@ use super::{
 };
 use crate::{
     SdkError,
-    custody::{BranchCredentials, CustodyVaultReason, PrimaryVault},
+    custody::{
+        BranchCredentials, CustodyVaultReason, PrimaryVault,
+        vault::{
+            AGENT_MASTER_PREFIX,
+            agent_master_item::{self, AgentMasterCells},
+        },
+    },
 };
-use ramflux_crypto::custody::SelfSigningKey;
-use ramflux_protocol::custody::DeviceRef;
+use ramflux_crypto::custody::{AgentMasterRequest, MasterKey, SelfSigningKey};
+use ramflux_protocol::custody::{DeviceRef, Envelope, MasterCertificate};
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
@@ -236,6 +242,14 @@ impl LinuxPrimaryVault {
     fn realm(&self, i: usize) -> Result<&Realm, SdkError> {
         self.realms[i].as_ref().ok_or(reason(CustodyVaultReason::PrimaryUnavailable))
     }
+    /// The primary realm for agent-master items. Their ids are not this handle's reference, so
+    /// only the role gate applies; the shared rules check the reference grammar.
+    fn agent_realm(&self) -> Result<&Realm, SdkError> {
+        if self.role == LinuxVaultRole::DataOnly {
+            return Err(reason(CustodyVaultReason::PrimaryUnavailable));
+        }
+        self.realm(0)
+    }
     fn bound(&self, reference: &str, prefix: &str) -> Result<(), SdkError> {
         if self.role == LinuxVaultRole::DataOnly {
             return Err(reason(CustodyVaultReason::PrimaryUnavailable));
@@ -249,9 +263,50 @@ impl LinuxPrimaryVault {
         self.realms[2].take().ok_or(SdkError::CustodyVaultUnavailable)
     }
 }
+/// Agent-master cells on the primary realm: seed entries are kind 5, certificate hashes kind 6.
+/// Absence maps to `None`; every other failure stays a failure.
+struct AgentCells<'a>(&'a Realm);
+fn agent_kind(reference: &str) -> Result<u8, SdkError> {
+    if reference.starts_with(agent_master_item::AGENT_MASTER_CERT_PREFIX) {
+        Ok(6)
+    } else if reference.starts_with(AGENT_MASTER_PREFIX) {
+        Ok(5)
+    } else {
+        Err(SdkError::CustodyVaultUnavailable)
+    }
+}
+impl AgentMasterCells for AgentCells<'_> {
+    fn read_item(&self, reference: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SdkError> {
+        match self.0.read(reference, agent_kind(reference)?) {
+            Ok(plain) => Ok(Some(Zeroizing::new(plain.bytes().to_vec()))),
+            Err(SdkError::CustodyVault(CustodyVaultReason::Missing)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    fn insert_item(&self, reference: &str, value: &[u8]) -> Result<(), SdkError> {
+        self.0.insert(reference, agent_kind(reference)?, value)
+    }
+    fn remove_item(&self, reference: &str) -> Result<(), SdkError> {
+        self.0.delete(reference, agent_kind(reference)?)
+    }
+}
+
 impl PrimaryVault for LinuxPrimaryVault {
     fn vault_class(&self) -> &'static str {
         self.class
+    }
+    fn store_agent_master(&self, reference: &str, master: &MasterKey) -> Result<(), SdkError> {
+        agent_master_item::store(&AgentCells(self.agent_realm()?), reference, master)
+    }
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: AgentMasterRequest,
+    ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        agent_master_item::certify(&AgentCells(self.agent_realm()?), reference, request)
+    }
+    fn delete_agent_master(&self, reference: &str, last_range: u64) -> Result<(), SdkError> {
+        agent_master_item::delete(&AgentCells(self.agent_realm()?), reference, last_range)
     }
     fn preflight(&self) -> Result<(), SdkError> {
         // Ceremony preflight requires primary capacity, not a branch-only service handle.

@@ -3,12 +3,12 @@
 
 //! Integration fixture. `Default` is process-local. `persist_at` keeps wrapping
 //! keys across a test process restart. Not a production vault or production file fallback.
-use super::vault::agent_master_item::{decode as decode_item, encode as encode_item};
-use super::vault::{AGENT_MASTER_PREFIX, agent_key_unavailable};
+use super::vault::agent_key_unavailable;
+use super::vault::agent_master_item::{self, AgentMasterCells};
 use super::{AgentDecisionSigning, BranchCredentials, PrimaryVault, require_vault_reference};
 use crate::SdkError;
 use ramflux_crypto::custody::{
-    AgentMasterRequest, MasterKey, SelfSigningKey, certify_agent_master, sign_register_decision,
+    AgentMasterRequest, MasterKey, SelfSigningKey, sign_register_decision,
 };
 use ramflux_protocol::custody::{
     Envelope, MasterCertificate, RegisterDecision, register_decision_body,
@@ -116,27 +116,6 @@ impl MemoryPrimaryVault {
         approval.pending = Some(plan_hash.into());
         Ok(())
     }
-    /// Replace an existing item, restoring the previous bytes when the flush fails.
-    fn replace_locked(
-        &self,
-        entries: &mut BTreeMap<String, Zeroizing<Vec<u8>>>,
-        reference: &str,
-        bytes: &[u8],
-    ) -> Result<(), SdkError> {
-        let previous = entries.insert(reference.into(), Zeroizing::new(bytes.to_vec()));
-        if let Err(error) = self.flush_locked(entries) {
-            match previous {
-                Some(old) => {
-                    entries.insert(reference.into(), old);
-                }
-                None => {
-                    entries.remove(reference);
-                }
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
         let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         if entries.contains_key(reference) {
@@ -195,6 +174,31 @@ fn load_persisted(path: &Path) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>, S
     }
     Ok(entries)
 }
+/// Insert-only primitives for the shared agent-master rules. A failed flush rolls back the insert.
+impl AgentMasterCells for MemoryPrimaryVault {
+    fn read_item(&self, reference: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SdkError> {
+        let entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        Ok(entries.get(reference).cloned())
+    }
+    fn insert_item(&self, reference: &str, value: &[u8]) -> Result<(), SdkError> {
+        let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        if entries.contains_key(reference) {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        entries.insert(reference.into(), Zeroizing::new(value.to_vec()));
+        if let Err(error) = self.flush_locked(&entries) {
+            entries.remove(reference);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn remove_item(&self, reference: &str) -> Result<(), SdkError> {
+        let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        entries.remove(reference);
+        self.flush_locked(&entries)
+    }
+}
+
 impl PrimaryVault for MemoryPrimaryVault {
     #[cfg(feature = "itest-memory-vault")]
     fn approve_migration_once_for_test(
@@ -250,24 +254,17 @@ impl PrimaryVault for MemoryPrimaryVault {
         self.put(reference, &**seeds)
     }
     fn store_agent_master(&self, reference: &str, master: &MasterKey) -> Result<(), SdkError> {
-        require_vault_reference(reference, AGENT_MASTER_PREFIX)?;
-        let item = encode_item(master, None)?;
-        self.put(reference, &item)
+        agent_master_item::store(self, reference, master)
     }
     fn certify_agent_master(
         &self,
         reference: &str,
         request: AgentMasterRequest,
     ) -> Result<Envelope<MasterCertificate>, SdkError> {
-        require_vault_reference(reference, AGENT_MASTER_PREFIX)?;
-        let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        let stored = entries.get(reference).ok_or_else(agent_key_unavailable)?;
-        let item = decode_item(stored)?;
-        let (certificate, hash) =
-            certify_agent_master(&item, request).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        let rewritten = encode_item(&item.master, Some(&hash))?;
-        self.replace_locked(&mut entries, reference, &rewritten)?;
-        Ok(certificate)
+        agent_master_item::certify(self, reference, request)
+    }
+    fn delete_agent_master(&self, reference: &str, last_range: u64) -> Result<(), SdkError> {
+        agent_master_item::delete(self, reference, last_range)
     }
     fn sign_agent_register_decision(
         &self,

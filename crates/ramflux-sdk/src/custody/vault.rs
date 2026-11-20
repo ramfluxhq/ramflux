@@ -8,8 +8,14 @@ pub(super) mod linux;
 mod reason;
 pub use reason::CustodyVaultReason;
 
-// The codec is used by the fixture vault only until the platform vaults implement the operation.
-#[cfg(any(test, feature = "itest-memory-vault"))]
+// Shared agent-master rules; every provider that stores the agent master calls them.
+#[cfg(any(
+    test,
+    feature = "itest-memory-vault",
+    target_os = "linux",
+    target_os = "macos",
+    windows
+))]
 pub(crate) mod agent_master_item;
 
 #[cfg(windows)]
@@ -130,15 +136,15 @@ pub trait PrimaryVault: Send + Sync {
     fn load_provisioning_secret(&self, _reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         Err(SdkError::CustodyVaultUnavailable)
     }
-    /// Store the agent master seed under `agent-master:<id>` with an empty certificate history.
-    /// Refuses an existing entry.
+    /// Store the agent master seed under `agent-master:<id>` once. Refuses an existing entry.
     /// # Errors
     /// The default refuses with `custody_key_unavailable`; providers without the operation keep it.
     fn store_agent_master(&self, _reference: &str, _master: &MasterKey) -> Result<(), SdkError> {
         Err(agent_key_unavailable())
     }
-    /// Issue one master certificate for a genesis or a rebind, then record its hash in the item.
-    /// The item is rewritten before the certificate is returned; a failed write refuses.
+    /// Issue one master certificate for a genesis or a rebind and record its hash in its own
+    /// insert-only item. A retry of the same request returns the recorded certificate; any other
+    /// recorded range refuses. Nothing is returned unless the record is written or already equal.
     /// # Errors
     /// The default refuses with `custody_key_unavailable`.
     fn certify_agent_master(
@@ -146,6 +152,13 @@ pub trait PrimaryVault: Send + Sync {
         _reference: &str,
         _request: AgentMasterRequest,
     ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        Err(agent_key_unavailable())
+    }
+    /// Remove the agent master seed and the recorded certificate items for ranges
+    /// `1..=last_range`. Certificates are removed first, so a failure can be retried.
+    /// # Errors
+    /// The default refuses with `custody_key_unavailable`.
+    fn delete_agent_master(&self, _reference: &str, _last_range: u64) -> Result<(), SdkError> {
         Err(agent_key_unavailable())
     }
     /// Sign a registration decision with the primary branch after user presence. The provider
@@ -346,6 +359,79 @@ impl PrimaryVault for NativePrimaryVault {
         {
             let _ = reference;
             Err(SdkError::CustodyVaultUnavailable)
+        }
+    }
+    fn store_agent_master(&self, reference: &str, master: &MasterKey) -> Result<(), SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            agent_master_item::store(&native::AgentCells, reference, master)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, master);
+            Err(agent_key_unavailable())
+        }
+    }
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: AgentMasterRequest,
+    ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            agent_master_item::certify(&native::AgentCells, reference, request)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, request);
+            Err(agent_key_unavailable())
+        }
+    }
+    fn delete_agent_master(&self, reference: &str, last_range: u64) -> Result<(), SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            agent_master_item::delete(&native::AgentCells, reference, last_range)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (reference, last_range);
+            Err(agent_key_unavailable())
+        }
+    }
+    /// Presence is the approval: the protected primary item is read with user presence (the
+    /// same path as `sign_home_authorization`), then the primary branch signs the exact body.
+    fn sign_agent_register_decision(
+        &self,
+        request: AgentDecisionSigning<'_>,
+    ) -> Result<RegisterDecision, SdkError> {
+        #[cfg(target_os = "macos")]
+        {
+            require_vault_reference(request.branch_reference, "branch:")?;
+            // Bind the body to the exact plan first: a refused plan never asks for presence.
+            let body = ramflux_protocol::custody::register_decision_body(request.request)
+                .map_err(|_| SdkError::CustodySetupInvalid)?;
+            drop(
+                presence::approved_primary(
+                    &native::KeychainItems::PROTECTED,
+                    request.primary_reference,
+                    request.expected_primary_public_key,
+                )
+                .map_err(|_| agent_key_unavailable())?,
+            );
+            let branch = self
+                .load_branch(
+                    request.branch_reference,
+                    request.principal_id,
+                    &request.request.signer,
+                )
+                .map_err(|_| agent_key_unavailable())?;
+            ramflux_crypto::custody::sign_register_decision(&branch.signing, body)
+                .map_err(|_| agent_key_unavailable())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = request;
+            Err(agent_key_unavailable())
         }
     }
 }

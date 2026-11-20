@@ -8,6 +8,7 @@ use super::{
     apply_decision, begin, cancel, primary_sign_decision, resume_request,
 };
 use crate::SdkError;
+use crate::custody::vault::agent_master_item::AgentMasterCells;
 use crate::custody::{PrimaryVault, memory_vault::MemoryPrimaryVault};
 use ramflux_crypto::create_device_branch_from_seed;
 use ramflux_crypto::custody::{
@@ -513,4 +514,112 @@ fn begin_refuses_a_primary_branch_that_is_already_invalid() -> TestResult {
 /// The deadline of a begun request, read back from its plan.
 fn outcome_expiry(outcome: &super::BeginOutcome) -> Result<u64, Box<dyn std::error::Error>> {
     Ok(ramflux_protocol::custody::decode_register_plan(&outcome.plan_bytes)?.expires_at)
+}
+
+/// A master request with a fixed self-signing key, so a retry builds byte-identical input.
+fn fixed_request(
+    master: &MasterKey,
+    self_key: &str,
+    external: &DeviceRef,
+    range: u64,
+    previous: Option<
+        ramflux_protocol::custody::Envelope<ramflux_protocol::custody::MasterCertificate>,
+    >,
+    issued_at: u64,
+) -> Result<AgentMasterRequest, Box<dyn std::error::Error>> {
+    Ok(AgentMasterRequest {
+        purpose: if previous.is_some() {
+            AgentMasterPurpose::Rebind
+        } else {
+            AgentMasterPurpose::Create
+        },
+        anchor: master_anchor(master)?,
+        principal_id: PRINCIPAL.into(),
+        principal_kind: ramflux_protocol::PrincipalKind::HeadlessAi,
+        cert_id: encode_base64url([7_u8; 32]),
+        self_signing_public_key: self_key.into(),
+        external_ref: external.clone(),
+        range,
+        previous,
+        issued_at,
+    })
+}
+
+#[test]
+fn certificate_retry_returns_the_recorded_certificate_and_a_changed_request_refuses() -> TestResult
+{
+    let dir = TempDir::new()?;
+    let (_store, vault) = desktop(&dir)?;
+    let phone = phone(&owner_anchor())?;
+    let master = MasterKey::generate()?;
+    let self_key = SelfSigningKey::generate()?.public_key();
+    let reference = format!("agent-master:{}", encode_base64url([9_u8; 32]));
+    vault.store_agent_master(&reference, &master)?;
+    let genesis = vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW)?,
+    )?;
+    // A retry after a crash between the insert and the reply returns the recorded certificate.
+    let retry = vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW)?,
+    )?;
+    assert_eq!(object_hash(&genesis)?, object_hash(&retry)?, "the genesis retry is identical");
+    let other_time = fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW + 1)?;
+    assert!(
+        vault.certify_agent_master(&reference, other_time).is_err(),
+        "a different genesis for a recorded range refuses"
+    );
+    let rebound = vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 2, Some(genesis.clone()), NOW)?,
+    )?;
+    let rebind_retry = vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 2, Some(genesis.clone()), NOW)?,
+    )?;
+    assert_eq!(
+        object_hash(&rebound)?,
+        object_hash(&rebind_retry)?,
+        "the rebind retry is identical"
+    );
+    let rebind_other =
+        fixed_request(&master, &self_key, &phone.primary_device, 2, Some(genesis), NOW + 1)?;
+    assert!(
+        vault.certify_agent_master(&reference, rebind_other).is_err(),
+        "a different rebind for a recorded range refuses"
+    );
+    Ok(())
+}
+
+#[test]
+fn delete_agent_master_removes_the_seed_and_every_certificate_item() -> TestResult {
+    let dir = TempDir::new()?;
+    let (_store, vault) = desktop(&dir)?;
+    let phone = phone(&owner_anchor())?;
+    let master = MasterKey::generate()?;
+    let self_key = SelfSigningKey::generate()?.public_key();
+    let id = encode_base64url([9_u8; 32]);
+    let reference = format!("agent-master:{id}");
+    vault.store_agent_master(&reference, &master)?;
+    let genesis = vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW)?,
+    )?;
+    vault.certify_agent_master(
+        &reference,
+        fixed_request(&master, &self_key, &phone.primary_device, 2, Some(genesis), NOW)?,
+    )?;
+    let cert_1 = format!("agent-master-cert:{id}:1");
+    let cert_2 = format!("agent-master-cert:{id}:2");
+    for item in [&reference, &cert_1, &cert_2] {
+        assert!(AgentMasterCells::read_item(&vault, item)?.is_some(), "{item} is recorded");
+    }
+    vault.delete_agent_master(&reference, 2)?;
+    for item in [&reference, &cert_1, &cert_2] {
+        assert!(AgentMasterCells::read_item(&vault, item)?.is_none(), "{item} is removed");
+    }
+    let after = fixed_request(&master, &self_key, &phone.primary_device, 1, None, NOW)?;
+    assert!(vault.certify_agent_master(&reference, after).is_err(), "a deleted master refuses");
+    Ok(())
 }

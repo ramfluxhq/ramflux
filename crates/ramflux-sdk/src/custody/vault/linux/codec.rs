@@ -8,6 +8,7 @@
 //! Enabled poly1305 zeroize clears software r/h/pad and the autodetected union
 //! containing software/AVX2 state; SIMD register and intermediate copies are not promised.
 use super::cleanup::Secret;
+use crate::custody::vault::{AGENT_MASTER_PREFIX, agent_master_item, require_vault_reference};
 use chacha20poly1305::{
     Tag, XChaCha20Poly1305, XNonce,
     aead::{AeadInPlace, KeyInit},
@@ -61,17 +62,17 @@ fn valid_fields(realm: u8, kind: u8, generation: u64, len: usize) -> Result<(), 
     if !(1..=3).contains(&realm) {
         return Err(Error::Realm);
     }
-    if !(1..=4).contains(&kind) {
+    if !(1..=6).contains(&kind) {
         return Err(Error::Kind);
     }
-    if !matches!((realm, kind), (1, 1) | (2, 2) | (3, 3 | 4)) {
+    if !matches!((realm, kind), (1, 1 | 5 | 6) | (2, 2) | (3, 3 | 4)) {
         return Err(Error::Combination);
     }
     if generation == 0 {
         return Err(Error::Generation);
     }
     let valid_len = match kind {
-        1 => len == 32,
+        1 | 5 | 6 => len == 32,
         2 => len == 64,
         _ => (1..=MAX_PLAINTEXT).contains(&len),
     };
@@ -84,7 +85,7 @@ fn valid_fields(realm: u8, kind: u8, generation: u64, len: usize) -> Result<(), 
 impl Binding<'_> {
     pub(super) fn validate_name(self) -> Result<(), Error> {
         self.validate(match self.kind {
-            1 => 32,
+            1 | 5 | 6 => 32,
             2 => 64,
             _ => 1,
         })
@@ -97,6 +98,19 @@ impl Binding<'_> {
             1 => self.reference,
             2 => self.reference.strip_prefix("branch:").ok_or(Error::Reference)?,
             3 => self.reference.strip_prefix("agent-provisioning:").ok_or(Error::Reference)?,
+            // Agent master seed: `agent-master:<id>`. Its id is not bound to the account handle.
+            5 => {
+                return require_vault_reference(self.reference, AGENT_MASTER_PREFIX)
+                    .map_err(|_| Error::Reference);
+            }
+            // Recorded master certificate hash: `agent-master-cert:<id>:<range>`.
+            6 => {
+                return if agent_master_item::valid_certificate_reference(self.reference) {
+                    Ok(())
+                } else {
+                    Err(Error::Reference)
+                };
+            }
             _ => {
                 return if self.reference.strip_prefix("unlock:") == Some(self.account) {
                     Ok(())
