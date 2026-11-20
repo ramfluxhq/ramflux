@@ -7,6 +7,7 @@ mod ceremony;
 mod commit_gate;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
+pub mod agent_creation;
 pub mod pairing;
 mod primary_signing;
 pub(crate) use primary_signing::PrimarySigningLease;
