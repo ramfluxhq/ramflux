@@ -231,6 +231,12 @@ Initialization recovers missing generated trust files using the same saved keys.
 path and mode defaults. Required keyring-provider inputs include
 `RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
 and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
+The gateway's attachment authority calls reach the relay over the compose network:
+`RAMFLUX_RELAY_ATTACHMENT_ADDR=0.0.0.0:7443` (relay listener, set on the relay service)
+and `RAMFLUX_RELAY_ATTACHMENT_ENDPOINT=ramflux-relay:7443` (gateway, set on the gateway
+service). Without the endpoint the gateway refuses every attachment call with
+`authority_unavailable`. Both values are written by `up`, so an existing node picks
+them up on its next `up`.
 The wrapper also supplies the matching `RF_COMPOSE_*` inputs for these concrete runtime values.
 The actual-provider regression renders the complete generated project and rejects
 unresolved `${...}` expressions anywhere in the result. Run it without a container
