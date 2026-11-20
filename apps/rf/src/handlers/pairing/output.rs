@@ -77,14 +77,36 @@ const KNOWN_CODES: &[&str] = &[
 ];
 /// The fixed category for a code outside the allowlist.
 const UNKNOWN: &str = "unknown";
+/// Longest local-bus code the CLI echoes after `unknown`.
+const MAX_ECHOED_CODE: usize = 64;
 
 fn known(code: &str) -> &'static str {
     KNOWN_CODES.iter().find(|candidate| **candidate == code).copied().unwrap_or(UNKNOWN)
 }
 
+/// A local-bus refusal: a listed code prints its text; an unlisted plain identifier prints
+/// `unknown (<code>)`; anything else prints `unknown`. The free-text message is never printed.
+fn refused_class(code: &str) -> String {
+    let listed = known(code);
+    if listed != UNKNOWN {
+        listed.to_owned()
+    } else if is_echoable_code(code) {
+        format!("{UNKNOWN} ({code})")
+    } else {
+        UNKNOWN.to_owned()
+    }
+}
+
+fn is_echoable_code(code: &str) -> bool {
+    code.len() <= MAX_ECHOED_CODE
+        && code.bytes().next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && code.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 /// A short typed class for a failed pairing command, safe to print: an allow-listed code name,
 /// the fixed passphrase-policy sentence, or `HTTP <status>` for a pairing HTTPS refusal, else
-/// `unknown`. No received text is echoed.
+/// `unknown`, or `unknown (<code>)` for an unlisted local-bus refusal code. No received text is
+/// echoed.
 pub(super) fn class(error: &RfError) -> String {
     use ramflux_sdk::SdkError;
     match error {
@@ -92,7 +114,7 @@ pub(super) fn class(error: &RfError) -> String {
         RfError::Sdk(SdkError::PassphrasePolicy(error)) => error.user_message(),
         RfError::Sdk(SdkError::GatewayWriterBusy) => "GatewayWriterBusy".to_owned(),
         RfError::Sdk(SdkError::LocalBusRefused { code, message, .. }) => http_status(message)
-            .map_or_else(|| known(code).to_owned(), |status| format!("HTTP {status}")),
+            .map_or_else(|| refused_class(code), |status| format!("HTTP {status}")),
         RfError::Sdk(SdkError::LocalBus(message)) => http_status(message)
             .map_or_else(|| UNKNOWN.to_owned(), |status| format!("HTTP {status}")),
         RfError::Sdk(SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. }) => {
