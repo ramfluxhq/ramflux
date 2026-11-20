@@ -623,3 +623,81 @@ async fn certificate_cutoff_is_reported_as_a_typed_status_error() -> TestResult 
     })
     .await
 }
+
+/// Captures the warn-level lines of the test thread; no global subscriber is installed.
+#[derive(Clone, Default)]
+struct WarnLines(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for WarnLines {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(self.0, "{}={value:?} ", field.name());
+            }
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        if let Ok(mut lines) = self.0.lock() {
+            lines.push(fields.0);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A failed publish keeps the stable outer code and logs the underlying typed code at warn.
+#[tokio::test]
+async fn failed_publish_keeps_publish_failed_and_logs_the_underlying_code() -> TestResult {
+    let local = tokio::task::LocalSet::new();
+    within(local.run_until(async {
+        let (account, _keep) = live_primary("layer-publish-cause").await?;
+        let (writer, actor_task) = actor(account);
+        let lines = WarnLines::default();
+        let outcome = {
+            let _guard = tracing::subscriber::set_default(lines.clone());
+            pass_with(writer.clone(), |_input| async {
+                Err::<String, SdkError>(SdkError::CustodyPublicationFailed)
+            })
+            .await
+        };
+        assert!(
+            matches!(outcome, Err(SdkError::CustodyPublicationFailed)),
+            "test: the publish error must reach the caller unchanged"
+        );
+        let stored = writer
+            .apply(|account| {
+                Ok(account
+                    .client
+                    .account_db()?
+                    .load_actor_state::<Option<String>>(LAST_ERROR_KEY)?
+                    .flatten())
+            })
+            .await?;
+        assert_eq!(
+            stored.as_deref(),
+            Some("PublishFailed"),
+            "test: the stable outer code must stay PublishFailed"
+        );
+        let observed = lines.0.lock().map_err(|_| "test: lines lock")?.clone();
+        assert!(
+            observed.iter().any(|line| {
+                line.contains("stage=\"publish\"")
+                    && line.contains("detail=\"CustodyPublicationFailed\"")
+            }),
+            "test: the underlying typed code must be logged at warn: {observed:?}"
+        );
+        actor_task.abort();
+        Ok(())
+    }))
+    .await
+}
