@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.3] - 2026-11-21
+
+- Device pairing is released: nodes with pairing enabled advertise it and clients pair by default; typing: an expired typing clear is idle and typing submit works without the raw-message capability; typed client for the PRX management API.
+
 ## [0.2.2] - 2026-11-21
 
 - Node tooling gives the gateway its attachment authority endpoint, so attachments can be imported, revoked and erased on deployed nodes; `rf pairing` prints the code of an unlisted refusal; a failed layer declaration publish logs its cause; dependency update that removes heapless 0.7.
