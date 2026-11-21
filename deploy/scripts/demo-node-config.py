@@ -591,6 +591,13 @@ def render_files(repo, state, owner):
                        for key in keys if key in custody}
         if environment:
             override["services"][f"ramflux-{service}"]["environment"] = environment
+    # Attachment authority: the gateway forwards calls to the relay listener over the mesh. The
+    # two values are set in runtime.env (relay listener 0.0.0.0:7443, gateway endpoint
+    # ramflux-relay:7443). Without the endpoint every attachment call is refused.
+    override["services"]["ramflux-gateway"].setdefault("environment", {})[
+        "RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"] = "${RAMFLUX_RELAY_ATTACHMENT_ENDPOINT}"
+    override["services"]["ramflux-relay"].setdefault("environment", {})[
+        "RAMFLUX_RELAY_ATTACHMENT_ADDR"] = "${RAMFLUX_RELAY_ATTACHMENT_ADDR}"
     reject_obsolete_inputs()
     if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
         if record is None:

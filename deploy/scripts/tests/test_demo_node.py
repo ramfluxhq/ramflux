@@ -1537,6 +1537,33 @@ class DemoNodeTests(unittest.TestCase):
         self.run_script("up")
         self.assertFalse(any("down" in args or "--volumes" in args for args in self.compose_commands()))
 
+    def test_gateway_attachment_endpoint_matches_the_relay_listener(self):
+        self.run_script("up")
+        runtime = dict(line.split("=", 1) for line in (self.state / "runtime.env").read_text().splitlines())
+        self.assertEqual(runtime["RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"], "ramflux-relay:7443")
+        self.assertEqual(runtime["RAMFLUX_RELAY_ATTACHMENT_ADDR"], "0.0.0.0:7443")
+        override = json.loads((self.state / "demo-override.json").read_text())
+        gateway = override["services"]["ramflux-gateway"]["environment"]
+        self.assertEqual(gateway["RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"], "${RAMFLUX_RELAY_ATTACHMENT_ENDPOINT}")
+        relay = override["services"]["ramflux-relay"]["environment"]
+        self.assertEqual(relay["RAMFLUX_RELAY_ATTACHMENT_ADDR"], "${RAMFLUX_RELAY_ATTACHMENT_ADDR}")
+        # The gateway's mesh endpoint for the relay is the same service name and port as the listener.
+        self.assertIn('relay = "ramflux-relay:7443"', (self.state / "config/gateway.toml").read_text())
+        self.assertEqual(runtime["RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"].rsplit(":", 1)[1],
+                         runtime["RAMFLUX_RELAY_ATTACHMENT_ADDR"].rsplit(":", 1)[1])
+
+    def test_existing_node_up_renders_the_attachment_endpoint(self):
+        self.run_script("up")
+        runtime_path = self.state / "runtime.env"
+        kept = [line for line in runtime_path.read_text().splitlines()
+                if not line.startswith("RAMFLUX_RELAY_ATTACHMENT_")]
+        runtime_path.write_text("\n".join(kept) + "\n")
+        self.run_script("up")
+        runtime = dict(line.split("=", 1) for line in runtime_path.read_text().splitlines())
+        self.assertEqual(runtime["RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"], "ramflux-relay:7443",
+                         "an existing node must render the gateway endpoint on its next up")
+        self.assertEqual(runtime["RAMFLUX_RELAY_ATTACHMENT_ADDR"], "0.0.0.0:7443")
+
     def test_status_reports_discovery_health_and_propagates_probe_failure(self):
         self.run_script("up")
         result = self.run_script("status")
