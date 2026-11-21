@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.4] - 2026-11-21
+
+- Agent creation on a paired device waits for approval from the primary device (agent identity); the PRX client is repinned; a newly added device receives the owner's earlier sent messages (own-history ordering fix); connection policy for network changes and restricted networks.
+
 ## [0.2.3] - 2026-11-21
 
 - Device pairing is released: nodes with pairing enabled advertise it and clients pair by default; typing: an expired typing clear is idle and typing submit works without the raw-message capability; typed client for the PRX management API.
