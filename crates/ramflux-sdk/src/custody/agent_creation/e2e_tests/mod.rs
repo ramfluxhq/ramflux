@@ -6,4 +6,5 @@
 //! Every test waits through a bounded deadline, and no test sleeps for expiry: time is passed as
 //! an explicit `now`.
 mod primary_phone;
+mod authorization_binding;
 mod refusal_timeout;

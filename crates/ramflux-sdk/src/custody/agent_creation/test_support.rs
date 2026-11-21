@@ -37,7 +37,7 @@ use crate::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError};
 use ramflux_node_core::{RouterCore, RouterRedbStore};
 use ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY;
 use ramflux_protocol::custody::{
-    AgentPublishReceipt, BindingMode, CustodyProofAction, CustodyServerFrame, Publication,
+    AgentPublishReceipt, BindingMode, CustodyProofAction, CustodyServerFrame, DeviceRef, Publication,
     RegisterOutcome, RegisterPlan, decode_register_plan, object_hash, register_plan_hash,
 };
 use ramflux_protocol::message as g;
@@ -346,6 +346,19 @@ pub(crate) fn later_primary_decision(
     now: u64,
 ) -> TestResult<Vec<u8>> {
     let plan = decode_register_plan(plan_bytes)?;
+    primary_decision_as(phone, phone_root, plan_bytes, &plan.human_primary, now)
+}
+
+/// The phone signs the decision for `primary` as the signer: the plan names the real primary, so
+/// any other device or owner is refused by the signing itself.
+pub(crate) fn primary_decision_as(
+    phone: &LocalBusAccountState,
+    phone_root: &Path,
+    plan_bytes: &[u8],
+    primary: &DeviceRef,
+    now: u64,
+) -> TestResult<Vec<u8>> {
+    let plan = decode_register_plan(plan_bytes)?;
     let human = phone.client.born_v3_account.as_deref().ok_or("test: the phone human record")?;
     let record = human.record();
     let account_id = phone.client.account_db()?.local_account_id.clone();
@@ -359,7 +372,7 @@ pub(crate) fn later_primary_decision(
     let fixture = phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?;
     fixture.vault.arm_agent_decision(&register_plan_hash(&plan)?)?;
     let signing = PrimarySigning {
-        primary_device: &plan.human_primary,
+        primary_device: primary,
         primary_reference: &reference,
         expected_primary_public_key: &public,
         branch_reference: &branch_reference,
