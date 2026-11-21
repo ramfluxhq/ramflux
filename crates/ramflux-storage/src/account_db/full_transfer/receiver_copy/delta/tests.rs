@@ -153,6 +153,7 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     seed_delivery(&a, "shared", 500)?;
     seed_delivery(&b, "shared", 100)?;
     seed_delivery(&a, "source-only", 200)?;
+    seed_contact_absences(&a, &b)?;
     let (record, base, bytes) = input(&a)?;
     let mut source = a.create_full_stage_for_test(source_record(&record), 604_900)?;
     let mut target = b.create_full_stage_for_test(record, 604_900)?;
@@ -170,6 +171,7 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     a.connection
         .execute("INSERT INTO object_payload_dependency VALUES(?1,?2)", params![h(61), h(62)])?;
     a.connection.execute("DELETE FROM contact_request_delivery", [])?;
+    a.connection.execute("DELETE FROM friend_link_projection", [])?;
     a.connection.execute("UPDATE account_erasure_generation SET generation=10", [])?;
     let next_id = h(71);
     capture(&source, &a, &aroot, 1, &next_id)?;
@@ -189,6 +191,7 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     };
     assert_eq!(manifest_hash, hash);
     assert_union(&copy, &b)?;
+    inspect_contact_absences(&copy)?;
     {
         let private = BackupDatabase::open_full_receiver_copy(
             &copy.scratch.path.join("private.db"),
@@ -598,4 +601,35 @@ fn select_prepared(
     stage.io_cancel_handle().cancel();
     assert!(data.open().is_err(), "G2 handback revived a generation after root lock");
     Ok(data)
+}
+
+fn seed_contact_absences(a: &crate::AccountDb, b: &crate::AccountDb) -> TestResult {
+    a.establish_friend_link("shared-friend", "self", "peer")?;
+    b.establish_friend_link("shared-friend", "self", "peer")?;
+    b.block_friend_link("shared-friend", 200)?;
+    a.record_pending_friend_link("a-only-pending", "self", "pending-peer", 100)?;
+    a.establish_friend_link("a-only-denied", "self", "denied-peer")?;
+    a.block_friend_link("a-only-denied", 300)?;
+    Ok(())
+}
+fn inspect_contact_absences(copy: &FullReceiverBaseCopy) -> TestResult {
+    let private =
+        BackupDatabase::open_full_receiver_copy(&copy.scratch.path.join("private.db"), &copy.key)?;
+    let mut query = private
+        .db
+        .prepare("SELECT link_id,state,blocked FROM friend_link_projection ORDER BY link_id")?;
+    let rows = query
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            ("a-only-denied".to_owned(), "blocked".to_owned(), true),
+            ("shared-friend".to_owned(), "blocked".to_owned(), true)
+        ],
+        "test: source absence dropped a retained denial, removed independent B, or preserved source-only pending content"
+    );
+    Ok(())
 }

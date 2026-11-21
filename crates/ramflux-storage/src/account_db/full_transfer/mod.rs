@@ -41,6 +41,7 @@ pub use reverse_source::{FullReverseSourceDraft, FullReverseSourceWork};
 mod reverse_merge;
 mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
+mod contact_projection;
 mod input_denial;
 mod message_denial;
 mod monotonic;

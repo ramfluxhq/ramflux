@@ -103,7 +103,7 @@ impl Contributions {
         if !super::removable(&header.family) {
             return Err(invalid());
         }
-        let old:Option<Vec<u8>>=tx.query_row("SELECT record FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key],|r|r.get(0)).optional()?;
+        let old:Option<Vec<u8>>=tx.query_row("SELECT coalesce(i.record,r.record) FROM full_union_record r LEFT JOIN full_union_input i USING(generation_nonce,owner,family,key) WHERE r.generation_nonce=?1 AND r.owner=?2 AND r.family=?3 AND r.key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key],|r|r.get(0)).optional()?;
         let Some(old) = old.map(Zeroizing::new) else {
             return Ok(());
         };
@@ -115,6 +115,9 @@ impl Contributions {
             &original.0,
             &mut input,
         )?;
+        if super::super::contact_projection::retain_absent(&header.family, &cells)? {
+            return Ok(());
+        }
         tx.execute("DELETE FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key])?;
         tx.execute("DELETE FROM full_union_input WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key])?;
         let retained:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3)",params![self.nonce.as_slice(),header.family,header.key],|r|r.get(0))?;

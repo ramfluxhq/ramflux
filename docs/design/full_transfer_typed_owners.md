@@ -163,3 +163,17 @@ a source delta or current-B absence removes only that contributor. In particular
 a normalized maximum timestamp is never relabeled as B's original evidence.
 Restrictions remain monotonic. Both delta and B-refresh paths use only compiled
 removal owners and apply restrictive families before content.
+
+Contact projections use one field-policy resolver: endpoints are immutable, lifecycle
+states and removal scope choose the stronger state, denial timestamps keep the
+earliest non-null cutoff, and projection update times take the maximum. Capability
+references are inert history and conflicting references refuse. A source absence
+can remove pending/active-only history, but cannot drop a contributor's retained
+block, rejection, removal or cutoff. Absence decisions use original inputs.
+
+Retained link decisions also close over both contact projections: blocked decisions
+set the product block state/flag and earliest capability cutoff; declines reject
+pending/accepted links; neither revives a removal. The derived expected projection
+uses the independently verified decision rows before materialization/DV. Reverse
+application restricts the actual old primary before its semantic receipt, not only
+B's private copy. Fresh local consent remains the only way to lift a denial.

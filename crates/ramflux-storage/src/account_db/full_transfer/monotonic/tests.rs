@@ -421,3 +421,91 @@ fn full_contact_delivery_same_recipient_different_material_refuses_before_dv() -
         conflict: true,
     })
 }
+
+fn seed_friends(a: &AccountDb, b: &AccountDb) -> TestResult {
+    a.establish_friend_link("source-only", "self", "peer-source")?;
+    a.establish_friend_link("blocked", "self", "peer-blocked")?;
+    b.establish_friend_link("blocked", "self", "peer-blocked")?;
+    b.block_friend_link("blocked", 200)?;
+    a.establish_friend_link("removed", "self", "peer-removed")?;
+    b.establish_friend_link("removed", "self", "peer-removed")?;
+    b.remove_friend_link("removed", "both", 300)?;
+    // The secondary projection is currently history-only; native friendship uses the
+    // ordinary APIs above. Give it its independent nullable restriction combinations.
+    for db in [a, b] {
+        db.connection.execute("INSERT INTO friend_projection VALUES('history','peer-history','accepted',NULL,NULL,NULL,100)",[])?;
+    }
+    b.connection.execute("UPDATE friend_projection SET link_state='removed',blocked_at=200,removed_at=300,updated_at=400",[])?;
+    Ok(())
+}
+#[test]
+fn full_contact_projection_owners_keep_friends_and_independent_removal_and_block() -> TestResult {
+    run(Case {
+        name: "contact-projections",
+        seed: seed_friends,
+        before: None,
+        inspect: |private, b| {
+            for (id, state, blocked, scope) in [
+                ("source-only", "accepted", false, None),
+                ("blocked", "blocked", true, None),
+                ("removed", "removed", true, Some("both")),
+            ] {
+                let value=private.db.query_row("SELECT state,blocked,remove_scope FROM friend_link_projection WHERE link_id=?1",[id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,Option<String>>(2)?)))?;
+                assert_eq!(
+                    value,
+                    (state.to_owned(), blocked, scope.map(str::to_owned)),
+                    "test: friend union lost source friendship or lifted B block/removal"
+                );
+            }
+            let history=private.db.query_row("SELECT link_state,capability_id,blocked_at,removed_at,updated_at FROM friend_projection WHERE link_id='history'",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<i64>>(2)?,row.get::<_,Option<i64>>(3)?,row.get::<_,i64>(4)?)))?;
+            assert_eq!(
+                history,
+                ("removed".to_owned(), None, Some(200), Some(300), 400),
+                "test: history owner revived a removal or adopted a capability"
+            );
+            assert!(
+                b.friend_link("source-only").is_err(),
+                "test: private import mutated live B contacts"
+            );
+            Ok(())
+        },
+        conflict: false,
+    })
+}
+#[test]
+fn full_contact_projection_same_link_with_different_endpoint_refuses_before_dv() -> TestResult {
+    run(Case {
+        name: "contact-endpoint-fork",
+        seed: |a, b| {
+            a.establish_friend_link("link", "self", "peer-a")?;
+            b.establish_friend_link("link", "self", "peer-b")?;
+            Ok(())
+        },
+        before: None,
+        inspect: |_, _| Ok(()),
+        conflict: true,
+    })
+}
+#[test]
+fn full_contact_retained_decision_restricts_an_active_projection_before_dv() -> TestResult {
+    run(Case {
+        name: "contact-decision-projection-closure",
+        seed: |a, b| {
+            a.establish_friend_link("link", "self", "peer")?;
+            b.connection
+                .execute("INSERT INTO contact_link_decision VALUES('link','blocked',100000)", [])?;
+            Ok(())
+        },
+        before: None,
+        inspect: |private, _| {
+            let value=private.db.query_row("SELECT state,blocked,capability_revoked_at FROM friend_link_projection WHERE link_id='link'",[],|row|Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,Option<i64>>(2)?)))?;
+            assert_eq!(
+                value,
+                ("blocked".to_owned(), true, Some(100)),
+                "test: retained denial left an active transferred friendship"
+            );
+            Ok(())
+        },
+        conflict: false,
+    })
+}

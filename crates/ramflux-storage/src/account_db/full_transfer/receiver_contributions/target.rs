@@ -117,7 +117,7 @@ impl Contributions {
         private: &BackupDatabase,
         stage: &impl super::super::receiver_read::ReceiverInput,
     ) -> Result<(), StorageError> {
-        let mut query=tx.prepare("SELECT old.record FROM full_union_record AS old WHERE old.generation_nonce=?1 AND old.owner=?2 AND NOT EXISTS(SELECT 1 FROM current_target AS fresh WHERE fresh.family=old.family AND fresh.key=old.key)")?;
+        let mut query=tx.prepare("SELECT coalesce(i.record,old.record) FROM full_union_record AS old LEFT JOIN full_union_input i USING(generation_nonce,owner,family,key) WHERE old.generation_nonce=?1 AND old.owner=?2 AND NOT EXISTS(SELECT 1 FROM current_target AS fresh WHERE fresh.family=old.family AND fresh.key=old.key)")?;
         let mut rows = query.query(params![self.nonce.as_slice(), self.owners[1]])?;
         while let Some(row) = rows.next()? {
             stage.require_io()?;
@@ -132,6 +132,9 @@ impl Contributions {
                 &header.0,
                 &mut bytes,
             )?;
+            if super::super::contact_projection::retain_absent(&header.0.family, &cells)? {
+                continue;
+            }
             tx.execute("DELETE FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[1],header.0.family,header.0.key])?;
             tx.execute("DELETE FROM full_union_input WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[1],header.0.family,header.0.key])?;
             let retained:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3)",params![self.nonce.as_slice(),header.0.family,header.0.key],|row|row.get(0))?;

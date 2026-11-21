@@ -13,12 +13,22 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Clone, Copy)]
 enum Merge {
+    Columns(&'static [Column]),
     Immutable,
     Decision { state: usize, stamp: usize },
     Denial { state: usize, until: usize },
     Maxima(&'static [usize]),
     EpochHash { epoch: usize, hash: usize, until: usize },
 }
+#[derive(Clone, Copy)]
+enum Column {
+    Exact,
+    Maximum,
+    EarliestOptional,
+    Ranked(&'static [&'static str]),
+}
+const LINK_STATES: &[&str] = &["pending", "accepted", "rejected", "blocked", "removed"];
+const REMOVE_SCOPES: &[&str] = &["me", "own_devices", "both"];
 pub(super) struct Owner {
     family: &'static str,
     names: &'static [&'static str],
@@ -97,6 +107,54 @@ static OWNERS: &[Owner] = &[
         keys: &[0, 1],
         merge: Merge::Maxima(&[3]),
     },
+    Owner {
+        family: "sql/friend_link_projection",
+        names: &[
+            "link_id",
+            "requester_id",
+            "target_id",
+            "state",
+            "remove_scope",
+            "blocked",
+            "capability_revoked_at",
+            "updated_at",
+        ],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Columns(&[
+            Column::Exact,
+            Column::Exact,
+            Column::Exact,
+            Column::Ranked(LINK_STATES),
+            Column::Ranked(REMOVE_SCOPES),
+            Column::Maximum,
+            Column::EarliestOptional,
+            Column::Maximum,
+        ]),
+    },
+    Owner {
+        family: "sql/friend_projection",
+        names: &[
+            "link_id",
+            "peer_principal_id",
+            "link_state",
+            "capability_id",
+            "blocked_at",
+            "removed_at",
+            "updated_at",
+        ],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Columns(&[
+            Column::Exact,
+            Column::Exact,
+            Column::Ranked(LINK_STATES),
+            Column::Exact,
+            Column::EarliestOptional,
+            Column::EarliestOptional,
+            Column::Maximum,
+        ]),
+    },
 ];
 pub(super) fn owner(family: &str) -> Option<&'static Owner> {
     OWNERS.iter().find(|owner| owner.family == family)
@@ -121,6 +179,7 @@ impl Owner {
         if rule.id != self.family
             || rule.restrictive != self.restrictive
             || rule.cells.len() != self.names.len()
+            || matches!(self.merge,Merge::Columns(columns) if columns.len()!=self.names.len())
             || !matches!(rule.selector,FamilySelector::Table(value) if value==table)
             || rule.key.len() != self.keys.len()
             || rule
@@ -142,6 +201,7 @@ impl Owner {
             }
         }
         match self.merge {
+            Merge::Columns(columns) => return merge_columns(columns, left, right),
             Merge::Immutable => {
                 for index in 0..self.names.len() {
                     if left.bytes(index)? != right.bytes(index)? {
@@ -312,7 +372,11 @@ impl Owner {
             Some(bytes) => self.resolve(&self.decode(rule, &bytes)?, incoming)?,
             None => incoming.clone(),
         };
-        self.store(db, &merged)
+        self.store(db, &merged)?;
+        if self.family == "sql/contact_link_decision" {
+            super::contact_projection::apply_decision(db, &merged)?;
+        }
+        Ok(())
     }
     fn store(&self, db: &Connection, merged: &Cells) -> Result<(), StorageError> {
         let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
@@ -370,7 +434,8 @@ impl Owner {
                 None => value,
             });
         }
-        let expected = expected.ok_or_else(invalid)?;
+        let mut expected = expected.ok_or_else(invalid)?;
+        super::contact_projection::derive(&private.db, self.family, &mut expected)?;
         // Nonrestrictive rows are reconstructed from the retained original contributors.
         // Normalizing a previous union into B's original would otherwise preserve A's
         // metadata after an A-only absence. Restrictions deliberately stay monotonic.
@@ -386,6 +451,46 @@ impl Owner {
             params![bytes.as_slice(),nonce.as_slice(),self.family,key])?;
         Ok(())
     }
+}
+
+fn rank(value: &Cells, index: usize, values: &[&str]) -> Result<usize, StorageError> {
+    if value.kind(index)? == ramflux_protocol::custody::pairing::full_transfer::CellType::Null {
+        return Ok(0);
+    }
+    let text = value.text(index)?;
+    values.iter().position(|state| *state == text).map(|rank| rank + 1).ok_or_else(invalid)
+}
+fn merge_columns(columns: &[Column], left: &Cells, right: &Cells) -> Result<Cells, StorageError> {
+    let mut result = left.clone();
+    for (index, column) in columns.iter().enumerate() {
+        match column {
+            Column::Exact => {
+                if left.kind(index)? != right.kind(index)?
+                    || left.bytes(index)? != right.bytes(index)?
+                {
+                    return Err(conflict());
+                }
+            }
+            Column::Maximum => {
+                result.set_integer(index, left.integer(index)?.max(right.integer(index)?))?;
+            }
+            Column::EarliestOptional => {
+                use ramflux_protocol::custody::pairing::full_transfer::CellType;
+                if left.kind(index)? == CellType::Null
+                    || right.kind(index)? != CellType::Null
+                        && right.integer(index)? < left.integer(index)?
+                {
+                    result.copy_cell(index, right)?;
+                }
+            }
+            Column::Ranked(values) => {
+                if rank(right, index, values)? > rank(left, index, values)? {
+                    result.copy_cell(index, right)?;
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 pub(super) fn normalize(

@@ -90,17 +90,41 @@ impl Cells {
         Ok(i64::from_be_bytes(self.bytes(index)?.try_into().map_err(|_| unsupported())?))
     }
     pub(super) fn set_integer(&mut self, index: usize, value: i64) -> Result<(), StorageError> {
-        let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
-        let bytes = self.bytes.get_mut(range).ok_or_else(unsupported)?;
-        if bytes.len() != 8 {
+        self.replace(
+            index,
+            ramflux_protocol::custody::pairing::full_transfer::CellType::I64,
+            &value.to_be_bytes(),
+        )
+    }
+    pub(super) fn kind(
+        &self,
+        index: usize,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::CellType, StorageError> {
+        if index >= self.count {
             return Err(unsupported());
         }
-        bytes.copy_from_slice(&value.to_be_bytes());
-        Ok(())
+        self.kinds.get(index).copied().ok_or_else(unsupported)
+    }
+    pub(super) fn set_text(&mut self, index: usize, text: &str) -> Result<(), StorageError> {
+        self.replace(
+            index,
+            ramflux_protocol::custody::pairing::full_transfer::CellType::Utf8,
+            text.as_bytes(),
+        )
     }
     pub(super) fn copy_cell(&mut self, index: usize, other: &Self) -> Result<(), StorageError> {
+        self.replace(index, other.kind(index)?, other.bytes(index)?)
+    }
+    fn replace(
+        &mut self,
+        index: usize,
+        kind: ramflux_protocol::custody::pairing::full_transfer::CellType,
+        source: &[u8],
+    ) -> Result<(), StorageError> {
+        if index >= self.count {
+            return Err(unsupported());
+        }
         let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
-        let source = other.bytes(index)?;
         let size = self
             .bytes
             .len()
@@ -113,8 +137,7 @@ impl Cells {
         bytes.extend_from_slice(source);
         bytes.extend_from_slice(self.bytes.get(range.end..).ok_or_else(unsupported)?);
         self.bytes = bytes;
-        *self.kinds.get_mut(index).ok_or_else(unsupported)? =
-            *other.kinds.get(index).ok_or_else(unsupported)?;
+        *self.kinds.get_mut(index).ok_or_else(unsupported)? = kind;
         let mut end = range.start;
         for position in index..self.count {
             let old = self.ranges.get(position).ok_or_else(unsupported)?.clone();
