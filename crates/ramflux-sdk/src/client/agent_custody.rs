@@ -10,7 +10,7 @@ use crate::client::identity_authority::HeadUse;
 use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
 use crate::client::routed::Opened;
 use crate::custody::agent_creation::{
-    AgentCreationStore, check_received_decision, check_received_request, expected_scope,
+    AgentCreationStore, cancel, check_received_decision, check_received_request, expected_scope,
     receive_decision, receive_plan,
 };
 use crate::error::GeneratedRefusalCode;
@@ -18,7 +18,9 @@ use crate::prelude::now_unix_timestamp;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_crypto::RootQualifiedDeviceRef;
-use ramflux_protocol::custody::{decode_register_decision, decode_register_plan};
+use ramflux_protocol::custody::{
+    decode_register_cancel, decode_register_decision, decode_register_plan,
+};
 use ramflux_protocol::message as g;
 
 /// The custody body of one authorized packet, ready for its receive step.
@@ -27,6 +29,8 @@ pub(crate) enum CustodyBody {
     Plan(Vec<u8>),
     /// Canonical decision bytes (the desktop consumes them).
     Decision(Vec<u8>),
+    /// Canonical cancel bytes from the initiating desktop (the primary tombstones its plan).
+    Cancel(Vec<u8>),
 }
 
 /// Domain of the local message id of one custody control.
@@ -64,7 +68,8 @@ impl RamfluxClient {
 
     /// Receive authorization of one `AgentHostPacket`. Refuses before any effect. A plan must name
     /// this device as its human primary. A decision must answer a plan stored on this root and come
-    /// from that plan's primary to its desktop. Cancel and receipt bodies are refused in this stage.
+    /// from that plan's primary to its desktop. A cancel must come from the initiating desktop.
+    /// Receipt bodies are refused until the publication step.
     /// # Errors
     /// Refuses endpoint, epoch, body, plan, decision or scope mismatches.
     pub(crate) fn authorize_generated_agent_sync(
@@ -130,7 +135,28 @@ impl RamfluxClient {
                 )?;
                 Ok(CustodyBody::Decision(decision_bytes.clone()))
             }
-            Some(_) => Err(refused("agent custody cancel and receipt are not applied yet")),
+            Some(g::agent_custody_packet::Value::CancelJson(cancel_bytes)) => {
+                let request = decode_register_cancel(cancel_bytes)
+                    .map_err(|_| refused("agent custody cancel does not decode"))?;
+                let stored = self
+                    .agent_creation_store()?
+                    .load(&request.request_id)?
+                    .ok_or_else(|| refused("agent custody cancel names no stored request"))?;
+                let plan = decode_register_plan(&stored.plan_bytes()?)
+                    .map_err(|_| refused("agent custody stored plan does not decode"))?;
+                let scope = expected_scope(&own_root, &plan.agent_anchor)?;
+                // Only the desktop that initiated the request may cancel it, on this root.
+                if plan.owner_anchor != own_root
+                    || source.root_commitment() != plan.owner_anchor
+                    || source.device_id() != plan.desktop.device_id
+                    || local.device_id() != plan.human_primary.device_id
+                    || conversation != scope.as_str()
+                {
+                    return Err(refused("agent custody cancel is not from the initiating desktop"));
+                }
+                Ok(CustodyBody::Cancel(cancel_bytes.clone()))
+            }
+            Some(_) => Err(refused("agent custody receipt is not applied yet")),
             None => Err(refused("agent custody body missing")),
         }
     }
@@ -163,6 +189,13 @@ impl RamfluxClient {
         let store = self.agent_creation_store()?;
         match body {
             CustodyBody::Plan(plan_bytes) => receive_plan(&store, &plan_bytes, now).map(|_| ()),
+            CustodyBody::Cancel(cancel_bytes) => {
+                let vault = self
+                    .born_v3_vault
+                    .as_deref()
+                    .ok_or_else(|| refused("agent custody needs the custody vault"))?;
+                cancel(&store, vault, &cancel_bytes, now).map(|_| ())
+            }
             CustodyBody::Decision(decision_bytes) => {
                 let account = self
                     .born_v3_account

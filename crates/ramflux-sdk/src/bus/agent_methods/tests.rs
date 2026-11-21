@@ -14,6 +14,9 @@ use crate::client::shared_group::tests::{
 };
 use crate::custody::agent_creation::AgentCreationState;
 use crate::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError};
+use ramflux_protocol::custody::{
+    RegisterCancel, RegisterPlan, decode_register_plan, encode_register_cancel,
+};
 use ramflux_protocol::message as g;
 use std::sync::Arc;
 
@@ -79,13 +82,11 @@ fn vault_of(client: &RamfluxClient) -> Result<Arc<dyn crate::custody::PrimaryVau
     client.born_v3_vault.clone().ok_or(SdkError::CustodyVaultUnavailable)
 }
 
-/// Capture the one staged packet of `source` and apply it on `target` through the own-device
-/// receive path (the same sequence the own-device surface tests use).
-async fn deliver(
+/// Flush the one staged packet of `source` and return it as the inbox entry a receiver gets.
+async fn outbound(
     source: &mut LocalBusAccountState,
-    target: &mut LocalBusAccountState,
     sequence: u64,
-) -> TestResult {
+) -> Result<GatewayInboxEntry, Box<dyn std::error::Error>> {
     let gateway = RecordingGateway::new(Arc::default());
     let attempted = gateway.attempted.clone();
     let engine =
@@ -93,14 +94,61 @@ async fn deliver(
     source.install_test_session(engine);
     assert_eq!(own_device_copy::flush(source).await?, 1, "one staged packet leaves the outbox");
     let packet = attempted.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(0);
-    let entry = GatewayInboxEntry {
+    Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: sequence,
         target_delivery_id: packet.target_delivery_id.clone(),
         envelope: packet,
-    };
+    })
+}
+
+/// Capture the one staged packet of `source` and apply it on `target` through the own-device
+/// receive path (the same sequence the own-device surface tests use).
+async fn deliver(
+    source: &mut LocalBusAccountState,
+    target: &mut LocalBusAccountState,
+    sequence: u64,
+) -> TestResult {
+    let entry = outbound(source, sequence).await?;
     assert!(receive_copy(&mut target.client, &target.gateway_config, &entry).await?);
     Ok(())
+}
+
+/// The cancel of one request as its initiating desktop holds it, with the plan it names.
+fn cancel_of(
+    initiator: &LocalBusAccountState,
+    request_id: &str,
+) -> Result<(Vec<u8>, RegisterPlan), Box<dyn std::error::Error>> {
+    let record =
+        initiator.client.agent_creation_store()?.load(request_id)?.ok_or("initiator record")?;
+    let plan = decode_register_plan(&record.plan_bytes()?)?;
+    let cancel = encode_register_cancel(&RegisterCancel {
+        request_id: request_id.into(),
+        request_hash: record.request_hash.clone(),
+    })?;
+    Ok((cancel, plan))
+}
+
+/// Stage a cancel from `sender` to `target` (both on one root) and return the entry the target gets.
+async fn stage_cancel(
+    sender: &mut LocalBusAccountState,
+    target: &LocalBusAccountState,
+    (cancel, plan): (Vec<u8>, RegisterPlan),
+    request_id: &str,
+    sequence: u64,
+) -> Result<GatewayInboxEntry, Box<dyn std::error::Error>> {
+    let device = target.client.owned_device_identity()?;
+    sender.client.stage_agent_custody(AgentCustodySend {
+        target: &device,
+        owner_anchor: &plan.owner_anchor,
+        agent_anchor: &plan.agent_anchor,
+        correlation_id: request_id,
+        custody: g::AgentCustodyPacket {
+            value: Some(g::agent_custody_packet::Value::CancelJson(cancel)),
+        },
+        now: now()?,
+    })?;
+    outbound(sender, sequence).await
 }
 
 fn refused_with<T: std::fmt::Debug>(result: Result<T, SdkError>, token: &str) -> TestResult {
@@ -164,6 +212,69 @@ fn operation_get_returns_the_stored_status_and_refuses_an_unknown_request() -> T
             "creation_request_unknown",
         )?;
         deliver(&mut laptop, &mut phone, 1).await?;
+        Ok(())
+    })
+}
+
+#[test]
+fn cancel_from_the_initiating_desktop_tombstones_the_primary_plan() -> TestResult {
+    let (mut phone, mut laptop) = pair("cancel")?;
+    block_on(async {
+        let desk = vault_of(&laptop.client)?;
+        let status = laptop.client.agent_create(desk.as_ref(), &create_body(Some(true)), now()?)?;
+        deliver(&mut laptop, &mut phone, 1).await?;
+        let cancel = cancel_of(&laptop, &status.request_id)?;
+        let entry = stage_cancel(&mut laptop, &phone, cancel, &status.request_id, 2).await?;
+        assert!(receive_copy(&mut phone.client, &phone.gateway_config, &entry).await?);
+        let store = phone.client.agent_creation_store()?;
+        let record = store.load(&status.request_id)?.ok_or("primary record")?;
+        assert_eq!(record.state, AgentCreationState::Cancelled, "the primary tombstones the plan");
+        let replay =
+            crate::custody::agent_creation::receive_plan(&store, &record.plan_bytes()?, now()?)?;
+        assert_eq!(replay.state, AgentCreationState::Cancelled, "a replayed plan never revives it");
+        Ok(())
+    })
+}
+
+#[test]
+fn cancel_from_another_source_is_refused() -> TestResult {
+    let (mut phone, mut laptop) = pair("cancel-other")?;
+    // A second paired desktop of the same human account: it did not initiate the request.
+    let mut tablet = native_sibling(&mut phone, "tablet-cancel-other", "tablet")?;
+    // Only the newest manifests are shared: the laptop's is one epoch behind after the enrolment.
+    let newest = |account: &LocalBusAccountState| {
+        account
+            .client
+            .native_bus_fixture
+            .as_ref()
+            .map(|material| material.manifest.clone())
+            .ok_or(SdkError::CustodySetupInvalid)
+    };
+    let (phone_manifest, tablet_manifest) = (newest(&phone)?, newest(&tablet)?);
+    phone.client.persist_observed_identity_directory_now(&tablet_manifest)?;
+    tablet.client.persist_observed_identity_directory_now(&phone_manifest)?;
+    laptop.client.persist_observed_identity_directory_now(&tablet_manifest)?;
+    crate::client::native_test_support::bus::seed_pair(&phone.client, &tablet.client)?;
+    block_on(async {
+        let desk = vault_of(&laptop.client)?;
+        let status = laptop.client.agent_create(desk.as_ref(), &create_body(Some(true)), now()?)?;
+        deliver(&mut laptop, &mut phone, 1).await?;
+        let cancel = cancel_of(&laptop, &status.request_id)?;
+        let entry = stage_cancel(&mut tablet, &phone, cancel, &status.request_id, 2).await?;
+        assert!(
+            receive_copy(&mut phone.client, &phone.gateway_config, &entry).await.is_err(),
+            "a cancel from a device other than the initiating desktop is refused"
+        );
+        let record = phone
+            .client
+            .agent_creation_store()?
+            .load(&status.request_id)?
+            .ok_or("primary record")?;
+        assert_eq!(
+            record.state,
+            AgentCreationState::AuthorizationPending,
+            "the refused cancel leaves the plan pending"
+        );
         Ok(())
     })
 }
