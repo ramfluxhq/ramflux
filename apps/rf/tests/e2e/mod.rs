@@ -8,6 +8,12 @@ mod ceremony_screen;
 #[cfg(windows)]
 mod conpty;
 #[cfg(unix)]
+pub mod pairing_tls;
+#[cfg(unix)]
+pub mod primary_transfer;
+#[cfg(unix)]
+pub mod primary_transfer_pairing;
+#[cfg(unix)]
 #[path = "proc.rs"]
 mod proc;
 #[cfg(windows)]
@@ -1322,10 +1328,24 @@ fn poll_json(
     timeout: Duration,
     ready: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
+    poll_value(
+        args.first().copied().unwrap_or("unknown command"),
+        timeout,
+        || rf_json(&daemon.socket, args),
+        ready,
+    )
+}
+
+fn poll_value(
+    label: &str,
+    timeout: Duration,
+    mut read: impl FnMut() -> Result<Value>,
+    ready: impl Fn(&Value) -> bool,
+) -> Result<Value> {
     let deadline = Instant::now() + timeout;
     let mut reported_failure = false;
     loop {
-        match rf_json(&daemon.socket, args) {
+        match read() {
             Ok(value) if ready(&value) => return Ok(value),
             Ok(value) if Instant::now() >= deadline => {
                 return Err(format!("timed out waiting for CLI JSON; last={value}").into());
@@ -1335,10 +1355,7 @@ fn poll_json(
             }
             Err(error) if !reported_failure => {
                 let reason = error.to_string().chars().take(768).collect::<String>();
-                eprintln!(
-                    "CLI poll {} first refusal: {reason}",
-                    args.first().copied().unwrap_or("unknown command"),
-                );
+                eprintln!("CLI poll {label} first refusal: {reason}");
                 reported_failure = true;
             }
             _ => {}

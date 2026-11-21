@@ -221,7 +221,7 @@ pub(super) async fn install(
             is_primary: false,
         },
         Some(proof),
-        Arc::new(HttpRelay::from_config(&pairing)?),
+        Arc::new(HttpRelay::for_node_profile(&pairing, &profile)?),
         pairing,
     );
     actor.set_full_node(node);

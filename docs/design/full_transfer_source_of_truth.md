@@ -36,6 +36,22 @@ ordinary owners; imported history must not fabricate those capabilities.
 
 ## Revised execution order
 
+The reproducible native seed lives in `apps/rf/tests/e2e/primary_transfer.rs` and
+uses the shared process stack, ordinary CLI writes and the durable message read
+model through `dm list`. `dm read` is unsuitable for this proof: it invokes
+`message.receive` before reading and can hide a stalled automatic courier.
+`primary_transfer_pairing.rs` supplies attended CLI enrollment and uses
+the same bounded TLS front as federation continuity tests (`pairing_tls.rs`).
+The seed keeps test-owned recovery input in a wiped buffer for the recipient's
+ordinary Prepare ceremony; it is never part of transfer content or a fixture file.
+An enrollment or seed result alone does not prove full transfer.
+
+`HttpRelay::for_node_profile` uses the selected local node profile's configured CA
+for pairing HTTPS, as the normal gateway already does. Invitations contribute no
+trust root. HTTPS validation, redirects refusal and native node-key binding remain
+required, including staged recipient resume. The process seed exposed `UnknownCA`
+when these bus installation paths used only the default HTTPS root set.
+
 Checkpoint0 is the committed census and cut/install contract. Checkpoint1 now has
 an early vertical gate, then expansion; checkpoints2–5 keep their numbers:
 

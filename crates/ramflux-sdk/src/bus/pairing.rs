@@ -140,18 +140,7 @@ async fn install_source(
     let root = &state.config.data_root;
     let native = actor_authority(root, account_id, resume.is_some())?;
     let record = native.record();
-    let device_id = native.local_device_id()?;
-    let device = record
-        .body
-        .devices
-        .iter()
-        .find(|device| device.device_id == device_id)
-        .ok_or(SdkError::CustodySetupInvalid)?;
-    let reference = DeviceRef {
-        account_anchor: record.body.account_anchor.clone(),
-        device_id: device_id.into(),
-        device_epoch: device.device_epoch,
-    };
+    let reference = local_reference(&native)?;
     let primary = if let Some(request) = resume {
         retained_data_role(account.client.account_db()?, request, &reference, record)?
     } else {
@@ -171,7 +160,7 @@ async fn install_source(
                 server_name: old.server_name.clone(),
                 ca_cert: old.ca_cert.clone(),
                 principal_id: record.body.principal_id.clone(),
-                device_id: device_id.into(),
+                device_id: reference.device_id.clone(),
                 target_delivery_id: old.target_delivery_id.clone(),
                 prekey_http_url: None,
             },
@@ -179,6 +168,7 @@ async fn install_source(
         .await?;
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
     let vault = super::custody_setup::primary_provider(&state.config);
+    let relay = Arc::new(HttpRelay::for_node_profile(&config, &profile)?);
     let gateway = GatewaySessionConfig::auto(endpoint)
         .with_host_network(&state.config)
         .with_tcp_gateway_addr(tcp)
@@ -216,7 +206,7 @@ async fn install_source(
             is_primary: primary,
         },
         Some(proof),
-        Arc::new(HttpRelay::from_config(&config)?),
+        relay,
         config,
     );
     if let Some(node) = recipient_node {
@@ -225,6 +215,22 @@ async fn install_source(
     actor.set_participant(participant);
     let writer = actor.bind_frontend_writer(account.client.account_db()?)?;
     install_actor_with_writer(root, account_id.into(), actor, Some(writer))
+}
+
+fn local_reference(native: &crate::custody::BornAccount) -> Result<DeviceRef, SdkError> {
+    let record = native.record();
+    let device_id = native.local_device_id()?;
+    let device = record
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    Ok(DeviceRef {
+        account_anchor: record.body.account_anchor.clone(),
+        device_id: device_id.into(),
+        device_epoch: device.device_epoch,
+    })
 }
 
 fn actor_authority(
@@ -433,6 +439,7 @@ async fn install_new_recipient(
             },
         )
         .await?;
+    let relay = Arc::new(HttpRelay::for_node_profile(&config, &profile)?);
     let gateway = GatewaySessionConfig::auto(endpoint)
         .with_host_network(&state.config)
         .with_tcp_gateway_addr(tcp)
@@ -476,7 +483,7 @@ async fn install_new_recipient(
             is_primary: false,
         },
         Some(proof),
-        Arc::new(HttpRelay::from_config(&config)?),
+        relay,
         config,
     );
     actor.set_full_node(node);
