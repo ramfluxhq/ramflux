@@ -32,11 +32,38 @@ struct WireTargeted {
     restart_required: bool,
 }
 
-/// The answer of `POST /api/config/reload`.
+/// The answer of `POST /api/config/reload`: the typed part of PRX's report.
+///
+/// PRX sends the report as a JSON text inside `message`. The client decodes only `status` and
+/// `rebuilt` (the report's other fields are not in the token document); a report that does not
+/// decode fails closed. After a credential is stored, a reload that rebuilds the turn runtime
+/// lists `gateway_turn_runtime` in `rebuilt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReloadReport {
-    /// PRX's report text. Shown, never parsed.
-    pub message: String,
+    pub status: ReloadStatus,
+    /// Runtime objects PRX rebuilt by this reload, by name.
+    pub rebuilt: Vec<String>,
+}
+
+/// The report's `status`, as PRX's configuration reload defines it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadStatus {
+    Unchanged,
+    Applied,
+    AppliedWithRestartRequired,
+    RestartRequired,
+}
+
+impl ReloadStatus {
+    fn from_wire(status: &str) -> Result<Self, PrxError> {
+        match status {
+            "unchanged" => Ok(Self::Unchanged),
+            "applied" => Ok(Self::Applied),
+            "applied_with_restart_required" => Ok(Self::AppliedWithRestartRequired),
+            "restart_required" => Ok(Self::RestartRequired),
+            _ => Err(protocol("config reload reports an unknown status")),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -44,6 +71,12 @@ pub struct ReloadReport {
 struct WireReload {
     success: bool,
     message: String,
+}
+
+#[derive(Deserialize)]
+struct WireReloadReport {
+    status: String,
+    rebuilt: Vec<String>,
 }
 
 impl TargetedAgents {
@@ -64,7 +97,8 @@ impl ReloadReport {
         if !wire.success {
             return Err(protocol("config reload reports success false"));
         }
-        Ok(Self { message: wire.message })
+        let report: WireReloadReport = decode_ok(wire.message.as_bytes())?;
+        Ok(Self { status: ReloadStatus::from_wire(&report.status)?, rebuilt: report.rebuilt })
     }
 }
 
@@ -145,13 +179,38 @@ mod tests {
         ));
     }
 
+    const RELOAD_APPLIED: &str = r#"{"success":true,"message":"{\n  \"status\": \"applied\",\n  \"active_generation\": 7,\n  \"changed\": [],\n  \"rebuilt\": [\"gateway_turn_runtime\"]\n}"}"#;
+
     #[test]
-    fn reload_needs_success_true() {
-        assert!(ReloadReport::from_body(br#"{"success":true,"message":"reloaded"}"#).is_ok());
+    fn reload_documented_report_decodes_status_and_rebuilt() {
+        let report = ReloadReport::from_body(RELOAD_APPLIED.as_bytes())
+            .expect("test: documented reload report decodes");
+        assert_eq!(report.status, ReloadStatus::Applied);
+        assert_eq!(report.rebuilt, vec!["gateway_turn_runtime".to_owned()]);
+    }
+
+    #[test]
+    fn reload_needs_success_true_and_a_known_status() {
         assert!(matches!(
             ReloadReport::from_body(br#"{"success":false,"message":"failed"}"#),
             Err(PrxError::Protocol { .. })
         ));
+        let unknown = r#"{"success":true,"message":"{\"status\":\"maybe\",\"rebuilt\":[]}"}"#;
+        assert!(matches!(
+            ReloadReport::from_body(unknown.as_bytes()),
+            Err(PrxError::Protocol { .. })
+        ));
+        let not_json = r#"{"success":true,"message":"reloaded"}"#;
+        assert!(matches!(
+            ReloadReport::from_body(not_json.as_bytes()),
+            Err(PrxError::Protocol { .. })
+        ));
+    }
+
+    #[test]
+    fn reload_refuses_unknown_outer_field() {
+        let body = r#"{"success":true,"message":"{}","extra":1}"#;
+        assert!(matches!(ReloadReport::from_body(body.as_bytes()), Err(PrxError::Protocol { .. })));
     }
 
     #[test]
@@ -166,7 +225,10 @@ mod tests {
 
     #[test]
     fn null_reload_success_is_refused() {
-        let literal = r#"{"success":true,"message":"reloaded"}"#;
-        crate::test_support::assert_null_refused(literal, "/success", ReloadReport::from_body);
+        crate::test_support::assert_null_refused(
+            RELOAD_APPLIED,
+            "/success",
+            ReloadReport::from_body,
+        );
     }
 }
