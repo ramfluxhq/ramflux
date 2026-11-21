@@ -327,6 +327,33 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": true,
+      "name": "agent.create",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": true,
+      "name": "agent.creation.decide",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.operation.get",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "attachment.enable",

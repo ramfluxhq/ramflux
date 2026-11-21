@@ -925,13 +925,12 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
-        SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::AgentCreationRefused(_) => RamfluxErrorCode::InvalidArgument,
         SdkError::Search(_)
         | SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
-        | SdkError::CustodyModeDowngrade => RamfluxErrorCode::UnsupportedVersion,
+        | SdkError::CustodyModeDowngrade
+        | SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
         SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
         | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
             RamfluxErrorCode::PermissionDenied
@@ -984,6 +983,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
         SdkError::OperationReconciliationRequired(_)
+        | SdkError::AgentCreationRefused(_)
         | SdkError::EditConflict { .. }
         | SdkError::PinLimitReached
         | SdkError::RestoreSetupRequired

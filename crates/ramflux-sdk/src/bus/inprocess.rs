@@ -137,6 +137,9 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "account.recover.begin",
         "account.recover.confirm",
         "account.recover.cancel",
+        "agent.create",
+        "agent.creation.decide",
+        "agent.operation.get",
         "subscription.close",
     ]);
     names.sort_unstable();
