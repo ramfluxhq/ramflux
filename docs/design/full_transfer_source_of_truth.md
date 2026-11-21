@@ -174,3 +174,33 @@ both the reset and import. No old reply/approval is resumed, and live B retains
 its original state. Whole-version request selection preserves independent denial
 and prevents mixed request/decision timestamps. This activates one required SQL
 owner; it does not prove native message or complete transfer installation.
+
+## Populated native vertical dependency cut
+
+The unchanged positive `primary_transfer_native_populated_source_preflight`
+assertion still fails UnsupportedRecord before invitation. Its actual source A cut
+(2026-11-21T22:45:16Z) has these nonempty, not-yet-owned categories:
+
+| Compiled family | Rows in this cut | Required boundary |
+|---|---:|---|
+| sql/conversation_delivery_state | 1 | Whole native-order watermark, not independent maxima |
+| sql/device_directory | 3 | Public directory with current B authorization kept local |
+| sql/direct_message_projection | 5 | Rebuild from verified native versions and erasure union |
+| sql/local_event_log | 7 | Separate inert history from executable callbacks |
+| sql/raw_inner_copy | 1 | Exact bytes, native evidence and per-kind bounded codec |
+| sql/raw_inner_owner | 1 | Rebuild all erasure ownership edges |
+| sql/receipt_projection | 1 | Qualified receipt bound to native message order |
+| sql/runtime_actor_state | 154 | Closed key/payload classes; unknown variants refuse |
+| sql/runtime_journal | 55 | B-local change journal; never import A cursor |
+| sql/runtime_message_content | 4 | Exact supported native content plus semantic evidence |
+| sql/runtime_message_sequence | 5 | Rebuild through B-local journal |
+| sql/runtime_operation | 2 | Classify history separately from pending execution |
+| sql/runtime_own_copy_state | 3 | Preserve history without resuming A delivery work |
+
+Counts describe this reproducible cut, not invariant population or the complete
+support envelope. B contributes an independently inspected cut. Groups, objects
+and public agent files are not yet seeded by this early vertical. Local
+diagnostics list compiled category constants and counts only; they preserve the
+first admission error and expose no row keys, contents or remote error text.
+The positive preflight remains red until the owners exist. This inventory adds
+no owner coverage or successful native-transfer claim.

@@ -35,17 +35,25 @@ impl FullTransferSchema {
                 return Err(schema());
             }
             if family.source_rows.0 > 0 {
-                rule.require_typed_codec().inspect_err(|_| {
-                    // Compiled local category only: neither row content nor a peer
-                    // supplied name is logged or added to a remote error frame.
-                    tracing::warn!(
-                        category = rule.id,
-                        "full transfer source has an unsupported nonempty category"
-                    );
-                })?;
+                rule.require_typed_codec().inspect_err(|_| self.log_unimplemented_rows(rules))?;
             }
         }
         Ok(())
+    }
+
+    fn log_unimplemented_rows(&self, rules: &[FamilyRule]) {
+        // Diagnose the whole exact cut once, while preserving the first admission error.
+        // Categories are compiled constants; no keys/content or peer-supplied names go to
+        // this local message or any remote error frame. Validation still fails above.
+        for (family, rule) in self.families.iter().zip(rules) {
+            if family.source_rows.0 > 0 && rule.require_typed_codec().is_err() {
+                tracing::warn!(
+                    category = rule.id,
+                    rows = family.source_rows.0,
+                    "full transfer source has an unsupported nonempty category"
+                );
+            }
+        }
     }
 }
 impl AccountDb {
