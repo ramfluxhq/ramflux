@@ -164,6 +164,27 @@ impl RamfluxClient {
     /// The creation store of the unlocked human account of this client.
     /// # Errors
     /// Refuses a client without an unlocked human account.
+    /// Stage D4: commit an authorized rebind of one bound agent, reading this unlocked human account's
+    /// verified authority (`commit_rebind`).
+    pub(crate) fn agent_rebind_commit(
+        &self,
+        vault: &dyn crate::custody::PrimaryVault,
+        request_id: &str,
+        capabilities: &[String],
+        now: u64,
+    ) -> Result<crate::custody::agent_creation::AgentCreationRecord, SdkError> {
+        let account = self.born_v3_account.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        let store = account.agent_creation_store()?;
+        crate::custody::agent_creation::commit_rebind(
+            &store,
+            vault,
+            account.record(),
+            request_id,
+            capabilities,
+            now,
+        )
+    }
+
     pub(crate) fn agent_creation_store(&self) -> Result<AgentCreationStore, SdkError> {
         let account = self
             .born_v3_account

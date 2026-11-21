@@ -18,6 +18,7 @@ pub(super) type AdvanceOutcome = (String, Result<AgentCreationState, SdkError>);
 struct SupervisorSteps<'a> {
     supervisor: &'a Supervisor,
     human: String,
+    store: AgentCreationStore,
 }
 
 impl SupervisorSteps<'_> {
@@ -33,6 +34,32 @@ impl SupervisorSteps<'_> {
     async fn home_node(&self) -> Result<String, SdkError> {
         self.human_actor()?.agent_home_node().await?.ok_or(SdkError::NoNodeSelected)
     }
+}
+
+/// The provisioning secret of an agent: the one its creation record names. A rebind names none of its
+/// own, so the creation record of the same agent account holds it.
+fn provisioning_reference(
+    store: &AgentCreationStore,
+    record: &AgentCreationRecord,
+) -> Result<String, SdkError> {
+    if let Some(reference) =
+        record.vault_refs.iter().find(|reference| reference.starts_with("agent-provisioning:"))
+    {
+        return Ok(reference.clone());
+    }
+    let account = record.account_id.as_deref().ok_or(SdkError::CustodySetupInvalid)?;
+    store
+        .records()?
+        .iter()
+        .filter(|candidate| candidate.account_id.as_deref() == Some(account))
+        .find_map(|candidate| {
+            candidate
+                .vault_refs
+                .iter()
+                .find(|reference| reference.starts_with("agent-provisioning:"))
+                .cloned()
+        })
+        .ok_or(SdkError::CustodySetupInvalid)
 }
 
 impl AgentSteps for SupervisorSteps<'_> {
@@ -58,19 +85,31 @@ impl AgentSteps for SupervisorSteps<'_> {
 
     async fn activate(&mut self, record: &AgentCreationRecord) -> Result<(), SdkError> {
         let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
-        let reference = record
-            .vault_refs
-            .iter()
-            .find(|reference| reference.starts_with("agent-provisioning:"))
-            .ok_or(SdkError::CustodySetupInvalid)?;
+        let reference = provisioning_reference(&self.store, record)?;
         let vault = super::custody_setup::primary_provider(&self.supervisor.config);
-        let secret = vault.load_provisioning_secret(reference)?;
+        let secret = vault.load_provisioning_secret(&reference)?;
         let passphrase = Zeroizing::new(
             std::str::from_utf8(&secret).map_err(|_| SdkError::CustodySetupInvalid)?.to_owned(),
         );
         let home = self.home_node().await?;
         self.supervisor.activate_native(&account_id, passphrase, Some(home)).await?;
         Ok(())
+    }
+
+    async fn commit_rebind(
+        &mut self,
+        request_id: &str,
+        now: u64,
+    ) -> Result<AgentCreationRecord, SdkError> {
+        let home = self.home_node().await?;
+        let capabilities = self.supervisor.node_capabilities(&home)?;
+        self.human_actor()?
+            .agent_creation_step(AgentStep::CommitRebind {
+                request_id: request_id.to_owned(),
+                capabilities,
+                now,
+            })
+            .await
     }
 
     async fn complete(&mut self, request_id: &str) -> Result<AgentCreationRecord, SdkError> {
@@ -119,7 +158,8 @@ impl Supervisor {
                 self.lock_account_session(&entry.agent_account_id).await?;
             }
         }
-        let mut steps = SupervisorSteps { supervisor: self, human: human.to_owned() };
+        let mut steps =
+            SupervisorSteps { supervisor: self, human: human.to_owned(), store: store.clone() };
         advance_all(&mut steps, &store, now).await
     }
 

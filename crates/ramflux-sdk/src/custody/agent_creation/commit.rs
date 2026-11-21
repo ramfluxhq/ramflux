@@ -126,7 +126,7 @@ const GENESIS_RANGE: u64 = 1;
 
 /// The signed agent profile of the approved plan, bound to the exact genesis record and to the
 /// human record. It is signed by the agent primary key; the phone signs only the decision.
-fn agent_profile_bytes(
+pub(super) fn agent_profile_bytes(
     primary: &SelfSigningKey,
     plan: &RegisterPlan,
     genesis: &Envelope<DeviceSet>,

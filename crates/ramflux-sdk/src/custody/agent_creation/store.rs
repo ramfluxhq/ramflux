@@ -121,30 +121,32 @@ impl AgentCreationStore {
         &self.root
     }
 
-    /// The record whose agent account has this local id, if any. Scans this directory only.
+    /// The record that publishes the agent account with this local id: the publishing record (state
+    /// `publication_pending`, `publication_unknown` or `complete`) with the highest master range, so
+    /// a committed rebind (stage D4) replaces the creation record it rebinds. Scans this directory
+    /// only; requests before their commit are not publishing records.
     /// # Errors
-    /// Propagates [`Self::load`] failures and refuses a directory that cannot be read.
+    /// Propagates [`Self::records`] failures.
     pub fn find_by_account(
         &self,
         account_id: &str,
     ) -> Result<Option<AgentCreationRecord>, SdkError> {
-        let entries =
-            std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        for entry in entries {
-            let entry = entry.map_err(|_| SdkError::CustodyVaultUnavailable)?;
-            let name = entry.file_name();
-            let Some(request_id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+        let mut found: Option<AgentCreationRecord> = None;
+        for record in self.records()? {
+            let publishing = matches!(
+                record.state,
+                AgentCreationState::PublicationPending
+                    | AgentCreationState::PublicationUnknown
+                    | AgentCreationState::Complete
+            );
+            if !publishing || record.account_id.as_deref() != Some(account_id) {
                 continue;
-            };
-            // A rebind request names the agent too, but it is never the agent's creation record.
-            if let Some(record) = self.load(request_id)?
-                && record.account_id.as_deref() == Some(account_id)
-                && !super::rebind_plan::is_rebind(&record)
-            {
-                return Ok(Some(record));
+            }
+            if found.as_ref().is_none_or(|known| record.master_range > known.master_range) {
+                found = Some(record);
             }
         }
-        Ok(None)
+        Ok(found)
     }
 
     /// Every record that still needs a step: `authorized`, `publication_pending` or

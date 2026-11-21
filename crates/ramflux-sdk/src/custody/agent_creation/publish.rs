@@ -4,6 +4,7 @@
 //! Publication of an approved agent (contract 7.2 step 5, controller decision r6 answer 3). The
 //! saved plan, decision and profile are replayed byte for byte, so a lost reply is answered by the
 //! identical `AgentPublish`. The receipt is compared field by field before it is persisted.
+use super::rebind::{RebindBinding, RebindEntry};
 use super::state::AgentCreationState;
 use super::store::{AgentCreationRecord, AgentCreationStore};
 use crate::SdkError;
@@ -11,8 +12,8 @@ use crate::custody::BornAccount;
 use ramflux_protocol::agent_profile::{AgentProfileEnvelope, decode_agent_profile};
 use ramflux_protocol::custody::{
     AgentPublishReceipt, CustodyProofAction, CustodyRefusal, DeviceSet, Envelope, Publication,
-    RegisterDecision, RegisterPlan, decode_register_decision, decode_register_plan, object_hash,
-    register_plan_hash,
+    RegisterDecision, RegisterPlan, RegisterPurpose, decode_register_decision,
+    decode_register_plan, object_hash, register_plan_hash,
 };
 use ramflux_protocol::{PrincipalKind, canonical_json_bytes, decode_base64url, encode_base64url};
 use std::path::Path;
@@ -179,6 +180,18 @@ impl AgentPublishing {
         if record.state != AgentCreationState::Complete {
             record.state = AgentCreationState::Complete;
             self.store.save(&record)?;
+        }
+        // Stage D4: a verified rebind publication binds the agent to the new primary (state B).
+        if self.plan.purpose == RegisterPurpose::Rebind {
+            let agent = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
+            self.store.save_rebind(&RebindEntry {
+                agent_account_id: agent,
+                binding: RebindBinding::Bound,
+                bound_primary: self.plan.human_primary.clone(),
+                master_range: self.plan.next_range,
+                request_id: Some(self.plan.request_id.clone()),
+                failure: None,
+            })?;
         }
         Ok(())
     }

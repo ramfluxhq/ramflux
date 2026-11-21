@@ -47,36 +47,36 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const DESKTOP_DEVICE: &str = "desktop-device";
 const REQUEST_AGENT: &str = "req-agent";
-const REQUEST_REBIND: &str = "req-rebind";
+pub(super) const REQUEST_REBIND: &str = "req-rebind";
 
 /// The new primary (the sibling after the transfer): its vault and its store.
-struct NewPrimary {
-    vault: MemoryPrimaryVault,
-    primary_ref: String,
-    branch_ref: String,
-    primary_public: String,
-    branch_public: String,
-    device: DeviceRef,
-    store: AgentCreationStore,
-    _dir: TempDir,
+pub(super) struct NewPrimary {
+    pub(super) vault: MemoryPrimaryVault,
+    pub(super) primary_ref: String,
+    pub(super) branch_ref: String,
+    pub(super) primary_public: String,
+    pub(super) branch_public: String,
+    pub(super) device: DeviceRef,
+    pub(super) store: AgentCreationStore,
+    pub(super) _dir: TempDir,
 }
 
 /// Everything the rebind tests share.
-struct Rebind {
-    fixture: HumanFixture,
-    store: AgentCreationStore,
-    desk: MemoryPrimaryVault,
-    agent_id: String,
-    agent_plan: RegisterPlan,
-    agent_record: AgentCreationRecord,
+pub(super) struct Rebind {
+    pub(super) fixture: HumanFixture,
+    pub(super) store: AgentCreationStore,
+    pub(super) desk: MemoryPrimaryVault,
+    pub(super) agent_id: String,
+    pub(super) agent_plan: RegisterPlan,
+    pub(super) agent_record: AgentCreationRecord,
     /// The human authority before the transfer (the stale snapshot).
-    before: Envelope<DeviceSet>,
+    pub(super) before: Envelope<DeviceSet>,
     /// The human authority after the transfer: the new primary is the sibling.
-    transferred: Envelope<DeviceSet>,
-    new_primary: NewPrimary,
+    pub(super) transferred: Envelope<DeviceSet>,
+    pub(super) new_primary: NewPrimary,
     /// The old primary's phone (fixture primary keys).
-    old_primary: Phone,
-    desktop: DeviceRef,
+    pub(super) old_primary: Phone,
+    pub(super) desktop: DeviceRef,
 }
 
 fn desktop_ref(fixture: &HumanFixture, device: &str) -> DeviceRef {
@@ -84,7 +84,7 @@ fn desktop_ref(fixture: &HumanFixture, device: &str) -> DeviceRef {
 }
 
 /// A committed agent under the old primary, then the real primary transfer to the sibling.
-fn setup() -> Result<Rebind, Box<dyn std::error::Error>> {
+pub(super) fn setup() -> Result<Rebind, Box<dyn std::error::Error>> {
     let fixture = human_fixture_with_sibling()?;
     let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
     let desk = MemoryPrimaryVault::default();
@@ -173,21 +173,18 @@ fn new_primary(
 }
 
 /// The desktop begins the rebind of the agent for `desktop`, with the transferred authority.
-fn begin(
+pub(super) fn begin(
     setup: &Rebind,
     request_id: &str,
     desktop: &DeviceRef,
 ) -> Result<super::BeginOutcome, SdkError> {
-    let agent = crate::custody::store::load_account(
-        &setup.fixture.root.0,
-        &setup.agent_id,
-        setup.fixture.now,
-    )?;
+    let stored_agent =
+        crate::custody::store::stored_record_unverified(&setup.fixture.root.0, &setup.agent_id)?;
     let profile: AgentProfileEnvelope = stored_profile(&setup.agent_record)?;
     let input = RebindInput {
         request_id: request_id.into(),
         agent_account_id: setup.agent_id.clone(),
-        agent: agent.record(),
+        agent: &stored_agent,
         profile: &profile,
         human: &setup.transferred,
         desktop,
@@ -197,7 +194,7 @@ fn begin(
 }
 
 /// The new primary approves the exact plan: presence is armed for its hash, then one signature.
-fn new_primary_decision(
+pub(super) fn new_primary_decision(
     setup: &Rebind,
     plan_bytes: &[u8],
     outcome: RegisterOutcome,
@@ -215,19 +212,34 @@ fn new_primary_decision(
     Ok(primary_sign_decision(&np.vault, &signing, plan_bytes, outcome, setup.fixture.now + 5)?)
 }
 
-fn now_of(setup: &Rebind) -> u64 {
+pub(super) fn now_of(setup: &Rebind) -> u64 {
     setup.fixture.now + 5
 }
 
-/// Steps that must never run: an advance of a rebind request reaches none of them.
-struct NoSteps;
+/// Steps that count their calls and refuse every one: an advance of a rebind request may reach only
+/// `commit_rebind`, never the creation commit or the activation of a creation.
+#[derive(Default)]
+struct CountingSteps {
+    creation_calls: u32,
+    rebind_calls: u32,
+}
 
-impl AgentSteps for NoSteps {
+impl AgentSteps for CountingSteps {
     fn commit(
         &mut self,
         _request_id: &str,
         _now: u64,
     ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
+        self.creation_calls += 1;
+        std::future::ready(Err(SdkError::CustodySetupInvalid))
+    }
+
+    fn commit_rebind(
+        &mut self,
+        _request_id: &str,
+        _now: u64,
+    ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
+        self.rebind_calls += 1;
         std::future::ready(Err(SdkError::CustodySetupInvalid))
     }
 
@@ -239,6 +251,7 @@ impl AgentSteps for NoSteps {
         &mut self,
         _record: &AgentCreationRecord,
     ) -> impl Future<Output = Result<(), SdkError>> {
+        self.creation_calls += 1;
         std::future::ready(Err(SdkError::CustodySetupInvalid))
     }
 
@@ -246,6 +259,7 @@ impl AgentSteps for NoSteps {
         &mut self,
         _request_id: &str,
     ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
+        self.creation_calls += 1;
         std::future::ready(Err(SdkError::CustodySetupInvalid))
     }
 }
@@ -255,12 +269,8 @@ fn rebind_plan_names_the_new_primary_and_the_next_range_with_nothing_widened() -
     let setup = setup()?;
     let outcome = begin(&setup, REQUEST_REBIND, &setup.desktop)?;
     let plan = decode_register_plan(&outcome.plan_bytes)?;
-    let agent = crate::custody::store::load_account(
-        &setup.fixture.root.0,
-        &setup.agent_id,
-        setup.fixture.now,
-    )?;
-    let stored = agent.record();
+    let stored =
+        &crate::custody::store::stored_record_unverified(&setup.fixture.root.0, &setup.agent_id)?;
     let branch = &stored.body.devices[0].branch_certificate.as_ref().ok_or("branch")?.body;
     assert_eq!(plan.purpose, RegisterPurpose::Rebind);
     assert_eq!(plan.human_primary, setup.new_primary.device, "the new primary is the sibling");
@@ -439,12 +449,13 @@ fn a_rebind_request_is_never_advanced_as_a_creation_nor_found_as_the_agent_recor
     let found = setup.store.find_by_account(&setup.agent_id)?.ok_or("the agent record")?;
     assert_eq!(found.request_id, REQUEST_AGENT, "the rebind is never the creation record");
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let state = runtime.block_on(advance_one(
-        &mut NoSteps,
-        &setup.store,
-        REQUEST_REBIND,
-        now_of(&setup),
-    ))?;
-    assert_eq!(state, AgentCreationState::Authorized, "advance leaves the rebind untouched");
+    let mut steps = CountingSteps::default();
+    let advanced =
+        runtime.block_on(advance_one(&mut steps, &setup.store, REQUEST_REBIND, now_of(&setup)));
+    assert!(advanced.is_err(), "the refusing rebind step reports its failure");
+    assert_eq!(steps.rebind_calls, 1, "a rebind is committed by its own step");
+    assert_eq!(steps.creation_calls, 0, "no creation step runs for a rebind");
+    let kept = setup.store.load(REQUEST_REBIND)?.ok_or("the request")?;
+    assert_eq!(kept.state, AgentCreationState::Authorized, "the failed commit keeps it authorized");
     Ok(())
 }

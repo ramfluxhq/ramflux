@@ -20,6 +20,12 @@ impl AccountRuntime {
                 let vault = super::super::custody_setup::primary_provider(&self.state.config);
                 commit_approved(&store, vault.as_ref(), &self.id, &request_id, &capabilities, now)
             }
+            AgentStep::CommitRebind { request_id, capabilities, now } => {
+                let vault = super::super::custody_setup::primary_provider(&self.state.config);
+                let account =
+                    self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+                account.client.agent_rebind_commit(vault.as_ref(), &request_id, &capabilities, now)
+            }
             AgentStep::Complete { request_id } => {
                 crate::custody::agent_creation::complete_with_receipt(&store, &request_id)
             }

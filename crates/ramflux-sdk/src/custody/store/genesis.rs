@@ -141,6 +141,28 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Stage D4: atomically replace an existing authority file (a rebind). Creation never replaces: its
+/// publication (`write_public`) refuses an existing name. A replacement writes a synced temporary
+/// file in the same directory and renames it over the old one; the temporary file is removed on
+/// any failure before the rename.
+pub(super) fn replace_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
+    let parent = path.parent().ok_or_else(super::super::invalid)?;
+    let temporary = parent.join(format!(
+        ".authority-{}.tmp",
+        ramflux_protocol::encode_base64url(*super::super::random()?)
+    ));
+    let mut file = crate::platform::fs::create_new_owner_only(&temporary)?;
+    let mut cleanup = TemporaryPublication(Some(temporary.clone()));
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path)?;
+    cleanup.0 = None;
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        tracing::warn!(%error, "replaced custody authority directory sync failed");
+    }
+    Ok(())
+}
+
 fn publication_failure(error: &std::io::Error) -> SdkError {
     // Release builds stay silent. Debug logs the I/O kind only: no path and no account id.
     #[cfg(debug_assertions)]

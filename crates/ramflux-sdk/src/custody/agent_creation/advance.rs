@@ -32,6 +32,8 @@ fn binding_is_paused(
 pub enum AgentStep {
     /// Commit an approved request (`commit_approved`), with the capabilities of the selected node.
     Commit { request_id: String, capabilities: Vec<String>, now: u64 },
+    /// Commit an authorized rebind (stage D4) with the capabilities of the home node.
+    CommitRebind { request_id: String, capabilities: Vec<String>, now: u64 },
     /// Mark a request complete once its receipt is saved (no-op before the receipt).
     Complete { request_id: String },
 }
@@ -45,6 +47,15 @@ pub trait AgentSteps {
         request_id: &str,
         now: u64,
     ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>>;
+    /// Commit an authorized rebind (stage D4); returns the record after the commit. The default
+    /// refuses, so an implementation without rebind support cannot commit one.
+    fn commit_rebind(
+        &mut self,
+        _request_id: &str,
+        _now: u64,
+    ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
+        std::future::ready(Err(SdkError::CustodySetupInvalid))
+    }
     /// Whether the agent account is already open (live), so activation can be skipped.
     fn is_live(&self, account_id: &str) -> bool;
     /// Activate the agent account; its ordinary connection runs the registration.
@@ -70,9 +81,12 @@ pub async fn advance_one<S: AgentSteps>(
     now: u64,
 ) -> Result<AgentCreationState, SdkError> {
     let mut record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
-    // Stage D3: a rebind request is not a creation (stage D4 commits it), and an agent whose
-    // binding is paused (rebind pending) or committed-but-unpublished is never activated here.
-    if is_rebind(&record) || binding_is_paused(store, &record)? {
+    if is_rebind(&record) {
+        return advance_rebind(steps, record, now).await;
+    }
+    // Stage D3: an agent whose binding is paused (rebind pending or committed) is never activated
+    // by a creation step. Only the rebind's own publication connects it (`advance_rebind`).
+    if binding_is_paused(store, &record)? {
         return Ok(record.state);
     }
     if record.state == AgentCreationState::Authorized {
@@ -92,6 +106,33 @@ pub async fn advance_one<S: AgentSteps>(
         steps.activate(&record).await?;
     }
     record = steps.complete(request_id).await?;
+    Ok(record.state)
+}
+
+/// Advances one rebind request (stage D4): commit when authorized, then publish its own binding
+/// through the activation of the agent (its `AgentPublish` is the reconcile step of contract 7.6)
+/// and complete it. A paused agent is connected only for this publication, never for a creation.
+async fn advance_rebind<S: AgentSteps>(
+    steps: &mut S,
+    mut record: AgentCreationRecord,
+    now: u64,
+) -> Result<AgentCreationState, SdkError> {
+    if record.state == AgentCreationState::Authorized {
+        let request_id = record.request_id.clone();
+        record = steps.commit_rebind(&request_id, now).await?;
+    }
+    if !matches!(
+        record.state,
+        AgentCreationState::PublicationPending | AgentCreationState::PublicationUnknown
+    ) {
+        return Ok(record.state);
+    }
+    let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    if !steps.is_live(&account_id) {
+        steps.activate(&record).await?;
+    }
+    let request_id = record.request_id.clone();
+    record = steps.complete(&request_id).await?;
     Ok(record.state)
 }
 
