@@ -80,7 +80,7 @@ impl Contributions {
         };
         super::stage::create_file(path)?.sync_all()?;
         let mut db = open(path, key)?;
-        db.execute_batch(super::union_encoding::SCHEMA)?;
+        db.execute_batch(&super::union_encoding::schema())?;
         let tx = db.transaction()?;
         schema.require_typed_owners(full_transfer_catalog())?;
         for (family, rule) in schema.families.iter().zip(full_transfer_catalog()) {

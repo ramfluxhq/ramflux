@@ -223,9 +223,11 @@ fn pairing_full_union_encoding_cancel_rolls_back_and_refuses_reuse() -> ResultOf
 fn full_union_old_internal_ledger_is_schema_mismatch_without_conversion()
 -> Result<(), Box<dyn std::error::Error>> {
     let db = rusqlite::Connection::open_in_memory()?;
-    db.execute_batch("CREATE TABLE full_union_record(generation_nonce BLOB NOT NULL,owner TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL,PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;")?;
+    // Keep the current payload constraint so this independently exercises the
+    // WITHOUT ROWID refusal, rather than failing on the older metadata format.
+    db.execute_batch(&format!("CREATE TABLE full_union_record(generation_nonce BLOB NOT NULL,owner TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL {},PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;",super::super::record_profile::sql_constraint()))?;
     // Opening the current schema never repairs an incompatible existing ledger.
-    db.execute_batch(SCHEMA)?;
+    db.execute_batch(&schema())?;
     assert!(
         matches!(require_existing_format(&db), Err(StorageError::PairingField("SchemaMismatch"))),
         "test: old internal ledger was reinterpreted or silently converted"

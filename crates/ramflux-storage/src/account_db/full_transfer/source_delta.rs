@@ -194,7 +194,7 @@ fn diff_family<W: Write + Send + 'static>(
                     std::cmp::Ordering::Greater => {
                         let row = b.ok_or_else(invalid)?;
                         let _header = checked(rule,row)?;
-                        let bytes = record(row)?;
+                        let bytes = record(rule, row)?;
                         output.write_all(bytes)?;
                         add(&mut counts,bytes.len() as u64)?;
                         b = right.next()?;
@@ -204,8 +204,8 @@ fn diff_family<W: Write + Send + 'static>(
                         let after = b.ok_or_else(invalid)?;
                         let _before_header = checked(rule,before)?;
                         let _after_header = checked(rule,after)?;
-                        if record(before)? != record(after)? {
-                            let bytes = record(after)?;
+                        if record(rule, before)? != record(rule, after)? {
+                            let bytes = record(rule, after)?;
                             output.write_all(bytes)?;
                             add(&mut counts,bytes.len() as u64)?;
                         }
@@ -224,15 +224,13 @@ fn diff_family<W: Write + Send + 'static>(
 fn key<'a>(row: &'a rusqlite::Row<'_>) -> Result<&'a str, StorageError> {
     row.get_ref(0)?.as_str().map_err(|_| invalid())
 }
-fn record<'a>(row: &'a rusqlite::Row<'_>) -> Result<&'a [u8], StorageError> {
+fn record<'a>(rule: &FamilyRule, row: &'a rusqlite::Row<'_>) -> Result<&'a [u8], StorageError> {
     let bytes = row.get_ref(1)?.as_blob().map_err(|_| invalid())?;
-    if bytes.len() > 262_144 {
-        return Err(invalid());
-    }
+    super::record_profile::require_length(rule, bytes.len() as u64)?;
     Ok(bytes)
 }
 fn checked(rule: &FamilyRule, row: &rusqlite::Row<'_>) -> Result<PrivateHeader, StorageError> {
-    let mut bytes = record(row)?;
+    let mut bytes = record(rule, row)?;
     let header =
         PrivateHeader(read_record_header(&mut bytes).map_err(|_| invalid())?.ok_or_else(invalid)?);
     if header.0.key != key(row)? || header.0.op != RecordOp::Put {

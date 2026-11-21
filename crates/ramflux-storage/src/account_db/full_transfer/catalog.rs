@@ -305,8 +305,8 @@ impl FamilyRule {
     }
     fn validate_projection_owners(&self) -> Result<(), StorageError> {
         for field in self.codec {
-            if matches!(field.codec, CodecRule::SqlNativePayload { .. })
-                && (self.id != "sql/runtime_message_content"
+            if let CodecRule::SqlNativePayload { payload } = field.codec
+                && (self.id != payload.family()
                     || !matches!(self.selector, FamilySelector::Table("runtime_message_content"))
                     || field.name != "body"
                     || field.nullable)

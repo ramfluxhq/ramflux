@@ -2,38 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 //! Native physical admission is not original-evidence or whole-transfer acceptance.
+use super::test_support::inner;
 use super::*;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-fn inner(text_bytes: usize) -> Result<g::Inner, Box<dyn std::error::Error>> {
-    if text_bytes > g::validation::MAX_TEXT_BYTES + 1 {
-        return Err("fixture text limit".into());
-    }
-    let author = g::QualifiedDevice {
-        account_anchor: ramflux_protocol::encode_base64url([31; 32]),
-        device_id: "original-native-device".into(),
-        device_epoch: 1,
-    };
-    let conversation =
-        g::dm_scope::derive(&author.account_anchor, &ramflux_protocol::encode_base64url([32; 32]))?;
-    Ok(g::Inner {
-        layer: g::registry::COMPILED_LAYER,
-        kind: 1,
-        identity: Some(g::EventIdentity {
-            id: g::identity::derive(&author, &conversation, 1)?.to_vec(),
-            author: Some(author),
-            conversation_id: conversation,
-            device_sequence: 1,
-            hlc: 1000,
-            ..Default::default()
-        }),
-        body: g::Message {
-            text: "t".repeat(text_bytes),
-            erasure_nonce: vec![9; 32],
-            ..Default::default()
-        }
-        .encode_to_vec(),
-    })
-}
+
 #[test]
 fn native_direct_payload_keeps_exact_native_text_larger_than_the_metadata_bound() -> TestResult {
     let bytes = inner(g::validation::MAX_TEXT_BYTES)?.encode_to_vec();
@@ -98,42 +70,8 @@ fn native_direct_payload_refuses_group_and_control_identity_shapes() -> TestResu
 #[test]
 fn native_sql_payload_preserves_exact_large_bytes_through_independent_stream_admission()
 -> TestResult {
-    use crate::account_db::full_transfer::{
-        CodecRule, FieldRule, MergeRule, full_transfer_catalog,
-    };
-    use ramflux_protocol::custody::pairing::full_transfer::{Disposition, U64, read_record_header};
-    static FIELDS: [FieldRule; 3] = [
-        FieldRule {
-            name: "message_id",
-            nullable: true,
-            disposition: Disposition::Transfer,
-            merge: MergeRule::Immutable,
-            codec: CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false },
-        },
-        FieldRule {
-            name: "conversation_id",
-            nullable: false,
-            disposition: Disposition::Transfer,
-            merge: MergeRule::Immutable,
-            codec: CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false },
-        },
-        FieldRule {
-            name: "body",
-            nullable: false,
-            disposition: Disposition::Transfer,
-            merge: MergeRule::Immutable,
-            codec: CodecRule::SqlNativePayload { payload: NativePayload::DirectInnerV1 },
-        },
-    ];
-    // A test descriptor only: the live compiled family remains RequiresOwner until
-    // evidence, erasure and contribution/materialization owners are implemented.
-    let mut rule = *full_transfer_catalog()
-        .iter()
-        .find(|rule| rule.id == "sql/runtime_message_content")
-        .ok_or("content declaration")?;
-    rule.codec_version = U64(2);
-    rule.codec = &FIELDS;
-    rule.require_typed_codec()?;
+    use ramflux_protocol::custody::pairing::full_transfer::read_record_header;
+    let mut rule = super::test_support::rule()?;
     let inner = inner(g::validation::MAX_TEXT_BYTES)?;
     let identity = inner.identity.as_ref().ok_or("fixture identity")?;
     let body = inner.encode_to_vec();

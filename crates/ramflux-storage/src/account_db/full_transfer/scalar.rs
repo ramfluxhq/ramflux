@@ -36,6 +36,7 @@ pub fn copy_full_scalar_record(
         return super::message_denial::copy(rule, header, reader, writer);
     }
     validate_scalar_schema(rule, header)?;
+    super::record_profile::require_header(rule, header)?;
     let raw = canonical_key(header)?;
     validate_key_grammar(rule, &raw)?;
     if header.op == RecordOp::Absent {

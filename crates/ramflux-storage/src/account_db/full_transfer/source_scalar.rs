@@ -12,9 +12,12 @@ use ramflux_protocol::custody::pairing::full_transfer::Disposition;
 use rusqlite::{OptionalExtension as _, params};
 use std::io::Write;
 
-pub(super) const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS source_scalar_family(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,rule_hash BLOB NOT NULL CHECK(length(rule_hash)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL,PRIMARY KEY(snapshot_id,family));
-CREATE TABLE IF NOT EXISTS source_scalar_row(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(snapshot_id,family,key));";
+pub(super) fn schema() -> String {
+    let check = super::record_profile::sql_constraint();
+    format!("CREATE TABLE IF NOT EXISTS source_scalar_family(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,rule_hash BLOB NOT NULL CHECK(length(rule_hash)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL,PRIMARY KEY(snapshot_id,family));
+CREATE TABLE IF NOT EXISTS source_scalar_row(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL {check},PRIMARY KEY(snapshot_id,family,key));")
+}
+
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
@@ -232,7 +235,7 @@ fn build(
         }
         let mut probe = blob::Probe::new();
         let bytes = write_full_scalar_sql_row(rule, row, &mut probe)?;
-        let header = probe.header(bytes)?;
+        let header = probe.header(bytes, rule)?;
         let mut sink =
             blob::Sink::create(spool, snapshot, rule.id, &header.0.key, bytes, source_guard)?;
         if write_full_scalar_sql_row(rule, row, &mut sink)? != bytes {

@@ -164,8 +164,8 @@ impl AccountDb {
         connection.execute_batch(super::receiver_input::SCHEMA)?;
         connection.execute_batch(super::receiver_copy::application::SCHEMA)?;
         connection.execute_batch(super::reverse_application::SCHEMA)?;
-        connection.execute_batch(super::union_encoding::SCHEMA)?;
-        connection.execute_batch(super::source_scalar::SCHEMA)?;
+        connection.execute_batch(&super::union_encoding::schema())?;
+        connection.execute_batch(&super::source_scalar::schema())?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
         connection.execute_batch(super::preservation::SCHEMA)?;
         connection.execute_batch(super::source_primary_owner::SCHEMA)?;
@@ -378,8 +378,8 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::receiver_input::SCHEMA)?;
         tx.execute_batch(super::receiver_copy::application::SCHEMA)?;
         tx.execute_batch(super::reverse_application::SCHEMA)?;
-        tx.execute_batch(super::union_encoding::SCHEMA)?;
-        tx.execute_batch(super::source_scalar::SCHEMA)?;
+        tx.execute_batch(&super::union_encoding::schema())?;
+        tx.execute_batch(&super::source_scalar::schema())?;
         tx.execute_batch(super::native_floor::SCHEMA)?;
         tx.execute_batch(super::preservation::SCHEMA)?;
         tx.execute_batch(super::source_primary_owner::SCHEMA)?;

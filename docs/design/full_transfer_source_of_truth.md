@@ -62,8 +62,13 @@ This is physical admission only. It authenticates no original signature or HLC,
 creates no erasure edge and proves no materialization or installation. The live
 runtime_message_content declaration remains RequiresOwner while native evidence,
 contribution merge, erasure closure and dedicated payload spooling are built.
-Existing metadata/staging bounds remain unchanged. Declaration coverage does not
-increase for this prerequisite.
+Metadata records retain the262144-byte bound. The shared record profile gives
+only the declared native family its format-specific payload allowance and still
+counts its header/other cells against the metadata budget. Source, incoming,
+original-contribution, refreshed-B and independent comparison spools use that
+profile; native payloads do not acquire a generic BLOB allowance. Older local
+metadata-only/pending-slot or WITHOUT ROWID shapes refuse SchemaMismatch without
+conversion. This prerequisite does not increase declaration coverage.
 
 ## Revised execution order
 

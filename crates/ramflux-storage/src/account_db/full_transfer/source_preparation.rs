@@ -61,7 +61,7 @@ impl AccountDb {
         create_file(&directory.join("stage.db"))?.sync_all()?;
         let connection = key.open_metadata(&directory.join("stage.db"))?;
         connection.execute_batch(super::source_cut::SCHEMA)?;
-        connection.execute_batch(super::source_scalar::SCHEMA)?;
+        connection.execute_batch(&super::source_scalar::schema())?;
         sync_stage(&directory)?;
         self.require_full_stage_unlock()?;
         Ok(FullSourcePreparation {

@@ -19,6 +19,11 @@ fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
 impl NativePayload {
+    pub(super) const fn family(self) -> &'static str {
+        match self {
+            Self::DirectInnerV1 => "sql/runtime_message_content",
+        }
+    }
     pub(super) const fn max_bytes(self) -> usize {
         match self {
             Self::DirectInnerV1 => g::validation::MAX_INNER_BYTES,
@@ -78,3 +83,6 @@ fn direct_inner(bytes: &[u8]) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) mod test_support;

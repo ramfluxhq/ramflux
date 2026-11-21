@@ -15,10 +15,13 @@ use rusqlite::params;
 use std::io::Write;
 use zeroize::Zeroizing;
 
-pub(super) const SCHEMA:&str="
-CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key));
-CREATE TABLE IF NOT EXISTS full_union_input(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key));
-CREATE TABLE IF NOT EXISTS full_union_encoding(generation_nonce BLOB PRIMARY KEY CHECK(length(generation_nonce)=32),records INTEGER NOT NULL CHECK(records>=0),total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),chunks_root BLOB NOT NULL CHECK(length(chunks_root)=32));";
+pub(super) fn schema() -> String {
+    let check = super::record_profile::sql_constraint();
+    format!("CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL {check},PRIMARY KEY(generation_nonce,owner,family,key));
+CREATE TABLE IF NOT EXISTS full_union_input(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL {check},PRIMARY KEY(generation_nonce,owner,family,key));
+CREATE TABLE IF NOT EXISTS full_union_encoding(generation_nonce BLOB PRIMARY KEY CHECK(length(generation_nonce)=32),records INTEGER NOT NULL CHECK(records>=0),total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),chunks_root BLOB NOT NULL CHECK(length(chunks_root)=32));")
+}
+
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
@@ -163,11 +166,12 @@ impl FullUnionEncodingBuilder<'_, '_> {
     }
 }
 
-/// The internal ledger format is local only. An older WITHOUT ROWID ledger is not
-/// relabeled or migrated by CREATE IF NOT EXISTS; reject it before reading records.
+/// Internal ledgers are local only. Older metadata-only or WITHOUT ROWID shapes
+/// refuse before reads; CREATE IF NOT EXISTS never converts or relabels them.
 pub(super) fn require_existing_format(db: &rusqlite::Connection) -> Result<(), StorageError> {
     use rusqlite::OptionalExtension as _;
     for table in ["full_union_record", "full_union_input"] {
+        super::record_profile::require_storage_format(db, "main", table)?;
         let without_rowid = db
             .query_row(
                 "SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1",

@@ -65,6 +65,7 @@ mod source_primary_owner;
 mod source_reconciliation;
 mod source_retirement;
 pub use source_primary_owner::FullSourcePrimaryOwner;
+mod record_profile;
 mod record_spool;
 mod source_owner;
 mod source_preparation;

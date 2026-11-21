@@ -19,7 +19,7 @@ impl Contributions {
     ) -> Result<super::FullUnionEncoding, StorageError> {
         let mut db = open(path, key)?;
         let tx = db.transaction()?;
-        tx.execute_batch("CREATE TABLE current_target(family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL CHECK(length(record)<=262144),PRIMARY KEY(family,key));")?;
+        tx.execute_batch(&format!("CREATE TABLE current_target(family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL {},PRIMARY KEY(family,key));", super::super::record_profile::sql_constraint()))?;
         Self::capture_target(&tx, rows.current, rows.schema, stage)?;
         self.remove_target_absences(&tx, private, stage)?;
         let content = super::super::full_transfer_catalog()

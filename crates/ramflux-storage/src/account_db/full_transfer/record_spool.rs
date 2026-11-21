@@ -21,7 +21,6 @@ use rusqlite::params;
 use std::io::{Seek as _, SeekFrom, Write};
 use zeroize::{Zeroize as _, Zeroizing};
 
-pub(super) const RECORD_LIMIT: usize = 262_144;
 const FRAGMENT_BYTES: usize = 16_384;
 /// A protocol-bounded prefix suffices to parse framing; payload size never sizes this buffer.
 pub(super) struct Probe {
@@ -35,10 +34,15 @@ impl Probe {
             bytes: 0,
         }
     }
-    pub(super) fn header(&self, encoded: u64) -> Result<PrivateHeader, StorageError> {
-        if encoded != self.bytes || encoded > RECORD_LIMIT as u64 {
+    pub(super) fn header(
+        &self,
+        encoded: u64,
+        rule: &super::FamilyRule,
+    ) -> Result<PrivateHeader, StorageError> {
+        if encoded != self.bytes {
             return Err(invalid());
         }
+        super::record_profile::require_length(rule, encoded)?;
         Ok(PrivateHeader(
             read_record_header(&mut self.prefix.as_slice())
                 .map_err(|_| invalid())?
@@ -82,10 +86,8 @@ impl Sink {
         guard: &SourceGuard,
     ) -> Result<Self, StorageError> {
         guard.require()?;
+        super::record_profile::require_length(super::source_scalar::compiled(family)?, length)?;
         let expected = usize::try_from(length).map_err(|_| invalid())?;
-        if expected == 0 || expected > RECORD_LIMIT {
-            return Err(invalid());
-        }
         let snapshot = snapshot.to_owned();
         let key = Zeroizing::new(key.to_owned());
         let rowid=db.call(move|db| {
@@ -198,13 +200,16 @@ impl<'db> LocalSink<'db> {
         db: &'db rusqlite::Connection,
         length: u64,
         scope: Scope,
+        rule: &super::FamilyRule,
     ) -> Result<Self, StorageError> {
-        if db.is_autocommit() || length == 0 || length > RECORD_LIMIT as u64 {
+        if db.is_autocommit() {
             return Err(invalid());
         }
+        super::record_profile::require_length(rule, length)?;
         let schema = scope.schema();
-        db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {schema}.full_stream_pending(slot INTEGER PRIMARY KEY CHECK(slot=1),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144));"))?;
-        db.execute(&format!("INSERT INTO {schema}.full_stream_pending VALUES(1,zeroblob(?1)) ON CONFLICT(slot) DO UPDATE SET record=excluded.record"),[length])?;
+        db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {schema}.full_stream_pending(slot INTEGER PRIMARY KEY CHECK(slot=1),family TEXT NOT NULL,record BLOB NOT NULL {});",super::record_profile::sql_constraint()))?;
+        super::record_profile::require_storage_format(db, schema, "full_stream_pending")?;
+        db.execute(&format!("INSERT INTO {schema}.full_stream_pending(slot,family,record) VALUES(1,?1,zeroblob(?2)) ON CONFLICT(slot) DO UPDATE SET family=excluded.family,record=excluded.record"),params![rule.id,length])?;
         Ok(Self {
             db,
             scope,
@@ -245,7 +250,7 @@ impl<'db> Candidate<'db> {
             header.0.cell_lengths.iter().try_fold(prefix.len() as u64, |sum, length| {
                 sum.checked_add(length.0).ok_or_else(invalid)
             })?;
-        let mut output = LocalSink::create(db, length, Scope::Main)?;
+        let mut output = LocalSink::create(db, length, Scope::Main, rule)?;
         output.write_all(&prefix)?;
         super::copy_full_scalar_record(rule, &header.0, input, &mut output)?;
         output.finish()?;
@@ -306,9 +311,7 @@ pub(super) fn checked_blob<'db>(
     rule: &super::FamilyRule,
     key: &str,
 ) -> Result<rusqlite::blob::Blob<'db>, StorageError> {
-    if length == 0 || length > RECORD_LIMIT as u64 {
-        return Err(invalid());
-    }
+    super::record_profile::require_length(rule, length)?;
     let mut input = db.blob_open("main", table, "record", rowid, true)?;
     if input.len() as u64 != length {
         return Err(invalid());
@@ -361,8 +364,8 @@ fn encode_sql(
 ) -> Result<PrivateHeader, StorageError> {
     let mut probe = Probe::new();
     let length = super::write_full_scalar_sql_row(rule, row, &mut probe)?;
-    let header = probe.header(length)?;
-    let mut output = LocalSink::create(db, length, scope)?;
+    let header = probe.header(length, rule)?;
+    let mut output = LocalSink::create(db, length, scope, rule)?;
     if super::write_full_scalar_sql_row(rule, row, &mut output)? != length {
         return Err(invalid());
     }
