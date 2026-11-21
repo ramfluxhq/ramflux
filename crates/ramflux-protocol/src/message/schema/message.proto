@@ -304,6 +304,76 @@ message AgentCustodyPacket {
     bytes receipt_json = 4;
   }
 }
+// Bus bodies of the agent creation methods (AGENT-CONFIG-01 contract 1 and 2; AGENT-IDENTITY-01 C3).
+// Requests and results are these messages as ProtoJSON. Field numbers are permanent.
+message AgentPersona {
+  string name = 1;
+  string avatar = 2;
+  string responsibility = 3;
+}
+message AgentAccessPolicy {
+  string dm = 1;
+  string group_inviters = 2;
+  repeated string allowed_humans = 3;
+}
+message AgentLimits {
+  optional uint32 max_concurrent_turns = 1;
+  optional uint64 max_cost_per_day_cents = 2;
+}
+message AgentConfigData {
+  string provider = 1;
+  string model = 2;
+  optional string prompt = 3;
+  string autonomy = 4;
+  repeated string tools = 5;
+  reserved 6;
+  reserved "memory";
+  optional bool enabled = 7;
+  optional AgentLimits limits = 8;
+}
+message AgentHostRef {
+  QualifiedDevice device = 1;
+  string agent_name = 2;
+  optional string incarnation = 3;
+}
+message AgentCreate {
+  AgentPersona persona = 1;
+  optional AgentHostRef host = 2;
+  optional AgentConfigData config = 3;
+  optional bool confirmed = 4;
+  AgentAccessPolicy access = 5;
+  string role = 6;
+}
+message AgentCreationDecide {
+  string request_id = 1;
+  string request_hash = 2;
+  optional bool approved = 3;
+}
+message AgentOperationGet { string operation_id = 1; }
+message AgentFailure {
+  string reason_code = 1;
+  optional string current_revision = 2;
+  optional uint64 retry_after_ms = 3;
+  string effects = 4;
+  optional bool restored = 5;
+  optional uint32 http_status = 6;
+  optional string current_incarnation = 7;
+}
+message AgentCustodyStatus {
+  string request_id = 1;
+  string state = 2;
+  optional string agent_anchor = 3;
+  optional uint64 expires_at = 4;
+  optional bytes request_json = 5;
+  optional bytes receipt_json = 6;
+  optional AgentFailure error = 7;
+}
+// Only the custody arm of the result is defined here; arms 1-8 belong to later agent stages.
+message AgentConfigResult {
+  oneof value {
+    AgentCustodyStatus custody = 9;
+  }
+}
 message PairReset { uint64 rejected_bootstrap_floor = 1; }
 message PairResetAck { uint64 rejected_bootstrap_floor = 1; }
 message ContactControl { NativeContactConsent consent = 1; }
