@@ -224,3 +224,9 @@ compile_error!("test-support is excluded from production and release builds");
 
 #[cfg(feature = "test-support")]
 pub use bus::account_runtime::testing_messages::NativeMessageBus;
+
+pub mod client_constraints;
+pub use gateway::ConnectionRace;
+pub use platform::network::{
+    NetworkChangeKind, NetworkKey, NetworkMonitor, NetworkSnapshot, is_network_blocked,
+};

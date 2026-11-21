@@ -1001,3 +1001,4 @@ crates/ramflux-transport/src/quic_gateway.rs | decode_quic_gateway_response | 1 
 crates/ramflux-transport/src/quic_gateway.rs | read_gateway_session_json | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_quic_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
+crates/ramflux-sdk/src/prekey.rs | sdk_policy_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_policy_gateway_request#1

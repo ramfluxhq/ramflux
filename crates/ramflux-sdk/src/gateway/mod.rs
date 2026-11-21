@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 pub mod access;
+mod auto_dial;
 pub(crate) mod call_resolution;
 pub mod engine;
 mod ephemeral;
@@ -28,4 +29,7 @@ mod custody;
 #[path = "submit_tests.rs"]
 mod submit_tests;
 pub use custody::GatewayCustodyConfig;
-pub(crate) use custody::proof_network_config;
+pub(crate) use custody::{connect_proof, discover_node, proof_network_config};
+
+#[cfg(all(test, feature = "http-connect-proxy", not(windows)))]
+mod proxy_tests;

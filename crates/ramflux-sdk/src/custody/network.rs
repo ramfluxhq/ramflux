@@ -103,16 +103,26 @@ impl CustodyConnection<GatewayTcpTlsStream> {
                 config.timeout,
             )
             .await?;
-            let opened = Self::open_stream(&config, tls.into_tls_stream()).await?;
-            let pins = opened.pins;
-            drop(opened.stream);
-            tokio::task::spawn_blocking(move || pins.current_record(now()?))
-                .await
-                .map_err(|_| invalid())?
+            Self::discover_pairing_node_over(config, tls.into_tls_stream()).await
         })
         .await
         .map_err(|_| SdkError::PairingCode("ResumeRequired"))?
     }
+    pub(crate) async fn discover_pairing_node_over(
+        config: CustodyNetworkConfig,
+        stream: GatewayTcpTlsStream,
+    ) -> Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError> {
+        if config.binding_mode == BindingMode::NoChannelBinding {
+            return Err(CustodyRefusal::BindingRefused.into());
+        }
+        let opened = Self::open_stream(&config, stream).await?;
+        let pins = opened.pins;
+        drop(opened.stream);
+        tokio::task::spawn_blocking(move || pins.current_record(now()?))
+            .await
+            .map_err(|_| invalid())?
+    }
+
     /// Publish, register and establish a session using the current locally verified v3 record.
     /// # Errors
     /// Rejects missing custody state, keychain failure, node-pin changes, exporter failure and

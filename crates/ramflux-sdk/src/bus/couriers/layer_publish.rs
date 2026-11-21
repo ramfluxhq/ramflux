@@ -11,7 +11,7 @@ use crate::bus::couriers::writer::Writer;
 use crate::bus::dispatch::device::native_revoke::{NativeAck, observe_published, with_db};
 use crate::bus::state::LocalBusAccountState;
 use crate::custody::{
-    self, CustodyConnection, DeclarationValidity,
+    self, DeclarationValidity,
     pairing::{HeadKind, HeadWrite, PairingNative, ProofPairingNative, PublishedHead},
 };
 use crate::{GatewaySessionConfig, SdkError};
@@ -467,9 +467,8 @@ pub(crate) fn settle_for_other_writer(account: &mut LocalBusAccountState) -> Res
 }
 
 async fn publish(input: PublishInput) -> Result<String, SdkError> {
-    let mut network = crate::gateway::proof_network_config(&input.config)?;
-    network.gateway_address = input.config.tcp_gateway_addr.unwrap_or(input.config.gateway_addr);
-    let connection = CustodyConnection::connect_for_proof(network, input.vault).await?;
+    let network = crate::gateway::proof_network_config(&input.config)?;
+    let connection = crate::gateway::connect_proof(network, input.vault, &input.config).await?;
     let native = ProofPairingNative::from_connection(Arc::new(tokio::sync::Mutex::new(connection)));
     native.publish(input.publication).await
 }

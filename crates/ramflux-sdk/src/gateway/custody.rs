@@ -53,7 +53,7 @@ pub(crate) fn proof_network_config(
         account_root: custody.account_root.clone(),
         account_id: custody.account_id.clone(),
         device_id: config.device_id.clone(),
-        gateway_address: config.gateway_addr,
+        gateway_address: config.tcp_gateway_addr.unwrap_or(config.gateway_addr),
         server_name: config.server_name.clone(),
         ca_certificate: config.ca_cert.clone(),
         node_id: custody.node_id.clone(),
@@ -195,3 +195,33 @@ impl ramflux_transport::GatewaySessionFrameSource for NativeSessionStream {
 #[cfg(test)]
 #[path = "custody_publication_tests.rs"]
 mod publication_tests;
+
+/// Fresh proof connection with the same host routing policy as the ordinary session.
+pub(crate) async fn connect_proof(
+    network: CustodyNetworkConfig,
+    vault: Arc<dyn PrimaryVault>,
+    gateway: &GatewaySessionConfig,
+) -> Result<CustodyConnection<ramflux_transport::GatewayTcpTlsStream>, SdkError> {
+    let mut retry = crate::custody::retry::AdmissionRetry::default();
+    let ((), connection) = Box::pin(CustodyConnection::connect_with_mode(
+        network,
+        vault,
+        &mut retry,
+        true,
+        || async { Ok(((), super::auto_dial::open_native_tcp(gateway).await?)) },
+    ))
+    .await?;
+    Ok(connection)
+}
+
+pub(crate) async fn discover_node(
+    network: CustodyNetworkConfig,
+    gateway: &GatewaySessionConfig,
+) -> Result<ramflux_crypto::custody::VerifiedNodeRecord, SdkError> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let stream = super::auto_dial::open_native_tcp(gateway).await?;
+        CustodyConnection::discover_pairing_node_over(network, stream).await
+    })
+    .await
+    .map_err(|_| SdkError::PairingCode("ResumeRequired"))?
+}

@@ -62,10 +62,9 @@ pub(super) async fn dispatch(
         )
     })?;
     let expected = object_hash(&publication.record)?;
-    let mut network = crate::gateway::proof_network_config(&config)?;
-    network.gateway_address = config.tcp_gateway_addr.unwrap_or(config.gateway_addr);
+    let network = crate::gateway::proof_network_config(&config)?;
     let connection =
-        custody::CustodyConnection::connect_for_proof(network, selected.vault.clone()).await?;
+        crate::gateway::connect_proof(network, selected.vault.clone(), &config).await?;
     let native = ProofPairingNative::from_connection(Arc::new(tokio::sync::Mutex::new(connection)));
     // The actual account DB stays in the frontend during every network await. Cancellation
     // leaves its exact submitted intent recoverable and never drops the unlocked DB worker.

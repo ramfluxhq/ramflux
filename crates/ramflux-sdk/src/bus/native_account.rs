@@ -109,9 +109,10 @@ pub(super) fn unlock(
         target_delivery_id: delivery,
         prekey_http_url: None,
     };
-    let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(
-        client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?,
-    );
+    let gateway =
+        GatewaySessionConfig::auto(endpoint).with_host_network(&state.config).with_born_v3_account(
+            client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?,
+        );
     let mut account = LocalBusAccountState::disconnected(client, gateway, anchor);
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());
@@ -342,6 +343,7 @@ pub(super) async fn configure_pending(account: &mut LocalBusAccountState) -> Res
     let endpoint = profile.gateway_config(root, endpoint).await?;
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
     let gateway = GatewaySessionConfig::auto(endpoint)
+        .with_host_network(setup)
         .with_tcp_gateway_addr(tcp)
         .with_native_custody(GatewayCustodyConfig {
             account_root: root.clone(),

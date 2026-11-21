@@ -141,7 +141,14 @@ async fn sdk_gateway_request_json<R>(
 where
     R: serde::de::DeserializeOwned,
 {
-    let response = match config.transport_kind {
+    // Keep carrier handshake state off the resident receive/courier callers' futures.
+    let response = Box::pin(async { Ok::<_, SdkError>(match config.transport_kind {
+        _ if config.has_http_proxy()
+            || (config.transport_kind == GatewaySessionTransportKind::Auto
+                && config.connection_race == crate::ConnectionRace::Raced) =>
+        {
+            sdk_policy_gateway_request(config, &request).await?
+        }
         GatewaySessionTransportKind::Auto => {
             match sdk_quic_gateway_request(config, &request, config.quic_fallback_timeout).await {
                 Ok(response) => response,
@@ -164,7 +171,7 @@ where
         GatewaySessionTransportKind::TcpTls => {
             sdk_tcp_tls_gateway_request(config, &request).await?
         }
-    };
+    }) }).await?;
     if let Ok(error) = serde_json::from_value::<ramflux_protocol::IdentityRegistrationFailure>(
         response.body.clone(),
     ) {
@@ -198,6 +205,28 @@ fn native_directory_request(
         && request.method == "GET"
         && (request.path.starts_with("/mvp1/device-manifest/")
             || request.path.starts_with(ramflux_protocol::custody::CUSTODY_HISTORY_PATH_PREFIX))
+}
+
+// The existing serial carrier helpers retain their strict decoder identities. The
+// raced/proxy policy opens one winning stream and applies the same framed response rules.
+async fn sdk_policy_gateway_request(
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
+    tokio::time::timeout(config.timeout.saturating_mul(3), async {
+        let (_owner, mut stream, _kind) =
+            crate::gateway::engine::open_gateway_session_transport(config).await?;
+        ramflux_transport::write_gateway_session_json(&mut *stream, request).await?;
+        if native_directory_request(config, request) {
+            let bytes =
+                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut *stream)
+                    .await?;
+            return Ok(ramflux_protocol::parse_i_json(&bytes)?);
+        }
+        Ok(ramflux_transport::read_gateway_session_json(&mut *stream).await?)
+    })
+    .await
+    .map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))?
 }
 
 async fn sdk_quic_gateway_request(

@@ -420,6 +420,26 @@ pub fn tcp_gateway_client_config(ca_cert: &Path) -> Result<ClientConfig, Transpo
         .with_no_client_auth())
 }
 
+/// QUIC client config for a long-lived gateway session: the same pinned roots and stream
+/// limits as [`quic_gateway_client_config`], plus an explicit idle timeout and keep-alive so
+/// the session does not depend on the transport default idle timeout.
+///
+/// # Errors
+/// Returns an error when the CA bundle cannot be loaded or the idle timeout is not
+/// representable.
+pub fn quic_gateway_session_client_config(
+    ca_cert: &Path,
+    max_idle_timeout: std::time::Duration,
+    keep_alive_interval: std::time::Duration,
+) -> Result<quinn::ClientConfig, TransportError> {
+    if keep_alive_interval.is_zero() || keep_alive_interval >= max_idle_timeout {
+        return Err(TransportError::Quic(
+            "gateway session keep-alive must be nonzero and below the idle timeout".to_owned(),
+        ));
+    }
+    relay_quic_pool_client_config(ca_cert, max_idle_timeout, keep_alive_interval)
+}
+
 pub(crate) fn ensure_ring_crypto_provider_installed() {
     RUSTLS_PROVIDER.call_once(|| {
         let _result = rustls::crypto::ring::default_provider().install_default();
