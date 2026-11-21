@@ -36,19 +36,6 @@ struct Human<'a> {
     local: DeviceRef,
 }
 
-/// Validate the access policy against its closed tokens (dm, group inviters, allowed humans).
-fn check_access(access: &g::AgentAccessPolicy) -> Result<(), SdkError> {
-    let closed = |token: &str| matches!(token, "owner" | "contacts" | "allowlist" | "open");
-    if !closed(&access.dm) || !closed(&access.group_inviters) {
-        return Err(refuse("access_policy_invalid"));
-    }
-    let allowlist = access.dm == "allowlist" || access.group_inviters == "allowlist";
-    if !allowlist && !access.allowed_humans.is_empty() {
-        return Err(refuse("access_policy_invalid"));
-    }
-    Ok(())
-}
-
 /// The primary branch expiry of the human authority, when the primary has a branch.
 fn primary_branch_expiry(record: &Envelope<DeviceSet>, primary: &DeviceRef) -> Option<u64> {
     record
@@ -175,7 +162,7 @@ impl RamfluxClient {
         {
             return Err(refuse("metadata_pending"));
         }
-        check_access(access)?;
+        crate::agent_record::check_access(access)?;
         let persona_bytes = serde_json::to_vec(&serde_json::json!({
             "avatar": persona.avatar,
             "name": persona.name,
@@ -208,6 +195,12 @@ impl RamfluxClient {
         };
         let store = self.agent_creation_store()?;
         let outcome = begin(&store, vault, &input, now)?;
+        // Stage E2: the persona and access are kept on the creation record for the agent record.
+        let mut intent_record = store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+        let intent =
+            crate::agent_record::AgentIntent { persona: persona.clone(), access: access.clone() };
+        intent_record.intent_b64 = Some(encode_base64url(serde_json::to_vec(&intent)?));
+        store.save(&intent_record)?;
         let plan =
             decode_register_plan(&outcome.plan_bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
         let target = RootQualifiedDeviceRef::from_custody_record(

@@ -81,6 +81,7 @@ pub fn begin_rebind(
         profile_b64: None,
         receipt_b64: None,
         agent_record_b64: None,
+        intent_b64: None,
     };
     store.save(&record)?;
     outcome(&record)

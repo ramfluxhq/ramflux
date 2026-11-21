@@ -120,6 +120,7 @@ pub fn begin(
         profile_b64: None,
         receipt_b64: None,
         agent_record_b64: None,
+        intent_b64: None,
     };
     store.save(&record)?;
 
@@ -248,6 +249,7 @@ pub fn receive_plan(
         profile_b64: None,
         receipt_b64: None,
         agent_record_b64: None,
+        intent_b64: None,
     };
     store.save(&record)?;
     Ok(record)

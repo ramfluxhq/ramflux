@@ -79,7 +79,12 @@ pub(crate) fn complete_with_receipt(
         return Ok(record);
     }
     AgentPublishing::from_record(store.clone(), record)?.mark_complete()?;
-    store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)
+    let completed = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+    // Stage E2: the agent record exists once the creation completes (a rebind keeps its record).
+    if !super::rebind_plan::is_rebind(&completed) {
+        crate::agent_record::record_completed(store.agent_record_dir(), &completed)?;
+    }
+    Ok(completed)
 }
 
 impl AgentPublishing {

@@ -363,7 +363,8 @@ fn validate_friend(body: &g::FriendControl) -> Result<(), SdkError> {
 fn validate_agent_sync(packet: &g::AgentHostPacket) -> Result<(), SdkError> {
     let custody_present = match packet.body.as_ref() {
         Some(g::agent_host_packet::Body::Custody(custody)) => custody.value.is_some(),
-        None => false,
+        // Metadata packets are applied by stage E3; until then they are refused here.
+        Some(g::agent_host_packet::Body::Metadata(_)) | None => false,
     };
     if packet.owner_anchor.is_empty()
         || packet.source.is_none()

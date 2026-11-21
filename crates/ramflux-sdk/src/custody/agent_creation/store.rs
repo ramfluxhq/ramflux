@@ -52,6 +52,10 @@ pub struct AgentCreationRecord {
     /// never reads the agent's authority file to freeze a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_record_b64: Option<String>,
+    /// The persona and access the creation was requested with (`AgentIntent` as JSON, base64url),
+    /// stored by `agent.create` so the agent record exists once the agent completes (AGENT-IDENTITY-01 E2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_b64: Option<String>,
 }
 
 impl AgentCreationRecord {
@@ -122,6 +126,12 @@ impl AgentCreationStore {
 
     /// Data root that the agent account is committed under.
     #[must_use]
+    /// The per-owner agent record directory, beside this creation directory (AGENT-IDENTITY-01 E2).
+    pub(crate) fn agent_record_dir(&self) -> PathBuf {
+        self.dir
+            .parent()
+            .map_or_else(|| self.dir.join("agent_record"), |parent| parent.join("agent_record"))
+    }
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
     }
@@ -251,7 +261,7 @@ impl AgentCreationStore {
 
 /// Write `bytes` to `dir/file_name` through a temporary file, `sync_all`, an atomic rename and a
 /// directory sync. A reader sees the old file or the new one, never a partial write.
-pub(super) fn write_json_atomic(
+pub(crate) fn write_json_atomic(
     dir: &std::path::Path,
     file_name: &str,
     bytes: &[u8],

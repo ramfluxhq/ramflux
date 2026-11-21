@@ -52,4 +52,5 @@ pub use receive_checks::{
 };
 pub use receive_decision::{check_received_decision, primary_branch_public_key, receive_decision};
 pub use state::{AgentCreationState, AgentFailure};
+pub(crate) use store::write_json_atomic;
 pub use store::{AgentCreationRecord, AgentCreationStore};
