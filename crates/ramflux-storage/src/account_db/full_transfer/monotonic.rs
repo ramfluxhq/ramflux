@@ -14,6 +14,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 #[derive(Clone, Copy)]
 enum Merge {
     Immutable,
+    Decision { state: usize, stamp: usize },
     Denial { state: usize, until: usize },
     Maxima(&'static [usize]),
     EpochHash { epoch: usize, hash: usize, until: usize },
@@ -67,6 +68,18 @@ static OWNERS: &[Owner] = &[
         keys: &[0],
         merge: Merge::Denial { state: 1, until: 2 },
     },
+    Owner {
+        family: "sql/contact_link_decision",
+        names: &["link_id", "state", "decided_at"],
+        keys: &[0],
+        merge: Merge::Decision { state: 1, stamp: 2 },
+    },
+    Owner {
+        family: "sql/contact_request_decision",
+        names: &["root", "state", "decided_at"],
+        keys: &[0],
+        merge: Merge::Decision { state: 1, stamp: 2 },
+    },
 ];
 pub(super) fn owner(family: &str) -> Option<&'static Owner> {
     OWNERS.iter().find(|owner| owner.family == family)
@@ -117,6 +130,22 @@ impl Owner {
                     if left.bytes(index)? != right.bytes(index)? {
                         return Err(conflict());
                     }
+                }
+            }
+            Merge::Decision { state, stamp } => {
+                let rank = |value| match value {
+                    "blocked" => Ok(2),
+                    "declined" => Ok(1),
+                    "lifted" => Ok(0),
+                    _ => Err(invalid()),
+                };
+                let a = rank(left.text(state)?)?;
+                let b = rank(right.text(state)?)?;
+                // A transferred lift is historical data, not a fresh B consent action.
+                // Keep the complete stronger decision; only equal states use stamp order.
+                if b > a || b == a && right.integer(stamp)? > left.integer(stamp)? {
+                    result.copy_cell(state, right)?;
+                    result.copy_cell(stamp, right)?;
                 }
             }
             Merge::Denial { state, until } => {

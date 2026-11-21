@@ -284,3 +284,71 @@ fn full_contact_untimed_fence_cannot_acquire_other_devices_expiry() -> TestResul
         conflict: true,
     })
 }
+
+fn seed_decisions(a: &AccountDb, b: &AccountDb) -> TestResult {
+    // Both owners have the same closed state/stamp shape. Exercise each through the
+    // actual encrypted source cut and generation verifier rather than a codec-only loop.
+    for table in ["contact_request_decision", "contact_link_decision"] {
+        for (id, left, left_at, right, right_at) in [
+            (80, "blocked", 100, "lifted", 300),
+            (81, "lifted", 400, "declined", 200),
+            (82, "declined", 500, "blocked", 100),
+            (83, "blocked", 100, "blocked", 600),
+            (84, "lifted", 100, "lifted", 700),
+        ] {
+            let key = encode_base64url([id; 32]);
+            let sql = format!("INSERT INTO {table} VALUES(?1,?2,?3)");
+            a.connection.execute(&sql, params![key, left, left_at])?;
+            b.connection.execute(&sql, params![key, right, right_at])?;
+        }
+    }
+    Ok(())
+}
+fn inspect_decisions(private: &BackupDatabase, _: &AccountDb) -> TestResult {
+    for (table, key_column) in
+        [("contact_request_decision", "root"), ("contact_link_decision", "link_id")]
+    {
+        for (id, state, stamp) in [
+            (80, "blocked", 100),
+            (81, "declined", 200),
+            (82, "blocked", 100),
+            (83, "blocked", 600),
+            (84, "lifted", 700),
+        ] {
+            let value = private.db.query_row(
+                &format!("SELECT state,decided_at FROM {table} WHERE {key_column}=?1"),
+                [encode_base64url([id; 32])],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            assert_eq!(
+                value,
+                (state.to_owned(), stamp),
+                "test: {table} lifted an independent denial or fabricated its original decision stamp"
+            );
+        }
+    }
+    Ok(())
+}
+#[test]
+fn full_contact_decision_owners_keep_denials_and_complete_original_stamps() -> TestResult {
+    run(Case {
+        name: "contact-decisions",
+        seed: seed_decisions,
+        before: None,
+        inspect: inspect_decisions,
+        conflict: false,
+    })
+}
+#[test]
+fn full_contact_unrelated_private_decision_cannot_mint_dv() -> TestResult {
+    run(Case {
+        name: "contact-decision-tamper",
+        seed: seed_decisions,
+        before: Some(|private| {
+            private.db.execute("UPDATE contact_request_decision SET state='blocked',decided_at=99999 WHERE root=?1",[encode_base64url([84;32])])?;
+            Ok(())
+        }),
+        inspect: inspect_decisions,
+        conflict: true,
+    })
+}

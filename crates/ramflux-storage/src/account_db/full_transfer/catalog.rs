@@ -608,6 +608,8 @@ macro_rules! table_rule {
     (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
     (@version "receive_erased_input",$mode:ident) => { U64(2) };
     (@version "contact_request_authority_floor",$mode:ident) => { U64(2) };
+    (@version "contact_link_decision",$mode:ident) => { U64(2) };
+    (@version "contact_request_decision",$mode:ident) => { U64(2) };
     (@version "contact_message_fence_retention",$mode:ident) => { U64(2) };
     (@version "contact_message_request_fence",$mode:ident) => { U64(2) };
     (@version "contact_request_fence",$mode:ident) => { U64(2) };

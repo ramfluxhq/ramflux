@@ -141,3 +141,11 @@ A retained message deadline without its contributor's matching fence, or a timed
 fence colliding with an independently untimed fence, refuses TransferConflict
 before DataVerified. This stricter choice avoids assigning an expiry to an
 independent denial; no wall-clock guess or fabricated deadline repairs the rows.
+
+Transferred contact decisions retain their complete state/stamp pair. Across
+independent contributors a block dominates a decline, and either dominates a lift;
+only equal states choose the later original stamp. A source lift never authorizes
+clearing B's independent restriction. This intentionally differs from restoring a
+single ordered local decision history: the new primary must obtain fresh local
+consent to lift an independently retained denial. Import does not synthesize a
+stamp from a different decision or perform a user consent action.

@@ -21,7 +21,7 @@ pub(super) const RULE_10: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "contact_link_decision", cell_type: CellType::Utf8 }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "state",
@@ -29,7 +29,7 @@ pub(super) const RULE_10: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlEnum { values: &["blocked", "declined", "lifted"], nullable: false }
         ),
         (
             "decided_at",
@@ -37,8 +37,8 @@ pub(super) const RULE_10: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 
@@ -239,10 +239,7 @@ pub(super) const RULE_15: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_request_decision",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "state",
@@ -250,7 +247,7 @@ pub(super) const RULE_15: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlEnum { values: &["blocked", "declined", "lifted"], nullable: false }
         ),
         (
             "decided_at",
@@ -258,8 +255,8 @@ pub(super) const RULE_15: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 
