@@ -60,7 +60,8 @@ fn agent_decide_and_get_keep_presence_of_approved() -> Result<(), serde_json::Er
 /// The record and page bodies of the agent methods (AGENT-IDENTITY-01 E1, contract 1 and 2). The
 /// later-stage record fields (`host`, `config`, `revision`) stay absent in this module.
 #[test]
-fn agent_record_and_page_bodies_decode_and_refuse_unknown_fields() -> Result<(), serde_json::Error> {
+fn agent_record_and_page_bodies_decode_and_refuse_unknown_fields() -> Result<(), serde_json::Error>
+{
     let list: AgentList = serde_json::from_value(json!({"limit": 20}))?;
     assert_eq!((list.cursor.as_deref(), list.limit), (None, 20));
     assert!(serde_json::from_value::<AgentList>(json!({"limit": 1, "extra": true})).is_err());
