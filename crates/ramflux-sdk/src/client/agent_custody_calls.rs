@@ -82,16 +82,28 @@ pub(crate) fn status_of(record: &AgentCreationRecord) -> Result<g::AgentCustodyS
         expires_at: Some(record.expires_at),
         request_json: plan,
         receipt_json,
-        error: record.failure.map(failure_body),
+        error: record.failure.map(|failure| failure_body(failure, record.state)),
     })
 }
 
-fn failure_body(failure: AgentFailure) -> g::AgentFailure {
+/// `AgentFailure.effects` of a stored request (AGENT-IDENTITY-01 r13 item 3). `possible`: the node
+/// may or may not have admitted the publication (`publication_unknown`). `applied`: the local
+/// account bundle is committed. `none`: nothing durable beyond the request record, which covers
+/// every refusal before the commit.
+fn failure_effects(state: AgentCreationState) -> &'static str {
+    match state {
+        AgentCreationState::PublicationUnknown => "possible",
+        AgentCreationState::PublicationPending | AgentCreationState::Complete => "applied",
+        _ => "none",
+    }
+}
+
+fn failure_body(failure: AgentFailure, state: AgentCreationState) -> g::AgentFailure {
     g::AgentFailure {
         reason_code: failure.as_str().to_owned(),
         current_revision: None,
         retry_after_ms: None,
-        effects: "none".to_owned(),
+        effects: failure_effects(state).to_owned(),
         restored: None,
         http_status: None,
         current_incarnation: None,
@@ -341,5 +353,20 @@ impl RamfluxClient {
             .load(operation_id)?
             .ok_or_else(|| refuse("creation_request_unknown"))?;
         status_of(&record)
+    }
+}
+
+#[cfg(test)]
+mod effects_tests {
+    use super::{AgentCreationState, failure_effects};
+
+    #[test]
+    fn failure_effects_follow_the_commit_point() {
+        assert_eq!(failure_effects(AgentCreationState::AuthorizationPending), "none");
+        assert_eq!(failure_effects(AgentCreationState::Refused), "none");
+        assert_eq!(failure_effects(AgentCreationState::Expired), "none");
+        assert_eq!(failure_effects(AgentCreationState::PublicationPending), "applied");
+        assert_eq!(failure_effects(AgentCreationState::Complete), "applied");
+        assert_eq!(failure_effects(AgentCreationState::PublicationUnknown), "possible");
     }
 }
