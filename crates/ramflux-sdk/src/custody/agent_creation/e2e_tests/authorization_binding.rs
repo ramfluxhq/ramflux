@@ -15,14 +15,15 @@ use super::super::test_support::{
     primary_decision_as, root_of, store_of, vault_of,
 };
 use crate::SdkError;
-use crate::custody::CustodyConnection;
 use crate::custody::agent_creation::{
-    AgentCreationState, AgentFailure, apply_decision, commit_approved, first_action,
-    load_publishing, primary_branch_public_key, receive_plan, require_agent_custody_authorization,
+    AgentCreationState, AgentFailure, AgentPublishing, apply_decision, commit_approved,
+    first_action, load_publishing, primary_branch_public_key, receive_plan,
+    require_agent_custody_authorization,
 };
+use crate::custody::{CustodyConnection, PrimaryVault};
 use crate::time::FixedClock;
 use ramflux_protocol::custody::{
-    CustodyProofAction, CustodyRefusal, CustodyServerFrame, DeviceRef, RegisterPlan,
+    CustodyProofAction, CustodyRefusal, CustodyServerFrame, DeviceRef, Publication, RegisterPlan,
     RegisterPurpose, decode_register_decision, decode_register_plan, encode_register_decision,
     encode_register_plan, register_plan_hash,
 };
@@ -381,68 +382,8 @@ async fn node_case(pair: &mut Pair) -> TestResult {
         "the node refuses a plain publish of a headless record: {plain_result:?}"
     );
     let saved = load_publishing(&laptop_root, proof.account())?.ok_or("the saved approval")?;
-    let CustodyProofAction::AgentPublish {
-        publication: pub_box,
-        agent_profile,
-        plan: plan_box,
-        authorization,
-    } = saved.publish_action(&publication)
-    else {
-        return Err("test: the saved approval builds an AgentPublish".into());
-    };
-    let mut bad_hash = (*authorization).clone();
-    bad_hash.body.request_hash = encode_base64url([0x21; 32]);
-    let bad_hash_action = CustodyProofAction::AgentPublish {
-        publication: pub_box.clone(),
-        agent_profile: agent_profile.clone(),
-        plan: plan_box.clone(),
-        authorization: Box::new(bad_hash),
-    };
-    let refused = proof.prove(bad_hash_action).await;
-    assert!(
-        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
-        "{refused:?}"
-    );
-    let (_, agent_credentials) =
-        proof.account().credentials(vault.as_ref(), &plan.agent_device.device_id, now()?)?;
-    let as_agent = ramflux_crypto::custody::sign_register_decision(
-        &agent_credentials.signing,
-        authorization.body.clone(),
-    )?;
-    let non_primary = CustodyProofAction::AgentPublish {
-        publication: pub_box.clone(),
-        agent_profile: agent_profile.clone(),
-        plan: plan_box.clone(),
-        authorization: Box::new(as_agent),
-    };
-    let refused = proof.prove(non_primary).await;
-    assert!(
-        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))),
-        "{refused:?}"
-    );
-    {
-        let _clock = FixedClock::set(i64::try_from(plan.expires_at + 1)?);
-        let expired = proof
-            .prove(CustodyProofAction::AgentPublish {
-                publication: pub_box.clone(),
-                agent_profile: agent_profile.clone(),
-                plan: plan_box.clone(),
-                authorization: authorization.clone(),
-            })
-            .await;
-        assert!(
-            matches!(expired, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
-            "{expired:?}"
-        );
-    }
-    let admitted = proof
-        .prove(CustodyProofAction::AgentPublish {
-            publication: pub_box,
-            agent_profile,
-            plan: plan_box,
-            authorization,
-        })
-        .await?;
+    refuse_tampered(&mut proof, vault.as_ref(), &plan, &saved, &publication).await?;
+    let admitted = proof.prove(saved.publish_action(&publication)).await?;
     let CustodyServerFrame::AgentPublished { receipt } = admitted else {
         return Err("test: the untouched action is admitted with a receipt".into());
     };
@@ -503,5 +444,72 @@ fn remote_confirm_case(pair: &mut Pair) -> TestResult {
         desk_record(pair, &record.request_id)?.state,
         AgentCreationState::AuthorizationPending
     );
+    Ok(())
+}
+
+/// Tampered `AgentPublish` actions, each refused by the real admission with its own code: a bad
+/// plan hash (`InvalidInput`), a decision signed by the agent branch as if it were the primary's
+/// (`BindingRefused`), and a decision whose expiry the node clock has passed (`InvalidInput`).
+async fn refuse_tampered(
+    proof: &mut CustodyConnection,
+    vault: &dyn PrimaryVault,
+    plan: &RegisterPlan,
+    saved: &AgentPublishing,
+    publication: &Publication,
+) -> TestResult {
+    let CustodyProofAction::AgentPublish {
+        publication: pub_box,
+        agent_profile,
+        plan: plan_box,
+        authorization,
+    } = saved.publish_action(publication)
+    else {
+        return Err("test: the saved approval builds an AgentPublish".into());
+    };
+    let mut bad_hash = (*authorization).clone();
+    bad_hash.body.request_hash = encode_base64url([0x21; 32]);
+    let bad_hash_action = CustodyProofAction::AgentPublish {
+        publication: pub_box.clone(),
+        agent_profile: agent_profile.clone(),
+        plan: plan_box.clone(),
+        authorization: Box::new(bad_hash),
+    };
+    let refused = proof.prove(bad_hash_action).await;
+    assert!(
+        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
+        "{refused:?}"
+    );
+    let (_, agent_credentials) =
+        proof.account().credentials(vault, &plan.agent_device.device_id, now()?)?;
+    let as_agent = ramflux_crypto::custody::sign_register_decision(
+        &agent_credentials.signing,
+        authorization.body.clone(),
+    )?;
+    let non_primary = CustodyProofAction::AgentPublish {
+        publication: pub_box.clone(),
+        agent_profile: agent_profile.clone(),
+        plan: plan_box.clone(),
+        authorization: Box::new(as_agent),
+    };
+    let refused = proof.prove(non_primary).await;
+    assert!(
+        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))),
+        "{refused:?}"
+    );
+    {
+        let _clock = FixedClock::set(i64::try_from(plan.expires_at + 1)?);
+        let expired = proof
+            .prove(CustodyProofAction::AgentPublish {
+                publication: pub_box.clone(),
+                agent_profile: agent_profile.clone(),
+                plan: plan_box.clone(),
+                authorization: authorization.clone(),
+            })
+            .await;
+        assert!(
+            matches!(expired, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
+            "{expired:?}"
+        );
+    }
     Ok(())
 }
