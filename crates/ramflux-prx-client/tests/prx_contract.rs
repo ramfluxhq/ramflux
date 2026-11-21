@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 67c5274ef9ee0eefa1521e45bdf9100ef8719fba>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 5d92a43a43a6373b063cd67b26dddbe0662fc2de>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -20,8 +20,10 @@
 
 use ramflux_prx_client::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentStatus,
-    ApiCode, ApplyOutcome, Autonomy, BuildCommit, CAPABILITIES_V1, Capabilities, ClientConfig,
-    ConfigRevision, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, ReloadStatus, Tools,
+    ApiCode, ApplyOutcome, Autonomy, BuildCommit, CAPABILITIES_V1, Capabilities, Chat, ChatKind,
+    ClientConfig, ConfigRevision, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
+    MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind,
+    ReloadStatus, RfMessage, SESSION_KEY_V1, Sender, Target, Tools,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -31,7 +33,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "67c5274ef9ee0eefa1521e45bdf9100ef8719fba";
+const PIN: &str = "5d92a43a43a6373b063cd67b26dddbe0662fc2de";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -82,7 +84,17 @@ impl Daemon {
         Self::prepare_state(extra, false)
     }
 
+    /// Like `prepare`, but the default provider is `provider` (no credential is stored for it).
+    /// Used with a `ModelStub`, so that no request leaves the host.
+    fn prepare_with_provider(provider: &str, extra: &str) -> Self {
+        Self::prepare_config(provider, "stub-model", extra, false)
+    }
+
     fn prepare_state(extra: &str, default_credential: bool) -> Self {
+        Self::prepare_config("openrouter", "openai/gpt-4o-mini", extra, default_credential)
+    }
+
+    fn prepare_config(provider: &str, model: &str, extra: &str, default_credential: bool) -> Self {
         let bin = prx_binary();
         let dir = TempDir::new().expect("test: temp dir");
         std::fs::create_dir_all(dir.path().join("cfg")).expect("test: config dir");
@@ -93,7 +105,7 @@ impl Daemon {
             listener.local_addr().expect("test: local addr").port()
         };
         let config = format!(
-            "default_provider = \"openrouter\"\ndefault_model = \"openai/gpt-4o-mini\"\n\n[gateway]\nhost = \"127.0.0.1\"\nport = {port}\nrequire_pairing = true\n{extra}"
+            "default_provider = \"{provider}\"\ndefault_model = \"{model}\"\n\n[gateway]\nhost = \"127.0.0.1\"\nport = {port}\nrequire_pairing = true\n{extra}"
         );
         std::fs::write(dir.path().join("cfg/config.toml"), config).expect("test: write config");
         let http = reqwest::Client::builder()
@@ -402,7 +414,17 @@ async fn k_ac2_capabilities_and_catalog() {
             caps.has(CAPABILITIES_V1) && caps.has(AGENT_CATALOG_V1),
             "K-AC2-1: documented tokens advertised"
         );
-        let known = [CAPABILITIES_V1, AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1];
+        // Landed at the pin: the AC-2 cards plus the B1 and HOST-1a tokens (see K-B1-16).
+        let known = [
+            CAPABILITIES_V1,
+            AGENT_CATALOG_V1,
+            AGENT_CRUD_V1,
+            AGENT_MAIN_READBACK_V1,
+            SESSION_KEY_V1,
+            MESSAGE_TARGET_V1,
+            MESSAGE_CONTEXT_DELIVERY_V1,
+            OWNER_ID_STABLE_V1,
+        ];
         assert!(
             caps.capabilities.iter().all(|t| known.contains(&t.as_str())),
             "K-AC2-1: no token beyond the landed cards: {:?}",
@@ -549,7 +571,7 @@ async fn k_ac2_6_stored_credential_for_non_default_provider() {
     .await;
 }
 
-/// K-AC2-7 to K-AC2-11 (repin rows, PRX main 67c5274ef): a daemon with NO provider credential,
+/// K-AC2-7 to K-AC2-11 (repin rows, PRX main 67c5274ef, kept at 5d92a43a4): a daemon with NO provider credential,
 /// then the credential PUT without a reload, then the reload. Also: /health while not ready,
 /// and the two tool names the catalog no longer lists.
 #[tokio::test]
@@ -1061,6 +1083,538 @@ async fn apply_helper_against_real_concurrent_changes() {
             "apply: intended config already stored, got {outcome:?}"
         );
         report("P8-already-applied");
+        daemon.stop();
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// rf message routes (B1: session_key_v1, message_target_v1, message_context_delivery_v1) and the
+// install owner id (HOST-1a: owner_id_stable_v1). Rows K-B1-n and K-HOST1a-n.
+// ---------------------------------------------------------------------------------------------
+
+/// A caller-keyed session of the owner (`session_key` grammar: 8 to 128 characters).
+const RF_SESSION: &str = "rf-contract-session-0001";
+/// Extra paired tokens, written to `gateway.paired_tokens` (PRX hashes plaintext on load). They
+/// stand for a second and a third paired device of the same install.
+const SECOND_TOKEN: &str = "zc_rf-contract-second-device-0001";
+const THIRD_TOKEN: &str = "zc_rf-contract-third-device-0002";
+/// Cap of an rf message body in the gateway (`MAX_BODY_SIZE`, bytes of the whole request).
+const GATEWAY_BODY_CAP: usize = 65_536;
+
+fn rf_chat() -> Chat {
+    Chat { id: "chat-contract-1".to_owned(), kind: ChatKind::Dm, title: None, member_count: 2 }
+}
+
+fn rf_sender() -> Sender {
+    Sender {
+        principal_id: "principal-contract-1".to_owned(),
+        display: "Contract Sender".to_owned(),
+    }
+}
+
+fn rf_message(client_message_id: &str, target: Target, text: &str) -> RfMessage {
+    RfMessage {
+        client_message_id: client_message_id.to_owned(),
+        target,
+        message: text.to_owned(),
+        chat: rf_chat(),
+        sender: rf_sender(),
+        mentions: Vec::new(),
+        reply_to: None,
+    }
+}
+
+/// The rf fields a body must carry besides `client_message_id` (raw bodies for negative rows).
+fn rf_body(deliver: &str, client_message_id: Option<&str>) -> Value {
+    let mut body = serde_json::json!({
+        "deliver": deliver,
+        "message": "raw contract body",
+        "chat": { "id": "chat-contract-1", "kind": "dm", "member_count": 2 },
+        "sender": { "principal_id": "principal-contract-1", "display": "Contract Sender" },
+    });
+    if let Some(id) = client_message_id {
+        body["client_message_id"] = Value::String(id.to_owned());
+    }
+    body
+}
+
+/// `GET /api/sessions` (a bare array of session summaries) with the daemon's bearer.
+async fn sessions_list(daemon: &Daemon) -> Vec<Value> {
+    let (status, text) =
+        daemon.raw_authorized(reqwest::Method::GET, "/api/sessions", None, None).await;
+    assert_eq!(status, 200, "sessions list must be 200: {text}");
+    serde_json::from_str(&text).expect("test: sessions list is JSON")
+}
+
+/// Starts a daemon with a stub model on the default provider and pairs it.
+async fn paired_rf_daemon(extra: &str) -> (Daemon, ModelStub) {
+    let stub = ModelStub::start(Duration::ZERO).await;
+    let mut daemon = Daemon::prepare_with_provider(&stub.provider(), extra);
+    daemon.start();
+    daemon.wait_ready().await;
+    daemon.pair().await;
+    (daemon, stub)
+}
+
+/// A `ModelStub`: a loopback OpenAI-compatible endpoint that counts the model requests it
+/// receives and answers `500` after `hold` (zero: at once). It is the only model endpoint the
+/// rf rows use, so a count that does not move proves that no model request was made, and a
+/// long `hold` keeps a turn live for the rows that need one.
+struct ModelStub {
+    port: u16,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ModelStub {
+    async fn start(hold: Duration) -> Self {
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("test: bind model stub");
+        let port = listener.local_addr().expect("test: stub addr").port();
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = requests.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0_u8; 16_384];
+                    if matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    tokio::time::sleep(hold).await;
+                    let body = r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        Self { port, requests, task }
+    }
+
+    /// The `custom:` provider spelling that points the daemon at this stub.
+    fn provider(&self) -> String {
+        format!("custom:http://127.0.0.1:{}/v1", self.port)
+    }
+
+    fn count(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for ModelStub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b1_sessions_and_message_validation() {
+    bounded(async {
+        let (mut daemon, _stub) = paired_rf_daemon("").await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+
+        // K-B1-16: exactly the tokens landed at this pin, none of the not-yet-landed ones.
+        let expected: std::collections::BTreeSet<String> = [
+            "agent_catalog_v1",
+            "agent_crud_v1",
+            "agent_main_readback_v1",
+            "capabilities_v1",
+            "message_context_delivery_v1",
+            "message_target_v1",
+            "owner_id_stable_v1",
+            "session_key_v1",
+        ]
+        .iter()
+        .map(|t| (*t).to_owned())
+        .collect();
+        assert_eq!(caps.capabilities, expected, "K-B1-16: advertised tokens at the pin");
+        for token in ["message_idempotency_v1", "message_delete_v1", "targeted_agents_v1"] {
+            assert!(!caps.has(token), "K-B1-16: {token} must not be advertised yet");
+        }
+        assert_eq!(caps.commit, BuildCommit::Sha(PIN.to_owned()), "K-B1-16: commit is the pin");
+        report("K-B1-16");
+
+        // K-B1-1 / K-B1-2: create 201 created:true, then the same key 200 created:false
+        let first = client.create_session(&caps, RF_SESSION).await.expect("K-B1-1: create");
+        assert!(first.created && first.session_id == RF_SESSION, "K-B1-1: {first:?}");
+        let again = client.create_session(&caps, RF_SESSION).await.expect("K-B1-2: create again");
+        assert!(!again.created && again.session_id == RF_SESSION, "K-B1-2: {again:?}");
+        report("K-B1-1");
+        report("K-B1-2");
+
+        // K-B1-3: a bad key is refused by PRX (field_invalid); a console- prefix too
+        for bad in ["bad key with space", "console-abcdef12"] {
+            match client.create_session(&caps, bad).await {
+                Err(PrxError::Api { status: 400, code: ApiCode::FieldInvalid, .. }) => {}
+                other => panic!("K-B1-3: bad key {bad:?} must be 400 field_invalid, got {other:?}"),
+            }
+        }
+        report("K-B1-3");
+
+        // K-B1-4: the session lists with channel rf
+        let listed = sessions_list(&daemon).await;
+        let row = listed
+            .iter()
+            .find(|row| row.get("session_id").and_then(Value::as_str) == Some(RF_SESSION))
+            .expect("K-B1-4: the session is listed");
+        assert_eq!(row.get("channel").and_then(Value::as_str), Some("rf"), "K-B1-4: channel rf");
+        report("K-B1-4");
+
+        // K-B1-5: an rf session refuses a plain Console body
+        let path = format!("/api/sessions/{RF_SESSION}/message");
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &path,
+                None,
+                Some(serde_json::json!({"message":"plain"})),
+            )
+            .await;
+        assert_eq!(
+            (status, error_code(&text).as_deref()),
+            (400, Some("field_invalid")),
+            "K-B1-5: {text}"
+        );
+        report("K-B1-5");
+
+        // K-B1-6: any rf field without client_message_id is refused
+        let (status, text) = daemon
+            .raw_authorized(reqwest::Method::POST, &path, None, Some(rf_body("context", None)))
+            .await;
+        assert_eq!(
+            (status, error_code(&text).as_deref()),
+            (400, Some("field_invalid")),
+            "K-B1-6: {text}"
+        );
+        report("K-B1-6");
+
+        // K-B1-7: bounds, through the typed client (its types allow every value).
+        let too_long = "x".repeat(257);
+        let mut title = rf_message("rf-bound-title", Target::Main, "bounds");
+        title.chat.title = Some(too_long.clone());
+        let mut display = rf_message("rf-bound-display", Target::Main, "bounds");
+        display.sender.display = too_long.clone();
+        let mut mentions = rf_message("rf-bound-mentions", Target::Main, "bounds");
+        mentions.mentions = (0..65).map(|i| format!("principal-{i}")).collect();
+        let size = rf_message("rf-bound-size", Target::Main, &"y".repeat(GATEWAY_BODY_CAP + 1));
+        for (row, message) in [("title", &title), ("display", &display), ("mentions", &mentions)] {
+            match client.post_context(&caps, RF_SESSION, message).await {
+                Err(PrxError::Api { status: 400, code: ApiCode::FieldInvalid, .. }) => {}
+                other => panic!("K-B1-7 {row}: must be 400 field_invalid, got {other:?}"),
+            }
+        }
+        // The size bound: real behaviour recorded verbatim by the caller (see report).
+        let size_answer = client.post_context(&caps, RF_SESSION, &size).await;
+        eprintln!(
+            "ROW K-B1-7 size: body {} bytes, typed answer {size_answer:?}",
+            GATEWAY_BODY_CAP + 1
+        );
+        // Positive control: a title of exactly 256 characters is accepted (recorded as context).
+        let mut edge = rf_message("rf-bound-edge", Target::Main, "bounds ok");
+        edge.chat.title = Some("t".repeat(256));
+        client
+            .post_context(&caps, RF_SESSION, &edge)
+            .await
+            .expect("K-B1-7: 256-character title is accepted");
+        report("K-B1-7");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_host1a_owner_id_is_stable_across_paired_tokens() {
+    bounded(async {
+        let extra = format!("paired_tokens = [\"{SECOND_TOKEN}\", \"{THIRD_TOKEN}\"]\n");
+        let stub = ModelStub::start(Duration::ZERO).await;
+        let mut daemon = Daemon::prepare_with_provider(&stub.provider(), &extra);
+        daemon.start();
+        daemon.wait_ready().await;
+        // Two paired tokens (the first was written to the config, not paired by POST /pair).
+        write_token_file(&daemon.dir.path().join("second-token"), SECOND_TOKEN);
+        write_token_file(&daemon.dir.path().join("third-token"), THIRD_TOKEN);
+        let second = PrxClient::new(&ClientConfig::new(
+            daemon.base(),
+            daemon.dir.path().join("second-token"),
+        ))
+        .expect("test: second client");
+        let caps = capabilities(&second).await;
+
+        // K-HOST1a-1: the same owner id for both paired tokens, in the documented form.
+        let third = PrxClient::new(&ClientConfig::new(
+            daemon.base(),
+            daemon.dir.path().join("third-token"),
+        ))
+        .expect("test: third client");
+        let a = second.owner_id(&caps).await.expect("K-HOST1a-1: owner for the second token");
+        let b = third.owner_id(&caps).await.expect("K-HOST1a-1: owner for the third token");
+        assert_eq!(a, b, "K-HOST1a-1: one install owner for every paired token");
+        assert!(
+            a.as_str().starts_with("api:install:") && a.as_str().len() == 44,
+            "K-HOST1a-1: {a:?}"
+        );
+        report("K-HOST1a-1");
+
+        // K-HOST1a-2: no paired bearer, and a bearer that is not paired, are both 401 auth_failed
+        let (status, text) = daemon.raw(reqwest::Method::GET, "/api/owner", &[], None).await;
+        assert_eq!(
+            (status, error_code(&text).as_deref()),
+            (401, Some("auth_failed")),
+            "K-HOST1a-2: {text}"
+        );
+        let (status, text) = daemon
+            .raw(
+                reqwest::Method::GET,
+                "/api/owner",
+                &[("Authorization", "Bearer zc_not_paired_token".to_owned())],
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, error_code(&text).as_deref()),
+            (401, Some("auth_failed")),
+            "K-HOST1a-2: {text}"
+        );
+        report("K-HOST1a-2");
+        daemon.stop();
+    })
+    .await;
+}
+
+fn write_token_file(path: &Path, token: &str) {
+    std::fs::write(path, token).expect("test: write token file");
+    set_owner_only(path);
+}
+
+/// Polls `GET /api/jobs/{job_id}` until the job ends (spaced polls; the API has a shared limit).
+async fn wait_job_terminal(client: &PrxClient, caps: &Capabilities, job_id: &str) -> JobStatus {
+    let started = Instant::now();
+    loop {
+        let job = client.job_status(caps, job_id).await.expect("test: job status reads");
+        if job.status.is_terminal() {
+            return job;
+        }
+        assert!(started.elapsed() < WAIT_DEADLINE, "test: job {job_id} did not end in time");
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Creates or replaces a named agent through the typed client.
+async fn put_agent(
+    client: &PrxClient,
+    caps: &Capabilities,
+    name: &str,
+    provider: &str,
+    enabled: bool,
+) {
+    let name = AgentName::parse(name).expect("test: agent name");
+    let rev = list_revision(client, caps).await;
+    let cfg = config(provider, "stub-model", None, Tools::All, enabled);
+    // A `custom:` endpoint names a new credential recipient: PRX answers 428 until the change is
+    // confirmed (recorded as a finding of this card). The helper confirms it.
+    client.put(caps, &name, &cfg, &rev, true).await.expect("test: agent put");
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b1_turn_context_and_agent_checks_with_targeting_off() {
+    bounded(async {
+        let fast = ModelStub::start(Duration::ZERO).await;
+        let hold = ModelStub::start(Duration::from_secs(600)).await;
+        let mut daemon = Daemon::prepare_with_provider(&fast.provider(), "");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "worker", &hold.provider(), true).await;
+        put_agent(&client, &caps, "other", &fast.provider(), true).await;
+        put_agent(&client, &caps, "off1", &fast.provider(), false).await;
+
+        // K-B1-11 (targeting off): an unknown agent is 404 agent_unknown; existence comes first.
+        match client
+            .post_turn(
+                &caps,
+                RF_SESSION,
+                &rf_message(
+                    "rf-ghost-1",
+                    Target::Named(AgentName::parse("ghost").expect("test: name")),
+                    "hi",
+                ),
+            )
+            .await
+        {
+            Err(PrxError::Api { status: 404, code: ApiCode::AgentUnknown, .. }) => {}
+            other => panic!("K-B1-11: unknown agent must be 404 agent_unknown, got {other:?}"),
+        }
+        report("K-B1-11 (targeting off)");
+
+        // K-B1-12: an existing agent with targeting off is 409 agent_targeting_disabled, whatever its state.
+        for name in ["worker", "off1"] {
+            let target = Target::Named(AgentName::parse(name).expect("test: name"));
+            match client
+                .post_turn(&caps, RF_SESSION, &rf_message("rf-targeted-off-1", target, "hi"))
+                .await
+            {
+                Err(PrxError::Api {
+                    status: 409, code: ApiCode::AgentTargetingDisabled, ..
+                }) => {}
+                other => {
+                    panic!("K-B1-12 {name}: must be 409 agent_targeting_disabled, got {other:?}")
+                }
+            }
+        }
+        report("K-B1-12");
+
+        // K-B1-14: Main still runs with targeting off (agent omitted, and "main" is the same key).
+        let main = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-main-1", Target::Main, "hello main"))
+            .await
+            .expect("K-B1-14: Main turn is admitted with targeting off");
+        report("K-B1-14");
+
+        // K-B1-8: the admitted turn carries exactly run_id and job_id (typed decode is strict).
+        assert!(!main.run_id.is_empty() && !main.job_id.is_empty(), "K-B1-8: {main:?}");
+        report("K-B1-8");
+
+        // K-B1-15: the job reaches a terminal state, carries the run id, and fails with the stub.
+        let job = wait_job_terminal(&client, &caps, &main.job_id).await;
+        assert_eq!(job.job_id, main.job_id, "K-B1-15: job id echoes");
+        assert_eq!(job.run_id.as_deref(), Some(main.run_id.as_str()), "K-B1-15: top-level run_id");
+        assert_eq!(job.status, JobState::Failed, "K-B1-15: the stub answers 500, so the run fails");
+        report("K-B1-15");
+
+        // K-B1-9: a context input starts no run and makes no model request. The Main run above has
+        // ended; the stub count and the job total must not move across the context post.
+        let jobs_before = daemon_job_total(&daemon).await;
+        let model_before = fast.count();
+        let recorded = client
+            .post_context(
+                &caps,
+                RF_SESSION,
+                &rf_message("rf-context-1", Target::Main, "context only"),
+            )
+            .await
+            .expect("K-B1-9: context is recorded");
+        assert!(!recorded.message_id.is_empty(), "K-B1-9: a message id");
+        tokio::time::sleep(POLL_INTERVAL).await;
+        assert_eq!(fast.count(), model_before, "K-B1-9: no model request for a context");
+        assert_eq!(daemon_job_total(&daemon).await, jobs_before, "K-B1-9: no job for a context");
+        report("K-B1-9");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// The job total of `GET /api/jobs` (bearer required).
+async fn daemon_job_total(daemon: &Daemon) -> u64 {
+    let (status, text) = daemon.raw_authorized(reqwest::Method::GET, "/api/jobs", None, None).await;
+    assert_eq!(status, 200, "job list must be 200: {text}");
+    let value: Value = serde_json::from_str(&text).expect("test: job list is JSON");
+    value.get("total").and_then(Value::as_u64).expect("test: job list carries total")
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b1_busy_and_agent_states_with_targeting_on() {
+    bounded(async {
+        let fast = ModelStub::start(Duration::ZERO).await;
+        let hold = ModelStub::start(Duration::from_secs(600)).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&fast.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        let switch = client.targeted_agents(&caps).await.expect("test: targeted read");
+        assert!(switch.effective, "test: targeted agents are effective after the restart");
+        let session = "rf-contract-session-0002";
+        client.create_session(&caps, session).await.expect("test: session");
+        put_agent(&client, &caps, "worker", &hold.provider(), true).await;
+        put_agent(&client, &caps, "other", &fast.provider(), true).await;
+        put_agent(&client, &caps, "off1", &fast.provider(), false).await;
+        put_agent(&client, &caps, "gone", &fast.provider(), true).await;
+        let gone = AgentName::parse("gone").expect("test: name");
+        let rev = list_revision(&client, &caps).await;
+        let retired = client.retire(&caps, &gone, &rev).await.expect("test: retire");
+        assert_eq!(retired.name, gone, "test: retired name");
+
+        // K-B1-10: one turn per (session, agent) at a time; context still accepted; another agent admitted
+        let worker = Target::Named(AgentName::parse("worker").expect("test: name"));
+        let live = client
+            .post_turn(&caps, session, &rf_message("rf-busy-1", worker.clone(), "long turn"))
+            .await
+            .expect("K-B1-10: first turn admitted");
+        match client
+            .post_turn(&caps, session, &rf_message("rf-busy-2", worker.clone(), "again"))
+            .await
+        {
+            Err(PrxError::Api { status: 409, code: ApiCode::SessionBusy, .. }) => {}
+            other => {
+                panic!("K-B1-10: second turn while live must be 409 session_busy, got {other:?}")
+            }
+        }
+        client
+            .post_context(
+                &caps,
+                session,
+                &rf_message("rf-busy-3", worker.clone(), "context while busy"),
+            )
+            .await
+            .expect("K-B1-10: context is accepted while a turn is live");
+        let other = Target::Named(AgentName::parse("other").expect("test: name"));
+        let admitted = client
+            .post_turn(&caps, session, &rf_message("rf-busy-4", other, "other agent"))
+            .await
+            .expect("K-B1-10: a turn to another agent is admitted");
+        assert!(
+            !admitted.run_id.is_empty() && admitted.run_id != live.run_id,
+            "K-B1-10: a new run"
+        );
+        report("K-B1-10");
+
+        // K-B1-11 (targeting on): unknown agent is still 404 agent_unknown
+        match client
+            .post_turn(
+                &caps,
+                session,
+                &rf_message(
+                    "rf-ghost-2",
+                    Target::Named(AgentName::parse("ghost").expect("test: name")),
+                    "hi",
+                ),
+            )
+            .await
+        {
+            Err(PrxError::Api { status: 404, code: ApiCode::AgentUnknown, .. }) => {}
+            other => panic!("K-B1-11 on: must be 404 agent_unknown, got {other:?}"),
+        }
+        report("K-B1-11 (targeting on)");
+
+        // K-B1-13: a disabled agent and a retired agent are both 409 agent_disabled
+        for name in ["off1", "gone"] {
+            let target = Target::Named(AgentName::parse(name).expect("test: name"));
+            match client.post_turn(&caps, session, &rf_message("rf-disabled-1", target, "hi")).await
+            {
+                Err(PrxError::Api { status: 409, code: ApiCode::AgentDisabled, .. }) => {}
+                other => panic!("K-B1-13 {name}: must be 409 agent_disabled, got {other:?}"),
+            }
+        }
+        report("K-B1-13");
         daemon.stop();
     })
     .await;
