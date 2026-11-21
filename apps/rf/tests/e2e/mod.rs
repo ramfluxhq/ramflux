@@ -4,9 +4,9 @@
 //! Shared boot for CLI e2e: mesh certs, four node processes, rf daemons, PTY create.
 #![allow(dead_code)]
 
-mod ceremony_screen;
 #[cfg(unix)]
 pub mod agent_flow;
+mod ceremony_screen;
 #[cfg(unix)]
 mod pairing_stack;
 // Shared by several test targets that each use a different part.

@@ -111,7 +111,9 @@ fn server_config(cert: &Path, key: &Path) -> Result<Arc<rustls::ServerConfig>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = rustls_pemfile::certs(&mut cert_pem).collect::<std::result::Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut key_pem)?.ok_or("the federation key is missing")?;
-    Ok(Arc::new(rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?))
+    Ok(Arc::new(
+        rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?,
+    ))
 }
 
 fn serve(
@@ -244,10 +246,7 @@ pub fn start_pairing_daemon(stack: &PairingStack, name: &str) -> Result<Daemon> 
     spawn_daemon_with_env(
         socket,
         data_root,
-        &[
-            ("RAMFLUX_ITEST_PAIRING_CA_FILE", ca.as_str()),
-            ("RUST_LOG", "info,ramflux_sdk=debug"),
-        ],
+        &[("RAMFLUX_ITEST_PAIRING_CA_FILE", ca.as_str()), ("RUST_LOG", "info,ramflux_sdk=debug")],
     )
 }
 
@@ -284,11 +283,9 @@ pub fn pair_devices(
 ) -> Result<Pair> {
     match pair_inner(stack, &primary, account, desktop_name) {
         Ok((desktop, joined)) => Ok(Pair { primary, desktop, account: joined }),
-        Err(error) => Err(format!(
-            "{error}; logs={}",
-            super::dump_logs(&stack.stack, &[&primary])
-        )
-        .into()),
+        Err(error) => {
+            Err(format!("{error}; logs={}", super::dump_logs(&stack.stack, &[&primary])).into())
+        }
     }
 }
 
@@ -303,39 +300,31 @@ fn pair_inner(
     match pair_steps(stack, primary, &desktop, account, desktop_name) {
         Ok(joined) => Ok((desktop, joined)),
         Err(error) => {
-            Err(format!("{error}; desktop log={}", super::dump_logs(&stack.stack, &[&desktop])).into())
+            Err(format!("{error}; desktop log={}", super::dump_logs(&stack.stack, &[&desktop]))
+                .into())
         }
     }
 }
 
-fn pair_steps(
-    stack: &PairingStack,
-    primary: &Daemon,
-    desktop: &Daemon,
-    account: &Account,
-    desktop_name: &str,
-) -> Result<Account> {
-    let _ = stack;
-    let dir = stack.stack.root.join(format!("pair-{desktop_name}"));
-    std::fs::create_dir_all(&dir)?;
-    let invitation = dir.join("invitation.json");
-    let id = account.id.as_str();
+/// `rf pairing begin` on the primary, once its layer declaration is fresh; a refused proof is
+/// retried a bounded number of times (see `wait_layer_declaration_fresh`).
+fn begin_invitation(primary: &Daemon, id: &str, invitation: &Path) -> Result<Value> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let (now_text, until_text) = (now.to_string(), (now + 3600).to_string());
     wait_layer_declaration_fresh(primary, id)?;
     let begin_args = [
-            "pairing",
-            "--account",
-            id,
-            "begin",
-            "--display-name",
-            "agent-e2e-pairing",
-            "--lease-not-before",
-            &now_text,
-            "--lease-expires-at",
-            &until_text,
-            "--invitation-out",
-            invitation.to_str().ok_or("invitation path")?,
+        "pairing",
+        "--account",
+        id,
+        "begin",
+        "--display-name",
+        "agent-e2e-pairing",
+        "--lease-not-before",
+        &now_text,
+        "--lease-expires-at",
+        &until_text,
+        "--invitation-out",
+        invitation.to_str().ok_or("invitation path")?,
     ];
     // A brand-new account's directory head can still be changing when the first proof is made; the
     // node then refuses that one proof (BindingRefused) and a fresh attempt passes. Bound the retries.
@@ -350,6 +339,70 @@ fn pair_steps(
             Err(error) => return Err(format!("pairing begin on the primary: {error}").into()),
         }
     };
+    Ok(begun)
+}
+
+/// `rf pairing approve` on the primary. The proposal can be reported a moment before the
+/// coordinator accepts the approval; a refusal before it is ready is a plain `NotFound`, so that one
+/// case is retried a bounded number of times.
+fn approve_when_ready(primary: &Daemon, approve_args: &[&str]) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        match rf_json_timeout(&primary.socket, approve_args, PAIR_CALL) {
+            Ok(_) => return Ok(()),
+            Err(error) if tries < 8 && error.to_string().contains("ValidationFailed") => {
+                tries += 1;
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(error) => return Err(format!("pairing approve: {error}").into()),
+        }
+    }
+}
+
+/// `rf pairing confirm` of one side, with the other side's code file as the attended peer proof.
+fn confirm_pairing(
+    daemon: &Daemon,
+    id: &str,
+    (op, generation, transcript): (&str, &str, &str),
+    peer: &Path,
+) -> Result<()> {
+    rf_json_timeout(
+        &daemon.socket,
+        &[
+            "pairing",
+            "--account",
+            id,
+            "confirm",
+            "--operation-id",
+            op,
+            "--generation",
+            generation,
+            "--transcript-hash",
+            transcript,
+            "--matches",
+            "true",
+            "--peer-sas-file",
+            peer.to_str().ok_or("peer path")?,
+            "--peer-sas-attended",
+        ],
+        PAIR_CALL,
+    )
+    .map_err(|error| format!("pairing confirm: {error}"))?;
+    Ok(())
+}
+
+fn pair_steps(
+    stack: &PairingStack,
+    primary: &Daemon,
+    desktop: &Daemon,
+    account: &Account,
+    desktop_name: &str,
+) -> Result<Account> {
+    let dir = stack.stack.root.join(format!("pair-{desktop_name}"));
+    std::fs::create_dir_all(&dir)?;
+    let invitation = dir.join("invitation.json");
+    let id = account.id.as_str();
+    let begun = begin_invitation(primary, id, &invitation)?;
     let op_primary = text(nested(&begun), "/operation_id")?;
     let generation_primary = nested(&begun)
         .pointer("/generation")
@@ -384,62 +437,32 @@ fn pair_steps(
         (primary, &op_primary, &generation_primary, &transcript_primary, &peer_for_primary),
         (desktop, &op_desktop, &generation_desktop, &transcript_desktop, &peer_for_desktop),
     ] {
-        rf_json_timeout(
-            &daemon.socket,
-            &[
-                "pairing",
-                "--account",
-                id,
-                "confirm",
-                "--operation-id",
-                op,
-                "--generation",
-                generation,
-                "--transcript-hash",
-                transcript,
-                "--matches",
-                "true",
-                "--peer-sas-file",
-                peer.to_str().ok_or("peer path")?,
-                "--peer-sas-attended",
-            ],
-            PAIR_CALL,
-        )
-        .map_err(|error| format!("pairing confirm: {error}"))?;
+        confirm_pairing(daemon, id, (op, generation, transcript), peer)?;
     }
     let proposal = poll_status(primary, id, &op_primary, &generation_primary, |value| {
-        nested(value).get("proposal_hash").and_then(Value::as_str).is_some_and(|hash| !hash.is_empty())
+        nested(value)
+            .get("proposal_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| !hash.is_empty())
     })?;
     let proposal_hash = text(nested(&proposal), "/proposal_hash")?;
     let approve_args = [
-            "pairing",
-            "--account",
-            id,
-            "approve",
-            "--operation-id",
-            &op_primary,
-            "--generation",
-            &generation_primary,
-            "--transcript-hash",
-            &transcript_primary,
-            "--proposal-hash",
-            &proposal_hash,
-            "--approved",
-            "true",
+        "pairing",
+        "--account",
+        id,
+        "approve",
+        "--operation-id",
+        &op_primary,
+        "--generation",
+        &generation_primary,
+        "--transcript-hash",
+        &transcript_primary,
+        "--proposal-hash",
+        &proposal_hash,
+        "--approved",
+        "true",
     ];
-    // The proposal can be reported a moment before the coordinator accepts the approval; a refusal
-    // before it is ready is a plain NotFound, so retry that one case a bounded number of times.
-    let mut tries = 0;
-    loop {
-        match rf_json_timeout(&primary.socket, &approve_args, PAIR_CALL) {
-            Ok(_) => break,
-            Err(error) if tries < 8 && error.to_string().contains("ValidationFailed") => {
-                tries += 1;
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            Err(error) => return Err(format!("pairing approve: {error}").into()),
-        }
-    }
+    approve_when_ready(primary, &approve_args)?;
     for (daemon, op, generation) in
         [(primary, &op_primary, &generation_primary), (desktop, &op_desktop, &generation_desktop)]
     {
@@ -563,7 +586,11 @@ fn pty_pairing_join(socket: &Path, id: &str, invitation: &Path, sas_out: &Path) 
     } else {
         command.arg("-q").arg("/dev/null").args(inner);
     }
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).env("TERM", "xterm");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TERM", "xterm");
     let mut session = PtySession::spawn(&mut command)?;
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut cursor = session.wait_until("New local data passphrase (hidden):", 0, deadline)?;

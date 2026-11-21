@@ -36,7 +36,10 @@ fn create_sends_the_persona_and_access_and_confirmation_only_when_confirmed()
     assert_eq!(body["persona"]["name"], "Helper");
     assert_eq!(body["access"]["dm"], "contacts", "the access policy is passed through");
     assert_eq!(body["access"]["allowed_humans"][0], "bob");
-    assert_eq!(body["config"]["provider"], "provider-a", "the creation request carries the provider");
+    assert_eq!(
+        body["config"]["provider"], "provider-a",
+        "the creation request carries the provider"
+    );
     assert_eq!(body["config"]["model"], "model-a", "and the model: the SDK refuses without them");
     assert_eq!(body["role"], "named", "the default role");
     assert!(body.get("confirmed").is_none(), "no confirmation without --confirm");
@@ -142,7 +145,15 @@ fn no_body_carries_a_secret_field() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn create_without_a_provider_or_model_does_not_parse() {
     let refused = Cli::try_parse_from([
-        "rf", "agent", "--account", "alice", "create", "--name", "n", "--responsibility", "r",
+        "rf",
+        "agent",
+        "--account",
+        "alice",
+        "create",
+        "--name",
+        "n",
+        "--responsibility",
+        "r",
         "--confirm",
     ]);
     assert_eq!(
@@ -164,10 +175,12 @@ fn pending_asks_for_the_next_request_with_an_empty_operation_id()
 #[test]
 fn the_review_names_what_the_owner_decides_and_the_hash_decide_repeats()
 -> Result<(), Box<dyn std::error::Error>> {
-    use ramflux_protocol::custody::{decode_register_plan, encode_register_plan, register_plan_hash};
+    use base64::Engine as _;
+    use ramflux_protocol::custody::{
+        decode_register_plan, encode_register_plan, register_plan_hash,
+    };
     let plan = sample_plan();
     let bytes = encode_register_plan(&plan)?;
-    use base64::Engine as _;
     let standard = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let review = super::review_of(&serde_json::json!({ "requestJson": standard }))
         .ok_or("the review is built from the plan")?;

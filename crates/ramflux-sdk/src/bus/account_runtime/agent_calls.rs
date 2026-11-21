@@ -16,7 +16,13 @@ impl AccountRuntime {
     /// Carries the agent records this device wrote to the owner's other devices. The record
     /// directory exists only after an agent was created; an account without one is left alone.
     pub(super) fn maintain_agent_record_broadcast(&self) {
-        let dir = self.state.config.data_root.join("custody_accounts").join(&self.id).join("agent_record");
+        let dir = self
+            .state
+            .config
+            .data_root
+            .join("custody_accounts")
+            .join(&self.id)
+            .join("agent_record");
         if !dir.is_dir() {
             return;
         }

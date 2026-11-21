@@ -41,11 +41,16 @@ fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
     let scratch = tempfile::TempDir::new()?;
 
     let agent = create_owned_agent(&pair, "Surface agent")?;
-    exchange_contacts(bob_desktop, &agent, bob_desktop, &bob)?;
+    // The agent runs on the desktop; Bob (and his contact card) is on the primary phone.
+    // KNOWN GAP (AGENT-CLI-E2E-01 report, finding F3): `rf contact card` of an agent account on the
+    // desktop is refused with `PrimaryRequired` (`group_primary`: the agent's primary is not the
+    // desktop device), so this step fails until the agent contact flow is designed.
+    exchange_contacts(bob_desktop, &agent, bob_d, &bob)?;
+    settle_contact_requests(bob_desktop, &agent, bob_d, &bob)?;
     let agent_conversation = dm_conversation(&agent, &bob)?;
     surface_round_trip(&Round {
         alice_d: bob_desktop,
-        bob_d: bob_desktop,
+        bob_d,
         alice: &agent,
         bob: &bob,
         conversation: &agent_conversation,

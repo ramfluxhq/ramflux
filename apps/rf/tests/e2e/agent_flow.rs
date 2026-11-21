@@ -45,7 +45,12 @@ fn field(value: &Value, key: &str) -> Result<String> {
 /// `rf agent create` on the desktop. Returns the operation id.
 /// # Errors
 /// Returns the command failure, which carries the typed refusal.
-pub fn create(desktop: &Daemon, owner: &Account, name: &str, responsibility: &str) -> Result<String> {
+pub fn create(
+    desktop: &Daemon,
+    owner: &Account,
+    name: &str,
+    responsibility: &str,
+) -> Result<String> {
     let reply = rf_json_timeout(
         &desktop.socket,
         &[
@@ -133,7 +138,12 @@ pub fn confirm_presence(primary: &Daemon, owner: &Account, request_hash: &str) -
 /// `rf agent decide` on the primary.
 /// # Errors
 /// Returns the command failure.
-pub fn decide(primary: &Daemon, owner: &Account, pending: &Pending, approved: bool) -> Result<Value> {
+pub fn decide(
+    primary: &Daemon,
+    owner: &Account,
+    pending: &Pending,
+    approved: bool,
+) -> Result<Value> {
     let reply = rf_json_timeout(
         &primary.socket,
         &[
@@ -157,7 +167,12 @@ pub fn decide(primary: &Daemon, owner: &Account, pending: &Pending, approved: bo
 /// is advanced by the status read itself (the daemon commits and publishes on the way).
 /// # Errors
 /// Returns the last status when the state is not reached.
-pub fn wait_state(desktop: &Daemon, owner: &Account, operation: &str, state: &str) -> Result<Value> {
+pub fn wait_state(
+    desktop: &Daemon,
+    owner: &Account,
+    operation: &str,
+    state: &str,
+) -> Result<Value> {
     let deadline = Instant::now() + WAIT;
     let mut last = Value::Null;
     while Instant::now() < deadline {
@@ -176,8 +191,7 @@ pub fn wait_state(desktop: &Daemon, owner: &Account, operation: &str, state: &st
 /// # Errors
 /// Returns the command failure.
 pub fn list(daemon: &Daemon, owner: &Account) -> Result<Vec<Value>> {
-    let reply =
-        rf_json_timeout(&daemon.socket, &["agent", "--account", &owner.id, "list"], CALL)?;
+    let reply = rf_json_timeout(&daemon.socket, &["agent", "--account", &owner.id, "list"], CALL)?;
     Ok(result(&reply, "page")?
         .get("records")
         .and_then(Value::as_array)

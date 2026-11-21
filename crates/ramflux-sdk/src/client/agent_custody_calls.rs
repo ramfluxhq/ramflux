@@ -369,7 +369,9 @@ fn next_decision(records: &[AgentCreationRecord], now: u64) -> Option<&AgentCrea
                 && record.expires_at > now
         })
         .min_by(|left, right| {
-            left.issued_at.cmp(&right.issued_at).then_with(|| left.request_id.cmp(&right.request_id))
+            left.issued_at
+                .cmp(&right.issued_at)
+                .then_with(|| left.request_id.cmp(&right.request_id))
         })
 }
 

@@ -7,8 +7,7 @@
 //! public creation records only.
 use super::conversation_ops::commit_write;
 use super::{
-    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient,
-    PathBuf, RfError,
+    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient, PathBuf, RfError,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -38,8 +37,8 @@ fn add_review(response: &mut LocalBusFrame) {
 /// What the owner decides on, read from the frozen plan of a creation status (`requestJson` is the
 /// plan's canonical JSON as standard base64). The hash is the one `decide` must repeat.
 pub(crate) fn review_of(status: &Value) -> Option<Value> {
-    let text = status.get("requestJson")?.as_str()?;
     use base64::Engine as _;
+    let text = status.get("requestJson")?.as_str()?;
     let bytes = base64::engine::general_purpose::STANDARD.decode(text).ok()?;
     let plan = ramflux_protocol::custody::decode_register_plan(&bytes).ok()?;
     let hash = ramflux_protocol::custody::register_plan_hash(&plan).ok()?;

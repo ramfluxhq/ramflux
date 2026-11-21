@@ -5,7 +5,7 @@
 //! processes and two real `rf` daemons (the primary and a desktop paired into the same account by
 //! `rf pairing`). Nothing is built by hand: every request and answer is a command a person types.
 //! Real: the four node services, both daemons, the pairing ceremony over HTTPS, own-device delivery
-//! of the plan and the decision through the node, the AgentPublish admission on the node, background
+//! of the plan and the decision through the node, the `AgentPublish` admission on the node, background
 //! commit and publication on the desktop. Fixture: the primary's user presence (the integration
 //! hook `itest.agent.approve_once`, one call per plan), the memory vault, the stack's test CA.
 #![cfg(unix)]
@@ -57,7 +57,10 @@ fn agent_lifecycle_is_driven_through_rf_with_two_daemons() -> Result<()> {
             .map_err(|error| format!("{error}; files: {}", agent_files(&daemon.data_root)))?;
         assert_eq!(shown["persona"]["name"], "Demo Agent", "{label} shows the persona: {shown}");
         assert_eq!(shown["persona"]["responsibility"], "answers the demo questions");
-        assert_eq!(shown["lifecycle"], "U", "{label}: the new agent has an identity and no runtime");
+        assert_eq!(
+            shown["lifecycle"], "U",
+            "{label}: the new agent has an identity and no runtime"
+        );
     }
 
     // The node holds the agent's published custody record: read through the public directory path
@@ -89,9 +92,7 @@ fn agent_lifecycle_is_driven_through_rf_with_two_daemons() -> Result<()> {
     let deleted = agent::delete(desktop, owner, &anchor)?;
     assert_eq!(deleted["cleanup"], "node_record_retained", "{deleted}");
     assert_eq!(deleted["lifecycle"], "X");
-    wait_for(|| {
-        agent::show(primary, owner, &anchor).is_ok_and(|shown| shown["lifecycle"] == "X")
-    })?;
+    wait_for(|| agent::show(primary, owner, &anchor).is_ok_and(|shown| shown["lifecycle"] == "X"))?;
     Ok(())
 }
 
@@ -106,47 +107,34 @@ fn wait_for(mut ready: impl FnMut() -> bool) -> Result<()> {
     Err("the awaited state never appeared on the other device".into())
 }
 
-/// The node logs and the agent-related lines of each daemon log, for a failure message.
+/// The node logs, the node's directory for the human and the tail of each daemon log, for a
+/// failure message.
 fn diagnose(
     stack: &crate::e2e::PairingStack,
     daemons: &[&crate::e2e::Daemon],
     owner: &crate::e2e::Account,
     operation: &str,
 ) -> String {
+    use std::fmt::Write as _;
     let mut out = crate::e2e::dump_logs(&stack.stack, &[]);
-    // What the node holds for the human: the published device set and its epoch.
-    let manifest = node_get(&stack.stack, &format!("/mvp1/device-manifest/{}", owner.principal_commitment))
-        .map(|body| {
-            let value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let record = &value["custody"]["publication"]["record"]["body"];
-            let listed: Vec<String> = value["custody"]["devices"]
-                .as_array()
-                .map(|rows| rows.iter().map(|row| row.to_string().chars().take(160).collect()).collect())
-                .unwrap_or_default();
-            format!(
-                "top-level keys={:?} listed devices={listed:?}; epoch={} devices={}",
-                value.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>()),
-                record["device_set_epoch"],
-                record["devices"].as_array().map_or(0, Vec::len)
-            )
-        })
-        .unwrap_or_else(|error| error.to_string());
+    let manifest =
+        node_get(&stack.stack, &format!("/mvp1/device-manifest/{}", owner.principal_commitment))
+            .map_or_else(|error| error.to_string(), |body| body.chars().take(1500).collect());
+    let _ = writeln!(out, "\n== node directory for the human: {manifest} ==");
     if let Some(desktop) = daemons.get(1) {
         let state = agent::status(desktop, owner, operation)
-            .map(|value| value.to_string())
-            .unwrap_or_else(|error| error.to_string());
-        out.push_str(&format!("\n== desktop operation: {state} ==\n"));
+            .map_or_else(|error| error.to_string(), |value| value.to_string());
+        let _ = writeln!(out, "\n== desktop operation: {state} ==");
     }
-    out.push_str(&format!("\n== node directory for the human: {manifest} ==\n"));
     for daemon in daemons {
         let text = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
         let tail = lines.len().saturating_sub(70);
-        out.push_str(&format!("\n== {} ==\n", daemon.data_root.display()));
-        let status = crate::e2e::rf_json(&daemon.socket, &["account", "status", "--account", &owner.id])
-            .map(|value| value.to_string())
-            .unwrap_or_else(|error| error.to_string());
-        out.push_str(&format!("status: {}\n", status.chars().take(2500).collect::<String>()));
+        let status =
+            crate::e2e::rf_json(&daemon.socket, &["account", "status", "--account", &owner.id])
+                .map_or_else(|error| error.to_string(), |value| value.to_string());
+        let _ = writeln!(out, "\n== {} ==", daemon.data_root.display());
+        let _ = writeln!(out, "status: {}", status.chars().take(2500).collect::<String>());
         out.push_str(&lines.get(tail..).unwrap_or(&[]).join("\n"));
     }
     out
