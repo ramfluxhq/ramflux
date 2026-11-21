@@ -6,6 +6,7 @@
 mod capability;
 mod commit;
 mod machine;
+mod publish;
 mod receive_checks;
 mod state;
 mod store;
@@ -22,5 +23,6 @@ pub use machine::{
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };
+pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub use state::{AgentCreationState, AgentFailure};
 pub use store::{AgentCreationRecord, AgentCreationStore};

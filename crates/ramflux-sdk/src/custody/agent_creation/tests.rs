@@ -5,6 +5,7 @@
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
 use super::commit::desktop_is_enrolled;
 use super::{
+    first_action, load_publishing,
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
     BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_request,
     check_sender, commit_approved, expected_scope, primary_sign_decision, receive_plan,
@@ -20,14 +21,16 @@ use ramflux_crypto::custody::{
     create_genesis, master_anchor, verify_register_decision,
 };
 use ramflux_crypto::X25519KeyPair;
+use ramflux_protocol::agent_profile::decode_agent_profile;
 use ramflux_protocol::custody::{
+    AgentPublishReceipt, CustodyProofAction, CustodyRefusal, custody_action_hash,
     AgentRegisterProfile, BranchCertificate, Device, DeviceRef, DeviceSet, Envelope,
     MAX_BRANCH_LEASE_SECONDS, MigrationState, RegisterCancel, RegisterOutcome,
     decode_register_decision, decode_register_plan, encode_register_cancel, encode_register_plan,
     object_hash,
 };
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind, domain};
-use ramflux_protocol::encode_base64url;
+use ramflux_protocol::{decode_base64url, encode_base64url};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -49,6 +52,11 @@ struct Phone {
     primary_public: String,
     branch_public: String,
     primary_device: DeviceRef,
+}
+
+/// The capability list of a node that advertises agent custody authorization.
+fn capable() -> Vec<String> {
+    vec![ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY.to_owned()]
 }
 
 fn owner_anchor() -> String {
@@ -983,7 +991,7 @@ fn commit_refuses_before_approval_and_writes_no_account() -> TestResult {
     let desk = MemoryPrimaryVault::default();
     let outcome = begin_for_human(&fixture, &store, &desk, "req-unapproved", None)?;
     let account_id = account_id_of(&store.load("req-unapproved")?.ok_or("record")?)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-unapproved", fixture.now + 2).is_err());
+    assert!(commit_approved(&store, &desk, HUMAN, "req-unapproved", &capable(), fixture.now + 2).is_err());
     assert!(
         !agent_account_dir(&fixture.root.0, &account_id).exists(),
         "no account directory before a verified approval"
@@ -1004,10 +1012,10 @@ fn commit_writes_the_bundle_once_after_a_verified_approval() -> TestResult {
     let account_id = account_id_of(&authorized)?;
     assert!(!store.committed(&authorized)?, "approval alone is not a commit");
 
-    let committed = commit_approved(&store, &desk, HUMAN, "req-commit", fixture.now + 2)?;
+    let committed = commit_approved(&store, &desk, HUMAN, "req-commit", &capable(), fixture.now + 2)?;
     assert_eq!(committed.state, AgentCreationState::PublicationPending);
     assert!(store.account_committed(&account_id)?, "the commit writes the authority");
-    let again = commit_approved(&store, &desk, HUMAN, "req-commit", fixture.now + 3)?;
+    let again = commit_approved(&store, &desk, HUMAN, "req-commit", &capable(), fixture.now + 3)?;
     assert_eq!(again, committed, "a second commit returns the saved record and writes nothing");
     let account =
         crate::custody::store::load_account(&fixture.root.0, &account_id, fixture.now + 3)?;
@@ -1026,7 +1034,7 @@ fn deny_cancel_and_expiry_after_the_commit_delete_nothing() -> TestResult {
     let phone = phone(&owner_anchor())?;
     let outcome = begin_for_human(&fixture, &store, &desk, "req-late", None)?;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    let committed = commit_approved(&store, &desk, HUMAN, "req-late", fixture.now + 2)?;
+    let committed = commit_approved(&store, &desk, HUMAN, "req-late", &capable(), fixture.now + 2)?;
     let refs = committed.vault_refs.clone();
     assert!(!refs.is_empty(), "the committed request still names its vault items");
 
@@ -1066,7 +1074,7 @@ fn restart_in_publication_pending_keeps_the_bundle() -> TestResult {
     let phone = phone(&owner_anchor())?;
     let outcome = begin_for_human(&fixture, &store, &desk, "req-restart", None)?;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    let committed = commit_approved(&store, &desk, HUMAN, "req-restart", fixture.now + 2)?;
+    let committed = commit_approved(&store, &desk, HUMAN, "req-restart", &capable(), fixture.now + 2)?;
     let reopened = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
     let resumed = resume_request(&reopened, &desk, "req-restart", fixture.now + 4)?;
     assert_eq!(resumed.state, AgentCreationState::PublicationPending);
@@ -1083,7 +1091,7 @@ fn a_crash_after_the_authority_write_is_recovered_as_committed() -> TestResult {
     let phone = phone(&owner_anchor())?;
     let outcome = begin_for_human(&fixture, &store, &desk, "req-crash", None)?;
     let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    commit_approved(&store, &desk, HUMAN, "req-crash", fixture.now + 2)?;
+    commit_approved(&store, &desk, HUMAN, "req-crash", &capable(), fixture.now + 2)?;
     // Simulate the crash window: the authority exists but the record still says authorized.
     store.save(&AgentCreationRecord { state: AgentCreationState::Authorized, ..authorized })?;
     let expired_at = decode_register_plan(&outcome.plan_bytes)?.expires_at + 1;
@@ -1103,7 +1111,7 @@ fn commit_refuses_a_changed_human_head_and_cleans_up_before_the_commit() -> Test
     let outcome = begin_for_human(&fixture, &store, &desk, "req-head", Some(stale.as_str()))?;
     let refs = store.load("req-head")?.ok_or("record")?.vault_refs;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-head", fixture.now + 2).is_err());
+    assert!(commit_approved(&store, &desk, HUMAN, "req-head", &capable(), fixture.now + 2).is_err());
     let refused = store.load("req-head")?.ok_or("record")?;
     assert_eq!(refused.state, AgentCreationState::Refused);
     assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
@@ -1126,7 +1134,7 @@ fn commit_refuses_a_desktop_missing_from_the_authority_and_cleans_up() -> TestRe
     let outcome = begin_for_human_as(&fixture, &store, &desk, "req-desktop", None, &absent)?;
     let refs = store.load("req-desktop")?.ok_or("record")?.vault_refs;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-desktop", fixture.now + 2).is_err());
+    assert!(commit_approved(&store, &desk, HUMAN, "req-desktop", &capable(), fixture.now + 2).is_err());
     let refused = store.load("req-desktop")?.ok_or("record")?;
     assert_eq!(refused.state, AgentCreationState::Refused);
     assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
@@ -1174,6 +1182,253 @@ fn desktop_enrollment_needs_a_present_unexpired_sync_branch() -> TestResult {
     assert!(
         !desktop_is_enrolled(&revoked, &desktop, fixture.now),
         "a revoked device is not enrolled, whatever its branch says"
+    );
+    Ok(())
+}
+
+/// A committed agent of the human fixture (commit done, record in `publication_pending`).
+struct CommittedAgent {
+    fixture: HumanFixture,
+    store: AgentCreationStore,
+    plan: ramflux_protocol::custody::RegisterPlan,
+    account_id: String,
+    request_id: String,
+}
+
+fn committed_agent(request_id: &str) -> Result<CommittedAgent, Box<dyn std::error::Error>> {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, request_id, None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let account_id = account_id_of(&authorized)?;
+    commit_approved(&store, &desk, HUMAN, request_id, &capable(), fixture.now + 2)?;
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    Ok(CommittedAgent { fixture, store, plan, account_id, request_id: request_id.into() })
+}
+
+fn load_committed_account(
+    committed: &CommittedAgent,
+) -> Result<crate::custody::BornAccount, Box<dyn std::error::Error>> {
+    Ok(crate::custody::store::load_account(
+        &committed.fixture.root.0,
+        &committed.account_id,
+        committed.fixture.now + 3,
+    )?)
+}
+
+/// The receipt the node returns for the committed agent, built from the stored request and record.
+fn valid_receipt(
+    committed: &CommittedAgent,
+    agent: &crate::custody::BornAccount,
+) -> Result<AgentPublishReceipt, Box<dyn std::error::Error>> {
+    let record = committed.store.load(&committed.request_id)?.ok_or("the record must exist")?;
+    let profile_bytes =
+        decode_base64url(record.profile_b64.as_deref().ok_or("the commit saves the profile")?)?;
+    let profile = decode_agent_profile(&profile_bytes)?;
+    Ok(AgentPublishReceipt {
+        request_id: committed.plan.request_id.clone(),
+        request_hash: record.request_hash.clone(),
+        record_hash: object_hash(agent.record())?,
+        profile_hash: object_hash(&profile)?,
+        custodian_head_hash: committed.plan.human_head_hash.clone(),
+        custodian_primary: committed.plan.human_primary.clone(),
+        accepted_at: committed.plan.issued_at,
+    })
+}
+
+/// A valid receipt is accepted; the same receipt with one field altered is refused.
+fn assert_receipt_field_refused(
+    field: &str,
+    mutate: impl FnOnce(&mut AgentPublishReceipt),
+) -> TestResult {
+    let committed = committed_agent("req-receipt")?;
+    let agent = load_committed_account(&committed)?;
+    let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let valid = valid_receipt(&committed, &agent)?;
+    saved.check_receipt(&valid, agent.record())?;
+    let mut altered = valid.clone();
+    mutate(&mut altered);
+    assert!(
+        saved.check_receipt(&altered, agent.record()).is_err(),
+        "a receipt whose {field} differs from the stored request or record must be refused"
+    );
+    Ok(())
+}
+
+#[test]
+fn publishing_selects_the_first_action_for_each_account_situation() -> TestResult {
+    let committed = committed_agent("req-select")?;
+    let agent = load_committed_account(&committed)?;
+    let human = crate::custody::store::load_account(
+        &committed.fixture.root.0,
+        HUMAN,
+        committed.fixture.now + 3,
+    )?;
+    let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let human_first = first_action(PrincipalKind::Human, None, &human.publication())?;
+    assert!(
+        matches!(human_first, CustodyProofAction::Publish { .. }),
+        "a human account publishes as before"
+    );
+    let agent_first =
+        first_action(PrincipalKind::HeadlessAi, Some(&saved), &agent.publication())?;
+    assert!(
+        matches!(agent_first, CustodyProofAction::AgentPublish { .. }),
+        "a headless account with a saved approval publishes through AgentPublish"
+    );
+    let refused = first_action(PrincipalKind::HeadlessAi, None, &agent.publication());
+    assert!(
+        matches!(
+            refused,
+            Err(SdkError::CustodyNetwork(CustodyRefusal::AgentAuthorizationRequired))
+        ),
+        "a headless account without a saved approval is refused"
+    );
+    Ok(())
+}
+
+#[test]
+fn publish_action_replays_identically_after_a_lost_reply() -> TestResult {
+    let committed = committed_agent("req-replay")?;
+    let agent = load_committed_account(&committed)?;
+    let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let first = saved.publish_action(&agent.publication());
+    // The reply was lost: the record says publication_unknown, and the next attempt is rebuilt
+    // from the saved bytes alone.
+    saved.mark_unknown()?;
+    let state = committed.store.load(&committed.request_id)?.ok_or("record")?.state;
+    assert_eq!(state, AgentCreationState::PublicationUnknown, "a lost reply is unknown");
+    let again = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let replay = again.publish_action(&agent.publication());
+    assert_eq!(
+        serde_json::to_vec(&first)?,
+        serde_json::to_vec(&replay)?,
+        "the identical AgentPublish is sent again"
+    );
+    assert_eq!(custody_action_hash(&first)?, custody_action_hash(&replay)?);
+    Ok(())
+}
+
+#[test]
+fn a_verified_receipt_is_saved_and_completes_the_record() -> TestResult {
+    let committed = committed_agent("req-complete")?;
+    let agent = load_committed_account(&committed)?;
+    let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let receipt = valid_receipt(&committed, &agent)?;
+    saved.check_receipt(&receipt, agent.record())?;
+    saved.save_receipt(&receipt)?;
+    saved.mark_complete()?;
+    let record = committed.store.load(&committed.request_id)?.ok_or("record")?;
+    assert_eq!(record.state, AgentCreationState::Complete);
+    assert!(record.receipt_b64.is_some(), "the verified receipt is persisted");
+    assert!(
+        load_publishing(&committed.fixture.root.0, &agent)?.is_some(),
+        "a complete approval stays readable for replay"
+    );
+    Ok(())
+}
+
+#[test]
+fn commit_stores_the_signed_profile_and_the_range_before_the_bundle() -> TestResult {
+    let committed = committed_agent("req-profile")?;
+    let agent = load_committed_account(&committed)?;
+    let record = committed.store.load(&committed.request_id)?.ok_or("record")?;
+    assert_eq!(record.master_range, 1, "the genesis range is written ahead of its certificate");
+    let profile = decode_agent_profile(&decode_base64url(
+        record.profile_b64.as_deref().ok_or("the commit saves the profile")?,
+    )?)?;
+    assert_eq!(
+        profile.body.agent_custody_hash,
+        object_hash(agent.record())?,
+        "the profile binds the exact genesis record"
+    );
+    assert_eq!(profile.body.custodian_primary, committed.plan.human_primary);
+    assert_eq!(profile.body.kind, "headless_ai");
+    Ok(())
+}
+
+#[test]
+fn commit_refuses_a_node_without_the_capability_before_any_write() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-capability", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let account_id = account_id_of(&authorized)?;
+    let refused = commit_approved(&store, &desk, HUMAN, "req-capability", &[], fixture.now + 2);
+    assert!(
+        matches!(refused, Err(SdkError::AgentCustodyUnsupported)),
+        "a node without the capability gives the typed unsupported result"
+    );
+    let unchanged = store.load("req-capability")?.ok_or("record")?;
+    assert_eq!(unchanged.state, AgentCreationState::Authorized, "nothing is written");
+    assert!(!agent_account_dir(&fixture.root.0, &account_id).exists(), "no account directory");
+    commit_approved(&store, &desk, HUMAN, "req-capability", &capable(), fixture.now + 3)?;
+    Ok(())
+}
+
+#[test]
+fn receipt_request_id_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("request_id", |receipt| {
+        receipt.request_id = "other-request".into();
+    })
+}
+
+#[test]
+fn receipt_request_hash_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("request_hash", |receipt| {
+        receipt.request_hash = encode_base64url([0x11_u8; 32]);
+    })
+}
+
+#[test]
+fn receipt_record_hash_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("record_hash", |receipt| {
+        receipt.record_hash = encode_base64url([0x12_u8; 32]);
+    })
+}
+
+#[test]
+fn receipt_profile_hash_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("profile_hash", |receipt| {
+        receipt.profile_hash = encode_base64url([0x13_u8; 32]);
+    })
+}
+
+#[test]
+fn receipt_custodian_head_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("custodian_head_hash", |receipt| {
+        receipt.custodian_head_hash = encode_base64url([0x14_u8; 32]);
+    })
+}
+
+#[test]
+fn receipt_custodian_primary_mismatch_refuses() -> TestResult {
+    assert_receipt_field_refused("custodian_primary", |receipt| {
+        receipt.custodian_primary.device_id = "other-primary".into();
+    })
+}
+
+#[test]
+fn receipt_accepted_outside_the_request_window_refuses() -> TestResult {
+    let committed = committed_agent("req-window")?;
+    let agent = load_committed_account(&committed)?;
+    let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
+    let valid = valid_receipt(&committed, &agent)?;
+    let mut at_expiry = valid.clone();
+    at_expiry.accepted_at = committed.plan.expires_at;
+    assert!(
+        saved.check_receipt(&at_expiry, agent.record()).is_err(),
+        "a receipt accepted at the expiry instant is outside the window"
+    );
+    let mut before_issue = valid;
+    before_issue.accepted_at = committed.plan.issued_at.saturating_sub(1);
+    assert!(
+        saved.check_receipt(&before_issue, agent.record()).is_err(),
+        "a receipt accepted before the plan was issued is refused"
     );
     Ok(())
 }

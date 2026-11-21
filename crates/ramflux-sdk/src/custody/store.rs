@@ -481,6 +481,11 @@ impl BornAccount {
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
     }
+    /// The human account that custodies this headless account on this root, if any.
+    #[must_use]
+    pub(crate) fn custodian_account_id(&self) -> Option<&str> {
+        self.stored.custodian_account_id.as_deref()
+    }
     pub(crate) fn local_device_id(&self) -> Result<&str, SdkError> {
         let id = if self.stored.local_device_id.is_empty() {
             match self.record().body.devices.as_slice() {

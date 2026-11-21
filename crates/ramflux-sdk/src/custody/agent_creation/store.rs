@@ -37,6 +37,16 @@ pub struct AgentCreationRecord {
     pub intended: Option<AgentCreationState>,
     pub failure: Option<AgentFailure>,
     pub decision_b64: Option<String>,
+    /// Highest master-certificate range issued for this agent. Written before the certificate is
+    /// requested (write-ahead), so a cleanup deletes every certificate item that can exist.
+    #[serde(default)]
+    pub master_range: u64,
+    /// Signed agent profile (canonical bytes), written with the commit bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_b64: Option<String>,
+    /// Publication receipt (canonical bytes), written once the receipt has been compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_b64: Option<String>,
 }
 
 impl AgentCreationRecord {
@@ -61,7 +71,7 @@ impl AgentCreationRecord {
 /// Directory of creation records, one file per request id. It lives inside the data directory
 /// of the human account that owns the request (`custody_accounts/<human>/agent_creation`), on
 /// the desktop (initiator) and on the primary (receiver) alike.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AgentCreationStore {
     root: PathBuf,
     dir: PathBuf,
@@ -109,6 +119,26 @@ impl AgentCreationStore {
     #[must_use]
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    /// The record whose agent account has this local id, if any. Scans this directory only.
+    /// # Errors
+    /// Propagates [`Self::load`] failures and refuses a directory that cannot be read.
+    pub fn find_by_account(&self, account_id: &str) -> Result<Option<AgentCreationRecord>, SdkError> {
+        let entries = std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| SdkError::CustodyVaultUnavailable)?;
+            let name = entry.file_name();
+            let Some(request_id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if let Some(record) = self.load(request_id)?
+                && record.account_id.as_deref() == Some(account_id)
+            {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     /// Load one record. `Ok(None)` when no record exists for the id.

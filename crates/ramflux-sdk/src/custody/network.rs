@@ -7,8 +7,9 @@ use crate::SdkError;
 use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
 use ramflux_protocol::custody::{
     BindingMode, BranchProofV3, CUSTODY_REQUEST_PATH, CustodyClientFrame, CustodyPeer,
-    CustodyProofAction, CustodyRefusal, CustodyServerFrame, CustodySession, CustodySessionAction,
-    DeviceRef, MAX_CUSTODY_FRAME_BYTES, custody_session_action_hash, decode, object_hash,
+    AgentPublishReceipt, CustodyProofAction, CustodyRefusal, CustodyServerFrame, CustodySession,
+    CustodySessionAction, DeviceRef, MAX_CUSTODY_FRAME_BYTES, custody_session_action_hash, decode,
+    object_hash,
 };
 use ramflux_transport::GatewayTcpTlsStream;
 use std::{
@@ -18,10 +19,28 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// A lost or unreadable publish reply: the record says `publication_unknown` until the identical
+/// `AgentPublish` is answered. Takes owned data, so no connection reference lives across the wait.
+async fn mark_publication_unknown(
+    saved: Option<super::agent_creation::AgentPublishing>,
+) -> Result<(), SdkError> {
+    let Some(saved) = saved else { return Ok(()) };
+    tokio::task::spawn_blocking(move || saved.mark_unknown()).await.map_err(|_| invalid())?
+}
+
+/// The account is live and its receipt is verified: the headless approval is complete.
+async fn complete_publication(
+    saved: Option<super::agent_creation::AgentPublishing>,
+) -> Result<(), SdkError> {
+    let Some(saved) = saved else { return Ok(()) };
+    tokio::task::spawn_blocking(move || saved.mark_complete()).await.map_err(|_| invalid())?
+}
+
 struct LocalAuthority {
     account: BornAccount,
     device: DeviceRef,
     credentials: BranchCredentials,
+    publishing: Option<super::agent_creation::AgentPublishing>,
 }
 struct OpenTransport<S = GatewayTcpTlsStream> {
     stream: S,
@@ -55,6 +74,8 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) pins: NodePins,
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
+    /// Saved approval of a headless account (plan, decision, profile); `None` for a human account.
+    publishing: Option<super::agent_creation::AgentPublishing>,
     mode: BindingMode,
     audience: String,
     capacity_key: String,
@@ -245,7 +266,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                     account.bind_capacity_node(&root, &node_id, &node_public_key, now()?)?;
                     let (device, credentials) =
                         account.credentials(vault.as_ref(), &device_id, now()?)?;
-                    Ok::<_, SdkError>(LocalAuthority { account, device, credentials })
+                    let publishing = super::agent_creation::load_publishing(&root, &account)?;
+                    Ok::<_, SdkError>(LocalAuthority { account, device, credentials, publishing })
                 })
                 .await
                 .map_err(|_| invalid())?
@@ -264,6 +286,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             match budget.attempt(connection.register(&actions, &mut next)).await {
                 Ok(()) => {
                     budget.attempt(connection.persist_live(&config.account_root)).await?;
+                    complete_publication(connection.publishing.clone()).await?;
                     return Ok((transport, connection));
                 }
                 Err(error) if super::retry::is_busy(&error) => {
@@ -347,6 +370,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             pairing_admission: config.pairing_admission.clone(),
             device: authority.device,
             credentials: authority.credentials,
+            publishing: authority.publishing,
             stream: opened.stream,
             pins: opened.pins,
             session: None,
@@ -357,9 +381,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         }
     }
     fn into_authority(self) -> LocalAuthority {
-        let Self { account, device, credentials, stream, .. } = self;
+        let Self { account, device, credentials, publishing, stream, .. } = self;
         drop(stream);
-        LocalAuthority { account, device, credentials }
+        LocalAuthority { account, device, credentials, publishing }
     }
     pub(crate) async fn into_gateway_parts(
         mut self,
@@ -370,9 +394,16 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         Ok((self.stream, self.account, self.device, self.credentials))
     }
 
-    fn registration_actions(&self) -> Result<[CustodyProofAction; 3], SdkError> {
-        Ok([
-            CustodyProofAction::Publish { publication: Box::new(self.account.publication()) },
+    /// Publish, register, open. A headless account publishes only with its saved approval (the
+    /// `AgentPublish` action); without one, registration is refused.
+    fn registration_actions(&self) -> Result<Vec<CustodyProofAction>, SdkError> {
+        let first = super::agent_creation::first_action(
+            self.account.record().body.principal_kind,
+            self.publishing.as_ref(),
+            &self.account.publication(),
+        )?;
+        Ok(vec![
+            first,
             CustodyProofAction::Register {
                 prekey_bundle: serde_json::to_value(self.prekey_bundle()?)?,
             },
@@ -381,14 +412,28 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     }
     async fn register(
         &mut self,
-        actions: &[CustodyProofAction; 3],
+        actions: &[CustodyProofAction],
         next: &mut usize,
     ) -> Result<(), SdkError> {
         while let Some(action) = actions.get(*next) {
-            let response = self.prove(action.clone()).await?;
+            let publishing = matches!(action, CustodyProofAction::AgentPublish { .. });
+            let response = match self.prove(action.clone()).await {
+                Ok(response) => response,
+                Err(error) => {
+                    // A lost or unreadable reply leaves the outcome unknown: the next attempt sends
+                    // the identical AgentPublish, and the node returns the saved receipt.
+                    if publishing && !super::retry::is_busy(&error) {
+                        mark_publication_unknown(self.publishing.clone()).await?;
+                    }
+                    return Err(error);
+                }
+            };
             match (*next, response) {
                 (0, CustodyServerFrame::Published { record_hash })
-                    if record_hash == object_hash(self.account.record())? => {}
+                    if !publishing && record_hash == object_hash(self.account.record())? => {}
+                (0, CustodyServerFrame::AgentPublished { receipt }) if publishing => {
+                    self.accept_receipt(*receipt).await?;
+                }
                 (1, CustodyServerFrame::Registered { device_ref, target_delivery_id })
                     if device_ref == self.device
                         && target_delivery_id
@@ -410,6 +455,21 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
             *next += 1;
         }
         Ok(())
+    }
+    /// Compare the receipt with the stored request and record, then persist it. A mismatch marks the
+    /// publication unknown and refuses (nothing is activated).
+    async fn accept_receipt(&mut self, receipt: AgentPublishReceipt) -> Result<(), SdkError> {
+        let saved = self.publishing.clone().ok_or_else(invalid)?;
+        let record = self.account.record().clone();
+        tokio::task::spawn_blocking(move || match saved.check_receipt(&receipt, &record) {
+            Ok(()) => saved.save_receipt(&receipt),
+            Err(error) => {
+                saved.mark_unknown()?;
+                Err(error)
+            }
+        })
+        .await
+        .map_err(|_| invalid())?
     }
     async fn persist_live(&mut self, root: &std::path::Path) -> Result<(), SdkError> {
         let root = root.to_path_buf();
@@ -474,7 +534,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         // Mandatory even when an operator and the client explicitly choose no binding.
         let material = self.stream.custody_exporter(&nonce)?;
         let record = match &action {
-            CustodyProofAction::Publish { publication } => &publication.record,
+            CustodyProofAction::Publish { publication }
+            | CustodyProofAction::AgentPublish { publication, .. } => &publication.record,
             _ => self.account.record(),
         };
         if record.body.account_anchor != self.device.account_anchor {

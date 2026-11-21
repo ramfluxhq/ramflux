@@ -246,7 +246,7 @@ mod tests {
 
     fn keys() -> (MasterKey, SelfSigningKey, DeviceBranch, X25519KeyPair) {
         (
-            MasterKey::from_vault_seed(&Zeroizing::new([7; 32])),
+            MasterKey::generate().expect("test: random master key"),
             SelfSigningKey::from_vault_seed(&Zeroizing::new([8; 32])),
             crate::create_device_branch("genesis.example", "agent", 1, [9; 32]),
             X25519KeyPair::from_seed([10; 32]),

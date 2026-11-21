@@ -115,6 +115,9 @@ pub fn begin(
         intended: None,
         failure: None,
         decision_b64: None,
+        master_range: 0,
+        profile_b64: None,
+        receipt_b64: None,
     };
     store.save(&record)?;
 
@@ -239,6 +242,9 @@ pub fn receive_plan(
         intended: None,
         failure: None,
         decision_b64: None,
+        master_range: 0,
+        profile_b64: None,
+        receipt_b64: None,
     };
     store.save(&record)?;
     Ok(record)
@@ -445,7 +451,13 @@ pub(super) fn finish(
     let target = record.intended.ok_or(SdkError::CustodySetupInvalid)?;
     let mut remaining = Vec::new();
     for reference in &record.vault_refs {
-        if vault.delete(reference).is_err() {
+        // The agent master is deleted with every certificate item up to the recorded range.
+        let deleted = if reference.starts_with(AGENT_MASTER_PREFIX) {
+            vault.delete_agent_master(reference, record.master_range)
+        } else {
+            vault.delete(reference)
+        };
+        if deleted.is_err() {
             remaining.push(reference.clone());
         }
     }
