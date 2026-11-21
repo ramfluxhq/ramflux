@@ -39,8 +39,13 @@ impl Fixture {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         let now = crate::custody::network_now()?;
-        let (account, phrase) =
-            crate::custody::tests::create_with_device_and_phrase(&root.0, id, device, vault.as_ref(), now)?;
+        let (account, phrase) = crate::custody::tests::create_with_device_and_phrase(
+            &root.0,
+            id,
+            device,
+            vault.as_ref(),
+            now,
+        )?;
         let record = account.record().clone();
         Ok((Self::finish_creation(root, vault, id, device, record).await?, phrase))
     }

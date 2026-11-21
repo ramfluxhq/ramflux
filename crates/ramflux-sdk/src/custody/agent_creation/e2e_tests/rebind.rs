@@ -10,11 +10,16 @@ use super::super::rebind::{RebindBinding, RebindEntry};
 use super::super::rebind_observe::observe_primary;
 use super::super::test_support::{
     DesktopSteps, OwnRouter, TestNode, TestResult, Transfer, capable, decide_body, desk_create,
-    now, phone_decides, root_of, store_of, transfer_fixture, transfer_primary, vault_of,
+    now, phone_decides, root_of, saved_receipt, store_of, transfer_fixture, transfer_primary,
+    vault_of,
 };
-use super::super::{AgentCreationState, advance_one, commit_approved};
+use super::super::{
+    AgentCreationState, AgentCreationStore, AgentFailure, advance_one, commit_approved,
+};
 use crate::SdkError;
-use ramflux_protocol::custody::decode_register_plan;
+use crate::custody::network_tests::ReplyFault;
+use crate::custody::vault::AGENT_MASTER_PREFIX;
+use ramflux_protocol::custody::{DeviceSet, Envelope, decode_register_plan, object_hash};
 
 fn runtime() -> TestResult<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_current_thread().enable_all().build()?)
@@ -272,4 +277,322 @@ async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
     );
     drop(steps);
     node.finish().await
+}
+
+/// Publishes the human, creates the agent under the old primary (P0) and brings it to `Complete` on
+/// the node. Returns the agent account id and the creation request id. Connections used: 2.
+async fn bind_agent(
+    node: &TestNode,
+    t: &mut Transfer,
+    router: &OwnRouter,
+    at: u64,
+) -> TestResult<(String, String)> {
+    let phone_root = root_of(&t.pair.phone)?;
+    let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
+    let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    let desk_vault = vault_of(&t.pair.laptop.client)?;
+    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
+        .await?;
+    let created = desk_create(&t.pair, desk_vault.as_ref(), at)?;
+    phone_decides(&mut t.pair, router, &created, true, at).await?;
+    let desk_store = store_of(&desk_root, &desk_id)?;
+    let mut steps = DesktopSteps {
+        node,
+        root: &desk_root,
+        human: &desk_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
+    let state = advance_one(&mut steps, &desk_store, &created.request_id, at).await?;
+    assert_eq!(state, AgentCreationState::Complete, "the agent is bound under the old primary");
+    let agent_id = desk_store
+        .load(&created.request_id)?
+        .and_then(|record| record.account_id)
+        .ok_or("test: the agent account")?;
+    Ok((agent_id, created.request_id))
+}
+
+/// Publishes the transferred human to the node (the old primary's connection), observes the new
+/// primary on the desktop, and sends the rebind plan. Connections used: 1. Returns the transferred
+/// authority and the rebind request id.
+async fn transfer_and_send(
+    node: &TestNode,
+    t: &mut Transfer,
+    router: &OwnRouter,
+    agent_id: &str,
+    at: u64,
+) -> TestResult<(Envelope<DeviceSet>, String)> {
+    let phone_root = root_of(&t.pair.phone)?;
+    let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
+    let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
+    let transferred = transfer_primary(t, at + 10)?;
+    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
+        .await?;
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    let desk_store = store_of(&desk_root, &desk_id)?;
+    let primary = transferred.body.master_certificate.body.primary_device_ref.clone();
+    observe_primary(&desk_store, &primary)?;
+    t.pair.laptop.client.agent_rebind_send(agent_id, now()?)?;
+    let request_id = desk_store
+        .load_rebind(agent_id)?
+        .and_then(|entry| entry.request_id)
+        .ok_or("test: the rebind request is recorded")?;
+    router.route(&mut t.pair.laptop, &mut t.new_primary, 3).await?;
+    Ok((transferred, request_id))
+}
+
+/// The new primary (P1) decides the rebind request: approve or deny. The decision returns to the
+/// desktop through the router.
+async fn new_primary_decides(
+    t: &mut Transfer,
+    router: &OwnRouter,
+    request_id: &str,
+    approve: bool,
+    at: u64,
+) -> TestResult {
+    let new_root = root_of(&t.new_primary)?;
+    let new_id = t.new_primary.client.account_db()?.local_account_id.clone();
+    let hash = store_of(&new_root, &new_id)?
+        .load(request_id)?
+        .ok_or("test: the new primary holds the plan")?
+        .request_hash;
+    t.new_primary
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("test: the new primary fixture")?
+        .vault
+        .arm_agent_decision(&hash)?;
+    t.new_primary.client.agent_creation_decide(
+        vault_of(&t.new_primary.client)?.as_ref(),
+        &decide_body(request_id, &hash, Some(approve)),
+        at,
+    )?;
+    router.route(&mut t.new_primary, &mut t.pair.laptop, 4).await
+}
+
+fn desk_store_of(t: &Transfer) -> TestResult<AgentCreationStore> {
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    Ok(store_of(&desk_root, &desk_id)?)
+}
+
+/// The new primary approved the rebind plan, but the old primary's approval of the creation is
+/// replayed for the same rebind request: the desktop refuses it and the request stays pending.
+#[test]
+fn a_p0_approval_replayed_for_a_rebind_is_refused() -> TestResult {
+    let mut t = transfer_fixture("rebind-replay")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+        let router = OwnRouter::new()?;
+        let at = now()?;
+        let node = TestNode::start(3, None).await?;
+        let (agent_id, created_id) = bind_agent(&node, &mut t, &router, at).await?;
+        let (transferred, request_id) =
+            transfer_and_send(&node, &mut t, &router, &agent_id, at).await?;
+        let desk_store = desk_store_of(&t)?;
+        let old_approval = desk_store
+            .load(&created_id)?
+            .ok_or("test: the creation record")?
+            .decision_bytes()?
+            .ok_or("test: the creation approval")?;
+        let desk_vault = vault_of(&t.pair.laptop.client)?;
+        let primary = transferred.body.master_certificate.body.primary_device_ref.clone();
+        let key = super::super::primary_branch_public_key(&transferred, &primary, now()?)?;
+        let replayed = super::super::apply_decision(
+            &desk_store,
+            desk_vault.as_ref(),
+            &request_id,
+            &old_approval,
+            &key,
+            now()?,
+        );
+        assert!(replayed.is_err(), "the old primary's approval is not the new primary's");
+        let record = desk_store.load(&request_id)?.ok_or("test: the rebind request")?;
+        assert_eq!(record.state, AgentCreationState::AuthorizationPending);
+        Ok(())
+    })))
+}
+
+/// The new primary denies the rebind: the request is refused and the agent stays paused in R, with
+/// no publication and no new binding.
+#[test]
+fn a_new_primary_denial_keeps_the_agent_paused() -> TestResult {
+    let mut t = transfer_fixture("rebind-deny")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+        let router = OwnRouter::new()?;
+        let at = now()?;
+        let node = TestNode::start(3, None).await?;
+        let (agent_id, _) = bind_agent(&node, &mut t, &router, at).await?;
+        let (_, request_id) = transfer_and_send(&node, &mut t, &router, &agent_id, at).await?;
+        new_primary_decides(&mut t, &router, &request_id, false, now()?).await?;
+        let desk_store = desk_store_of(&t)?;
+        let record = desk_store.load(&request_id)?.ok_or("test: the rebind request")?;
+        assert_eq!(record.state, AgentCreationState::Refused, "the denial refuses the request");
+        let entry = desk_store.load_rebind(&agent_id)?.ok_or("test: the inventory")?;
+        assert_eq!(entry.binding, RebindBinding::RebindPending, "the agent stays paused");
+        assert_ne!(entry.binding, RebindBinding::Bound);
+        Ok(())
+    })))
+}
+
+/// The desktop is offline while the transfer happens: nothing reaches the new primary, and when the
+/// desktop returns it observes the transfer, sends, and completes the rebind.
+#[test]
+fn a_desktop_offline_during_the_transfer_completes_when_it_returns() -> TestResult {
+    let mut t = transfer_fixture("rebind-offline")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+        let router = OwnRouter::new()?;
+        let at = now()?;
+        let node = TestNode::start(5, None).await?;
+        let (agent_id, _) = bind_agent(&node, &mut t, &router, at).await?;
+        // The desktop is offline: the transfer is published, the desktop does not observe it yet.
+        let transferred = transfer_primary(&mut t, at + 10)?;
+        let phone_root = root_of(&t.pair.phone)?;
+        let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
+        let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
+        node.publish_current(
+            &phone_root,
+            &phone_id,
+            &phone_device,
+            vault_of(&t.pair.phone.client)?,
+        )
+        .await?;
+        let new_root = root_of(&t.new_primary)?;
+        let new_id = t.new_primary.client.account_db()?.local_account_id.clone();
+        assert!(
+            store_of(&new_root, &new_id)?.records()?.is_empty(),
+            "the new primary holds no request while the desktop is offline"
+        );
+        // The desktop returns: it observes the new primary, sends, and the rebind completes.
+        let desk_store = desk_store_of(&t)?;
+        let primary = transferred.body.master_certificate.body.primary_device_ref.clone();
+        observe_primary(&desk_store, &primary)?;
+        t.pair.laptop.client.agent_rebind_send(&agent_id, now()?)?;
+        let request_id = desk_store
+            .load_rebind(&agent_id)?
+            .and_then(|entry| entry.request_id)
+            .ok_or("test: the rebind request is recorded")?;
+        router.route(&mut t.pair.laptop, &mut t.new_primary, 3).await?;
+        new_primary_decides(&mut t, &router, &request_id, true, now()?).await?;
+        let desk_vault = vault_of(&t.pair.laptop.client)?;
+        let desk_root = root_of(&t.pair.laptop)?;
+        let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+        let mut steps = DesktopSteps {
+            node: &node,
+            root: &desk_root,
+            human: &desk_id,
+            vault: desk_vault.clone(),
+            connections: Vec::new(),
+        };
+        let state = advance_one(&mut steps, &desk_store, &request_id, now()?).await?;
+        assert_eq!(state, AgentCreationState::Complete, "the rebind completes after the return");
+        let entry = desk_store.load_rebind(&agent_id)?.ok_or("test: the inventory")?;
+        assert_eq!(entry.binding, RebindBinding::Bound);
+        Ok(())
+    })))
+}
+
+/// The desktop's vault lost the agent master: the rebind is not forged. The request stays
+/// authorized, the inventory names `custody_key_unavailable`, and the authority is not rewritten.
+#[test]
+fn a_missing_agent_master_refuses_with_custody_key_unavailable() -> TestResult {
+    let mut t = transfer_fixture("rebind-no-master")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(
+        missing_master(&mut t),
+    )))
+}
+
+async fn missing_master(t: &mut Transfer) -> TestResult {
+    let router = OwnRouter::new()?;
+    let at = now()?;
+    let node = TestNode::start(3, None).await?;
+    let (agent_id, _) = bind_agent(&node, t, &router, at).await?;
+    let (_, request_id) = transfer_and_send(&node, t, &router, &agent_id, at).await?;
+    new_primary_decides(t, &router, &request_id, true, now()?).await?;
+    let desk_store = desk_store_of(t)?;
+    let desk_vault = vault_of(&t.pair.laptop.client)?;
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    let plan = decode_register_plan(
+        &desk_store.load(&request_id)?.ok_or("test: the rebind request")?.plan_bytes()?,
+    )?;
+    // The master item of the agent is lost from the desktop vault (its seed and certificates).
+    let reference =
+        crate::custody::custody_vault_reference(&desk_root, &agent_id, &plan.agent_anchor)?;
+    desk_vault.delete_agent_master(&format!("{AGENT_MASTER_PREFIX}{reference}"), 1)?;
+    let before = crate::custody::store::stored_record_unverified(&desk_root, &agent_id)?;
+    let mut steps = DesktopSteps {
+        node: &node,
+        root: &desk_root,
+        human: &desk_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
+    let refused = advance_one(&mut steps, &desk_store, &request_id, now()?).await;
+    assert!(
+        matches!(
+            refused,
+            Err(SdkError::CustodyVault(crate::custody::CustodyVaultReason::KeyUnavailable))
+        ),
+        "a missing master refuses: {refused:?}"
+    );
+    let record = desk_store.load(&request_id)?.ok_or("test: the rebind request")?;
+    assert_eq!(record.state, AgentCreationState::Authorized, "the request stays authorized");
+    let entry = desk_store.load_rebind(&agent_id)?.ok_or("test: the inventory")?;
+    assert_eq!(entry.binding, RebindBinding::RebindPending, "the agent stays paused");
+    assert_eq!(entry.failure, Some(AgentFailure::CustodyKeyUnavailable));
+    let after = crate::custody::store::stored_record_unverified(&desk_root, &agent_id)?;
+    assert_eq!(
+        object_hash(&after)?,
+        object_hash(&before)?,
+        "the authority is not rewritten without the master"
+    );
+    drop(steps);
+    Ok(())
+}
+
+/// The rebind publication's reply is lost once after the node admitted it. The request becomes
+/// `publication_unknown`; the next advance sends the identical `AgentPublish`, the node returns the
+/// saved receipt, and the request reaches state B. The creation's reply passes first (skip 1).
+#[test]
+fn a_lost_rebind_publish_reply_reconciles_to_state_b() -> TestResult {
+    let mut t = transfer_fixture("rebind-lost")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(
+        lost_rebind_reply(&mut t),
+    )))
+}
+
+async fn lost_rebind_reply(t: &mut Transfer) -> TestResult {
+    let router = OwnRouter::new()?;
+    let at = now()?;
+    let node = TestNode::start(6, Some(ReplyFault::DropAgentPublishedAfter(1))).await?;
+    let (agent_id, _) = bind_agent(&node, t, &router, at).await?;
+    let (_, request_id) = transfer_and_send(&node, t, &router, &agent_id, at).await?;
+    new_primary_decides(t, &router, &request_id, true, now()?).await?;
+    let desk_store = desk_store_of(t)?;
+    let desk_vault = vault_of(&t.pair.laptop.client)?;
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    let mut steps = DesktopSteps {
+        node: &node,
+        root: &desk_root,
+        human: &desk_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
+    let lost = advance_one(&mut steps, &desk_store, &request_id, now()?).await;
+    assert!(lost.is_err(), "the lost reply is an error for this attempt");
+    let unknown = desk_store.load(&request_id)?.ok_or("test: the rebind request")?;
+    assert_eq!(unknown.state, AgentCreationState::PublicationUnknown);
+    let state = advance_one(&mut steps, &desk_store, &request_id, now()?).await?;
+    assert_eq!(state, AgentCreationState::Complete, "the saved receipt reconciles to state B");
+    let receipt = saved_receipt(&desk_store.load(&request_id)?.ok_or("test: the rebind request")?)?;
+    assert!(!receipt.record_hash.is_empty(), "the receipt of the rebind is saved");
+    let entry = desk_store.load_rebind(&agent_id)?.ok_or("test: the inventory")?;
+    assert_eq!(entry.binding, RebindBinding::Bound);
+    drop(steps);
+    Ok(())
 }

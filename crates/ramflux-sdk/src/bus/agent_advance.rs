@@ -162,7 +162,8 @@ impl Supervisor {
             // next advance tries again.
             if entry.binding == RebindBinding::RebindPending
                 && entry.request_id.is_none()
-                && let Some(actor) = self.account_actor(human).filter(super::actor::AccountActor::is_open)
+                && let Some(actor) =
+                    self.account_actor(human).filter(super::actor::AccountActor::is_open)
             {
                 let _ = actor
                     .agent_creation_step(AgentStep::SendRebind {

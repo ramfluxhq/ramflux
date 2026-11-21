@@ -90,20 +90,29 @@ pub(crate) enum ReplyFault {
     /// Close the connection instead of writing the first `AgentPublished` reply. The node has
     /// already admitted the publication, so only the reply is lost.
     DropAgentPublished,
+    /// Like `DropAgentPublished`, after `skip` admitted `AgentPublished` replies have been written
+    /// (the rebind's publication is the second one of a test that creates an agent first).
+    DropAgentPublishedAfter(u8),
 }
 /// The armed fault of one test server, shared by its connection tasks.
 type ReplyFaults = Arc<std::sync::Mutex<Option<ReplyFault>>>;
 /// Consumes the armed drop fault when this reply is the `AgentPublished` the test drops.
 fn drop_reply_fault(faults: &ReplyFaults, response: &CustodyServerFrame) -> bool {
     let mut armed = faults.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if matches!(
-        (*armed, response),
-        (Some(ReplyFault::DropAgentPublished), CustodyServerFrame::AgentPublished { .. })
-    ) {
-        *armed = None;
-        return true;
+    if !matches!(response, CustodyServerFrame::AgentPublished { .. }) {
+        return false;
     }
-    false
+    match *armed {
+        Some(ReplyFault::DropAgentPublished | ReplyFault::DropAgentPublishedAfter(0)) => {
+            *armed = None;
+            true
+        }
+        Some(ReplyFault::DropAgentPublishedAfter(skip)) => {
+            *armed = Some(ReplyFault::DropAgentPublishedAfter(skip.saturating_sub(1)));
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Applies the armed fault to one reply, consuming it.
@@ -191,14 +200,14 @@ async fn start_server_with_connections(
     )
     .await
 }
-/// Starts a real TLS custody server that accepts exactly `connections` connections (at most five, the
-/// bound of the rebind test), with at most one armed `fault`. The server ends when every accepted connection has closed.
+/// Starts a real TLS custody server that accepts exactly `connections` connections (at most six, the
+/// bound of the rebind tests), with at most one armed `fault`. The server ends when every accepted connection has closed.
 pub(crate) async fn start_server_with_faults(
     root: &Root,
     fault: Option<ReplyFault>,
     connections: u8,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
-    if connections == 0 || connections > 5 {
+    if connections == 0 || connections > 6 {
         return Err("test: TLS fixture connection bound".into());
     }
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;

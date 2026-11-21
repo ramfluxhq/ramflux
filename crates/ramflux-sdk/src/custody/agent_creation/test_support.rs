@@ -149,7 +149,7 @@ pub(crate) struct TestNode {
 }
 
 impl TestNode {
-    /// Starts the node for exactly `connections` client connections (at most 5).
+    /// Starts the node for exactly `connections` client connections (at most 6).
     pub(crate) async fn start(connections: u8, fault: Option<ReplyFault>) -> TestResult<Self> {
         let temporary = ramflux_test_support::TestPath::new()?;
         let root = Root(temporary.child("node"));
