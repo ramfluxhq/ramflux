@@ -87,9 +87,25 @@ pub(crate) fn node(
 pub(crate) enum ReplyFault {
     /// Replace the first recovery `Published` reply (sent for a successor record) with a wrong hash.
     CorruptRecoveryAck,
+    /// Close the connection instead of writing the first `AgentPublished` reply. The node has
+    /// already admitted the publication, so only the reply is lost.
+    DropAgentPublished,
 }
 /// The armed fault of one test server, shared by its connection tasks.
 type ReplyFaults = Arc<std::sync::Mutex<Option<ReplyFault>>>;
+/// Consumes the armed drop fault when this reply is the `AgentPublished` the test drops.
+fn drop_reply_fault(faults: &ReplyFaults, response: &CustodyServerFrame) -> bool {
+    let mut armed = faults.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(
+        (*armed, response),
+        (Some(ReplyFault::DropAgentPublished), CustodyServerFrame::AgentPublished { .. })
+    ) {
+        *armed = None;
+        return true;
+    }
+    false
+}
+
 /// Applies the armed fault to one reply, consuming it.
 fn apply_reply_fault(
     faults: &ReplyFaults,
@@ -148,6 +164,9 @@ async fn tls_server(
             super::network::now()?,
         );
         apply_reply_fault(&faults, replacement, &mut response);
+        if drop_reply_fault(&faults, &response) {
+            return Ok(());
+        }
         ramflux_transport::write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?)
             .await?;
     }
