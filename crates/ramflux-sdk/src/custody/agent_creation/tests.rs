@@ -5,29 +5,27 @@
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
 use super::commit::desktop_is_enrolled;
 use super::{
-    first_action, load_publishing,
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
     BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_request,
-    check_sender, commit_approved, expected_scope, primary_sign_decision, receive_plan,
-    resume_request,
+    check_sender, commit_approved, expected_scope, first_action, load_publishing,
+    primary_sign_decision, receive_plan, resume_request,
 };
 use crate::SdkError;
-use crate::custody::vault::agent_master_item::AgentMasterCells;
 use crate::custody::store::GenesisMaterial;
+use crate::custody::vault::agent_master_item::AgentMasterCells;
 use crate::custody::{CreateInput, PrimaryVault, memory_vault::MemoryPrimaryVault};
+use ramflux_crypto::X25519KeyPair;
 use ramflux_crypto::create_device_branch_from_seed;
 use ramflux_crypto::custody::{
     AgentMasterPurpose, AgentMasterRequest, GenesisInput, MasterKey, SelfSigningKey,
     create_genesis, master_anchor, verify_register_decision,
 };
-use ramflux_crypto::X25519KeyPair;
 use ramflux_protocol::agent_profile::decode_agent_profile;
 use ramflux_protocol::custody::{
-    AgentPublishReceipt, CustodyProofAction, CustodyRefusal, custody_action_hash,
-    AgentRegisterProfile, BranchCertificate, Device, DeviceRef, DeviceSet, Envelope,
-    MAX_BRANCH_LEASE_SECONDS, MigrationState, RegisterCancel, RegisterOutcome,
-    decode_register_decision, decode_register_plan, encode_register_cancel, encode_register_plan,
-    object_hash,
+    AgentPublishReceipt, AgentRegisterProfile, BranchCertificate, CustodyProofAction,
+    CustodyRefusal, Device, DeviceRef, DeviceSet, Envelope, MAX_BRANCH_LEASE_SECONDS,
+    MigrationState, RegisterCancel, RegisterOutcome, custody_action_hash, decode_register_decision,
+    decode_register_plan, encode_register_cancel, encode_register_plan, object_hash,
 };
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind, domain};
 use ramflux_protocol::{decode_base64url, encode_base64url};
@@ -991,7 +989,10 @@ fn commit_refuses_before_approval_and_writes_no_account() -> TestResult {
     let desk = MemoryPrimaryVault::default();
     let outcome = begin_for_human(&fixture, &store, &desk, "req-unapproved", None)?;
     let account_id = account_id_of(&store.load("req-unapproved")?.ok_or("record")?)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-unapproved", &capable(), fixture.now + 2).is_err());
+    assert!(
+        commit_approved(&store, &desk, HUMAN, "req-unapproved", &capable(), fixture.now + 2)
+            .is_err()
+    );
     assert!(
         !agent_account_dir(&fixture.root.0, &account_id).exists(),
         "no account directory before a verified approval"
@@ -1012,7 +1013,8 @@ fn commit_writes_the_bundle_once_after_a_verified_approval() -> TestResult {
     let account_id = account_id_of(&authorized)?;
     assert!(!store.committed(&authorized)?, "approval alone is not a commit");
 
-    let committed = commit_approved(&store, &desk, HUMAN, "req-commit", &capable(), fixture.now + 2)?;
+    let committed =
+        commit_approved(&store, &desk, HUMAN, "req-commit", &capable(), fixture.now + 2)?;
     assert_eq!(committed.state, AgentCreationState::PublicationPending);
     assert!(store.account_committed(&account_id)?, "the commit writes the authority");
     let again = commit_approved(&store, &desk, HUMAN, "req-commit", &capable(), fixture.now + 3)?;
@@ -1074,7 +1076,8 @@ fn restart_in_publication_pending_keeps_the_bundle() -> TestResult {
     let phone = phone(&owner_anchor())?;
     let outcome = begin_for_human(&fixture, &store, &desk, "req-restart", None)?;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    let committed = commit_approved(&store, &desk, HUMAN, "req-restart", &capable(), fixture.now + 2)?;
+    let committed =
+        commit_approved(&store, &desk, HUMAN, "req-restart", &capable(), fixture.now + 2)?;
     let reopened = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
     let resumed = resume_request(&reopened, &desk, "req-restart", fixture.now + 4)?;
     assert_eq!(resumed.state, AgentCreationState::PublicationPending);
@@ -1111,7 +1114,9 @@ fn commit_refuses_a_changed_human_head_and_cleans_up_before_the_commit() -> Test
     let outcome = begin_for_human(&fixture, &store, &desk, "req-head", Some(stale.as_str()))?;
     let refs = store.load("req-head")?.ok_or("record")?.vault_refs;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-head", &capable(), fixture.now + 2).is_err());
+    assert!(
+        commit_approved(&store, &desk, HUMAN, "req-head", &capable(), fixture.now + 2).is_err()
+    );
     let refused = store.load("req-head")?.ok_or("record")?;
     assert_eq!(refused.state, AgentCreationState::Refused);
     assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
@@ -1134,10 +1139,12 @@ fn commit_refuses_a_desktop_missing_from_the_authority_and_cleans_up() -> TestRe
     let outcome = begin_for_human_as(&fixture, &store, &desk, "req-desktop", None, &absent)?;
     let refs = store.load("req-desktop")?.ok_or("record")?.vault_refs;
     approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
-    assert!(commit_approved(&store, &desk, HUMAN, "req-desktop", &capable(), fixture.now + 2).is_err());
+    assert!(
+        commit_approved(&store, &desk, HUMAN, "req-desktop", &capable(), fixture.now + 2).is_err()
+    );
     let refused = store.load("req-desktop")?.ok_or("record")?;
     assert_eq!(refused.state, AgentCreationState::Refused);
-    assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
+    assert_eq!(refused.failure, Some(AgentFailure::CreationPairingRequired));
     assert!(
         !agent_account_dir(&fixture.root.0, &account_id_of(&refused)?).exists(),
         "a refused enrollment writes no account directory"
@@ -1176,7 +1183,9 @@ fn desktop_enrollment_needs_a_present_unexpired_sync_branch() -> TestResult {
         "before its not_before the branch is not enrolled"
     );
     let mut revoked = record.clone();
-    if let Some(entry) = revoked.body.devices.iter_mut().find(|entry| entry.device_id == DESKTOP_DEVICE) {
+    if let Some(entry) =
+        revoked.body.devices.iter_mut().find(|entry| entry.device_id == DESKTOP_DEVICE)
+    {
         entry.status = DeviceSetStatus::Revoked;
     }
     assert!(
@@ -1272,8 +1281,7 @@ fn publishing_selects_the_first_action_for_each_account_situation() -> TestResul
         matches!(human_first, CustodyProofAction::Publish { .. }),
         "a human account publishes as before"
     );
-    let agent_first =
-        first_action(PrincipalKind::HeadlessAi, Some(&saved), &agent.publication())?;
+    let agent_first = first_action(PrincipalKind::HeadlessAi, Some(&saved), &agent.publication())?;
     assert!(
         matches!(agent_first, CustodyProofAction::AgentPublish { .. }),
         "a headless account with a saved approval publishes through AgentPublish"
@@ -1413,22 +1421,38 @@ fn receipt_custodian_primary_mismatch_refuses() -> TestResult {
 }
 
 #[test]
-fn receipt_accepted_outside_the_request_window_refuses() -> TestResult {
+fn receipt_accepted_outside_the_decision_window_refuses() -> TestResult {
     let committed = committed_agent("req-window")?;
     let agent = load_committed_account(&committed)?;
     let saved = load_publishing(&committed.fixture.root.0, &agent)?.ok_or("saved approval")?;
     let valid = valid_receipt(&committed, &agent)?;
+    let record = committed.store.load(&committed.request_id)?.ok_or("the record must exist")?;
+    let decision_bytes = record.decision_bytes()?.ok_or("the commit keeps the approval")?;
+    let decision = decode_register_decision(&decision_bytes)?;
+    // Decision r8 item 1: the node's acceptance must be below the decision expiry, and above zero.
     let mut at_expiry = valid.clone();
-    at_expiry.accepted_at = committed.plan.expires_at;
+    at_expiry.accepted_at = decision.body.expires_at;
     assert!(
         saved.check_receipt(&at_expiry, agent.record()).is_err(),
-        "a receipt accepted at the expiry instant is outside the window"
+        "a receipt accepted at the decision expiry instant is outside the window"
     );
-    let mut before_issue = valid;
-    before_issue.accepted_at = committed.plan.issued_at.saturating_sub(1);
+    let mut zero = valid.clone();
+    zero.accepted_at = 0;
     assert!(
-        saved.check_receipt(&before_issue, agent.record()).is_err(),
-        "a receipt accepted before the plan was issued is refused"
+        saved.check_receipt(&zero, agent.record()).is_err(),
+        "a zero acceptance time is refused"
+    );
+    let mut just_before_expiry = valid.clone();
+    just_before_expiry.accepted_at = decision.body.expires_at.saturating_sub(1);
+    assert!(
+        saved.check_receipt(&just_before_expiry, agent.record()).is_ok(),
+        "the node's clock is not compared with the phone's issue time: any acceptance below the expiry is valid"
+    );
+    let mut before_plan_issue = valid;
+    before_plan_issue.accepted_at = committed.plan.issued_at.saturating_sub(1).max(1);
+    assert!(
+        saved.check_receipt(&before_plan_issue, agent.record()).is_ok(),
+        "clock skew: an acceptance before the phone's issue time is still accepted"
     );
     Ok(())
 }

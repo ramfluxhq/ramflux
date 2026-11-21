@@ -57,7 +57,8 @@ pub fn commit_approved(
         AgentCreationState::Expired => return Err(SdkError::CustodyExpired),
         _ => return Err(SdkError::CustodySetupInvalid),
     }
-    let plan = decode_register_plan(&record.plan_bytes()?).map_err(|_| SdkError::CustodySetupInvalid)?;
+    let plan =
+        decode_register_plan(&record.plan_bytes()?).map_err(|_| SdkError::CustodySetupInvalid)?;
     let account = custody_store::load_account(store.root(), human_account_id, now)?;
     let human_record = account.record();
     let human_head = object_hash(human_record).map_err(|_| SdkError::CustodySetupInvalid)?;
@@ -65,9 +66,14 @@ pub fn commit_approved(
     if human_head != plan.human_head_hash
         || *human_primary != plan.human_primary
         || human_record.body.account_anchor != plan.owner_anchor
-        || !desktop_is_enrolled(human_record, &plan.desktop, now)
     {
-        finish_refused(store, vault, record)?;
+        finish_refused(store, vault, record, AgentFailure::CreationPrimaryChanged)?;
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    // Decision r8 item 2: a desktop that is no longer an enrolled paired device refuses with the
+    // pairing token, not the primary token.
+    if !desktop_is_enrolled(human_record, &plan.desktop, now) {
+        finish_refused(store, vault, record, AgentFailure::CreationPairingRequired)?;
         return Err(SdkError::CustodySetupInvalid);
     }
     let refs = StagedRefs::for_record(store, &record, &plan)?;
@@ -150,7 +156,11 @@ fn agent_profile_bytes(
 /// Desktop enrollment (contract 7.2 step 4): the sending desktop must still be an active device of
 /// the human account, with a branch that is valid at `now` and holds the `sync` capability. Checked
 /// in the same compare-and-set as the human head and the primary.
-pub(super) fn desktop_is_enrolled(record: &Envelope<DeviceSet>, desktop: &DeviceRef, now: u64) -> bool {
+pub(super) fn desktop_is_enrolled(
+    record: &Envelope<DeviceSet>,
+    desktop: &DeviceRef,
+    now: u64,
+) -> bool {
     record.body.devices.iter().any(|device| {
         device.device_id == desktop.device_id
             && device.device_epoch == desktop.device_epoch
@@ -208,15 +218,9 @@ fn finish_refused(
     store: &AgentCreationStore,
     vault: &dyn PrimaryVault,
     record: AgentCreationRecord,
+    failure: AgentFailure,
 ) -> Result<(), SdkError> {
-    finish(
-        store,
-        vault,
-        record,
-        AgentCreationState::Refused,
-        Some(AgentFailure::CreationPrimaryChanged),
-    )
-    .map(|_| ())
+    finish(store, vault, record, AgentCreationState::Refused, Some(failure)).map(|_| ())
 }
 
 /// Every genesis value of an approved plan. Nothing is recomputed from the clock or the device.

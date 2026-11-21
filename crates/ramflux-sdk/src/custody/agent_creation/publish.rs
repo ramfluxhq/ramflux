@@ -66,7 +66,10 @@ pub(crate) fn first_action(
 }
 
 impl AgentPublishing {
-    fn from_record(store: AgentCreationStore, record: AgentCreationRecord) -> Result<Self, SdkError> {
+    fn from_record(
+        store: AgentCreationStore,
+        record: AgentCreationRecord,
+    ) -> Result<Self, SdkError> {
         if !matches!(
             record.state,
             AgentCreationState::PublicationPending
@@ -75,17 +78,19 @@ impl AgentPublishing {
         ) {
             return Err(SdkError::CustodySetupInvalid);
         }
-        let plan = decode_register_plan(&record.plan_bytes()?).map_err(|_| SdkError::CustodySetupInvalid)?;
-        if register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)? != record.request_hash {
+        let plan = decode_register_plan(&record.plan_bytes()?)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        if register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)?
+            != record.request_hash
+        {
             return Err(SdkError::CustodySetupInvalid);
         }
         let decision_bytes = record.decision_bytes()?.ok_or(SdkError::CustodySetupInvalid)?;
         let decision =
             decode_register_decision(&decision_bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
-        let profile_bytes = decode_base64url(
-            record.profile_b64.as_deref().ok_or(SdkError::CustodySetupInvalid)?,
-        )
-        .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let profile_bytes =
+            decode_base64url(record.profile_b64.as_deref().ok_or(SdkError::CustodySetupInvalid)?)
+                .map_err(|_| SdkError::CustodySetupInvalid)?;
         let profile =
             decode_agent_profile(&profile_bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
         Ok(Self { store, record, plan, decision, profile })
@@ -120,8 +125,11 @@ impl AgentPublishing {
             && receipt.profile_hash == profile_hash
             && receipt.custodian_head_hash == self.plan.human_head_hash
             && receipt.custodian_primary == self.plan.human_primary
-            && receipt.accepted_at >= self.plan.issued_at
-            && receipt.accepted_at < self.plan.expires_at;
+            // Decision r8 item 1: `accepted_at` is the node's clock, so it is not compared with the
+            // phone's issue time. The node refuses an expired decision, so its acceptance is below
+            // the decision expiry.
+            && receipt.accepted_at > 0
+            && receipt.accepted_at < self.decision.body.expires_at;
         if matches { Ok(()) } else { Err(SdkError::CustodySetupInvalid) }
     }
 
