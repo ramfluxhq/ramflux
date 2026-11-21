@@ -5,9 +5,15 @@
 //!
 //! Scans the client crates' non-test sources for URL literals and known vendor hosts, and
 //! the client manifests for vendor dependencies and default features.
+//! Syntax is parsed without compiling: cfg(test)-only items and module files are excluded,
+//! uncertain feature/platform configurations are scanned, and input errors fail closed.
+//! Macro literals are inspected recursively; expansions, includes, name resolution and
+//! addresses assembled at runtime are outside this guard's proof. Resource identifiers
+//! are allowed only in exact schema-builder positions backed by verified embedded JSON.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+
+mod endpoint_guard;
 
 /// Crates that are linked into a client host. Node services under `apps/` are not clients.
 const CLIENT_SOURCE_ROOTS: &[&str] = &[
@@ -75,45 +81,6 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn is_test_source(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    text.contains("/tests/")
-        || text.contains("_tests/")
-        || text.ends_with("_tests.rs")
-        || text.ends_with("/tests.rs")
-        || text.contains("fixture")
-        || text.contains("itest")
-}
-
-/// Production lines of one file: comment lines and everything from the first `#[cfg(test)]`
-/// on are dropped (test modules sit at the end of a file in this workspace).
-fn production_lines(source: &str) -> Vec<(usize, &str)> {
-    let mut lines = Vec::new();
-    for (index, line) in source.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("#[cfg(test)]") {
-            break;
-        }
-        if trimmed.starts_with("//") {
-            continue;
-        }
-        lines.push((index + 1, line));
-    }
-    lines
-}
-
 /// Hosts of every `scheme://host` literal in `line`.
 fn url_hosts(line: &str) -> Vec<&str> {
     let mut hosts = Vec::new();
@@ -163,48 +130,17 @@ fn host_is_not_a_service(host: &str) -> bool {
         || matches!(lower.as_str(), "example.com" | "example.org" | "example.net")
 }
 
-/// Exact identifiers of vendored schemas; HTTP/filesystem resolution is disabled there.
-/// These are resource names, not dial targets. Do not exempt the host or other files.
-fn embedded_schema_identifier(file: &Path, line: &str) -> bool {
-    if !file.ends_with("crates/ramflux-protocol/src/a2ui/schema.rs") {
-        return false;
-    }
-    matches!(
-        line.trim(),
-        "const BASE: &str = \"https://a2ui.org/specification/v1_0/catalog.json\";"
-            | ".with_base_uri(\"https://a2ui.org/specification/v1_0/validation.json\")"
-            | "\"https://a2ui.org/specification/v1_0/common_types.json\","
-            | "\"https://a2ui.org/specification/v1_0/catalogs/basic/common_types.json\","
-    )
-}
-
 #[test]
 fn client_sources_name_no_central_or_vendor_endpoint() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    for source_root in CLIENT_SOURCE_ROOTS {
-        let dir = root.join(source_root);
-        assert!(dir.is_dir(), "client source root is missing: {source_root}");
-        rust_files(&dir, &mut files);
-    }
-    assert!(files.len() > 50, "the scan found too few client sources: {}", files.len());
+    endpoint_guard::embedded_resources(&root).expect("test: embedded resource contract");
+    let sources =
+        endpoint_guard::sources(&root).expect("test: all sources must be readable and parseable");
+    assert!(sources.len() > 50, "the scan found too few client sources: {}", sources.len());
     let mut violations = Vec::new();
-    for file in files.iter().filter(|file| !is_test_source(file)) {
-        let Ok(source) = fs::read_to_string(file) else { continue };
-        for (number, line) in production_lines(&source) {
-            let lower = line.to_ascii_lowercase();
-            for fragment in FORBIDDEN_HOST_FRAGMENTS {
-                if lower.contains(fragment) {
-                    violations
-                        .push(format!("{}:{number}: vendor host `{fragment}`", file.display()));
-                }
-            }
-            for host in url_hosts(line) {
-                if !host_is_not_a_service(host) && !embedded_schema_identifier(file, line) {
-                    violations.push(format!("{}:{number}: endpoint `{host}`", file.display()));
-                }
-            }
-        }
+    for (file, source) in sources {
+        let errors = endpoint_guard::scan(&file, &source).expect("test: source must be decidable");
+        violations.extend(errors.into_iter().map(|error| format!("{}:{error}", file.display())));
     }
     assert!(violations.is_empty(), "compiled-in endpoints:\n{}", violations.join("\n"));
 }
@@ -214,7 +150,7 @@ fn client_manifests_have_no_vendor_dependency_and_no_default_feature() {
     let root = workspace_root();
     for manifest in CLIENT_MANIFESTS {
         let path = root.join(manifest);
-        let text = fs::read_to_string(&path).expect("test: client manifest must be readable");
+        let text = endpoint_guard::read(&path).expect("test: client manifest must be readable");
         let mut in_dependencies = false;
         let mut default_seen = false;
         for line in text.lines() {
@@ -278,23 +214,194 @@ fn dependency_guard_distinguishes_exact_short_names_from_crypto_packages() {
 }
 
 #[test]
-fn embedded_schema_exception_is_exact_and_file_scoped() {
-    let schema = Path::new("crates/ramflux-protocol/src/a2ui/schema.rs");
-    let other = Path::new("crates/ramflux-sdk/src/gateway.rs");
-    for line in [
-        "const BASE: &str = \"https://a2ui.org/specification/v1_0/catalog.json\";",
-        ".with_base_uri(\"https://a2ui.org/specification/v1_0/validation.json\")",
-        "\"https://a2ui.org/specification/v1_0/common_types.json\",",
-        "\"https://a2ui.org/specification/v1_0/catalogs/basic/common_types.json\",",
+fn scanner_catches_production_after_test_items_and_in_macro_arguments() {
+    for source in [
+        r#"#[cfg(test)] fn helper() {} const URL: &str = "https://updates.vendor.com/v1";"#,
+        r#"mod outer { #[cfg(test)] fn helper() {} const URL: &str = "https://updates.vendor.com/v1"; }"#,
+        r#"#[cfg(test)] mod tests {} endpoint!({ [ ("https://updates.vendor.com/v1") ] });"#,
+        r####"const URL: &str = r###"https://updates.vendor.com/v1"###;"####,
+        r#"const URL: &str = "https://updates.\x76endor.com/v1";"#,
+        r#"const URL: &[u8] = b"https://updates.vendor.com/v1";"#,
+        r#"/* #[cfg(test)] */ const URL: &str = "https://updates.vendor.com/v1";"#,
+        r#"#[cfg_attr(not(test), endpoint("https://updates.vendor.com/v1"))] fn run() {}"#,
+        r#"#[cfg(test)] fn helper() {} #[cfg(not(test))] fn run() { endpoint!("https://updates.vendor.com/v1"); }"#,
     ] {
-        assert!(embedded_schema_identifier(schema, line));
-        assert!(!embedded_schema_identifier(other, line));
+        let errors = endpoint_guard::scan(Path::new("src/fixture_itest_tests.rs"), source)
+            .expect("test: valid regression source");
+        assert!(!errors.is_empty(), "production endpoint escaped: {source}");
     }
-    for line in [
-        "fetch(\"https://a2ui.org/specification/v1_0/catalog.json\");",
-        "\"https://a2ui.org/telemetry\",",
-        "\"https://vendor.example.com/\",",
+}
+
+#[test]
+fn scanner_cfg_excludes_only_proven_test_only_syntax() {
+    for cfg in ["test", "all(test, feature = \"x\")", "not(not(test))", "any()"] {
+        let source = format!("#[cfg({cfg})] const URL: &str = \"https://updates.vendor.com/v1\";");
+        assert!(
+            endpoint_guard::scan(Path::new("src/main.rs"), &source)
+                .expect("test: valid cfg")
+                .is_empty(),
+            "test-only syntax scanned: {cfg}"
+        );
+    }
+    for cfg in ["not(test)", "any(test, feature = \"x\")", "all()", "target_os = \"linux\""] {
+        let source = format!("#[cfg({cfg})] const URL: &str = \"https://updates.vendor.com/v1\";");
+        assert!(
+            !endpoint_guard::scan(Path::new("src/main.rs"), &source)
+                .expect("test: valid cfg")
+                .is_empty(),
+            "possible production syntax excluded: {cfg}"
+        );
+    }
+    for source in [
+        r#"#[cfg_attr(not(test), cfg(test))] const URL: &str = "https://updates.vendor.com/v1";"#,
+        r#"fn run() { #[cfg(test)] let url = "https://updates.vendor.com/v1"; }"#,
+        r#"#![cfg(test)] const URL: &str = "https://updates.vendor.com/v1";"#,
     ] {
-        assert!(!embedded_schema_identifier(schema, line));
+        assert!(
+            endpoint_guard::scan(Path::new("src/main.rs"), source)
+                .expect("test: valid test-only syntax")
+                .is_empty(),
+            "test-only syntax scanned: {source}"
+        );
+    }
+    for source in [
+        r#"#[cfg_attr(test, cfg(test))] const URL: &str = "https://updates.vendor.com/v1";"#,
+        r#"#[cfg_attr(feature = "x", cfg(test))] const URL: &str = "https://updates.vendor.com/v1";"#,
+    ] {
+        assert!(
+            !endpoint_guard::scan(Path::new("src/main.rs"), source)
+                .expect("test: valid uncertain syntax")
+                .is_empty(),
+            "uncertain syntax excluded: {source}"
+        );
+    }
+    for source in ["fn broken(", "#[cfg(unknown(test))] fn f() {}", "#[cfg_attr(test)] fn f() {}"] {
+        let result = endpoint_guard::scan(Path::new("src/main.rs"), source);
+        assert!(
+            result.is_err() || result.is_ok_and(|errors| !errors.is_empty()),
+            "undecidable source passed: {source}"
+        );
+    }
+}
+
+#[test]
+fn schema_identifiers_are_exact_and_usage_scoped() {
+    let schema = Path::new("crates/ramflux-protocol/src/a2ui/schema.rs");
+    for source in [
+        r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json";"#,
+        r#"fn f() { jsonschema::options().with_base_uri("https://a2ui.org/specification/v1_0/validation.json"); }"#,
+        r#"fn f() { jsonschema::options().with_resource("https://a2ui.org/specification/v1_0/common_types.json", jsonschema::Resource::from_contents(common.clone())); }"#,
+        r#"fn f() { jsonschema::options().with_resource("https://a2ui.org/specification/v1_0/catalogs/basic/common_types.json", jsonschema::Resource::from_contents(common.clone())); }"#,
+    ] {
+        assert!(
+            endpoint_guard::scan(schema, source).expect("test: identifier syntax").is_empty(),
+            "embedded identifier rejected: {source}"
+        );
+        assert!(
+            !endpoint_guard::scan(Path::new("src/other.rs"), source)
+                .expect("test: identifier syntax")
+                .is_empty(),
+            "identifier allowed outside schema owner"
+        );
+    }
+    for source in [
+        r#"fn f() { fetch("https://a2ui.org/specification/v1_0/catalog.json"); }"#,
+        r#"fn f() { jsonschema::options().with_base_uri("https://a2ui.org/telemetry"); }"#,
+        r#"fn f() { jsonschema::options().with_resource("https://a2ui.org/specification/v1_0/common_types.json", jsonschema::Resource::from_contents(other.clone())); }"#,
+        r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json"; const URL: &str = "https://a2ui.org/telemetry";"#,
+    ] {
+        assert!(
+            !endpoint_guard::scan(schema, source)
+                .expect("test: negative identifier syntax")
+                .is_empty(),
+            "unregistered identifier or endpoint escaped: {source}"
+        );
+    }
+}
+
+#[test]
+fn source_reads_and_traversal_fail_closed() {
+    let dir = tempfile::TempDir::new().expect("test: isolated source directory");
+    assert!(
+        endpoint_guard::read(&dir.path().join("missing.rs")).is_err(),
+        "missing source skipped"
+    );
+    assert!(
+        endpoint_guard::rust_files(&dir.path().join("missing"), &mut Vec::new(), 0).is_err(),
+        "missing source directory skipped"
+    );
+}
+
+#[test]
+fn module_graph_excludes_tests_without_trusting_filenames() {
+    let dir = tempfile::TempDir::new().expect("test: isolated module tree");
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).expect("test: source root");
+    std::fs::write(src.join("lib.rs"),
+        "#[cfg(test)] mod fixtures; mod production_tests; #[cfg(test)] mod shared; mod live { #[path = \"../shared.rs\"] mod shared; }")
+        .expect("test: module declarations");
+    std::fs::create_dir(src.join("live")).expect("test: inline module directory");
+    for file in ["fixtures.rs", "production_tests.rs", "shared.rs", "orphan_fixture.rs"] {
+        std::fs::write(src.join(file), "const URL: &str = \"https://updates.vendor.com/v1\";")
+            .expect("test: module source");
+    }
+    let sources =
+        endpoint_guard::sources_under(dir.path(), &["src"]).expect("test: valid source graph");
+    let names: Vec<_> = sources
+        .iter()
+        .filter_map(|(file, _)| file.file_name())
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.iter().any(|name| name == "fixtures.rs"), "proven test-only file scanned");
+    for name in ["production_tests.rs", "shared.rs", "orphan_fixture.rs"] {
+        assert!(
+            names.iter().any(|file| file == name),
+            "production or orphan source hidden: {name}"
+        );
+    }
+    std::fs::write(src.join("lib.rs"), "mod missing;").expect("test: unresolved module fixture");
+    assert!(
+        endpoint_guard::sources_under(dir.path(), &["src"]).is_err(),
+        "unresolved module source silently skipped"
+    );
+}
+
+#[test]
+fn embedded_resource_contract_rejects_data_registration_and_resolver_drift() {
+    let root = workspace_root();
+    let paths = [
+        "crates/ramflux-protocol/Cargo.toml",
+        "crates/ramflux-protocol/src/a2ui/schema.rs",
+        "crates/ramflux-protocol/vendor/a2ui/specification/v1_0/json/common_types.json",
+        "crates/ramflux-protocol/catalogs/rf-card-v1.json",
+    ];
+    for (index, from, to) in [
+        (0, "default-features = false", "default-features = true"),
+        (1, ".with_resource(BASE,", ".with_resource(OTHER,"),
+        (1, "../../catalogs/rf-card-v1.json", "../../catalogs/other.json"),
+        (
+            2,
+            "https://a2ui.org/specification/v1_0/common_types.json",
+            "https://a2ui.org/unknown.json",
+        ),
+        (3, "urn:ramflux:catalog:rf-card:1.0", "urn:unknown:catalog"),
+    ] {
+        let dir = tempfile::TempDir::new().expect("test: isolated resource contract");
+        for (file_index, relative) in paths.iter().enumerate() {
+            let mut text =
+                endpoint_guard::read(&root.join(relative)).expect("test: embedded source");
+            if file_index == index {
+                assert!(text.contains(from), "contract regression mutation does not match: {from}");
+                text = text.replace(from, to);
+            }
+            let destination = dir.path().join(relative);
+            std::fs::create_dir_all(destination.parent().expect("test: fixture parent"))
+                .expect("test: fixture directories");
+            std::fs::write(destination, text).expect("test: fixture data");
+        }
+        assert!(
+            endpoint_guard::embedded_resources(dir.path()).is_err(),
+            "embedded contract drift accepted: {from} -> {to}"
+        );
     }
 }
