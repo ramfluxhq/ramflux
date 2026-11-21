@@ -11,142 +11,20 @@
 //! have no read method on the vault; their removal is checked through the record's `vault_refs`,
 //! which is emptied only when every delete, master included, succeeded.
 use super::super::test_support::{
-    DesktopSteps, OwnRouter, Pair, TestNode, TestResult, create_body, decide_body, now, pair,
-    root_of, saved_receipt, store_of, vault_of,
+    DesktopSteps, OwnRouter, Pair, TestNode, TestResult, assert_items_gone, assert_items_present,
+    assert_no_account, assert_retry_creates_no_second_anchor, desk_create, desk_record,
+    now, phone_decides, pair, root_of, saved_receipt, store_of, vault_of,
 };
-use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
-    BeginOutcome, advance_one, begin, load_publishing, resume_request,
-};
+use crate::custody::agent_creation::{AgentCreationState, AgentFailure, advance_one, load_publishing, resume_request};
 use crate::custody::network_tests::ReplyFault;
-use crate::custody::vault::AGENT_MASTER_PREFIX;
-use crate::custody::{CustodyConnection, PrimaryVault, load_account};
+use crate::custody::CustodyConnection;
 use ramflux_protocol::custody::{
-    CustodyServerFrame, REGISTER_TTL_SECONDS, RegisterPlan, decode_register_plan,
+    CustodyServerFrame, REGISTER_TTL_SECONDS, decode_register_plan,
 };
-use std::path::Path;
 
 fn scenario(case: impl std::future::Future<Output = TestResult>) -> TestResult {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(case)))
-}
-
-/// Creates a request on the desktop with `vault` and returns its saved desktop record.
-fn desk_create(pair: &Pair, vault: &dyn PrimaryVault, at: u64) -> TestResult<AgentCreationRecord> {
-    let laptop_root = root_of(&pair.laptop)?;
-    let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
-    let status = pair.laptop.client.agent_create(vault, &create_body(Some(true)), at)?;
-    store_of(&laptop_root, &laptop_id)?
-        .load(&status.request_id)?
-        .ok_or_else(|| "test: the desktop saved the request".into())
-}
-
-/// Carries the desktop's plan to the phone, has the phone decide, and carries the decision back.
-async fn phone_decides(
-    pair: &mut Pair,
-    router: &OwnRouter,
-    record: &AgentCreationRecord,
-    approve: bool,
-    at: u64,
-) -> TestResult {
-    router.route(&mut pair.laptop, &mut pair.phone, 1).await?;
-    let phone_vault = vault_of(&pair.phone.client)?;
-    let hash = record.request_hash.clone();
-    let fixture = pair.phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?;
-    fixture.vault.arm_agent_decision(&hash)?;
-    pair.phone.client.agent_creation_decide(
-        phone_vault.as_ref(),
-        &decide_body(&record.request_id, &hash, Some(approve)),
-        at,
-    )?;
-    router.route(&mut pair.phone, &mut pair.laptop, 2).await
-}
-
-/// Whether one pending item of a request is still in the vault (master items are not probed).
-fn item_present(vault: &dyn PrimaryVault, plan: &RegisterPlan, reference: &str) -> bool {
-    if reference.starts_with(AGENT_MASTER_PREFIX) {
-        false
-    } else if reference.starts_with("agent-provisioning:") {
-        vault.load_provisioning_secret(reference).is_ok()
-    } else if reference.starts_with("branch:") {
-        vault.load_branch(reference, &plan.principal_id, &plan.agent_device).is_ok()
-    } else {
-        vault.load_primary(reference).is_ok()
-    }
-}
-
-/// The request holds its pending items before it closes.
-fn assert_items_present(vault: &dyn PrimaryVault, plan: &RegisterPlan, before: &[String]) {
-    assert!(
-        before.iter().any(|reference| item_present(vault, plan, reference)),
-        "the open request holds its pending items"
-    );
-}
-
-/// Every pending item of a closed request is gone, and the record names none.
-fn assert_items_gone(
-    vault: &dyn PrimaryVault,
-    plan: &RegisterPlan,
-    before: &[String],
-    after: &AgentCreationRecord,
-) {
-    for reference in before {
-        assert!(!item_present(vault, plan, reference), "pending item {reference} is deleted");
-    }
-    assert!(after.vault_refs.is_empty(), "the closed request names no pending item");
-}
-
-/// No agent account exists: no directory and no account entry on the desktop root.
-fn assert_no_account(root: &Path, agent_id: &str, at: u64) {
-    assert!(!root.join("custody_accounts").join(agent_id).exists(), "no agent account directory");
-    assert!(load_account(root, agent_id, at).is_err(), "no agent account entry");
-}
-
-/// `begin` again with the request's own id, rebuilt from its stored plan. The machine returns the
-/// saved request and creates no second anchor.
-fn begin_again(
-    store: &AgentCreationStore,
-    vault: &dyn PrimaryVault,
-    record: &AgentCreationRecord,
-    at: u64,
-) -> TestResult<BeginOutcome> {
-    let plan = decode_register_plan(&record.plan_bytes()?)?;
-    let input = BeginInput {
-        request_id: plan.request_id.clone(),
-        owner_anchor: plan.owner_anchor.clone(),
-        human_head_hash: plan.human_head_hash.clone(),
-        human_primary: plan.human_primary.clone(),
-        desktop: plan.desktop.clone(),
-        principal_id: plan.principal_id.clone(),
-        display_name: plan.display_name.clone(),
-        profile: plan.profile.clone(),
-        primary_branch_expires_at: plan.branch_expires_at,
-    };
-    Ok(begin(store, vault, &input, at)?)
-}
-
-/// The retry with the same operation id returns the saved plan, keeps the account identifier and
-/// the request hash: no second anchor is created.
-fn assert_retry_creates_no_second_anchor(
-    store: &AgentCreationStore,
-    vault: &dyn PrimaryVault,
-    record: &AgentCreationRecord,
-    at: u64,
-) -> TestResult {
-    let outcome = begin_again(store, vault, record, at)?;
-    let kept = store.load(&record.request_id)?.ok_or("test: the record is kept")?;
-    assert_eq!(outcome.plan_bytes, record.plan_bytes()?, "the retry returns the saved plan");
-    assert_eq!(kept.account_id, record.account_id, "the retry names the same account");
-    assert_eq!(kept.request_hash, record.request_hash, "the retry keeps the request hash");
-    Ok(())
-}
-
-/// The desktop record of a request, read back from its store.
-fn desk_record(pair: &Pair, request_id: &str) -> TestResult<AgentCreationRecord> {
-    let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
-    store_of(&root_of(&pair.laptop)?, &laptop_id)?
-        .load(request_id)?
-        .ok_or_else(|| "test: the desktop record".into())
 }
 
 #[test]
