@@ -8,7 +8,7 @@ use super::{
 use crate::{AccountDbKey, BackupDatabase, StorageError};
 use ramflux_protocol::custody::{
     DeviceRef,
-    pairing::full_transfer::{RecordHeader, read_record_header, write_record_header},
+    pairing::full_transfer::{RecordHeader, read_record_header},
 };
 use rusqlite::{Connection, params};
 use std::{
@@ -66,23 +66,19 @@ fn retain(
     owner: &str,
     bytes: &[u8],
 ) -> Result<(), StorageError> {
-    if bytes.len() > 262_144 {
+    if bytes.len() > super::record_spool::RECORD_LIMIT {
         return Err(invalid());
     }
     let mut input = bytes;
-    let header =
-        Header(read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?);
-    let rule = compiled(&header.0.family)?;
-    super::copy_full_scalar_record(rule, &header.0, &mut input, &mut std::io::sink())?;
+    let header = read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?;
+    let rule = compiled(&header.family)?;
+    let candidate = super::record_spool::Candidate::input(db, rule, header, &mut input)?;
     if !input.is_empty() {
         return Err(invalid());
     }
-    let changed = db.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record WHERE full_union_record.record=excluded.record", params![nonce.as_slice(),owner,header.0.family,header.0.key,bytes])?;
-    if changed != 1 {
-        return Err(StorageError::PairingField("TransferConflict"));
-    }
-    Ok(())
+    candidate.retain_union(nonce, owner, false)
 }
+
 impl Contributions {
     pub(super) fn capture(
         path: &Path,
@@ -131,9 +127,11 @@ impl Contributions {
                         return Err(invalid());
                     }
                 }
-                let mut record = Zeroizing::new(Vec::new());
-                super::write_full_scalar_sql_row(rule, row, &mut *record)?;
-                retain(&tx, &value.nonce, &value.owners[1], &record)?;
+                super::record_spool::Candidate::sql(&tx, rule, row)?.retain_union(
+                    &value.nonce,
+                    &value.owners[1],
+                    false,
+                )?;
                 count = count.checked_add(1).ok_or_else(invalid)?;
             }
             if count != family.source_rows.0 {
@@ -162,12 +160,12 @@ impl Contributions {
         let mut input = stage.forward_reader(hash)?;
         while let Some(header) = read_record_header(&mut input).map_err(|_| invalid())? {
             stage.require_io()?;
-            let header = Header(header);
-            let rule = compiled(&header.0.family)?;
-            let mut record = Zeroizing::new(Vec::new());
-            write_record_header(&mut *record, &header.0).map_err(|_| invalid())?;
-            super::copy_full_scalar_record(rule, &header.0, &mut input, &mut *record)?;
-            retain(&tx, &self.nonce, &self.owners[0], &record)?;
+            let rule = compiled(&header.family)?;
+            super::record_spool::Candidate::input(&tx, rule, header, &mut input)?.retain_union(
+                &self.nonce,
+                &self.owners[0],
+                false,
+            )?;
         }
         let encoding = self.root(&tx, private, stage)?;
         tx.commit()?;

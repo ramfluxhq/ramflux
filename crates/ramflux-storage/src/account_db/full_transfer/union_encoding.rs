@@ -13,20 +13,14 @@ use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::{DeviceRef, pairing::full_transfer::read_record_header};
 use rusqlite::params;
 use std::io::Write;
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroizing;
 
 pub(super) const SCHEMA:&str="
-CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS full_union_input(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key));
+CREATE TABLE IF NOT EXISTS full_union_input(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key));
 CREATE TABLE IF NOT EXISTS full_union_encoding(generation_nonce BLOB PRIMARY KEY CHECK(length(generation_nonce)=32),records INTEGER NOT NULL CHECK(records>=0),total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),chunks_root BLOB NOT NULL CHECK(length(chunks_root)=32));";
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
-}
-struct PrivateHeader(ramflux_protocol::custody::pairing::full_transfer::RecordHeader);
-impl Drop for PrivateHeader {
-    fn drop(&mut self) {
-        self.0.key.zeroize();
-    }
 }
 
 /// Exact data operands for one committed qualified stream. No semantic receipt or approval.
@@ -175,7 +169,7 @@ pub(super) fn visit(
     writer: &mut impl Write,
     guard: &SourceGuard,
 ) -> Result<(u64, u64), StorageError> {
-    let mut statement=db.prepare("SELECT owner,family,key,record FROM full_union_record WHERE generation_nonce=?1 ORDER BY owner COLLATE BINARY,family COLLATE BINARY,key COLLATE BINARY")?;
+    let mut statement=db.prepare("SELECT owner,family,key,rowid,length(record) FROM full_union_record WHERE generation_nonce=?1 ORDER BY owner COLLATE BINARY,family COLLATE BINARY,key COLLATE BINARY")?;
     let mut rows = statement.query(params![nonce.as_slice()])?;
     let mut records = 0_u64;
     let mut total = 0_u64;
@@ -184,32 +178,29 @@ pub(super) fn visit(
         let owner = row.get_ref(0)?.as_str().map_err(|_| invalid())?;
         let family = row.get_ref(1)?.as_str().map_err(|_| invalid())?;
         let key = row.get_ref(2)?.as_str().map_err(|_| invalid())?;
-        let bytes = row.get_ref(3)?.as_blob().map_err(|_| invalid())?;
-        if bytes.len() > 262_144 || !owners.iter().any(|allowed| allowed == owner) {
+        let length = row.get::<_, u64>(4)?;
+        if !owners.iter().any(|allowed| allowed == owner) {
             return Err(invalid());
         }
         let rule = compiled(family)?;
-        let mut input = bytes;
-        let header = PrivateHeader(
-            read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?,
-        );
-        if header.0.key != key {
-            return Err(invalid());
-        }
-        super::copy_full_scalar_record(rule, &header.0, &mut input, &mut std::io::sink())?;
-        if !input.is_empty() {
-            return Err(invalid());
-        }
+        let mut input = super::record_spool::checked_blob(
+            db,
+            "full_union_record",
+            row.get(3)?,
+            length,
+            rule,
+            key,
+        )?;
         records = records.checked_add(1).ok_or_else(invalid)?;
         let size = 4_u64
             .checked_add(owner.len() as u64)
-            .and_then(|n| n.checked_add(bytes.len() as u64))
+            .and_then(|n| n.checked_add(length))
             .ok_or_else(invalid)?;
         total =
             total.checked_add(size).filter(|n| i64::try_from(*n).is_ok()).ok_or_else(invalid)?;
         writer.write_all(&u32::try_from(owner.len()).map_err(|_| invalid())?.to_be_bytes())?;
         writer.write_all(owner.as_bytes())?;
-        writer.write_all(bytes)?;
+        super::record_spool::copy_blob(&mut input, length, writer, guard)?;
     }
     guard.require()?;
     Ok((records, total))

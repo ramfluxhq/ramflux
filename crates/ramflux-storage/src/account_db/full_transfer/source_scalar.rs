@@ -2,22 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Encrypted, fixed-owner base-row spool. SQLite key order is the protocol's encoded order.
+use super::record_spool as blob;
 use super::source_owner::SourceContext;
 use super::{
     FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog, write_full_scalar_sql_row,
 };
 use crate::{StorageError, database::Connection};
-use ramflux_protocol::custody::pairing::full_transfer::{Disposition, read_record_header};
+use ramflux_protocol::custody::pairing::full_transfer::Disposition;
 use rusqlite::{OptionalExtension as _, params};
-use std::io::{Read as _, Seek as _, SeekFrom, Write};
-mod blob;
-use zeroize::{Zeroize as _, Zeroizing};
-struct PrivateHeader(ramflux_protocol::custody::pairing::full_transfer::RecordHeader);
-impl Drop for PrivateHeader {
-    fn drop(&mut self) {
-        self.0.key.zeroize();
-    }
-}
+use std::io::Write;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS source_scalar_family(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,rule_hash BLOB NOT NULL CHECK(length(rule_hash)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL,PRIMARY KEY(snapshot_id,family));
@@ -272,40 +265,15 @@ fn write_sorted<W: Write>(
         source_guard.require()?;
         let key = row.get_ref(0)?.as_str().map_err(|_| invalid())?;
         let length = row.get::<_, u64>(2)?;
-        if length == 0 || length > blob::RECORD_LIMIT as u64 {
-            return Err(invalid());
-        }
-        let mut input = db.blob_open("main", "source_scalar_row", "record", row.get(1)?, true)?;
-        if input.len() as u64 != length {
-            return Err(invalid());
-        }
-        let header = PrivateHeader(
-            read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?,
-        );
-        if header.0.key != key {
-            return Err(invalid());
-        }
-        super::copy_full_scalar_record(rule, &header.0, &mut input, &mut std::io::sink())?;
-        if input.stream_position()? != length {
-            return Err(invalid());
-        }
-        input.seek(SeekFrom::Start(0))?;
-        let mut buffer = Zeroizing::new([0_u8; 16_384]);
-        let mut copied = 0_u64;
-        loop {
-            source_guard.require()?;
-            let amount = input.read(buffer.as_mut_slice())?;
-            if amount == 0 {
-                break;
-            }
-            let bytes = buffer.get_mut(..amount).ok_or_else(invalid)?;
-            writer.write_all(bytes)?;
-            bytes.zeroize();
-            copied = copied.checked_add(amount as u64).ok_or_else(invalid)?;
-        }
-        if copied != length {
-            return Err(invalid());
-        }
+        let mut input = super::record_spool::checked_blob(
+            db,
+            "source_scalar_row",
+            row.get(1)?,
+            length,
+            rule,
+            key,
+        )?;
+        super::record_spool::copy_blob(&mut input, length, &mut writer, source_guard)?;
         total.records = total.records.checked_add(1).ok_or_else(invalid)?;
         total.encoded_bytes = total.encoded_bytes.checked_add(length).ok_or_else(invalid)?;
     }

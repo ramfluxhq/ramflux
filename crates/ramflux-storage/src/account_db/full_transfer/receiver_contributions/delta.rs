@@ -3,7 +3,7 @@
 
 //! Successor records change only A's contribution; B's independent rows stay independent.
 use super::*;
-use ramflux_protocol::custody::pairing::full_transfer::RecordOp;
+use ramflux_protocol::custody::pairing::full_transfer::{RecordOp, write_record_header};
 use rusqlite::OptionalExtension as _;
 
 struct Pending<'a>(&'a mut BackupDatabase, bool);
