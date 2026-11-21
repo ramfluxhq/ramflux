@@ -926,13 +926,11 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
         SdkError::Search(_)
-        | SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::CustodyModeDowngrade
         | SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
-        | SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected) => {
+        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
             RamfluxErrorCode::PermissionDenied
         }
         SdkError::CustodyRandomUnavailable
@@ -951,15 +949,10 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodyNetwork(_)
         | SdkError::IdentityRootMissing
         | SdkError::OwnDeviceAuthorizationRefreshFailed(_) => RamfluxErrorCode::AuthFailed,
-        SdkError::Storage(error) => storage_error_code(error),
+        SdkError::Storage(error) => storage_sdk_error_code(error),
         SdkError::Transport(error) => transport_error_code(error),
-        SdkError::ContactUnavailable(source)
-            if crate::error_policy::security_code(source).is_some() =>
-        {
-            RamfluxErrorCode::AuthFailed
-        }
-        SdkError::ContactUnavailable(_)
-        | SdkError::GatewayWriterBusy
+        SdkError::ContactUnavailable(source) => contact_unavailable_code(source),
+        SdkError::GatewayWriterBusy
         | SdkError::NoNodeSelected
         | SdkError::NodeUnreachable { .. }
         | SdkError::NodeTimeout { .. }
@@ -1016,6 +1009,28 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::PairRecoveryRequired
         | SdkError::PairingField(_)
         | SdkError::PairingCode(_) => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
+// Storage errors: the two SDK-visible refusals first, every other storage error through
+// `storage_error_code`. Behaviour is the same as the arms of `sdk_error_code` it replaces.
+fn storage_sdk_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode {
+    match error {
+        ramflux_storage::StorageError::AccountSchemaTooNew { .. } => {
+            RamfluxErrorCode::UnsupportedVersion
+        }
+        ramflux_storage::StorageError::AuthorizationRejected => RamfluxErrorCode::PermissionDenied,
+        other => storage_error_code(other),
+    }
+}
+
+// A contact lookup failure with a security cause is an authentication failure; any other one
+// is a transport-level unavailability.
+fn contact_unavailable_code(source: &SdkError) -> RamfluxErrorCode {
+    if crate::error_policy::security_code(source).is_some() {
+        RamfluxErrorCode::AuthFailed
+    } else {
+        RamfluxErrorCode::TransportUnavailable
     }
 }
 
