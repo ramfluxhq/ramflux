@@ -433,3 +433,53 @@ async fn supervisor_publishes_the_rebind(
     drop(node);
     Ok(())
 }
+
+/// AGENT-IDENTITY-01 E0 unlock guard (decision r21), passphrase route: `account.unlock` with the
+/// agent's REAL passphrase is refused with `rebind_pending` for a pending (R) and a committed (C)
+/// rebind, and the account is not opened. The guard runs before the actor is started, so the
+/// passphrase is never checked for a paused agent.
+#[tokio::test(flavor = "current_thread")]
+async fn passphrase_unlock_refuses_a_paused_agent_with_its_real_passphrase() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let nodes = node_store(vec![node(DEFAULT_NODE, true)], Some(DEFAULT_NODE));
+            let setup = authorized_request("req-unlock-passphrase", &nodes)?;
+            let record = setup
+                .store
+                .load("req-unlock-passphrase")?
+                .ok_or("the creation request is stored")?;
+            let passphrase = agent_passphrase(&setup.desk, &record)?;
+            let supervisor = crate::bus::supervisor::Supervisor::new(setup.config.clone())?;
+            let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
+            let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
+            for binding in [RebindBinding::RebindPending, RebindBinding::Committed] {
+                setup.store.save_rebind(&RebindEntry {
+                    agent_account_id: setup.account_id.clone(),
+                    binding,
+                    bound_primary: DeviceRef {
+                        account_anchor: setup.fixture.anchor.clone(),
+                        device_id: "desktop-device".into(),
+                        device_epoch: 1,
+                    },
+                    master_range: 2,
+                    request_id: None,
+                    failure: None,
+                })?;
+                let frame = crate::LocalBusFrame::request(
+                    format!("unlock-{binding:?}"),
+                    Some(setup.account_id.clone()),
+                    "account",
+                    "account.unlock",
+                    serde_json::json!({ "passphrase": passphrase.as_str() }),
+                );
+                let refused = supervisor.request(frame, &connection).await;
+                assert!(
+                    matches!(refused, Err(SdkError::AgentCreationRefused("rebind_pending"))),
+                    "{binding:?}: the passphrase unlock must be refused by the guard"
+                );
+                assert!(!supervisor.account_is_open(&setup.account_id), "{binding:?}: not opened");
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await
+}

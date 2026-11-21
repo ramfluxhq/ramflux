@@ -372,6 +372,9 @@ impl Supervisor {
             return Err(SdkError::CustodySetupInvalid);
         }
         let id = request_account_id(request)?.to_owned();
+        // AGENT-IDENTITY-01 E0 unlock guard (decision r21): the credential unlock of a paused agent
+        // is refused before the provider is asked for the passphrase.
+        self.refuse_paused_agent(&id)?;
         self.require_restore_ready(&id, true)?;
         let secret =
             super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
@@ -521,6 +524,11 @@ impl Supervisor {
     ) -> Result<ActorResponse, SdkError> {
         self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
+        if request.method == "account.unlock" {
+            // AGENT-IDENTITY-01 E0 unlock guard (decision r21): a passphrase unlock of a paused agent
+            // is refused before the account actor is started or any secret is read.
+            self.refuse_paused_agent(&id)?;
+        }
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
         }

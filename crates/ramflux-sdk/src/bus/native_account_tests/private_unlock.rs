@@ -114,4 +114,75 @@ mod tests {
     }))
     .await
     }
+
+    /// AGENT-IDENTITY-01 E0 unlock guard (decision r21), credential route: a private bus unlock of an
+    /// account whose rebind is pending (R) is refused with `rebind_pending`, and the provider is never
+    /// asked for the passphrase. The paused state is planted in the inventory the advance step reads
+    /// (`custody_accounts/<human>/agent_creation/rebind/<agent>.json`); the account itself is the
+    /// ordinary native account created above, so only the rebind inventory differs.
+    #[tokio::test]
+    async fn private_bus_unlock_refuses_a_paused_agent_before_asking_for_the_passphrase() -> Result
+    {
+        use crate::custody::agent_creation::{AgentCreationStore, RebindBinding, RebindEntry};
+        use ramflux_protocol::custody::DeviceRef;
+        crate::bus::credentials::contract_tests::deadline(Box::pin(async {
+            let root = tempfile::tempdir()?;
+            let now = crate::custody::network_now()?;
+            let vault = Arc::new(TestVault::default());
+            let mut ceremony = CreationCeremony::begin(root.path(), input("private-native"), now)?;
+            let phrase = ceremony.show_once()?;
+            let positions = ceremony.hidden_challenge()?;
+            let born = ceremony.confirm_with_passphrase(
+                &words(&phrase, positions)?,
+                vault.as_ref(),
+                now,
+                b"native-private-data-canary",
+            )?;
+            let anchor = born.record().body.account_anchor.clone();
+            drop((born, phrase));
+            AgentCreationStore::open(root.path().to_path_buf(), "private-native")?.save_rebind(
+                &RebindEntry {
+                    agent_account_id: "private-native".into(),
+                    binding: RebindBinding::RebindPending,
+                    bound_primary: DeviceRef {
+                        account_anchor: anchor,
+                        device_id: "desktop-device".into(),
+                        device_epoch: 1,
+                    },
+                    master_range: 1,
+                    request_id: None,
+                    failure: None,
+                },
+            )?;
+            let socket = root.path().join("private-paused.sock");
+            let (stop, receiver) = watch::channel(false);
+            let flow = async {
+                let _stop = Stop(stop);
+                // The retrying ordinary connect waits until the server has bound the socket.
+                let _ordinary = connect(&socket).await?;
+                let input = Arc::new(Input { calls: AtomicUsize::new(0), refuse: false });
+                let mut private = PairingBusClient::connect(&socket, input.clone()).await?;
+                let error = private
+                    .request(Some("private-native".into()), "account", "account.unlock", json!({}))
+                    .await
+                    .err()
+                    .ok_or("the paused agent must not unlock")?
+                    .to_string();
+                assert!(
+                    error.contains("rebind_pending"),
+                    "the typed refusal names the rebind: {error}"
+                );
+                assert_eq!(input.calls.load(Ordering::Relaxed), 0, "the provider is never asked");
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            let (server, result) = tokio::join!(
+                crate::serve_local_bus_until(LocalBusConfig::new(&socket, root.path()), receiver),
+                flow
+            );
+            server?;
+            result?;
+            Ok(())
+        }))
+        .await
+    }
 }
