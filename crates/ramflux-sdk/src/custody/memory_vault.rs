@@ -208,6 +208,10 @@ impl PrimaryVault for MemoryPrimaryVault {
     ) -> Result<(), SdkError> {
         Self::approve_migration_once_for_test(self, account, request_id)
     }
+    #[cfg(feature = "itest-memory-vault")]
+    fn approve_agent_decision_once_for_test(&self, plan_hash: &str) -> Result<(), SdkError> {
+        Self::approve_agent_decision_once_for_test(self, plan_hash)
+    }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
         let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         entries.remove(reference);

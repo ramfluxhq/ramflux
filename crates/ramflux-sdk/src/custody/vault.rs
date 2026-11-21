@@ -71,6 +71,19 @@ pub trait PrimaryVault: Send + Sync {
             })),
         })
     }
+    /// Arm one signature for the exact plan hash in the default-off integration fixture only.
+    /// # Errors
+    /// Refuses unavailable fixture providers, an armed approval or a consumed plan hash.
+    #[cfg(feature = "itest-memory-vault")]
+    fn approve_agent_decision_once_for_test(&self, _plan_hash: &str) -> Result<(), SdkError> {
+        Err(SdkError::LocalBusRefused {
+            code: "AgentApprovalUnavailable".into(),
+            message: "agent decision fixture approval is unavailable".into(),
+            body: Box::new(serde_json::json!({
+                "reason_code": "agent_approval_unavailable"
+            })),
+        })
+    }
     /// Durable class recorded with new authority after a successful store.
     fn vault_class(&self) -> &'static str {
         VAULT_CLASS_PROTECTED
