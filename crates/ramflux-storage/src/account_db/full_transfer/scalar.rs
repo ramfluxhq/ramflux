@@ -90,11 +90,12 @@ pub fn copy_full_scalar_record(
                 | CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlMacSubkeys
                 | CodecRule::SqlDeviceRef
+                | CodecRule::SqlQualifiedDeviceKey
                 | CodecRule::SqlEnum { .. }
         ) && *kind != CellType::Null
         {
             let count = usize::try_from(length.0).map_err(|_| invalid())?;
-            let mut bytes = Zeroizing::new([0; 512]);
+            let mut bytes = Zeroizing::new([0; 2048]);
             let value = bytes.get_mut(..count).ok_or_else(invalid)?;
             reader.read_exact(value)?;
             validate_sql_value(codec, *kind, value)?;
@@ -148,6 +149,7 @@ fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<()
             CodecRule::Scalar { .. }
                 | CodecRule::SqlMacSubkeys
                 | CodecRule::SqlDeviceRef
+                | CodecRule::SqlQualifiedDeviceKey
                 | CodecRule::SqlBytes { .. }
                 | CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlI64 { .. }
@@ -273,6 +275,7 @@ fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result
     let valid = match codec {
         CodecRule::SqlMacSubkeys => kind == CellType::Bytes && length == 192,
         CodecRule::SqlDeviceRef => kind == CellType::Utf8 && (1..=512).contains(&length),
+        CodecRule::SqlQualifiedDeviceKey => kind == CellType::Utf8 && (1..=2048).contains(&length),
         CodecRule::SqlBytes { length: expected, nullable } => {
             (kind == CellType::Bytes && length == expected.0)
                 || (kind == CellType::Null && *nullable && length == 0)
@@ -302,6 +305,17 @@ fn validate_sql_value(codec: &CodecRule, kind: CellType, bytes: &[u8]) -> Result
     validate_sql_header(codec, kind, bytes.len() as u64)?;
     if kind == CellType::Null {
         return Ok(());
+    }
+    if matches!(codec, CodecRule::SqlQualifiedDeviceKey) {
+        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+        let (root, device) = ramflux_protocol::parse_qualified_device_id(text)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        ramflux_protocol::validate_device_name(&device).map_err(|_| invalid())?;
+        let raw = Zeroizing::new(ramflux_protocol::decode_base64url(&root).map_err(|_| invalid())?);
+        if raw.len() != 32 || ramflux_protocol::encode_base64url(&raw) != root {
+            return Err(invalid());
+        }
     }
     if matches!(codec, CodecRule::SqlDeviceRef) {
         super::super::mac_subkeys::full::decode_source_ref(bytes)?;

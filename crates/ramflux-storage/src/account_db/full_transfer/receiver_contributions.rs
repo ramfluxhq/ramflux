@@ -208,3 +208,24 @@ impl Contributions {
         })
     }
 }
+
+// Only explicitly registered content owners can remove an absent contribution. Excluded
+// local execution, imported MAC denial capabilities and restrictions are never deleted here.
+fn removable(family: &str) -> bool {
+    family == "sql/object_payload_dependency"
+        || super::monotonic::owner(family).is_some_and(super::monotonic::Owner::removable)
+}
+fn remove_materialized(
+    private: &BackupDatabase,
+    header: &RecordHeader,
+    cells: &super::fixed_union::Cells,
+) -> Result<(), StorageError> {
+    if let Some(owner) = super::monotonic::owner(&header.family) {
+        owner.remove(&private.db, cells)
+    } else if header.family == "sql/object_payload_dependency" {
+        private.db.execute("DELETE FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",params![cells.text(0)?,cells.text(1)?])?;
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}

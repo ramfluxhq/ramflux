@@ -149,3 +149,17 @@ clearing B's independent restriction. This intentionally differs from restoring 
 single ordered local decision history: the new primary must obtain fresh local
 consent to lift an independently retained denial. Import does not synthesize a
 stamp from a different decision or perform a user consent action.
+
+Contact delivery history is keyed by the request and a canonical root-qualified
+recipient key; a bare device name is refused. The recipient-material hash remains
+immutable for that key and conflicting hashes refuse TransferConflict. Repeated
+matching evidence chooses the latest submitted_at, without importing its work
+queue or conferring device authority. The ordinary sender still verifies fresh
+recipient material before using this dedup evidence.
+
+The encrypted union ledger keeps original input rows apart from normalized output.
+For nonrestrictive owners the expected row is reconstructed from those originals;
+a source delta or current-B absence removes only that contributor. In particular,
+a normalized maximum timestamp is never relabeled as B's original evidence.
+Restrictions remain monotonic. Both delta and B-refresh paths use only compiled
+removal owners and apply restrictive families before content.

@@ -119,3 +119,27 @@ fn pairing_full_sql_metadata_rejects_unknown_same_width_token_before_output() ->
     );
     Ok(())
 }
+
+#[test]
+fn full_sql_qualified_delivery_key_never_accepts_a_bare_or_malformed_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    let rule = crate::account_db::full_transfer::full_transfer_catalog()
+        .iter()
+        .find(|rule| rule.id == "sql/contact_request_delivery")
+        .ok_or("test: delivery owner absent")?;
+    for recipient in [
+        "phone".to_owned(),
+        "root~e30".to_owned(),
+        ramflux_protocol::qualified_device_id("not-a-root", "phone")?,
+    ] {
+        let mut output = Vec::new();
+        let result=db.query_row("SELECT 'request' AS request_id,?1 AS recipient_identity,?2 AS material_hash,100 AS submitted_at",rusqlite::params![recipient,ramflux_protocol::encode_base64url([92;32])],|row|Ok(write_full_scalar_sql_row(rule,row,&mut output)))?;
+        assert!(
+            matches!(result, Err(StorageError::PairingField("UnsupportedRecord"))),
+            "test: unqualified or malformed delivery identity was encoded"
+        );
+        assert!(output.is_empty(), "test: invalid source emitted provisional delivery evidence");
+    }
+    Ok(())
+}

@@ -162,9 +162,10 @@ pub(super) fn validate_columns(
             | CodecRule::RequiresOwner { cell_type, .. }
             | CodecRule::Generated { cell_type, .. } => Some(cell_type),
             CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
-            CodecRule::SqlBase64 { .. } | CodecRule::SqlText { .. } | CodecRule::SqlEnum { .. } => {
-                Some(CellType::Utf8)
-            }
+            CodecRule::SqlQualifiedDeviceKey
+            | CodecRule::SqlBase64 { .. }
+            | CodecRule::SqlText { .. }
+            | CodecRule::SqlEnum { .. } => Some(CellType::Utf8),
             CodecRule::SqlI64 { .. } => Some(CellType::I64),
             _ => None,
         };

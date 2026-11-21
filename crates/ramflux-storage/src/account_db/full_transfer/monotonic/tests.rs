@@ -352,3 +352,72 @@ fn full_contact_unrelated_private_decision_cannot_mint_dv() -> TestResult {
         conflict: true,
     })
 }
+
+#[test]
+fn full_contact_delivery_keeps_qualified_recipient_and_material_evidence() -> TestResult {
+    use crate::account_db::full_transfer::receiver_copy::owner_tests::{
+        delivery_recipient, seed_delivery,
+    };
+    run(Case {
+        name: "contact-delivery",
+        seed: |a, b| {
+            seed_delivery(a, "shared", 500)?;
+            seed_delivery(b, "shared", 100)?;
+            seed_delivery(a, "source", 200)?;
+            seed_delivery(b, "target", 300)
+        },
+        before: None,
+        inspect: |private, b| {
+            let recipient = delivery_recipient()?;
+            let mut query=private.db.prepare("SELECT request_id,recipient_identity,material_hash,submitted_at FROM contact_request_delivery ORDER BY request_id")?;
+            let rows = query
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected =
+                [("shared", 500), ("source", 200), ("target", 300)].map(|(id, stamp)| {
+                    (
+                        id.to_owned(),
+                        recipient.storage_key().to_owned(),
+                        encode_base64url([92; 32]),
+                        stamp,
+                    )
+                });
+            assert_eq!(
+                rows, expected,
+                "test: delivery union changed qualified recipient/material or lost independent history"
+            );
+            assert!(
+                b.contact_request_delivered("target", &recipient, &encode_base64url([92; 32]))?,
+                "test: transfer changed B delivery reader"
+            );
+            Ok(())
+        },
+        conflict: false,
+    })
+}
+#[test]
+fn full_contact_delivery_same_recipient_different_material_refuses_before_dv() -> TestResult {
+    use crate::account_db::full_transfer::receiver_copy::owner_tests::seed_delivery;
+    run(Case {
+        name: "contact-delivery-material-fork",
+        seed: |a, b| {
+            seed_delivery(a, "shared", 100)?;
+            seed_delivery(b, "shared", 200)?;
+            b.connection.execute(
+                "UPDATE contact_request_delivery SET material_hash=?1",
+                params![encode_base64url([93; 32])],
+            )?;
+            Ok(())
+        },
+        before: None,
+        inspect: |_, _| Ok(()),
+        conflict: true,
+    })
+}

@@ -17,6 +17,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 pub(super) const SCHEMA:&str="
 CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS full_union_input(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS full_union_encoding(generation_nonce BLOB PRIMARY KEY CHECK(length(generation_nonce)=32),records INTEGER NOT NULL CHECK(records>=0),total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),chunks_root BLOB NOT NULL CHECK(length(chunks_root)=32));";
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")

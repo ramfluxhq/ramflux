@@ -78,6 +78,8 @@ pub enum CodecRule {
     SqlMacSubkeys,
     /// Closed canonical public `DeviceRef` JSON text (at most 512 bytes), not opaque JSON.
     SqlDeviceRef,
+    /// Canonical root-qualified public device lookup key; never an authority object.
+    SqlQualifiedDeviceKey,
     /// Closed five-column message-erasure projection, interpreted by its semantic owner.
     SqlMessageTombstone,
     /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
@@ -126,6 +128,7 @@ pub(super) fn scalar_sql_codec(codec: &CodecRule) -> bool {
         codec,
         CodecRule::SqlMacSubkeys
             | CodecRule::SqlDeviceRef
+            | CodecRule::SqlQualifiedDeviceKey
             | CodecRule::SqlBytes { .. }
             | CodecRule::SqlBase64 { .. }
             | CodecRule::SqlI64 { .. }
@@ -292,6 +295,7 @@ impl FamilyRule {
                     field.codec,
                     CodecRule::SqlMacSubkeys
                         | CodecRule::SqlDeviceRef
+                        | CodecRule::SqlQualifiedDeviceKey
                         | CodecRule::SqlBytes { .. }
                         | CodecRule::SqlBase64 { .. }
                         | CodecRule::SqlI64 { .. }
@@ -321,6 +325,7 @@ impl FamilyRule {
                 CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
                 CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlDeviceRef
+                | CodecRule::SqlQualifiedDeviceKey
                 | CodecRule::SqlMessageTombstone
                 | CodecRule::SqlText { .. }
                 | CodecRule::SqlEnum { .. } => Some(CellType::Utf8),
@@ -437,7 +442,10 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
-        CodecRule::SqlMacSubkeys | CodecRule::SqlDeviceRef | CodecRule::SqlMessageTombstone => {
+        CodecRule::SqlMacSubkeys
+        | CodecRule::SqlDeviceRef
+        | CodecRule::SqlQualifiedDeviceKey
+        | CodecRule::SqlMessageTombstone => {
             if depth != 1 {
                 return Err(unsupported());
             }
@@ -608,6 +616,7 @@ macro_rules! table_rule {
     (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
     (@version "receive_erased_input",$mode:ident) => { U64(2) };
     (@version "contact_request_authority_floor",$mode:ident) => { U64(2) };
+    (@version "contact_request_delivery",$mode:ident) => { U64(2) };
     (@version "contact_link_decision",$mode:ident) => { U64(2) };
     (@version "contact_request_decision",$mode:ident) => { U64(2) };
     (@version "contact_message_fence_retention",$mode:ident) => { U64(2) };

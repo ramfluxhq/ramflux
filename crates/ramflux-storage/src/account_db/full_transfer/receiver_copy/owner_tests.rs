@@ -92,3 +92,26 @@ pub(in crate::account_db::full_transfer) fn run(case: Case) -> TestResult {
     );
     Ok(())
 }
+
+pub(in crate::account_db::full_transfer) fn delivery_recipient()
+-> TestResult<ramflux_crypto::RootQualifiedDeviceRef> {
+    let root = ramflux_crypto::create_identity_root("delivery-peer", [91; 32]);
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(&root, "phone")?)
+}
+pub(in crate::account_db::full_transfer) fn seed_delivery(
+    db: &AccountDb,
+    id: &str,
+    stamp: i64,
+) -> TestResult {
+    let recipient = delivery_recipient()?;
+    db.connection.execute(
+        "INSERT INTO contact_request_delivery VALUES(?1,?2,?3,?4)",
+        rusqlite::params![
+            id,
+            recipient.storage_key(),
+            ramflux_protocol::encode_base64url([92; 32]),
+            stamp
+        ],
+    )?;
+    Ok(())
+}

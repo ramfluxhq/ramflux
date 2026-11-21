@@ -23,62 +23,79 @@ pub(super) struct Owner {
     family: &'static str,
     names: &'static [&'static str],
     keys: &'static [usize],
+    restrictive: bool,
     merge: Merge,
 }
 static OWNERS: &[Owner] = &[
     Owner {
         family: "sql/account_erasure_generation",
         names: &["singleton", "generation"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::Maxima(&[1]),
     },
     Owner {
         family: "sql/contact_request_authority_floor",
         names: &["root", "epoch", "record_hash", "until"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::EpochHash { epoch: 1, hash: 2, until: 3 },
     },
     Owner {
         family: "sql/receive_erased_input",
         names: &["selector", "bundle_id", "expires_at"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::Maxima(&[2]),
     },
     Owner {
         family: "sql/contact_message_request_fence",
         names: &["sender_identity", "message_id"],
+        restrictive: true,
         keys: &[0, 1],
         merge: Merge::Immutable,
     },
     Owner {
         family: "sql/contact_message_fence_retention",
         names: &["sender_identity", "message_id", "until"],
+        restrictive: true,
         keys: &[0, 1],
         merge: Merge::Maxima(&[2]),
     },
     Owner {
         family: "sql/contact_request_retirement",
         names: &["root", "direction", "next_at"],
+        restrictive: true,
         keys: &[0, 1],
         merge: Merge::Maxima(&[2]),
     },
     Owner {
         family: "sql/contact_request_fence",
         names: &["root", "state", "until"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::Denial { state: 1, until: 2 },
     },
     Owner {
         family: "sql/contact_link_decision",
         names: &["link_id", "state", "decided_at"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::Decision { state: 1, stamp: 2 },
     },
     Owner {
         family: "sql/contact_request_decision",
         names: &["root", "state", "decided_at"],
+        restrictive: true,
         keys: &[0],
         merge: Merge::Decision { state: 1, stamp: 2 },
+    },
+    Owner {
+        family: "sql/contact_request_delivery",
+        names: &["request_id", "recipient_identity", "material_hash", "submitted_at"],
+        restrictive: false,
+        keys: &[0, 1],
+        merge: Merge::Maxima(&[3]),
     },
 ];
 pub(super) fn owner(family: &str) -> Option<&'static Owner> {
@@ -102,7 +119,7 @@ impl Owner {
         rule.require_typed_codec()?;
         let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
         if rule.id != self.family
-            || !rule.restrictive
+            || rule.restrictive != self.restrictive
             || rule.cells.len() != self.names.len()
             || !matches!(rule.selector,FamilySelector::Table(value) if value==table)
             || rule.key.len() != self.keys.len()
@@ -223,6 +240,34 @@ impl Owner {
         })??;
         Ok(bytes)
     }
+    pub(super) fn removable(&self) -> bool {
+        !self.restrictive
+    }
+    pub(super) fn remove(&self, db: &Connection, value: &Cells) -> Result<(), StorageError> {
+        if !self.removable() {
+            return Err(invalid());
+        }
+        let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
+        let predicate = self
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(position, index)| {
+                self.names
+                    .get(*index)
+                    .map(|name| format!("\"{name}\" IS ?{}", position + 1))
+                    .ok_or_else(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" AND ");
+        let values =
+            self.keys.iter().map(|index| value.value(*index)).collect::<Result<Vec<_>, _>>()?;
+        db.execute(
+            &format!("DELETE FROM \"{table}\" WHERE {predicate}"),
+            params_from_iter(values),
+        )?;
+        Ok(())
+    }
     fn current(
         &self,
         db: &Connection,
@@ -267,6 +312,9 @@ impl Owner {
             Some(bytes) => self.resolve(&self.decode(rule, &bytes)?, incoming)?,
             None => incoming.clone(),
         };
+        self.store(db, &merged)
+    }
+    fn store(&self, db: &Connection, merged: &Cells) -> Result<(), StorageError> {
         let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
         let keys = self
             .keys
@@ -311,7 +359,8 @@ impl Owner {
         rule: &FamilyRule,
         key: &str,
     ) -> Result<(), StorageError> {
-        let mut query=db.prepare("SELECT record FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3 ORDER BY owner")?;
+        let table = if self.restrictive { "full_union_record" } else { "full_union_input" };
+        let mut query=db.prepare(&format!("SELECT record FROM {table} WHERE generation_nonce=?1 AND family=?2 AND key=?3 ORDER BY owner"))?;
         let mut rows = query.query(params![nonce.as_slice(), self.family, key])?;
         let mut expected = None;
         while let Some(row) = rows.next()? {
@@ -322,6 +371,12 @@ impl Owner {
             });
         }
         let expected = expected.ok_or_else(invalid)?;
+        // Nonrestrictive rows are reconstructed from the retained original contributors.
+        // Normalizing a previous union into B's original would otherwise preserve A's
+        // metadata after an A-only absence. Restrictions deliberately stay monotonic.
+        if !self.restrictive {
+            self.store(&private.db, &expected)?;
+        }
         let bytes = self.encode(db, rule, &expected)?;
         let actual = self.current(&private.db, rule, &expected)?.ok_or_else(conflict)?;
         if bytes.as_slice() != actual.as_slice() {
@@ -338,6 +393,7 @@ pub(super) fn normalize(
     nonce: &[u8; 32],
     private: &BackupDatabase,
 ) -> Result<(), StorageError> {
+    db.execute("INSERT OR IGNORE INTO full_union_input SELECT * FROM full_union_record WHERE generation_nonce=?1",[nonce.as_slice()])?;
     // A fence with no retained deadline must not acquire another device's expiry.
     // Retention rows without their own fence have no denial provenance either. Refuse
     // both inconsistent shapes rather than silently shortening a durable restriction.

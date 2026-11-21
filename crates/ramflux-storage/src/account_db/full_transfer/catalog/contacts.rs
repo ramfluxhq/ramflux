@@ -264,7 +264,7 @@ pub(super) const RULE_16: FamilyRule = table_rule!(
     "sql/contact_request_delivery",
     "contact_request_delivery",
     Transfer,
-    Immutable,
+    Revision,
     false,
     ["request_id", "recipient_identity"],
     [
@@ -274,34 +274,24 @@ pub(super) const RULE_16: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_request_delivery",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(256), nullable: false }
         ),
-        (
-            "recipient_identity",
-            Utf8,
-            false,
-            Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
-        ),
+        ("recipient_identity", Utf8, false, Transfer, Immutable, CodecRule::SqlQualifiedDeviceKey),
         (
             "material_hash",
             Utf8,
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "submitted_at",
             I64,
             false,
             Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CursorMax,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

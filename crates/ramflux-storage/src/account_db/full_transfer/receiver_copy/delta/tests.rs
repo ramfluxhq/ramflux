@@ -3,6 +3,7 @@
 
 //! Real encrypted immutable cuts -> signed delta -> independent private A/B contributions.
 use super::*;
+use crate::account_db::full_transfer::receiver_copy::owner_tests::seed_delivery;
 use crate::account_db::full_transfer::receiver_projection::tests::{db, input, seed};
 use ramflux_crypto::custody::pairing::{FullResumeRecord, PairingRole};
 use ramflux_protocol::{custody::pairing::full_transfer::*, encode_base64url};
@@ -149,6 +150,9 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
         .execute("INSERT INTO object_payload_dependency VALUES(?1,?2)", params![h(51), h(52)])?;
     b.connection
         .execute("INSERT INTO object_payload_dependency VALUES(?1,?2)", params![h(11), h(12)])?;
+    seed_delivery(&a, "shared", 500)?;
+    seed_delivery(&b, "shared", 100)?;
+    seed_delivery(&a, "source-only", 200)?;
     let (record, base, bytes) = input(&a)?;
     let mut source = a.create_full_stage_for_test(source_record(&record), 604_900)?;
     let mut target = b.create_full_stage_for_test(record, 604_900)?;
@@ -165,6 +169,7 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     )?;
     a.connection
         .execute("INSERT INTO object_payload_dependency VALUES(?1,?2)", params![h(61), h(62)])?;
+    a.connection.execute("DELETE FROM contact_request_delivery", [])?;
     a.connection.execute("UPDATE account_erasure_generation SET generation=10", [])?;
     let next_id = h(71);
     capture(&source, &a, &aroot, 1, &next_id)?;
@@ -184,6 +189,24 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     };
     assert_eq!(manifest_hash, hash);
     assert_union(&copy, &b)?;
+    {
+        let private = BackupDatabase::open_full_receiver_copy(
+            &copy.scratch.path.join("private.db"),
+            &copy.key,
+        )?;
+        let mut query = private.db.prepare(
+            "SELECT request_id,submitted_at FROM contact_request_delivery ORDER BY request_id",
+        )?;
+        let rows = query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            rows,
+            vec![("shared".to_owned(), 100)],
+            "test: source absence removed B's original evidence or retained source-only metadata/stamp"
+        );
+    }
+
     drop(copy);
     drop(source);
     drop(target);
