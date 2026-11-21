@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+crates/ramflux-protocol/src/a2ui/action.rs | from_wire_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
+crates/ramflux-protocol/src/a2ui/rpc.rs | from_wire_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
+crates/ramflux-protocol/src/a2ui/schema.rs | build | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | function | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | rpc_message | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | rpc_message | 2 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | schemas | 1 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/schema.rs | schemas | 2 | E | excluded=embedded immutable catalog or upstream schema configuration, not signed-envelope ingress
+crates/ramflux-protocol/src/a2ui/state.rs | from_checkpoint_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
+crates/ramflux-protocol/src/a2ui/wire.rs | decode_canonical | 1 | A | strict=parse_i_json; admission=original canonical Surface frame bytes
+crates/ramflux-protocol/src/a2ui/wire.rs | decode_canonical | 2 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
+crates/ramflux-protocol/src/a2ui/wire.rs | from_wire_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui/wire.rs#decode_canonical#1
+crates/ramflux-protocol/src/call_resolution.rs | validate_call_resolution_frame | 1 | A | strict=parse_i_json; admission=closed correlated call decision ingress
+crates/ramflux-protocol/src/call_resolution.rs | validate_call_resolution_frame | 2 | A | strict=parse_i_json; admission=closed correlated call decision ingress
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 7 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 8 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 9 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 10 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 11 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 12 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 13 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 14 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 15 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 16 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 17 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 18 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 19 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 20 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 21 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 22 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 23 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 24 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 25 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/client_discovery.rs | client_discovery_signing_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/custody/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/custody/mod.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded decrypted original-byte full-data packet before root/census/staging validation
+crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=selected bounded full-data packet after original-byte kind and control limit check
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded secret v3 StartFull control before HPKE setup and lease-opening validation
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/bootstrap.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded original v3-only bootstrap kind before closed control decoder and private opening use
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/claim.rs | kind | 1 | A | strict=parse_i_json_secret; admission=bounded original full claim/proof kind before the closed typed decoder and role admission
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/control.rs | decode_control | 1 | A | strict=parse_i_json_secret; admission=bounded original-byte A1 control before authenticated lease role admission
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=owned endpoint full-data Send after bounded strict borrowed preflight
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=borrowed original full-data Send bytes within charged node body budget
+crates/ramflux-protocol/src/custody/pairing/mod.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=original-byte I-JSON and closed typed pairing schemas; no secret Value tree
+crates/ramflux-protocol/src/custody/pairing/sas_context.rs | require_context_version | 1 | A | strict=parse_i_json_secret; admission=bounded original-byte I-JSON version check before the selected closed SAS context decoder
+crates/ramflux-protocol/src/device_address.rs | parse_qualified_device_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/dm_fs_v3/frames.rs | from_json | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/group_device_roots.rs | from_event | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/group_state.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 7 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/home_migration/control.rs | try_from | 8 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/i_json.rs | decode_signed_ack_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_ack_ijson#1
+crates/ramflux-protocol/src/i_json.rs | decode_signed_envelope_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_envelope_ijson#1
+crates/ramflux-protocol/src/i_json.rs | decode_signed_nack_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_nack_ijson#1
+crates/ramflux-protocol/src/i_json.rs | parse_i_json | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/i_json.rs | parse_i_json | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/i_json.rs | parse_i_json_secret | 1 | E | excluded=generic owned-secret decoder primitive validates original bytes before typed deserialization; callers register admission
+crates/ramflux-protocol/src/i_json.rs | validate_i_json_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/identity_keys.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/identity_profile_v2.rs | decode_profile_document | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/identity_profile_v2.rs | decode_profile_document | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/original_header/edited.rs | check | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
+crates/ramflux-protocol/src/message/original_header/edited.rs | check | 2 | C | admission=crates/ramflux-protocol/src/message/original_header/edited.rs#check#1
+crates/ramflux-protocol/src/message/outer/compact.rs | compact_cryptobox_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/outer/mod.rs | cryptobox_from_sidecar | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 1 | A | strict=parse_i_json; admission=A ingress boundary
+crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 2 | E | excluded=from_value over the value already strictly parsed by parse_i_json at ordinal 1
+crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_candidate_sidecar_in | 1 | A | strict=parse_i_json; admission=A ingress boundary
+crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_sidecar_value | 1 | E | excluded=from_value over a sidecar value already strictly parsed by parse_i_json in decode_candidate_sidecar_in
+crates/ramflux-protocol/src/message/protojson.rs | from_protojson | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/scanner.rs | validate_string | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/tasks/event.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/username_directory/codec.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/username_directory/codec.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/wake_v2.rs | parse_signed_call_intent_v1 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/wake_v2.rs | parse_signed_wake_v2 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

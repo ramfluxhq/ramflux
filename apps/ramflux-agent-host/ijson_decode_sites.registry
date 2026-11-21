@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+apps/ramflux-agent-host/src/bus.rs | request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/checkpoint.rs | load | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-agent-host/src/config.rs | load | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/participant.rs | mentions_self | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/provisioning.rs | import_provisioning_bundle | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/prx.rs | request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/prx.rs | restore | 1 | E | excluded=agent-host PRX response decoding; outside the signed-envelope closure
+apps/ramflux-agent-host/src/runner_output.rs | recover_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/runner_surface.rs | derive_action_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "tests/configured_shutdown.rs", call = "method::recv_timeout", duration = "remaining", count = 1, owner = "tests", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "tests/configured_shutdown.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( if mode = = \"churn\" { 300 } else { 10 } )", count = 1, owner = "tests", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "tests/configured_shutdown.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 10 )", count = 4, owner = "tests", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "tests/configured_shutdown.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 25 )", count = 1, owner = "tests", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "tests/configured_shutdown.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 30 )", count = 1, owner = "tests", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "tests/configured_shutdown.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 5 )", count = 2, owner = "tests", reason = "Bounded TLS child exit and admitted-request marker polling; no correctness delay", expires = "2026-12-12" },
+]
