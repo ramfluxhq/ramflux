@@ -374,7 +374,7 @@ impl Supervisor {
         let id = request_account_id(request)?.to_owned();
         // AGENT-IDENTITY-01 E0 unlock guard (decision r21): the credential unlock of a paused agent
         // is refused before the provider is asked for the passphrase.
-        self.refuse_paused_agent(&id)?;
+        self.refuse_unusable_agent(&id)?;
         self.require_restore_ready(&id, true)?;
         let secret =
             super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
@@ -527,7 +527,7 @@ impl Supervisor {
         if request.method == "account.unlock" {
             // AGENT-IDENTITY-01 E0 unlock guard (decision r21): a passphrase unlock of a paused agent
             // is refused before the account actor is started or any secret is read.
-            self.refuse_paused_agent(&id)?;
+            self.refuse_unusable_agent(&id)?;
         }
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
@@ -679,7 +679,7 @@ impl Supervisor {
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         // Stage E0 (decision r20): an agent whose rebind is pending or committed is never
         // activated or unlocked; the rebind publication owns its connection.
-        self.refuse_paused_agent(id)?;
+        self.refuse_unusable_agent(id)?;
         self.start_event_router();
         let existing = self.accounts.borrow().get(id).cloned();
         let actor = if let Some(actor) = existing {

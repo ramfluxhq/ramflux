@@ -8,12 +8,14 @@ use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    RebindBinding, advance_all, observe_primary, paused_agent_binding,
+    RebindBinding, advance_all, agent_account_id, is_retired_agent_account, observe_primary,
+    paused_agent_binding,
 };
 use crate::custody::{CustodyConnection, CustodyNetworkConfig};
 use crate::gateway::GatewayQuicEndpointConfig;
 use crate::node::NodeProfile;
 use ramflux_protocol::custody::{BindingMode, RegisterPlan, decode_register_plan};
+use ramflux_protocol::message as g;
 use std::path::Path;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -201,14 +203,52 @@ async fn rebind_network(
 }
 
 impl Supervisor {
-    /// Stage E0 (decision r20): refuses an agent whose rebind is pending (R) or committed (C) with the
-    /// typed reason `rebind_pending`. An account with no inventory entry passes.
-    pub(super) fn refuse_paused_agent(&self, account_id: &str) -> Result<(), SdkError> {
-        match paused_agent_binding(&self.config.data_root, account_id)? {
-            Some(RebindBinding::RebindPending | RebindBinding::Committed) => {
-                Err(SdkError::AgentCreationRefused("rebind_pending"))
-            }
-            _ => Ok(()),
+    /// Refuses an agent account that must not be unlocked or activated. Stage E0 (decision r20): an
+    /// agent whose rebind is pending (R) or committed (C) is refused with the typed reason
+    /// `rebind_pending`. Stage F1 (decision r23): an agent that was deleted (`agent.delete`,
+    /// lifecycle `X`) is refused with `agent_retired`, before its missing directory can be reported
+    /// as an unknown account. An account with no inventory entry and no retired record passes.
+    pub(super) fn refuse_unusable_agent(&self, account_id: &str) -> Result<(), SdkError> {
+        if matches!(
+            paused_agent_binding(&self.config.data_root, account_id)?,
+            Some(RebindBinding::RebindPending | RebindBinding::Committed)
+        ) {
+            return Err(SdkError::AgentCreationRefused("rebind_pending"));
+        }
+        if is_retired_agent_account(&self.config.data_root, account_id)? {
+            return Err(SdkError::AgentCreationRefused("agent_retired"));
+        }
+        Ok(())
+    }
+
+    /// Stage F1 (decision r23): before `agent.delete` removes the local state of an agent in state
+    /// `U`, the agent's running session is closed through the account lock path
+    /// (`lock_account_session`). Nothing is closed unless the delete would proceed (confirmed, a
+    /// stored record in `U`, a local account for the agent), so a refused delete leaves the session
+    /// alone; the delete itself repeats the checks and reports the typed refusal.
+    pub(super) async fn close_agent_before_delete(
+        &self,
+        human: &str,
+        mutation: &g::AgentMutation,
+    ) -> Result<(), SdkError> {
+        if mutation.confirmed != Some(true) {
+            return Ok(());
+        }
+        let directory = self.config.data_root.join("custody_accounts").join(human);
+        if !directory.join("agent_creation").is_dir() {
+            return Ok(());
+        }
+        let store = AgentCreationStore::open(self.config.data_root.clone(), human)?;
+        let records = crate::agent_record::AgentRecordStore::at(store.agent_record_dir());
+        let Some(record) = records.load(&mutation.agent_anchor)? else {
+            return Ok(());
+        };
+        if record.lifecycle != crate::agent_record::LIFECYCLE_ACTIVE {
+            return Ok(());
+        }
+        match agent_account_id(&store, &mutation.agent_anchor)? {
+            Some(account_id) => self.lock_account_session(&account_id).await,
+            None => Ok(()),
         }
     }
 

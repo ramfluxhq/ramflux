@@ -483,3 +483,152 @@ async fn passphrase_unlock_refuses_a_paused_agent_with_its_real_passphrase() -> 
         })
         .await
 }
+
+/// The agent record of an advanced creation, seeded in state `U` as the completing desktop writes it,
+/// with the creation marked complete. Returns the agent anchor and the record store.
+fn complete_with_record(
+    setup: &Setup,
+    request_id: &str,
+) -> Result<(String, crate::agent_record::AgentRecordStore), Box<dyn std::error::Error>> {
+    let mut record = setup.store.load(request_id)?.ok_or("the creation request is stored")?;
+    record.state = AgentCreationState::Complete;
+    setup.store.save(&record)?;
+    let plan = ramflux_protocol::custody::decode_register_plan(&record.plan_bytes()?)
+        .map_err(|_| "the stored plan decodes")?;
+    let records = crate::agent_record::AgentRecordStore::at(setup.store.agent_record_dir());
+    let author = DeviceRef {
+        account_anchor: setup.fixture.anchor.clone(),
+        device_id: "desktop-device".into(),
+        device_epoch: 1,
+    };
+    crate::agent_record::seed_for_test(&records, &plan.agent_anchor, &author, setup.fixture.now)?;
+    Ok((plan.agent_anchor, records))
+}
+
+/// A confirmed or unconfirmed `agent.delete` request frame for the human account.
+fn delete_frame(anchor: &str, confirmed: bool) -> crate::LocalBusFrame {
+    crate::LocalBusFrame::request(
+        format!("delete-{confirmed}"),
+        Some(HUMAN.to_owned()),
+        "agent",
+        "agent.delete",
+        serde_json::json!({ "agent_anchor": anchor, "confirmed": confirmed }),
+    )
+}
+
+/// AGENT-IDENTITY-01 F1 (a), decision r23: `agent.delete` closes the agent's running session before
+/// the local state goes. The close happens only for a confirmed delete of a stored record in `U`; an
+/// unconfirmed delete leaves the session open. Through the routed method the session is closed and
+/// the local account directory is removed. The record retirement that follows needs the owner
+/// device's native enrolment, which this custody-level fixture does not have (it is covered by
+/// `agent_delete_in_u_removes_the_vault_items_and_retires_on_both_roots`), so the reply of the routed
+/// call is not asserted here.
+#[tokio::test(flavor = "current_thread")]
+async fn agent_delete_closes_the_running_session_before_removing_local_state() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let nodes = node_store(vec![node(DEFAULT_NODE, true)], Some(DEFAULT_NODE));
+            let setup = authorized_request("req-delete", &nodes)?;
+            let now = setup.fixture.now;
+            let supervisor = crate::bus::supervisor::Supervisor::new(setup.config.clone())?;
+            supervisor
+                .activate_native(HUMAN, human_passphrase(), Some(DEFAULT_NODE.into()))
+                .await?;
+            supervisor.advance_agent_creations(HUMAN, now + 2).await?;
+            assert!(supervisor.account_is_open(&setup.account_id), "the agent is connected");
+            let (anchor, _records) = complete_with_record(&setup, "req-delete")?;
+            let directory = setup.fixture.root.0.join("custody_accounts").join(&setup.account_id);
+
+            let mutation =
+                |anchor: &str, confirmed: Option<bool>| ramflux_protocol::message::AgentMutation {
+                    agent_anchor: anchor.to_owned(),
+                    base_revision: None,
+                    incarnation: None,
+                    confirmed,
+                };
+            for refused in [mutation(&anchor, None), mutation(&anchor, Some(false))] {
+                supervisor.close_agent_before_delete(HUMAN, &refused).await?;
+                assert!(
+                    supervisor.account_is_open(&setup.account_id),
+                    "an unconfirmed delete keeps the session"
+                );
+            }
+            let unknown = mutation(&ramflux_protocol::encode_base64url([7_u8; 32]), Some(true));
+            supervisor.close_agent_before_delete(HUMAN, &unknown).await?;
+            assert!(
+                supervisor.account_is_open(&setup.account_id),
+                "a delete of another agent keeps the session"
+            );
+            assert!(directory.is_dir(), "nothing was removed so far");
+
+            let mut confirmed = delete_frame(&anchor, true);
+            let _ = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await?;
+            assert!(!supervisor.account_is_open(&setup.account_id), "the session is closed");
+            assert!(!directory.exists(), "the local account directory is removed after the close");
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await
+}
+
+/// AGENT-IDENTITY-01 F1 (b), decision r23: a retired agent is refused at activation and at the
+/// passphrase unlock with the typed reason `agent_retired`, by account id (resolved to the anchor
+/// through the creation records), before any directory lookup can report an unknown account. The
+/// passphrase is the agent's real one, so the refusal is the guard and not a wrong secret.
+#[tokio::test(flavor = "current_thread")]
+async fn activation_and_unlock_refuse_a_retired_agent() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let nodes = node_store(vec![node(DEFAULT_NODE, true)], Some(DEFAULT_NODE));
+            let setup = authorized_request("req-retired", &nodes)?;
+            let record =
+                setup.store.load("req-retired")?.ok_or("the creation request is stored")?;
+            let passphrase = agent_passphrase(&setup.desk, &record)?;
+            let (anchor, records) = complete_with_record(&setup, "req-retired")?;
+            let supervisor = crate::bus::supervisor::Supervisor::new(setup.config.clone())?;
+
+            // Before the retirement the guard passes: the account is not refused by it.
+            assert!(
+                supervisor.refuse_unusable_agent(&setup.account_id).is_ok(),
+                "an agent in U passes the guard"
+            );
+
+            let current = records.load(&anchor)?.ok_or("the record")?;
+            let author = DeviceRef {
+                account_anchor: setup.fixture.anchor.clone(),
+                device_id: "desktop-device".into(),
+                device_epoch: 1,
+            };
+            crate::agent_record::retire(
+                &records,
+                &anchor,
+                &current.identity,
+                &author,
+                setup.fixture.now,
+            )?;
+
+            let refused = supervisor
+                .activate_native(&setup.account_id, passphrase.clone(), Some(DEFAULT_NODE.into()))
+                .await;
+            assert!(
+                matches!(refused, Err(SdkError::AgentCreationRefused("agent_retired"))),
+                "activation of a retired agent is refused: {refused:?}"
+            );
+            let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
+            let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
+            let frame = crate::LocalBusFrame::request(
+                "unlock-retired",
+                Some(setup.account_id.clone()),
+                "account",
+                "account.unlock",
+                serde_json::json!({ "passphrase": passphrase.as_str() }),
+            );
+            let refused = supervisor.request(frame, &connection).await;
+            assert!(
+                matches!(refused, Err(SdkError::AgentCreationRefused("agent_retired"))),
+                "the passphrase unlock of a retired agent is refused"
+            );
+            assert!(!supervisor.account_is_open(&setup.account_id), "not opened");
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await
+}

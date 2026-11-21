@@ -97,6 +97,10 @@ async fn apply(
         AgentCall::Get(id) => Some(id.clone()),
         _ => None,
     };
+    if let AgentCall::Delete(mutation) = &call {
+        // The running session of the agent goes first (decision r23 F1 a).
+        supervisor.close_agent_before_delete(&account_id, mutation).await?;
+    }
     let result = actor.agent_call(call).await?;
     match read_id {
         Some(id) if advances_on_read(&result) => {
