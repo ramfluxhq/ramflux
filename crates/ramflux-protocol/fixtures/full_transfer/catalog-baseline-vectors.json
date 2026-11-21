@@ -1,5 +1,5 @@
 {
-  "census_hash": "87-_zOKNikJN6g8AGH4fgHs9YhZZmEI7N_nWD_uCIPA",
+  "census_hash": "RJHnGN4yecGQbgtR0APRtG5DsiszYv4Hsbd7YooVNb0",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -519,7 +519,7 @@
       "id": "sql/receipt_projection"
     },
     {
-      "hash": "5SGDB4WvY5LmHg_yn_i535aQcF0bYhz94eVvfg2ooxY",
+      "hash": "fmc2_2rWJ2FmX6zTPsSuOWAL2beX_rvfxKeQwBRVX1U",
       "id": "sql/receive_erased_input"
     },
     {

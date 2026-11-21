@@ -19,6 +19,7 @@ pub(super) const FAMILY: &str = "sql/message_tombstone_projection";
 const NAMES: [&str; 5] =
     ["tombstone_id", "conversation_id", "message_id", "delete_scope", "created_at"];
 const TEXT_LIMIT: usize = MAX_STABLE_KEY_BYTES - 5;
+pub(super) const MAX_BODY_BYTES: u64 = (4 * TEXT_LIMIT + 8) as u64;
 
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")

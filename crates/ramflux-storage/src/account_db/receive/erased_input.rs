@@ -133,7 +133,10 @@ impl AccountDb {
                 return Ok(true);
             }
         }
-        Ok(false)
+        let input = zeroize::Zeroizing::new(ErasedTuple::from_envelope(envelope).canonical()?);
+        self.connection.call(move |db| {
+            Ok(super::super::mac_subkeys::full::imported_erased_input_matches(db, &input, now))
+        })?
     }
 }
 

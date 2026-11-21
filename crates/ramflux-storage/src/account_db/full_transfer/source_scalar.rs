@@ -230,6 +230,12 @@ fn build(
     let mut total = FullScalarSourceCounts { records: 0, encoded_bytes: 0 };
     while let Some(row) = rows.next()? {
         source_guard.require()?;
+        if rule.id == super::input_denial::FAMILY {
+            super::input_denial::require_bundle(
+                source,
+                row.get_ref(1)?.as_str().map_err(|_| invalid())?,
+            )?;
+        }
         if rule.id == "sql/full_imported_mac_bundle" {
             let source = super::super::mac_subkeys::full::decode_source_ref(
                 row.get_ref(0)?.as_str().map_err(|_| invalid())?.as_bytes(),

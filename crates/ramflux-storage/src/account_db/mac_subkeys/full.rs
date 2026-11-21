@@ -42,6 +42,45 @@ fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
 
+/// Denial-only lookup of a transferred authenticated-input marker. Keys stay in the
+/// imported namespace; this path cannot grant ownership or extend any active MAC set.
+pub(in crate::account_db) fn imported_erased_input_matches(
+    db: &rusqlite::Connection,
+    input: &[u8],
+    now: i64,
+) -> Result<bool, StorageError> {
+    let root: String = db.query_row(
+        "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut query = db.prepare(
+        "SELECT source_ref,bundle_id,subkeys FROM full_imported_mac_bundle ORDER BY source_ref,bundle_id",
+    )?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        let source =
+            decode_source_ref(row.get_ref(0)?.as_str().map_err(|_| invalid())?.as_bytes())?;
+        let id = row.get_ref(1)?.as_str().map_err(|_| invalid())?;
+        let bytes = row.get_ref(2)?.as_blob().map_err(|_| invalid())?;
+        if source.account_anchor != root || bytes.len() != BUNDLE_BYTES || bundle_id(bytes) != id {
+            return Err(invalid());
+        }
+        let mut keys = Zeroizing::new(vec![0; BUNDLE_BYTES].into_boxed_slice());
+        keys.copy_from_slice(bytes);
+        let bundle = Bundle { id: id.to_owned(), keys, current: false };
+        let selector = bundle.mac(FullImportedMacDomain::DeletedEnvelope.label(), input)?;
+        let denied: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM receive_erased_input WHERE selector=?1 AND bundle_id=?2 AND expires_at>?3)",
+            params![selector,id,now], |row|row.get(0),
+        )?;
+        if denied {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(in crate::account_db) fn source_key(source: &DeviceRef) -> Result<String, StorageError> {
     if source.account_anchor.len() != 43 {
         return Err(invalid());

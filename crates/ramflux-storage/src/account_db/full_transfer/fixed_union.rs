@@ -65,7 +65,7 @@ impl Cells {
     pub(super) fn text(&self, index: usize) -> Result<&str, StorageError> {
         std::str::from_utf8(self.bytes(index)?).map_err(|_| unsupported())
     }
-    fn integer(&self, index: usize) -> Result<i64, StorageError> {
+    pub(super) fn integer(&self, index: usize) -> Result<i64, StorageError> {
         Ok(i64::from_be_bytes(self.bytes(index)?.try_into().map_err(|_| unsupported())?))
     }
 }
@@ -119,6 +119,9 @@ pub(super) fn apply_fixed_base_in_transaction(
         .ok_or_else(unsupported)?;
     let cells = Cells::read(rule, header, input)?;
     match rule.id {
+        "sql/receive_erased_input" => {
+            super::input_denial::apply(db, source, &cells)?;
+        }
         "sql/account_erasure_generation" => {
             let changed=db.execute("UPDATE account_erasure_generation SET generation=max(generation,?1) WHERE singleton=1",params![cells.integer(1)?])?;
             if changed != 1 {

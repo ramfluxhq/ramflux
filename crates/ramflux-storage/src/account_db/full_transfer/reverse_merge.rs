@@ -78,7 +78,12 @@ impl FullTransferStage<'_> {
                 .cell_lengths
                 .iter()
                 .try_fold(0_u64, |sum, length| sum.checked_add(length.0).ok_or_else(wrong))?;
-            if size > 1024 {
+            let bound = if rule.id == super::message_denial::FAMILY {
+                super::message_denial::MAX_BODY_BYTES
+            } else {
+                1024
+            };
+            if size > bound {
                 return Err(StorageError::PairingField("UnsupportedRecord"));
             }
             record.bytes = Zeroizing::new(vec![0; usize::try_from(size).map_err(|_| wrong())?]);

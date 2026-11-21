@@ -182,6 +182,7 @@ impl Contributions {
         private: &BackupDatabase,
         stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullUnionEncoding, StorageError> {
+        super::input_denial::normalize(tx, &self.nonce, private)?;
         // The only mutable fixed base owner is the declared erasure-generation maximum.
         // Both contribution records must describe the actual normalized prepared value.
         let rule = compiled("sql/account_erasure_generation")?;
