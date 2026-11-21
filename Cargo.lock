@@ -3600,6 +3600,7 @@ dependencies = [
 name = "ramflux-prx-client"
 version = "0.2.2"
 dependencies = [
+ "ramflux-protocol",
  "reqwest",
  "serde",
  "serde_json",

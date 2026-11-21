@@ -96,10 +96,11 @@ pub(crate) fn local_refusal(code: ApiCode) -> PrxError {
     PrxError::Api { status: 400, code, current_revision: None, revision: None }
 }
 
-/// Decodes a 2xx body. Invalid UTF-8, a wrong type and an unknown field all fail closed.
+/// Decodes a 2xx body through the strict I-JSON decoder (duplicate names, unsafe integers,
+/// invalid UTF-8 and trailing input are refused). A wrong type or an unknown field also fails closed.
 pub(crate) fn decode_ok<T: DeserializeOwned>(body: &[u8]) -> Result<T, PrxError> {
-    let text = std::str::from_utf8(body).map_err(|_| protocol("body is not UTF-8"))?;
-    serde_json::from_str(text).map_err(|_| protocol("body does not match the documented shape"))
+    ramflux_protocol::parse_i_json::<T>(body)
+        .map_err(|_| protocol("body does not match the documented shape"))
 }
 
 #[derive(Deserialize)]
@@ -133,15 +134,12 @@ struct CodedBody {
 /// Builds the rate-limit error for an HTTP 429. `Retry-After` (seconds) wins over a numeric
 /// `retry_after` in the body, top level or inside `error` (the future coded shape).
 pub(crate) fn rate_limited(header_seconds: Option<u64>, body: &[u8]) -> PrxError {
-    let body_seconds = std::str::from_utf8(body)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        .and_then(|value| {
-            value
-                .get("retry_after")
-                .or_else(|| value.pointer("/error/retry_after"))
-                .and_then(Value::as_u64)
-        });
+    let body_seconds = ramflux_protocol::parse_i_json::<Value>(body).ok().and_then(|value| {
+        value
+            .get("retry_after")
+            .or_else(|| value.pointer("/error/retry_after"))
+            .and_then(Value::as_u64)
+    });
     PrxError::RateLimited { retry_after_seconds: header_seconds.or(body_seconds) }
 }
 
@@ -362,6 +360,16 @@ mod tests {
                 e @ PrxError::Protocol { .. } => Err(e),
                 _ => Ok(()),
             },
+        );
+    }
+
+    #[test]
+    fn duplicate_member_names_fail_closed_in_a_2xx_body() {
+        let body = br#"{"revision":"x","revision":"y"}"#;
+        let parsed: Result<serde_json::Value, _> = decode_ok(body);
+        assert!(
+            matches!(parsed, Err(PrxError::Protocol { .. })),
+            "strict decoding refuses duplicate names"
         );
     }
 }
