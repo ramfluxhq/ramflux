@@ -12,7 +12,7 @@ milestones. Ordinary product reads and authorization checks decide acceptance.
 | Concern | Authoritative source and existing owner | Transfer contract and witness |
 |---|---|---|
 | Received native content | Exact Inner and first-hand origin; `crates/ramflux-crypto/src/native_origin/` (`RetainedOrigin::verify`, `authority`, `Provenance`); SDK capture remains in `client/raw_inner_origin.rs` and `client/routed/generated_receive.rs` | Preserve exact bytes, original qualified author and receive-time provenance. Verify original public custody/signature/commitment bindings; never manufacture peer-origin evidence from a local MAC or an own-authored capture. Read the restored message through the native product reader. |
-| Own-authored history | `client/own_sent_message/authored.rs` (`Captured`, `capture_own_authored_revision`), `own-history/capture/{owner}` | Keep original/current identities and exact authored content in their own evidence class. The original author's account anchor determines own-authorship; B's new branch name does not replace A's author. A missing peer-origin record is not repaired by inventing one. |
+| Own-authored history | `ramflux-crypto::native_origin::OwnAuthoredCapture`; SDK `client/own_sent_message/authored.rs` (`capture_own_authored_revision`), `own-history/capture/{owner}` | Keep original/current identities and exact authored content in their own evidence class. The original author's account anchor determines own-authorship; B's new branch name does not replace A's author. A missing peer-origin record is not repaired by inventing one. |
 | Own-copy attestation | `client/own_sent_message/attestation.rs` (`OwnSentAttestation`) | Preserve the exact enclosing own-copy and its origin evidence. Its commitment authenticates the enclosing copy, not a fabricated first-hand receipt of the nested Message. |
 | Event order | `crates/ramflux-protocol/src/message/identity.rs` (`EventOrder`, `order_key`); native readers in SDK `client/typed_messages.rs`, `client/typed_read_model.rs` | Preserve HLC, original account/device/epoch/sequence and event id as original event identity. Compare the ordinary reader's own and peer order, including after a tail and restart. Do not relabel the author as B. |
 | Local change cursor | Storage `account_db/journal/mod.rs:58`, `message_footprint/schema.rs:359`; `account_db/messages.rs:194` | `runtime_message_sequence.seq` comes from local journal `NEW.seq`. It is not the original event order or an imported B counter. Rebuild under B's journal/generation owner. An already-running B consumer must observe imported history without accepting A's cursor. |
@@ -37,6 +37,16 @@ This extraction alone activates no transfer family: storage owners must still
 bind these proofs to exact content, native identities and erasure ownership.
 Group mutation authorization and current B head/pin checks remain with their
 ordinary owners; imported history must not fabricate those capabilities.
+
+`OwnAuthoredCapture::check_direct` checks the original/current/target identities,
+exact direct Message/Edit and same-account conversation bindings. It supplies
+data under a separately authenticated same-account carrier; it proves no
+first-hand receipt, original signature or current branch permission. Its original
+identity survives an Edit while the current identity names the replacement.
+Do not use an event-id derivation check alone to authenticate HLC/order: the event
+id transcript does not commit to HLC. Received order requires its native origin
+proof; own history requires the authenticated same-account contribution. This
+shared prerequisite alone activates no transfer family.
 
 ## Revised execution order
 
@@ -126,7 +136,9 @@ private application; these are data bindings, not fresh device/key authorization
 The actual private file must contain the portable metadata, not merely encode as
 that projection. receiver_copy captures B's original public contribution before
 resetting its copied execution field; receiver_materialization validates the
-stored form independently. No old reply/approval is resumed, and live B retains
+stored form independently. The reset joins the existing restrictive-first private
+projection transaction after original-contribution capture, so failures roll back
+both the reset and import. No old reply/approval is resumed, and live B retains
 its original state. Whole-version request selection preserves independent denial
 and prevents mixed request/decision timestamps. This activates one required SQL
 owner; it does not prove native message or complete transfer installation.

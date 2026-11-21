@@ -4,19 +4,12 @@
 //! Exact own-authored plaintext captured before recipient-specific sealing.
 use super::{OwnSentInput, RamfluxClient, SdkError, g, invalid};
 use prost::Message as _;
-use serde::{Deserialize, Serialize};
 
 pub(crate) mod delivery;
 
 pub(super) const CAPTURE: &str = "own-history/capture/";
 
-#[derive(Deserialize, Serialize)]
-pub(super) struct Captured {
-    pub target: Vec<u8>,
-    pub current: Vec<u8>,
-    pub original: g::EventIdentity,
-    pub sent: g::OwnSentMessage,
-}
+pub(super) use ramflux_crypto::native_origin::OwnAuthoredCapture as Captured;
 
 impl RamfluxClient {
     /// Joins the send writer; plaintext capture, ratchet and outbox roll back together.

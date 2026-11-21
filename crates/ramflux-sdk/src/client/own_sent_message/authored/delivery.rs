@@ -254,7 +254,7 @@ impl RamfluxClient {
         })?;
         Ok(GatewayDirectMessage {
             conversation_id: capture
-                .sent
+                .into_sent()
                 .context
                 .ok_or_else(|| SdkError::InboundRejected("own history context missing".into()))?
                 .conversation_id,
@@ -311,7 +311,7 @@ impl RamfluxClient {
                     target: Some(work.target.clone()),
                     created_at: message.created_at,
                     expires_at: message.created_at.saturating_add(i64::from(message.ttl)),
-                    payload: Some(g::own_message_copy::Payload::Sent(capture.sent)),
+                    payload: Some(g::own_message_copy::Payload::Sent(capture.into_sent())),
                 }))?;
             let exact = zeroize::Zeroizing::new(Self::encode_generated_inner(
                 identity,

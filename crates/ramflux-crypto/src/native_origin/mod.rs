@@ -5,7 +5,9 @@
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde::{Deserialize, Serialize};
+mod authored;
 mod authority;
+pub use authored::OwnAuthoredCapture;
 mod group;
 mod own_sent;
 mod routing;
