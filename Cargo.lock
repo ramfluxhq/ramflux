@@ -3924,6 +3924,7 @@ dependencies = [
  "fs2",
  "hkdf 0.13.0",
  "hmac 0.13.0",
+ "prost",
  "ramflux-core",
  "ramflux-crypto",
  "ramflux-protocol",

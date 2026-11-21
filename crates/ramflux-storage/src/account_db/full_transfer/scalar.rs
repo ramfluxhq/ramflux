@@ -100,6 +100,8 @@ pub fn copy_full_scalar_record(
                 return Err(invalid());
             }
             tee.write_all(value)?;
+        } else if let CodecRule::SqlNativePayload { payload } = codec {
+            payload.copy(length.0, reader, &mut tee)?;
         } else {
             copy_record_cells(reader, &mut tee, &one.0).map_err(|error| match error {
                 ramflux_protocol::custody::pairing::full_transfer::StreamError::Io(error) => {
@@ -150,6 +152,7 @@ fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<()
         if !matches!(
             field.codec,
             CodecRule::Scalar { .. }
+                | CodecRule::SqlNativePayload { .. }
                 | CodecRule::SqlMacSubkeys
                 | CodecRule::SqlJsonProjection { .. }
                 | CodecRule::SqlDeviceRef
@@ -277,6 +280,9 @@ fn validate_key_grammar(rule: &FamilyRule, mut key: &[u8]) -> Result<(), Storage
 }
 fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result<(), StorageError> {
     let valid = match codec {
+        CodecRule::SqlNativePayload { payload } => {
+            kind == CellType::Bytes && length > 0 && length <= payload.max_bytes() as u64
+        }
         CodecRule::SqlMacSubkeys => kind == CellType::Bytes && length == 192,
         CodecRule::SqlJsonProjection { projection, .. } => {
             kind == CellType::Bytes && length > 0 && length <= projection.max_bytes() as u64

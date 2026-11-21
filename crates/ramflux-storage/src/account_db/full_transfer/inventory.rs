@@ -201,6 +201,7 @@ pub(super) fn validate_columns(
             | CodecRule::RequiresOwner { cell_type, .. }
             | CodecRule::Generated { cell_type, .. } => Some(cell_type),
             CodecRule::SqlMacSubkeys
+            | CodecRule::SqlNativePayload { .. }
             | CodecRule::SqlBytes { .. }
             | CodecRule::SqlJsonProjection { .. } => Some(CellType::Bytes),
             CodecRule::SqlQualifiedDeviceKey

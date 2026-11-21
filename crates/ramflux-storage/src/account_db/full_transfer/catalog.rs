@@ -82,6 +82,10 @@ pub enum CodecRule {
     },
     /// Exactly 192 account MAC subkey bytes, SHA256-bound to the `bundle_id` key.
     SqlMacSubkeys,
+    /// Exact bounded native bytes; only their semantic owner may certify the record.
+    SqlNativePayload {
+        payload: super::NativePayload,
+    },
     /// Closed metadata with explicit nested public/execution field assignments.
     SqlJsonProjection {
         projection: SqlProjection,
@@ -138,6 +142,7 @@ pub(super) fn scalar_sql_codec(codec: &CodecRule) -> bool {
     matches!(
         codec,
         CodecRule::SqlMacSubkeys
+            | CodecRule::SqlNativePayload { .. }
             | CodecRule::SqlJsonProjection { .. }
             | CodecRule::SqlDeviceRef
             | CodecRule::SqlQualifiedDeviceKey
@@ -300,6 +305,14 @@ impl FamilyRule {
     }
     fn validate_projection_owners(&self) -> Result<(), StorageError> {
         for field in self.codec {
+            if matches!(field.codec, CodecRule::SqlNativePayload { .. })
+                && (self.id != "sql/runtime_message_content"
+                    || !matches!(self.selector, FamilySelector::Table("runtime_message_content"))
+                    || field.name != "body"
+                    || field.nullable)
+            {
+                return Err(unsupported());
+            }
             if matches!(field.codec, CodecRule::SqlJsonProjection { .. })
                 && (self.id != super::contact_request_history::FAMILY
                     || !matches!(
@@ -322,6 +335,7 @@ impl FamilyRule {
                 matches!(
                     field.codec,
                     CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlNativePayload { .. }
                         | CodecRule::SqlJsonProjection { .. }
                         | CodecRule::SqlDeviceRef
                         | CodecRule::SqlQualifiedDeviceKey
@@ -352,6 +366,7 @@ impl FamilyRule {
                     Some(cell_type)
                 }
                 CodecRule::SqlMacSubkeys
+                | CodecRule::SqlNativePayload { .. }
                 | CodecRule::SqlBytes { .. }
                 | CodecRule::SqlJsonProjection { .. } => Some(CellType::Bytes),
                 CodecRule::SqlBase64 { .. }
@@ -474,6 +489,7 @@ fn validate_codec(
     *remaining -= 1;
     match codec {
         CodecRule::SqlMacSubkeys
+        | CodecRule::SqlNativePayload { .. }
         | CodecRule::SqlDeviceRef
         | CodecRule::SqlQualifiedDeviceKey
         | CodecRule::SqlMessageTombstone => {

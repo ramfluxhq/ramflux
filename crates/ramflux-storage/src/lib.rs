@@ -104,9 +104,9 @@ pub use account_db::full_transfer::{
     FullSourceTailEncodingWork, FullSourceTailWork, FullStageIoCancel, FullStageKey,
     FullTailAppliedReceipt, FullTailEndpoint, FullTailValidationWork, FullTargetObservation,
     FullTransferSchema, FullTransferStage, FullUnionEncoding, FullUnionEncodingBuilder,
-    FullValidatedReverseInput, FullValidatedTailInput, MergeRule, PreparedFullSource,
-    SqlProjection, StageDirection, VariantRule, WrappedFullStageKey, copy_full_scalar_record,
-    full_census_hash, full_transfer_catalog, write_full_scalar_sql_row,
+    FullValidatedReverseInput, FullValidatedTailInput, MergeRule, NativePayload,
+    PreparedFullSource, SqlProjection, StageDirection, VariantRule, WrappedFullStageKey,
+    copy_full_scalar_record, full_census_hash, full_transfer_catalog, write_full_scalar_sql_row,
 };
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{

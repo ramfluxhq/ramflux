@@ -15,6 +15,8 @@ mod keys;
 mod local_unlock;
 pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
+mod native_payload;
+pub use native_payload::NativePayload;
 mod preservation;
 mod read_work;
 mod rebind;

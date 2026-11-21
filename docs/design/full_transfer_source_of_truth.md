@@ -48,6 +48,23 @@ id transcript does not commit to HLC. Received order requires its native origin
 proof; own history requires the authenticated same-account contribution. This
 shared prerequisite alone activates no transfer family.
 
+## Native payload framing versus semantic ownership
+
+Storage `full_transfer/native_payload.rs` defines closed native formats separately
+from small SQL metadata. `DirectInnerV1` uses the native Inner bound, scans exact
+protobuf bytes, checks the event-id transcript and Message/Edit content, and
+rejects group/control shapes. The SQL field codec is restricted to its declared
+content family/column; it is not an arbitrary BLOB or JSON adapter. Source SQL
+encoding and independent stream admission preserve exact bytes, including valid
+native text whose encoding exceeds the metadata bound.
+
+This is physical admission only. It authenticates no original signature or HLC,
+creates no erasure edge and proves no materialization or installation. The live
+runtime_message_content declaration remains RequiresOwner while native evidence,
+contribution merge, erasure closure and dedicated payload spooling are built.
+Existing metadata/staging bounds remain unchanged. Declaration coverage does not
+increase for this prerequisite.
+
 ## Revised execution order
 
 The reproducible native seed lives in `apps/rf/tests/e2e/primary_transfer.rs` and
