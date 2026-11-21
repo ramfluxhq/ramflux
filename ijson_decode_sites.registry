@@ -442,6 +442,8 @@ crates/ramflux-protocol/src/username_directory/codec.rs | decode | 1 | E | exclu
 crates/ramflux-protocol/src/username_directory/codec.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_call_intent_v1 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_wake_v2 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-prx-client/src/error.rs | decode_ok | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 2xx response bytes over loopback
+crates/ramflux-prx-client/src/error.rs | rate_limited | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 429 response body over loopback
 crates/ramflux-sdk/src/attachment_send/bus.rs | begin | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | cancel | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | chunk | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission

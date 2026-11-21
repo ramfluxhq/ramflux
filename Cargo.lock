@@ -3597,6 +3597,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ramflux-prx-client"
+version = "0.2.2"
+dependencies = [
+ "ramflux-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "ramflux-relay"
 version = "0.2.2"
 dependencies = [
