@@ -29,12 +29,15 @@ fn create_sends_the_persona_and_access_and_confirmation_only_when_confirmed()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut create = vec!["create"];
     create.extend_from_slice(&PERSONA);
+    create.extend_from_slice(&["--provider", "provider-a", "--model", "model-a"]);
     create.extend_from_slice(&["--dm", "contacts", "--allowed-human", "bob"]);
     let (method, body) = shaped(&create)?;
     assert_eq!(method, "agent.create");
     assert_eq!(body["persona"]["name"], "Helper");
     assert_eq!(body["access"]["dm"], "contacts", "the access policy is passed through");
     assert_eq!(body["access"]["allowed_humans"][0], "bob");
+    assert_eq!(body["config"]["provider"], "provider-a", "the creation request carries the provider");
+    assert_eq!(body["config"]["model"], "model-a", "and the model: the SDK refuses without them");
     assert_eq!(body["role"], "named", "the default role");
     assert!(body.get("confirmed").is_none(), "no confirmation without --confirm");
 
@@ -119,11 +122,12 @@ fn access_refuses_a_base_that_is_not_an_identity_object() {
 
 #[test]
 fn no_body_carries_a_secret_field() -> Result<(), Box<dyn std::error::Error>> {
-    let samples: [&[&str]; 4] = [
-        &["create", "--name", "n", "--responsibility", "r"],
+    let samples: [&[&str]; 5] = [
+        &["create", "--name", "n", "--responsibility", "r", "--provider", "p", "--model", "m"],
         &["decide", "--request-id", "r", "--request-hash", "h", "--approved", "true"],
         &["delete", "--agent", "a1", "--confirm"],
         &["status", "--operation-id", "op"],
+        &["pending"],
     ];
     for rest in samples {
         let (_, body) = shaped(rest)?;
@@ -133,4 +137,95 @@ fn no_body_carries_a_secret_field() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn create_without_a_provider_or_model_does_not_parse() {
+    let refused = Cli::try_parse_from([
+        "rf", "agent", "--account", "alice", "create", "--name", "n", "--responsibility", "r",
+        "--confirm",
+    ]);
+    assert_eq!(
+        refused.err().map(|error| error.kind()),
+        Some(clap::error::ErrorKind::MissingRequiredArgument),
+        "the CLI never sends a creation the SDK would refuse with metadata_pending"
+    );
+}
+
+#[test]
+fn pending_asks_for_the_next_request_with_an_empty_operation_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (method, body) = shaped(&["pending"])?;
+    assert_eq!(method, "agent.operation.get");
+    assert_eq!(body["operation_id"], "");
+    Ok(())
+}
+
+#[test]
+fn the_review_names_what_the_owner_decides_and_the_hash_decide_repeats()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::custody::{decode_register_plan, encode_register_plan, register_plan_hash};
+    let plan = sample_plan();
+    let bytes = encode_register_plan(&plan)?;
+    use base64::Engine as _;
+    let standard = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let review = super::review_of(&serde_json::json!({ "requestJson": standard }))
+        .ok_or("the review is built from the plan")?;
+    assert_eq!(review["agent_name"], plan.display_name);
+    assert_eq!(review["provider"], plan.profile.provider);
+    assert_eq!(review["model"], plan.profile.model);
+    assert_eq!(review["request_hash"], register_plan_hash(&decode_register_plan(&bytes)?)?);
+    assert!(review.to_string().find("secret").is_none(), "the review carries no secret");
+    assert!(super::review_of(&serde_json::json!({})).is_none(), "no plan, no review");
+    Ok(())
+}
+
+fn sample_plan() -> ramflux_protocol::custody::RegisterPlan {
+    use ramflux_protocol::custody::{
+        AGENT_REGISTER_VERSION, AgentRegisterProfile, DeviceRef, GENESIS_BRANCH_CAPABILITIES,
+        REGISTER_PLAN_SCHEMA, RegisterPlan, RegisterPurpose,
+    };
+    let key = |byte: u8| ramflux_protocol::encode_base64url([byte; 32]);
+    let device = |anchor: u8, id: &str| DeviceRef {
+        account_anchor: key(anchor),
+        device_id: id.to_owned(),
+        device_epoch: 1,
+    };
+    RegisterPlan {
+        schema: REGISTER_PLAN_SCHEMA.to_owned(),
+        version: AGENT_REGISTER_VERSION,
+        request_id: "req-1".to_owned(),
+        purpose: RegisterPurpose::Create,
+        owner_anchor: key(1),
+        human_head_hash: key(2),
+        human_primary: device(1, "phone"),
+        desktop: device(1, "desktop"),
+        agent_anchor: key(3),
+        principal_id: "principal-agent".to_owned(),
+        agent_device: device(3, "agent-desktop"),
+        master_public_key: key(4),
+        self_signing_public_key: key(5),
+        branch_signing_public_key: key(6),
+        agreement_public_key: key(7),
+        capabilities: GENESIS_BRANCH_CAPABILITIES.iter().map(|c| (*c).to_owned()).collect(),
+        display_name: "Helper".to_owned(),
+        certificate_issued_at: 1_800_000_000,
+        branch_not_before: 1_800_000_000,
+        branch_expires_at: 1_800_086_400,
+        master_cert_id: "master-cert-1".to_owned(),
+        branch_cert_id: "branch-cert-1".to_owned(),
+        profile: AgentRegisterProfile {
+            responsibility: "Answers questions".to_owned(),
+            provider: "provider".to_owned(),
+            model: "model".to_owned(),
+            persona_version: 1,
+            persona_hash: key(8),
+            profile_epoch: 1,
+        },
+        issued_at: 1_800_000_000,
+        expires_at: 1_800_000_300,
+        previous_agent_head_hash: None,
+        previous_master_certificate_hash: None,
+        next_range: 1,
+    }
 }

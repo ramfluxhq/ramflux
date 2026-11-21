@@ -334,19 +334,43 @@ impl RamfluxClient {
         })
     }
 
-    /// `agent.operation.get`: the stored status of one request on this root.
+    /// `agent.operation.get`: the stored status of one request on this root. An empty
+    /// `operation_id` asks for the next request that waits for THIS device's decision: the oldest
+    /// plan received from a paired desktop, still `authorization_pending` and unexpired. The primary
+    /// has no other way to learn a request id (the desktop's `agent.create` reply carries it).
     /// # Errors
-    /// `creation_request_unknown` when no request with this id is stored here.
+    /// `creation_request_unknown` when no request with this id is stored here, or when an empty id
+    /// finds nothing that waits for a decision.
     pub(crate) fn agent_operation_status(
         &self,
         operation_id: &str,
     ) -> Result<g::AgentCustodyStatus, SdkError> {
-        let record = self
-            .agent_creation_store()?
-            .load(operation_id)?
-            .ok_or_else(|| refuse("creation_request_unknown"))?;
+        let store = self.agent_creation_store()?;
+        if operation_id.is_empty() {
+            let now = u64::try_from(crate::time::now_unix_timestamp()).unwrap_or(0);
+            let records = store.records()?;
+            let record =
+                next_decision(&records, now).ok_or_else(|| refuse("creation_request_unknown"))?;
+            return status_of(record);
+        }
+        let record = store.load(operation_id)?.ok_or_else(|| refuse("creation_request_unknown"))?;
         status_of(&record)
     }
+}
+
+/// The oldest request that waits for this device's decision at `now`. A request this device started
+/// as the desktop has an account id; one it received as the primary has none.
+fn next_decision(records: &[AgentCreationRecord], now: u64) -> Option<&AgentCreationRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.state == AgentCreationState::AuthorizationPending
+                && record.account_id.is_none()
+                && record.expires_at > now
+        })
+        .min_by(|left, right| {
+            left.issued_at.cmp(&right.issued_at).then_with(|| left.request_id.cmp(&right.request_id))
+        })
 }
 
 #[cfg(test)]

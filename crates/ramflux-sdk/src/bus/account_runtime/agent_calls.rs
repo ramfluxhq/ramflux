@@ -13,6 +13,19 @@ use crate::custody::agent_creation::{
 const NODE_RECORD_RETAINED: &str = "node_record_retained";
 
 impl AccountRuntime {
+    /// Carries the agent records this device wrote to the owner's other devices. The record
+    /// directory exists only after an agent was created; an account without one is left alone.
+    pub(super) fn maintain_agent_record_broadcast(&self) {
+        let dir = self.state.config.data_root.join("custody_accounts").join(&self.id).join("agent_record");
+        if !dir.is_dir() {
+            return;
+        }
+        let Some(account) = self.state.accounts.get(&self.id) else { return };
+        let Ok(now) = super::super::custody_setup::now() else { return };
+        if let Err(error) = account.client.broadcast_own_agent_records(dir, now) {
+            tracing::debug!(%error, "agent record broadcast deferred");
+        }
+    }
     pub(super) fn agent_creation_step(
         &self,
         step: AgentStep,

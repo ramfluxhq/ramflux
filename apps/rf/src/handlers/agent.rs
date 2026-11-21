@@ -7,7 +7,8 @@
 //! public creation records only.
 use super::conversation_ops::commit_write;
 use super::{
-    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient, PathBuf, RfError,
+    AgentAccessArgs, AgentAction, AgentCommand, AgentPersonaArgs, LocalBusClient,
+    PathBuf, RfError,
 };
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
@@ -17,16 +18,52 @@ pub(crate) async fn handle_agent(socket: PathBuf, command: AgentCommand) -> Resu
     let (method, body) = request_of(command.action)?;
     let bus = LocalBusClient::connect(socket).await?;
     let frame = LocalBusFrame::request(request_id(), Some(command.account), "agent", method, body);
-    let response = bus.request_frame_response(frame).await?;
+    let mut response = bus.request_frame_response(frame).await?;
+    add_review(&mut response);
     commit_write(method, &response)
+}
+
+/// Adds the `review` object to a creation status that carries its plan, so the owner sees what is
+/// decided without decoding the plan by hand. A reply without a plan is left as it is.
+fn add_review(response: &mut LocalBusFrame) {
+    // The reply is an `AgentConfigResult`: the creation status sits under `custody`.
+    let Some(review) = response.body.get("custody").and_then(review_of) else {
+        return;
+    };
+    if let Some(body) = response.body.as_object_mut() {
+        body.insert("review".into(), review);
+    }
+}
+
+/// What the owner decides on, read from the frozen plan of a creation status (`requestJson` is the
+/// plan's canonical JSON as standard base64). The hash is the one `decide` must repeat.
+pub(crate) fn review_of(status: &Value) -> Option<Value> {
+    let text = status.get("requestJson")?.as_str()?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(text).ok()?;
+    let plan = ramflux_protocol::custody::decode_register_plan(&bytes).ok()?;
+    let hash = ramflux_protocol::custody::register_plan_hash(&plan).ok()?;
+    Some(json!({
+        "request_id": plan.request_id,
+        "request_hash": hash,
+        "purpose": serde_json::to_value(plan.purpose).ok()?,
+        "agent_name": plan.display_name,
+        "agent_anchor": plan.agent_anchor,
+        "responsibility": plan.profile.responsibility,
+        "provider": plan.profile.provider,
+        "model": plan.profile.model,
+        "requested_by_device": plan.desktop.device_id,
+        "expires_at": plan.expires_at,
+    }))
 }
 
 /// The bus method and the `ProtoJSON` body of one `rf agent` action. Pure: no socket, no file.
 pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), RfError> {
     Ok(match action {
-        AgentAction::Create { persona, access, role, confirm } => {
+        AgentAction::Create { persona, model, access, role, confirm } => {
             let mut body = json!({
                 "persona": persona_value(&persona),
+                "config": {"provider": model.provider, "model": model.model},
                 "access": access_value(&access),
                 "role": role,
             });
@@ -68,6 +105,8 @@ pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), R
         AgentAction::Status { operation_id } => {
             ("agent.operation.get", json!({"operation_id": operation_id}))
         }
+        // An empty operation id asks the daemon for the next request that waits for this device.
+        AgentAction::Pending => ("agent.operation.get", json!({"operation_id": ""})),
     })
 }
 

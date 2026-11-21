@@ -282,7 +282,20 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             work,
             key,
             root: account.client.surface_local_root_commitment()?,
-            config: account.gateway_config.clone(),
+            config: {
+                // A native account's stored config names neither its device branch (which signs
+                // the envelope) nor a source identity (the envelope's source root, which the
+                // receiver's report check reads); a session fills the branch in the same way.
+                let mut config = account.gateway_config.clone();
+                if config.device_branch.is_none() {
+                    config.device_branch =
+                        account.client.device_branch.clone().map(std::sync::Arc::new);
+                }
+                if config.source_identity.is_none() {
+                    config.source_identity = Some(account.client.owned_device_identity()?);
+                }
+                config
+            },
             cached_manifest: manifest.is_some(),
             manifest,
         }));

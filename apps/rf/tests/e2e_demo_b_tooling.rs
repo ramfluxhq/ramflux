@@ -10,8 +10,9 @@
 mod e2e;
 
 use e2e::{
-    Account, Daemon, boot_stack, configure_node, create_account, create_owned_agent,
-    dm_conversation, exchange_contacts, rf_json, rf_output, start_daemon, unique, wait_json,
+    Account, Daemon, boot_agent_stack, configure_node, create_account, create_owned_agent,
+    dm_conversation, exchange_contacts, pair_devices, rf_json, rf_output, start_pairing_daemon,
+    unique, wait_json,
 };
 use ramflux_protocol::{
     CATALOG_ID, CreateSurface, EVENT_SCHEMA, EventFrame, Mutation, MutationMessage, SurfaceEvent,
@@ -23,30 +24,34 @@ use std::path::Path;
 #[ignore = "cli e2e: Demo B B9 rf drivers; explicit QA/CI run only"]
 #[test]
 fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
-    let stack = boot_stack()?;
-    let alice_d = start_daemon(&stack, "alice")?;
-    let bob_d = start_daemon(&stack, "bob")?;
-    configure_node(&alice_d, &stack.discovery_url)?;
-    configure_node(&bob_d, &stack.discovery_url)?;
+    let stack = boot_agent_stack()?;
+    let alice_d = start_pairing_daemon(&stack, "alice")?;
+    let bob_phone = start_pairing_daemon(&stack, "bob")?;
+    configure_node(&alice_d, &stack.stack.discovery_url)?;
+    configure_node(&bob_phone, &stack.stack.discovery_url)?;
     let alice = create_account(&alice_d, "Alice")?;
-    let bob = create_account(&bob_d, "Bob")?;
-    exchange_contacts(&alice_d, &alice, &bob_d, &bob)?;
-    settle_contact_requests(&alice_d, &alice, &bob_d, &bob)?;
+    let bob = create_account(&bob_phone, "Bob")?;
+    // Bob's primary phone and a paired desktop: an agent is created on the desktop and approved on
+    // the phone (the real flow; the retired phrase ceremony no longer creates agents).
+    let pair = pair_devices(&stack, bob_phone, &bob, "bob-desktop")?;
+    let (bob_d, bob_desktop) = (&pair.primary, &pair.desktop);
+    exchange_contacts(&alice_d, &alice, bob_d, &bob)?;
+    settle_contact_requests(&alice_d, &alice, bob_d, &bob)?;
     let conversation = dm_conversation(&alice, &bob)?;
     let scratch = tempfile::TempDir::new()?;
 
-    let agent = create_owned_agent(&bob_d, &bob)?;
-    exchange_contacts(&bob_d, &agent, &bob_d, &bob)?;
+    let agent = create_owned_agent(&pair, "Surface agent")?;
+    exchange_contacts(bob_desktop, &agent, bob_desktop, &bob)?;
     let agent_conversation = dm_conversation(&agent, &bob)?;
     surface_round_trip(&Round {
-        alice_d: &bob_d,
-        bob_d: &bob_d,
+        alice_d: bob_desktop,
+        bob_d: bob_desktop,
         alice: &agent,
         bob: &bob,
         conversation: &agent_conversation,
         scratch: scratch.path(),
     })?;
-    task_display(&alice_d, &bob_d, &alice, &bob, &conversation, scratch.path())?;
+    task_display(&alice_d, bob_d, &alice, &bob, &conversation, scratch.path())?;
     expect_a2i_authority_refusal(
         &alice_d,
         &[
