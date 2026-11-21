@@ -9,6 +9,7 @@ mod commit;
 mod machine;
 mod publish;
 mod rebind;
+mod rebind_observe;
 mod receive_checks;
 mod receive_decision;
 mod state;
@@ -34,6 +35,7 @@ pub use machine::{
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub use rebind::{RebindBinding, RebindEntry};
+pub use rebind_observe::observe_primary;
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };

@@ -7,7 +7,8 @@
 use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps, advance_all,
+    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
+    advance_all, observe_primary,
 };
 use zeroize::Zeroizing;
 
@@ -100,7 +101,18 @@ impl Supervisor {
         if !directory.is_dir() {
             return Ok(Vec::new());
         }
-        let store = AgentCreationStore::open(root, human)?;
+        let store = AgentCreationStore::open(root.clone(), human)?;
+        // Stage D2: observe the human's current primary first, so the rebind inventory is current
+        // before any step runs. Complete agents are not advanced (advance only handles pending
+        // requests), so the pause is recorded in the inventory and read by stage D3.
+        let primary = crate::custody::load_account(&root, human, now)?
+            .record()
+            .body
+            .master_certificate
+            .body
+            .primary_device_ref
+            .clone();
+        observe_primary(&store, &primary)?;
         let mut steps = SupervisorSteps { supervisor: self, human: human.to_owned() };
         advance_all(&mut steps, &store, now).await
     }
