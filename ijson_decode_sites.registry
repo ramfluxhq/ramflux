@@ -443,6 +443,8 @@ crates/ramflux-protocol/src/username_directory/codec.rs | decode | 1 | E | exclu
 crates/ramflux-protocol/src/username_directory/codec.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_call_intent_v1 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_wake_v2 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/agent_record/edit.rs | record_completed | 1 | D | admitted-before-persist: the creation intent was validated by agent.create before the creation record stored it; not an ingress decoder
+crates/ramflux-sdk/src/agent_record/store.rs | load | 1 | D | admitted-before-persist: the agent record is written by this module through save after check_record; not an ingress decoder
 crates/ramflux-sdk/src/attachment_send/bus.rs | begin | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | cancel | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | chunk | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
