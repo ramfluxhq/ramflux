@@ -12,6 +12,7 @@ mod writer;
 
 pub use evidence::KnownContentEvidence;
 pub use quota::{RawInnerQuota, RawInnerQuotaScope};
+pub(in crate::account_db) use writer::MAX_HISTORY_CONTAINER_BYTES;
 pub(crate) use writer::raw_copy_deleted;
 pub use writer::{RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite};
 

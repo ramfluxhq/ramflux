@@ -5,7 +5,7 @@
 use super::*;
 use ramflux_crypto::native_origin::OwnSentAttestation;
 
-fn attest(
+pub(super) fn attest(
     author: &HistorySenderFixture,
     target: &HistorySenderFixture,
     nested: &g::Inner,

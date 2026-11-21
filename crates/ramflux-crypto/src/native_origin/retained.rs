@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Proves the original signer committed to these bytes; not delivery, freshness or node custody.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetainedOrigin {
     pub evidence: g::HistoryOriginEvidence,
     pub reported_inner: Vec<u8>,

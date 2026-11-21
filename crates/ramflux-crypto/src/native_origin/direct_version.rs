@@ -13,9 +13,19 @@ use prost::Message as _;
 /// separately authenticated own-account history data, not a fabricated peer header.
 #[derive(Clone, Copy)]
 pub enum DirectEvidence<'a> {
-    Received { origin: &'a RetainedOrigin, original: Option<&'a OriginalHeader> },
+    Received {
+        origin: &'a RetainedOrigin,
+        original: Option<&'a OriginalHeader>,
+    },
     Authored(&'a OwnAuthoredCapture),
-    OwnCopy { attestation: &'a OwnSentAttestation, original: Option<&'a g::EventIdentity> },
+    /// Narrow original data under an authenticated own-account transfer carrier.
+    AuthoredData {
+        original: &'a g::EventIdentity,
+    },
+    OwnCopy {
+        attestation: &'a OwnSentAttestation,
+        original: Option<&'a g::EventIdentity>,
+    },
 }
 
 /// Original order and current revision admitted together, never independent maxima.
@@ -130,6 +140,12 @@ impl DirectEvidence<'_> {
                     return Err(bad);
                 }
                 capture.original.clone()
+            }
+            Self::AuthoredData { original } => {
+                if current.author.as_ref().is_none_or(|author| author.account_anchor != own_root) {
+                    return Err(bad);
+                }
+                original.clone()
             }
             Self::OwnCopy { attestation, original } => {
                 let sent = attestation.verify(exact_inner, own_root)?;

@@ -70,6 +70,29 @@ body/HLC, foreign root pair, changed route, missing original header and wrong
 message delivery policy. The shared verifier alone activates no SQL/actor family;
 semantic export/import, erasure closure and product-read witnesses remain required.
 
+## Narrow private native history encoding
+
+Storage `FullDirectHistory` uses a private NDH1 record with an explicit proof class,
+canonical own/peer anchors and two separately bounded parts. The HistoryItem part
+uses exact canonical protobuf; decode/re-encode equality rejects unknown fields,
+duplicates and alternate encodings. Its native bodies remain exact. The optional
+own-copy attestation uses strict closed I-JSON and its original exact signed bytes.
+Each part shares the existing4-MiB raw HistoryContainer bound; the combined bound
+is only their sum plus the fixed header. This does not change metadata or wire
+chunk limits. No frame-sized capacity is taken from a peer length.
+
+Decode requires the authenticated transfer account and checks the embedded own
+anchor against it before native verification. Authored projection keeps exact
+content and original identity, excluding unsigned outbox ids, recipient delivery
+targets and execution labels. Signed own-copy evidence stays exact and inert; its
+context grants no fresh friend or callback authority. Received Edit records carry
+only the original signed header, never reconstructed retired plaintext/openings.
+
+This encoding is a prerequisite, not a SQL/actor owner activation or transfer
+receipt. Source-cut export, original-contribution union, restriction-first erasure,
+raw ownership closure and independent actual-materialization/product-read gates
+must still use it before the native families are counted complete.
+
 ## Native payload framing versus semantic ownership
 
 Storage `full_transfer/native_payload.rs` defines closed native formats separately

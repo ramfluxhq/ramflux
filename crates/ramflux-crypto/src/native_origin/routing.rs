@@ -15,6 +15,7 @@ pub enum Kind {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Routing {
     pub kind: Kind,
     pub conversation_id: String,
@@ -27,6 +28,7 @@ pub struct Routing {
 }
 /// Only immutable authenticated receive provenance is retained, never a fresh authority grant.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provenance {
     pub source: String,
     pub conversation: String,

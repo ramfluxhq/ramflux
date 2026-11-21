@@ -141,3 +141,4 @@ crates/ramflux-storage/src/row_mappers.rs | pending_recovery_from_row | 2 | E | 
 crates/ramflux-storage/src/schema_device_namespace.rs | metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/sql_projection.rs | source | 1 | E | excluded=closed local consent metadata is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/sql_projection.rs | read_contact_metadata | 1 | E | excluded=closed public consent metadata is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/full_transfer/direct_history.rs | read | 1 | A | strict=parse_i_json_secret; admission=bounded closed own-root native attestation before exact original custody/signature/report binding verification

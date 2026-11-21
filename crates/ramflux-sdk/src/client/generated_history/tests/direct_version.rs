@@ -240,3 +240,6 @@ fn direct_version_authored_is_same_account_data_and_rejects_received_substitutio
 
 #[path = "direct_version/own_copy.rs"]
 mod own_copy;
+
+#[path = "direct_version/record.rs"]
+mod record;
