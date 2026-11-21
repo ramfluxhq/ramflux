@@ -161,25 +161,6 @@ impl AccountSessionHarness {
         Err(SdkError::PairingCode("TransferCapacity"))
     }
 
-    /// Counts of own-authored captures, reserved deliveries and sealed deliveries held by this
-    /// account, for failure evidence of the authored-history courier.
-    /// # Errors
-    /// Returns the actual writer's storage or account error.
-    pub fn pairing_authored_history_counts(&self) -> Result<(usize, usize, usize), SdkError> {
-        let account = self
-            .runtime
-            .state
-            .accounts
-            .get(&self.runtime.id)
-            .ok_or(SdkError::AccountDbNotUnlocked)?;
-        let db = account.client.account_db()?;
-        Ok((
-            db.actor_state_keys("own-history/capture/")?.len(),
-            db.actor_state_keys("own-history/pending/")?.len(),
-            db.actor_state_keys("own-history/staged/")?.len(),
-        ))
-    }
-
     /// Whether the account's job ledger still holds an unfinished enrollment history attempt.
     /// # Errors
     /// Returns the actual writer's storage or account error.

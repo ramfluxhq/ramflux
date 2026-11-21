@@ -8,7 +8,6 @@ use ramflux_sdk::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 #[path = "history/objects.rs"]
 mod objects;
 pub(super) const BODY: &[u8] = b"existing DM authored on phone before enrollment";
-const OWN_HISTORY_WAIT_SECS: u64 = 60;
 /// The primary's own reply in the same conversation, authored before enrollment.
 pub(super) const OWN_BODY: &[u8] = b"own reply authored on phone before enrollment";
 
@@ -205,26 +204,15 @@ async fn run(late: bool) -> TestResult {
     Ok(())
 }
 /// The owner's own text is not driven by hand: the source's real background children (the
-/// authored-history courier) deliver it while both writers are serviced under a bound.
+/// authored-history courier) deliver it while both writers are serviced. The wait is bounded by
+/// the writer step limit of the helper and by the test's overall deadline.
 async fn wait_own_history(
     target: &mut ramflux_sdk::AccountSessionHarness,
     source: &mut ramflux_sdk::AccountSessionHarness,
     own: (&str, &str),
 ) -> TestResult {
     let text = std::str::from_utf8(OWN_BODY)?;
-    let waited = tokio::time::timeout(
-        Duration::from_secs(OWN_HISTORY_WAIT_SECS),
-        Box::pin(target.wait_pairing_history(source, own.0, own.1, text)),
-    )
-    .await;
-    if let Ok(result) = waited {
-        return Ok(result?);
-    }
-    let (captures, pending, staged) = source.pairing_authored_history_counts()?;
-    Err(format!(
-        "test: the enrolled device never showed the owner's own pre-enrollment DM within {OWN_HISTORY_WAIT_SECS} s (source captures={captures} pending={pending} staged={staged})"
-    )
-    .into())
+    Ok(target.wait_pairing_history(source, own.0, own.1, text).await?)
 }
 fn branch_identity(device: &device::Device) -> TestResult<([u8; 32], [u8; 32], DeviceRef)> {
     let native = custody::load_account(device.root.path(), &device.id, wall()?)?;
