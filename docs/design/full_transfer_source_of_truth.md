@@ -49,6 +49,24 @@ id transcript does not commit to HLC. Received order requires its native origin
 proof; own history requires the authenticated same-account contribution. This
 shared prerequisite alone activates no transfer family.
 
+## Coupled direct version verification
+
+`ramflux-crypto::native_origin::DirectVersion` checks a complete Message/Edit
+against its derived own/peer root namespace. Received history requires exact
+RetainedOrigin signatures/report openings and durable message policy; an Edit
+additionally requires the independently verified OriginalHeader. Routing ids and
+original/current author roots must agree. OwnAuthoredCapture remains same-account
+carrier data, never a peer-origin signature. Both paths apply the same supported
+native content, target, original identity/order and current revision checks.
+
+The sealed result exposes original identity, current identity and revision together.
+It supplies no current mutation permission, membership, delivery receipt, pin or
+local change cursor. Own-copy attestations remain a separate class and are not
+silently admitted through either path. Real signed SDK fixtures exercise altered
+body/HLC, foreign root pair, changed route, missing original header and wrong
+message delivery policy. The shared verifier alone activates no SQL/actor family;
+semantic export/import, erasure closure and product-read witnesses remain required.
+
 ## Native payload framing versus semantic ownership
 
 Storage `full_transfer/native_payload.rs` defines closed native formats separately

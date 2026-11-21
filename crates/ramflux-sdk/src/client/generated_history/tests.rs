@@ -1058,3 +1058,6 @@ mod producer_rows {
 
 #[path = "tests/restore_header.rs"]
 mod restore_header;
+
+#[path = "tests/direct_version.rs"]
+mod direct_version;
