@@ -44,7 +44,8 @@ const SENTINEL: &str = "sk-rf-contract-sentinel-0001";
 /// A dummy key for the default provider; it is never a real credential.
 const DEFAULT_PROVIDER_KEY: &str = "test-key-not-real";
 const GROQ_ROUTE: &str = "\n[[model_routes]]\nhint = \"fast\"\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\ncredential_ref = \"cred-groq\"\n";
-const HAND_WRITTEN_AGENT: &str = "\n[agents.worker1]\nprovider = \"openrouter\"\nmodel = \"openai/gpt-4o-mini\"\n";
+const HAND_WRITTEN_AGENT: &str =
+    "\n[agents.worker1]\nprovider = \"openrouter\"\nmodel = \"openai/gpt-4o-mini\"\n";
 const MODEL_ROW: &str = "\n[[providers.models]]\nprovider = \"ollama\"\nmodel = \"qwen3:8b\"\noperations = [\"chat\"]\n";
 
 fn prx_binary() -> PathBuf {
