@@ -10,7 +10,9 @@
 // Only this private FFI boundary permits unsafe. The safe password setter updates duplicate
 // items, so it cannot implement our insert-only primary replacement protocol.
 #![allow(unsafe_code)]
-use super::{SdkError, Zeroizing, presence::Items, primary_items};
+use super::{
+    SdkError, Zeroizing, agent_master_item::AgentMasterCells, presence::Items, primary_items,
+};
 use core_foundation::{
     base::{CFType, TCFType},
     boolean::CFBoolean,
@@ -348,6 +350,21 @@ pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
         let _ = primary_items::delete(items, reference);
     }
     primary
+}
+
+/// Agent-master cells on the keychain: insert-only through the selected store, reads and
+/// removals through both stores like the other primary items.
+pub(super) struct AgentCells;
+impl AgentMasterCells for AgentCells {
+    fn read_item(&self, reference: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SdkError> {
+        read_any(reference)
+    }
+    fn insert_item(&self, reference: &str, value: &[u8]) -> Result<(), SdkError> {
+        insert_new(reference, value)
+    }
+    fn remove_item(&self, reference: &str) -> Result<(), SdkError> {
+        delete(reference)
+    }
 }
 
 #[cfg(test)]

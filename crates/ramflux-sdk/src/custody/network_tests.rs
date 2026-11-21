@@ -82,12 +82,56 @@ pub(crate) fn node(
         now,
     )?)
 }
+/// One reply fault a test arms on the server. It is consumed by the first matching reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplyFault {
+    /// Replace the first recovery `Published` reply (sent for a successor record) with a wrong hash.
+    CorruptRecoveryAck,
+    /// Close the connection instead of writing the first `AgentPublished` reply. The node has
+    /// already admitted the publication, so only the reply is lost.
+    DropAgentPublished,
+    /// Like `DropAgentPublished`, after `skip` admitted `AgentPublished` replies have been written
+    /// (the rebind's publication is the second one of a test that creates an agent first).
+    DropAgentPublishedAfter(u8),
+}
+/// The armed fault of one test server, shared by its connection tasks.
+type ReplyFaults = Arc<std::sync::Mutex<Option<ReplyFault>>>;
+/// Consumes the armed drop fault when this reply is the `AgentPublished` the test drops.
+fn drop_reply_fault(faults: &ReplyFaults, response: &CustodyServerFrame) -> bool {
+    let mut armed = faults.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !matches!(response, CustodyServerFrame::AgentPublished { .. }) {
+        return false;
+    }
+    match *armed {
+        Some(ReplyFault::DropAgentPublished | ReplyFault::DropAgentPublishedAfter(0)) => {
+            *armed = None;
+            true
+        }
+        Some(ReplyFault::DropAgentPublishedAfter(skip)) => {
+            *armed = Some(ReplyFault::DropAgentPublishedAfter(skip.saturating_sub(1)));
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Applies the armed fault to one reply, consuming it.
+fn apply_reply_fault(faults: &ReplyFaults, replacement: bool, response: &mut CustodyServerFrame) {
+    let mut armed = faults.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let (Some(ReplyFault::CorruptRecoveryAck), CustodyServerFrame::Published { record_hash }) =
+        (*armed, response)
+        && replacement
+    {
+        *armed = None;
+        *record_hash = ramflux_protocol::encode_base64url([99; 32]);
+    }
+}
 async fn tls_server(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     router: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     service: Arc<ramflux_node_core::CustodyService>,
-    corrupt_recovery_ack: Arc<std::sync::atomic::AtomicBool>,
+    faults: ReplyFaults,
 ) -> Result {
     let mut stream = ramflux_transport::GatewayTcpTlsStream::Server(stream);
     let connection = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
@@ -124,13 +168,9 @@ async fn tls_server(
             },
             super::network::now()?,
         );
-        if replacement
-            && matches!(response, CustodyServerFrame::Published { .. })
-            && corrupt_recovery_ack.swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            response = CustodyServerFrame::Published {
-                record_hash: ramflux_protocol::encode_base64url([99; 32]),
-            };
+        apply_reply_fault(&faults, replacement, &mut response);
+        if drop_reply_fault(&faults, &response) {
+            return Ok(());
         }
         ramflux_transport::write_custody_tcp_frame(&mut stream, &serde_json::to_vec(&response)?)
             .await?;
@@ -145,14 +185,29 @@ pub(crate) async fn start_server_with_ack_fault(
     root: &Root,
     corrupt_ack: bool,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
-    start_server_with_connections(root, corrupt_ack, if corrupt_ack { 4 } else { 3 }).await
+    let fault = corrupt_ack.then_some(ReplyFault::CorruptRecoveryAck);
+    start_server_with_faults(root, fault, if corrupt_ack { 4 } else { 3 }).await
 }
 async fn start_server_with_connections(
     root: &Root,
     corrupt_ack: bool,
     connections: u8,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
-    if connections == 0 || connections > 4 {
+    start_server_with_faults(
+        root,
+        corrupt_ack.then_some(ReplyFault::CorruptRecoveryAck),
+        connections,
+    )
+    .await
+}
+/// Starts a real TLS custody server that accepts exactly `connections` connections (at most eight, the
+/// bound of the two-transfer rebind test), with at most one armed `fault`. The server ends when every accepted connection has closed.
+pub(crate) async fn start_server_with_faults(
+    root: &Root,
+    fault: Option<ReplyFault>,
+    connections: u8,
+) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
+    if connections == 0 || connections > 8 {
         return Err("test: TLS fixture connection bound".into());
     }
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
@@ -182,16 +237,16 @@ async fn start_server_with_connections(
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
         let mut clients = Vec::new();
-        let fault = Arc::new(std::sync::atomic::AtomicBool::new(corrupt_ack));
+        let faults: ReplyFaults = Arc::new(std::sync::Mutex::new(fault));
         for _ in 0..connections {
             let (stream, _) = listener.accept().await?;
             let acceptor = acceptor.clone();
             let router = Arc::clone(&router);
             let store = Arc::clone(&store);
             let service = Arc::clone(&service);
-            let fault = fault.clone();
+            let faults = Arc::clone(&faults);
             clients.push(tokio::spawn(async move {
-                tls_server(acceptor.accept(stream).await?, router, store, service, fault).await
+                tls_server(acceptor.accept(stream).await?, router, store, service, faults).await
             }));
         }
         for client in clients {

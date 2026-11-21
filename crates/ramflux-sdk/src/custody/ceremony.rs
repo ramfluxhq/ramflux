@@ -53,9 +53,11 @@ impl std::fmt::Debug for CreationCeremony {
     }
 }
 impl CreationCeremony {
-    /// Prepare a native account without persisting recovery material.
+    /// Prepare a native human account without persisting recovery material. An agent
+    /// (`headless_ai`) account is never created by this ceremony: it comes from the
+    /// primary-approved agent creation flow (AGENT-IDENTITY-01 decision D6).
     /// # Errors
-    /// Rejects existing account ids, invalid names and unsupported custodians.
+    /// Rejects existing account ids, invalid names, a non-human kind and any custodian.
     pub fn begin(root: &Path, input: CreateInput, now: u64) -> Result<Self, SdkError> {
         let lease = crate::bus::data_root_lock::DataRootLock::acquire(root)?;
         Self::begin_with_lease(root, input, now, lease)
@@ -71,8 +73,6 @@ impl CreationCeremony {
     pub(crate) fn begin_account(
         context: (&Path, Option<std::sync::Arc<crate::bus::data_root_lock::DataRootLock>>),
         display_name: String,
-        kind: PrincipalKind,
-        custodian_account_id: Option<String>,
         home_node_id: Option<String>,
         now: u64,
     ) -> Result<Self, SdkError> {
@@ -81,16 +81,13 @@ impl CreationCeremony {
             Some(lease) => lease,
             None => crate::bus::data_root_lock::DataRootLock::acquire(root)?,
         };
-        if !matches!(kind, PrincipalKind::Human | PrincipalKind::HeadlessAi) {
-            return Err(invalid());
-        }
         let input = CreateInput {
             local_account_id: format!("account-{}", encode_base64url(*random()?)),
             principal_id: String::new(),
             device_id: format!("device-{}", encode_base64url(*random()?)),
             display_name,
-            principal_kind: kind,
-            custodian_account_id,
+            principal_kind: PrincipalKind::Human,
+            custodian_account_id: None,
         };
         Self::prepare(root, input, true, home_node_id, now, lease)
     }
@@ -99,7 +96,8 @@ impl CreationCeremony {
         mut input: CreateInput,
         allocate_principal: bool,
         home_node_id: Option<String>,
-        now: u64,
+        // A human ceremony needs no authority lookup; callers still pass the creation clock.
+        _now: u64,
         lease: std::sync::Arc<crate::bus::data_root_lock::DataRootLock>,
     ) -> Result<Self, SdkError> {
         valid_id(&input.local_account_id)?;
@@ -119,22 +117,10 @@ impl CreationCeremony {
         if account_exists(root, &input.local_account_id)? {
             return Err(invalid());
         }
-        if input.principal_kind == PrincipalKind::Human {
-            if input.custodian_account_id.is_some() {
-                return Err(invalid());
-            }
-        } else {
-            let id = input.custodian_account_id.as_ref().ok_or_else(invalid)?;
-            let human = super::load_account(root, id, now)?;
-            if human.record().body.principal_kind != PrincipalKind::Human {
-                return Err(invalid());
-            }
-            human.require_networking()?;
-            human.verified().authorize(
-                &human.record().body.master_certificate.body.primary_device_ref,
-                "register",
-                now,
-            )?;
+        // The phrase ceremony creates humans only. An agent account is created by the approved
+        // agent creation flow, so a custodian or any other kind is refused here (decision D6).
+        if input.principal_kind != PrincipalKind::Human || input.custodian_account_id.is_some() {
+            return Err(invalid());
         }
         let phrase = RecoveryPhrase::generate()?;
         let master = MasterKey::from_phrase(&phrase)?;
@@ -306,15 +292,6 @@ impl CreationCeremony {
             &signing,
         );
         let agreement_key = ramflux_crypto::X25519KeyPair::from_seed_ref(&agreement);
-        let human = self
-            .input
-            .custodian_account_id
-            .as_ref()
-            .map(|id| super::load_account(&self.root, id, now))
-            .transpose()?;
-        let external = human.as_ref().map(|account| {
-            account.record().body.master_certificate.body.primary_device_ref.clone()
-        });
         let record = create_genesis(
             &master,
             &primary,
@@ -326,7 +303,7 @@ impl CreationCeremony {
                 issued_at: now,
                 master_cert_id: encode_base64url(*random()?),
                 branch_cert_id: encode_base64url(*random()?),
-                external_human_primary: external,
+                external_human_primary: None,
             },
         )?;
         drop(master);
@@ -339,10 +316,11 @@ impl CreationCeremony {
             super::store::GenesisMaterial {
                 record,
                 primary: &primary,
-                branch: &branch_seeds,
+                branch: Some(&branch_seeds),
                 now,
                 data_secret,
                 commit_gate: self.commit_gate.as_deref(),
+                pre_staged: false,
             },
             vault,
         )
@@ -464,14 +442,8 @@ mod tests {
         let root = crate::custody::tests::Root::new()?;
         let vault = crate::custody::tests::TestVault::default();
         let now = crate::custody::network_now()?;
-        let mut pending = CreationCeremony::begin_account(
-            (&root.0, None),
-            "Ordinary Human".into(),
-            PrincipalKind::Human,
-            None,
-            None,
-            now,
-        )?;
+        let mut pending =
+            CreationCeremony::begin_account((&root.0, None), "Ordinary Human".into(), None, now)?;
         let id = pending.input.local_account_id.clone();
         assert_eq!(pending.input.principal_id, format!("principal-{}", pending.account_anchor()));
         assert!(pending.input.device_id.starts_with("device-"));
@@ -504,14 +476,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
         let vault = crate::custody::tests::TestVault::default();
-        let mut pending = CreationCeremony::begin_account(
-            (&root.0, None),
-            "Ordinary Human".into(),
-            PrincipalKind::Human,
-            None,
-            None,
-            100,
-        )?;
+        let mut pending =
+            CreationCeremony::begin_account((&root.0, None), "Ordinary Human".into(), None, 100)?;
         let id = pending.input.local_account_id.clone();
         let phrase = pending.show_once()?;
         let positions = pending.hidden_challenge()?;
@@ -541,17 +507,37 @@ mod tests {
         assert!(!error.to_string().contains(expected.as_str()));
         assert!(!root.0.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists());
         assert!(!root.0.join("custody_accounts").join(id).exists());
-        assert!(matches!(
-            CreationCeremony::begin_account(
-                (&root.0, None),
-                "Machine".into(),
-                PrincipalKind::HeadlessAi,
-                None,
-                None,
-                100
+        Ok(())
+    }
+
+    /// AGENT-IDENTITY-01 decision D6: the phrase ceremony never creates an agent account, with or
+    /// without a custodian, and refuses before it writes anything.
+    #[test]
+    fn phrase_ceremony_refuses_an_agent_account_with_or_without_a_custodian()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        for custodian in [None, Some("human".to_owned())] {
+            let mut input = crate::custody::tests::input("machine");
+            input.principal_kind = PrincipalKind::HeadlessAi;
+            input.custodian_account_id = custodian;
+            assert!(
+                matches!(
+                    CreationCeremony::begin(&root.0, input, 100),
+                    Err(SdkError::CustodySetupInvalid)
+                ),
+                "an agent kind must be refused by the phrase ceremony"
+            );
+        }
+        let mut human = crate::custody::tests::input("human-with-custodian");
+        human.custodian_account_id = Some("human".into());
+        assert!(
+            matches!(
+                CreationCeremony::begin(&root.0, human, 100),
+                Err(SdkError::CustodySetupInvalid)
             ),
-            Err(SdkError::CustodySetupInvalid)
-        ));
+            "a human never has a custodian"
+        );
+        assert!(!root.0.join("custody_accounts").exists(), "nothing was written");
         Ok(())
     }
 

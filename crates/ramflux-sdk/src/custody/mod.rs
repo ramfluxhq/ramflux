@@ -7,6 +7,7 @@ mod ceremony;
 mod commit_gate;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
+pub mod agent_creation;
 pub mod pairing;
 mod primary_signing;
 pub(crate) use primary_signing::PrimarySigningLease;
@@ -36,7 +37,7 @@ pub(crate) use store::{
 pub(crate) use store::{finish_recovery, pending_restore};
 pub(crate) use vault::require_vault_reference;
 pub use vault::{
-    BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
+    AgentDecisionSigning, BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
 #[cfg(windows)]
@@ -105,8 +106,12 @@ impl crate::RamfluxClient {
 #[cfg(test)]
 pub(crate) mod observer;
 #[cfg(test)]
+mod seam_guard_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(feature = "test-support")]
+pub(crate) mod agent_fixture;
 #[cfg(any(test, feature = "itest-memory-vault"))]
 pub(crate) mod memory_vault;
 #[cfg(feature = "itest-memory-vault")]

@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;
-pub(in crate::bus) struct RecordingGateway {
+pub(crate) struct RecordingGateway {
     last: Option<GatewayClientFrame>,
     cursor: Option<GatewayCursor>,
     pub inbox: Vec<GatewayInboxEntry>,

@@ -127,6 +127,20 @@ impl Supervisor {
         });
         self.lifecycle_changed.notify_one();
     }
+    /// Client capabilities of one named node. A node that is not in the store refuses with
+    /// `NoNodeSelected`; a default node is never substituted.
+    pub(super) fn node_capabilities(&self, node_id: &str) -> Result<Vec<String>, SdkError> {
+        self.nodes
+            .borrow()
+            .profiles
+            .get(node_id)
+            .map(|profile| profile.client_capabilities.clone())
+            .ok_or(SdkError::NoNodeSelected)
+    }
+    /// The stored profile of one named node, for the proof path of a paused agent (stage E0).
+    pub(super) fn node_profile(&self, node_id: &str) -> Result<crate::NodeProfile, SdkError> {
+        self.nodes.borrow().profiles.get(node_id).cloned().ok_or(SdkError::NoNodeSelected)
+    }
     pub(super) fn account_is_open(&self, id: &str) -> bool {
         self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
     }
@@ -358,6 +372,9 @@ impl Supervisor {
             return Err(SdkError::CustodySetupInvalid);
         }
         let id = request_account_id(request)?.to_owned();
+        // AGENT-IDENTITY-01 E0 unlock guard (decision r21): the credential unlock of a paused agent
+        // is refused before the provider is asked for the passphrase.
+        self.refuse_unusable_agent(&id)?;
         self.require_restore_ready(&id, true)?;
         let secret =
             super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
@@ -380,6 +397,7 @@ impl Supervisor {
         self.restore_states.borrow_mut().remove(&id);
         self.set_active(&id).await?;
         self.set_unlocked(&id, true).await?;
+        self.advance_after_unlock(&id).await;
         Ok(reply(serde_json::to_value(result)?))
     }
 
@@ -506,6 +524,11 @@ impl Supervisor {
     ) -> Result<ActorResponse, SdkError> {
         self.prepare_import(&mut request, connection).await?;
         let id = account_actor_id(&request)?;
+        if request.method == "account.unlock" {
+            // AGENT-IDENTITY-01 E0 unlock guard (decision r21): a passphrase unlock of a paused agent
+            // is refused before the account actor is started or any secret is read.
+            self.refuse_unusable_agent(&id)?;
+        }
         if self.installing.borrow().contains(&id) {
             return Err(super::backup_jobs::refusal("restore_install_in_progress"));
         }
@@ -537,6 +560,7 @@ impl Supervisor {
             return Err(self.account_unavailable(&id));
         };
         let locking = request.method == "account.lock";
+        let unlocking = request.method == "account.unlock";
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
@@ -557,6 +581,9 @@ impl Supervisor {
             self.restore_states.borrow_mut().remove(&id);
             self.set_active(&id).await?;
             self.set_unlocked(&id, true).await?;
+        }
+        if unlocking && response.is_ok() {
+            self.advance_after_unlock(&id).await;
         }
         if locking && response.is_ok() {
             actor.stop().await?;
@@ -650,6 +677,9 @@ impl Supervisor {
         passphrase: zeroize::Zeroizing<String>,
         home_node_id: Option<String>,
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
+        // Stage E0 (decision r20): an agent whose rebind is pending or committed is never
+        // activated or unlocked; the rebind publication owns its connection.
+        self.refuse_unusable_agent(id)?;
         self.start_event_router();
         let existing = self.accounts.borrow().get(id).cloned();
         let actor = if let Some(actor) = existing {
@@ -756,6 +786,31 @@ impl Supervisor {
             }
             request.account_id = Some(id);
         }
+        Ok(())
+    }
+
+    /// Closes an open account session the way the `account.lock` route does: the lock request, then
+    /// stop, the index unlock flag, and the removal from the account, subscriber and attended maps.
+    /// Does nothing when the account is not open. Stage D3 pauses an agent through it.
+    pub(super) async fn lock_account_session(&self, id: &str) -> Result<(), SdkError> {
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(());
+        };
+        let (outbound, _receiver) = mpsc::channel(1);
+        let connection = LocalBusConnectionState::new(0, outbound);
+        let lock = LocalBusFrame::request(
+            "rebind-pause-lock",
+            Some(id.to_owned()),
+            "account",
+            "account.lock",
+            serde_json::json!({}),
+        );
+        actor.request(command(lock, &connection)).await?;
+        actor.stop().await?;
+        self.set_unlocked(id, false).await?;
+        self.accounts.borrow_mut().remove(id);
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id.as_str() != id);
+        self.attended.borrow_mut().retain(|_, account| account.as_str() != id);
         Ok(())
     }
 
@@ -1022,7 +1077,7 @@ impl Supervisor {
         self.start_event_router();
     }
 
-    fn start_event_router(&self) {
+    pub(super) fn start_event_router(&self) {
         if self.backup_expiry.borrow().is_none() {
             let jobs = self.backup_jobs.clone();
             *self.backup_expiry.borrow_mut() = Some(tokio::task::spawn_local(async move {

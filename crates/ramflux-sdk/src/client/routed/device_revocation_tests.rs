@@ -186,13 +186,10 @@ async fn externally_custodied_revoke_refuses_non_primary_before_publication() ->
                 .is_empty(),
             "test: refused external revoke erased private pairs"
         );
+        let agent_id = owner.client.account_db()?.local_account_id.clone();
         assert_eq!(
-            crate::custody::load_account(
-                &owner.root.0,
-                "external-agent",
-                crate::custody::network_now()?
-            )?
-            .record(),
+            crate::custody::load_account(&owner.root.0, &agent_id, crate::custody::network_now()?)?
+                .record(),
             &before,
             "test: refused external revoke installed an acknowledged head"
         );

@@ -397,3 +397,123 @@ fn linux_vault_insert_sealer_seam_is_test_only() -> TestResult {
     assert!(hits.is_empty(), "insert_with callers outside the test module: {hits:?}");
     Ok(())
 }
+
+#[test]
+fn linux_vault_agent_master_history_body() -> TestResult {
+    run_in_child(&format!("{BODY}agent_master_body"))
+}
+
+fn agent_master_request(
+    master: &MasterKey,
+    self_key: &str,
+    range: u64,
+    previous: Option<Envelope<MasterCertificate>>,
+    issued_at: u64,
+) -> Result<AgentMasterRequest, Box<dyn std::error::Error>> {
+    let purpose = if previous.is_some() {
+        ramflux_crypto::custody::AgentMasterPurpose::Rebind
+    } else {
+        ramflux_crypto::custody::AgentMasterPurpose::Create
+    };
+    Ok(AgentMasterRequest {
+        purpose,
+        anchor: ramflux_crypto::custody::master_anchor(master)?,
+        principal_id: "agent-principal-1".into(),
+        principal_kind: ramflux_protocol::PrincipalKind::HeadlessAi,
+        cert_id: ramflux_protocol::encode_base64url([7_u8; 32]),
+        self_signing_public_key: self_key.into(),
+        external_ref: DeviceRef {
+            account_anchor: ramflux_protocol::encode_base64url([9_u8; 32]),
+            device_id: "phone".into(),
+            device_epoch: 1,
+        },
+        range,
+        previous,
+        issued_at,
+    })
+}
+
+#[test]
+fn agent_master_body() -> TestResult {
+    use ramflux_protocol::custody::object_hash;
+    if !in_child() {
+        return Ok(());
+    }
+    let root = private_root()?;
+    let provider = provider_in(root.path(), &ramflux_protocol::encode_base64url([7; 32]))?;
+    let id = ramflux_protocol::encode_base64url([9_u8; 32]);
+    let reference = format!("agent-master:{id}");
+    let cert_1 = format!("agent-master-cert:{id}:1");
+    let cert_2 = format!("agent-master-cert:{id}:2");
+    let realm_1 = root.path().join("account/1");
+    let master = MasterKey::generate()?;
+    let self_key = SelfSigningKey::generate()?.public_key();
+    provider.store_agent_master(&reference, &master)?;
+    assert!(provider.store_agent_master(&reference, &master).is_err(), "the seed is insert-only");
+    assert!(realm_1.join(&reference).exists(), "the seed is a primary-realm entry");
+    let genesis = provider.certify_agent_master(
+        &reference,
+        agent_master_request(&master, &self_key, 1, None, 1_000)?,
+    )?;
+    assert!(realm_1.join(&cert_1).exists(), "the genesis hash is recorded");
+    let retry = provider.certify_agent_master(
+        &reference,
+        agent_master_request(&master, &self_key, 1, None, 1_000)?,
+    )?;
+    assert_eq!(
+        object_hash(&genesis)?,
+        object_hash(&retry)?,
+        "a retry returns the recorded genesis"
+    );
+    assert!(
+        provider
+            .certify_agent_master(
+                &reference,
+                agent_master_request(&master, &self_key, 1, None, 1_001)?
+            )
+            .is_err(),
+        "a different genesis for the recorded range refuses"
+    );
+    let rebound = provider.certify_agent_master(
+        &reference,
+        agent_master_request(&master, &self_key, 2, Some(genesis.clone()), 2_000)?,
+    )?;
+    assert!(realm_1.join(&cert_2).exists(), "the rebind hash is recorded");
+    let rebind_retry = provider.certify_agent_master(
+        &reference,
+        agent_master_request(&master, &self_key, 2, Some(genesis.clone()), 2_000)?,
+    )?;
+    assert_eq!(object_hash(&rebound)?, object_hash(&rebind_retry)?, "a rebind retry is identical");
+    assert!(
+        provider
+            .certify_agent_master(
+                &reference,
+                agent_master_request(&master, &self_key, 2, Some(genesis), 2_001)?,
+            )
+            .is_err(),
+        "a different rebind for the recorded range refuses"
+    );
+    let mut data_only = provider_in(root.path(), &ramflux_protocol::encode_base64url([7; 32]))?;
+    data_only.role = LinuxVaultRole::DataOnly;
+    assert!(
+        matches!(
+            data_only.delete_agent_master(&reference, 2),
+            Err(SdkError::CustodyVault(CustodyVaultReason::PrimaryUnavailable))
+        ),
+        "a data-only handle never touches agent master items"
+    );
+    provider.delete_agent_master(&reference, 2)?;
+    for item in [&reference, &cert_1, &cert_2] {
+        assert!(!realm_1.join(item).exists(), "{item} is removed");
+    }
+    assert!(
+        provider
+            .certify_agent_master(
+                &reference,
+                agent_master_request(&master, &self_key, 1, None, 1_000)?
+            )
+            .is_err(),
+        "a deleted master refuses"
+    );
+    Ok(())
+}

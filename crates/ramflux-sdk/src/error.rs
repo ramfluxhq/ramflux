@@ -240,6 +240,14 @@ pub enum SdkError {
     NodeTimeout { retry_after_ms: u64 },
     #[error("born-v3 cannot accept legacy authority")]
     CustodyModeDowngrade,
+    /// The home node does not advertise `agent_custody_authorization_v1`. Refused before any
+    /// agent key, reservation or account write.
+    #[error("the home node does not advertise agent custody authorization")]
+    AgentCustodyUnsupported,
+    /// An agent creation request refused before any effect. The token is a closed wire reason
+    /// (for example `desktop_required` or `creation_pairing_required`), never prose.
+    #[error("agent creation refused: {0}")]
+    AgentCreationRefused(&'static str),
     #[error("invalid custody setup")]
     CustodySetupInvalid,
     /// A confirm check failed. The reason token names the check and never a secret.

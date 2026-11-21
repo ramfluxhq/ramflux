@@ -26,15 +26,26 @@ fn native_block_on<T>(
 }
 
 /// One native account whose only device is `device`, held as a public-bus fixture.
-pub(super) fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+pub(crate) fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
     native_block_on(async move {
         let fixture = Native::with_device(id, device).await?;
         Ok(fixture.into_bus())
     })
 }
 
+/// `native_person`, also returning the recovery words the fixture was created with.
+pub(crate) fn native_person_keeping_phrase(
+    id: &str,
+    device: &str,
+) -> Result<(LocalBusAccountState, zeroize::Zeroizing<String>), SdkError> {
+    native_block_on(async move {
+        let (fixture, phrase) = Native::with_device_keeping_phrase(id, device).await?;
+        Ok((fixture.into_bus(), phrase))
+    })
+}
+
 /// A laptop sibling of `phone`. It carries the account primary, as the phone holds it.
-pub(super) fn native_sibling(
+pub(crate) fn native_sibling(
     phone: &mut LocalBusAccountState,
     id: &str,
     device: &str,
@@ -60,7 +71,7 @@ pub(super) fn native_target(client: &RamfluxClient) -> Result<String, SdkError> 
 }
 
 /// Publishes each listed account's native manifest into every listed account's directory.
-pub(super) fn install_native_directories(
+pub(crate) fn install_native_directories(
     accounts: &[&LocalBusAccountState],
 ) -> Result<(), SdkError> {
     for holder in accounts {

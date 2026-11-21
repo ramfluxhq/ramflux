@@ -19,9 +19,11 @@ mod dpapi;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use ramflux_crypto::custody::SelfSigningKey;
+use ramflux_crypto::custody::{AgentMasterRequest, MasterKey, SelfSigningKey};
+use ramflux_protocol::custody::{Envelope, MasterCertificate};
 use zeroize::Zeroizing;
 
+use super::agent_master_item::{self, AgentMasterCells};
 use super::{BranchCredentials, PrimaryVault};
 use crate::SdkError;
 use crate::platform::fs;
@@ -316,6 +318,40 @@ impl PrimaryVault for WindowsDpapiVault {
 
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         self.read(reference)
+    }
+
+    fn store_agent_master(&self, reference: &str, master: &MasterKey) -> Result<(), SdkError> {
+        agent_master_item::store(self, reference, master)
+    }
+
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: AgentMasterRequest,
+    ) -> Result<Envelope<MasterCertificate>, SdkError> {
+        agent_master_item::certify(self, reference, request)
+    }
+
+    fn delete_agent_master(&self, reference: &str, last_range: u64) -> Result<(), SdkError> {
+        agent_master_item::delete(self, reference, last_range)
+    }
+}
+
+/// Agent-master cells: insert-only DPAPI entries; an absent file reads as `None`.
+impl AgentMasterCells for WindowsDpapiVault {
+    fn read_item(&self, reference: &str) -> Result<Option<Zeroizing<Vec<u8>>>, SdkError> {
+        if !self.entry_path(reference)?.exists() {
+            return Ok(None);
+        }
+        self.read(reference).map(Some)
+    }
+
+    fn insert_item(&self, reference: &str, value: &[u8]) -> Result<(), SdkError> {
+        self.insert(reference, value)
+    }
+
+    fn remove_item(&self, reference: &str) -> Result<(), SdkError> {
+        PrimaryVault::delete(self, reference)
     }
 }
 

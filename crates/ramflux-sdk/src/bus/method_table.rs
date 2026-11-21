@@ -113,6 +113,7 @@ methods! {
         "group.sender_key.export",
         "group.sender_key.import",
         "itest.migration.approve_once",
+        "itest.agent.approve_once",
         "mcp.approval.denied",
         "mcp.approval.granted",
         "mcp.server.add",

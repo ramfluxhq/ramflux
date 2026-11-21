@@ -4,7 +4,7 @@
 //! Public local authority and irreversible born-v3 latch; never contains a master or phrase.
 use super::{PrimaryVault, invalid, valid_id};
 use crate::SdkError;
-use ramflux_crypto::custody::{AuthorityPins, VerifiedRecord, verify_record};
+use ramflux_crypto::custody::{AuthorityPins, PinOutcome, VerifiedRecord, verify_record};
 use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -481,6 +481,21 @@ impl BornAccount {
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
     }
+    /// The human account that custodies this headless account on this root, if any.
+    #[must_use]
+    pub(crate) fn custodian_account_id(&self) -> Option<&str> {
+        self.stored.custodian_account_id.as_deref()
+    }
+    /// The agent creation store of this human account, opened on its data root.
+    /// # Errors
+    /// `CustodySetupInvalid` when the networking path is not under a data root;
+    /// `CustodyVaultUnavailable` when the store directory cannot be created.
+    pub(crate) fn agent_creation_store(
+        &self,
+    ) -> Result<super::agent_creation::AgentCreationStore, SdkError> {
+        let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        super::agent_creation::AgentCreationStore::open(root, self.local_account_id())
+    }
     pub(crate) fn local_device_id(&self) -> Result<&str, SdkError> {
         let id = if self.stored.local_device_id.is_empty() {
             match self.record().body.devices.as_slice() {
@@ -838,6 +853,62 @@ fn read_account(
     let _ = account.networking_view(now);
     Ok(account)
 }
+/// Stage D4 (contract 7.5): replace the authority of a headless agent account after its rebind. The
+/// new record is verified against its custodian `human`, and the stored pins must observe it as the
+/// successor of the stored record: a fork or an older head refuses. Only the authority file changes,
+/// through the atomic write that creation uses. Replaying the same record changes nothing.
+/// # Errors
+/// `CustodySetupInvalid` for a missing or foreign account; `PairingCode("HeadChanged")` when the
+/// pins do not advance; verification and I/O failures pass through.
+pub(crate) fn replace_rebound_authority(
+    root: &Path,
+    account_id: &str,
+    record: &Envelope<DeviceSet>,
+    custodian: Option<&VerifiedRecord>,
+    now: u64,
+) -> Result<(), SdkError> {
+    let path = directory(root, account_id)?.join("authority.json");
+    let mut stored = read_stored(root, account_id)?;
+    if stored.local_account_id != account_id
+        || stored.custodian_account_id.is_some() != custodian.is_some()
+    {
+        return Err(invalid());
+    }
+    let verified = verify_record(record, now, None, custodian)?;
+    if ramflux_protocol::custody::object_hash(&stored.record)?
+        == ramflux_protocol::custody::object_hash(record)?
+    {
+        return Ok(());
+    }
+    let outcome = stored.pins.observe_with_previous(&verified, Some(&stored.record))?;
+    if !matches!(outcome, PinOutcome::Advanced | PinOutcome::Unchanged) {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    stored.record = record.clone();
+    stored.compacted_ids = None;
+    genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
+/// The stored record of one account, decoded and NOT verified. A rebind uses it: the stored agent
+/// names the previous custodian primary, so it no longer verifies against the current human. The
+/// approved plan's predecessor hashes authenticate it instead, and the new record is fully verified.
+pub(crate) fn stored_record_unverified(
+    root: &Path,
+    account_id: &str,
+) -> Result<Envelope<DeviceSet>, SdkError> {
+    Ok(read_stored(root, account_id)?.record)
+}
+
+fn read_stored(root: &Path, account_id: &str) -> Result<StoredAuthority, SdkError> {
+    let path = directory(root, account_id)?.join("authority.json");
+    let mut bytes = Vec::new();
+    fs::File::open(&path)?.take((MAX_STORED_AUTHORITY_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STORED_AUTHORITY_BYTES {
+        return Err(invalid());
+    }
+    ramflux_protocol::custody::decode(&bytes, MAX_STORED_AUTHORITY_BYTES).map_err(Into::into)
+}
+
 fn load_human(root: &Path, id: &str, now: u64) -> Result<VerifiedRecord, SdkError> {
     // Decode directly and reject nonhuman evidence before following any custodian reference.
     let mut bytes = Vec::new();
@@ -883,10 +954,15 @@ fn create_private_temp(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 pub(super) struct GenesisMaterial<'a> {
     pub record: Envelope<DeviceSet>,
     pub primary: &'a ramflux_crypto::custody::SelfSigningKey,
-    pub branch: &'a Zeroizing<[u8; 64]>,
+    /// Branch seeds to store. Required unless `pre_staged`.
+    pub branch: Option<&'a Zeroizing<[u8; 64]>>,
     pub now: u64,
     pub data_secret: Option<&'a [u8]>,
     pub commit_gate: Option<&'a super::CommitGate>,
+    /// True when the primary, branch and provisioning secrets already sit in the vault under the
+    /// final references (agent creation stages them at begin). Persist then writes no vault item
+    /// and rolls back none.
+    pub pre_staged: bool,
 }
 pub(super) fn persist(
     root: &Path,
@@ -894,7 +970,8 @@ pub(super) fn persist(
     material: GenesisMaterial<'_>,
     vault: &dyn PrimaryVault,
 ) -> Result<BornAccount, SdkError> {
-    let GenesisMaterial { record, primary: key, branch, now, data_secret, commit_gate } = material;
+    let GenesisMaterial { record, primary: key, branch, now, data_secret, commit_gate, pre_staged } =
+        material;
     let human =
         input.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
     let verified = verify_record(&record, now, None, human.as_ref())?;
@@ -923,14 +1000,17 @@ pub(super) fn persist(
     let mut branch_written = false;
     let mut provisioning_written = false;
     let result = (|| {
-        vault.store_new(&reference, key)?;
-        primary_written = true;
-        vault.store_branch(&branch_reference, branch)?;
-        branch_written = true;
-        if let Some(agent_reference) = &agent_provisioning_reference {
-            let secret = data_secret.ok_or_else(invalid)?;
-            vault.store_provisioning_secret(agent_reference, secret)?;
-            provisioning_written = true;
+        if !pre_staged {
+            let branch = branch.ok_or_else(invalid)?;
+            vault.store_new(&reference, key)?;
+            primary_written = true;
+            vault.store_branch(&branch_reference, branch)?;
+            branch_written = true;
+            if let Some(agent_reference) = &agent_provisioning_reference {
+                let secret = data_secret.ok_or_else(invalid)?;
+                vault.store_provisioning_secret(agent_reference, secret)?;
+                provisioning_written = true;
+            }
         }
         if let Some(secret) = data_secret {
             let mut data = crate::RamfluxClient::new();

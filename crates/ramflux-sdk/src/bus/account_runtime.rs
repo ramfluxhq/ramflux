@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 mod commands;
 mod transient;
 pub(super) use transient::TransientHost;
+mod agent_calls;
 mod connection;
 mod pairing_calls;
 mod pairing_data;

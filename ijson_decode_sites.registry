@@ -183,6 +183,7 @@ apps/rf/src/handlers/a2ui.rs | handle_a2ui | 2 | E | excluded=decode is not an i
 apps/rf/src/handlers/a2ui.rs | handle_a2ui | 3 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/account_backup.rs | job | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/account_backup.rs | wait | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/rf/src/handlers/agent.rs | request_of | 1 | E | excluded=decode is not an ingress admission; the JSON is a local command-line argument, no signed envelope is admitted here
 apps/rf/src/handlers/bot.rs | handle_bot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/bot.rs | handle_bot | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/daemon.rs | handle_daemon | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
@@ -285,6 +286,7 @@ crates/ramflux-node-core/src/router_store.rs | load_bool_key_set | 1 | E | exclu
 crates/ramflux-node-core/src/router_store.rs | load_incremental_replay_tuples | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store.rs | load_table_values | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store.rs | remove_inbox_entries_for_target | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-node-core/src/router_store/agent_publish.rs | agent_publish_by_request | 1 | D | admitted-before-persist: the stored publication row is written only after the node admitted it; not an ingress decoder
 crates/ramflux-node-core/src/router_store/custody.rs | custody_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store/custody.rs | observe_custody_node | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store/custody.rs | observe_custody_node | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -444,6 +446,8 @@ crates/ramflux-protocol/src/wake_v2.rs | parse_signed_call_intent_v1 | 1 | E | e
 crates/ramflux-protocol/src/wake_v2.rs | parse_signed_wake_v2 | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-prx-client/src/error.rs | decode_ok | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 2xx response bytes over loopback
 crates/ramflux-prx-client/src/error.rs | rate_limited | 1 | B | strict=parse_i_json; admission=B ingress boundary: PRX daemon 429 response body over loopback
+crates/ramflux-sdk/src/agent_record/edit.rs | record_completed | 1 | D | admitted-before-persist: the creation intent was validated by agent.create before the creation record stored it; not an ingress decoder
+crates/ramflux-sdk/src/agent_record/store.rs | load | 1 | D | admitted-before-persist: the agent record is written by this module through save after check_record; not an ingress decoder
 crates/ramflux-sdk/src/attachment_send/bus.rs | begin | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | cancel | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
 crates/ramflux-sdk/src/attachment_send/bus.rs | chunk | 1 | E | excluded=local bus request body; SDK authorizes the account before any attachment admission
@@ -471,10 +475,12 @@ crates/ramflux-sdk/src/bindings/mod.rs | decode_send_message | 1 | E | excluded=
 crates/ramflux-sdk/src/bus/account_runtime/fetches.rs | prepare_fetch | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/account_runtime/testing.rs | stage_calls | 1 | E | excluded=bounded native test fixture; no external signed envelope admission
 crates/ramflux-sdk/src/bus/account_runtime/testing.rs | trust_peer | 1 | E | excluded=test-support fixture reconstructs a root-verified public manifest; outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | enroll_desktop | 1 | E | excluded=test-support fixture re-reads the manifest it serialized itself; not a received production ingress
 crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | prepare_call_peer | 1 | E | excluded=bounded native fixture directory; no external signed envelope admission
 crates/ramflux-sdk/src/bus/account_runtime/testing_messages.rs | deliver_message | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
 crates/ramflux-sdk/src/bus/account_runtime/testing_messages.rs | deliver_message_to_client | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
 crates/ramflux-sdk/src/bus/account_runtime/transient.rs | apply_transient_frame | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
+crates/ramflux-sdk/src/bus/agent_methods.rs | decode | 1 | E | excluded=ProtoJSON body of a local bus agent method (AGENT-IDENTITY-01 C3c); the caller is the local bus, no signed envelope is admitted here
 crates/ramflux-sdk/src/bus/backup_jobs/format.rs | load_metadata | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/backup_jobs/format.rs | write | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/backup_jobs/output_ownership.rs | recover | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -551,6 +557,7 @@ crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_send_request | 1 |
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_sender_key_distribution | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/group/history.rs | read | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/identity_authority.rs | dispatch_identity_authority | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/itest_agent.rs | approve_once | 1 | E | excluded=itest hook body {plan_hash} (AGENT-IDENTITY-01 C3c); compiled only with the itest opt-in; no signed envelope
 crates/ramflux-sdk/src/bus/dispatch/itest_migration.rs | approve_once | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/message.rs | dispatch_conversation_disappearing_expire | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/message.rs | dispatch_conversation_disappearing_set | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -772,6 +779,9 @@ crates/ramflux-sdk/src/client/task/lifecycle.rs | maintain_task_source | 1 | E |
 crates/ramflux-sdk/src/client/task/quota.rs | record_task_capacity_rejection | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/contact_card.rs | parse_contact_card | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/contact_card.rs | parse_contact_card | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/custody/agent_creation/rebind.rs | load_entry_in | 1 | D | admitted-before-persist: the inventory entry is written by this module after its checks; not an ingress decoder
+crates/ramflux-sdk/src/custody/agent_creation/rebind_send.rs | stored_agent_record | 1 | D | admitted-before-persist: the committed agent record is read from the local creation store; not an ingress decoder
+crates/ramflux-sdk/src/custody/agent_creation/store.rs | load | 1 | D | admitted-before-persist: the local creation record is written by this module after its checks; not an ingress decoder
 crates/ramflux-sdk/src/custody/bus.rs | exchange | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/custody/memory_vault.rs | load_persisted | 1 | E | excluded=fixture JSON map of wrapping-key references; not network ingress
 crates/ramflux-sdk/src/custody/pairing/coordinator.rs | bus_body | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

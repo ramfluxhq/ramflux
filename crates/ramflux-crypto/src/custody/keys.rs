@@ -19,6 +19,28 @@ impl fmt::Debug for MasterKey {
     }
 }
 impl MasterKey {
+    /// Create an agent master from 32 fresh random bytes. No recovery phrase is involved.
+    /// # Errors
+    /// Returns a random-source failure without including any key material.
+    pub fn generate() -> Result<Self, CryptoError> {
+        let seed = super::random_secret()?;
+        Ok(Self(SigningKey::from_bytes(&seed)))
+    }
+    /// Rebuild a master from a provider-owned zeroizing seed (vault load path only).
+    #[doc(hidden)]
+    // vault implementations only; the source guard test enforces this scope.
+    #[must_use]
+    pub fn from_vault_seed(seed: &Zeroizing<[u8; 32]>) -> Self {
+        Self(SigningKey::from_bytes(seed))
+    }
+    /// Transfer the seed directly into a primary-only vault provider. Never expose it on a bus
+    /// method, C ABI export, log, report or sync payload.
+    #[doc(hidden)]
+    // vault implementations only; the source guard test enforces this scope.
+    #[must_use]
+    pub fn vault_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.0.to_bytes())
+    }
     /// Derive the exact master seed with zero salt, entropy IKM and the bare v1 info label.
     /// # Errors
     /// Returns a derivation/provider failure without including recovery material.
@@ -176,6 +198,19 @@ impl SelfSigningKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_master_is_random_and_survives_the_vault_seam() -> Result<(), CryptoError> {
+        let first = MasterKey::generate()?;
+        let second = MasterKey::generate()?;
+        assert_ne!(first.public_key(), second.public_key(), "two masters must differ");
+        let reloaded = MasterKey::from_vault_seed(&first.vault_seed());
+        assert_eq!(
+            reloaded.public_key(),
+            first.public_key(),
+            "the vault seam must reproduce the same master public key"
+        );
+        Ok(())
+    }
     #[test]
     fn hkdf_seed_matches_the_independent_vector_without_a_production_seed_export()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -65,6 +65,15 @@ policies! {
     "account.status" => ("account", false, true, false, false),
     "account.switch" => ("account", true, true, false, false),
     "account.unlock" => ("account", true, true, false, false),
+    "agent.access.set" => ("agent", false, false, false, false),
+    "agent.create" => ("agent", false, false, false, true),
+    "agent.creation.decide" => ("agent", false, false, false, true),
+    "agent.get" => ("agent", false, false, false, false),
+    "agent.list" => ("agent", false, false, false, false),
+    "agent.operation.get" => ("agent", false, false, false, false),
+    "agent.persona.edit" => ("agent", false, false, false, false),
+    "agent.delete" => ("agent", false, false, false, false),
+    "agent.watch" => ("agent", false, false, false, false),
     "attachment.enable" => ("account", true, true, false, false),
     "attachment.import.begin" => ("account", true, true, false, false),
     "attachment.import.cancel" => ("account", true, true, false, false),
@@ -282,9 +291,9 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
     "ramflux.message.v1.ContactSafetyVerifyResult";
 /// blake3 of the generated message descriptor set.
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
-    "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc";
+    "917e88f03ace69a82f1830281c76feed9b7dd7fc5edbbcf3388d18d3df0ee11b";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "8edd837e0fe3317ba529009dd3cc34b04cd23d3d";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -300,7 +309,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "8edd837e0fe3317ba529009dd3cc34b04cd23d3d"
 }
 
 #[cfg(test)]

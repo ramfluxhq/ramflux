@@ -74,13 +74,9 @@ fn with_profile(
 #[tokio::test]
 async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_contact_verification()
 -> TestResult {
-    let agent = crate::client::native_test_support::Fixture::headless(
-        "agent-home",
-        "agent",
-        "agent-device",
-        "Café Agent",
-    )
-    .await?;
+    let agent =
+        crate::client::native_test_support::Fixture::headless("agent", "Café Agent").await?;
+    let device = agent.client.owned_device_identity()?.device_id().to_owned();
     let peer = crate::client::native_test_support::Fixture::new("bob").await?;
     peer.client.persist_observed_identity_directory_now(&agent.manifest)?;
     let stored = peer.client.account_db()?.client_record("identity", "agent")?.ok_or("identity")?;
@@ -96,21 +92,21 @@ async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_
     assert_eq!(contact["display_name"], "Café Agent");
     assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["verified"], false);
-    assert!(crate::client::task::actor_kind_verified(&peer.client, "agent", "agent-device"));
+    assert!(crate::client::task::actor_kind_verified(&peer.client, "agent", &device));
     assert!(!crate::client::task::actor_role_kind_verified(
         &peer.client,
         "agent",
-        "agent-device",
+        &device,
         ramflux_protocol::ActorType::Human
     ));
     assert!(crate::client::task::actor_role_kind_verified(
         &peer.client,
         "agent",
-        "agent-device",
+        &device,
         ramflux_protocol::ActorType::Bot
     ));
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "agent", "bob"));
-    assert!(!crate::client::task::actor_kind_verified(&peer.client, "unknown", "agent-device"));
+    assert!(!crate::client::task::actor_kind_verified(&peer.client, "unknown", &device));
     Ok(())
 }
 #[test]

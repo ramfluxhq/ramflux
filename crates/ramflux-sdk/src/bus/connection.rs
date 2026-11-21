@@ -143,7 +143,9 @@ pub(super) async fn handle<S: crate::platform::listener::BusStream>(
                     Err(error) => break Err(error),
                     },
                 };
-                if super::custody_setup::handles(&incoming.frame()?.method) {
+                if super::custody_setup::handles(&incoming.frame()?.method)
+                    || super::agent_methods::handles(&incoming.frame()?.method)
+                {
                     let bytes = custody_response(
                         &mut incoming,
                         &supervisor,
@@ -252,11 +254,8 @@ async fn custody_response(
     disconnected: &mut watch::Receiver<bool>,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
     let frame = incoming.frame()?;
-    if frame.method == "account.create.begin"
-        && frame.body["principal_kind"] == "headless_ai"
-        && !frame.account_id.as_deref().is_some_and(|id| supervisor.account_is_open(id))
-    {
-        return super::custody_response::error(frame, &SdkError::LocalBusPermissionDenied);
+    if super::agent_methods::handles(&frame.method) {
+        return super::agent_methods::respond(frame, supervisor).await;
     }
     if frame.method.starts_with("account.recover.") {
         return super::recovery::respond(frame, supervisor, recovery, disconnected).await;

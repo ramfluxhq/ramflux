@@ -38,10 +38,11 @@ fn known_account(root: &Path, vault: &TestVault) -> TestResult<(BornAccount, Zer
         super::super::GenesisMaterial {
             record,
             primary: &primary,
-            branch: &seeds,
+            branch: Some(&seeds),
             now,
             data_secret: Some(b"independent data secret"),
             commit_gate: None,
+            pre_staged: false,
         },
         vault,
     )?;
