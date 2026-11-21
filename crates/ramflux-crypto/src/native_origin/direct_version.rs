@@ -2,15 +2,20 @@
 // Copyright (c) 2026 Span Brain
 
 //! Coupled direct-message versions. No current permission or local cursor is imported.
-use super::{EvidenceError, Kind, OriginalHeader, OwnAuthoredCapture, RetainedOrigin, g};
+use super::{
+    EvidenceError, Kind, OriginalHeader, OwnAuthoredCapture, OwnSentAttestation, RetainedOrigin, g,
+};
 use prost::Message as _;
 
 /// These evidence classes are deliberately distinct. Authored data requires an
 /// independently authenticated same-account carrier; it is never peer-origin proof.
+/// `OwnCopy` verifies its exact enclosing signature; an Edit's original identity is
+/// separately authenticated own-account history data, not a fabricated peer header.
 #[derive(Clone, Copy)]
 pub enum DirectEvidence<'a> {
     Received { origin: &'a RetainedOrigin, original: Option<&'a OriginalHeader> },
     Authored(&'a OwnAuthoredCapture),
+    OwnCopy { attestation: &'a OwnSentAttestation, original: Option<&'a g::EventIdentity> },
 }
 
 /// Original order and current revision admitted together, never independent maxima.
@@ -55,33 +60,7 @@ impl DirectVersion {
         let inner = g::Inner::decode(exact_inner).map_err(|_| bad)?;
         let current = inner.identity.ok_or(bad)?;
         check_scope(&current, &conversation, own_root, peer_root)?;
-        let original = match evidence {
-            DirectEvidence::Received { origin, original } => {
-                let verified = origin.verify(&current, exact_inner)?;
-                if verified.outer.delivery_mode.as_deref() != Some("durable")
-                    || verified.outer.delivery_class != ramflux_protocol::DeliveryClass::Message
-                    || origin.routing.kind != Kind::Direct
-                    || origin.routing.group_id.is_some()
-                    || origin.routing.group_message_id.is_some()
-                    || origin.routing.message_id != ramflux_protocol::encode_base64url(&current.id)
-                {
-                    return Err(bad);
-                }
-                match (inner.kind, original) {
-                    (1, None) => current.clone(),
-                    (3, Some(header)) => header.verify_header()?.identity().clone(),
-                    _ => return Err(bad),
-                }
-            }
-            DirectEvidence::Authored(capture) => {
-                if capture.sent.exact_inner != exact_inner
-                    || capture.check_direct(own_root)? != current
-                {
-                    return Err(bad);
-                }
-                capture.original.clone()
-            }
-        };
+        let original = evidence.original(&current, inner.kind, exact_inner, own_root)?;
         check_scope(&original, &conversation, own_root, peer_root)?;
         if original.author.as_ref().map(|a| &a.account_anchor)
             != current.author.as_ref().map(|a| &a.account_anchor)
@@ -114,6 +93,58 @@ impl DirectVersion {
             _ => return Err(bad),
         };
         Ok(Self { original, current, revision })
+    }
+}
+
+impl DirectEvidence<'_> {
+    fn original(
+        self,
+        current: &g::EventIdentity,
+        kind: u32,
+        exact_inner: &[u8],
+        own_root: &str,
+    ) -> Result<g::EventIdentity, EvidenceError> {
+        let bad = EvidenceError::OriginCommitmentMismatch;
+        Ok(match self {
+            Self::Received { origin, original } => {
+                let verified = origin.verify(current, exact_inner)?;
+                if verified.outer.delivery_mode.as_deref() != Some("durable")
+                    || verified.outer.delivery_class != ramflux_protocol::DeliveryClass::Message
+                    || origin.routing.kind != Kind::Direct
+                    || origin.routing.group_id.is_some()
+                    || origin.routing.group_message_id.is_some()
+                    || origin.routing.message_id != ramflux_protocol::encode_base64url(&current.id)
+                {
+                    return Err(bad);
+                }
+                match (kind, original) {
+                    (1, None) => current.clone(),
+                    (3, Some(header)) => header.verify_header()?.identity().clone(),
+                    _ => return Err(bad),
+                }
+            }
+            Self::Authored(capture) => {
+                if capture.sent.exact_inner != exact_inner
+                    || capture.check_direct(own_root)? != *current
+                {
+                    return Err(bad);
+                }
+                capture.original.clone()
+            }
+            Self::OwnCopy { attestation, original } => {
+                let sent = attestation.verify(exact_inner, own_root)?;
+                if sent.ciphertext_digest.is_some()
+                    || sent.context.as_ref().is_none_or(|context| context.group.is_some())
+                {
+                    return Err(bad);
+                }
+                match (kind, original) {
+                    (1, None) => current.clone(),
+                    (3, Some(identity)) => identity.clone(),
+                    _ => return Err(bad),
+                }
+            }
+        })
     }
 }
 

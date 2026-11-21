@@ -61,8 +61,11 @@ native content, target, original identity/order and current revision checks.
 
 The sealed result exposes original identity, current identity and revision together.
 It supplies no current mutation permission, membership, delivery receipt, pin or
-local change cursor. Own-copy attestations remain a separate class and are not
-silently admitted through either path. Real signed SDK fixtures exercise altered
+local change cursor. Own-copy attestations use an explicit third class: the exact
+signed enclosing control authenticates the nested own-account bytes without
+replacing their original author by the enclosing sibling. For an Edit, the
+original identity is separately authenticated own-account contribution data;
+it is not reconstructed from the Edit or promoted to peer signed-header proof. Real signed SDK fixtures exercise altered
 body/HLC, foreign root pair, changed route, missing original header and wrong
 message delivery policy. The shared verifier alone activates no SQL/actor family;
 semantic export/import, erasure closure and product-read witnesses remain required.

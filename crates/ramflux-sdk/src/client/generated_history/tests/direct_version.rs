@@ -237,3 +237,6 @@ fn direct_version_authored_is_same_account_data_and_rejects_received_substitutio
     );
     Ok(())
 }
+
+#[path = "direct_version/own_copy.rs"]
+mod own_copy;
