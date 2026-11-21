@@ -10,20 +10,21 @@ use super::store::{AgentCreationRecord, AgentCreationStore};
 use crate::SdkError;
 use crate::custody::store::GenesisMaterial;
 use crate::custody::{CreateInput, PrimaryVault, store as custody_store};
-use ramflux_crypto::custody::{AgentMasterPurpose, AgentMasterRequest, SelfSigningKey};
-use ramflux_protocol::custody::{
-    BranchCertificate, Device, DeviceSet, Envelope, MigrationState, Profile, RegisterPlan,
-    SectionHashes, decode_register_plan, encode_epoch, object_hash,
+use ramflux_crypto::custody::{
+    AgentMasterPurpose, AgentMasterRequest, GenesisDraft, create_genesis_from_draft,
 };
-use ramflux_protocol::{DeviceSetStatus, PrincipalKind, domain};
+use ramflux_protocol::custody::{
+    Envelope, MasterCertificate, RegisterPlan, decode_register_plan, object_hash,
+};
+use ramflux_protocol::PrincipalKind;
 
 /// Commit an authorized request exactly once. The complete bundle is written by one persist call
-/// after the human head and primary are re-read; the record then moves to `publication_pending`.
-/// A repeated call returns the saved record and writes nothing.
+/// after the human head, the primary and the desktop enrollment are re-read; the record then moves
+/// to `publication_pending`. A repeated call returns the saved record and writes nothing.
 /// # Errors
-/// `CustodySetupInvalid` for a request that is not authorized, or a human head or primary that no
-/// longer matches the plan (the request is refused and its pending secrets are cleaned up);
-/// `CustodyExpired` past the deadline before the commit.
+/// `CustodySetupInvalid` for a request that is not authorized; `CustodyExpired` past the deadline
+/// before the commit. A human head, a primary or a desktop enrollment that no longer matches the
+/// plan refuses the request (its pending secrets are cleaned up before the commit).
 pub fn commit_approved(
     store: &AgentCreationStore,
     vault: &dyn PrimaryVault,
@@ -62,7 +63,11 @@ pub fn commit_approved(
     let refs = StagedRefs::for_record(store, &record, &plan)?;
     let primary_key = vault.load_primary(&refs.primary)?;
     let provisioning = vault.load_provisioning_secret(&refs.provisioning)?;
-    let genesis = build_genesis(vault, &refs, &plan, &primary_key)?;
+    let genesis = create_genesis_from_draft(
+        |body| issue_agent_master(vault, &refs, body),
+        &primary_key,
+        &plan_draft(&plan),
+    )?;
     let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
     let input = CreateInput {
         local_account_id: account_id,
@@ -124,7 +129,7 @@ impl StagedRefs {
     }
 }
 
-/// Close a request whose human head or primary changed before the commit.
+/// Close a request whose human head, primary or desktop enrollment changed before the commit.
 fn finish_refused(
     store: &AgentCreationStore,
     vault: &dyn PrimaryVault,
@@ -140,94 +145,50 @@ fn finish_refused(
     .map(|_| ())
 }
 
-/// Build the native genesis of the agent from the approved plan. The master certificate is issued
-/// by the vault (the master never leaves it); the branch certificate and the `DeviceSet` are
-/// signed by the agent self-signing key. Every field comes from the plan, not from the clock.
-fn build_genesis(
+/// Every genesis value of an approved plan. Nothing is recomputed from the clock or the device.
+fn plan_draft(plan: &RegisterPlan) -> GenesisDraft {
+    GenesisDraft {
+        account_anchor: plan.agent_anchor.clone(),
+        principal_id: plan.principal_id.clone(),
+        principal_kind: PrincipalKind::HeadlessAi,
+        display_name: plan.display_name.clone(),
+        primary_device_ref: plan.human_primary.clone(),
+        custodian: Some(plan.human_primary.clone()),
+        master_public_key: plan.master_public_key.clone(),
+        self_signing_public_key: plan.self_signing_public_key.clone(),
+        master_cert_id: plan.master_cert_id.clone(),
+        device_id: plan.agent_device.device_id.clone(),
+        device_epoch: plan.agent_device.device_epoch,
+        branch_signing_public_key: plan.branch_signing_public_key.clone(),
+        agreement_public_key: plan.agreement_public_key.clone(),
+        branch_cert_id: plan.branch_cert_id.clone(),
+        branch_capabilities: plan.capabilities.clone(),
+        issued_at: plan.certificate_issued_at,
+        branch_not_before: plan.branch_not_before,
+        branch_expires_at: plan.branch_expires_at,
+    }
+}
+
+/// The master certificate is issued by the vault (the master never leaves it). The request is
+/// built from the body the genesis fixed; the genesis rejects any returned body that differs.
+fn issue_agent_master(
     vault: &dyn PrimaryVault,
     refs: &StagedRefs,
-    plan: &RegisterPlan,
-    primary: &SelfSigningKey,
-) -> Result<Envelope<DeviceSet>, SdkError> {
-    let master_cert = vault.certify_agent_master(
+    body: MasterCertificate,
+) -> Result<Envelope<MasterCertificate>, SdkError> {
+    vault.certify_agent_master(
         &refs.master,
         AgentMasterRequest {
             purpose: AgentMasterPurpose::Create,
-            anchor: plan.agent_anchor.clone(),
-            principal_id: plan.principal_id.clone(),
-            principal_kind: PrincipalKind::HeadlessAi,
-            cert_id: plan.master_cert_id.clone(),
-            self_signing_public_key: plan.self_signing_public_key.clone(),
-            external_ref: plan.human_primary.clone(),
-            range: 1,
+            anchor: body.account_anchor,
+            principal_id: body.principal_id,
+            principal_kind: body.principal_kind,
+            cert_id: body.cert_id,
+            self_signing_public_key: body.self_signing_public_key,
+            external_ref: body.primary_device_ref,
+            range: body.range_index,
             previous: None,
-            issued_at: plan.certificate_issued_at,
+            issued_at: body.issued_at,
         },
-    )?;
-    let branch_cert = primary
-        .certify_branch(BranchCertificate {
-            schema: domain::CUSTODY_BRANCH_CERTIFICATE.into(),
-            version: 1,
-            account_anchor: plan.agent_anchor.clone(),
-            master_certificate_hash: object_hash(&master_cert)
-                .map_err(|_| SdkError::CustodySetupInvalid)?,
-            device_id: plan.agent_device.device_id.clone(),
-            device_epoch: plan.agent_device.device_epoch,
-            principal_kind: PrincipalKind::HeadlessAi,
-            branch_signing_public_key: plan.branch_signing_public_key.clone(),
-            agreement_identity_public_key: plan.agreement_public_key.clone(),
-            capabilities: plan.capabilities.clone(),
-            not_before: plan.branch_not_before,
-            expires_at: plan.branch_expires_at,
-            cert_id: plan.branch_cert_id.clone(),
-        })
-        .map_err(|_| SdkError::CustodySetupInvalid)?;
-    let (signing_commitment, agreement_commitment) = ramflux_crypto::device_key_commitments(
-        &plan.branch_signing_public_key,
-        &plan.agreement_public_key,
     )
-    .map_err(|_| SdkError::CustodySetupInvalid)?;
-    let device_set = DeviceSet {
-        schema: domain::SIGNED_DEVICE_SET_V3.into(),
-        version: 3,
-        principal_id: plan.principal_id.clone(),
-        account_anchor: plan.agent_anchor.clone(),
-        principal_kind: PrincipalKind::HeadlessAi,
-        origin: "new".into(),
-        custody_mode: "v3".into(),
-        device_set_epoch: encode_epoch(1, 1).map_err(|_| SdkError::CustodySetupInvalid)?,
-        previous_record_hash: None,
-        issued_at: plan.certificate_issued_at,
-        master_certificate: master_cert,
-        legacy_binding: None,
-        profile: Profile {
-            kind: PrincipalKind::HeadlessAi,
-            display_name: plan.display_name.clone(),
-            custodian: Some(plan.human_primary.clone()),
-        },
-        devices: vec![Device {
-            device_id: plan.agent_device.device_id.clone(),
-            device_epoch: plan.agent_device.device_epoch,
-            signing_key_commitment: signing_commitment,
-            agreement_key_commitment: agreement_commitment,
-            status: DeviceSetStatus::Active,
-            revoked_at: None,
-            branch_certificate: Some(branch_cert),
-            message_layer: None,
-            migration_state: MigrationState::Native,
-        }],
-        delegations: vec![],
-        revoked_delegation_ids: vec![],
-        migration: None,
-        revoked_device_checkpoint: None,
-        section_hashes: SectionHashes {
-            profile: String::new(),
-            devices: String::new(),
-            delegations: String::new(),
-            revoked_delegation_ids: String::new(),
-            migration: String::new(),
-            revoked_device_checkpoint: String::new(),
-        },
-    };
-    primary.sign_record(device_set).map_err(|_| SdkError::CustodySetupInvalid)
 }

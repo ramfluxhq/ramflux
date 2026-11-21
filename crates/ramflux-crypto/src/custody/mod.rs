@@ -15,7 +15,7 @@ pub use cooperative_transfer::{
 pub use recovery::{RecoveryInput, recover_primary};
 mod contact_card;
 pub use contact_card::verify_contact_card_v3;
-pub use genesis::{GenesisInput, create_genesis};
+pub use genesis::{GenesisDraft, GenesisInput, create_genesis, create_genesis_from_draft};
 mod phrase;
 mod pins;
 pub use pins::{
