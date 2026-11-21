@@ -43,7 +43,7 @@ pub struct PairingConfig {
 }
 
 impl PairingConfig {
-    /// Production reader: env once at process start. Pairing remains default-off.
+    /// Production reader: env once at process start. Pairing is on by default; `0` turns it off.
     /// # Errors
     /// Refuses non-Unicode values and every value other than unset, `0` or `1`.
     pub fn from_env() -> Result<Self, SdkError> {
@@ -57,8 +57,8 @@ impl PairingConfig {
     }
     fn from_value(value: Option<&str>) -> Result<Self, SdkError> {
         let enabled = match value {
-            None | Some("0") => false,
-            Some("1") => true,
+            None | Some("1") => true,
+            Some("0") => false,
             Some(_) => return Err(SdkError::PairingField("RAMFLUX_DEVICE_PAIRING_ENABLED")),
         };
         Ok(Self { enabled, extra_root_ca_pem: None })
@@ -751,9 +751,8 @@ const _: () = assert!(POLL_SECS >= 1);
 mod config_tests {
     use super::*;
     #[test]
-    fn pairing_preview_capability_is_default_off_and_invalid_values_refuse() -> Result<(), SdkError>
-    {
-        for (value, expected) in [(None, false), (Some("0"), false), (Some("1"), true)] {
+    fn pairing_is_on_by_default_and_invalid_values_refuse() -> Result<(), SdkError> {
+        for (value, expected) in [(None, true), (Some("0"), false), (Some("1"), true)] {
             assert_eq!(PairingConfig::from_value(value)?.enabled, expected);
         }
         for value in ["", "true", "false", " 1", "1\n", "2", "on"] {
