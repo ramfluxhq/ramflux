@@ -3,6 +3,7 @@
 
 //! Stage B exit tests: the vault operations and the creation state machine, driven by the real
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
+use super::commit::desktop_is_enrolled;
 use super::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
     BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_request,
@@ -11,16 +12,21 @@ use super::{
 };
 use crate::SdkError;
 use crate::custody::vault::agent_master_item::AgentMasterCells;
-use crate::custody::{PrimaryVault, memory_vault::MemoryPrimaryVault};
+use crate::custody::store::GenesisMaterial;
+use crate::custody::{CreateInput, PrimaryVault, memory_vault::MemoryPrimaryVault};
 use ramflux_crypto::create_device_branch_from_seed;
 use ramflux_crypto::custody::{
-    AgentMasterPurpose, AgentMasterRequest, MasterKey, SelfSigningKey, master_anchor,
-    verify_register_decision,
+    AgentMasterPurpose, AgentMasterRequest, GenesisInput, MasterKey, SelfSigningKey,
+    create_genesis, master_anchor, verify_register_decision,
 };
+use ramflux_crypto::X25519KeyPair;
 use ramflux_protocol::custody::{
-    AgentRegisterProfile, DeviceRef, RegisterCancel, RegisterOutcome, decode_register_decision,
-    decode_register_plan, encode_register_cancel, encode_register_plan, object_hash,
+    AgentRegisterProfile, BranchCertificate, Device, DeviceRef, DeviceSet, Envelope,
+    MAX_BRANCH_LEASE_SECONDS, MigrationState, RegisterCancel, RegisterOutcome,
+    decode_register_decision, decode_register_plan, encode_register_cancel, encode_register_plan,
+    object_hash,
 };
+use ramflux_protocol::{DeviceSetStatus, PrincipalKind, domain};
 use ramflux_protocol::encode_base64url;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -772,13 +778,70 @@ fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() ->
     Ok(())
 }
 
-/// A live human account on a fresh data root; its keys live in its own vault (not used here).
+/// Principal and device names of the human fixture: the primary phone and a paired desktop.
+const HUMAN_PRINCIPAL: &str = "principal-human";
+const HUMAN_PRIMARY_DEVICE: &str = "primary";
+
+/// A live human account on a fresh data root with two active devices in its authority: the primary
+/// (genesis, signed by the human primary key) and the desktop, a successor record signed by the
+/// same key with a `sync` branch. The phone-side keys of these tests are separate, as in production.
 struct HumanFixture {
     root: crate::custody::tests::Root,
     now: u64,
     anchor: String,
     primary: DeviceRef,
     head: String,
+}
+
+/// The desktop device of the human fixture, with a branch signed by the human primary key.
+fn with_desktop_device(
+    primary: &SelfSigningKey,
+    base: &Envelope<DeviceSet>,
+    now: u64,
+) -> Result<Envelope<DeviceSet>, Box<dyn std::error::Error>> {
+    let branch = create_device_branch_from_seed(
+        HUMAN_PRINCIPAL,
+        DESKTOP_DEVICE,
+        1,
+        &Zeroizing::new([27_u8; 32]),
+    );
+    let signing = encode_base64url(branch.signing_key.verifying_key().to_bytes());
+    let agreement = encode_base64url(X25519KeyPair::from_seed([28_u8; 32]).public);
+    let (signing_commitment, agreement_commitment) =
+        ramflux_crypto::device_key_commitments(&signing, &agreement)?;
+    let branch_cert = primary.certify_branch(BranchCertificate {
+        schema: domain::CUSTODY_BRANCH_CERTIFICATE.into(),
+        version: 1,
+        account_anchor: base.body.account_anchor.clone(),
+        master_certificate_hash: object_hash(&base.body.master_certificate)?,
+        device_id: DESKTOP_DEVICE.into(),
+        device_epoch: 1,
+        principal_kind: PrincipalKind::Human,
+        branch_signing_public_key: signing,
+        agreement_identity_public_key: agreement,
+        capabilities: ["call", "group", "message", "register", "sync"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        not_before: now,
+        expires_at: now + MAX_BRANCH_LEASE_SECONDS,
+        cert_id: encode_base64url([29_u8; 32]),
+    })?;
+    let mut body = base.body.clone();
+    body.devices.push(Device {
+        device_id: DESKTOP_DEVICE.into(),
+        device_epoch: 1,
+        signing_key_commitment: signing_commitment,
+        agreement_key_commitment: agreement_commitment,
+        status: DeviceSetStatus::Active,
+        revoked_at: None,
+        branch_certificate: Some(branch_cert),
+        message_layer: None,
+        migration_state: MigrationState::Native,
+    });
+    // The roster is sorted by device id and must stay unique (`desktop-device` before `primary`).
+    body.devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    Ok(primary.sign_record(body)?)
 }
 
 fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
@@ -788,9 +851,55 @@ fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
         .saturating_sub(60);
-    let human = crate::custody::tests::create(&root.0, HUMAN, &vault, now)?;
+    let master = MasterKey::from_vault_seed(&Zeroizing::new([21_u8; 32]));
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([22_u8; 32]));
+    let signing_seed = Zeroizing::new([23_u8; 32]);
+    let branch =
+        create_device_branch_from_seed(HUMAN_PRINCIPAL, HUMAN_PRIMARY_DEVICE, 1, &signing_seed);
+    let agreement = X25519KeyPair::from_seed([24_u8; 32]);
+    let base = create_genesis(
+        &master,
+        &primary,
+        &branch,
+        &agreement,
+        GenesisInput {
+            principal_kind: PrincipalKind::Human,
+            display_name: "Example Human".into(),
+            issued_at: now,
+            master_cert_id: encode_base64url([25_u8; 32]),
+            branch_cert_id: encode_base64url([26_u8; 32]),
+            external_human_primary: None,
+        },
+    )?;
+    let record = with_desktop_device(&primary, &base, now)?;
+    let mut seeds = Zeroizing::new([0_u8; 64]);
+    seeds[..32].copy_from_slice(&signing_seed[..]);
+    seeds[32..].copy_from_slice(&[24_u8; 32]);
+    let input = CreateInput {
+        local_account_id: HUMAN.into(),
+        principal_id: HUMAN_PRINCIPAL.into(),
+        device_id: HUMAN_PRIMARY_DEVICE.into(),
+        display_name: "Example Human".into(),
+        principal_kind: PrincipalKind::Human,
+        custodian_account_id: None,
+    };
+    crate::custody::store::persist(
+        &root.0,
+        &input,
+        GenesisMaterial {
+            record,
+            primary: &primary,
+            branch: Some(&seeds),
+            now,
+            data_secret: None,
+            commit_gate: None,
+            pre_staged: false,
+        },
+        &vault,
+    )?;
     crate::custody::tests::mark_live(&root.0, HUMAN, now)?;
-    let record = human.record();
+    let account = crate::custody::store::load_account(&root.0, HUMAN, now)?;
+    let record = account.record();
     Ok(HumanFixture {
         anchor: record.body.account_anchor.clone(),
         primary: record.body.master_certificate.body.primary_device_ref.clone(),
@@ -801,6 +910,7 @@ fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
 }
 
 /// Begin a request against the human fixture; `head` overrides the human head hash when given.
+/// The desktop named here is the fixture's desktop device, whose branch is in the authority.
 fn begin_for_human(
     fixture: &HumanFixture,
     store: &AgentCreationStore,
@@ -808,9 +918,27 @@ fn begin_for_human(
     request_id: &str,
     head: Option<&str>,
 ) -> Result<BeginOutcome, Box<dyn std::error::Error>> {
+    let desktop = DeviceRef {
+        account_anchor: fixture.anchor.clone(),
+        device_id: DESKTOP_DEVICE.into(),
+        device_epoch: 1,
+    };
+    begin_for_human_as(fixture, store, desk, request_id, head, &desktop)
+}
+
+/// Like [`begin_for_human`], with the desktop device named by `desktop`.
+fn begin_for_human_as(
+    fixture: &HumanFixture,
+    store: &AgentCreationStore,
+    desk: &MemoryPrimaryVault,
+    request_id: &str,
+    head: Option<&str>,
+    desktop: &DeviceRef,
+) -> Result<BeginOutcome, Box<dyn std::error::Error>> {
     let mut input =
         begin_input(request_id, &fixture.anchor, &fixture.primary, fixture.now + 10_000);
     input.human_head_hash = head.unwrap_or(&fixture.head).to_owned();
+    input.desktop = desktop.clone();
     Ok(begin(store, desk, &input, fixture.now)?)
 }
 
@@ -980,6 +1108,73 @@ fn commit_refuses_a_changed_human_head_and_cleans_up_before_the_commit() -> Test
     assert_eq!(refused.state, AgentCreationState::Refused);
     assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
     assert_items_gone(&desk, &refs)?;
+    Ok(())
+}
+
+#[test]
+fn commit_refuses_a_desktop_missing_from_the_authority_and_cleans_up() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    // The plan names a desktop device with no branch in the human authority at commit time.
+    let absent = DeviceRef {
+        account_anchor: fixture.anchor.clone(),
+        device_id: "removed-desktop".into(),
+        device_epoch: 1,
+    };
+    let outcome = begin_for_human_as(&fixture, &store, &desk, "req-desktop", None, &absent)?;
+    let refs = store.load("req-desktop")?.ok_or("record")?.vault_refs;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    assert!(commit_approved(&store, &desk, HUMAN, "req-desktop", fixture.now + 2).is_err());
+    let refused = store.load("req-desktop")?.ok_or("record")?;
+    assert_eq!(refused.state, AgentCreationState::Refused);
+    assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
+    assert!(
+        !agent_account_dir(&fixture.root.0, &account_id_of(&refused)?).exists(),
+        "a refused enrollment writes no account directory"
+    );
+    assert_items_gone(&desk, &refs)?;
+    Ok(())
+}
+
+#[test]
+fn desktop_enrollment_needs_a_present_unexpired_sync_branch() -> TestResult {
+    let fixture = human_fixture()?;
+    let account = crate::custody::store::load_account(&fixture.root.0, HUMAN, fixture.now)?;
+    let record = account.record();
+    let device = record
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == DESKTOP_DEVICE)
+        .ok_or("the human authority names the desktop device")?;
+    let branch = device.branch_certificate.as_ref().ok_or("the desktop device has a branch")?;
+    let desktop = DeviceRef {
+        account_anchor: fixture.anchor.clone(),
+        device_id: device.device_id.clone(),
+        device_epoch: device.device_epoch,
+    };
+    assert!(
+        desktop_is_enrolled(record, &desktop, fixture.now),
+        "an active branch valid at now with the sync capability is enrolled"
+    );
+    assert!(
+        !desktop_is_enrolled(record, &desktop, branch.body.expires_at),
+        "at its expiry instant the branch is no longer enrolled"
+    );
+    assert!(
+        !desktop_is_enrolled(record, &desktop, branch.body.not_before.saturating_sub(1)),
+        "before its not_before the branch is not enrolled"
+    );
+    let mut revoked = record.clone();
+    if let Some(entry) = revoked.body.devices.iter_mut().find(|entry| entry.device_id == DESKTOP_DEVICE) {
+        entry.status = DeviceSetStatus::Revoked;
+    }
+    assert!(
+        !desktop_is_enrolled(&revoked, &desktop, fixture.now),
+        "a revoked device is not enrolled, whatever its branch says"
+    );
     Ok(())
 }
 

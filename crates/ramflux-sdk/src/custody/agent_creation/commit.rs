@@ -14,9 +14,10 @@ use ramflux_crypto::custody::{
     AgentMasterPurpose, AgentMasterRequest, GenesisDraft, create_genesis_from_draft,
 };
 use ramflux_protocol::custody::{
-    Envelope, MasterCertificate, RegisterPlan, decode_register_plan, object_hash,
+    DeviceRef, DeviceSet, Envelope, MasterCertificate, RegisterPlan, decode_register_plan,
+    object_hash,
 };
-use ramflux_protocol::PrincipalKind;
+use ramflux_protocol::{DeviceSetStatus, PrincipalKind};
 
 /// Commit an authorized request exactly once. The complete bundle is written by one persist call
 /// after the human head, the primary and the desktop enrollment are re-read; the record then moves
@@ -56,6 +57,7 @@ pub fn commit_approved(
     if human_head != plan.human_head_hash
         || *human_primary != plan.human_primary
         || human_record.body.account_anchor != plan.owner_anchor
+        || !desktop_is_enrolled(human_record, &plan.desktop, now)
     {
         finish_refused(store, vault, record)?;
         return Err(SdkError::CustodySetupInvalid);
@@ -92,6 +94,27 @@ pub fn commit_approved(
         vault,
     )?;
     mark_publication_pending(store, record)
+}
+
+/// Desktop enrollment (contract 7.2 step 4): the sending desktop must still be an active device of
+/// the human account, with a branch that is valid at `now` and holds the `sync` capability. Checked
+/// in the same compare-and-set as the human head and the primary.
+pub(super) fn desktop_is_enrolled(record: &Envelope<DeviceSet>, desktop: &DeviceRef, now: u64) -> bool {
+    record.body.devices.iter().any(|device| {
+        device.device_id == desktop.device_id
+            && device.device_epoch == desktop.device_epoch
+            && matches!(device.status, DeviceSetStatus::Active)
+            && device.revoked_at.is_none()
+            && device.branch_certificate.as_ref().is_some_and(|branch| {
+                let body = &branch.body;
+                body.account_anchor == record.body.account_anchor
+                    && body.device_id == desktop.device_id
+                    && body.device_epoch == desktop.device_epoch
+                    && body.not_before <= now
+                    && now < body.expires_at
+                    && body.capabilities.iter().any(|capability| capability == "sync")
+            })
+    })
 }
 
 /// The vault references of one request, derived from its final account reference. A stored record
