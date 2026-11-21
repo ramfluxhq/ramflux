@@ -259,3 +259,4 @@ mod group_history;
 
 pub(crate) mod bus;
 pub(crate) mod pairing_history;
+pub(crate) mod router;
