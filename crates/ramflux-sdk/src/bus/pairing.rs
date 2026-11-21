@@ -5,7 +5,7 @@
 use super::state::LocalBusDaemonState;
 use crate::custody::pairing::{
     FreshPairingNative, HttpRelay, LocalPairingParticipant, NativePairingPublication,
-    NativePairingQuery, PairingActor, PairingIdentity, PairingNative, install_actor_with_writer,
+    NativePairingQuery, PairingActor, PairingIdentity, install_actor_with_writer,
     private_credential::provider_for_account, work_signal,
 };
 use crate::{
@@ -180,6 +180,7 @@ async fn install_source(
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
     let vault = super::custody_setup::primary_provider(&state.config);
     let gateway = GatewaySessionConfig::auto(endpoint)
+        .with_host_network(&state.config)
         .with_tcp_gateway_addr(tcp)
         .with_native_custody(GatewayCustodyConfig {
             account_root: root.clone(),
@@ -189,11 +190,9 @@ async fn install_source(
             vault: vault.clone(),
         })
         .with_account_identity(&account.client)?;
-    let mut network = crate::gateway::proof_network_config(&gateway)?;
-    // FreshPairingNative uses TCP, while the ordinary config's default address is QUIC.
-    network.gateway_address = tcp;
-    let recipient_node = verified_recipient_node(recipient, network.clone()).await?;
-    let proof: Arc<dyn PairingNative> = Arc::new(FreshPairingNative::new(network, vault.clone()));
+    let network = crate::gateway::proof_network_config(&gateway)?;
+    let recipient_node = verified_recipient_node(recipient, network.clone(), &gateway).await?;
+    let proof = FreshPairingNative::for_gateway(network, vault.clone(), gateway.clone());
     let runtime = tokio::runtime::Handle::current();
     let participant = Arc::new(LocalPairingParticipant {
         root: root.clone(),
@@ -244,11 +243,12 @@ fn actor_authority(
 async fn verified_recipient_node(
     recipient: Option<&Join>,
     network: crate::custody::CustodyNetworkConfig,
+    gateway: &GatewaySessionConfig,
 ) -> Result<Option<ramflux_crypto::custody::VerifiedNodeRecord>, SdkError> {
     let Some(join) = recipient else {
         return Ok(None);
     };
-    let node = crate::custody::CustodyConnection::discover_pairing_node(network).await?;
+    let node = crate::gateway::discover_node(network, gateway).await?;
     if node.envelope().body.node_signing_public_key != join.token.invitation.body.node_key {
         return Err(SdkError::PairingCode("WrongContext"));
     }
@@ -434,6 +434,7 @@ async fn install_new_recipient(
         )
         .await?;
     let gateway = GatewaySessionConfig::auto(endpoint)
+        .with_host_network(&state.config)
         .with_tcp_gateway_addr(tcp)
         .with_native_custody(GatewayCustodyConfig {
             account_root: root.clone(),
@@ -442,13 +443,12 @@ async fn install_new_recipient(
             node_public_key: profile.node_public_key,
             vault: vault.clone(),
         });
-    let mut network = crate::gateway::proof_network_config(&gateway)?;
-    network.gateway_address = tcp;
-    let node = crate::custody::CustodyConnection::discover_pairing_node(network.clone()).await?;
+    let network = crate::gateway::proof_network_config(&gateway)?;
+    let node = crate::gateway::discover_node(network.clone(), &gateway).await?;
     if node.envelope().body.node_signing_public_key != invitation.node_key {
         return Err(SdkError::PairingCode("WrongContext"));
     }
-    let proof: Arc<dyn PairingNative> = Arc::new(FreshPairingNative::new(network, vault.clone()));
+    let proof = FreshPairingNative::for_gateway(network, vault.clone(), gateway.clone());
     let runtime = tokio::runtime::Handle::current();
     let participant = Arc::new(LocalPairingParticipant {
         root: root.clone(),
@@ -510,7 +510,9 @@ pub(super) fn adopt_installed(
         target_delivery_id: client.owned_device_identity()?.storage_key().into(),
         prekey_http_url: None,
     };
-    let gateway = GatewaySessionConfig::auto(endpoint).with_born_v3_account(native);
+    let gateway = GatewaySessionConfig::auto(endpoint)
+        .with_host_network(&state.config)
+        .with_born_v3_account(native);
     let mut account = super::state::LocalBusAccountState::disconnected(client, gateway, anchor);
     account.activation_pending = true;
     account.native_setup = Some(state.config.clone());

@@ -115,9 +115,26 @@ impl FreshPairingNative {
         config: crate::custody::CustodyNetworkConfig,
         vault: Arc<dyn crate::custody::PrimaryVault>,
     ) -> Self {
+        Self::with_network_policy(config, vault, None)
+    }
+
+    pub(crate) fn for_gateway(
+        config: crate::custody::CustodyNetworkConfig,
+        vault: Arc<dyn crate::custody::PrimaryVault>,
+        gateway: crate::GatewaySessionConfig,
+    ) -> Arc<dyn PairingNative> {
+        Arc::new(Self::with_network_policy(config, vault, Some(gateway)))
+    }
+
+    fn with_network_policy(
+        config: crate::custody::CustodyNetworkConfig,
+        vault: Arc<dyn crate::custody::PrimaryVault>,
+        gateway: Option<crate::GatewaySessionConfig>,
+    ) -> Self {
         Self::with_factory(Arc::new(move || {
             let mut config = config.clone();
             let vault = Arc::clone(&vault);
+            let gateway = gateway.clone();
             Box::pin(async move {
                 let root = config.account_root.clone();
                 let account_id = config.account_id.clone();
@@ -134,7 +151,10 @@ impl FreshPairingNative {
                 })
                 .await
                 .map_err(|_| SdkError::PairingCode("Retired"))??;
-                CustodyConnection::connect_for_proof(config, vault).await
+                match gateway {
+                    Some(gateway) => crate::gateway::connect_proof(config, vault, &gateway).await,
+                    None => CustodyConnection::connect_for_proof(config, vault).await,
+                }
             })
         }))
     }
