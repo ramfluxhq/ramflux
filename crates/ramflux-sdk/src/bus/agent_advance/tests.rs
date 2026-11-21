@@ -303,3 +303,133 @@ async fn a_paused_agent_is_closed_on_the_observation_and_not_reactivated() -> Te
         })
         .await
 }
+
+/// Stage E0 (decision r20): the activation guard refuses an agent whose rebind is pending (R) or
+/// committed (C) with the typed reason `rebind_pending`, before any account is opened. A bound
+/// agent (B) is not refused by the guard.
+#[tokio::test]
+async fn activation_refuses_an_agent_whose_rebind_is_pending_or_committed() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let nodes = node_store(vec![node(DEFAULT_NODE, true)], Some(DEFAULT_NODE));
+            let setup = authorized_request("req-guard", &nodes)?;
+            let supervisor = crate::bus::supervisor::Supervisor::new(setup.config.clone())?;
+            for binding in [RebindBinding::RebindPending, RebindBinding::Committed] {
+                setup.store.save_rebind(&RebindEntry {
+                    agent_account_id: setup.account_id.clone(),
+                    binding,
+                    bound_primary: DeviceRef {
+                        account_anchor: setup.fixture.anchor.clone(),
+                        device_id: "desktop-device".into(),
+                        device_epoch: 1,
+                    },
+                    master_range: 2,
+                    request_id: None,
+                    failure: None,
+                })?;
+                let refused = supervisor
+                    .activate_native(
+                        &setup.account_id,
+                        Zeroizing::new("not the agent passphrase".into()),
+                        Some(DEFAULT_NODE.into()),
+                    )
+                    .await;
+                assert!(
+                    matches!(refused, Err(SdkError::AgentCreationRefused("rebind_pending"))),
+                    "{binding:?} must be refused by the guard"
+                );
+                assert!(!supervisor.account_is_open(&setup.account_id), "{binding:?}: not opened");
+            }
+            // A bound agent passes the guard: the failure is the passphrase, not the rebind token.
+            setup.store.save_rebind(&RebindEntry {
+                agent_account_id: setup.account_id.clone(),
+                binding: RebindBinding::Bound,
+                bound_primary: DeviceRef {
+                    account_anchor: setup.fixture.anchor.clone(),
+                    device_id: "desktop-device".into(),
+                    device_epoch: 1,
+                },
+                master_range: 2,
+                request_id: None,
+                failure: None,
+            })?;
+            let passed = supervisor
+                .activate_native(
+                    &setup.account_id,
+                    Zeroizing::new("not the agent passphrase".into()),
+                    Some(DEFAULT_NODE.into()),
+                )
+                .await;
+            assert!(
+                !matches!(passed, Err(SdkError::AgentCreationRefused("rebind_pending"))),
+                "a bound agent is not refused by the guard"
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await
+}
+
+/// Stage E0 (decision r20): the supervisor path of a committed rebind. The desktop's human account
+/// is activated on its real root with the node profile of the real test node, and one advance
+/// commits the authorized rebind, publishes it through the supervisor's proof connection (no
+/// session), and connects the agent again under binding B. The fixture (the transfer, the approval
+/// by the new primary, the adopted authority) is the R3 fixture; the node, the store, the vault
+/// and the publication are the real components. The R3 fixture builds its own runtime, so the
+/// test is synchronous and the supervisor part runs on a `LocalSet` afterwards.
+#[test]
+fn a_committed_rebind_is_published_by_the_supervisor_and_reaches_b() -> TestResult {
+    use crate::custody::agent_creation::test_support::transfer_fixture;
+    let mut t = transfer_fixture("supervisor-rebind")?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(tokio::task::LocalSet::new().run_until(supervisor_publishes_the_rebind(&mut t)))
+}
+
+async fn supervisor_publishes_the_rebind(
+    t: &mut crate::custody::agent_creation::test_support::Transfer,
+) -> TestResult {
+    use crate::custody::agent_creation::e2e_tests::rebind::{
+        approve_rebind, bind_transfer_and_observe,
+    };
+    use crate::custody::agent_creation::test_support::{OwnRouter, TestNode, now};
+    let router = OwnRouter::new()?;
+    let node = TestNode::start(8, None).await?;
+    let observed = bind_transfer_and_observe(t, &node, &router).await?;
+    let request_id = approve_rebind(t, &router, &observed.desk_store, &observed.agent_id).await?;
+
+    // The desktop's node store names the test node, so the human's home node is that node.
+    node_store(vec![node.profile()?], Some("node")).save(&observed.desk_root)?;
+    let mut config =
+        crate::LocalBusConfig::new(observed.desk_root.join("activate.sock"), &observed.desk_root);
+    config.custody_vault = Some(observed.desk_vault.clone());
+    // Fixture: the test node is a direct custody endpoint, so it is reached with DirectExporter.
+    config.rebind_binding_mode = Some(ramflux_protocol::custody::BindingMode::DirectExporter);
+    let supervisor = crate::bus::supervisor::Supervisor::new(config)?;
+    // The desktop (sibling) fixture's data passphrase (`client/native_test_support/sibling.rs:66`).
+    let passphrase = Zeroizing::new("native sibling data passphrase".to_owned());
+    supervisor
+        .activate_native(&observed.desk_id, passphrase, Some("node".into()))
+        .await
+        .map_err(|error| format!("activate the human: {error}"))?;
+
+    let outcomes = supervisor
+        .advance_agent_creations(&observed.desk_id, now()?)
+        .await
+        .map_err(|error| format!("advance: {error}"))?;
+    assert!(
+        matches!(outcomes.as_slice(), [(id, Ok(AgentCreationState::Complete))] if *id == request_id),
+        "the rebind reaches complete through the supervisor: {outcomes:?}"
+    );
+    let entry = observed
+        .desk_store
+        .load_rebind(&observed.agent_id)?
+        .ok_or("the inventory entry of the agent")?;
+    assert_eq!(entry.binding, RebindBinding::Bound, "the agent is bound (B)");
+    assert!(supervisor.account_is_open(&observed.agent_id), "the agent connects under B");
+    // The node is dropped, not finished: the supervisor's own gateway session also dials this
+    // address, and the custody-only fixture server reports that traffic when it finishes. The
+    // publication outcome above is the assertion that matters here.
+    drop(node);
+    Ok(())
+}

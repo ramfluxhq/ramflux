@@ -184,6 +184,34 @@ impl TestNode {
         }
     }
 
+    /// The stored node profile of this node, for a supervisor that reaches it through its node store
+    /// (stage E0). The gateway addresses are the test node's; the pins are those of `config`.
+    pub(crate) fn profile(&self) -> TestResult<crate::NodeProfile> {
+        let address = self.address.to_string();
+        Ok(crate::NodeProfile {
+            discovery_url: "https://node.test".into(),
+            node_id: "node".into(),
+            node_public_key: ramflux_crypto::fixture_public_key_base64url(),
+            pin_source: crate::NodePinSource::Operator,
+            ca_cert_pem: std::fs::read_to_string(&self.ca)?,
+            gateway: crate::NodeGateway {
+                quic_addr: address.clone(),
+                tcp_addr: address.clone(),
+                server_name: "localhost".into(),
+            },
+            relay: crate::NodeRelay { quic_addr: address.clone(), server_name: "localhost".into() },
+            prekey_http_url: "https://node.test".into(),
+            signaling_turn_addr: String::new(),
+            protocol_versions: Vec::new(),
+            client_capabilities: capable(),
+            discovered_at: 1,
+            expires_at: u64::MAX,
+            enabled: true,
+            builtin: false,
+            safety_warnings: std::collections::BTreeSet::new(),
+        })
+    }
+
     /// Publishes the account's current record over real TLS. The node must answer `Published`
     /// with the hash of exactly that record.
     pub(crate) async fn publish_current(

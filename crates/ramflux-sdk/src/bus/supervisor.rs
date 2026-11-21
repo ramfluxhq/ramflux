@@ -137,6 +137,10 @@ impl Supervisor {
             .map(|profile| profile.client_capabilities.clone())
             .ok_or(SdkError::NoNodeSelected)
     }
+    /// The stored profile of one named node, for the proof path of a paused agent (stage E0).
+    pub(super) fn node_profile(&self, node_id: &str) -> Result<crate::NodeProfile, SdkError> {
+        self.nodes.borrow().profiles.get(node_id).cloned().ok_or(SdkError::NoNodeSelected)
+    }
     pub(super) fn account_is_open(&self, id: &str) -> bool {
         self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
     }
@@ -665,6 +669,9 @@ impl Supervisor {
         passphrase: zeroize::Zeroizing<String>,
         home_node_id: Option<String>,
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
+        // Stage E0 (decision r20): an agent whose rebind is pending or committed is never
+        // activated or unlocked; the rebind publication owns its connection.
+        self.refuse_paused_agent(id)?;
         self.start_event_router();
         let existing = self.accounts.borrow().get(id).cloned();
         let actor = if let Some(actor) = existing {

@@ -158,9 +158,7 @@ impl CustodyConnection<GatewayTcpTlsStream> {
     /// # Errors
     /// Connection and proof refusals. A lost or mismatched reply leaves the publication unknown, so
     /// the next attempt sends the identical `AgentPublish` and the node returns the saved receipt.
-    // The supervisor's proof path for paused agents is not wired yet (open question in the lane
-    // memory); the rebind test drives this function through the desktop's steps.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Called by the supervisor's advance step (`bus/agent_advance.rs`), and by the tests' steps.
     pub(crate) async fn publish_rebind(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,

@@ -83,27 +83,7 @@ impl AgentCreationStore {
     /// # Errors
     /// `CustodySetupInvalid` for an invalid id, an oversized, corrupt or mismatched file.
     pub fn load_rebind(&self, agent_account_id: &str) -> Result<Option<RebindEntry>, SdkError> {
-        crate::custody::valid_id(agent_account_id)?;
-        let path = self.rebind_dir().join(format!("{agent_account_id}.json"));
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(SdkError::CustodyVaultUnavailable),
-        };
-        let mut bytes = Vec::new();
-        file.take(MAX_ENTRY_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES {
-            return Err(SdkError::CustodySetupInvalid);
-        }
-        let entry: RebindEntry =
-            serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
-        if entry.agent_account_id != agent_account_id {
-            return Err(SdkError::CustodySetupInvalid);
-        }
-        check_entry(&entry)?;
-        Ok(Some(entry))
+        load_entry_in(&self.rebind_dir(), agent_account_id)
     }
 
     /// Every inventory entry, sorted by agent account id. An absent inventory is empty.
@@ -134,6 +114,59 @@ impl AgentCreationStore {
     fn rebind_dir(&self) -> PathBuf {
         self.dir.join(REBIND_DIR)
     }
+}
+
+/// Reads one inventory entry from a rebind directory. `Ok(None)` when the file does not exist.
+fn load_entry_in(
+    dir: &std::path::Path,
+    agent_account_id: &str,
+) -> Result<Option<RebindEntry>, SdkError> {
+    crate::custody::valid_id(agent_account_id)?;
+    let path = dir.join(format!("{agent_account_id}.json"));
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(SdkError::CustodyVaultUnavailable),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    let entry: RebindEntry =
+        serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+    if entry.agent_account_id != agent_account_id {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    check_entry(&entry)?;
+    Ok(Some(entry))
+}
+
+/// The inventory binding of an agent account, found in whichever human creation store holds it.
+/// Stage E0 (decision r20): the activation guard reads this without opening any store, so no
+/// directory is created. `Ok(None)` when no human store has an entry for the agent.
+/// # Errors
+/// `CustodySetupInvalid` for an invalid id or a corrupt entry; `CustodyVaultUnavailable` for I/O.
+pub fn paused_agent_binding(
+    root: &std::path::Path,
+    agent_account_id: &str,
+) -> Result<Option<RebindBinding>, SdkError> {
+    crate::custody::valid_id(agent_account_id)?;
+    let humans = match std::fs::read_dir(root.join("custody_accounts")) {
+        Ok(humans) => humans,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(SdkError::CustodyVaultUnavailable),
+    };
+    for human in humans {
+        let human = human.map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let dir = human.path().join("agent_creation").join(REBIND_DIR);
+        if let Some(entry) = load_entry_in(&dir, agent_account_id)? {
+            return Ok(Some(entry.binding));
+        }
+    }
+    Ok(None)
 }
 
 fn check_entry(entry: &RebindEntry) -> Result<(), SdkError> {

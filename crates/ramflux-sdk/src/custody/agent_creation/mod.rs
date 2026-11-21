@@ -19,7 +19,7 @@ mod state;
 mod store;
 
 #[cfg(test)]
-mod e2e_tests;
+pub(crate) mod e2e_tests;
 #[cfg(test)]
 mod rebind_commit_tests;
 #[cfg(test)]
@@ -41,7 +41,7 @@ pub use machine::{
 };
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
-pub use rebind::{RebindBinding, RebindEntry};
+pub use rebind::{RebindBinding, RebindEntry, paused_agent_binding};
 pub use rebind_commit::commit_rebind;
 pub use rebind_observe::observe_primary;
 pub(crate) use rebind_plan::check_decision_context;

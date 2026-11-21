@@ -8,8 +8,14 @@ use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    RebindBinding, advance_all, observe_primary,
+    RebindBinding, advance_all, observe_primary, paused_agent_binding,
 };
+use crate::custody::{CustodyConnection, CustodyNetworkConfig};
+use crate::gateway::GatewayQuicEndpointConfig;
+use crate::node::NodeProfile;
+use ramflux_protocol::custody::{BindingMode, RegisterPlan, decode_register_plan};
+use std::path::Path;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Outcome of one advanced request: its id and its state, or the step failure.
@@ -112,6 +118,38 @@ impl AgentSteps for SupervisorSteps<'_> {
             .await
     }
 
+    /// Stage E0: the rebind publication of a committed agent through a proof-only connection to the
+    /// human's home node. The connection is dropped at once: no session, no registration.
+    async fn publish_rebind(&mut self, request_id: &str) -> Result<AgentCreationRecord, SdkError> {
+        let record = self.store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+        let plan: RegisterPlan = decode_register_plan(&record.plan_bytes()?)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let home = self.home_node().await?;
+        let profile = self.supervisor.node_profile(&home)?;
+        // Production reaches the custody service through the gateway, which proves the channel with
+        // `HomeRelayReceipt` (`gateway/custody.rs` `proof_network_config`). The test node is a direct
+        // custody endpoint and sets its own mode through `LocalBusConfig::rebind_binding_mode`.
+        #[cfg(test)]
+        let binding =
+            self.supervisor.config.rebind_binding_mode.unwrap_or(BindingMode::HomeRelayReceipt);
+        #[cfg(not(test))]
+        let binding = BindingMode::HomeRelayReceipt;
+        let config = rebind_network(
+            &self.supervisor.config.data_root,
+            &profile,
+            &account_id,
+            &plan,
+            binding,
+        )
+        .await?;
+        let vault = super::custody_setup::primary_provider(&self.supervisor.config);
+        // Boxed like the other connect futures (`custody/network.rs`): the connection state machine
+        // is large and the advance future is awaited from the unlock path.
+        drop(Box::pin(CustodyConnection::publish_rebind(config, vault)).await?);
+        self.store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)
+    }
+
     async fn complete(&mut self, request_id: &str) -> Result<AgentCreationRecord, SdkError> {
         self.human_actor()?
             .agent_creation_step(AgentStep::Complete { request_id: request_id.to_owned() })
@@ -119,7 +157,61 @@ impl AgentSteps for SupervisorSteps<'_> {
     }
 }
 
+/// The custody connection settings of a paused agent, built from the home node's stored profile
+/// the way `configure_pending` builds the gateway settings of an account (`bus/native_account.rs`).
+/// The agent device is the one the rebind plan names.
+async fn rebind_network(
+    root: &Path,
+    profile: &NodeProfile,
+    account_id: &str,
+    plan: &RegisterPlan,
+    binding_mode: BindingMode,
+) -> Result<CustodyNetworkConfig, SdkError> {
+    let unset = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
+    let endpoint = profile
+        .gateway_config(
+            root,
+            GatewayQuicEndpointConfig {
+                bind_addr: unset,
+                gateway_addr: unset,
+                server_name: String::new(),
+                ca_cert: std::path::PathBuf::new(),
+                principal_id: String::new(),
+                device_id: plan.agent_device.device_id.clone(),
+                target_delivery_id: String::new(),
+                prekey_http_url: None,
+            },
+        )
+        .await?;
+    Ok(CustodyNetworkConfig {
+        pairing_admission: None,
+        account_root: root.to_path_buf(),
+        account_id: account_id.to_owned(),
+        device_id: plan.agent_device.device_id.clone(),
+        gateway_address: crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?,
+        server_name: endpoint.server_name,
+        ca_certificate: endpoint.ca_cert,
+        node_id: profile.node_id.clone(),
+        node_public_key: profile.node_public_key.clone(),
+        audience: profile.node_id.clone(),
+        binding_mode,
+        allow_no_channel_binding: false,
+        timeout: Duration::from_secs(10),
+    })
+}
+
 impl Supervisor {
+    /// Stage E0 (decision r20): refuses an agent whose rebind is pending (R) or committed (C) with the
+    /// typed reason `rebind_pending`. An account with no inventory entry passes.
+    pub(super) fn refuse_paused_agent(&self, account_id: &str) -> Result<(), SdkError> {
+        match paused_agent_binding(&self.config.data_root, account_id)? {
+            Some(RebindBinding::RebindPending | RebindBinding::Committed) => {
+                Err(SdkError::AgentCreationRefused("rebind_pending"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Advances every pending agent creation of one open human account. Returns no outcomes when the
     /// account is not open.
     ///

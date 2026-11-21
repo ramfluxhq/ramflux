@@ -168,8 +168,28 @@ fn agent_custodian_primary_transfer_rebind() -> TestResult {
     )))
 }
 
-async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
-    let router = OwnRouter::new()?;
+/// The values of the rebind fixture that the rebind steps and the supervisor test read after the
+/// transfer: the agent, the desktop's store and root and its human, the new primary and the
+/// original creation request.
+pub(crate) struct Observed {
+    pub(crate) agent_id: String,
+    pub(crate) desk_store: AgentCreationStore,
+    pub(crate) desk_root: std::path::PathBuf,
+    pub(crate) desk_id: String,
+    pub(crate) desk_vault: std::sync::Arc<dyn crate::custody::PrimaryVault>,
+    pub(crate) primary: DeviceRef,
+    pub(crate) original_request_id: String,
+}
+
+/// Stage D R3 steps 1 to 3, shared by the R3 test and the supervisor test: the agent is created
+/// under the old primary and bound (state C0 `Complete`), the old primary publishes the transfer,
+/// and the desktop observes the new primary (the agent is paused, R). Connections used: 2 plus the
+/// transfer's publication.
+pub(crate) async fn bind_transfer_and_observe(
+    t: &mut Transfer,
+    node: &TestNode,
+    router: &OwnRouter,
+) -> TestResult<Observed> {
     let phone_root = root_of(&t.pair.phone)?;
     let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
     let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
@@ -180,15 +200,14 @@ async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
 
     // Five client connections: the human publication before and after the transfer, the agent's
     // activation, the rebind's proof-only publication and the agent's activation after state B.
-    let node = TestNode::start(5, None).await?;
     node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault.clone()).await?;
 
     let at = now()?;
     let created = desk_create(&t.pair, desk_vault.as_ref(), at)?;
-    phone_decides(&mut t.pair, &router, &created, true, at).await?;
+    phone_decides(&mut t.pair, router, &created, true, at).await?;
     let desk_store = store_of(&desk_root, &desk_id)?;
     let mut steps = DesktopSteps {
-        node: &node,
+        node,
         root: &desk_root,
         human: &desk_id,
         vault: desk_vault.clone(),
@@ -213,11 +232,31 @@ async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
     assert_eq!(entry.binding, super::super::RebindBinding::RebindPending, "the agent is paused");
     // The paused agent's session closes with the observation (contract 7.5 pause).
     steps.connections.clear();
+    steps.connections.clear();
+    Ok(Observed {
+        agent_id,
+        desk_store,
+        desk_root,
+        desk_id,
+        desk_vault,
+        primary,
+        original_request_id: created.request_id,
+    })
+}
 
+/// Stage D R3 step 4, shared by the R3 test and the supervisor test: the desktop freezes the rebind
+/// plan, the new primary approves it, and the approval is routed back. Returns the rebind request id,
+/// which the desktop's record holds in state `Authorized`.
+pub(crate) async fn approve_rebind(
+    t: &mut Transfer,
+    router: &OwnRouter,
+    desk_store: &AgentCreationStore,
+    agent_id: &str,
+) -> TestResult<String> {
     // The desktop freezes the rebind plan and sends it to the new primary, which approves it.
-    t.pair.laptop.client.agent_rebind_send(&agent_id, now()?)?;
+    t.pair.laptop.client.agent_rebind_send(agent_id, now()?)?;
     let request_id = desk_store
-        .load_rebind(&agent_id)?
+        .load_rebind(agent_id)?
         .and_then(|entry| entry.request_id)
         .ok_or("test: the rebind request is recorded")?;
     router.route(&mut t.pair.laptop, &mut t.new_primary, 3).await?;
@@ -242,6 +281,29 @@ async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
         "the new primary's approval authorizes the rebind on the desktop"
     );
 
+    Ok(request_id)
+}
+
+async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
+    let router = OwnRouter::new()?;
+    let node = TestNode::start(5, None).await?;
+    let Observed {
+        agent_id,
+        desk_store,
+        desk_root,
+        desk_id,
+        desk_vault,
+        primary,
+        original_request_id,
+    } = bind_transfer_and_observe(t, &node, &router).await?;
+    let request_id = approve_rebind(t, &router, &desk_store, &agent_id).await?;
+    let mut steps = DesktopSteps {
+        node: &node,
+        root: &desk_root,
+        human: &desk_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
     // Commit the next range, publish the rebind (proof only), then connect the agent again.
     let state = advance_one(&mut steps, &desk_store, &request_id, now()?).await?;
     assert_eq!(state, AgentCreationState::Complete, "the rebind reaches state B");
@@ -256,7 +318,7 @@ async fn rebind_on_the_real_node(t: &mut Transfer) -> TestResult {
     // The rebound profile names the new primary with a higher epoch; the anchor and the keys are the
     // original ones (nothing is widened or replaced).
     let original_record =
-        desk_store.load(&created.request_id)?.ok_or("test: the creation record")?;
+        desk_store.load(&original_request_id)?.ok_or("test: the creation record")?;
     let original = decode_register_plan(&original_record.plan_bytes()?)?;
     let bound = desk_store.load(&request_id)?.ok_or("test: the rebind record")?;
     let rebound = decode_register_plan(&bound.plan_bytes()?)?;

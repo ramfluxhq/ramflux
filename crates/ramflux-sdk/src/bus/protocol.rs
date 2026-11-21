@@ -15,6 +15,10 @@ pub struct LocalBusConfig {
     pub(crate) custody_confirm_completed: Option<std::sync::Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub(crate) lifecycle_gate: Option<std::sync::Arc<super::lifecycle::TestGate>>,
+    /// Binding mode of a rebind publication made by the supervisor. Production leaves it unset and
+    /// uses `HomeRelayReceipt` through the gateway; the fixture node is a direct custody endpoint.
+    #[cfg(test)]
+    pub(crate) rebind_binding_mode: Option<ramflux_protocol::custody::BindingMode>,
     pub builtin_nodes: Vec<NodeProfile>,
     pub socket_path: PathBuf,
     pub data_root: PathBuf,
@@ -1126,6 +1130,8 @@ impl LocalBusConfig {
             custody_confirm_completed: None,
             #[cfg(test)]
             lifecycle_gate: None,
+            #[cfg(test)]
+            rebind_binding_mode: None,
             builtin_nodes: Vec::new(),
             socket_path: socket_path.into(),
             data_root: data_root.into(),
