@@ -38,6 +38,12 @@ pub enum PrxError {
     /// The per-request deadline passed.
     #[error("PRX did not answer before the deadline")]
     Timeout,
+    /// A turn or context post whose outcome is unknown: the request may have reached PRX
+    /// (transport failure after sending, or `storage_unavailable` on the message route, which
+    /// PRX documents as "treat the outcome as unknown"). `http_status` is `None` for a transport
+    /// failure. The client never resends the post; the caller decides and checks first.
+    #[error("the outcome of the message post is unknown (HTTP {http_status:?})")]
+    OutcomeUnknown { http_status: Option<u16> },
     /// The client configuration was refused before any request.
     #[error("client configuration refused: {reason}")]
     Config { reason: &'static str },
@@ -63,7 +69,8 @@ impl NotReadyReason {
     }
 }
 
-/// The closed list of error codes in the token document, plus `Unknown` for any other string.
+/// The error codes the token document names (the session and targeting codes are the ones the
+/// rf message routes answer at the pinned commit), plus `Unknown` for any other string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiCode {
     AgentInvalid,
@@ -79,6 +86,11 @@ pub enum ApiCode {
     ConfirmationRequired,
     StorageUnavailable,
     RateLimited,
+    SessionUnknown,
+    SessionOwnerConflict,
+    SessionBusy,
+    AgentTargetingDisabled,
+    AgentScopeRefused,
     Unknown(String),
 }
 
@@ -98,6 +110,11 @@ impl ApiCode {
             "confirmation_required" => Self::ConfirmationRequired,
             "storage_unavailable" => Self::StorageUnavailable,
             "rate_limited" => Self::RateLimited,
+            "session_unknown" => Self::SessionUnknown,
+            "session_owner_conflict" => Self::SessionOwnerConflict,
+            "session_busy" => Self::SessionBusy,
+            "agent_targeting_disabled" => Self::AgentTargetingDisabled,
+            "agent_scope_refused" => Self::AgentScopeRefused,
             other => Self::Unknown(other.to_owned()),
         }
     }
