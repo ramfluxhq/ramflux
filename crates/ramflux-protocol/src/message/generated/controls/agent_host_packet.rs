@@ -16,13 +16,15 @@ pub struct AgentHostPacket {
     pub recipient: ::core::option::Option<QualifiedDevice>,
     #[prost(string, tag = "4")]
     pub correlation_id: ::prost::alloc::string::String,
-    #[prost(oneof = "agent_host_packet::Body", tags = "13")]
+    #[prost(oneof = "agent_host_packet::Body", tags = "10, 13")]
     pub body: ::core::option::Option<agent_host_packet::Body>,
 }
 /// Nested message and enum types in `AgentHostPacket`.
 pub mod agent_host_packet {
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Body {
+        #[prost(message, tag = "10")]
+        Metadata(super::AgentMetadata),
         #[prost(message, tag = "13")]
         Custody(super::AgentCustodyPacket),
     }
@@ -66,6 +68,9 @@ impl serde::Serialize for AgentHostPacket {
         }
         if let Some(v) = self.body.as_ref() {
             match v {
+                agent_host_packet::Body::Metadata(v) => {
+                    struct_ser.serialize_field("metadata", v)?;
+                }
                 agent_host_packet::Body::Custody(v) => {
                     struct_ser.serialize_field("custody", v)?;
                 }
@@ -87,6 +92,7 @@ impl<'de> serde::Deserialize<'de> for AgentHostPacket {
             "recipient",
             "correlation_id",
             "correlationId",
+            "metadata",
             "custody",
         ];
         #[allow(clippy::enum_variant_names)]
@@ -95,6 +101,7 @@ impl<'de> serde::Deserialize<'de> for AgentHostPacket {
             Source,
             Recipient,
             CorrelationId,
+            Metadata,
             Custody,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -121,6 +128,7 @@ impl<'de> serde::Deserialize<'de> for AgentHostPacket {
                             "source" => Ok(GeneratedField::Source),
                             "recipient" => Ok(GeneratedField::Recipient),
                             "correlationId" | "correlation_id" => Ok(GeneratedField::CorrelationId),
+                            "metadata" => Ok(GeneratedField::Metadata),
                             "custody" => Ok(GeneratedField::Custody),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -173,6 +181,14 @@ impl<'de> serde::Deserialize<'de> for AgentHostPacket {
                                 return Err(serde::de::Error::duplicate_field("correlationId"));
                             }
                             correlation_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Metadata => {
+                            if body__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("metadata"));
+                            }
+                            body__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(agent_host_packet::Body::Metadata);
                         }
                         GeneratedField::Custody => {
                             if body__.is_some() {

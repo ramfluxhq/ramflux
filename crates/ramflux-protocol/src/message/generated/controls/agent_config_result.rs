@@ -5,16 +5,23 @@
 #[allow(unused_imports)]
 use super::super::*;
 
-/// Only the custody arm of the result is defined here; arms 1-8 belong to later agent stages.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+/// The result arms of this module: list (page), get and edit (record), watch (ack) and creation
+/// custody. Arms 4-8 belong to later agent stages.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AgentConfigResult {
-    #[prost(oneof = "agent_config_result::Value", tags = "9")]
+    #[prost(oneof = "agent_config_result::Value", tags = "1, 2, 3, 9")]
     pub value: ::core::option::Option<agent_config_result::Value>,
 }
 /// Nested message and enum types in `AgentConfigResult`.
 pub mod agent_config_result {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Value {
+        #[prost(message, tag = "1")]
+        Page(super::AgentPage),
+        #[prost(message, tag = "2")]
+        Record(super::AgentRecord),
+        #[prost(message, tag = "3")]
+        Watch(super::AgentWatchAck),
         #[prost(message, tag = "9")]
         Custody(super::AgentCustodyStatus),
     }
@@ -34,6 +41,15 @@ impl serde::Serialize for AgentConfigResult {
             serializer.serialize_struct("ramflux.message.v1.AgentConfigResult", len)?;
         if let Some(v) = self.value.as_ref() {
             match v {
+                agent_config_result::Value::Page(v) => {
+                    struct_ser.serialize_field("page", v)?;
+                }
+                agent_config_result::Value::Record(v) => {
+                    struct_ser.serialize_field("record", v)?;
+                }
+                agent_config_result::Value::Watch(v) => {
+                    struct_ser.serialize_field("watch", v)?;
+                }
                 agent_config_result::Value::Custody(v) => {
                     struct_ser.serialize_field("custody", v)?;
                 }
@@ -48,9 +64,12 @@ impl<'de> serde::Deserialize<'de> for AgentConfigResult {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["custody"];
+        const FIELDS: &[&str] = &["page", "record", "watch", "custody"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
+            Page,
+            Record,
+            Watch,
             Custody,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -73,6 +92,9 @@ impl<'de> serde::Deserialize<'de> for AgentConfigResult {
                         E: serde::de::Error,
                     {
                         match value {
+                            "page" => Ok(GeneratedField::Page),
+                            "record" => Ok(GeneratedField::Record),
+                            "watch" => Ok(GeneratedField::Watch),
                             "custody" => Ok(GeneratedField::Custody),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
@@ -98,6 +120,30 @@ impl<'de> serde::Deserialize<'de> for AgentConfigResult {
                         return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
                     }
                     match k {
+                        GeneratedField::Page => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("page"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(agent_config_result::Value::Page);
+                        }
+                        GeneratedField::Record => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("record"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(agent_config_result::Value::Record);
+                        }
+                        GeneratedField::Watch => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("watch"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(agent_config_result::Value::Watch);
+                        }
                         GeneratedField::Custody => {
                             if value__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("custody"));

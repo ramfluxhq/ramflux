@@ -3,7 +3,10 @@
 
 //! `ProtoJSON` bodies of the agent creation bus methods (AGENT-IDENTITY-01 C3, contract 2). They
 //! decode through the generated serde implementations and refuse unknown or reserved fields.
-use super::{AgentCreate, AgentCreationDecide, AgentOperationGet};
+use super::{
+    AgentCreate, AgentCreationDecide, AgentList, AgentMetadata, AgentOperationGet, AgentPage,
+    AgentRecord,
+};
 use serde_json::json;
 
 fn create_body() -> serde_json::Value {
@@ -51,5 +54,55 @@ fn agent_decide_and_get_keep_presence_of_approved() -> Result<(), serde_json::Er
     assert_eq!(approve.approved, Some(false), "an explicit false is present");
     let get: AgentOperationGet = serde_json::from_value(json!({"operationId": "op-1"}))?;
     assert_eq!(get.operation_id, "op-1");
+    Ok(())
+}
+
+/// The record and page bodies of the agent methods (AGENT-IDENTITY-01 E1, contract 1 and 2). The
+/// later-stage record fields (`host`, `config`, `revision`) stay absent in this module.
+#[test]
+fn agent_record_and_page_bodies_decode_and_refuse_unknown_fields() -> Result<(), serde_json::Error> {
+    let list: AgentList = serde_json::from_value(json!({"limit": 20}))?;
+    assert_eq!((list.cursor.as_deref(), list.limit), (None, 20));
+    assert!(serde_json::from_value::<AgentList>(json!({"limit": 1, "extra": true})).is_err());
+
+    let record_body = json!({
+        "agentAnchor": "agent-1",
+        "custodianAnchor": "owner-1",
+        "persona": {"name": "Support", "avatar": "", "responsibility": "answers questions"},
+        "lifecycle": "U",
+        "observation": "",
+        "cleanup": "",
+        "role": "named",
+        "access": {"dm": "owner", "groupInviters": "owner", "allowedHumans": []}
+    });
+    let record: AgentRecord = serde_json::from_value(record_body.clone())?;
+    assert_eq!(record.lifecycle, "U");
+    assert!(
+        record.host.is_none() && record.config.is_none() && record.revision.is_none(),
+        "the later-stage fields stay absent"
+    );
+    let mut unknown = record_body.clone();
+    unknown["extra"] = json!("x");
+    assert!(serde_json::from_value::<AgentRecord>(unknown).is_err(), "unknown field refuses");
+
+    let page: AgentPage = serde_json::from_value(json!({
+        "records": [record_body],
+        "journalCursor": "c1"
+    }))?;
+    assert_eq!((page.records.len(), page.journal_cursor.as_str()), (1, "c1"));
+
+    let metadata: AgentMetadata = serde_json::from_value(json!({
+        "agentAnchor": "agent-1",
+        "custodianAnchor": "owner-1",
+        "persona": {"name": "Support", "avatar": "", "responsibility": "answers questions"},
+        "role": "named",
+        "access": {"dm": "owner", "groupInviters": "owner", "allowedHumans": []}
+    }))?;
+    assert_eq!(metadata.identity_retired, None, "an absent retirement flag stays absent");
+    let retired: AgentMetadata = serde_json::from_value(json!({
+        "agentAnchor": "agent-1",
+        "identityRetired": true
+    }))?;
+    assert_eq!(retired.identity_retired, Some(true));
     Ok(())
 }
