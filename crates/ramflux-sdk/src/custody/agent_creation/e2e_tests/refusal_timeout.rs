@@ -12,12 +12,13 @@
 //! which is emptied only when every delete, master included, succeeded.
 use super::super::test_support::{
     DesktopSteps, OwnRouter, Pair, TestNode, TestResult, assert_items_gone, assert_items_present,
-    assert_no_account, assert_retry_creates_no_second_anchor, desk_create, desk_record, now, pair,
-    phone_decides, root_of, saved_receipt, store_of, vault_of,
+    assert_no_account, assert_retry_creates_no_second_anchor, begin_again, capable, decide_body,
+    desk_create, desk_record, now, pair, phone_decides, root_of, saved_receipt, store_of, vault_of,
 };
+use crate::SdkError;
 use crate::custody::CustodyConnection;
 use crate::custody::agent_creation::{
-    AgentCreationState, AgentFailure, advance_one, load_publishing, resume_request,
+    AgentCreationState, AgentFailure, advance_one, commit_approved, load_publishing, resume_request,
 };
 use crate::custody::network_tests::ReplyFault;
 use ramflux_protocol::custody::{CustodyServerFrame, REGISTER_TTL_SECONDS, decode_register_plan};
@@ -291,4 +292,126 @@ async fn lost_reply_case(pair: &mut Pair) -> TestResult {
     drop(proof);
     drop(steps);
     node.finish().await
+}
+
+#[test]
+fn same_operation_replay_keeps_the_saved_request_in_pending_authorized_and_committed() -> TestResult
+{
+    let mut pair = pair("refusal-replay")?;
+    scenario(replay_case(&mut pair))
+}
+
+/// Same-operation replay (7.6 row "Desktop starts / same-operation replay", states P, A and C). The
+/// retry with the request's own id returns the saved plan, account and hash in every state, and
+/// creates no second anchor. In C the replay reports the committed state (`publication_pending`).
+async fn replay_case(pair: &mut Pair) -> TestResult {
+    let vault = vault_of(&pair.laptop.client)?;
+    let at = now()?;
+    let laptop_root = root_of(&pair.laptop)?;
+    let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
+    let store = store_of(&laptop_root, &laptop_id)?;
+
+    // P: the request waits for the phone.
+    let pending = desk_create(pair, vault.as_ref(), at)?;
+    assert_retry_creates_no_second_anchor(&store, vault.as_ref(), &pending, at + 1)?;
+    let still = store.load(&pending.request_id)?.ok_or("test: the desktop record")?;
+    assert_eq!(still.state, AgentCreationState::AuthorizationPending, "the replay keeps P");
+
+    // A: the phone approved; the desktop holds the decision and has not committed.
+    phone_decides(pair, &OwnRouter::new()?, &pending, true, now()?).await?;
+    let authorized = desk_record(pair, &pending.request_id)?;
+    assert_eq!(authorized.state, AgentCreationState::Authorized);
+    assert_retry_creates_no_second_anchor(&store, vault.as_ref(), &authorized, at + 2)?;
+
+    // C: the commit point is passed (the local bundle is written); publication is still pending.
+    let committed = commit_approved(
+        &store,
+        vault.as_ref(),
+        &laptop_id,
+        &pending.request_id,
+        &capable(),
+        at + 3,
+    )?;
+    assert_eq!(committed.state, AgentCreationState::PublicationPending, "C is committed");
+    assert_retry_creates_no_second_anchor(&store, vault.as_ref(), &committed, at + 4)?;
+    let replayed = begin_again(&store, vault.as_ref(), &committed, at + 5)?;
+    assert_eq!(replayed.state, AgentCreationState::PublicationPending, "the replay reports C");
+    Ok(())
+}
+
+#[test]
+fn a_decision_at_the_original_deadline_is_refused_and_the_phone_stays_pending() -> TestResult {
+    let mut pair = pair("refusal-late-decide")?;
+    scenario(late_decide_case(&mut pair))
+}
+
+/// A decision after the stored deadline (7.6 row "Original deadline expires"): the primary refuses
+/// with `CustodyExpired` before any presence check, nothing is saved on the phone, and the desktop
+/// keeps its request pending until its own clock expires it.
+async fn late_decide_case(pair: &mut Pair) -> TestResult {
+    let vault = vault_of(&pair.laptop.client)?;
+    let at = now()?;
+    let record = desk_create(pair, vault.as_ref(), at)?;
+    let router = OwnRouter::new()?;
+    router.route(&mut pair.laptop, &mut pair.phone, 1).await?;
+    let phone_vault = vault_of(&pair.phone.client)?;
+    let hash = record.request_hash.clone();
+    let fixture = pair.phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?;
+    fixture.vault.arm_agent_decision(&hash)?;
+    let late = pair.phone.client.agent_creation_decide(
+        phone_vault.as_ref(),
+        &decide_body(&record.request_id, &hash, Some(true)),
+        record.expires_at,
+    );
+    assert!(matches!(late, Err(SdkError::CustodyExpired)), "a decision at the deadline is refused");
+    let phone_id = pair.phone.client.account_db()?.local_account_id.clone();
+    let held = store_of(&root_of(&pair.phone)?, &phone_id)?
+        .load(&record.request_id)?
+        .ok_or("test: the phone stores the plan")?;
+    assert_eq!(held.state, AgentCreationState::AuthorizationPending, "the phone stays pending");
+    assert!(held.decision_b64.is_none(), "no decision is saved for a late answer");
+    let laptop_root = root_of(&pair.laptop)?;
+    let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
+    let desk = store_of(&laptop_root, &laptop_id)?.load(&record.request_id)?;
+    assert_eq!(
+        desk.ok_or("test: the desktop record")?.state,
+        AgentCreationState::AuthorizationPending
+    );
+    Ok(())
+}
+
+#[test]
+fn local_expiry_on_the_phone_reaches_x_and_a_replay_of_it_stays_x() -> TestResult {
+    let mut pair = pair("refusal-phone-expiry")?;
+    scenario(phone_expiry_case(&mut pair))
+}
+
+/// The phone's own copy of a request expires by its own clock at the stored deadline (X), and a
+/// second look at that deadline keeps X. The phone never held an account or a pending item.
+async fn phone_expiry_case(pair: &mut Pair) -> TestResult {
+    let vault = vault_of(&pair.laptop.client)?;
+    let at = now()?;
+    let record = desk_create(pair, vault.as_ref(), at)?;
+    let router = OwnRouter::new()?;
+    router.route(&mut pair.laptop, &mut pair.phone, 1).await?;
+    let phone_root = root_of(&pair.phone)?;
+    let phone_id = pair.phone.client.account_db()?.local_account_id.clone();
+    let phone_store = store_of(&phone_root, &phone_id)?;
+    let phone_vault = vault_of(&pair.phone.client)?;
+    let before = phone_store.load(&record.request_id)?.ok_or("test: the phone stores the plan")?;
+    assert_eq!(before.state, AgentCreationState::AuthorizationPending);
+    let expired =
+        resume_request(&phone_store, phone_vault.as_ref(), &record.request_id, record.expires_at)?;
+    assert_eq!(expired.state, AgentCreationState::Expired, "the phone's copy reaches X");
+    let again = resume_request(
+        &phone_store,
+        phone_vault.as_ref(),
+        &record.request_id,
+        record.expires_at + 5,
+    )?;
+    assert_eq!(again.state, AgentCreationState::Expired, "a replay of the expiry stays X");
+    if let Some(account_id) = &record.account_id {
+        assert!(!phone_root.join("custody_accounts").join(account_id).exists(), "no phone account");
+    }
+    Ok(())
 }
