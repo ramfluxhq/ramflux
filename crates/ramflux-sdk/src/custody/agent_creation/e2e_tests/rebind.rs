@@ -9,9 +9,9 @@
 use super::super::rebind::{RebindBinding, RebindEntry};
 use super::super::rebind_observe::observe_primary;
 use super::super::test_support::{
-    DesktopSteps, OwnRouter, TestNode, TestResult, Transfer, capable, decide_body, desk_create,
-    now, phone_decides, root_of, saved_receipt, store_of, transfer_fixture, transfer_primary,
-    vault_of,
+    DesktopSteps, OwnRouter, THIRD_PRIMARY_DEVICE, TestNode, TestResult, Transfer, capable,
+    decide_body, desk_create, now, phone_decides, root_of, saved_receipt, store_of,
+    transfer_fixture, transfer_fixture_two, transfer_primary, transfer_primary_to, vault_of,
 };
 use super::super::{
     AgentCreationState, AgentCreationStore, AgentFailure, advance_one, commit_approved,
@@ -19,6 +19,7 @@ use super::super::{
 use crate::SdkError;
 use crate::custody::network_tests::ReplyFault;
 use crate::custody::vault::AGENT_MASTER_PREFIX;
+use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::{DeviceSet, Envelope, decode_register_plan, object_hash};
 
 fn runtime() -> TestResult<tokio::runtime::Runtime> {
@@ -595,4 +596,107 @@ async fn lost_rebind_reply(t: &mut Transfer) -> TestResult {
     assert_eq!(entry.binding, RebindBinding::Bound);
     drop(steps);
     Ok(())
+}
+
+/// The primary's approval of a rebind request, sent back to the desktop, for any new primary
+/// device. The decision and its return use `seq` for the routed packets.
+async fn decide_as(
+    primary: &mut crate::bus::state::LocalBusAccountState,
+    desk: &mut crate::bus::state::LocalBusAccountState,
+    router: &OwnRouter,
+    request_id: &str,
+    approve: bool,
+    seq: u64,
+) -> TestResult {
+    let at = now()?;
+    let primary_root = root_of(primary)?;
+    let primary_id = primary.client.account_db()?.local_account_id.clone();
+    let hash = store_of(&primary_root, &primary_id)?
+        .load(request_id)?
+        .ok_or("test: the primary holds the plan")?
+        .request_hash;
+    primary
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("test: the primary fixture")?
+        .vault
+        .arm_agent_decision(&hash)?;
+    primary.client.agent_creation_decide(
+        vault_of(&primary.client)?.as_ref(),
+        &decide_body(request_id, &hash, Some(approve)),
+        at,
+    )?;
+    router.route(primary, desk, seq).await
+}
+
+/// The agent rebound twice: P0 -> P1 -> P2. Each transfer is the real cooperative transfer with a
+/// new successor key, each rebind is approved by the new primary, and each one reaches state B.
+/// The agent ends bound to P2 with the profile epoch of the second rebind. Connections: 8.
+#[test]
+fn two_transfers_in_a_row_rebind_the_agent_twice() -> TestResult {
+    let mut t = transfer_fixture_two("rebind-two")?;
+    runtime()?.block_on(crate::bus::credentials::contract_tests::deadline(Box::pin(two_transfers(
+        &mut t,
+    ))))
+}
+
+async fn two_transfers(t: &mut Transfer) -> TestResult {
+    let router = OwnRouter::new()?;
+    let at = now()?;
+    let node = TestNode::start(8, None).await?;
+    let (agent_id, _) = bind_agent(&node, t, &router, at).await?;
+
+    // First transfer P0 -> P1: the agent is rebound to P1.
+    let (_, first) = transfer_and_send(&node, t, &router, &agent_id, at).await?;
+    new_primary_decides(t, &router, &first, true, now()?).await?;
+    let desk_store = desk_store_of(t)?;
+    let desk_vault = vault_of(&t.pair.laptop.client)?;
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    let mut steps = DesktopSteps {
+        node: &node,
+        root: &desk_root,
+        human: &desk_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
+    let state = advance_one(&mut steps, &desk_store, &first, now()?).await?;
+    assert_eq!(state, AgentCreationState::Complete, "the first rebind reaches state B");
+    steps.connections.clear();
+
+    // Second transfer P1 -> P2 (signed by the master with a third successor key).
+    let second = transfer_primary_to(t, at + 20, THIRD_PRIMARY_DEVICE, [41_u8; 32])?;
+    let phone_root = root_of(&t.pair.phone)?;
+    let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
+    let phone_device = t.pair.phone.client.owned_device_identity()?.device_id().to_owned();
+    node.publish_current(&phone_root, &phone_id, &phone_device, vault_of(&t.pair.phone.client)?)
+        .await?;
+    let primary: DeviceRef = second.body.master_certificate.body.primary_device_ref.clone();
+    let observed = observe_primary(&desk_store, &primary)?;
+    let entry = observed
+        .iter()
+        .find(|entry| entry.agent_account_id == agent_id)
+        .ok_or("test: the agent is observed")?;
+    assert_eq!(entry.binding, RebindBinding::RebindPending, "the second transfer pauses the agent");
+    t.pair.laptop.client.agent_rebind_send(&agent_id, now()?)?;
+    let second_request = desk_store
+        .load_rebind(&agent_id)?
+        .and_then(|entry| entry.request_id)
+        .ok_or("test: the second rebind request is recorded")?;
+    let third = t.third.as_mut().ok_or("test: the fourth device")?;
+    router.route(&mut t.pair.laptop, third, 5).await?;
+    decide_as(third, &mut t.pair.laptop, &router, &second_request, true, 6).await?;
+    let state = advance_one(&mut steps, &desk_store, &second_request, now()?).await?;
+    assert_eq!(state, AgentCreationState::Complete, "the second rebind reaches state B");
+    let entry = desk_store.load_rebind(&agent_id)?.ok_or("test: the inventory")?;
+    assert_eq!(entry.binding, RebindBinding::Bound);
+    assert_eq!(entry.bound_primary, primary, "the agent is bound to the second new primary");
+    assert_eq!(entry.master_range, 3, "the third range is the agent's current master range");
+    let bound = desk_store.load(&second_request)?.ok_or("test: the second rebind record")?;
+    let profile = super::super::stored_profile(&bound)?;
+    assert_eq!(profile.body.custodian_primary, primary);
+    assert_eq!(profile.body.profile_epoch, 3, "each rebind raises the profile epoch once");
+    drop(steps);
+    node.finish().await
 }
