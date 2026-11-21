@@ -23,6 +23,7 @@ pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPrepara
 pub(crate) mod agent_custody;
 pub(crate) mod agent_custody_calls;
 pub(crate) mod agent_rebind;
+pub(crate) mod agent_record_sync;
 pub(crate) mod application_outbox;
 mod authored_delete;
 mod authored_send;

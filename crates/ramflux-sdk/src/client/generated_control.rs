@@ -361,16 +361,19 @@ fn validate_friend(body: &g::FriendControl) -> Result<(), SdkError> {
 
 /// The packet names its owner, both endpoints and exactly one custody body.
 fn validate_agent_sync(packet: &g::AgentHostPacket) -> Result<(), SdkError> {
-    let custody_present = match packet.body.as_ref() {
+    let body_present = match packet.body.as_ref() {
         Some(g::agent_host_packet::Body::Custody(custody)) => custody.value.is_some(),
-        // Metadata packets are applied by stage E3; until then they are refused here.
-        Some(g::agent_host_packet::Body::Metadata(_)) | None => false,
+        // A metadata body names its agent and carries its identity (AGENT-IDENTITY-01 E3).
+        Some(g::agent_host_packet::Body::Metadata(metadata)) => {
+            !metadata.agent_anchor.is_empty() && metadata.identity.is_some()
+        }
+        None => false,
     };
     if packet.owner_anchor.is_empty()
         || packet.source.is_none()
         || packet.recipient.is_none()
         || packet.correlation_id.is_empty()
-        || !custody_present
+        || !body_present
     {
         return Err(refused("agent sync requires owner, endpoints, correlation and custody body"));
     }

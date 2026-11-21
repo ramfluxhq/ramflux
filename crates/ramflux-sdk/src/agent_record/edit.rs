@@ -6,8 +6,8 @@
 //! with. Its identity is minted from the plan's issue time, and its author is the desktop that asked
 //! for the agent.
 use super::{
-    AgentIntent, AgentRecordStore, LIFECYCLE_ACTIVE, ROLE_NAMED, StoredAgentRecord, check_access,
-    check_persona,
+    AgentIntent, AgentRecordStore, LIFECYCLE_ACTIVE, LIFECYCLE_RETIRED, ROLE_NAMED,
+    StoredAgentRecord, check_access, check_persona, check_record,
 };
 use crate::SdkError;
 use crate::custody::agent_creation::AgentCreationRecord;
@@ -41,6 +41,36 @@ pub(crate) fn create_from_plan(
     Ok(record)
 }
 
+/// Test fixture: the `U` record that the completing desktop writes (E2), written by `author` without
+/// a creation. The replicas on the other devices come from the metadata packets, not from this.
+#[cfg(test)]
+pub(crate) fn seed_for_test(
+    store: &AgentRecordStore,
+    agent: &str,
+    author: &DeviceRef,
+    now: u64,
+) -> Result<StoredAgentRecord, SdkError> {
+    let record = StoredAgentRecord {
+        agent_anchor: agent.into(),
+        custodian_anchor: author.account_anchor.clone(),
+        persona: ramflux_protocol::message::AgentPersona {
+            name: "seeded".into(),
+            avatar: String::new(),
+            responsibility: "seeded for the test".into(),
+        },
+        access: ramflux_protocol::message::AgentAccessPolicy {
+            dm: "owner".into(),
+            group_inviters: "owner".into(),
+            allowed_humans: Vec::new(),
+        },
+        role: ROLE_NAMED.into(),
+        lifecycle: LIFECYCLE_ACTIVE.into(),
+        identity: mint(None, agent, author, now)?,
+    };
+    store.save(&record)?;
+    Ok(record)
+}
+
 /// Completion hook of the creation store (`complete_with_receipt`). A creation that carries no intent
 /// (an SDK flow that calls `begin` directly) writes no agent record; `agent.create` always stores one.
 pub(crate) fn record_completed(dir: PathBuf, record: &AgentCreationRecord) -> Result<(), SdkError> {
@@ -57,9 +87,65 @@ pub(crate) fn record_completed(dir: PathBuf, record: &AgentCreationRecord) -> Re
     Ok(())
 }
 
+/// A local change of the stored record (AGENT-IDENTITY-01 E3/E4). The change applies only when `base`
+/// names the stored identity (`EventOrder` equal), otherwise it refuses with `stale_base`. The new
+/// identity is minted by this device, so the change is strictly newer than the stored one.
+/// # Errors
+/// `agent_not_found` for no record, `agent_retired` for a retired one, `stale_base` for a base that
+/// is not the stored identity, and the store's own refusals.
+#[cfg_attr(not(test), allow(dead_code, reason = "the bus methods of stage E4 are the callers"))]
+pub(crate) fn edit_record(
+    store: &AgentRecordStore,
+    agent: &str,
+    base: &EventIdentity,
+    author: &DeviceRef,
+    now: u64,
+    change: impl FnOnce(&mut StoredAgentRecord),
+) -> Result<StoredAgentRecord, SdkError> {
+    let current = store.load(agent)?.ok_or(SdkError::AgentCreationRefused("agent_not_found"))?;
+    if current.lifecycle == LIFECYCLE_RETIRED {
+        return Err(SdkError::AgentCreationRefused("agent_retired"));
+    }
+    let base_order = ramflux_protocol::message::identity::order_key(base)
+        .map_err(|_| SdkError::AgentCreationRefused("stale_base"))?;
+    let stored_order = ramflux_protocol::message::identity::order_key(&current.identity)
+        .map_err(|_| SdkError::CustodySetupInvalid)?;
+    if base_order != stored_order {
+        return Err(SdkError::AgentCreationRefused("stale_base"));
+    }
+    let mut next = current.clone();
+    change(&mut next);
+    next.identity = mint(Some(&current.identity), agent, author, now)?;
+    check_record(&next)?;
+    store.save(&next)?;
+    Ok(next)
+}
+
+/// Retires the record (state `X`, contract 2 delete). Idempotent: a record that is already retired
+/// is returned unchanged, so a replayed delete mints nothing new.
+/// # Errors
+/// `agent_not_found` for no record, `stale_base` for a base that is not the stored identity.
+#[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
+pub(crate) fn retire(
+    store: &AgentRecordStore,
+    agent: &str,
+    base: &EventIdentity,
+    author: &DeviceRef,
+    now: u64,
+) -> Result<StoredAgentRecord, SdkError> {
+    let current = store.load(agent)?.ok_or(SdkError::AgentCreationRefused("agent_not_found"))?;
+    if current.lifecycle == LIFECYCLE_RETIRED {
+        return Ok(current);
+    }
+    let retired = edit_record(store, agent, base, author, now, |record| {
+        record.lifecycle = LIFECYCLE_RETIRED.into();
+    })?;
+    Ok(retired)
+}
+
 /// Mints the `EventIdentity` of one change. The HLC never goes back, and the device sequence grows, so
 /// two changes of one agent have strictly increasing `EventOrder` keys.
-fn mint(
+pub(crate) fn mint(
     previous: Option<&EventIdentity>,
     agent: &str,
     author: &DeviceRef,

@@ -31,6 +31,26 @@ pub(crate) enum CustodyBody {
     Decision(Vec<u8>),
     /// Canonical cancel bytes from the initiating desktop (the primary tombstones its plan).
     Cancel(Vec<u8>),
+    /// The agent record of a sibling, to apply by `EventOrder` (AGENT-IDENTITY-01 E3).
+    Metadata(Box<g::AgentMetadata>),
+}
+
+/// Authorizes an `AgentMetadata` broadcast (AGENT-IDENTITY-01 E3): the source must be another device
+/// of this root (a current sibling), and the conversation must be the agent's scope on this root.
+fn authorize_metadata(
+    own_root: &str,
+    source: &RootQualifiedDeviceRef,
+    local: &RootQualifiedDeviceRef,
+    conversation: &str,
+    metadata: &g::AgentMetadata,
+) -> Result<CustodyBody, SdkError> {
+    if source.root_commitment() != own_root || source.device_id() == local.device_id() {
+        return Err(refused("agent metadata source is not a current sibling"));
+    }
+    if conversation != expected_scope(own_root, &metadata.agent_anchor)?.as_str() {
+        return Err(refused("agent metadata scope mismatch"));
+    }
+    Ok(CustodyBody::Metadata(Box::new(metadata.clone())))
 }
 
 /// Domain of the local message id of one custody control.
@@ -85,23 +105,31 @@ impl RamfluxClient {
             packet.source.as_ref().ok_or_else(|| refused("agent custody source missing"))?;
         let declared_recipient =
             packet.recipient.as_ref().ok_or_else(|| refused("agent custody recipient missing"))?;
+        // A metadata broadcast is sent to every sibling at once, so its recipient names the root
+        // only; a custody packet is point-to-point and names this device.
+        let broadcast =
+            matches!(packet.body.as_ref(), Some(g::agent_host_packet::Body::Metadata(_)));
         if packet.owner_anchor != own_root
             || declared_source.account_anchor != source.root_commitment()
             || declared_source.device_id != source.device_id()
             || declared_recipient.account_anchor != own_root
-            || declared_recipient.device_id != local.device_id()
+            || (!broadcast && declared_recipient.device_id != local.device_id())
         {
             return Err(refused("agent custody endpoints do not match the authenticated devices"));
         }
         if self.device_epoch_of(&source)? != declared_source.device_epoch
-            || self.device_epoch_of(&local)? != declared_recipient.device_epoch
+            || (!broadcast && self.device_epoch_of(&local)? != declared_recipient.device_epoch)
         {
             return Err(refused("agent custody device epoch is not current"));
         }
-        let Some(g::agent_host_packet::Body::Custody(custody)) = packet.body.as_ref() else {
-            return Err(refused("agent custody body missing"));
-        };
         let conversation = opened.routing.conversation_id.as_str();
+        let custody = match packet.body.as_ref() {
+            Some(g::agent_host_packet::Body::Metadata(metadata)) => {
+                return authorize_metadata(&own_root, &source, &local, conversation, metadata);
+            }
+            Some(g::agent_host_packet::Body::Custody(custody)) => custody,
+            _ => return Err(refused("agent custody body missing")),
+        };
         match custody.value.as_ref() {
             Some(g::agent_custody_packet::Value::RequestJson(plan_bytes)) => {
                 check_received_request(
@@ -209,6 +237,7 @@ impl RamfluxClient {
             .map_err(|_| refused("agent custody clock range"))?;
         let store = self.agent_creation_store()?;
         match body {
+            CustodyBody::Metadata(metadata) => self.receive_agent_metadata(&metadata).map(|_| ()),
             CustodyBody::Plan(plan_bytes) => receive_plan(&store, &plan_bytes, now).map(|_| ()),
             CustodyBody::Cancel(cancel_bytes) => {
                 let vault = self

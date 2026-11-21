@@ -10,13 +10,17 @@ use crate::SdkError;
 use ramflux_protocol::message::{AgentAccessPolicy, AgentPersona, EventIdentity};
 use serde::{Deserialize, Serialize};
 
+mod apply;
 mod edit;
 mod policy;
 mod store;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use edit::record_completed;
+pub(crate) use apply::{apply_metadata, metadata_of};
+#[cfg(test)]
+pub(crate) use edit::seed_for_test;
+pub(crate) use edit::{edit_record, record_completed, retire};
 pub(crate) use policy::{check_access, check_persona};
 pub(crate) use store::AgentRecordStore;
 
