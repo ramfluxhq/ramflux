@@ -68,6 +68,10 @@ enum ResultBody {
     },
 }
 pub(super) fn now() -> Result<u64, SdkError> {
+    #[cfg(test)]
+    if let Some(frozen) = crate::time::test_clock::frozen() {
+        return u64::try_from(frozen).map_err(|_| SdkError::CustodySetupInvalid);
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|t| t.as_secs())
