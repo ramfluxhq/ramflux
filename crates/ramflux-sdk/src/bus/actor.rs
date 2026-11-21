@@ -35,6 +35,10 @@ pub(super) enum PrivateCommand {
         reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
     },
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
+    AgentCreation {
+        step: crate::custody::agent_creation::AgentStep,
+        reply: oneshot::Sender<Result<crate::custody::agent_creation::AgentCreationRecord, SdkError>>,
+    },
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -247,6 +251,15 @@ impl AccountActor {
     ) -> Result<bool, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::SearchRebuild { owner, job, admission, reset, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// One store step of an agent creation, performed by this human account's runtime.
+    pub(super) async fn agent_creation_step(
+        &self,
+        step: crate::custody::agent_creation::AgentStep,
+    ) -> Result<crate::custody::agent_creation::AgentCreationRecord, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::AgentCreation { step, reply })?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(

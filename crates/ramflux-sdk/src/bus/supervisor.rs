@@ -127,6 +127,15 @@ impl Supervisor {
         });
         self.lifecycle_changed.notify_one();
     }
+    /// Client capabilities of the selected node (the node new accounts are created on).
+    pub(super) fn selected_node_capabilities(&self) -> Result<Vec<String>, SdkError> {
+        Ok(self
+            .nodes
+            .borrow()
+            .selected(None, false)?
+            .map(|profile| profile.client_capabilities)
+            .unwrap_or_default())
+    }
     pub(super) fn account_is_open(&self, id: &str) -> bool {
         self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)
     }
@@ -380,6 +389,7 @@ impl Supervisor {
         self.restore_states.borrow_mut().remove(&id);
         self.set_active(&id).await?;
         self.set_unlocked(&id, true).await?;
+        self.advance_after_unlock(&id).await;
         Ok(reply(serde_json::to_value(result)?))
     }
 
@@ -537,6 +547,7 @@ impl Supervisor {
             return Err(self.account_unavailable(&id));
         };
         let locking = request.method == "account.lock";
+        let unlocking = request.method == "account.unlock";
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
@@ -557,6 +568,9 @@ impl Supervisor {
             self.restore_states.borrow_mut().remove(&id);
             self.set_active(&id).await?;
             self.set_unlocked(&id, true).await?;
+        }
+        if unlocking && response.is_ok() {
+            self.advance_after_unlock(&id).await;
         }
         if locking && response.is_ok() {
             actor.stop().await?;

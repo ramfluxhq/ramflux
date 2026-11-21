@@ -5,10 +5,11 @@
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
 use super::commit::desktop_is_enrolled;
 use super::{
-    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
-    BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_decision,
-    check_received_request, check_sender, commit_approved, expected_scope, first_action,
-    load_publishing, primary_sign_decision, receive_decision, receive_plan, resume_request,
+    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, AgentSteps,
+    BeginInput, BeginOutcome, PrimarySigning, advance_all, advance_one, apply_decision, begin,
+    cancel, check_received_decision, check_received_request, check_sender, commit_approved,
+    expected_scope, first_action, load_publishing, primary_sign_decision, receive_decision,
+    receive_plan, resume_request,
 };
 use crate::SdkError;
 use crate::custody::store as custody_store;
@@ -1699,3 +1700,184 @@ fn received_decision_must_come_from_the_plan_primary_to_its_desktop() -> TestRes
     );
     Ok(())
 }
+
+/// The receipt the node returns for `record` once `agent` is published (every field matches).
+fn receipt_of(
+    record: &AgentCreationRecord,
+    agent: &crate::custody::BornAccount,
+) -> Result<AgentPublishReceipt, Box<dyn std::error::Error>> {
+    let plan = decode_register_plan(&record.plan_bytes()?)?;
+    let profile_bytes =
+        decode_base64url(record.profile_b64.as_deref().ok_or("the commit saves the profile")?)?;
+    let profile = decode_agent_profile(&profile_bytes)?;
+    Ok(AgentPublishReceipt {
+        request_id: plan.request_id.clone(),
+        request_hash: record.request_hash.clone(),
+        record_hash: object_hash(agent.record())?,
+        profile_hash: object_hash(&profile)?,
+        custodian_head_hash: plan.human_head_hash.clone(),
+        custodian_primary: plan.human_primary.clone(),
+        accepted_at: plan.issued_at,
+    })
+}
+
+/// The real store steps: commit goes through `commit_approved`, completion through the record.
+/// Activation stands in for the connection: it verifies and saves the receipt the node would
+/// return, then marks the agent account live. Every call is counted.
+struct FlowSteps<'a> {
+    now: u64,
+    store: &'a AgentCreationStore,
+    vault: &'a MemoryPrimaryVault,
+    capabilities: Vec<String>,
+    live: std::collections::BTreeSet<String>,
+    commits: usize,
+    activations: usize,
+    completions: usize,
+}
+
+impl AgentSteps for FlowSteps<'_> {
+    fn commit(
+        &mut self,
+        request_id: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<AgentCreationRecord, SdkError>> {
+        self.commits += 1;
+        std::future::ready(commit_approved(
+            self.store,
+            self.vault,
+            HUMAN,
+            request_id,
+            &self.capabilities,
+            now,
+        ))
+    }
+
+    fn is_live(&self, account_id: &str) -> bool {
+        self.live.contains(account_id)
+    }
+
+    fn activate(
+        &mut self,
+        record: &AgentCreationRecord,
+    ) -> impl std::future::Future<Output = Result<(), SdkError>> {
+        self.activations += 1;
+        std::future::ready(self.connect(record))
+    }
+
+    fn complete(
+        &mut self,
+        request_id: &str,
+    ) -> impl std::future::Future<Output = Result<AgentCreationRecord, SdkError>> {
+        self.completions += 1;
+        std::future::ready(super::complete_with_receipt(self.store, request_id))
+    }
+}
+
+impl FlowSteps<'_> {
+    /// The connection's part of activation: the node's receipt is compared and saved, then the
+    /// account is live.
+    fn connect(&mut self, record: &AgentCreationRecord) -> Result<(), SdkError> {
+        let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let agent =
+            crate::custody::store::load_account(self.store.root(), &account_id, self.now)?;
+        let saved =
+            load_publishing(self.store.root(), &agent)?.ok_or(SdkError::CustodySetupInvalid)?;
+        let receipt = receipt_of(record, &agent).map_err(|_| SdkError::CustodySetupInvalid)?;
+        saved.check_receipt(&receipt, agent.record())?;
+        saved.save_receipt(&receipt)?;
+        self.live.insert(account_id);
+        Ok(())
+    }
+}
+
+fn flow_steps<'a>(
+    fixture: &HumanFixture,
+    store: &'a AgentCreationStore,
+    vault: &'a MemoryPrimaryVault,
+    capabilities: Vec<String>,
+) -> FlowSteps<'a> {
+    FlowSteps {
+        now: fixture.now + 3,
+        store,
+        vault,
+        capabilities,
+        live: std::collections::BTreeSet::new(),
+        commits: 0,
+        activations: 0,
+        completions: 0,
+    }
+}
+
+#[tokio::test]
+async fn advance_is_idempotent_and_skips_the_finished_steps() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-advance", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let account_id = account_id_of(&authorized)?;
+    let mut steps = flow_steps(&fixture, &store, &desk, capable());
+
+    let first = advance_all(&mut steps, &store, fixture.now + 2).await?;
+    let (id, result) = first.first().ok_or("one pending request")?;
+    assert_eq!(id, "req-advance");
+    assert!(matches!(result, Ok(AgentCreationState::Complete)), "the first advance completes it");
+    assert_eq!((steps.commits, steps.activations, steps.completions), (1, 1, 1));
+
+    assert!(advance_all(&mut steps, &store, fixture.now + 3).await?.is_empty());
+    let again = advance_one(&mut steps, &store, "req-advance", fixture.now + 3).await?;
+    assert_eq!(again, AgentCreationState::Complete);
+    assert_eq!((steps.commits, steps.activations, steps.completions), (1, 1, 1));
+    assert!(store.account_committed(&account_id)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn advance_without_the_capability_leaves_authorized_and_commits_nothing() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-missing", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let account_id = account_id_of(&authorized)?;
+    let mut steps = flow_steps(&fixture, &store, &desk, Vec::new());
+
+    let outcomes = advance_all(&mut steps, &store, fixture.now + 2).await?;
+    let (_, result) = outcomes.first().ok_or("one pending request")?;
+    assert!(matches!(result, Err(SdkError::AgentCustodyUnsupported)), "the typed refusal");
+    let record = store.load("req-missing")?.ok_or("the record stays")?;
+    assert_eq!(record.state, AgentCreationState::Authorized);
+    assert!(!store.account_committed(&account_id)?, "nothing is committed");
+    assert_eq!((steps.commits, steps.activations, steps.completions), (1, 0, 0));
+    assert_items_present(&desk, &record.vault_refs)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_picks_up_authorized_and_publication_pending_requests() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    // Request A is approved only; request B is approved and committed (publication pending).
+    let outcome_a = begin_for_human(&fixture, &store, &desk, "req-restart-a", None)?;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome_a)?;
+    let outcome_b = begin_for_human(&fixture, &store, &desk, "req-restart-b", None)?;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome_b)?;
+    commit_approved(&store, &desk, HUMAN, "req-restart-b", &capable(), fixture.now + 2)?;
+
+    // A new store object stands in for the restarted process.
+    let reopened = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let mut steps = flow_steps(&fixture, &reopened, &desk, capable());
+    let outcomes = advance_all(&mut steps, &reopened, fixture.now + 3).await?;
+    assert_eq!(outcomes.len(), 2, "both pending requests are picked up");
+    for (id, result) in &outcomes {
+        assert!(matches!(result, Ok(AgentCreationState::Complete)), "{id} completes");
+    }
+    assert_eq!(steps.commits, 1, "only the authorized request is committed");
+    assert_eq!((steps.activations, steps.completions), (2, 2));
+    Ok(())
+}
+

@@ -13,6 +13,7 @@ mod commands;
 mod transient;
 pub(super) use transient::TransientHost;
 mod connection;
+mod agent_calls;
 mod pairing_calls;
 mod pairing_data;
 mod pairing_own_sync;

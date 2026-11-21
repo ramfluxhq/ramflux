@@ -145,6 +145,35 @@ impl AgentCreationStore {
         Ok(None)
     }
 
+    /// Every record that still needs a step: `authorized`, `publication_pending` or
+    /// `publication_unknown`, oldest request id first.
+    /// # Errors
+    /// Refuses a directory that cannot be read and any record that fails [`Self::load`].
+    pub fn pending(&self) -> Result<Vec<AgentCreationRecord>, SdkError> {
+        let entries =
+            std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| SdkError::CustodyVaultUnavailable)?;
+            let name = entry.file_name();
+            let Some(request_id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if let Some(record) = self.load(request_id)?
+                && matches!(
+                    record.state,
+                    AgentCreationState::Authorized
+                        | AgentCreationState::PublicationPending
+                        | AgentCreationState::PublicationUnknown
+                )
+            {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        Ok(records)
+    }
+
     /// Load one record. `Ok(None)` when no record exists for the id.
     /// # Errors
     /// Refuses an invalid id, an oversized or corrupt file, or a plan that does not match the

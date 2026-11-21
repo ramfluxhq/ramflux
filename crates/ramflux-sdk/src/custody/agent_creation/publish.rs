@@ -65,6 +65,22 @@ pub(crate) fn first_action(
     }
 }
 
+/// Completes a request whose receipt is saved, once the agent account is live. Without a saved
+/// receipt the record is returned unchanged.
+/// # Errors
+/// Propagates store failures and refuses a record that is not in a publishing state.
+pub(crate) fn complete_with_receipt(
+    store: &AgentCreationStore,
+    request_id: &str,
+) -> Result<AgentCreationRecord, SdkError> {
+    let record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+    if record.receipt_b64.is_none() {
+        return Ok(record);
+    }
+    AgentPublishing::from_record(store.clone(), record)?.mark_complete()?;
+    store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)
+}
+
 impl AgentPublishing {
     fn from_record(
         store: AgentCreationStore,

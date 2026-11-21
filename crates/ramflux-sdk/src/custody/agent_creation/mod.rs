@@ -3,6 +3,7 @@
 
 //! Agent creation on the desktop: the request state machine and its durable record. Transport,
 //! node admission and publication are separate stages; this module takes and returns bytes.
+mod advance;
 mod capability;
 mod commit;
 mod machine;
@@ -15,6 +16,8 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
+pub(crate) use publish::complete_with_receipt;
 pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
 pub use machine::{
