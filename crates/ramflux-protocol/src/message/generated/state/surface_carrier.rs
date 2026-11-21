@@ -31,7 +31,7 @@ pub struct SurfaceCarrier {
     pub signature: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "12")]
     pub snapshot: ::core::option::Option<SurfaceSnapshotProof>,
-    #[prost(oneof = "surface_carrier::Payload", tags = "16, 17, 18")]
+    #[prost(oneof = "surface_carrier::Payload", tags = "16, 17, 18, 19, 20, 21")]
     pub payload: ::core::option::Option<surface_carrier::Payload>,
 }
 /// Nested message and enum types in `SurfaceCarrier`.
@@ -44,6 +44,12 @@ pub mod surface_carrier {
         Action(super::SurfaceAction),
         #[prost(message, tag = "18")]
         ActionReceipt(::prost::alloc::boxed::Box<super::SurfaceCarrier>),
+        #[prost(message, tag = "19")]
+        FunctionCall(super::SurfaceRpcFrame),
+        #[prost(message, tag = "20")]
+        FunctionResponse(super::SurfaceRpcFrame),
+        #[prost(message, tag = "21")]
+        Error(super::SurfaceRpcFrame),
     }
 }
 impl serde::Serialize for SurfaceCarrier {
@@ -146,6 +152,15 @@ impl serde::Serialize for SurfaceCarrier {
                 surface_carrier::Payload::ActionReceipt(v) => {
                     struct_ser.serialize_field("actionReceipt", v)?;
                 }
+                surface_carrier::Payload::FunctionCall(v) => {
+                    struct_ser.serialize_field("functionCall", v)?;
+                }
+                surface_carrier::Payload::FunctionResponse(v) => {
+                    struct_ser.serialize_field("functionResponse", v)?;
+                }
+                surface_carrier::Payload::Error(v) => {
+                    struct_ser.serialize_field("error", v)?;
+                }
             }
         }
         struct_ser.end()
@@ -183,6 +198,11 @@ impl<'de> serde::Deserialize<'de> for SurfaceCarrier {
             "action",
             "action_receipt",
             "actionReceipt",
+            "function_call",
+            "functionCall",
+            "function_response",
+            "functionResponse",
+            "error",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
@@ -201,6 +221,9 @@ impl<'de> serde::Deserialize<'de> for SurfaceCarrier {
             Event,
             Action,
             ActionReceipt,
+            FunctionCall,
+            FunctionResponse,
+            Error,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -245,6 +268,11 @@ impl<'de> serde::Deserialize<'de> for SurfaceCarrier {
                             "event" => Ok(GeneratedField::Event),
                             "action" => Ok(GeneratedField::Action),
                             "actionReceipt" | "action_receipt" => Ok(GeneratedField::ActionReceipt),
+                            "functionCall" | "function_call" => Ok(GeneratedField::FunctionCall),
+                            "functionResponse" | "function_response" => {
+                                Ok(GeneratedField::FunctionResponse)
+                            }
+                            "error" => Ok(GeneratedField::Error),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -388,6 +416,30 @@ impl<'de> serde::Deserialize<'de> for SurfaceCarrier {
                             payload__ = map_
                                 .next_value::<::std::option::Option<_>>()?
                                 .map(surface_carrier::Payload::ActionReceipt);
+                        }
+                        GeneratedField::FunctionCall => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("functionCall"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::FunctionCall);
+                        }
+                        GeneratedField::FunctionResponse => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("functionResponse"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::FunctionResponse);
+                        }
+                        GeneratedField::Error => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("error"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::Error);
                         }
                     }
                 }

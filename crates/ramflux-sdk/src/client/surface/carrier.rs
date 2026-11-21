@@ -5,7 +5,7 @@
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message as g;
-use ramflux_protocol::{A2uiConversationEvent, A2uiSurfaceAction};
+use ramflux_protocol::{RpcKind, SurfaceAction, SurfaceEvent, SurfaceRpc};
 use serde::{Deserialize, Serialize};
 pub(crate) const MAX_CARRIER_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -14,6 +14,9 @@ pub(crate) enum PayloadKind {
     Event,
     Action,
     ActionReceipt,
+    FunctionCall,
+    FunctionResponse,
+    Error,
 }
 // Some native DTOs erase protobuf field presence. Retain the signed typed view only
 // when rebuilding would change it; this private storage record never selects a wire codec.
@@ -46,18 +49,34 @@ pub(crate) struct Carrier {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<super::SnapshotProof>,
 }
+impl PayloadKind {
+    pub(crate) const fn rpc_kind(&self) -> Option<RpcKind> {
+        match self {
+            Self::FunctionCall => Some(RpcKind::FunctionCall),
+            Self::FunctionResponse => Some(RpcKind::FunctionResponse),
+            Self::Error => Some(RpcKind::Error),
+            _ => None,
+        }
+    }
+}
 pub(crate) enum Payload {
-    Event(A2uiConversationEvent),
-    Action(A2uiSurfaceAction),
-    ActionReceipt { original: Box<Carrier>, action: A2uiSurfaceAction },
+    Event(Box<SurfaceEvent>),
+    Action(SurfaceAction),
+    Rpc(RpcKind, SurfaceRpc),
+    ActionReceipt { original: Box<Carrier>, action: SurfaceAction },
 }
 impl Carrier {
     pub fn payload(&self) -> Result<Payload, SdkError> {
         let bytes = ramflux_protocol::decode_base64url(&self.wire_base64)
             .map_err(|_| invalid("invalid surface wire encoding"))?;
         let payload = match self.payload_kind {
-            PayloadKind::Event => Payload::Event(A2uiConversationEvent::from_wire_bytes(&bytes)?),
-            PayloadKind::Action => Payload::Action(A2uiSurfaceAction::from_wire_bytes(&bytes)?),
+            PayloadKind::Event => Payload::Event(Box::new(SurfaceEvent::from_wire_bytes(&bytes)?)),
+            PayloadKind::Action => Payload::Action(SurfaceAction::from_wire_bytes(&bytes)?),
+            PayloadKind::FunctionCall | PayloadKind::FunctionResponse | PayloadKind::Error => {
+                let kind =
+                    self.payload_kind.rpc_kind().ok_or_else(|| invalid("RPC kind missing"))?;
+                Payload::Rpc(kind, SurfaceRpc::from_wire_bytes(&bytes, kind)?)
+            }
             PayloadKind::ActionReceipt => {
                 let original = Self::decode(&bytes)?
                     .ok_or_else(|| invalid("action receipt lacks original carrier"))?;
@@ -72,22 +91,24 @@ impl Carrier {
                 Payload::ActionReceipt { original: Box::new(original), action }
             }
         };
-        if self.payload_kind == PayloadKind::Action && self.snapshot.is_some() {
+        if (self.payload_kind == PayloadKind::Action || self.payload_kind.rpc_kind().is_some())
+            && self.snapshot.is_some()
+        {
             return Err(invalid("actions cannot carry state attestations"));
         }
-        if let (Some(proof), Payload::Event(event)) = (&self.snapshot, &payload)
-            && proof.is_full()
-        {
-            if !matches!(
-                event.command(),
-                ramflux_protocol::A2uiConversationCommand::CreateSurface(_)
-            ) {
-                return Err(invalid("delta events cannot include a full snapshot"));
+        if let Payload::Event(event) = &payload {
+            if self.snapshot.is_some() {
+                return Err(invalid("event proofs belong in the v3 resync frame"));
             }
-            proof.restore(self, &ramflux_protocol::SurfaceState::default(), event.version())?;
+            if event.is_resync() {
+                ramflux_protocol::SurfaceState::validate_proof(event)?;
+            }
         }
         let (conversation, surface) = match &payload {
-            Payload::Event(event) => (event.conversation_id(), command_id(event.command())),
+            Payload::Event(event) => (event.conversation_id(), event.surface_id()),
+            Payload::Rpc(_, rpc) => {
+                (rpc.frame().conversation_id.as_str(), rpc.frame().surface_id.as_str())
+            }
             Payload::Action(action) | Payload::ActionReceipt { action, .. } => {
                 (action.conversation_id(), action.surface_id())
             }
@@ -95,7 +116,7 @@ impl Carrier {
         if let (Some(proof), Payload::ActionReceipt { action, .. }) = (&self.snapshot, &payload) {
             proof.restore(self, &ramflux_protocol::SurfaceState::default(), action.version())?;
         }
-        if self.schema != "ramflux.surface.carrier.v2"
+        if self.schema != ramflux_protocol::domain::SURFACE_CARRIER
             || self.content_type != "surface"
             || conversation != self.conversation_id
             || surface != self.surface_id
@@ -150,17 +171,6 @@ impl Carrier {
         Ok(Some(carrier))
     }
 }
-pub(crate) fn command_id(command: &ramflux_protocol::A2uiConversationCommand) -> &str {
-    use ramflux_protocol::A2uiConversationCommand as C;
-    match command {
-        C::CreateSurface(c) => &c.surface_id,
-        C::UpdateComponents(c) => &c.surface_id,
-        C::UpdateDataModel(c) => &c.surface_id,
-        C::DeleteSurface(c) => &c.surface_id,
-        C::PatchSurface(c) => &c.surface_id,
-        C::StreamAppend(c) => &c.surface_id,
-    }
-}
 pub(crate) fn invalid(message: &str) -> SdkError {
     SdkError::LocalBus(message.into())
 }
@@ -177,7 +187,7 @@ impl RamfluxClient {
         if carrier.posted_at.is_none() {
             carrier.posted_at = prior.as_ref().and_then(|v| v["created_at"].as_i64());
             if carrier.posted_at.is_none()
-                && matches!(carrier.payload()?, Payload::Event(event) if event.version()==1 && matches!(event.command(),ramflux_protocol::A2uiConversationCommand::CreateSurface(_)))
+                && matches!(carrier.payload()?, Payload::Event(event) if event.version()==1 && event.is_create())
             {
                 carrier.posted_at = Some(crate::prelude::now_unix_timestamp());
             }
@@ -205,7 +215,10 @@ impl RamfluxClient {
             > match carrier.payload_kind {
                 PayloadKind::Action => 256 * 1024,
                 PayloadKind::Event => 512 * 1024,
-                PayloadKind::ActionReceipt => MAX_CARRIER_BYTES,
+                PayloadKind::ActionReceipt
+                | PayloadKind::FunctionCall
+                | PayloadKind::FunctionResponse
+                | PayloadKind::Error => MAX_CARRIER_BYTES,
             }
         {
             return Err(invalid("surface carrier exceeds byte budget"));
@@ -241,15 +254,6 @@ impl RamfluxClient {
             &public,
         )?;
         let payload = carrier.payload()?;
-        if let Payload::Event(event) = &payload
-            && !matches!(
-                event.command(),
-                ramflux_protocol::A2uiConversationCommand::CreateSurface(_)
-            )
-            && carrier.snapshot.as_ref().and_then(|proof| proof.surface_hash.as_ref()).is_none()
-        {
-            return Err(invalid("surface delta requires a result hash"));
-        }
         Ok(payload)
     }
 }

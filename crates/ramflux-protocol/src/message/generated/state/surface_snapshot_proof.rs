@@ -9,12 +9,6 @@ use super::super::*;
 pub struct SurfaceSnapshotProof {
     #[prost(message, optional, tag = "1")]
     pub event: ::core::option::Option<SurfaceEvent>,
-    #[prost(message, optional, tag = "2")]
-    pub checkpoint: ::core::option::Option<SurfaceCheckpoint>,
-    #[prost(string, optional, tag = "3")]
-    pub surface_hash: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(message, optional, tag = "4")]
-    pub metadata: ::core::option::Option<SurfaceResyncMetadata>,
     #[prost(string, tag = "5")]
     pub author_device_id: ::prost::alloc::string::String,
 }
@@ -29,15 +23,6 @@ impl serde::Serialize for SurfaceSnapshotProof {
         if self.event.is_some() {
             len += 1;
         }
-        if self.checkpoint.is_some() {
-            len += 1;
-        }
-        if self.surface_hash.is_some() {
-            len += 1;
-        }
-        if self.metadata.is_some() {
-            len += 1;
-        }
         if !self.author_device_id.is_empty() {
             len += 1;
         }
@@ -45,15 +30,6 @@ impl serde::Serialize for SurfaceSnapshotProof {
             serializer.serialize_struct("ramflux.message.v1.SurfaceSnapshotProof", len)?;
         if let Some(v) = self.event.as_ref() {
             struct_ser.serialize_field("event", v)?;
-        }
-        if let Some(v) = self.checkpoint.as_ref() {
-            struct_ser.serialize_field("checkpoint", v)?;
-        }
-        if let Some(v) = self.surface_hash.as_ref() {
-            struct_ser.serialize_field("surfaceHash", v)?;
-        }
-        if let Some(v) = self.metadata.as_ref() {
-            struct_ser.serialize_field("metadata", v)?;
         }
         if !self.author_device_id.is_empty() {
             struct_ser.serialize_field("authorDeviceId", &self.author_device_id)?;
@@ -67,21 +43,10 @@ impl<'de> serde::Deserialize<'de> for SurfaceSnapshotProof {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &[
-            "event",
-            "checkpoint",
-            "surface_hash",
-            "surfaceHash",
-            "metadata",
-            "author_device_id",
-            "authorDeviceId",
-        ];
+        const FIELDS: &[&str] = &["event", "author_device_id", "authorDeviceId"];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             Event,
-            Checkpoint,
-            SurfaceHash,
-            Metadata,
             AuthorDeviceId,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
@@ -105,9 +70,6 @@ impl<'de> serde::Deserialize<'de> for SurfaceSnapshotProof {
                     {
                         match value {
                             "event" => Ok(GeneratedField::Event),
-                            "checkpoint" => Ok(GeneratedField::Checkpoint),
-                            "surfaceHash" | "surface_hash" => Ok(GeneratedField::SurfaceHash),
-                            "metadata" => Ok(GeneratedField::Metadata),
                             "authorDeviceId" | "author_device_id" => {
                                 Ok(GeneratedField::AuthorDeviceId)
                             }
@@ -132,9 +94,6 @@ impl<'de> serde::Deserialize<'de> for SurfaceSnapshotProof {
                 V: serde::de::MapAccess<'de>,
             {
                 let mut event__ = None;
-                let mut checkpoint__ = None;
-                let mut surface_hash__ = None;
-                let mut metadata__ = None;
                 let mut author_device_id__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
@@ -148,24 +107,6 @@ impl<'de> serde::Deserialize<'de> for SurfaceSnapshotProof {
                             }
                             event__ = map_.next_value()?;
                         }
-                        GeneratedField::Checkpoint => {
-                            if checkpoint__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("checkpoint"));
-                            }
-                            checkpoint__ = map_.next_value()?;
-                        }
-                        GeneratedField::SurfaceHash => {
-                            if surface_hash__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("surfaceHash"));
-                            }
-                            surface_hash__ = map_.next_value()?;
-                        }
-                        GeneratedField::Metadata => {
-                            if metadata__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("metadata"));
-                            }
-                            metadata__ = map_.next_value()?;
-                        }
                         GeneratedField::AuthorDeviceId => {
                             if author_device_id__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("authorDeviceId"));
@@ -176,9 +117,6 @@ impl<'de> serde::Deserialize<'de> for SurfaceSnapshotProof {
                 }
                 Ok(SurfaceSnapshotProof {
                     event: event__,
-                    checkpoint: checkpoint__,
-                    surface_hash: surface_hash__,
-                    metadata: metadata__,
                     author_device_id: author_device_id__.unwrap_or_default(),
                 })
             }

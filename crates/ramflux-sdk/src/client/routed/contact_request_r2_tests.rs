@@ -606,37 +606,22 @@ async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback_b
 }
 
 #[tokio::test]
-async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thread()
+async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_without_renderer_recovery()
 -> Result<(), SdkError> {
-    crate::client::native_test_support::watchdog::within(
-        contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thread_body(),
-    )
-    .await
-    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
-}
-
-async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thread_body()
--> Result<(), SdkError> {
+    use crate::client::surface::test_support::{append_frame, create_frame, text_snapshot};
     use crate::client::surface::{Carrier, ControlKind, PayloadKind};
     use ramflux_protocol::message as g;
-    use ramflux_protocol::{A2uiConversationCommand as C, StreamAppendCommand};
+    use ramflux_protocol::{SurfaceEvent as E, SurfaceState};
     let mut a = Box::pin(Fixture::native_named("alice", 231)).await?;
     let mut b = Box::pin(Fixture::native_named("bob", 241)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
     let conversation = direct_thread(&state)?;
-    account(&state, "alice")?.set_offline_retention_secs(3600)?;
-    let append = ramflux_protocol::encode_a2ui_conversation_event(
-        &conversation,
-        2,
-        &C::StreamAppend(StreamAppendCommand {
-            surface_id: "held".into(),
-            component_id: "stream".into(),
-            text_delta: "hello".into(),
-            final_: false,
-        }),
-    )?;
+    let create =
+        create_frame(&conversation, &text_snapshot("held", "Working", ""))?.wire_bytes()?;
+    let base = SurfaceState::default().apply(&E::from_wire_bytes(&create)?)?;
+    let append = append_frame(&base, "/result", "hello", false)?.wire_bytes()?;
     let carrier = account(&state, "alice")?.sign_surface_carrier(Carrier {
         typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
@@ -652,7 +637,7 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
         author_principal_id: "alice".into(),
         wire_base64: ramflux_protocol::encode_base64url(&append),
         signature: String::new(),
-        snapshot: Some(held_surface_hash(&conversation, &append)?),
+        snapshot: None,
     })?;
     let delivery =
         account(&state, "alice")?.surface_control_packet(&carrier, ControlKind::Peer, None)?;
@@ -681,27 +666,21 @@ async fn contact02_r2_held_surface_expiry_starts_at_release_and_creates_its_thre
     let entry = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("surface"))?;
     deliver(&mut state, "bob", &entry).await?;
     let source = root(&state, "alice")?;
-    let at = now_unix_timestamp();
     contact(&mut state, "bob", "contact.accept", json!({"root_commitment":source})).await?;
     let receiver = account(&state, "bob")?;
     let pending = receiver.account_db()?.list_actor_states::<Value>("surface/pending/")?;
-    assert_eq!(pending.len(), 1, "future surface is held for its missing create");
-    let [pending] = pending.as_slice() else {
-        return Err(invalid("one held Surface expected"));
-    };
-    assert!(
-        pending["wire_expires_at"].as_i64().is_some_and(|expiry| expiry >= at + 3600),
-        "the held Surface retention starts at consent release: {pending}",
-    );
-    let committed = receiver
-        .account_db()?
-        .load_actor_state::<crate::client::routed::committed::Committed>(
-            &receiver.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?,
-        )?
-        .ok_or_else(|| invalid("held Surface receipt missing"))?;
+    assert!(pending.is_empty(), "human-authored cards must not enter the renderer recovery queue");
+    let messages = receiver.direct_messages(&conversation)?;
     assert_eq!(
-        committed.entry.envelope, entry.envelope,
-        "consent release must preserve the exact authenticated envelope and its original clock",
+        messages.first().map(|message| message.created_at),
+        Some(entry.envelope.created_at),
+        "contact consent must preserve the fallback message's authenticated send time"
+    );
+    assert!(
+        receiver.surface_list(&conversation, "", 100)?["surfaces"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "fallback-only authors must not bootstrap card state"
     );
     assert!(receiver.account_db()?.client_record("conversation", &conversation)?.is_some());
     assert_eq!(receiver.direct_messages(&conversation)?.len(), 1);
@@ -792,41 +771,4 @@ async fn known_peer_traffic(
     sent?;
     let entry = frames(directory)?.into_iter().next().ok_or_else(|| invalid("known DM frame"))?;
     Ok((entry, conversation))
-}
-
-fn held_surface_hash(
-    conversation: &str,
-    append: &[u8],
-) -> Result<crate::client::surface::SnapshotProof, SdkError> {
-    use ramflux_protocol::{
-        A2uiConversationCommand as C, A2uiConversationEvent as E, CreateSurfaceCommand,
-        SurfaceState, SurfaceType,
-    };
-    let create = ramflux_protocol::encode_a2ui_conversation_event(
-        conversation,
-        1,
-        &C::CreateSurface(CreateSurfaceCommand {
-            surface_id: "held".into(),
-            surface_type: SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Working".into(),
-            fallback_markdown: None,
-            components: vec![json!({"id":"stream","text":""})],
-            data_model: serde_json::Map::default(),
-            allowed_actions: vec![],
-        }),
-    )?;
-    let state = SurfaceState::default()
-        .apply(&E::from_wire_bytes(&create)?)
-        .map_err(|_| invalid("create"))?
-        .apply(&E::from_wire_bytes(append)?)
-        .map_err(|_| invalid("append"))?;
-    Ok(crate::client::surface::SnapshotProof {
-        wire_base64: String::new(),
-        checkpoint_base64: String::new(),
-        surface_hash: state.hash().map(str::to_owned),
-        metadata: None,
-        author_device_id: "alice".into(),
-    })
 }

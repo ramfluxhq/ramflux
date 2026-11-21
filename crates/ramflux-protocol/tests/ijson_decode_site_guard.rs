@@ -127,7 +127,7 @@ struct RegistryRow {
 fn ijson_decode_site_guard() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sites = scan_tree(&root)?;
-    let registry = read_registry(&root.join(REGISTRY))?;
+    let registry = read_registries(&root)?;
     validate_registry(&sites, &registry)?;
     Ok(())
 }
@@ -137,7 +137,7 @@ fn deleting_a_class_a_row_reports_the_exact_unregistered_verdict()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sites = scan_tree(&root)?;
-    let mut registry = read_registry(&root.join(REGISTRY))?;
+    let mut registry = read_registries(&root)?;
     let key = registry
         .iter()
         .find_map(|(key, row)| (row.class == 'A').then_some(key.clone()))
@@ -306,9 +306,26 @@ fn crate_root_test_modules_resolve_from_the_src_directory() -> Result<(), Box<dy
 fn regenerate_ijson_decode_site_registry() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sites = scan_tree(&root)?;
-    let previous = read_registry(&root.join(REGISTRY)).unwrap_or_default();
+    let previous = read_registries(&root)?;
     let text = registry_text(&sites, &previous);
-    fs::write(root.join(REGISTRY), text)?;
+    let mut groups = BTreeMap::<PathBuf, String>::new();
+    for line in text.lines().filter(|line| !line.starts_with('#')) {
+        let source = line.split('|').next().ok_or("missing source path")?.trim();
+        let destination = registry_destination(source)?;
+        let output = groups.entry(destination).or_insert_with(|| {
+            "# SPDX-License-Identifier: BSD-3-Clause\n# path | enclosing fn | ordinal | class | admission provenance or exclusion reason\n".into()
+        });
+        writeln!(output, "{line}")?;
+    }
+    // Include existing files so removing the last site cannot leave stale rows.
+    for path in registry_files(&root)? {
+        groups
+            .entry(path.strip_prefix(&root)?.to_path_buf())
+            .or_insert_with(|| "# SPDX-License-Identifier: BSD-3-Clause\n".into());
+    }
+    for (path, text) in groups {
+        fs::write(root.join(path), text)?;
+    }
     Ok(())
 }
 
@@ -915,6 +932,108 @@ fn validate_registry(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>) -> Resul
         }
     }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
+}
+
+fn registry_destination(source: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let parts = source.split('/').collect::<Vec<_>>();
+    if parts.len() < 3
+        || !matches!(parts.first(), Some(&"apps" | &"crates"))
+        || parts.iter().any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return Err(format!("no owning crate/app for registry source: {source}").into());
+    }
+    Ok(Path::new(parts.first().ok_or("missing source root")?)
+        .join(parts.get(1).ok_or("missing crate directory")?)
+        .join(REGISTRY))
+}
+
+fn registry_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    fn collect(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                collect(&path, paths)?;
+            } else if path.file_name().is_some_and(|name| name == REGISTRY) {
+                paths.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    for top in ["apps", "crates"] {
+        if root.join(top).is_dir() {
+            collect(&root.join(top), &mut paths)?;
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn read_registries(root: &Path) -> Result<BTreeMap<Key, RegistryRow>, Box<dyn std::error::Error>> {
+    if root.join(REGISTRY).exists() {
+        let old = read_registry(&root.join(REGISTRY))?;
+        if let Some(key) = old.keys().next() {
+            return Err(format!(
+                "retired registry: move row for {} to {}",
+                key.path,
+                registry_destination(&key.path)?.display()
+            )
+            .into());
+        }
+    }
+    let mut rows = BTreeMap::new();
+    for path in registry_files(root)? {
+        for (key, row) in read_registry(&path)? {
+            let destination = registry_destination(&key.path)?;
+            if path != root.join(&destination) {
+                return Err(format!(
+                    "wrong crate registry: {}; move row to {}",
+                    key.path,
+                    destination.display()
+                )
+                .into());
+            }
+            if !path.parent().ok_or("missing registry parent")?.join("Cargo.toml").is_file() {
+                return Err(format!("registry owner has no Cargo.toml: {}", path.display()).into());
+            }
+            if rows.insert(key, row).is_some() {
+                return Err("duplicate registry key across files".into());
+            }
+        }
+    }
+    Ok(rows)
+}
+
+#[test]
+fn split_loader_rejects_wrong_crate_and_retired_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let root = temp_tree("split-loader")?;
+    let row = "crates/demo/src/lib.rs | ingress | 1 | E | excluded=fixture\n";
+    write_source(&root, "crates/demo/Cargo.toml", "[package]\nname = \"demo\"\n")?;
+    write_source(&root, "crates/demo/ijson_decode_sites.registry", row)?;
+    assert_eq!(read_registries(&root)?.len(), 1, "discovered crate registry must be loaded");
+    write_source(&root, "crates/other/Cargo.toml", "[package]\nname = \"other\"\n")?;
+    fs::create_dir_all(root.join("crates/demo/nested"))?;
+    for wrong in [
+        "crates/other/ijson_decode_sites.registry",
+        "crates/demo/nested/ijson_decode_sites.registry",
+    ] {
+        fs::rename(root.join("crates/demo/ijson_decode_sites.registry"), root.join(wrong))?;
+        let error = read_registries(&root).expect_err("wrong crate registry must fail").to_string();
+        assert!(
+            error.contains("wrong crate registry")
+                && error.contains("crates/demo/ijson_decode_sites.registry"),
+            "wrong-file verdict must name destination: {error}"
+        );
+        fs::rename(root.join(wrong), root.join("crates/demo/ijson_decode_sites.registry"))?;
+    }
+    write_source(&root, REGISTRY, row)?;
+    let error = read_registries(&root).expect_err("retired registry must fail").to_string();
+    assert!(
+        error.contains("retired registry")
+            && error.contains("crates/demo/ijson_decode_sites.registry"),
+        "retired-file verdict must name destination: {error}"
+    );
+    Ok(())
 }
 
 fn read_registry(path: &Path) -> Result<BTreeMap<Key, RegistryRow>, Box<dyn std::error::Error>> {

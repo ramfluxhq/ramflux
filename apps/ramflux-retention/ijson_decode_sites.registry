@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+apps/ramflux-retention/src/main.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-retention/src/main.rs | handle_itest_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-retention/src/main.rs | handle_itest_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

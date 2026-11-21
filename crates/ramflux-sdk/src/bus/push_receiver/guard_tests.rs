@@ -217,8 +217,7 @@ fn assert_inventory_scan() {
     assert!(
         !SITES
             .iter()
-            .any(|site| site.file == "src/client/a2i.rs"
-                || site.file == "src/bus/dispatch/a2i_a2ui.rs"),
+            .any(|site| site.file == "src/client/a2i.rs" || site.file == "src/bus/dispatch/a2i.rs"),
         "closed A2I endpoints have no receive writers"
     );
     assert!(

@@ -15,7 +15,7 @@ impl OwnedSurfaceCheckpoint {
         let checkpoint: serde_json::Value = serde_json::from_slice(&bytes)?;
         let wire = ramflux_protocol::decode_base64url(&self.snapshot_wire_base64)
             .map_err(|_| invalid("surface history snapshot encoding"))?;
-        let event = ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&wire)?;
+        let event = ramflux_protocol::SurfaceEvent::from_wire_bytes(&wire)?;
         Ok(g::OwnedSurfaceCheckpoint {
             record: Some(g::StoredSurface {
                 surface_id: self.record.surface_id.clone(),

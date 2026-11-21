@@ -39,24 +39,6 @@
     },
     {
       "bridge_allowed": true,
-      "capability": "a2ui",
-      "key_export": false,
-      "name": "a2ui.action",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "a2ui",
-      "key_export": false,
-      "name": "a2ui.render",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "account.backup.cancel",
@@ -807,9 +789,9 @@
       "capability": "contact.verify.cas",
       "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
-      "message_descriptor_blake3": "917e88f03ace69a82f1830281c76feed9b7dd7fc5edbbcf3388d18d3df0ee11b",
+      "message_descriptor_blake3": "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5",
       "name": "contact.verify",
-      "product_pin": "8edd837e0fe3317ba529009dd3cc34b04cd23d3d",
+      "product_pin": "8ba8ea13c2d63a339527476398b1ed6503709dbe",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,

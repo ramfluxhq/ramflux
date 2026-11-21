@@ -92,7 +92,7 @@ cancellation and courier/transfer task framework.
 
 Approved S0 r4 input is the published `design/s0-msg-schema` at
 `61d96751b550c661d15444a7ddecff116897498d`,
-`docs/design/message_schema_v1.md:285-354` (complete Decision 6). Controller
+[historical message schema design, lines 285–354](https://github.com/ramfluxhq/ramflux/blob/61d96751b550c661d15444a7ddecff116897498d/docs/design/message_schema_v1.md#L285-L354) (complete Decision 6). Controller
 approval of this design SHA satisfies S6c's S0 dependency. Section 8.2 copies its
 clock and indicator wording verbatim. Its transient transport and endpoint Unsupported
 retention are distinct: S6 has no transient DB write; S10a owns S0's authenticated

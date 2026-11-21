@@ -38,7 +38,7 @@ fn shape(name: &str, value: &Value, generated: bool, depth: usize) -> Result<Val
     }
     let descriptor =
         registry::descriptor(name).map_err(|_| invalid("surface descriptor missing"))?;
-    if descriptor.oneofs().any(|choice| !choice.is_synthetic()) {
+    if name != "SurfaceEvent" && descriptor.oneofs().any(|choice| !choice.is_synthetic()) {
         return choice(name, value, generated, depth, &descriptor);
     }
     if name.starts_with("SurfaceCommand") && descriptor.fields().count() == 1 {
@@ -101,6 +101,12 @@ fn shape(name: &str, value: &Value, generated: bool, depth: usize) -> Result<Val
     }
     if !generated {
         native_defaults(name, &descriptor, &mut result);
+        if name == "SurfaceEvent"
+            && !result.contains_key("resync")
+            && result.get("final").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        {
+            result.remove("final");
+        }
     }
     Ok(Value::Object(result))
 }
@@ -202,10 +208,8 @@ fn choice(
 fn native_key<'a>(name: &str, field: &'a prost_reflect::FieldDescriptor) -> &'a str {
     if field.name() == "final_" {
         "final"
-    } else if matches!(
-        name,
-        "SurfaceCheckpoint" | "SurfaceFinalEntry" | "SurfaceResyncMetadata" | "SurfaceTaskBinding"
-    ) || name.starts_with("SurfacePatchOp")
+    } else if matches!(name, "SurfaceResyncMetadata" | "SurfaceTaskBinding")
+        || name.starts_with("SurfacePatchOp")
         || name.starts_with("Task")
         || name.starts_with("LocalMcp")
     {

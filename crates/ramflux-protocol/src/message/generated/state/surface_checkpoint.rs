@@ -7,18 +7,26 @@ use super::super::*;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SurfaceCheckpoint {
-    #[prost(string, tag = "1")]
-    pub schema: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub content: ::core::option::Option<CreateSurfaceCommand>,
-    #[prost(string, optional, tag = "3")]
-    pub conversation_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "3")]
+    pub conversation_id: ::prost::alloc::string::String,
     #[prost(uint64, tag = "4")]
-    pub version: u64,
+    pub surface_version: u64,
     #[prost(bool, tag = "5")]
     pub closed: bool,
-    #[prost(message, repeated, tag = "6")]
-    pub final_text: ::prost::alloc::vec::Vec<SurfaceFinalEntry>,
+    #[prost(string, tag = "7")]
+    pub surface_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub catalog_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub fallback_text: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "10")]
+    pub metadata: ::core::option::Option<JsonObject>,
+    #[prost(message, repeated, tag = "11")]
+    pub components: ::prost::alloc::vec::Vec<JsonValue>,
+    #[prost(message, optional, tag = "12")]
+    pub data_model: ::core::option::Option<JsonObject>,
+    #[prost(message, repeated, tag = "13")]
+    pub r#final: ::prost::alloc::vec::Vec<SurfaceFinalEntry>,
 }
 impl serde::Serialize for SurfaceCheckpoint {
     #[allow(deprecated)]
@@ -28,45 +36,72 @@ impl serde::Serialize for SurfaceCheckpoint {
     {
         use serde::ser::SerializeStruct;
         let mut len = 0;
-        if !self.schema.is_empty() {
+        if !self.conversation_id.is_empty() {
             len += 1;
         }
-        if self.content.is_some() {
-            len += 1;
-        }
-        if self.conversation_id.is_some() {
-            len += 1;
-        }
-        if self.version != 0 {
+        if self.surface_version != 0 {
             len += 1;
         }
         if self.closed {
             len += 1;
         }
-        if !self.final_text.is_empty() {
+        if !self.surface_id.is_empty() {
+            len += 1;
+        }
+        if !self.catalog_id.is_empty() {
+            len += 1;
+        }
+        if !self.fallback_text.is_empty() {
+            len += 1;
+        }
+        if self.metadata.is_some() {
+            len += 1;
+        }
+        if !self.components.is_empty() {
+            len += 1;
+        }
+        if self.data_model.is_some() {
+            len += 1;
+        }
+        if !self.r#final.is_empty() {
             len += 1;
         }
         let mut struct_ser =
             serializer.serialize_struct("ramflux.message.v1.SurfaceCheckpoint", len)?;
-        if !self.schema.is_empty() {
-            struct_ser.serialize_field("schema", &self.schema)?;
+        if !self.conversation_id.is_empty() {
+            struct_ser.serialize_field("conversationId", &self.conversation_id)?;
         }
-        if let Some(v) = self.content.as_ref() {
-            struct_ser.serialize_field("content", v)?;
-        }
-        if let Some(v) = self.conversation_id.as_ref() {
-            struct_ser.serialize_field("conversationId", v)?;
-        }
-        if self.version != 0 {
+        if self.surface_version != 0 {
             #[allow(clippy::needless_borrow)]
             #[allow(clippy::needless_borrows_for_generic_args)]
-            struct_ser.serialize_field("version", ToString::to_string(&self.version).as_str())?;
+            struct_ser.serialize_field(
+                "surfaceVersion",
+                ToString::to_string(&self.surface_version).as_str(),
+            )?;
         }
         if self.closed {
             struct_ser.serialize_field("closed", &self.closed)?;
         }
-        if !self.final_text.is_empty() {
-            struct_ser.serialize_field("finalText", &self.final_text)?;
+        if !self.surface_id.is_empty() {
+            struct_ser.serialize_field("surfaceId", &self.surface_id)?;
+        }
+        if !self.catalog_id.is_empty() {
+            struct_ser.serialize_field("catalogId", &self.catalog_id)?;
+        }
+        if !self.fallback_text.is_empty() {
+            struct_ser.serialize_field("fallbackText", &self.fallback_text)?;
+        }
+        if let Some(v) = self.metadata.as_ref() {
+            struct_ser.serialize_field("metadata", v)?;
+        }
+        if !self.components.is_empty() {
+            struct_ser.serialize_field("components", &self.components)?;
+        }
+        if let Some(v) = self.data_model.as_ref() {
+            struct_ser.serialize_field("dataModel", v)?;
+        }
+        if !self.r#final.is_empty() {
+            struct_ser.serialize_field("final", &self.r#final)?;
         }
         struct_ser.end()
     }
@@ -78,23 +113,35 @@ impl<'de> serde::Deserialize<'de> for SurfaceCheckpoint {
         D: serde::Deserializer<'de>,
     {
         const FIELDS: &[&str] = &[
-            "schema",
-            "content",
             "conversation_id",
             "conversationId",
-            "version",
+            "surface_version",
+            "surfaceVersion",
             "closed",
-            "final_text",
-            "finalText",
+            "surface_id",
+            "surfaceId",
+            "catalog_id",
+            "catalogId",
+            "fallback_text",
+            "fallbackText",
+            "metadata",
+            "components",
+            "data_model",
+            "dataModel",
+            "final",
         ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
-            Schema,
-            Content,
             ConversationId,
-            Version,
+            SurfaceVersion,
             Closed,
-            FinalText,
+            SurfaceId,
+            CatalogId,
+            FallbackText,
+            Metadata,
+            Components,
+            DataModel,
+            Final,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -116,14 +163,20 @@ impl<'de> serde::Deserialize<'de> for SurfaceCheckpoint {
                         E: serde::de::Error,
                     {
                         match value {
-                            "schema" => Ok(GeneratedField::Schema),
-                            "content" => Ok(GeneratedField::Content),
                             "conversationId" | "conversation_id" => {
                                 Ok(GeneratedField::ConversationId)
                             }
-                            "version" => Ok(GeneratedField::Version),
+                            "surfaceVersion" | "surface_version" => {
+                                Ok(GeneratedField::SurfaceVersion)
+                            }
                             "closed" => Ok(GeneratedField::Closed),
-                            "finalText" | "final_text" => Ok(GeneratedField::FinalText),
+                            "surfaceId" | "surface_id" => Ok(GeneratedField::SurfaceId),
+                            "catalogId" | "catalog_id" => Ok(GeneratedField::CatalogId),
+                            "fallbackText" | "fallback_text" => Ok(GeneratedField::FallbackText),
+                            "metadata" => Ok(GeneratedField::Metadata),
+                            "components" => Ok(GeneratedField::Components),
+                            "dataModel" | "data_model" => Ok(GeneratedField::DataModel),
+                            "final" => Ok(GeneratedField::Final),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -141,41 +194,33 @@ impl<'de> serde::Deserialize<'de> for SurfaceCheckpoint {
             where
                 V: serde::de::MapAccess<'de>,
             {
-                let mut schema__ = None;
-                let mut content__ = None;
                 let mut conversation_id__ = None;
-                let mut version__ = None;
+                let mut surface_version__ = None;
                 let mut closed__ = None;
-                let mut final_text__ = None;
+                let mut surface_id__ = None;
+                let mut catalog_id__ = None;
+                let mut fallback_text__ = None;
+                let mut metadata__ = None;
+                let mut components__ = None;
+                let mut data_model__ = None;
+                let mut r#final__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
                         return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
                     }
                     match k {
-                        GeneratedField::Schema => {
-                            if schema__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("schema"));
-                            }
-                            schema__ = Some(map_.next_value()?);
-                        }
-                        GeneratedField::Content => {
-                            if content__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("content"));
-                            }
-                            content__ = map_.next_value()?;
-                        }
                         GeneratedField::ConversationId => {
                             if conversation_id__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("conversationId"));
                             }
-                            conversation_id__ = map_.next_value()?;
+                            conversation_id__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::Version => {
-                            if version__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("version"));
+                        GeneratedField::SurfaceVersion => {
+                            if surface_version__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("surfaceVersion"));
                             }
-                            version__ = Some(
+                            surface_version__ = Some(
                                 map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
                             );
                         }
@@ -185,21 +230,61 @@ impl<'de> serde::Deserialize<'de> for SurfaceCheckpoint {
                             }
                             closed__ = Some(map_.next_value()?);
                         }
-                        GeneratedField::FinalText => {
-                            if final_text__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("finalText"));
+                        GeneratedField::SurfaceId => {
+                            if surface_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("surfaceId"));
                             }
-                            final_text__ = Some(map_.next_value()?);
+                            surface_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::CatalogId => {
+                            if catalog_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("catalogId"));
+                            }
+                            catalog_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::FallbackText => {
+                            if fallback_text__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("fallbackText"));
+                            }
+                            fallback_text__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Metadata => {
+                            if metadata__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("metadata"));
+                            }
+                            metadata__ = map_.next_value()?;
+                        }
+                        GeneratedField::Components => {
+                            if components__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("components"));
+                            }
+                            components__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::DataModel => {
+                            if data_model__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("dataModel"));
+                            }
+                            data_model__ = map_.next_value()?;
+                        }
+                        GeneratedField::Final => {
+                            if r#final__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("final"));
+                            }
+                            r#final__ = Some(map_.next_value()?);
                         }
                     }
                 }
                 Ok(SurfaceCheckpoint {
-                    schema: schema__.unwrap_or_default(),
-                    content: content__,
-                    conversation_id: conversation_id__,
-                    version: version__.unwrap_or_default(),
+                    conversation_id: conversation_id__.unwrap_or_default(),
+                    surface_version: surface_version__.unwrap_or_default(),
                     closed: closed__.unwrap_or_default(),
-                    final_text: final_text__.unwrap_or_default(),
+                    surface_id: surface_id__.unwrap_or_default(),
+                    catalog_id: catalog_id__.unwrap_or_default(),
+                    fallback_text: fallback_text__.unwrap_or_default(),
+                    metadata: metadata__,
+                    components: components__.unwrap_or_default(),
+                    data_model: data_model__,
+                    r#final: r#final__.unwrap_or_default(),
                 })
             }
         }

@@ -3,7 +3,7 @@
 
 //! Typed egress builders with durable-retry-friendly, unpredictable logical message identifiers.
 use crate::SdkError;
-use ramflux_protocol::{A2uiConversationCommand, A2uiSurfaceAction};
+use ramflux_protocol::{EventFrame, SurfaceAction};
 use serde::Serialize;
 
 /// Creates a fresh 128-bit random surface message id. Persist it before sending and reuse it
@@ -28,25 +28,35 @@ impl SurfaceSendRequest {
     /// Encodes a locally authored typed command and assigns one fresh logical message id.
     /// # Errors
     /// Rejects invalid I-JSON values or an entropy failure.
-    pub fn event(
-        conversation_id: &str,
-        version: u64,
-        command: &A2uiConversationCommand,
-    ) -> Result<Self, SdkError> {
-        let wire =
-            ramflux_protocol::encode_a2ui_conversation_event(conversation_id, version, command)?;
+    pub fn event(frame: &EventFrame) -> Result<Self, SdkError> {
+        let wire = frame.wire_bytes()?;
         Ok(Self {
-            conversation_id: conversation_id.into(),
+            conversation_id: frame.conversation_id.clone(),
             message_id: new_surface_message_id()?,
             wire_base64: ramflux_protocol::encode_base64url(wire),
             author_principal_id: None,
+        })
+    }
+    /// Encode an RPC frame for the `surface.send` transport method.
+    /// # Errors
+    /// Refuses invalid framing, bounds or an entropy failure.
+    pub fn rpc(
+        author: Option<&str>,
+        frame: &ramflux_protocol::RpcFrame,
+        kind: ramflux_protocol::RpcKind,
+    ) -> Result<Self, SdkError> {
+        Ok(Self {
+            conversation_id: frame.conversation_id.clone(),
+            message_id: new_surface_message_id()?,
+            wire_base64: ramflux_protocol::encode_base64url(frame.wire_bytes(kind)?),
+            author_principal_id: author.map(str::to_owned),
         })
     }
     /// Preserves the exact validated action wire bytes and selects the intended author namespace.
     /// # Errors
     /// Rejects invalid original action bytes or an entropy failure.
     pub fn action(author_principal_id: &str, wire: &[u8]) -> Result<Self, SdkError> {
-        let action = A2uiSurfaceAction::from_wire_bytes(wire)?;
+        let action = SurfaceAction::from_wire_bytes(wire)?;
         Ok(Self {
             conversation_id: action.conversation_id().into(),
             message_id: new_surface_message_id()?,
@@ -65,10 +75,10 @@ mod tests {
         let second = super::new_surface_message_id()?;
         assert_ne!(first, second);
         assert_eq!(ramflux_protocol::decode_base64url(&first)?.len(), 16);
-        let values = serde_json::json!({});
-        let wire = serde_json::to_vec(
-            &serde_json::json!({"schema":"ramflux.a2ui.action.v2","conversationId":"c","surfaceId":"s","version":1,"surfaceHash":"h","actionId":"choose","values":values,"argsHash":ramflux_protocol::surface_args_hash(&values)?}),
-        )?;
+        let wire = include_bytes!(
+            "../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/submit.action.json"
+        )
+        .to_vec();
         let request = super::SurfaceSendRequest::action("author", &wire)?;
         assert_eq!(ramflux_protocol::decode_base64url(&request.wire_base64)?, wire);
         assert_eq!(request.author_principal_id.as_deref(), Some("author"));

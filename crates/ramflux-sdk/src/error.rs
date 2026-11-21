@@ -173,6 +173,8 @@ fn word_from_token(token: &str) -> Option<CustodyConfirmReason> {
 pub enum SdkError {
     #[error(transparent)]
     Search(#[from] ramflux_storage::local_search::SearchError),
+    #[error(transparent)]
+    SurfaceProtocol(#[from] ramflux_protocol::a2ui::Reject),
     #[error("priority session calls cannot await account writer checkpoints")]
     PriorityWriterAccess,
     #[error("gateway_writer_busy: retryable")]

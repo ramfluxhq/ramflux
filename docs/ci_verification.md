@@ -74,7 +74,8 @@ call within a file, and renaming its function do not require exception changes.
 Adding a call or changing its duration does. Receiver/Condvar APIs select their
 actual duration argument, not the receiver/guard or predicate.
 
-`.config/test-timing-allowlist.toml` binds each identity to an `owner`, `reason`
+The owning crate/app’s `test-timing-allowlist.toml` (or
+`tests/test-timing-allowlist.toml` for root tests) binds each identity to an `owner`, `reason`
 and inclusive UTC expiry. Initial top-level crate/app groups are staggered over
 2026-12-12, 2026-12-19, 2026-12-26 and 2027-01-02; root tests form their own group.
 CI rejects new/changed sites, expired entries, **stale rows** and excess counts.
@@ -110,3 +111,18 @@ The job summary lists caught, missed, unviable, and timed-out counts plus missed
 mutant file/line locations; `mutants-out` retains details. Empty diffs, setup
 failures, missing results, and exhausted budgets are explicit. Do not turn this
 job into a required check or treat its green conclusion as proof all mutants ran.
+
+
+Decode-site rows belong in `ijson_decode_sites.registry` at the root of the
+crate/app containing the row’s source path. Timing exceptions belong in that
+crate/app’s `test-timing-allowlist.toml`; root test exceptions go in
+`tests/test-timing-allowlist.toml`.
+
+The loaders discover every file with these names recursively under their source
+roots (decode: `apps`, `crates`; timing: also `tools`, `tests`), without a central
+file list. A row in another crate’s file or a nested file is rejected. The old
+repo-wide locations reject rows with the destination to move them to; they do
+not provide a second registration path. The ignored decode-regeneration test
+writes the per-crate files; timing `--seed` output must be divided by source path
+before review. To verify the initial split against its immutable baseline, run
+`python3 -B scripts/ci/check-registry-split.py --base b21b398c1ef407e4ab149b4b1cca9afe79621abb`.

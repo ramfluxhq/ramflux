@@ -30,15 +30,4 @@ impl RamfluxClient {
     ) -> Result<String, SdkError> {
         Ok(self.mcp_registry.invoke_tool(server_id, tool_name, grant)?)
     }
-
-    /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn render_a2ui_surface(
-        &self,
-        surface: &A2uiSurface,
-        supported_catalogs: &BTreeSet<String>,
-        granted_permissions: &BTreeSet<String>,
-    ) -> Result<RenderedSurface, SdkError> {
-        Ok(ramflux_sync::render_a2ui_surface(surface, supported_catalogs, granted_permissions)?)
-    }
 }
