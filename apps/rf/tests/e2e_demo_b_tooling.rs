@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Demo B B9 through the rf binary, a real daemon and a real router: a Surface v2 event
+//! Demo B B9 through the rf binary, a real daemon and a real router: an owned-agent Surface v3 event
 //! built by the SDK encoder round-trips to the peer, a Task is displayed on the peer, and an
 //! A2I approval is refused with the typed `generated_authority` code.
 #![cfg(all(unix, feature = "itest-memory-vault"))]
@@ -10,12 +10,12 @@
 mod e2e;
 
 use e2e::{
-    Account, Daemon, boot_stack, configure_node, create_account, dm_conversation,
-    exchange_contacts, rf_json, rf_output, start_daemon, unique, wait_json,
+    Account, Daemon, boot_stack, configure_node, create_account, create_owned_agent,
+    dm_conversation, exchange_contacts, rf_json, rf_output, start_daemon, unique, wait_json,
 };
 use ramflux_protocol::{
-    A2uiConversationCommand, CreateSurfaceCommand, PatchSurfaceCommand, SurfacePatchOp,
-    decode_base64url, surface_snapshot_hash,
+    CATALOG_ID, CreateSurface, EVENT_SCHEMA, EventFrame, Mutation, MutationMessage, SurfaceEvent,
+    SurfaceSnapshot, SurfaceState, UpdateDataModel, decode_base64url,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -35,12 +35,15 @@ fn b9_surface_round_trip_task_display_and_a2i_refusal() -> e2e::Result<()> {
     let conversation = dm_conversation(&alice, &bob)?;
     let scratch = tempfile::TempDir::new()?;
 
+    let agent = create_owned_agent(&bob_d, &bob)?;
+    exchange_contacts(&bob_d, &agent, &bob_d, &bob)?;
+    let agent_conversation = dm_conversation(&agent, &bob)?;
     surface_round_trip(&Round {
-        alice_d: &alice_d,
+        alice_d: &bob_d,
         bob_d: &bob_d,
-        alice: &alice,
+        alice: &agent,
         bob: &bob,
-        conversation: &conversation,
+        conversation: &agent_conversation,
         scratch: scratch.path(),
     })?;
     task_display(&alice_d, &bob_d, &alice, &bob, &conversation, scratch.path())?;
@@ -91,7 +94,7 @@ struct SurfaceView {
 
 struct Created {
     view: SurfaceView,
-    snapshot: CreateSurfaceCommand,
+    state: SurfaceState,
 }
 
 /// Alice creates a Surface with `rf surface send`; Bob lists and reads the same surface.
@@ -105,18 +108,23 @@ fn create_observed_surface(trip: &Round<'_>) -> e2e::Result<Created> {
     let surface_id = unique("demo-b-surface");
     let fallback = unique("Demo B surface fallback");
     let command = trip.scratch.join("create-surface.json");
-    std::fs::write(
-        &command,
-        serde_json::to_vec(&json!({
-            "command": "createSurface",
-            "surfaceId": surface_id,
-            "surfaceType": "status_panel",
-            "catalog": "basic",
-            "catalogVersion": "1",
-            "fallbackText": fallback,
-            "allowedActions": [{"name": "choose"}],
-        }))?,
-    )?;
+    let frame = SurfaceState::default().prepare_event(EventFrame {
+        schema: EVENT_SCHEMA.into(), conversation_id: trip.conversation.into(), surface_version: 1,
+        base_surface_hash: None, new_surface_hash: String::new(), fallback_text: Some(fallback.clone()), close_reason: None,
+        a2ui: Some(MutationMessage::new(Mutation::CreateSurface(CreateSurface {
+            surface_id: surface_id.clone(), catalog_id: CATALOG_ID.into(), send_data_model: None,
+            components: Some(vec![
+                json!({"id":"root","component":"Column","children":["status","choose","deny"]}),
+                json!({"id":"status","component":"Text","text":{"@path":"/status"}}),
+                json!({"id":"choose","component":"Button","child":"label","action":{"event":{"name":"choose","context":{"choice":"yes"}}}}),
+                json!({"id":"deny","component":"Button","child":"label","action":{"event":{"name":"deny","context":{"choice":"yes"}}},"@checks":[{"condition":false}]}),
+                json!({"id":"label","component":"Text","text":"Choose"})]),
+            data_model: Some(json!({"status":"Created"})), metadata: None,
+        }))), append_text: None, resync: None, final_: None, closed: None, metadata: None,
+    })?;
+    let wire = frame.wire_bytes()?;
+    let state = SurfaceState::default().apply(&SurfaceEvent::from_wire_bytes(&wire)?)?;
+    std::fs::write(&command, &wire)?;
     let command_path = command.to_string_lossy().into_owned();
     let sent = rf_json(
         &trip.alice_d.socket,
@@ -127,9 +135,7 @@ fn create_observed_surface(trip: &Round<'_>) -> e2e::Result<Created> {
             &trip.alice.id,
             "--conversation",
             trip.conversation,
-            "--version",
-            "1",
-            "--command-file",
+            "--wire-file",
             &command_path,
         ],
     )?;
@@ -148,7 +154,7 @@ fn create_observed_surface(trip: &Round<'_>) -> e2e::Result<Created> {
     if !read.to_string().contains(&fallback) {
         return Err(format!("peer surface get lacks the created fallback: {read}").into());
     }
-    if !read["snapshot"]["allowedActions"].to_string().contains("choose") {
+    if !read["snapshot"]["components"].to_string().contains("choose") {
         return Err(format!("receiver snapshot does not declare choose: {read}").into());
     }
     let author_view = rf_json(
@@ -160,32 +166,40 @@ fn create_observed_surface(trip: &Round<'_>) -> e2e::Result<Created> {
     }
     let version = required_u64(&author_view, "version")?;
     let hash = required_str(&author_view, "surface_hash")?.to_owned();
-    let snapshot: CreateSurfaceCommand = serde_json::from_value(author_view["snapshot"].clone())?;
-    let recomputed = surface_snapshot_hash(&snapshot)?;
+    let snapshot: SurfaceSnapshot = serde_json::from_value(author_view["snapshot"].clone())?;
+    let recomputed = snapshot.hash()?;
     if recomputed != hash {
         return Err(format!("author snapshot hash {recomputed} != view {hash}").into());
     }
-    Ok(Created { view: SurfaceView { surface_id, version, hash }, snapshot })
+    Ok(Created { view: SurfaceView { surface_id, version, hash }, state })
 }
 
 fn patch_observed_surface(trip: &Round<'_>, created: &Created) -> e2e::Result<SurfaceView> {
     let patched = unique("Demo B patched fallback");
-    let mut snapshot = created.snapshot.clone();
-    snapshot.fallback_text.clone_from(&patched);
-    let new_hash = surface_snapshot_hash(&snapshot)?;
     let next_version = created.view.version.checked_add(1).ok_or("surface version exhausted")?;
-    let patch_path = trip.scratch.join("patch-surface.json");
-    std::fs::write(
-        &patch_path,
-        serde_json::to_vec(&A2uiConversationCommand::PatchSurface(PatchSurfaceCommand {
+    let frame = created.state.prepare_event(EventFrame {
+        schema: EVENT_SCHEMA.into(),
+        conversation_id: trip.conversation.into(),
+        surface_version: next_version,
+        base_surface_hash: Some(created.view.hash.clone()),
+        new_surface_hash: String::new(),
+        fallback_text: None,
+        close_reason: None,
+        a2ui: Some(MutationMessage::new(Mutation::UpdateDataModel(UpdateDataModel {
             surface_id: created.view.surface_id.clone(),
-            base_surface_hash: created.view.hash.clone(),
-            ops: vec![SurfacePatchOp::SetFallbackText { fallback_text: patched.clone() }],
-            new_surface_hash: new_hash.clone(),
-        }))?,
-    )?;
+            path: Some("/status".into()),
+            value: json!(patched),
+        }))),
+        append_text: None,
+        resync: None,
+        final_: None,
+        closed: None,
+        metadata: None,
+    })?;
+    let new_hash = frame.new_surface_hash.clone();
+    let patch_path = trip.scratch.join("patch-surface.json");
+    std::fs::write(&patch_path, frame.wire_bytes()?)?;
     let patch_file = patch_path.to_string_lossy().into_owned();
-    let version_arg = next_version.to_string();
     let patched_send = rf_json(
         &trip.alice_d.socket,
         &[
@@ -195,9 +209,7 @@ fn patch_observed_surface(trip: &Round<'_>, created: &Created) -> e2e::Result<Su
             &trip.alice.id,
             "--conversation",
             trip.conversation,
-            "--version",
-            &version_arg,
-            "--command-file",
+            "--wire-file",
             &patch_file,
         ],
     )?;
@@ -225,7 +237,7 @@ fn patch_observed_surface(trip: &Round<'_>, created: &Created) -> e2e::Result<Su
 fn prove_action_round_trip(trip: &Round<'_>, view: &SurfaceView) -> e2e::Result<()> {
     let deny = action_command(&action_send(trip, view, "deny"))?;
     let deny_args: Vec<&str> = deny.iter().map(String::as_str).collect();
-    expect_typed_refusal(trip.bob_d, &deny_args, "unknown_action")?;
+    expect_typed_refusal(trip.bob_d, &deny_args, "invalid_request")?;
     let choose = action_command(&action_send(trip, view, "choose"))?;
     let choose_args: Vec<&str> = choose.iter().map(String::as_str).collect();
     let acted = rf_json(&trip.bob_d.socket, &choose_args)?;
@@ -302,9 +314,9 @@ fn assert_author_receipt(receipt: &Value, bob: &Account, view: &SurfaceView) -> 
         return Err(format!("author receipt is not verified: {row}").into());
     }
     let wire = action_wire(row)?;
-    if wire.get("version").and_then(Value::as_u64) != Some(view.version)
+    if wire.get("surfaceVersion").and_then(Value::as_u64) != Some(view.version)
         || wire.get("surfaceHash").and_then(Value::as_str) != Some(view.hash.as_str())
-        || wire.get("actionId").and_then(Value::as_str) != Some("choose")
+        || wire.pointer("/a2ui/action/name").and_then(Value::as_str) != Some("choose")
     {
         return Err(format!("author action wire is not the exact decision: {wire}").into());
     }
@@ -324,26 +336,39 @@ struct ActionSend<'a> {
 
 fn action_command(send: &ActionSend<'_>) -> e2e::Result<Vec<String>> {
     let path = send.scratch.join(format!("action-{}.json", send.action_id));
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&json!({
-            "surfaceId": send.surface_id,
-            "version": send.version,
-            "surfaceHash": send.hash,
-            "actionId": send.action_id,
-            "values": {"choice": "yes"},
-        }))?,
-    )?;
+    let mut frame = ramflux_protocol::ActionFrame {
+        schema: ramflux_protocol::ACTION_SCHEMA.into(),
+        conversation_id: send.conversation.into(),
+        surface_version: send.version,
+        surface_hash: send.hash.into(),
+        source_instance: Vec::new(),
+        args_hash: String::new(),
+        task_binding: None,
+        a2ui: ramflux_protocol::ActionMessage {
+            version: "1.0".into(),
+            action: ramflux_protocol::Action {
+                name: send.action_id.into(),
+                surface_id: send.surface_id.into(),
+                source_component_id: send.action_id.into(),
+                timestamp: "2026-11-21T00:00:00Z".into(),
+                context: serde_json::from_value(json!({"choice":"yes"}))?,
+                user_message: None,
+                metadata: None,
+            },
+        },
+    };
+    frame.args_hash = frame.arguments_hash()?;
+    std::fs::write(&path, frame.wire_bytes()?)?;
     Ok(vec![
         "surface".to_owned(),
-        "send".to_owned(),
+        "action".to_owned(),
         "--account".to_owned(),
         send.actor.id.clone(),
         "--conversation".to_owned(),
         send.conversation.to_owned(),
         "--author".to_owned(),
         send.author.principal_id.clone(),
-        "--action".to_owned(),
+        "--wire-file".to_owned(),
         path.to_string_lossy().into_owned(),
     ])
 }
@@ -466,10 +491,9 @@ fn required_str<'a>(value: &'a Value, field: &str) -> e2e::Result<&'a str> {
 
 fn action_row<'a>(view: &'a Value, action_id: &str) -> Option<&'a Value> {
     view.get("actions")?.as_array()?.iter().find(|row| {
-        action_wire(row)
-            .ok()
-            .and_then(|wire| wire.get("actionId").and_then(Value::as_str).map(str::to_owned))
-            == Some(action_id.to_owned())
+        action_wire(row).ok().and_then(|wire| {
+            wire.pointer("/a2ui/action/name").and_then(Value::as_str).map(str::to_owned)
+        }) == Some(action_id.to_owned())
     })
 }
 

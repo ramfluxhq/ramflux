@@ -315,7 +315,7 @@ mod tests {
             ],
             owner_identity_commitment: "owner_id".to_owned(),
             hosting_model: ramflux_protocol::HostingModel::Federated,
-            a2ui_profiles: vec!["ramflux.a2ui.v1".to_owned()],
+            a2ui_profiles: vec![ramflux_protocol::CATALOG_ID.to_owned()],
             safety_disclosure: safety(),
             created_at: NOW,
             expires_at: Some(NOW + 3_600),

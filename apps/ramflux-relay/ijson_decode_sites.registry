@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+apps/ramflux-relay/src/attachment_authority/listener.rs | challenge | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/attachment_authority/listener.rs | renew | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/attachment_authority/listener.rs | renew | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/attachment_authority/quic.rs | write_token | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/attachment_service.rs | serve_one | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/client_quic.rs | relay_client_quic_object_put | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/client_quic.rs | relay_client_quic_object_tombstone | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/client_quic.rs | relay_client_quic_verify_invocation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/trust_keyring.rs | load_keyring_trust | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/trust_keyring.rs | load_provider_keyring | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/voice.rs | start_voice_surfaces | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

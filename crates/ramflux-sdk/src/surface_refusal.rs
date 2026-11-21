@@ -47,13 +47,11 @@ impl SurfaceRefusalCode {
     pub(crate) fn renderer(error: &serde_json::Value) -> Self {
         if let Ok(reject) = serde_json::from_value::<SurfaceReject>(error["reject"].clone()) {
             return match reject {
-                SurfaceReject::Version { .. } | SurfaceReject::Stale => Self::StaleVersion,
-                SurfaceReject::Conflict
-                | SurfaceReject::ResultHashMismatch
-                | SurfaceReject::ArgumentsHashMismatch => Self::StaleHash,
-                SurfaceReject::Closed | SurfaceReject::BlockClosed => Self::Closed,
+                SurfaceReject::Version { .. } => Self::StaleVersion,
+                SurfaceReject::Conflict | SurfaceReject::Integrity => Self::StaleHash,
+                SurfaceReject::Closed => Self::Closed,
                 SurfaceReject::NotCreated => Self::NotFound,
-                SurfaceReject::LimitExceeded { .. } => Self::TooLarge,
+                SurfaceReject::Limit => Self::TooLarge,
                 _ => Self::InvalidRequest,
             };
         }
@@ -72,6 +70,10 @@ pub(crate) fn map_surface_error(error: SdkError) -> SdkError {
     match error {
         SdkError::LocalBus(message) => SurfaceRefusalCode::InvalidRequest.error(message),
         SdkError::Protocol(error) => SurfaceRefusalCode::InvalidRequest.error(error.to_string()),
+        SdkError::SurfaceProtocol(error) => {
+            SurfaceRefusalCode::renderer(&serde_json::json!({"reject":error}))
+                .error(error.to_string())
+        }
         SdkError::Json(error) => SurfaceRefusalCode::InvalidRequest.error(error.to_string()),
         other => other,
     }

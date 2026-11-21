@@ -53,30 +53,6 @@ pub use call_control_types::*;
 #[path = "call_endpoint.rs"]
 mod call_endpoint_types;
 pub use call_endpoint_types::*;
-#[path = "create_surface_command.rs"]
-mod create_surface_command_types;
-pub use create_surface_command_types::*;
-#[path = "delete_surface_command.rs"]
-mod delete_surface_command_types;
-pub use delete_surface_command_types::*;
-#[path = "delete_surface_reason.rs"]
-mod delete_surface_reason_types;
-pub use delete_surface_reason_types::*;
-#[path = "delete_surface_reason_cancelled.rs"]
-mod delete_surface_reason_cancelled_types;
-pub use delete_surface_reason_cancelled_types::*;
-#[path = "delete_surface_reason_completed.rs"]
-mod delete_surface_reason_completed_types;
-pub use delete_surface_reason_completed_types::*;
-#[path = "delete_surface_reason_error.rs"]
-mod delete_surface_reason_error_types;
-pub use delete_surface_reason_error_types::*;
-#[path = "delete_surface_reason_expired.rs"]
-mod delete_surface_reason_expired_types;
-pub use delete_surface_reason_expired_types::*;
-#[path = "delete_surface_reason_replaced.rs"]
-mod delete_surface_reason_replaced_types;
-pub use delete_surface_reason_replaced_types::*;
 #[path = "needs_me.rs"]
 mod needs_me_types;
 pub use needs_me_types::*;
@@ -92,51 +68,27 @@ pub use needs_me_input_types::*;
 #[path = "owned_surface_checkpoint.rs"]
 mod owned_surface_checkpoint_types;
 pub use owned_surface_checkpoint_types::*;
-#[path = "patch_surface_command.rs"]
-mod patch_surface_command_types;
-pub use patch_surface_command_types::*;
 #[path = "self_sync.rs"]
 mod self_sync_types;
 pub use self_sync_types::*;
 #[path = "stored_surface.rs"]
 mod stored_surface_types;
 pub use stored_surface_types::*;
-#[path = "stream_append_command.rs"]
-mod stream_append_command_types;
-pub use stream_append_command_types::*;
 #[path = "surface.rs"]
 mod surface_types;
 pub use surface_types::*;
 #[path = "surface_action.rs"]
 mod surface_action_types;
 pub use surface_action_types::*;
+#[path = "surface_append_text.rs"]
+mod surface_append_text_types;
+pub use surface_append_text_types::*;
 #[path = "surface_carrier.rs"]
 mod surface_carrier_types;
 pub use surface_carrier_types::*;
 #[path = "surface_checkpoint.rs"]
 mod surface_checkpoint_types;
 pub use surface_checkpoint_types::*;
-#[path = "surface_command.rs"]
-mod surface_command_types;
-pub use surface_command_types::*;
-#[path = "surface_command_create_surface.rs"]
-mod surface_command_create_surface_types;
-pub use surface_command_create_surface_types::*;
-#[path = "surface_command_delete_surface.rs"]
-mod surface_command_delete_surface_types;
-pub use surface_command_delete_surface_types::*;
-#[path = "surface_command_patch_surface.rs"]
-mod surface_command_patch_surface_types;
-pub use surface_command_patch_surface_types::*;
-#[path = "surface_command_stream_append.rs"]
-mod surface_command_stream_append_types;
-pub use surface_command_stream_append_types::*;
-#[path = "surface_command_update_components.rs"]
-mod surface_command_update_components_types;
-pub use surface_command_update_components_types::*;
-#[path = "surface_command_update_data_model.rs"]
-mod surface_command_update_data_model_types;
-pub use surface_command_update_data_model_types::*;
 #[path = "surface_control_kind.rs"]
 mod surface_control_kind_types;
 pub use surface_control_kind_types::*;
@@ -161,66 +113,21 @@ pub use surface_final_entry_types::*;
 #[path = "surface_history_export.rs"]
 mod surface_history_export_types;
 pub use surface_history_export_types::*;
-#[path = "surface_patch_op.rs"]
-mod surface_patch_op_types;
-pub use surface_patch_op_types::*;
-#[path = "surface_patch_op_insert_block.rs"]
-mod surface_patch_op_insert_block_types;
-pub use surface_patch_op_insert_block_types::*;
-#[path = "surface_patch_op_remove_block.rs"]
-mod surface_patch_op_remove_block_types;
-pub use surface_patch_op_remove_block_types::*;
-#[path = "surface_patch_op_replace_block.rs"]
-mod surface_patch_op_replace_block_types;
-pub use surface_patch_op_replace_block_types::*;
-#[path = "surface_patch_op_set_actions.rs"]
-mod surface_patch_op_set_actions_types;
-pub use surface_patch_op_set_actions_types::*;
-#[path = "surface_patch_op_set_fallback_text.rs"]
-mod surface_patch_op_set_fallback_text_types;
-pub use surface_patch_op_set_fallback_text_types::*;
-#[path = "surface_resync_metadata.rs"]
-mod surface_resync_metadata_types;
-pub use surface_resync_metadata_types::*;
+#[path = "surface_resync.rs"]
+mod surface_resync_types;
+pub use surface_resync_types::*;
 #[path = "surface_resync_request.rs"]
 mod surface_resync_request_types;
 pub use surface_resync_request_types::*;
+#[path = "surface_rpc_frame.rs"]
+mod surface_rpc_frame_types;
+pub use surface_rpc_frame_types::*;
 #[path = "surface_snapshot_proof.rs"]
 mod surface_snapshot_proof_types;
 pub use surface_snapshot_proof_types::*;
 #[path = "surface_task_binding.rs"]
 mod surface_task_binding_types;
 pub use surface_task_binding_types::*;
-#[path = "surface_type.rs"]
-mod surface_type_types;
-pub use surface_type_types::*;
-#[path = "surface_type_agent_result.rs"]
-mod surface_type_agent_result_types;
-pub use surface_type_agent_result_types::*;
-#[path = "surface_type_approval_card.rs"]
-mod surface_type_approval_card_types;
-pub use surface_type_approval_card_types::*;
-#[path = "surface_type_call_card.rs"]
-mod surface_type_call_card_types;
-pub use surface_type_call_card_types::*;
-#[path = "surface_type_file_preview.rs"]
-mod surface_type_file_preview_types;
-pub use surface_type_file_preview_types::*;
-#[path = "surface_type_form_card.rs"]
-mod surface_type_form_card_types;
-pub use surface_type_form_card_types::*;
-#[path = "surface_type_message_card.rs"]
-mod surface_type_message_card_types;
-pub use surface_type_message_card_types::*;
-#[path = "surface_type_notification_card.rs"]
-mod surface_type_notification_card_types;
-pub use surface_type_notification_card_types::*;
-#[path = "surface_type_status_panel.rs"]
-mod surface_type_status_panel_types;
-pub use surface_type_status_panel_types::*;
-#[path = "surface_type_task_card.rs"]
-mod surface_type_task_card_types;
-pub use surface_type_task_card_types::*;
 #[path = "task.rs"]
 mod task_types;
 pub use task_types::*;
@@ -368,12 +275,6 @@ pub use task_step_types::*;
 #[path = "task_update.rs"]
 mod task_update_types;
 pub use task_update_types::*;
-#[path = "update_components_command.rs"]
-mod update_components_command_types;
-pub use update_components_command_types::*;
-#[path = "update_data_model_command.rs"]
-mod update_data_model_command_types;
-pub use update_data_model_command_types::*;
 #[path = "voice_allocation_request.rs"]
 mod voice_allocation_request_types;
 pub use voice_allocation_request_types::*;

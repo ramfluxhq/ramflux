@@ -1,0 +1,26 @@
+[
+  {
+    "suite": "initial_state_validation.json",
+    "index": 2,
+    "description": "Valid createSurface with only dataModel update",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "P3 requires a reachable root component at create admission"
+  },
+  {
+    "suite": "initial_state_validation.json",
+    "index": 12,
+    "description": "Valid createSurface with metadata.extensions",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "P3 requires a reachable root component at create admission"
+  },
+  {
+    "suite": "initial_state_validation.json",
+    "index": 13,
+    "description": "Valid createSurface with non-ASCII Unicode UAX #31 extension keys",
+    "upstreamValid": true,
+    "profileAccepted": false,
+    "reason": "P3 requires a reachable root component at create admission"
+  }
+]

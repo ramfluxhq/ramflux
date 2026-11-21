@@ -32,7 +32,7 @@ impl RamfluxClient {
                 }
                 let wire = ramflux_protocol::decode_base64url(&carrier.wire_base64)
                     .map_err(|_| invalid("retained task action wire invalid"))?;
-                let action = ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&wire)?;
+                let action = ramflux_protocol::SurfaceAction::from_wire_bytes(&wire)?;
                 let Some(binding) = action.task_binding() else { continue };
                 let id = ramflux_protocol::hash_base64url(
                     "ramflux.surface.action_delivery.v1",

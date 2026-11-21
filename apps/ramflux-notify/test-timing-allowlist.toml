@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "apps/ramflux-notify/src/permit_tests.rs", call = "method::recv_timeout", duration = "(std::time::Duration::from_secs ( 5 ))", count = 8, owner = "apps/ramflux-notify", reason = "Bounded acceptance deadline on real authority, provider, gateway and SDK components; no correctness sleep", expires = "2026-12-13" },
+  { path = "apps/ramflux-notify/src/permit_tests.rs", call = "tokio::time::timeout", duration = "(std::time::Duration::from_secs ( 5 ))", count = 4, owner = "apps/ramflux-notify", reason = "Bounded acceptance deadline on real authority, provider, gateway and SDK components; no correctness sleep", expires = "2026-12-13" },
+  { path = "apps/ramflux-notify/src/permit_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 30 )", count = 1, owner = "apps/ramflux-notify", reason = "Bounded acceptance deadline on real authority, provider, gateway and SDK components; no correctness sleep", expires = "2026-12-13" },
+  { path = "apps/ramflux-notify/src/permit_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 45 )", count = 1, owner = "apps/ramflux-notify", reason = "Bounded acceptance deadline on real authority, provider, gateway and SDK components; no correctness sleep", expires = "2026-12-13" },
+  { path = "apps/ramflux-notify/src/permit_tests.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 60 )", count = 2, owner = "apps/ramflux-notify", reason = "Bounded acceptance deadline on real authority, provider, gateway and SDK components; no correctness sleep", expires = "2026-12-13" },
+  { path = "apps/ramflux-notify/src/native_provider_tests.rs", call = "method::recv_timeout", duration = "(std::time::Duration::from_secs ( 5 ))", count = 3, owner = "apps/ramflux-notify", reason = "Bounded native WebPush provider capture; no correctness sleep", expires = "2026-12-13" },
+]

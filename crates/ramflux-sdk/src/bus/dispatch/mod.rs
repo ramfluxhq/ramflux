@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-pub mod a2i_a2ui;
+pub mod a2i;
 pub mod account;
 pub(in crate::bus) mod attachment_prepare;
 pub(crate) mod call;
@@ -41,7 +41,7 @@ pub(in crate::bus) mod object_status;
 pub(crate) mod residue;
 pub(crate) mod surface;
 
-pub(crate) use a2i_a2ui::*;
+pub(crate) use a2i::*;
 pub(crate) use account::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;

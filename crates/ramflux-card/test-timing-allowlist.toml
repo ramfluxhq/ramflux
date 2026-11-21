@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "crates/ramflux-card/src/ffi.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( 2 )", count = 1, owner = "crates/ramflux-card", reason = "Real foreign-thread C handle rejection; causal channel response, timeout only bounds a stuck test thread and does not order work", expires = "2026-12-12" },
+  { path = "crates/ramflux-card/tests/package_cli.rs", call = "tokio::time::timeout", duration = "(std::time::Duration::from_secs ( 5 ))", count = 1, owner = "crates/ramflux-card", reason = "Real release packer child process deadline; bounded logs and kill_on_drop, no timing ordering", expires = "2026-12-12" },
+]

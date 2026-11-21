@@ -6,38 +6,18 @@ use crate::client::surface::{ControlKind, control::SurfaceControl, invalid};
 use std::path::PathBuf;
 pub(super) struct Terminals {
     pub(super) clients: Vec<RamfluxClient>,
-    _fixtures: Vec<crate::client::native_test_support::Fixture>,
+    _root: ramflux_test_support::TestPath,
 }
 impl Terminals {
-    pub(super) async fn new() -> Result<Self, SdkError> {
-        use crate::client::native_test_support::Fixture;
-        let mut author = Box::pin(Fixture::with_principal("author", "author-device", "author"))
-            .await
-            .map_err(|error| invalid(&error.to_string()))?;
-        let sibling = Box::pin(author.enroll_sibling("author-two", "author-two"))
-            .await
-            .map_err(|error| invalid(&error.to_string()))?;
-        let mut human = Box::pin(Fixture::with_principal("human", "human-device", "human"))
-            .await
-            .map_err(|error| invalid(&error.to_string()))?;
-        let human_two = Box::pin(human.enroll_sibling("human-two", "human-two"))
-            .await
-            .map_err(|error| invalid(&error.to_string()))?;
-        let manifests = [author.manifest.clone(), human.manifest.clone()];
-        let mut fixtures = vec![author, sibling, human, human_two];
-        let mut clients = Vec::new();
-        for fixture in &mut fixtures {
-            for manifest in &manifests {
-                fixture.client.persist_observed_identity_directory_now(manifest)?;
-            }
-            fixture.client.account_db()?.persist_client_record(
-                "conversation",
-                "thread",
-                &json!({"kind":"direct","participants":["author","human"]}),
-            )?;
-            clients.push(std::mem::take(&mut fixture.client));
-        }
-        Ok(Self { clients, _fixtures: fixtures })
+    pub(super) async fn new() -> TestResult<Self> {
+        let root = ramflux_test_support::TestPath::new()?;
+        let clients = super::super::test_support::owned_terminals(&root).await?;
+        Ok(Self { clients, _root: root })
+    }
+}
+impl Drop for Terminals {
+    fn drop(&mut self) {
+        self.clients.clear();
     }
 }
 pub(super) fn entry(
@@ -144,7 +124,7 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
     let [b1, b2, a1, a2] = t.clients.as_slice() else { return Err("terminals".into()) };
     let mut create =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    b1.attach_surface_snapshot(&mut create)?;
+
     create = b1.sign_surface_carrier(create)?;
     project(b1, &create, "b1-create")?;
     project(a1, &create, "a1-create")?;
@@ -154,11 +134,16 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
     for terminal in [b1, b2, a1, a2] {
         let view = terminal.surface_get("s", 0, None)?;
         assert_eq!(view["version"], 1);
-        assert_eq!(view["executor_device_id"], "author-device");
+        assert_eq!(view["executor_device_id"], b1.owned_device_identity()?.device_id());
     }
     let hash = b1.surface_get("s", 0, None)?["surface_hash"].as_str().ok_or("hash")?.to_owned();
     let first = action(a1, "decision-one", 1, &hash)?;
-    assert!(project(b2, &first, "b2-first")?.queued);
+    let waiting = project(b2, &first, "b2-first")?;
+    assert!(
+        waiting.queued,
+        "the secondary must await its executor: accepted={}, retryable={}, error={:?}",
+        waiting.accepted, waiting.retryable, waiting.renderer_error
+    );
     assert_eq!(b2.surface_get("s", 0, None)?["actions"], json!([]));
     assert!(project(b1, &first, "b1-first")?.accepted);
     let reference = first.surface_reference()?;
@@ -219,16 +204,17 @@ async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches_b
     let b2 = &t.clients[1];
     let mut c =
         carrier(b1, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    b1.attach_surface_snapshot(&mut c)?;
+
     c = b1.sign_surface_carrier(c)?;
     let db = b2.account_db()?;
-    let mut record = db.client_record("device", "author-device")?.ok_or("device")?;
+    let mut record =
+        db.client_record("device", b1.owned_device_identity()?.device_id())?.ok_or("device")?;
     db.remove_actor_state(&format!(
         "directory/device/{}",
         b1.owned_device_identity()?.storage_key()
     ))?;
     record["principal_commitment"] = json!("another-root");
-    db.persist_client_record("device", "author-device", &record)?;
+    db.persist_client_record("device", b1.owned_device_identity()?.device_id(), &record)?;
     assert!(own_forward(b1, b2, &c).is_err());
     assert!(b2.surface_get("s", 0, None)?.is_null());
     Ok(())
@@ -249,16 +235,16 @@ async fn own_history_retains_closed_surfaces_with_full_finality_and_quoted_fallb
     let target = &t.clients[1];
     let mut first =
         carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    source.attach_surface_snapshot(&mut first)?;
+
     first = source.sign_surface_carrier(first)?;
     project(source, &first, "create")?;
     let mut close = carrier(
         source,
         PayloadKind::Event,
         "close",
-        &event(2, C::DeleteSurface(DeleteSurfaceCommand { surface_id: "s".into(), reason: None }))?,
+        &event(2, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
-    source.attach_surface_snapshot(&mut close)?;
+
     close = source.sign_surface_carrier(close)?;
     project(source, &close, "close")?;
     let exported = source.own_surface_history_export(None)?;
@@ -286,19 +272,19 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
 -> TestResult {
     let t = Box::pin(Terminals::new()).await?;
     let source = &t.clients[0];
-    source.create_group("g", "author-device")?;
+    source.create_group("g", source.owned_device_identity()?.storage_key())?;
     let db = source.account_db()?;
     db.persist_client_record("conversation", "thread", &json!({"kind":"group","group_id":"g"}))?;
     let mut first =
         carrier(source, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    source.attach_surface_snapshot(&mut first)?;
+
     first = source.sign_surface_carrier(first)?;
     source.project_surface_message(
         "thread",
         "group-create",
         super::super::SurfaceSender {
             principal: "author",
-            device: "author-device",
+            device: source.owned_device_identity()?.device_id(),
             envelope_id: "group-create",
             expires_at: None,
             group_epoch: Some(1),
@@ -307,7 +293,15 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
         false,
     )?;
     assert_eq!(source.own_surface_history_export(None)?.checkpoints.len(), 1);
-    db.upsert_group_local_membership_snapshot("g", 5, 128, "none", "author-device", "owner", 5)?;
+    db.upsert_group_local_membership_snapshot(
+        "g",
+        5,
+        128,
+        "none",
+        source.owned_device_identity()?.storage_key(),
+        "owner",
+        5,
+    )?;
     assert_eq!(source.own_surface_history_controls()?.len(), 0);
     Ok(())
 }
@@ -338,10 +332,10 @@ async fn live_deltas_omit_repeated_context_while_explicit_history_keeps_it_body(
         "append",
         &event(
             2,
-            C::StreamAppend(StreamAppendCommand {
+            C::AppendText(AppendText {
                 surface_id: "s".into(),
-                component_id: "stream".into(),
-                text_delta: "x".into(),
+                path: "/stream".into(),
+                delta: "x".into(),
                 final_: false,
             }),
         )?,

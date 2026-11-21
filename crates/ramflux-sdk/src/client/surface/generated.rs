@@ -61,9 +61,7 @@ impl SurfaceControl {
     }
 }
 
-pub(crate) fn event(
-    value: &ramflux_protocol::A2uiConversationEvent,
-) -> Result<g::SurfaceEvent, SdkError> {
+pub(crate) fn event(value: &ramflux_protocol::SurfaceEvent) -> Result<g::SurfaceEvent, SdkError> {
     Ok(serde_json::from_value(shape::convert(
         "SurfaceEvent",
         &serde_json::to_value(value)?,
@@ -74,11 +72,11 @@ pub(crate) fn event(
 pub(super) fn native_event(value: &g::SurfaceEvent) -> Result<Vec<u8>, SdkError> {
     let native = shape::convert("SurfaceEvent", &serde_json::to_value(value)?, false)?;
     let bytes = ramflux_protocol::canonical_json_bytes(&native)?;
-    ramflux_protocol::A2uiConversationEvent::from_wire_bytes(&bytes)?;
+    ramflux_protocol::SurfaceEvent::from_wire_bytes(&bytes)?;
     Ok(bytes)
 }
 
-fn action(value: &ramflux_protocol::A2uiSurfaceAction) -> Result<g::SurfaceAction, SdkError> {
+fn action(value: &ramflux_protocol::SurfaceAction) -> Result<g::SurfaceAction, SdkError> {
     Ok(serde_json::from_value(shape::convert(
         "SurfaceAction",
         &serde_json::to_value(value)?,
@@ -89,77 +87,44 @@ fn action(value: &ramflux_protocol::A2uiSurfaceAction) -> Result<g::SurfaceActio
 fn native_action(value: &g::SurfaceAction) -> Result<Vec<u8>, SdkError> {
     let native = shape::convert("SurfaceAction", &serde_json::to_value(value)?, false)?;
     let bytes = ramflux_protocol::canonical_json_bytes(&native)?;
-    ramflux_protocol::A2uiSurfaceAction::from_wire_bytes(&bytes)?;
+    ramflux_protocol::SurfaceAction::from_wire_bytes(&bytes)?;
     Ok(bytes)
 }
 
 fn snapshot(value: &SnapshotProof) -> Result<g::SurfaceSnapshotProof, SdkError> {
-    let event = if value.wire_base64.is_empty() {
-        None
-    } else {
-        Some(event(&ramflux_protocol::A2uiConversationEvent::from_wire_bytes(
-            &ramflux_protocol::decode_base64url(&value.wire_base64)
-                .map_err(|_| invalid("snapshot event encoding"))?,
-        )?)?)
-    };
-    let checkpoint = if value.checkpoint_base64.is_empty() {
-        None
-    } else {
-        let bytes = ramflux_protocol::decode_base64url(&value.checkpoint_base64)
-            .map_err(|_| invalid("snapshot checkpoint encoding"))?;
-        let native = ramflux_protocol::parse_i_json::<serde_json::Value>(&bytes)?;
-        Some(serde_json::from_value(shape::convert("SurfaceCheckpoint", &native, true)?)?)
-    };
+    let bytes = ramflux_protocol::decode_base64url(&value.wire_base64)
+        .map_err(|_| invalid("snapshot event encoding"))?;
     Ok(g::SurfaceSnapshotProof {
-        event,
-        checkpoint,
-        surface_hash: value.surface_hash.clone(),
-        metadata: value
-            .metadata
-            .as_ref()
-            .map(|metadata| {
-                Ok::<_, SdkError>(serde_json::from_value(shape::convert(
-                    "SurfaceResyncMetadata",
-                    metadata,
-                    true,
-                )?)?)
-            })
-            .transpose()?,
+        event: Some(event(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&bytes)?)?),
         author_device_id: value.author_device_id.clone(),
     })
 }
 
 fn native_snapshot(value: &g::SurfaceSnapshotProof) -> Result<SnapshotProof, SdkError> {
     Ok(SnapshotProof {
-        wire_base64: value
-            .event
-            .as_ref()
-            .map(native_event)
-            .transpose()?
-            .map(ramflux_protocol::encode_base64url)
-            .unwrap_or_default(),
-        checkpoint_base64: value
-            .checkpoint
-            .as_ref()
-            .map(|checkpoint| {
-                let native =
-                    shape::convert("SurfaceCheckpoint", &serde_json::to_value(checkpoint)?, false)?;
-                Ok::<_, SdkError>(ramflux_protocol::encode_base64url(
-                    ramflux_protocol::canonical_json_bytes(&native)?,
-                ))
-            })
-            .transpose()?
-            .unwrap_or_default(),
-        surface_hash: value.surface_hash.clone(),
-        metadata: value
-            .metadata
-            .as_ref()
-            .map(|metadata| {
-                shape::convert("SurfaceResyncMetadata", &serde_json::to_value(metadata)?, false)
-            })
-            .transpose()?,
+        wire_base64: ramflux_protocol::encode_base64url(native_event(
+            value.event.as_ref().ok_or_else(|| invalid("snapshot event missing"))?,
+        )?),
         author_device_id: value.author_device_id.clone(),
     })
+}
+
+fn rpc(value: &ramflux_protocol::SurfaceRpc) -> Result<g::SurfaceRpcFrame, SdkError> {
+    Ok(serde_json::from_value(shape::convert(
+        "SurfaceRpcFrame",
+        &serde_json::to_value(value)?,
+        true,
+    )?)?)
+}
+
+fn native_rpc(
+    value: &g::SurfaceRpcFrame,
+    kind: ramflux_protocol::RpcKind,
+) -> Result<Vec<u8>, SdkError> {
+    let native = shape::convert("SurfaceRpcFrame", &serde_json::to_value(value)?, false)?;
+    let bytes = ramflux_protocol::canonical_json_bytes(&native)?;
+    ramflux_protocol::SurfaceRpc::from_wire_bytes(&bytes, kind)?;
+    Ok(bytes)
 }
 
 impl Carrier {
@@ -174,6 +139,17 @@ impl Carrier {
         let payload = match self.payload()? {
             Payload::Event(value) => g::surface_carrier::Payload::Event(event(&value)?),
             Payload::Action(value) => g::surface_carrier::Payload::Action(action(&value)?),
+            Payload::Rpc(kind, value) => match kind {
+                ramflux_protocol::RpcKind::FunctionCall => {
+                    g::surface_carrier::Payload::FunctionCall(rpc(&value)?)
+                }
+                ramflux_protocol::RpcKind::FunctionResponse => {
+                    g::surface_carrier::Payload::FunctionResponse(rpc(&value)?)
+                }
+                ramflux_protocol::RpcKind::Error => {
+                    g::surface_carrier::Payload::Error(rpc(&value)?)
+                }
+            },
             Payload::ActionReceipt { original, .. } => {
                 g::surface_carrier::Payload::ActionReceipt(Box::new(original.to_generated()?))
             }
@@ -208,6 +184,17 @@ impl Carrier {
             .ok_or_else(|| invalid("Surface payload missing"))?
         {
             g::surface_carrier::Payload::Event(event) => (PayloadKind::Event, native_event(event)?),
+            g::surface_carrier::Payload::FunctionCall(value) => (
+                PayloadKind::FunctionCall,
+                native_rpc(value, ramflux_protocol::RpcKind::FunctionCall)?,
+            ),
+            g::surface_carrier::Payload::FunctionResponse(value) => (
+                PayloadKind::FunctionResponse,
+                native_rpc(value, ramflux_protocol::RpcKind::FunctionResponse)?,
+            ),
+            g::surface_carrier::Payload::Error(value) => {
+                (PayloadKind::Error, native_rpc(value, ramflux_protocol::RpcKind::Error)?)
+            }
             g::surface_carrier::Payload::Action(action) => {
                 (PayloadKind::Action, native_action(action)?)
             }

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_itest_request_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_mvp10_notify_deliver | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_mvp10_notify_deliver_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_mvp10_notify_wake | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_mvp10_notify_wake_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_notify_mesh_quic_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_s13_provider_credential | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_s13_provider_credential_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_s13_push_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | handle_s13_push_route_value_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | parse_s13_wake_request_body | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/main.rs | project_mvp10_signed_wake | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/provider_outcome.rs | apns_outcome | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/provider_outcome.rs | fcm_outcome | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/push_registration.rs | credentials | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-notify/src/push_registration.rs | deregister | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-notify/src/push_registration.rs | register | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-notify/src/send_authority.rs | decode | 1 | E | excluded=typed authenticated notification authority metadata; original bytes validated by mesh ingress

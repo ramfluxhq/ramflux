@@ -608,7 +608,22 @@ pub fn configure_node(daemon: &Daemon, discovery_url: &str) -> Result<String> {
 
 pub fn create_account(daemon: &Daemon, display_name: &str) -> Result<Account> {
     let created = pty_account_create(&daemon.socket, display_name, PASSPHRASE)?;
-    let id = required_str(&created, "account_id")?;
+    created_account(daemon, display_name, &created)
+}
+
+#[cfg(unix)]
+pub fn create_owned_agent(daemon: &Daemon, custodian: &Account) -> Result<Account> {
+    let created = pty_account_create_with_args(
+        &daemon.socket,
+        "Surface agent",
+        PASSPHRASE,
+        &["--kind", "headless_ai", "--custodian", &custodian.id],
+    )?;
+    created_account(daemon, "Surface agent", &created)
+}
+
+fn created_account(daemon: &Daemon, display_name: &str, created: &Value) -> Result<Account> {
+    let id = required_str(created, "account_id")?;
     wait_networking_live(daemon, &id)?;
     let status = rf_json(&daemon.socket, &["account", "status", "--account", &id])?;
     Ok(Account {
@@ -1485,9 +1500,19 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
 
 #[cfg(not(windows))]
 fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Result<Value> {
+    pty_account_create_with_args(socket, display_name, passphrase, &[])
+}
+
+#[cfg(not(windows))]
+fn pty_account_create_with_args(
+    socket: &Path,
+    display_name: &str,
+    passphrase: &str,
+    extra: &[&str],
+) -> Result<Value> {
     let rf = rf_bin();
     let socket_text = socket.to_str().ok_or("socket path")?;
-    let inner = [
+    let mut inner = vec![
         rf.to_str().ok_or("rf path")?,
         "--socket",
         socket_text,
@@ -1496,6 +1521,7 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
         "--display-name",
         display_name,
     ];
+    inner.extend_from_slice(extra);
     let mut command = Command::new("script");
     if cfg!(target_os = "linux") {
         command.args(["-q", "-e", "-f", "-c", &shell_join(&inner), "/dev/null"]);

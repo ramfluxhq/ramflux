@@ -209,6 +209,7 @@ fn dispatch_device_list(
     let account = local_bus_account(state, account_id)?;
     let devices = account_known_devices(account)?;
     Ok(local_bus_ok(serde_json::to_value(LocalBusDeviceListResponse {
+        a2ui_renderer_capabilities: ramflux_protocol::renderer_capabilities(),
         principal_id: account.gateway_config.principal_id.clone(),
         local_device_id: account.gateway_config.device_id.clone(),
         devices,
