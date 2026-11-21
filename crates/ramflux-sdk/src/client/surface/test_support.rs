@@ -75,8 +75,8 @@ pub(crate) async fn owned_pair_with_vault(
     let human_manifest = native_manifest(&human_client)?;
     let agent_manifest = native_manifest(&agent_client)?;
     for client in [&human_client, &agent_client] {
-        client.persist_fetched_identity_directory(&human_manifest)?;
-        client.persist_fetched_identity_directory(&agent_manifest)?;
+        client.persist_observed_identity_directory_now(&human_manifest)?;
+        client.persist_observed_identity_directory_now(&agent_manifest)?;
     }
     Ok((human_client, agent_client, vault))
 }
@@ -158,13 +158,29 @@ pub(crate) async fn owned_terminals(root: &Path) -> TestResult<Vec<RamfluxClient
     let author_two =
         enroll_surface_sibling(&secondary, &mut agent, &vault, "author", "author-two").await?;
     let clients = vec![agent, author_two, human, human_two];
-    let manifests = [
-        clients.first().ok_or("author client")?.local_own_copy_manifest()?,
-        clients.get(2).ok_or("human client")?.local_own_copy_manifest()?,
-    ];
+    let mut by_root =
+        std::collections::BTreeMap::<String, ramflux_protocol::custody::CustodyManifest>::new();
+    for client in &clients {
+        let manifest = native_manifest(client)?;
+        let native = *manifest.custody.ok_or("terminal native manifest")?;
+        if let Some(full) = by_root.get_mut(&manifest.principal_commitment) {
+            assert_eq!(
+                ramflux_protocol::custody::object_hash(&full.publication.record)?,
+                ramflux_protocol::custody::object_hash(&native.publication.record)?,
+                "all enrolled terminals must observe the same actual custody head"
+            );
+            full.devices.extend(native.devices);
+        } else {
+            by_root.insert(manifest.principal_commitment, native);
+        }
+    }
+    let manifests = by_root
+        .into_values()
+        .map(crate::prekey::SdkDeviceManifestResponse::from_native)
+        .collect::<Result<Vec<_>, _>>()?;
     for client in &clients {
         for manifest in &manifests {
-            client.persist_fetched_identity_directory(manifest)?;
+            client.persist_observed_identity_directory_now(manifest)?;
         }
         client.account_db()?.persist_client_record(
             "conversation",
@@ -250,6 +266,8 @@ async fn enroll_surface_sibling(
         },
         now,
     )?;
+    let source_device = source.owned_device_identity()?.device_id().to_owned();
+    source.initialize_born_v3_branch_for_fixture(&source_device, vault.as_ref())?;
     let sibling_vault = Arc::new(TestVault::default());
     crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
         root,
@@ -272,8 +290,8 @@ async fn enroll_surface_sibling(
     let manifest = native_manifest(&client)?;
     native.devices.extend(manifest.custody.ok_or("sibling native manifest")?.devices);
     let full = crate::prekey::SdkDeviceManifestResponse::from_native(*native)?;
-    source.persist_fetched_identity_directory(&full)?;
-    client.persist_fetched_identity_directory(&full)?;
+    source.persist_observed_identity_directory_now(&full)?;
+    client.persist_observed_identity_directory_now(&full)?;
     Ok(client)
 }
 
@@ -299,7 +317,7 @@ fn native_manifest(client: &RamfluxClient) -> TestResult<crate::prekey::SdkDevic
             message_layer: None,
         }],
     })?;
-    client.persist_fetched_identity_directory(&manifest)?;
+    client.persist_observed_identity_directory_now(&manifest)?;
     Ok(manifest)
 }
 

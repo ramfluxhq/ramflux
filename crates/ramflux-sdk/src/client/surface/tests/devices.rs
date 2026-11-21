@@ -138,7 +138,12 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
     }
     let hash = b1.surface_get("s", 0, None)?["surface_hash"].as_str().ok_or("hash")?.to_owned();
     let first = action(a1, "decision-one", 1, &hash)?;
-    assert!(project(b2, &first, "b2-first")?.queued);
+    let waiting = project(b2, &first, "b2-first")?;
+    assert!(
+        waiting.queued,
+        "the secondary must await its executor: accepted={}, retryable={}, error={:?}",
+        waiting.accepted, waiting.retryable, waiting.renderer_error
+    );
     assert_eq!(b2.surface_get("s", 0, None)?["actions"], json!([]));
     assert!(project(b1, &first, "b1-first")?.accepted);
     let reference = first.surface_reference()?;

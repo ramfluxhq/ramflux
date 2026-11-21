@@ -242,8 +242,8 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
     )?;
     f.human.verify_surface_carrier(&other, "outsider", "author-device")?;
     assert!(
-        project(&f.human, &other, "outsider")?.accepted,
-        "a verified foreign author retains its fallback despite the colliding device name"
+        !project(&f.human, &other, "outsider")?.accepted,
+        "a colliding peer device name must not authorize another principal's surface"
     );
     assert!(
         f.human.surface_state_scoped("thread", "outsider", "s")?.is_none(),
