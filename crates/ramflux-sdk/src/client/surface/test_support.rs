@@ -150,6 +150,12 @@ pub(crate) fn append_frame(
 }
 
 pub(crate) async fn owned_terminals(root: &Path) -> TestResult<Vec<RamfluxClient>> {
+    Ok(owned_terminals_with_vault(root).await?.0)
+}
+
+pub(crate) async fn owned_terminals_with_vault(
+    root: &Path,
+) -> TestResult<(Vec<RamfluxClient>, Arc<TestVault>)> {
     let (mut human, mut agent, vault) = owned_pair_with_vault(root, "human", "author").await?;
     let secondary = root.join("secondary");
     std::fs::create_dir_all(&secondary)?;
@@ -188,7 +194,7 @@ pub(crate) async fn owned_terminals(root: &Path) -> TestResult<Vec<RamfluxClient
             &serde_json::json!({"kind":"direct","participants":["author","human"]}),
         )?;
     }
-    Ok(clients)
+    Ok((clients, vault))
 }
 async fn enroll_surface_sibling(
     root: &Path,

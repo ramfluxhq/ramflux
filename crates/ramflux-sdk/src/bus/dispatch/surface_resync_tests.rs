@@ -18,32 +18,20 @@ struct Group {
     _root: ramflux_test_support::TestPath,
 }
 impl Group {
-    async fn new() -> TestResult<Self> {
+    async fn new(grouped: bool) -> TestResult<Self> {
         let root = runtime_tests::root("surface-private-resync");
-        let mut clients = crate::client::surface::test_support::owned_terminals(&root).await?;
+        let (mut clients, vault) =
+            crate::client::surface::test_support::owned_terminals_with_vault(&root).await?;
         let author_sibling = clients.remove(1);
         let source_client = clients.remove(0);
         clients.push(author_sibling);
-        let source_identity = source_client.owned_device_identity()?;
-        source_client.create_group("group", source_identity.storage_key())?;
-        let identities = clients
-            .iter()
-            .map(RamfluxClient::owned_device_identity)
-            .collect::<Result<Vec<_>, _>>()?;
-        for identity in &identities {
-            source_client.add_group_member("group", identity.storage_key(), "member")?;
-        }
-        let epoch = source_client.group_state("group")?.group_epoch;
+        let (conversation, epoch) =
+            Self::establish_conversation(&source_client, &clients, vault.as_ref(), grouped)?;
         let mut manifests = BTreeMap::new();
         for client in std::iter::once(&source_client).chain(&clients) {
             let manifest = client.local_own_copy_manifest()?;
             manifests
                 .insert(manifest.principal_commitment.clone(), serde_json::to_value(manifest)?);
-            client.account_db()?.persist_client_record(
-                "conversation",
-                "thread",
-                &json!({"kind":"group","group_id":"group"}),
-            )?;
         }
         let (address, directory) = super::fixture::directory(&root, manifests).await?;
         let branch = source_client.device_branch.as_ref().ok_or("source branch")?;
@@ -61,7 +49,7 @@ impl Group {
             &source_client,
         )?;
         let snapshot = text_snapshot("surface", "中文 é 🦀", "");
-        let request = crate::SurfaceSendRequest::event(&create_frame("thread", &snapshot)?)?;
+        let request = crate::SurfaceSendRequest::event(&create_frame(&conversation, &snapshot)?)?;
         let create = source_client.sign_surface_carrier(Carrier {
             typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
@@ -69,7 +57,7 @@ impl Group {
             posted_at: None,
             updated_at: None,
             payload_kind: PayloadKind::Event,
-            conversation_id: "thread".into(),
+            conversation_id: conversation,
             surface_id: "surface".into(),
             message_id: request.message_id,
             sender_principal_id: branch.principal_id.clone(),
@@ -79,16 +67,13 @@ impl Group {
             signature: String::new(),
             snapshot: None,
         })?;
-        assert!(
-            source_client.stage_surface_outgoing(&create, Some(epoch))?.accepted,
-            "author create"
-        );
+        assert!(source_client.stage_surface_outgoing(&create, epoch)?.accepted, "author create");
         for client in &clients {
-            Self::prepare_peer(&source_client, client, &create, epoch, &identities)?;
+            Self::prepare_peer(&source_client, client, &create, epoch)?;
         }
         let delta = super::own_tests::append(&source_client, &create, 2)?;
         assert!(
-            source_client.stage_surface_outgoing(&delta, Some(epoch))?.accepted,
+            source_client.stage_surface_outgoing(&delta, epoch)?.accepted,
             "author advances without recipient delivery"
         );
         let wrap = |client: RamfluxClient| -> TestResult<LocalBusAccountState> {
@@ -113,55 +98,124 @@ impl Group {
             2,
             "the initial create and delta must finish their own-device submission"
         );
+        if grouped {
+            // Signed group creation also queues state distribution and service work.
+            // Finish setup through the real driver before counting private resync effects.
+            crate::bus::sync_driver::run(&mut source).await?;
+            assert_eq!(
+                crate::bus::sync_driver::run(&mut source).await?,
+                0,
+                "the native group setup must be quiescent before resync",
+            );
+        }
         let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
-        let baseline =
-            peers.get(2).ok_or("unrelated peer missing")?.client.direct_messages("thread")?.len();
+        let baseline = peers
+            .get(2)
+            .ok_or("unrelated peer missing")?
+            .client
+            .direct_messages(&create.conversation_id)?
+            .len();
         Ok(Self { source, peers, config, directory, create, baseline, _root: root })
+    }
+    fn establish_conversation(
+        source: &RamfluxClient,
+        peers: &[RamfluxClient],
+        vault: &crate::custody::tests::TestVault,
+        grouped: bool,
+    ) -> TestResult<(String, Option<u64>)> {
+        if grouped {
+            let conversation = "surface_group_thread";
+            let epoch = Self::establish_group(source, peers, vault, conversation)?;
+            return Ok((conversation.into(), Some(epoch)));
+        }
+        let author = source.owned_device_identity()?.root_commitment().to_owned();
+        let human = peers
+            .first()
+            .ok_or("human peer")?
+            .owned_device_identity()?
+            .root_commitment()
+            .to_owned();
+        let conversation = ramflux_protocol::message::dm_scope::derive(&author, &human)?;
+        for client in std::iter::once(source).chain(peers) {
+            client.account_db()?.persist_client_record(
+                "conversation",
+                &conversation,
+                &json!({"kind":"direct","group_id":null,"participants":["author","human"],
+                    "participant_roots":[author,human]}),
+            )?;
+            client.establish_friend_link("native-resync", &author, &human)?;
+        }
+        Ok((conversation, None))
+    }
+    fn establish_group(
+        source_client: &RamfluxClient,
+        clients: &[RamfluxClient],
+        vault: &crate::custody::tests::TestVault,
+        conversation: &str,
+    ) -> TestResult<u64> {
+        let source_identity = source_client.owned_device_identity()?;
+        let primary = vault.primary_for_public_key(
+            &source_client
+                .born_v3_account
+                .as_ref()
+                .ok_or("source account")?
+                .record()
+                .body
+                .master_certificate
+                .body
+                .self_signing_public_key,
+        )?;
+        let mut state = source_client.shared_group_create_with_primary(
+            "group",
+            conversation,
+            None,
+            source_identity.storage_key(),
+            Some(&primary),
+        )?;
+        for client in clients {
+            let identity = client.owned_device_identity()?;
+            let member = client.owned_group_actor(identity.storage_key())?.identity;
+            state = source_client.shared_group_change_with_primary(
+                "group",
+                source_identity.storage_key(),
+                ramflux_protocol::GroupStateChange::Add {
+                    member,
+                    role: ramflux_protocol::SharedGroupRole::Member,
+                },
+                Some(&primary),
+            )?;
+        }
+        for client in clients {
+            assert!(
+                client.accept_shared_group_state(
+                    &state,
+                    client.owned_device_identity()?.storage_key()
+                )?,
+                "each peer must accept the primary-signed native group state",
+            );
+        }
+        Ok(state.view().epoch)
     }
     fn prepare_peer(
         source_client: &RamfluxClient,
         client: &RamfluxClient,
         create: &Carrier,
-        epoch: u64,
-        identities: &[ramflux_crypto::RootQualifiedDeviceRef],
+        epoch: Option<u64>,
     ) -> TestResult {
         let source_identity = source_client.owned_device_identity()?;
         let source_device = source_identity.device_id().to_owned();
-        let local = client.device_branch.as_ref().ok_or("peer branch")?;
-        client.account_db()?.upsert_group_local_membership_snapshot(
-            "group",
-            epoch,
-            128,
-            "none",
-            &local.device_id,
-            "member",
-            1,
-        )?;
-        client.account_db()?.upsert_root_bound_group_member_snapshot(
-            "group",
-            &source_identity,
-            "owner",
-            1,
-        )?;
-        for identity in identities {
-            client
-                .account_db()?
-                .upsert_root_bound_group_member_snapshot("group", identity, "member", 1)?;
-        }
-        client.pin_local_group_member("group")?;
-        client.pin_joined_group_member("group", source_identity.storage_key())?;
         crate::client::native_test_support::bus::seed_pair(source_client, client)?;
         assert!(
             client
                 .project_surface_message(
-                    "thread",
+                    &create.conversation_id,
                     &create.message_id,
                     SurfaceSender {
                         principal: &create.sender_principal_id,
                         device: &source_device,
                         envelope_id: "native-create",
                         expires_at: None,
-                        group_epoch: Some(epoch),
+                        group_epoch: epoch,
                     },
                     &create.bytes()?,
                     false
@@ -170,7 +224,12 @@ impl Group {
                 .accepted,
             "native own-agent create"
         );
-        client.send_direct_message("thread", "initial-visible", &source_device, b"encrypted")?;
+        client.send_direct_message(
+            &create.conversation_id,
+            "initial-visible",
+            &source_device,
+            b"encrypted",
+        )?;
         Ok(())
     }
     fn peer_config(&self, index: usize) -> TestResult<GatewaySessionConfig> {
@@ -219,8 +278,8 @@ impl Group {
 #[tokio::test]
 async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_author_rows()
 -> TestResult {
-    let mut group = Box::pin(Group::new()).await?;
-    let before = group.source.client.direct_messages("thread")?.len();
+    let mut group = Box::pin(Group::new(true)).await?;
+    let before = group.source.client.direct_messages(&group.create.conversation_id)?.len();
     let requests = vec![group.request(0).await?, group.request(1).await?];
     let replies = Arc::new(Mutex::new(Vec::new()));
     let mut gateway = super::fixture::RecordingGateway::new(Arc::clone(&replies));
@@ -279,9 +338,9 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
         peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 2);
     }
-    assert_eq!(group.source.client.direct_messages("thread")?.len(), before);
+    assert_eq!(group.source.client.direct_messages(&group.create.conversation_id)?.len(), before);
     assert_eq!(
-        group.peers[2].client.direct_messages("thread")?.len(),
+        group.peers[2].client.direct_messages(&group.create.conversation_id)?.len(),
         group.baseline,
         "a reply addressed to two requesters must not write rows for other members"
     );
@@ -315,21 +374,8 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
 }
 
 pub(super) async fn native_pair_resync() -> TestResult {
-    let mut pair = Box::pin(Group::new()).await?;
-    let author_root = pair.source.client.owned_device_identity()?.root_commitment().to_owned();
-    for account in std::iter::once(&pair.source).chain(&pair.peers) {
-        account.client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"direct","participants":["author","human"]}),
-        )?;
-        if account.client.device_branch.as_ref().ok_or("branch")?.principal_id == "human" {
-            let human_root = account.client.owned_device_identity()?.root_commitment().to_owned();
-            account.client.establish_friend_link("native-resync", &author_root, &human_root)?;
-            pair.source.client.establish_friend_link("native-resync", &author_root, &human_root)?;
-        }
-    }
-    let before = pair.source.client.direct_messages("thread")?.len();
+    let mut pair = Box::pin(Group::new(false)).await?;
+    let before = pair.source.client.direct_messages(&pair.create.conversation_id)?.len();
     let request = pair.request(0).await?;
     assert_eq!(
         super::super::surface::request_resync(
@@ -392,7 +438,7 @@ pub(super) async fn native_pair_resync() -> TestResult {
         "recipient and author commit the same signed base"
     );
     assert_eq!(
-        pair.source.client.direct_messages("thread")?.len(),
+        pair.source.client.direct_messages(&pair.create.conversation_id)?.len(),
         before,
         "resync controls never add timeline rows"
     );
