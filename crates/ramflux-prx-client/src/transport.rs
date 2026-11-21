@@ -5,8 +5,8 @@
 //! response bound. The HTTP stack is the workspace's `reqwest` (same features as
 //! `apps/ramflux-agent-host`).
 
-use crate::error::{PrxError, config, decode_api_error, protocol};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH};
+use crate::error::{PrxError, config, decode_api_error, protocol, rate_limited};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH, RETRY_AFTER};
 use reqwest::{Method, Url, redirect};
 use serde_json::Value;
 use std::fs::File;
@@ -67,6 +67,8 @@ impl ClientConfig {
 pub(crate) struct Raw {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
+    /// `Retry-After` in whole seconds, when the server sent one.
+    pub(crate) retry_after: Option<u64>,
 }
 
 /// The HTTP side of a client: one connection pool, one token, the limits.
@@ -114,6 +116,9 @@ impl Transport {
         }
         if (200..300).contains(&raw.status) {
             Ok(raw)
+        } else if raw.status == 429 {
+            // No built-in retry (card D4): the caller decides.
+            Err(rate_limited(raw.retry_after, &raw.body))
         } else {
             Err(decode_api_error(raw.status, &raw.body))
         }
@@ -145,6 +150,11 @@ impl Transport {
         }
         let mut response = request.send().await.map_err(|error| map_transport_error(&error))?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.trim().parse::<u64>().ok());
         let mut raw_body = Vec::new();
         while let Some(chunk) =
             response.chunk().await.map_err(|error| map_transport_error(&error))?
@@ -154,7 +164,7 @@ impl Transport {
             }
             raw_body.extend_from_slice(&chunk);
         }
-        Ok(Raw { status, body: raw_body })
+        Ok(Raw { status, body: raw_body, retry_after })
     }
 
     fn authorization(&self) -> Result<HeaderValue, PrxError> {

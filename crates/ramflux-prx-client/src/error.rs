@@ -6,6 +6,7 @@
 use crate::revision::ConfigRevision;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 /// Every failure of a client call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -25,6 +26,10 @@ pub enum PrxError {
     /// The daemon could not be reached.
     #[error("PRX is unreachable")]
     Unavailable,
+    /// PRX answered HTTP 429 (shared API rate limit). Any 429 maps here, whatever its body.
+    /// No retry is built in; the caller decides.
+    #[error("PRX rate-limited the request")]
+    RateLimited { retry_after_seconds: Option<u64> },
     /// The per-request deadline passed.
     #[error("PRX did not answer before the deadline")]
     Timeout,
@@ -51,6 +56,7 @@ pub enum ApiCode {
     NotApplied,
     ConfirmationRequired,
     StorageUnavailable,
+    RateLimited,
     Unknown(String),
 }
 
@@ -69,6 +75,7 @@ impl ApiCode {
             "not_applied" => Self::NotApplied,
             "confirmation_required" => Self::ConfirmationRequired,
             "storage_unavailable" => Self::StorageUnavailable,
+            "rate_limited" => Self::RateLimited,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -113,6 +120,21 @@ struct CodedBody {
     revision: Option<ConfigRevision>,
 }
 
+/// Builds the rate-limit error for an HTTP 429. `Retry-After` (seconds) wins over a numeric
+/// `retry_after` in the body, top level or inside `error` (the future coded shape).
+pub(crate) fn rate_limited(header_seconds: Option<u64>, body: &[u8]) -> PrxError {
+    let body_seconds = std::str::from_utf8(body)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .and_then(|value| {
+            value
+                .get("retry_after")
+                .or_else(|| value.pointer("/error/retry_after"))
+                .and_then(Value::as_u64)
+        });
+    PrxError::RateLimited { retry_after_seconds: header_seconds.or(body_seconds) }
+}
+
 /// Decodes a non-2xx body. A body that is not the coded shape is a contract violation.
 pub(crate) fn decode_api_error(status: u16, body: &[u8]) -> PrxError {
     match decode_ok::<CodedTop>(body) {
@@ -132,6 +154,43 @@ mod tests {
 
     const HEX_A: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
     const HEX_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
+    #[test]
+    fn rate_limit_today_body_gives_body_retry_after() {
+        let body = br#"{"error":"Too many API requests. Please retry later.","retry_after":60}"#;
+        assert_eq!(
+            rate_limited(None, body),
+            PrxError::RateLimited { retry_after_seconds: Some(60) }
+        );
+    }
+
+    #[test]
+    fn rate_limit_future_coded_body_decodes_to_same_variant() {
+        let body = br#"{"error":{"code":"rate_limited","message":"slow down","retry_after":30}}"#;
+        assert_eq!(
+            rate_limited(None, body),
+            PrxError::RateLimited { retry_after_seconds: Some(30) }
+        );
+        assert_eq!(ApiCode::from_wire("rate_limited"), ApiCode::RateLimited);
+    }
+
+    #[test]
+    fn rate_limit_header_wins_over_body() {
+        let body = br#"{"error":"x","retry_after":60}"#;
+        assert_eq!(
+            rate_limited(Some(5), body),
+            PrxError::RateLimited { retry_after_seconds: Some(5) }
+        );
+    }
+
+    #[test]
+    fn rate_limit_with_only_header_or_nothing() {
+        assert_eq!(
+            rate_limited(Some(7), b"not json"),
+            PrxError::RateLimited { retry_after_seconds: Some(7) }
+        );
+        assert_eq!(rate_limited(None, b""), PrxError::RateLimited { retry_after_seconds: None });
+    }
 
     #[test]
     fn revision_conflict_decodes_current_revision() {
