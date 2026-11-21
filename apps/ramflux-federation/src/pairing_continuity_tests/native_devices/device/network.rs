@@ -61,14 +61,16 @@ impl Device {
             }),
         });
         let mut history = None;
+        let mut own_history = None;
         let mut peer_root = None;
         if primary {
             let reference = identity.local_ref.device_id.clone();
             client.initialize_born_v3_branch(&reference, local.vault.clone()).await?;
             let seeding = session_config(&local, profile, stack, &identity.local_ref)?;
-            let (peer, dm) = seed_history(&mut client, &seeding).await?;
+            let (peer, dm, own_dm) = seed_history(&mut client, &seeding).await?;
             peer_root = Some(peer);
             history = Some(dm);
+            own_history = Some(own_dm);
             participant.take_client(&mut client)?;
         }
         let mut actor = PairingActor::new(
@@ -80,7 +82,16 @@ impl Device {
         actor.set_participant(participant.clone());
         Ok((
             actor,
-            Self { client, participant, credential, phrase, history, _peer: peer_root, local },
+            Self {
+                client,
+                participant,
+                credential,
+                phrase,
+                history,
+                own_history,
+                _peer: peer_root,
+                local,
+            },
         ))
     }
     pub(in super::super) async fn connect_network(
@@ -166,13 +177,18 @@ fn session_config(
 async fn seed_history(
     client: &mut RamfluxClient,
     config: &GatewaySessionConfig,
-) -> TestResult<(tempfile::TempDir, (String, String))> {
+) -> TestResult<(tempfile::TempDir, (String, String), (String, String))> {
     let peer_root = tempfile::tempdir()?;
-    let peer = ramflux_sdk::NativeCallAccount::new(peer_root.path(), "history-peer").await?;
+    let mut peer = ramflux_sdk::NativeCallAccount::new(peer_root.path(), "history-peer").await?;
     let text = std::str::from_utf8(super::super::history::BODY)?;
     let message = ramflux_protocol::message::Message { text: text.into(), ..Default::default() };
     let delivered = peer.deliver_message_to_client(client, config, &message).await?;
-    Ok((peer_root, delivered))
+    // The primary then answers in the same conversation: this is the owner's own pre-enrollment
+    // text, which only the authored-history carrier can bring to the enrolled device.
+    let own_text = std::str::from_utf8(super::super::history::OWN_BODY)?;
+    let own = ramflux_protocol::message::Message { text: own_text.into(), ..Default::default() };
+    let authored = peer.receive_message_from_client(client, config, &own).await?;
+    Ok((peer_root, delivered, authored))
 }
 
 fn network_now() -> Result<u64, SdkError> {

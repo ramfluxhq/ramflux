@@ -172,7 +172,7 @@ impl RamfluxClient {
                 continue;
             }
             let now = crate::time::now_unix_timestamp();
-            if work.next_at > now {
+            if work.next_at > now || self.authored_target_awaits_history(&work)? {
                 continue;
             }
             let message = self.authored_history_message(config, &work)?;
@@ -194,6 +194,21 @@ impl RamfluxClient {
             }));
         }
         Ok(None)
+    }
+
+    /// An authored copy of a direct message binds to the conversation the received history
+    /// pages create on the target. While the enrollment history for that target is still being
+    /// delivered the copy waits, so it never arrives ahead of the context it needs.
+    fn authored_target_awaits_history(&self, work: &Work) -> Result<bool, SdkError> {
+        if self.account_db()?.pairing_own_sync_open_for(&work.target.device_id)? {
+            return Ok(true);
+        }
+        let Ok(target) =
+            self.device_identity_for_root(&work.target.account_anchor, &work.target.device_id)
+        else {
+            return Ok(false);
+        };
+        Ok(self.generated_history_transfer_done(&target)? == Some(false))
     }
 
     fn authored_work_current(&self, work: &Work) -> Result<bool, SdkError> {

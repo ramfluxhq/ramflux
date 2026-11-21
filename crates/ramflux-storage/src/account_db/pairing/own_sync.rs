@@ -229,6 +229,16 @@ impl AccountDb {
         let value = self.own_sync_stored(operation)?.ok_or_else(wrong)?;
         Ok(Some(value.job))
     }
+    /// Whether an enrollment history attempt for this target device is still queued or running.
+    /// # Errors
+    /// Returns SQLite errors.
+    pub fn pairing_own_sync_open_for(&self, target_device_id: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pairing_own_sync WHERE operation_kind=?1 AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.phase') END IN ('queued','attempted') AND CASE WHEN length(response_json)<=2048 AND json_valid(response_json) THEN json_extract(response_json,'$.job.target_ref.device_id') END=?2)",
+            params![KIND, target_device_id],
+            |row| row.get(0),
+        )?)
+    }
     /// Durably consume the one automatic attempt before ordinary network effects.
     /// A crash or failure leaves manual retry available through the existing export API.
     /// # Errors
