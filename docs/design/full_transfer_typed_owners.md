@@ -125,8 +125,8 @@ block otherwise supported accounts. No automatic deletion or selective export.
    couriers, normal-account data, send/receive after transfer, source demotion,
    node authority, private-key exclusion, cancellation, abandonment and restarts.
 
-One module and one PR. Commit each checkpoint. Open the PR after checkpoint 1;
-keep it unready until checkpoint 5 and exact-head CI are green. Tests use semantic
+One module and one PR. Controller r3 opens a neutral-title draft now and pushes each owner group;
+keep it unready until checkpoint 5 and exact-head CI are green. The early native vertical gate and source-of-truth map are in [full_transfer_source_of_truth.md](full_transfer_source_of_truth.md). Tests use semantic
 barriers/bounded deadlines. No fixture-only or manually driven courier success
 stands in for the process proof. No deployment or test-node operation by this lane.
 
@@ -177,3 +177,12 @@ pending/accepted links; neither revives a removal. The derived expected projecti
 uses the independently verified decision rows before materialization/DV. Reverse
 application restricts the actual old primary before its semantic receipt, not only
 B's private copy. Fresh local consent remains the only way to lift a denial.
+
+
+Conversation preference owners fold B's original contribution first, independent
+of DeviceRef byte order. Existing B archive/pin/mute preferences win; hidden and
+clear bounds keep the later non-null boundary. For matching on_send expiry scopes,
+zero means disabled and the shortest positive timer wins. Incompatible scopes
+refuse TransferConflict; no wider deletion context is synthesized. Source absences
+retain visibility denials and positive expiry policy. These metadata witnesses do
+not yet establish native message expiry/ordering or binary transfer acceptance.

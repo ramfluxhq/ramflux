@@ -22,6 +22,9 @@ enum Merge {
 }
 #[derive(Clone, Copy)]
 enum Column {
+    Keep,
+    DenialTime,
+    MinimumPositive,
     Exact,
     Maximum,
     EarliestOptional,
@@ -155,6 +158,42 @@ static OWNERS: &[Owner] = &[
             Column::Maximum,
         ]),
     },
+    Owner {
+        family: "sql/conversation_list_state",
+        names: &[
+            "conversation_id",
+            "archived",
+            "pin_order",
+            "mute_until",
+            "hidden_at",
+            "cleared_at",
+            "updated_at",
+        ],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Columns(&[
+            Column::Exact,
+            Column::Keep,
+            Column::Keep,
+            Column::Keep,
+            Column::DenialTime,
+            Column::DenialTime,
+            Column::Maximum,
+        ]),
+    },
+    Owner {
+        family: "sql/conversation_disappearing_policy",
+        names: &["conversation_id", "timer_seconds", "countdown_mode", "scope", "updated_at"],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Columns(&[
+            Column::Exact,
+            Column::MinimumPositive,
+            Column::Exact,
+            Column::Exact,
+            Column::Maximum,
+        ]),
+    },
 ];
 pub(super) fn owner(family: &str) -> Option<&'static Owner> {
     OWNERS.iter().find(|owner| owner.family == family)
@@ -172,6 +211,11 @@ impl Drop for Header {
     }
 }
 
+struct UnionContext<'a> {
+    db: &'a Connection,
+    nonce: &'a [u8; 32],
+    preferred_owner: &'a str,
+}
 impl Owner {
     fn check(&self, rule: &FamilyRule) -> Result<(), StorageError> {
         rule.require_typed_codec()?;
@@ -417,15 +461,15 @@ impl Owner {
     }
     fn normalize_key(
         &self,
-        db: &Connection,
-        nonce: &[u8; 32],
+        context: &UnionContext<'_>,
         private: &BackupDatabase,
         rule: &FamilyRule,
         key: &str,
     ) -> Result<(), StorageError> {
+        let (db, nonce, preferred_owner) = (context.db, context.nonce, context.preferred_owner);
         let table = if self.restrictive { "full_union_record" } else { "full_union_input" };
-        let mut query=db.prepare(&format!("SELECT record FROM {table} WHERE generation_nonce=?1 AND family=?2 AND key=?3 ORDER BY owner"))?;
-        let mut rows = query.query(params![nonce.as_slice(), self.family, key])?;
+        let mut query=db.prepare(&format!("SELECT record FROM {table} WHERE generation_nonce=?1 AND family=?2 AND key=?3 ORDER BY CASE WHEN owner=?4 THEN 0 ELSE 1 END,owner"))?;
+        let mut rows = query.query(params![nonce.as_slice(), self.family, key, preferred_owner])?;
         let mut expected = None;
         while let Some(row) = rows.next()? {
             let value = self.decode(rule, row.get_ref(0)?.as_blob().map_err(|_| invalid())?)?;
@@ -464,6 +508,27 @@ fn merge_columns(columns: &[Column], left: &Cells, right: &Cells) -> Result<Cell
     let mut result = left.clone();
     for (index, column) in columns.iter().enumerate() {
         match column {
+            Column::Keep => {}
+            Column::DenialTime => {
+                use ramflux_protocol::custody::pairing::full_transfer::CellType;
+                if left.kind(index)? == CellType::Null
+                    || right.kind(index)? != CellType::Null
+                        && right.integer(index)? > left.integer(index)?
+                {
+                    result.copy_cell(index, right)?;
+                }
+            }
+            Column::MinimumPositive => {
+                let a = left.integer(index)?;
+                let b = right.integer(index)?;
+                result.set_integer(
+                    index,
+                    match (a, b) {
+                        (0, value) | (value, 0) => value,
+                        _ => a.min(b),
+                    },
+                )?;
+            }
             Column::Exact => {
                 if left.kind(index)? != right.kind(index)?
                     || left.bytes(index)? != right.bytes(index)?
@@ -493,10 +558,28 @@ fn merge_columns(columns: &[Column], left: &Cells, right: &Cells) -> Result<Cell
     Ok(result)
 }
 
+pub(super) fn retain_absent(family: &str, value: &Cells) -> Result<bool, StorageError> {
+    if let Some(owner) = owner(family)
+        && let Merge::Columns(columns) = owner.merge
+    {
+        for (index, column) in columns.iter().enumerate() {
+            if matches!(column, Column::DenialTime)
+                && value.kind(index)?
+                    != ramflux_protocol::custody::pairing::full_transfer::CellType::Null
+                || matches!(column, Column::MinimumPositive) && value.integer(index)? > 0
+            {
+                return Ok(true);
+            }
+        }
+    }
+    super::contact_projection::retain_absent(family, value)
+}
+
 pub(super) fn normalize(
     db: &Connection,
     nonce: &[u8; 32],
     private: &BackupDatabase,
+    owners: &[String; 2],
 ) -> Result<(), StorageError> {
     db.execute("INSERT OR IGNORE INTO full_union_input SELECT * FROM full_union_record WHERE generation_nonce=?1",[nonce.as_slice()])?;
     // A fence with no retained deadline must not acquire another device's expiry.
@@ -510,6 +593,8 @@ pub(super) fn normalize(
     if incompatible {
         return Err(conflict());
     }
+    // DeviceRef byte order must never decide which user's existing B preferences win.
+    let context = UnionContext { db, nonce, preferred_owner: owners.get(1).ok_or_else(invalid)? };
     for owner in OWNERS {
         let rule = full_transfer_catalog()
             .iter()
@@ -520,8 +605,7 @@ pub(super) fn normalize(
         let mut rows = query.query(params![nonce.as_slice(), owner.family])?;
         while let Some(row) = rows.next()? {
             owner.normalize_key(
-                db,
-                nonce,
+                &context,
                 private,
                 rule,
                 row.get_ref(0)?.as_str().map_err(|_| invalid())?,
@@ -533,3 +617,6 @@ pub(super) fn normalize(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod conversation_tests;

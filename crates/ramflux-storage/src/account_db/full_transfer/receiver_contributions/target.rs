@@ -131,7 +131,7 @@ impl Contributions {
                 &header.0,
                 &mut bytes,
             )?;
-            if super::super::contact_projection::retain_absent(&header.0.family, &cells)? {
+            if super::super::monotonic::retain_absent(&header.0.family, &cells)? {
                 continue;
             }
             tx.execute("DELETE FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[1],header.0.family,header.0.key])?;

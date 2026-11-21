@@ -75,43 +75,43 @@ pub(super) const RULE_23: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "conversation_disappearing_policy",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "timer_seconds",
             I64,
             false,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            RestrictUnion,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
         (
             "countdown_mode",
             Utf8,
             false,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            Immutable,
+            CodecRule::SqlEnum { values: &["on_send"], nullable: false }
         ),
         (
             "scope",
             Utf8,
             false,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            Immutable,
+            CodecRule::SqlEnum {
+                values: &["local", "own_devices", "all_devices", "both"],
+                nullable: false
+            }
         ),
         (
             "updated_at",
             I64,
             false,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CursorMax,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 
@@ -129,10 +129,7 @@ pub(super) const RULE_24: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "conversation_list_state",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "archived",
@@ -140,7 +137,7 @@ pub(super) const RULE_24: FamilyRule = table_rule!(
             false,
             Transfer,
             PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "1", nullable: false }
         ),
         (
             "pin_order",
@@ -148,7 +145,11 @@ pub(super) const RULE_24: FamilyRule = table_rule!(
             true,
             Transfer,
             PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 {
+                min: "-9223372036854775808",
+                max: "9223372036854775807",
+                nullable: true
+            }
         ),
         (
             "mute_until",
@@ -156,32 +157,32 @@ pub(super) const RULE_24: FamilyRule = table_rule!(
             true,
             Transfer,
             PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: true }
         ),
         (
             "hidden_at",
             I64,
             true,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            RestrictUnion,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: true }
         ),
         (
             "cleared_at",
             I64,
             true,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            RestrictUnion,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: true }
         ),
         (
             "updated_at",
             I64,
             false,
             Transfer,
-            PreferLocal,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CursorMax,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 

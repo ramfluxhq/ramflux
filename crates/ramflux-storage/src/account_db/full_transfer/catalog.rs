@@ -616,6 +616,8 @@ macro_rules! table_rule {
     (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
     (@version "receive_erased_input",$mode:ident) => { U64(2) };
     (@version "contact_request_authority_floor",$mode:ident) => { U64(2) };
+    (@version "conversation_list_state",$mode:ident) => { U64(2) };
+    (@version "conversation_disappearing_policy",$mode:ident) => { U64(2) };
     (@version "friend_link_projection",$mode:ident) => { U64(2) };
     (@version "friend_projection",$mode:ident) => { U64(2) };
     (@version "contact_request_delivery",$mode:ident) => { U64(2) };
