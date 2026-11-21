@@ -14,7 +14,7 @@ mod state;
 mod store;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
 pub(crate) use publish::complete_with_receipt;

@@ -41,11 +41,11 @@ const PRIMARY_DEVICE: &str = "primary-device";
 const PRINCIPAL: &str = "agent-principal-1";
 const DESKTOP_DEVICE: &str = "desktop-device";
 /// The human account whose data directory holds the creation records in these tests.
-const HUMAN: &str = "human";
+pub(crate) const HUMAN: &str = "human";
 
 /// The human primary phone: vault holds its self-signing key and branch seeds, plus one armed
 /// presence approval per plan hash.
-struct Phone {
+pub(crate) struct Phone {
     vault: MemoryPrimaryVault,
     primary_ref: String,
     branch_ref: String,
@@ -55,15 +55,15 @@ struct Phone {
 }
 
 /// The capability list of a node that advertises agent custody authorization.
-fn capable() -> Vec<String> {
+pub(crate) fn capable() -> Vec<String> {
     vec![ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY.to_owned()]
 }
 
-fn owner_anchor() -> String {
+pub(crate) fn owner_anchor() -> String {
     encode_base64url([9_u8; 32])
 }
 
-fn phone(owner: &str) -> Result<Phone, Box<dyn std::error::Error>> {
+pub(crate) fn phone(owner: &str) -> Result<Phone, Box<dyn std::error::Error>> {
     let vault = MemoryPrimaryVault::default();
     let primary = SelfSigningKey::generate()?;
     let primary_ref = encode_base64url([1_u8; 32]);
@@ -793,9 +793,9 @@ const HUMAN_PRIMARY_DEVICE: &str = "primary";
 /// A live human account on a fresh data root with two active devices in its authority: the primary
 /// (genesis, signed by the human primary key) and the desktop, a successor record signed by the
 /// same key with a `sync` branch. The phone-side keys of these tests are separate, as in production.
-struct HumanFixture {
-    root: crate::custody::tests::Root,
-    now: u64,
+pub(crate) struct HumanFixture {
+    pub(crate) root: crate::custody::tests::Root,
+    pub(crate) now: u64,
     anchor: String,
     primary: DeviceRef,
     head: String,
@@ -852,7 +852,14 @@ fn with_desktop_device(
     Ok(primary.sign_record(body)?)
 }
 
-fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
+pub(crate) fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
+    human_fixture_with(None)
+}
+
+/// The human fixture, sealed with `data_secret` when given (the human account can then unlock).
+pub(crate) fn human_fixture_with(
+    data_secret: Option<&[u8]>,
+) -> Result<HumanFixture, Box<dyn std::error::Error>> {
     let root = crate::custody::tests::Root::new()?;
     let vault = crate::custody::tests::TestVault::default();
     let now = std::time::SystemTime::now()
@@ -899,7 +906,7 @@ fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
             primary: &primary,
             branch: Some(&seeds),
             now,
-            data_secret: None,
+            data_secret,
             commit_gate: None,
             pre_staged: false,
         },
@@ -919,7 +926,7 @@ fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
 
 /// Begin a request against the human fixture; `head` overrides the human head hash when given.
 /// The desktop named here is the fixture's desktop device, whose branch is in the authority.
-fn begin_for_human(
+pub(crate) fn begin_for_human(
     fixture: &HumanFixture,
     store: &AgentCreationStore,
     desk: &MemoryPrimaryVault,
@@ -951,7 +958,7 @@ fn begin_for_human_as(
 }
 
 /// One approval from the human primary (presence armed for this plan), applied to the request.
-fn approve_for_human(
+pub(crate) fn approve_for_human(
     fixture: &HumanFixture,
     phone: &Phone,
     store: &AgentCreationStore,
@@ -980,7 +987,9 @@ fn agent_account_dir(root: &std::path::Path, account_id: &str) -> std::path::Pat
     root.join("custody_accounts").join(account_id)
 }
 
-fn account_id_of(record: &AgentCreationRecord) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn account_id_of(
+    record: &AgentCreationRecord,
+) -> Result<String, Box<dyn std::error::Error>> {
     Ok(record.account_id.clone().ok_or("the desktop record names its account")?)
 }
 
@@ -1054,7 +1063,11 @@ fn committed_agent_secret_unlocks_its_sealed_data_and_exports_as_text() -> TestR
     // The sealed data of the committed account opens with the stored secret, through the same
     // check the recovery path uses. The account is not live yet, so the activation-only unlock
     // (`RamfluxClient::unlock_account`) is not exercised here.
-    crate::client::account::verify_stored_data_secret(&fixture.root.0, &account_id, text.as_bytes())?;
+    crate::client::account::verify_stored_data_secret(
+        &fixture.root.0,
+        &account_id,
+        text.as_bytes(),
+    )?;
     assert!(
         crate::client::account::verify_stored_data_secret(
             &fixture.root.0,
@@ -1778,8 +1791,7 @@ impl FlowSteps<'_> {
     /// account is live.
     fn connect(&mut self, record: &AgentCreationRecord) -> Result<(), SdkError> {
         let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
-        let agent =
-            crate::custody::store::load_account(self.store.root(), &account_id, self.now)?;
+        let agent = crate::custody::store::load_account(self.store.root(), &account_id, self.now)?;
         let saved =
             load_publishing(self.store.root(), &agent)?.ok_or(SdkError::CustodySetupInvalid)?;
         let receipt = receipt_of(record, &agent).map_err(|_| SdkError::CustodySetupInvalid)?;
@@ -1880,4 +1892,3 @@ async fn restart_picks_up_authorized_and_publication_pending_requests() -> TestR
     assert_eq!((steps.activations, steps.completions), (2, 2));
     Ok(())
 }
-

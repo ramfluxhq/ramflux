@@ -7,8 +7,7 @@
 use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    advance_all,
+    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps, advance_all,
 };
 use zeroize::Zeroizing;
 
@@ -30,7 +29,11 @@ impl SupervisorSteps<'_> {
 }
 
 impl AgentSteps for SupervisorSteps<'_> {
-    async fn commit(&mut self, request_id: &str, now: u64) -> Result<AgentCreationRecord, SdkError> {
+    async fn commit(
+        &mut self,
+        request_id: &str,
+        now: u64,
+    ) -> Result<AgentCreationRecord, SdkError> {
         let capabilities = self.supervisor.selected_node_capabilities()?;
         self.human_actor()?
             .agent_creation_step(AgentStep::Commit {
@@ -54,8 +57,9 @@ impl AgentSteps for SupervisorSteps<'_> {
             .ok_or(SdkError::CustodySetupInvalid)?;
         let vault = super::custody_setup::primary_provider(&self.supervisor.config);
         let secret = vault.load_provisioning_secret(reference)?;
-        let passphrase =
-            Zeroizing::new(std::str::from_utf8(&secret).map_err(|_| SdkError::CustodySetupInvalid)?.to_owned());
+        let passphrase = Zeroizing::new(
+            std::str::from_utf8(&secret).map_err(|_| SdkError::CustodySetupInvalid)?.to_owned(),
+        );
         self.supervisor.activate_native(&account_id, passphrase, None).await?;
         Ok(())
     }
@@ -101,3 +105,6 @@ impl Supervisor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
