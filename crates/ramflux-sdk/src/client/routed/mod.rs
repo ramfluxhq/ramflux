@@ -56,27 +56,7 @@ mod typing;
 pub(crate) use ephemeral_content::EphemeralContent;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Kind {
-    Direct,
-    GroupMessage,
-    GroupControl,
-    Receipt,
-    Control,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct Routing {
-    pub kind: Kind,
-    pub conversation_id: String,
-    pub group_id: Option<String>,
-    pub message_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_message_id: Option<String>,
-    #[serde(default)]
-    pub attachments: bool,
-}
+pub(crate) use ramflux_crypto::native_origin::{Kind, Routing};
 #[derive(Deserialize, Serialize)]
 struct Plaintext {
     routing: Routing,

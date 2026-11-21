@@ -4,3 +4,5 @@ crates/ramflux-crypto/src/backup_stream/mod.rs | read_header | 1 | E | excluded=
 crates/ramflux-crypto/src/custody/pairing/full_resume/record.rs | restore_local_stage | 1 | A | strict=parse_i_json_secret; admission=bounded local encrypted-stage lease envelope revalidated against saved SAS grant and locally pinned node before data-only resume
 crates/ramflux-crypto/src/home_migration.rs | sign_actor | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-crypto/src/home_migration.rs | verify_actor | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-crypto/src/native_origin/mod.rs | verify | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
+crates/ramflux-crypto/src/native_origin/mod.rs | verify | 2 | C | admission=crates/ramflux-crypto/src/native_origin/mod.rs#verify#1

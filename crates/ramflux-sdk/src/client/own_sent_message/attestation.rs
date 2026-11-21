@@ -2,100 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Private own-root attestation, kept separate from a peer's first-hand origin evidence.
+#[cfg(test)]
 use crate::client::raw_inner_origin::RetainedOrigin;
 use crate::client::routed::Opened;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
-use zeroize::Zeroize as _;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OwnSentAttestation {
-    exact_outer_inner: Vec<u8>,
-    origin: RetainedOrigin,
-}
-impl Drop for OwnSentAttestation {
-    fn drop(&mut self) {
-        self.exact_outer_inner.zeroize();
-        self.origin.reported_inner.zeroize();
-        self.origin.evidence.report_opening.zeroize();
-        self.origin.evidence.group_plaintext.zeroize();
-        self.origin.evidence.group_opening.zeroize();
-    }
-}
-
-impl OwnSentAttestation {
-    pub(super) fn enclosing_copy(&self) -> Result<g::OwnMessageCopy, SdkError> {
-        let inner = g::Inner::decode(self.exact_outer_inner.as_slice())
-            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        let control = g::Control::decode(inner.body.as_slice())
-            .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
-        match control.payload {
-            Some(g::control::Payload::OwnMessageCopy(copy)) => Ok(copy),
-            _ => Err(EvidenceError::OriginCommitmentMismatch.into()),
-        }
-    }
-
-    pub(crate) fn verify(
-        &self,
-        exact_nested: &[u8],
-        own_root: &str,
-    ) -> Result<g::OwnSentMessage, SdkError> {
-        let bad = EvidenceError::OriginCommitmentMismatch;
-        let scanned = g::validation::scan_inner(&self.exact_outer_inner).map_err(|_| bad)?;
-        let outer = g::Inner::decode(self.exact_outer_inner.as_slice()).map_err(|_| bad)?;
-        let identity = outer.identity.as_ref().ok_or(bad)?;
-        if scanned.kind != 8
-            || identity.group_id.is_some()
-            || identity.device_sequence & (1 << 63) == 0
-        {
-            return Err(bad.into());
-        }
-        // This verifies C against the enclosing own-copy, never against the nested Message.
-        let verified = self.origin.verify(identity, &self.exact_outer_inner)?;
-        if verified.author.root != own_root
-            || verified.outer.delivery_mode.as_deref() != Some("durable")
-            || verified.outer.delivery_class != ramflux_protocol::DeliveryClass::Message
-        {
-            return Err(bad.into());
-        }
-        let control = g::Control::decode(scanned.body).map_err(|_| bad)?;
-        let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload else {
-            return Err(bad.into());
-        };
-        if control.operation != 15
-            || copy.source.as_ref() != identity.author.as_ref()
-            || copy.target.as_ref().is_none_or(|target| target.account_anchor != own_root)
-        {
-            return Err(bad.into());
-        }
-        let Some(g::own_message_copy::Payload::Sent(sent)) = copy.payload else {
-            return Err(bad.into());
-        };
-        if sent.exact_inner != exact_nested
-            || sent
-                .context
-                .as_ref()
-                .is_none_or(|context| context.conversation_id != identity.conversation_id)
-        {
-            return Err(bad.into());
-        }
-        let nested = g::Inner::decode(exact_nested).map_err(|_| bad)?;
-        g::validation::scan_inner(exact_nested).map_err(|_| bad)?;
-        let original = nested.identity.as_ref().ok_or(bad)?;
-        g::identity::verify(original).map_err(|_| bad)?;
-        if original.conversation_id != identity.conversation_id
-            || original.device_sequence & (1 << 63) != 0
-            || original.author.as_ref().is_none_or(|author| author.account_anchor != own_root)
-            || ramflux_protocol::encode_base64url(&original.id) != sent.message_id
-            || !matches!(nested.kind, 1 | 3 | 4 | 5)
-        {
-            return Err(bad.into());
-        }
-        Ok(sent)
-    }
-}
+pub(crate) use ramflux_crypto::native_origin::OwnSentAttestation;
 
 impl RamfluxClient {
     pub(crate) fn retain_received_own_sent_attestation(

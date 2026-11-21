@@ -11,7 +11,7 @@ milestones. Ordinary product reads and authorization checks decide acceptance.
 
 | Concern | Authoritative source and existing owner | Transfer contract and witness |
 |---|---|---|
-| Received native content | Exact Inner and first-hand origin; `crates/ramflux-sdk/src/client/raw_inner_origin.rs` (`RetainedOrigin::verify`), `client/generated_history.rs` (`authority`), `client/routed/generated_receive.rs` (`Provenance`) | Preserve exact bytes, original qualified author and receive-time provenance. Verify original public custody/signature/commitment bindings; never manufacture peer-origin evidence from a local MAC or an own-authored capture. Read the restored message through the native product reader. |
+| Received native content | Exact Inner and first-hand origin; `crates/ramflux-crypto/src/native_origin/` (`RetainedOrigin::verify`, `authority`, `Provenance`); SDK capture remains in `client/raw_inner_origin.rs` and `client/routed/generated_receive.rs` | Preserve exact bytes, original qualified author and receive-time provenance. Verify original public custody/signature/commitment bindings; never manufacture peer-origin evidence from a local MAC or an own-authored capture. Read the restored message through the native product reader. |
 | Own-authored history | `client/own_sent_message/authored.rs` (`Captured`, `capture_own_authored_revision`), `own-history/capture/{owner}` | Keep original/current identities and exact authored content in their own evidence class. The original author's account anchor determines own-authorship; B's new branch name does not replace A's author. A missing peer-origin record is not repaired by inventing one. |
 | Own-copy attestation | `client/own_sent_message/attestation.rs` (`OwnSentAttestation`) | Preserve the exact enclosing own-copy and its origin evidence. Its commitment authenticates the enclosing copy, not a fabricated first-hand receipt of the nested Message. |
 | Event order | `crates/ramflux-protocol/src/message/identity.rs` (`EventOrder`, `order_key`); native readers in SDK `client/typed_messages.rs`, `client/typed_read_model.rs` | Preserve HLC, original account/device/epoch/sequence and event id as original event identity. Compare the ordinary reader's own and peer order, including after a tail and restart. Do not relabel the author as B. |
@@ -27,10 +27,14 @@ milestones. Ordinary product reads and authorization checks decide acceptance.
 
 ## Shared native evidence boundary
 
-The received `RetainedOrigin` and receive `Provenance` currently live privately in
-SDK; storage cannot depend on SDK. Controller r3 authorizes moving a closed data
-and verifier contract to a dependency storage can use. That move has not landed.
-Its eventual location and consumers must be recorded here and in the report.
+The closed `RetainedOrigin`, `OwnSentAttestation`, `Routing` and receive
+`Provenance` data contracts and original-evidence verifiers live in
+`ramflux-crypto::native_origin`, a dependency both storage and SDK already use.
+SDK ingestion, own-copy attestation and history replay reuse that verifier; SDK
+capture and runtime authorization stay in SDK. The publication verifier checks
+the signed original issuance time without reading or adopting local pins.
+This extraction alone activates no transfer family: storage owners must still
+bind these proofs to exact content, native identities and erasure ownership.
 Group mutation authorization and current B head/pin checks remain with their
 ordinary owners; imported history must not fabricate those capabilities.
 

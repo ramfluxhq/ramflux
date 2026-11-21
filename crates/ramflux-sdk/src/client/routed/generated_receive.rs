@@ -11,7 +11,6 @@ use ramflux_protocol::message::{
     validation::{self, ScanOutcome},
 };
 use ramflux_storage::{MessageMetadata, RawInnerCopyKind, RawInnerCopyWrite};
-use serde::{Deserialize, Serialize};
 
 pub(super) enum GeneratedProjection {
     Handled(Option<Vec<u8>>),
@@ -101,23 +100,7 @@ fn nested_erasure_targets(bytes: &[u8]) -> (bool, Vec<super::committed::ErasureT
     )
 }
 
-/// Only immutable authenticated receive provenance is retained, never a fresh authority grant.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Provenance {
-    pub source: String,
-    pub conversation: String,
-    pub message: String,
-    pub envelope_id: String,
-    pub payload_hash: String,
-    pub expires_at: i64,
-    pub original_mode: String,
-    pub source_epoch: u64,
-    pub original_route: String,
-    pub outer_receipt_key: String,
-    #[serde(default)]
-    pub source_evidence_copy: Option<String>,
-    pub received_erasure_generation: i64,
-}
+pub(crate) use ramflux_crypto::native_origin::Provenance;
 
 impl RamfluxClient {
     pub(super) fn project_generated_entry(

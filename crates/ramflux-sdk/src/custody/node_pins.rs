@@ -236,17 +236,7 @@ pub(crate) fn verify_authority(
     custodian: Option<&ramflux_protocol::custody::Publication>,
     now: u64,
 ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
-    let human = custodian
-        .map(|p| {
-            ramflux_crypto::custody::verify_record(&p.record, now, p.compacted_ids.as_deref(), None)
-        })
-        .transpose()?;
-    Ok(ramflux_crypto::custody::verify_record(
-        &publication.record,
-        now,
-        publication.compacted_ids.as_deref(),
-        human.as_ref(),
-    )?)
+    Ok(ramflux_crypto::native_origin::verify_public_authority(publication, custodian, now)?)
 }
 
 pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
