@@ -25,7 +25,8 @@ use crate::client::shared_group::tests::{
     install_native_directories, native_person, native_sibling,
 };
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationStore, AgentSteps, commit_approved, complete_with_receipt,
+    AgentCreationRecord, AgentCreationStore, AgentSteps, PrimarySigning, commit_approved,
+    complete_with_receipt, primary_sign_decision,
 };
 use crate::custody::network_tests::{ReplyFault, Root, start_server_with_faults};
 use crate::custody::{CustodyConnection, CustodyNetworkConfig, PrimaryVault};
@@ -33,8 +34,8 @@ use crate::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError};
 use ramflux_node_core::{RouterCore, RouterRedbStore};
 use ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY;
 use ramflux_protocol::custody::{
-    BindingMode, CustodyProofAction, CustodyServerFrame, Publication, RegisterPlan,
-    decode_register_plan, object_hash,
+    AgentPublishReceipt, BindingMode, CustodyProofAction, CustodyServerFrame, Publication,
+    RegisterOutcome, RegisterPlan, decode_register_plan, object_hash, register_plan_hash,
 };
 use ramflux_protocol::message as g;
 use std::net::SocketAddr;
@@ -323,4 +324,44 @@ impl AgentSteps for DesktopSteps<'_> {
             .and_then(|store| complete_with_receipt(&store, request_id));
         std::future::ready(result)
     }
+}
+
+/// The receipt the desktop saved for a completed request (`AgentPublishing::save_receipt`).
+pub(crate) fn saved_receipt(record: &AgentCreationRecord) -> TestResult<AgentPublishReceipt> {
+    let encoded = record.receipt_b64.as_deref().ok_or("test: the receipt is saved")?;
+    let bytes = ramflux_protocol::decode_base64url(encoded).map_err(|_| "test: receipt base64")?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// A later approval of the primary phone for the stored plan: the same signing as
+/// `agent_creation_decide` (`client/agent_custody_calls.rs` `sign_primary_decision`), with the
+/// phone's human record and its branch reference. A different instant gives a different decision.
+pub(crate) fn later_primary_decision(
+    phone: &LocalBusAccountState,
+    phone_root: &Path,
+    plan_bytes: &[u8],
+    now: u64,
+) -> TestResult<Vec<u8>> {
+    let plan = decode_register_plan(plan_bytes)?;
+    let human = phone.client.born_v3_account.as_deref().ok_or("test: the phone human record")?;
+    let record = human.record();
+    let account_id = phone.client.account_db()?.local_account_id.clone();
+    let reference = crate::custody::custody_vault_reference(
+        phone_root,
+        &account_id,
+        &record.body.account_anchor,
+    )?;
+    let branch_reference = format!("branch:{reference}");
+    let public = record.body.master_certificate.body.self_signing_public_key.clone();
+    let fixture = phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?;
+    fixture.vault.arm_agent_decision(&register_plan_hash(&plan)?)?;
+    let signing = PrimarySigning {
+        primary_device: &plan.human_primary,
+        primary_reference: &reference,
+        expected_primary_public_key: &public,
+        branch_reference: &branch_reference,
+        principal_id: &record.body.principal_id,
+    };
+    let vault = vault_of(&phone.client)?;
+    Ok(primary_sign_decision(vault.as_ref(), &signing, plan_bytes, RegisterOutcome::Approve, now)?)
 }
