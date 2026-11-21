@@ -3,18 +3,19 @@
 
 //! Peer-driven export regressions and validated same-root checkpoint replication.
 use super::*;
-#[test]
-fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -> TestResult {
-    let f = Fixture::new()?;
-    create(&f)?;
-    let exported = f.human.own_surface_history_export(None)?;
+#[tokio::test]
+async fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -> TestResult {
+    let terminals = devices::Terminals::new().await?;
+    let [author, _, human, replica] = terminals.clients.as_slice() else {
+        return Err("terminals".into());
+    };
+    create_for(author, human)?;
+    let exported = human.own_surface_history_export(None)?;
     assert_eq!(exported.checkpoints.len(), 1);
     assert!(!exported.metadata.truncated);
     assert!(exported.metadata.skipped.is_empty());
-    let mut replica = client(&f.root.join("replica"), "human", 35)?;
-    replica.create_device_branch("human", "human-two", 1, [37; 32]);
     replica.import_owned_surface_checkpoints(&exported.checkpoints)?;
-    let expected = f.human.surface_get("s", 0, None)?;
+    let expected = human.surface_get("s", 0, None)?;
     let actual = replica.surface_get("s", 0, None)?;
     for field in ["snapshot", "version", "surface_hash", "closed", "fallback_text"] {
         assert_eq!(actual[field], expected[field]);
@@ -29,9 +30,9 @@ fn peer_without_snapshot_proof_exports_and_restores_its_validated_checkpoint() -
     assert_eq!(conflict["out_of_sync"], true);
     Ok(())
 }
-#[test]
-fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> TestResult {
+    let f = Fixture::new().await?;
     let mut own_content = snapshot();
     own_content.surface_id = "own".into();
     let mut own =
@@ -78,10 +79,10 @@ fn sixty_five_peer_surfaces_export_a_marked_window_and_page_the_oldest() -> Test
     assert_eq!(recorded["truncated"], false);
     Ok(())
 }
-#[test]
-fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundred_row_cap()
+#[tokio::test]
+async fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundred_row_cap()
 -> TestResult {
-    let f = Fixture::new()?;
+    let f = Fixture::new().await?;
     create(&f)?;
     for version in 1..=128 {
         if version > 1 {
@@ -91,10 +92,10 @@ fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundre
                 &format!("v{version}"),
                 &event(
                     version,
-                    C::StreamAppend(StreamAppendCommand {
+                    C::AppendText(AppendText {
                         surface_id: "s".into(),
-                        component_id: "stream".into(),
-                        text_delta: String::new(),
+                        path: "/stream".into(),
+                        delta: String::new(),
                         final_: false,
                     }),
                 )?,
@@ -130,7 +131,7 @@ fn one_hundred_twenty_eight_actions_do_not_abort_export_or_silently_use_a_hundre
 }
 
 fn cache_human_manifest(f: &Fixture) -> TestResult {
-    let manifest = crate::client::identity_authority::test_support::public_manifest(&f.human)?;
+    let manifest = f.human.local_own_copy_manifest()?;
     RamfluxClient::verify_device_manifest_json(
         serde_json::to_value(&manifest)?,
         &manifest.principal_commitment,
@@ -139,9 +140,9 @@ fn cache_human_manifest(f: &Fixture) -> TestResult {
     Ok(())
 }
 
-#[test]
-fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let before = serde_json::to_value(f.human.own_surface_history_export(None)?)?;
     for i in 0..64 {
@@ -153,16 +154,14 @@ fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
         )?;
         held.wire_base64 = ramflux_protocol::encode_base64url(event(
             3,
-            C::StreamAppend(StreamAppendCommand {
-                surface_id: format!("unknown-{i}"),
-                component_id: "stream".into(),
-                text_delta: "future".into(),
+            C::AppendText(AppendText {
+                surface_id: format!("unknown_{i}"),
+                path: "/stream".into(),
+                delta: "future".into(),
                 final_: false,
             }),
         )?);
-        held.surface_id = format!("unknown-{i}");
-        let wire = ramflux_protocol::decode_base64url(&held.wire_base64)?;
-        attach_reference_hash(&f.author, &mut held, &wire)?;
+        held.surface_id = format!("unknown_{i}");
         held = f.author.sign_surface_carrier(held)?;
         assert!(project(&f.human, &held, &held.message_id)?.queued);
     }
@@ -179,22 +178,24 @@ fn placeholders_never_displace_validated_export_and_expire() -> TestResult {
     assert_eq!(serde_json::to_value(f.human.own_surface_history_export(None)?)?, before);
     Ok(())
 }
-#[test]
-fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent() -> TestResult {
-    let f = Fixture::new()?;
-    create(&f)?;
-    let original = f.human.own_surface_history_export(None)?.checkpoints.remove(0);
+#[tokio::test]
+async fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent()
+-> TestResult {
+    let terminals = devices::Terminals::new().await?;
+    let [author, _, human, replica] = terminals.clients.as_slice() else {
+        return Err("terminals".into());
+    };
+    create_for(author, human)?;
+    let original = human.own_surface_history_export(None)?.checkpoints.remove(0);
     let mut content = snapshot();
     content.surface_id = "honest".into();
     let mut honest =
-        carrier(&f.author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
+        carrier(author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
     honest.wire_base64 = ramflux_protocol::encode_base64url(event(1, C::CreateSurface(content))?);
     honest.surface_id = "honest".into();
-    honest = f.author.sign_surface_carrier(honest)?;
-    assert!(project(&f.human, &honest, "honest")?.accepted);
-    let exported = f.human.own_surface_history_export(None)?;
-    let mut replica = client(&f.root.join("conflict-replica"), "human", 35)?;
-    replica.create_device_branch("human", "human-two", 1, [37; 32]);
+    honest = author.sign_surface_carrier(honest)?;
+    assert!(project(human, &honest, "honest")?.accepted);
+    let exported = human.own_surface_history_export(None)?;
     replica.import_owned_surface_checkpoints(std::slice::from_ref(&original))?;
     let mut corrupt = serde_json::to_value(&original)?;
     corrupt["surface_hash"] = json!("divergent-content");
@@ -222,9 +223,9 @@ fn divergent_checkpoint_does_not_abort_honest_surface_and_retries_are_idempotent
     Ok(())
 }
 
-#[test]
-fn repeated_checkpoint_retains_the_original_signed_history_entry() -> TestResult {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn repeated_checkpoint_retains_the_original_signed_history_entry() -> TestResult {
+    let f = Fixture::new().await?;
     create(&f)?;
     let owned = f.human.export_owned_surface_checkpoint(
         &f.human.resolve_surface_reference("s", None, None)?.ok_or("reference")?,

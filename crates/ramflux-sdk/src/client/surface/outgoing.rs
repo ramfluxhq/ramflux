@@ -15,6 +15,10 @@ impl RamfluxClient {
         self.account_db()?.surface_transaction(|| {
             let outcome = self.stage_surface_outgoing_as(carrier, group_epoch, &timeline)?;
             if outcome.accepted {
+                self.retain_authored_surface(carrier)?;
+                if carrier.payload_kind.rpc_kind().is_some() {
+                    return Ok(outcome);
+                }
                 self.queue_surface_own_copy(carrier, group_epoch)?;
                 if self.direct_message_by_id(&timeline)?.is_none() {
                     self.send_direct_message(

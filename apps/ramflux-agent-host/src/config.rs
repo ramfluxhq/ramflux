@@ -79,11 +79,11 @@ impl SurfaceRule {
     fn valid(&self, reply: &str) -> bool {
         (256..=4096).contains(&self.chunk_bytes)
             && self.choices.len() <= 16
+            && 3usize.saturating_add(self.choices.len().saturating_mul(2))
+                <= ramflux_protocol::MAX_COMPONENTS
             && crate::engine::chunks(reply, self.chunk_bytes).len() <= 64
             && self.choices.iter().all(|c| {
-                !c.id.is_empty()
-                    && c.id.len() <= 128
-                    && ramflux_protocol::text_safety::free_text_is_safe(&c.id)
+                ramflux_protocol::a2ui::validate_identifier(&c.id).is_ok()
                     && !c.label.is_empty()
                     && c.label.len() <= 256
                     && ramflux_protocol::text_safety::free_text_is_safe(&c.label)

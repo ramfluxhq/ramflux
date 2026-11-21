@@ -18,11 +18,8 @@ async fn stale_stream_reloads_and_appends_only_the_missing_suffix_with_a_final_m
     let mut host = AgentHost::new(f.config.clone(), RuleEngine::new(&f.config)?)?;
     host.start(&mut bus).await?;
     host.apply(&mut bus, incoming(11, true), 2000).await?;
-    assert_eq!(
-        bus.state.content().ok_or("surface")?.components[0]["text"],
-        f.config.rules[0].reply
-    );
-    assert_eq!(bus.state.stream_states()["reply"], ramflux_protocol::SurfaceStreamState::Final);
+    assert_eq!(bus.state.content().ok_or("surface")?.data_model["reply"], f.config.rules[0].reply);
+    assert_eq!(bus.state.stream_states()["/reply"], ramflux_protocol::SurfaceStreamState::Final);
     assert_ne!(bus.requests[1]["message_id"], bus.requests[2]["message_id"]);
     assert_eq!(host.checkpoint().cursor, Some(11));
     Ok(())

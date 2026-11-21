@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 
-mod a2i_a2ui;
+mod a2i;
 mod account;
 mod admin;
 mod agent;
@@ -33,7 +33,7 @@ pub(crate) use node::*;
 pub(crate) use surface::*;
 pub(crate) use task::*;
 
-pub(crate) use a2i_a2ui::*;
+pub(crate) use a2i::*;
 pub(crate) use account::*;
 pub(crate) use admin::*;
 pub(crate) use agent::*;
@@ -93,7 +93,6 @@ pub(crate) enum Command {
     Keychain(KeychainCommand),
     Vault(VaultCommand),
     A2i(A2iCommand),
-    A2ui(A2uiCommand),
     Surface(SurfaceCommand),
     /// Task drivers over the existing task.* bus methods.
     Task(TaskCommand),

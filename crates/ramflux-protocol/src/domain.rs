@@ -51,12 +51,11 @@ pub const BOT_MANIFEST: &str = "ramflux.bot_manifest.v1";
 pub const BOT_EVENT: &str = "ramflux.bot_event.v1";
 pub const BOT_INSTALL_GRANT: &str = "ramflux.bot_install_grant.v1";
 pub const A2I_CONTROL: &str = "ramflux.a2i_control.v1";
-pub const A2UI_SURFACE: &str = "ramflux.a2ui_surface.v1";
-pub const A2UI_SURFACE_HASH: &str = "ramflux.a2ui.surface_hash.v1";
-pub const A2UI_FINAL_COMPONENT: &str = "ramflux.a2ui.final_component.v1";
-pub const A2UI_FINAL_TEXT: &str = "ramflux.a2ui.final_text.v1";
-pub const A2UI_ACTION_ARGS: &str = "ramflux.a2ui.action_args.v1";
-pub const SURFACE_CARRIER: &str = "ramflux.surface.carrier.v2";
+pub const A2UI_SURFACE_HASH: &str = "ramflux.a2ui.surface_hash.v2";
+pub const A2UI_FINAL_TEXT: &str = "ramflux.a2ui.final_text.v2";
+pub const SURFACE_RPC_REQUEST: &str = "ramflux.surface.rpc_request.v1";
+pub const A2UI_ACTION_ARGS: &str = "ramflux.a2ui.action_args.v2";
+pub const SURFACE_CARRIER: &str = "ramflux.surface.carrier.v3";
 pub const PUSH_ALIAS: &str = "ramflux.push_alias.v1";
 pub const FEDERATION_HANDSHAKE: &str = "ramflux.federation_handshake.v1";
 pub const X3DH_PREKEY_BUNDLE: &str = "ramflux.x3dh.prekey_bundle.v1";
@@ -200,7 +199,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 168] = [
+pub const ALL: [&str; 167] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -240,10 +239,9 @@ pub const ALL: [&str; 168] = [
     BOT_EVENT,
     BOT_INSTALL_GRANT,
     A2I_CONTROL,
-    A2UI_SURFACE,
     A2UI_SURFACE_HASH,
     A2UI_ACTION_ARGS,
-    A2UI_FINAL_COMPONENT,
+    SURFACE_RPC_REQUEST,
     A2UI_FINAL_TEXT,
     SURFACE_CARRIER,
     PUSH_ALIAS,
@@ -394,7 +392,7 @@ mod tests {
         let unique = super::ALL.into_iter().collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), super::ALL.len());
         assert!(unique.contains(super::A2UI_ACTION_ARGS));
-        assert_eq!(super::A2UI_ACTION_ARGS, "ramflux.a2ui.action_args.v1");
+        assert_eq!(super::A2UI_ACTION_ARGS, "ramflux.a2ui.action_args.v2");
         assert!(unique.contains(super::REPORT_OPENING));
         assert!(unique.contains(super::COLLAPSE_KEY));
         assert!(unique.contains(super::FRANKING_NODE_TAG_V2));
@@ -413,20 +411,20 @@ mod tests {
                 );
             }
         }
-        for label in &super::ALL[66..117] {
+        for label in &super::ALL[65..116] {
             assert!(
                 label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
             );
         }
-        assert_eq!(super::ALL[117..140].len(), 23);
-        for label in &super::ALL[117..140] {
+        assert_eq!(super::ALL[116..139].len(), 23);
+        for label in &super::ALL[116..139] {
             assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
         }
-        assert_eq!(super::ALL[140..155].len(), 15);
-        for label in &super::ALL[140..155] {
+        assert_eq!(super::ALL[139..154].len(), 15);
+        for label in &super::ALL[139..154] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[155..164].len(), 9);
+        assert_eq!(super::ALL[154..163].len(), 9);
         for label in [
             super::MESSAGE_ID,
             super::MESSAGE_FRIEND_APPLIED,
@@ -434,13 +432,13 @@ mod tests {
             super::MESSAGE_HISTORY_PAGE,
             super::MESSAGE_ORIGINAL_HEADER,
         ] {
-            assert!(super::ALL[155..164].contains(&label));
+            assert!(super::ALL[154..163].contains(&label));
         }
-        assert!(super::ALL[155..164].contains(&super::REPORT_OPENING));
-        assert!(super::ALL[155..164].contains(&super::COLLAPSE_KEY));
-        assert!(super::ALL[155..164].contains(&super::FRANKING_NODE_TAG_V2));
-        assert_eq!(super::ALL[164..].len(), 4);
-        for label in &super::ALL[164..] {
+        assert!(super::ALL[154..163].contains(&super::REPORT_OPENING));
+        assert!(super::ALL[154..163].contains(&super::COLLAPSE_KEY));
+        assert!(super::ALL[154..163].contains(&super::FRANKING_NODE_TAG_V2));
+        assert_eq!(super::ALL[163..].len(), 4);
+        for label in &super::ALL[163..] {
             assert!(label.starts_with("ramflux.notification."));
         }
         assert!(super::ALL.contains(&super::NOTIFICATION_WAKE_V2));

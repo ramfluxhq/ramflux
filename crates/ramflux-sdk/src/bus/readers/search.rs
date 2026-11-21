@@ -66,8 +66,7 @@ pub(super) fn execute(
     let runtime = runtime.ok_or(SearchError::IndexUnavailable)?;
     client.reader_device_identity.clone_from(&*identity.read().map_err(|_| closed())?);
     let view = Arc::clone(&*view.read().map_err(|_| closed())?);
-    client.born_v3_account.clone_from(&view.native);
-    client.reader_account_root.clone_from(&view.account_root);
+    view.install_reader_authority(client);
     match work {
         Work::Query { owner, request, admission } => {
             let completion = runtime.execute_query(client, owner, &request, admission)?;

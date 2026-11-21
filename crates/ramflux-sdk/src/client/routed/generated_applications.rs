@@ -79,6 +79,12 @@ impl RamfluxClient {
                 )? {
                     return Err(invalid("Surface delivery was not admitted"));
                 }
+                if !matches!(
+                    delivery.carrier.as_ref().and_then(|carrier| carrier.payload.as_ref()),
+                    Some(g::surface_carrier::Payload::Event(_))
+                ) {
+                    return Ok(());
+                }
             }
             g::surface::Payload::ResyncRequest(_) => {
                 if !self.receive_surface_resync_request(

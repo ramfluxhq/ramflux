@@ -313,22 +313,11 @@ pub(super) fn queue_surface_at(
     let peer_branch = peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let peer_root = peer.own_account_anchor()?;
     let conversation = client.generated_direct_conversation_id(&peer.owned_device_identity()?)?;
-    let command = ramflux_protocol::A2uiConversationCommand::CreateSurface(
-        ramflux_protocol::CreateSurfaceCommand {
-            surface_id: "s".into(),
-            surface_type: ramflux_protocol::SurfaceType::StatusPanel,
-            catalog: "basic".into(),
-            catalog_version: "1".into(),
-            fallback_text: "Reply".into(),
-            fallback_markdown: None,
-            components: Vec::new(),
-            data_model: serde_json::Map::new(),
-            allowed_actions: Vec::new(),
-        },
-    );
-    let wire = serde_json::to_vec(
-        &json!({"schema":"ramflux.a2ui.conversation.v2", "conversationId":conversation, "version":1, "command": command}),
-    )?;
+    let wire = crate::client::surface::test_support::create_frame(
+        &conversation,
+        &crate::client::surface::test_support::text_snapshot("s", "Reply", ""),
+    )?
+    .wire_bytes()?;
     let raw = json!({
         "carrier": {
             "schema": ramflux_protocol::domain::SURFACE_CARRIER,

@@ -163,6 +163,21 @@ fn host_is_not_a_service(host: &str) -> bool {
         || matches!(lower.as_str(), "example.com" | "example.org" | "example.net")
 }
 
+/// Exact identifiers of vendored schemas; HTTP/filesystem resolution is disabled there.
+/// These are resource names, not dial targets. Do not exempt the host or other files.
+fn embedded_schema_identifier(file: &Path, line: &str) -> bool {
+    if !file.ends_with("crates/ramflux-protocol/src/a2ui/schema.rs") {
+        return false;
+    }
+    matches!(
+        line.trim(),
+        "const BASE: &str = \"https://a2ui.org/specification/v1_0/catalog.json\";"
+            | ".with_base_uri(\"https://a2ui.org/specification/v1_0/validation.json\")"
+            | "\"https://a2ui.org/specification/v1_0/common_types.json\","
+            | "\"https://a2ui.org/specification/v1_0/catalogs/basic/common_types.json\","
+    )
+}
+
 #[test]
 fn client_sources_name_no_central_or_vendor_endpoint() {
     let root = workspace_root();
@@ -185,7 +200,7 @@ fn client_sources_name_no_central_or_vendor_endpoint() {
                 }
             }
             for host in url_hosts(line) {
-                if !host_is_not_a_service(host) {
+                if !host_is_not_a_service(host) && !embedded_schema_identifier(file, line) {
                     violations.push(format!("{}:{number}: endpoint `{host}`", file.display()));
                 }
             }
@@ -259,5 +274,27 @@ fn dependency_guard_distinguishes_exact_short_names_from_crypto_packages() {
             forbidden_dependency(name).is_none(),
             "ordinary dependency {name} was mistaken for vendor software"
         );
+    }
+}
+
+#[test]
+fn embedded_schema_exception_is_exact_and_file_scoped() {
+    let schema = Path::new("crates/ramflux-protocol/src/a2ui/schema.rs");
+    let other = Path::new("crates/ramflux-sdk/src/gateway.rs");
+    for line in [
+        "const BASE: &str = \"https://a2ui.org/specification/v1_0/catalog.json\";",
+        ".with_base_uri(\"https://a2ui.org/specification/v1_0/validation.json\")",
+        "\"https://a2ui.org/specification/v1_0/common_types.json\",",
+        "\"https://a2ui.org/specification/v1_0/catalogs/basic/common_types.json\",",
+    ] {
+        assert!(embedded_schema_identifier(schema, line));
+        assert!(!embedded_schema_identifier(other, line));
+    }
+    for line in [
+        "fetch(\"https://a2ui.org/specification/v1_0/catalog.json\");",
+        "\"https://a2ui.org/telemetry\",",
+        "\"https://vendor.example.com/\",",
+    ] {
+        assert!(!embedded_schema_identifier(schema, line));
     }
 }

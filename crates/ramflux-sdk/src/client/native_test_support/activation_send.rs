@@ -793,23 +793,15 @@ pub(crate) mod tests {
         outgoing: &GatewayDirectMessage,
     ) -> TestResult<(crate::client::surface::Carrier, g::Content)> {
         use crate::client::surface::{Carrier, ControlKind, PayloadKind};
-        let wire = ramflux_protocol::encode_a2ui_conversation_event(
+        let wire = crate::client::surface::test_support::create_frame(
             &outgoing.conversation_id,
-            1,
-            &ramflux_protocol::A2uiConversationCommand::CreateSurface(
-                ramflux_protocol::CreateSurfaceCommand {
-                    surface_id: "activation-surface".into(),
-                    surface_type: ramflux_protocol::SurfaceType::StatusPanel,
-                    catalog: "basic".into(),
-                    catalog_version: "1".into(),
-                    fallback_text: "typed surface ready".into(),
-                    fallback_markdown: None,
-                    components: vec![serde_json::json!({"id":"status","text":"ready"})],
-                    data_model: serde_json::Map::default(),
-                    allowed_actions: Vec::new(),
-                },
+            &crate::client::surface::test_support::text_snapshot(
+                "activation_surface",
+                "typed surface ready",
+                "ready",
             ),
-        )?;
+        )?
+        .wire_bytes()?;
         let carrier = source.client.sign_surface_carrier(Carrier {
             typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
@@ -818,7 +810,7 @@ pub(crate) mod tests {
             updated_at: None,
             payload_kind: PayloadKind::Event,
             conversation_id: outgoing.conversation_id.clone(),
-            surface_id: "activation-surface".into(),
+            surface_id: "activation_surface".into(),
             message_id: "native-surface-operation".into(),
             sender_principal_id: source.config.principal_id.clone(),
             sender_device_id: source.config.device_id.clone(),
@@ -893,9 +885,14 @@ pub(crate) mod tests {
             );
             let reference = carrier.surface_reference()?;
             let state = target.client.surface_get_ref(&reference, 0, None)?;
-            assert_eq!(
-                state["version"], 1,
-                "the real native Surface executor must apply the command"
+            assert!(state.is_null(), "a foreign human author must remain fallback-only");
+            assert!(
+                target
+                    .client
+                    .direct_messages(&outgoing.conversation_id)?
+                    .iter()
+                    .any(|message| message.message_id == outgoing.message_id),
+                "native fallback delivery must retain its timeline entry"
             );
             assert_eq!(
                 target.client.account_db()?.message_content(&outgoing.message_id)?,

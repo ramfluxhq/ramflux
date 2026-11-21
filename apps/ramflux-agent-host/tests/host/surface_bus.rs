@@ -3,7 +3,7 @@
 
 use super::support::Fake;
 use ramflux_agent_host::{AgentBus, Error, Result};
-use ramflux_protocol::{A2uiConversationCommand as C, A2uiConversationEvent, SurfaceState};
+use ramflux_protocol::{Mutation, SurfaceEvent, SurfaceState};
 use ramflux_sdk::LocalBusFrame;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -44,8 +44,30 @@ impl SurfaceBus {
         self.state.content().map(|c| c.surface_id.as_str()).ok_or(Error::State)
     }
     pub fn decision(&mut self) -> Result<()> {
-        let values = json!({});
-        let wire=serde_json::to_vec(&json!({"schema":"ramflux.a2ui.action.v2","conversationId":"group-thread","surfaceId":self.id()?,"version":self.state.version(),"surfaceHash":self.state.hash(),"actionId":"thu","values":values,"argsHash":ramflux_protocol::surface_args_hash(&values).map_err(|_|Error::State)?})).map_err(|_|Error::State)?;
+        let mut frame = ramflux_protocol::ActionFrame {
+            schema: ramflux_protocol::ACTION_SCHEMA.into(),
+            conversation_id: "group-thread".into(),
+            surface_version: self.state.version(),
+            surface_hash: self.state.hash().ok_or(Error::State)?.into(),
+            source_instance: Vec::new(),
+            args_hash: String::new(),
+            task_binding: None,
+            a2ui: ramflux_protocol::ActionMessage {
+                version: "1.0".into(),
+                action: ramflux_protocol::Action {
+                    name: "thu".into(),
+                    surface_id: self.id()?.into(),
+                    source_component_id: "choice0".into(),
+                    timestamp: "2026-11-14T00:00:00Z".into(),
+                    context: serde_json::from_value(json!({"decision":"thu"}))
+                        .map_err(|_| Error::State)?,
+                    user_message: None,
+                    metadata: None,
+                },
+            },
+        };
+        frame.args_hash = frame.arguments_hash().map_err(|_| Error::State)?;
+        let wire = frame.wire_bytes().map_err(|_| Error::State)?;
         self.action = Some(
             json!({"id":"decision","actionable":!self.replica,"wire_base64":ramflux_protocol::encode_base64url(wire)}),
         );
@@ -53,29 +75,29 @@ impl SurfaceBus {
     }
     fn advance_before_close(&mut self) -> Result<()> {
         self.faults.stale = StalePoint::None;
-        let content = self.state.content().ok_or(Error::State)?;
-        let patch = C::PatchSurface(ramflux_protocol::PatchSurfaceCommand {
-            surface_id: content.surface_id.clone(),
-            base_surface_hash: self.state.hash().ok_or(Error::State)?.into(),
-            ops: vec![ramflux_protocol::SurfacePatchOp::SetFallbackText {
-                fallback_text: content.fallback_text.clone(),
-            }],
-            new_surface_hash: self.state.hash().ok_or(Error::State)?.into(),
-        });
-        let wire = ramflux_protocol::encode_a2ui_conversation_event(
-            "group-thread",
-            self.state.version() + 1,
-            &patch,
-        )
-        .map_err(|_| Error::State)?;
+        let mut frame = self.state.resync_frame().map_err(|_| Error::State)?;
+        frame.surface_version += 1;
+        let wire = frame.wire_bytes().map_err(|_| Error::State)?;
         self.state = self
             .state
-            .apply(&A2uiConversationEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
+            .apply(&SurfaceEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
             .map_err(|_| Error::State)?;
         if let Some(action) = self.action.as_mut() {
             action["actionable"] = json!(false);
         }
         Ok(())
+    }
+    fn append_wire(&self, append: ramflux_protocol::AppendText) -> Result<Vec<u8>> {
+        let mut frame = self.state.resync_frame().map_err(|_| Error::State)?;
+        frame.surface_version += 1;
+        frame.base_surface_hash = self.state.hash().map(str::to_owned);
+        frame.fallback_text = None;
+        frame.resync = None;
+        frame.final_ = None;
+        frame.closed = None;
+        frame.metadata = None;
+        frame.append_text = Some(append);
+        self.state.prepare_event(frame).and_then(|f| f.wire_bytes()).map_err(|_| Error::State)
     }
     fn send(&mut self, body: Value) -> Result<Value> {
         self.requests.push(body.clone());
@@ -86,65 +108,59 @@ impl SurfaceBus {
         let raw =
             ramflux_protocol::decode_base64url(body["wire_base64"].as_str().ok_or(Error::State)?)
                 .map_err(|_| Error::State)?;
-        let event = A2uiConversationEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?;
+        let event = SurfaceEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?;
         if let Some(reason) = self.refusal.take() {
             return Err(Error::SurfaceRefused(reason));
         }
         if self.faults.stale == StalePoint::Stream
-            && let C::StreamAppend(append) = event.command()
+            && let Some(append) = &event.frame().append_text
         {
             self.faults.stale = StalePoint::None;
             let mut concurrent = append.clone();
             concurrent.final_ = false;
-            let mut end = (concurrent.text_delta.len() / 2).max(1);
-            while !concurrent.text_delta.is_char_boundary(end) {
+            let mut end = (concurrent.delta.len() / 2).max(1);
+            while !concurrent.delta.is_char_boundary(end) {
                 end -= 1;
             }
-            concurrent.text_delta.truncate(end);
-            let wire = ramflux_protocol::encode_a2ui_conversation_event(
-                "group-thread",
-                self.state.version() + 1,
-                &C::StreamAppend(concurrent),
-            )
-            .map_err(|_| Error::State)?;
+            concurrent.delta.truncate(end);
+            let wire = self.append_wire(concurrent)?;
             self.state = self
                 .state
-                .apply(&A2uiConversationEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
+                .apply(&SurfaceEvent::from_wire_bytes(&wire).map_err(|_| Error::State)?)
                 .map_err(|_| Error::State)?;
             if self.faults.disconnect_after_conflict {
                 self.get_failures = 1;
             }
         }
-        if self.faults.stale == StalePoint::Close && matches!(event.command(), C::DeleteSurface(_))
+        if self.faults.stale == StalePoint::Close
+            && event
+                .frame()
+                .a2ui
+                .as_ref()
+                .is_some_and(|m| matches!(m.mutation, Mutation::DeleteSurface(_)))
         {
             self.advance_before_close()?;
         }
         if (self.conflict || self.conflicts_remaining > 0)
-            && matches!(event.command(), C::PatchSurface(_))
+            && event.is_resync()
             && self.action.is_some()
         {
             self.conflict = false;
             self.conflicts_remaining = self.conflicts_remaining.saturating_sub(1);
-            let command = C::StreamAppend(ramflux_protocol::StreamAppendCommand {
+            let raw = self.append_wire(ramflux_protocol::AppendText {
                 surface_id: self.id()?.into(),
-                component_id: "result".into(),
-                text_delta: "Concurrent update".into(),
+                path: "/result".into(),
+                delta: "Concurrent update".into(),
                 final_: false,
-            });
-            let raw = ramflux_protocol::encode_a2ui_conversation_event(
-                "group-thread",
-                self.state.version() + 1,
-                &command,
-            )
-            .map_err(|_| Error::State)?;
+            })?;
             self.state = self
                 .state
-                .apply(&A2uiConversationEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?)
+                .apply(&SurfaceEvent::from_wire_bytes(&raw).map_err(|_| Error::State)?)
                 .map_err(|_| Error::State)?;
         }
         if self.faults.disconnect_after_conflict
             && self.action.is_some()
-            && matches!(event.command(), C::PatchSurface(_))
+            && event.is_resync()
             && self.state.version() >= event.version()
         {
             self.get_failures = 1;
@@ -158,8 +174,7 @@ impl SurfaceBus {
             }
             Err(error) => {
                 let reason = match error {
-                    ramflux_protocol::SurfaceReject::Version { .. }
-                    | ramflux_protocol::SurfaceReject::Stale => {
+                    ramflux_protocol::SurfaceReject::Version { .. } => {
                         ramflux_sdk::SurfaceRefusalCode::StaleVersion
                     }
                     _ => ramflux_sdk::SurfaceRefusalCode::StaleHash,
