@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "apps/ramflux-relay/src/attachment_publication/tests.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( 5 )", count = 2, owner = "apps/ramflux-relay", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "apps/ramflux-relay/src/tests/quic_failure_diagnostics.rs", call = "tokio::time::timeout", duration = "std::time::Duration::from_secs ( 3 )", count = 1, owner = "apps/ramflux-relay", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "apps/ramflux-relay/src/tests/quic_service.rs", call = "tokio::time::sleep", duration = "std::time::Duration::from_millis ( 50 )", count = 1, owner = "apps/ramflux-relay", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-12" },
+  { path = "apps/ramflux-relay/src/itest_http.rs", call = "std::net::TcpStream::connect_timeout", duration = "(std::time::Duration::from_secs ( 3 ))", count = 1, owner = "LEGACY-REMOVAL-1", reason = "Bounded real-component IO or async test hang guard required by hardened-test audit M4; no readiness delay", expires = "2026-12-13" },
+]

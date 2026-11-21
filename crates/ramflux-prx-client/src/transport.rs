@@ -114,6 +114,23 @@ impl Transport {
             self.reload_token()?;
             raw = self.send_once(&method, path, if_match, body).await?;
         }
+        Self::check_status(raw)
+    }
+
+    /// Sends a request exactly once and returns whatever HTTP answer came back, with no token
+    /// re-read and no status check. Used for a turn or a context post: the client never sends
+    /// such a post a second time by itself (product rule), and the caller decides what each
+    /// status means for the post's outcome.
+    pub(crate) async fn send_single(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Raw, PrxError> {
+        self.send_once(&method, path, None, body).await
+    }
+
+    fn check_status(raw: Raw) -> Result<Raw, PrxError> {
         if (200..300).contains(&raw.status) {
             Ok(raw)
         } else if raw.status == 429 {

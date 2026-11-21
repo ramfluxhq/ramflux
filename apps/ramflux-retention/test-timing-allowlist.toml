@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "apps/ramflux-retention/src/main.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( 1 )", count = 1, owner = "apps/ramflux-retention", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-19" },
+  { path = "apps/ramflux-retention/src/main.rs", call = "method::recv_timeout", duration = "std::time::Duration::from_secs ( 5 )", count = 6, owner = "apps/ramflux-retention", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-19" },
+  { path = "apps/ramflux-retention/src/main.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 1 )", count = 1, owner = "apps/ramflux-retention", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-19" },
+  { path = "apps/ramflux-retention/src/main.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 25 )", count = 1, owner = "apps/ramflux-retention", reason = "Existing test watchdog or real-component wait; migrate or justify before expiry", expires = "2026-12-19" },
+]

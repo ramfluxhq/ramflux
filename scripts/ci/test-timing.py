@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import tempfile
 import unittest
 
 
@@ -458,6 +459,47 @@ def inventory(sources):
     return sites, paused_sites
 
 
+TIMING_REGISTRY = "test-timing-allowlist.toml"
+
+
+def registry_destination(source):
+    parts = PurePosixPath(source).parts
+    if (not parts or PurePosixPath(source).is_absolute() or ".." in parts
+            or str(PurePosixPath(source)) != source):
+        raise ValueError("invalid registry source path: " + source)
+    if parts[0] in ("crates", "apps", "tools") and len(parts) >= 3:
+        return PurePosixPath(*parts[:2]) / TIMING_REGISTRY
+    if parts[0] == "tests" and len(parts) >= 2:
+        return PurePosixPath("tests") / TIMING_REGISTRY
+    raise ValueError("no owning crate/app for registry source: " + source)
+
+
+def load_allowlists(root, explicit=None):
+    old = root / ".config" / TIMING_REGISTRY
+    if old.exists():
+        rows = tomllib.loads(old.read_text()).get("site", [])
+        if rows:
+            raise ValueError("retired allow-list: move row for " + rows[0]["path"]
+                             + " to " + str(registry_destination(rows[0]["path"])))
+    if explicit is not None and not explicit.is_absolute():
+        explicit = root / explicit
+    paths = ([explicit] if explicit else sorted(
+        path for top in ("apps", "crates", "tools", "tests")
+        for path in (root / top).rglob(TIMING_REGISTRY)))
+    rows = []
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        for row in tomllib.loads(path.read_text()).get("site", []):
+            destination = registry_destination(row["path"])
+            if relative != str(destination):
+                raise ValueError("wrong crate allow-list: " + row["path"]
+                                 + "; move row to " + str(destination))
+            if destination.parts[0] != "tests" and not (path.parent / "Cargo.toml").is_file():
+                raise ValueError("allow-list owner has no Cargo.toml: " + relative)
+            rows.append(row)
+    return {"site": rows}
+
+
 def key(row):
     return row["path"], row["call"], row["duration"]
 
@@ -511,6 +553,32 @@ def seed(sites, owner, reason, expiry):
 
 
 class Tests(unittest.TestCase):
+    def test_split_loader_and_wrong_crate_and_retired_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            owner = root / "crates/example"
+            owner.mkdir(parents=True)
+            (owner / "Cargo.toml").write_text('[package]\nname = "example"\n')
+            row = 'site = [{ path = "crates/example/src/lib.rs", call = "std::thread::sleep", duration = "D", count = 1, owner = "example", reason = "test", expires = "2027-01-02" }]'
+            registry = owner / TIMING_REGISTRY
+            registry.write_text(row)
+            self.assertEqual(len(load_allowlists(root)["site"]), 1)
+            self.assertEqual(len(load_allowlists(root, Path("crates/example") / TIMING_REGISTRY)["site"]), 1)
+            other = root / "crates/other"
+            other.mkdir()
+            (other / "Cargo.toml").write_text('[package]\nname = "other"\n')
+            (owner / "nested").mkdir()
+            for wrong in (other / TIMING_REGISTRY, owner / "nested" / TIMING_REGISTRY):
+                registry.rename(wrong)
+                with self.assertRaisesRegex(ValueError, "wrong crate.*crates/example/test-timing"):
+                    load_allowlists(root)
+                wrong.rename(registry)
+            old = root / ".config" / TIMING_REGISTRY
+            old.parent.mkdir()
+            old.write_text(row)
+            with self.assertRaisesRegex(ValueError, "retired.*crates/example/test-timing"):
+                load_allowlists(root)
+
     def scan(self, source):
         return inventory({"crates/example/src/lib.rs": source})
 
@@ -662,8 +730,8 @@ def main():
         if args.seed:
             print(seed(sites, args.owner, args.reason, args.expires), end="")
             return 0
-        allowlist = args.allowlist or args.root / ".config/test-timing-allowlist.toml"
-        errors = validate(sites, tomllib.loads(allowlist.read_text()), datetime.now(timezone.utc).date())
+        errors = validate(sites, load_allowlists(args.root, args.allowlist),
+                          datetime.now(timezone.utc).date())
         for error in errors:
             print(error, file=sys.stderr)
         print("test-timing: {} ({} wall-clock/unclassified sites, {} paused-time sites, {} errors)".format(

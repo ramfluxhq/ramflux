@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+apps/ramflux-router/src/attachment_renew_home.rs | capability_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/attachment_renew_home.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/attachment_source.rs | requester_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/attachment_source.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/forward_http.rs | post | 1 | B | strict=parse_i_json; admission=B ingress boundary
+apps/ramflux-router/src/handlers.rs | authenticated_principal_mesh_response | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | forward_authority_response | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_itest_directory_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mesh_fast_path_value | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mesh_quic_request_raw | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mesh_quic_request_raw | 2 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mesh_quic_request_raw | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mesh_retention_value | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp0_ack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp0_ack_bound | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_async_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp0_envelope_mesh_from | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp0_nack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp0_nack_bound | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp10_own_devices_fanout | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | handle_mvp1_device_auth_key_batch | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp1_device_revoke | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp1_identity_register | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp1_prekey_publish | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp6_friend_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_mvp6_registration_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | handle_s1_session_upsert | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers.rs | mesh_fanout_response | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | registration_peer_gate | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 1 | A | strict=parse_i_json; admission=A byte ingress
+apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 2 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#bound_ack#1
+apps/ramflux-router/src/handlers/session_push.rs | bound_nack | 1 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#route#1
+apps/ramflux-router/src/handlers/session_push.rs | envelope_ephemeral | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers/session_push.rs | issued | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers/session_push.rs | reassert | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers/session_push.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers/session_push.rs | route | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers/session_push.rs | route | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/handlers/session_push.rs | route | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/identity_authority.rs | handle_signed_device_set | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_custody_budgets | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_mvp7_abuse_report | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_mvp7_federated_tombstone | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_cancel | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_event | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_finalize | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/pairing_mesh.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/send_authority.rs | read | 1 | E | excluded=typed authenticated notification authority metadata; original bytes validated by mesh ingress
+apps/ramflux-router/src/serve.rs | submit_raw_envelope | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
