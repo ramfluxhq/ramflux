@@ -218,3 +218,28 @@ fn pairing_full_union_encoding_cancel_rolls_back_and_refuses_reuse() -> ResultOf
     ));
     Ok(())
 }
+
+#[test]
+fn full_union_old_internal_ledger_is_schema_mismatch_without_conversion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    db.execute_batch("CREATE TABLE full_union_record(generation_nonce BLOB NOT NULL,owner TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL,PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;")?;
+    // Opening the current schema never repairs an incompatible existing ledger.
+    db.execute_batch(SCHEMA)?;
+    assert!(
+        matches!(require_existing_format(&db), Err(StorageError::PairingField("SchemaMismatch"))),
+        "test: old internal ledger was reinterpreted or silently converted"
+    );
+    let without_rowid = db.query_row(
+        "SELECT wr FROM pragma_table_list WHERE name='full_union_record'",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    assert!(without_rowid, "test: compatibility refusal changed old stage schema");
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM full_union_record", [], |row| row.get::<_, u64>(0))?,
+        0,
+        "test: refusal fabricated ledger data"
+    );
+    Ok(())
+}

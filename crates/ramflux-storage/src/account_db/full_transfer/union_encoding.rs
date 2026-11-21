@@ -94,6 +94,7 @@ impl FullUnionEncodingBuilder<'_, '_> {
         row: &rusqlite::Row<'_>,
     ) -> Result<(), StorageError> {
         self.stage.require_io()?;
+        self.stage.connection.call(|db| Ok(require_existing_format(db)))??;
         let owner = super::super::mac_subkeys::full::source_key(owner)?;
         if !self.owners.contains(&owner) {
             return Err(StorageError::PairingField("WrongContext"));
@@ -162,6 +163,25 @@ impl FullUnionEncodingBuilder<'_, '_> {
     }
 }
 
+/// The internal ledger format is local only. An older WITHOUT ROWID ledger is not
+/// relabeled or migrated by CREATE IF NOT EXISTS; reject it before reading records.
+pub(super) fn require_existing_format(db: &rusqlite::Connection) -> Result<(), StorageError> {
+    use rusqlite::OptionalExtension as _;
+    for table in ["full_union_record", "full_union_input"] {
+        let without_rowid = db
+            .query_row(
+                "SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?1",
+                [table],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+        if without_rowid == Some(true) {
+            return Err(StorageError::PairingField("SchemaMismatch"));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn visit(
     db: &rusqlite::Connection,
     nonce: &[u8; 32],
@@ -169,6 +189,7 @@ pub(super) fn visit(
     writer: &mut impl Write,
     guard: &SourceGuard,
 ) -> Result<(u64, u64), StorageError> {
+    require_existing_format(db)?;
     let mut statement=db.prepare("SELECT owner,family,key,rowid,length(record) FROM full_union_record WHERE generation_nonce=?1 ORDER BY owner COLLATE BINARY,family COLLATE BINARY,key COLLATE BINARY")?;
     let mut rows = statement.query(params![nonce.as_slice()])?;
     let mut records = 0_u64;

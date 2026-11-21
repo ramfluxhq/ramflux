@@ -58,6 +58,7 @@ pub(super) fn open(path: &Path, key: &AccountDbKey) -> Result<Connection, Storag
         hex.as_str()
     ));
     db.execute_batch(&pragma)?;
+    super::union_encoding::require_existing_format(&db)?;
     Ok(db)
 }
 fn retain(
