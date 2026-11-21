@@ -42,6 +42,10 @@ pub fn commit_approved(
     // gets a typed unsupported result and no effect.
     require_agent_custody_authorization(client_capabilities)?;
     let record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+    // A rebind request never creates an account: it commits through the rebind path (stage D4).
+    if super::rebind_plan::is_rebind(&record) {
+        return Err(SdkError::CustodySetupInvalid);
+    }
     if matches!(
         record.state,
         AgentCreationState::PublicationPending

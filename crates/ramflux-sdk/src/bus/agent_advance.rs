@@ -8,7 +8,7 @@ use super::supervisor::Supervisor;
 use crate::SdkError;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentStep, AgentSteps,
-    advance_all, observe_primary,
+    RebindBinding, advance_all, observe_primary,
 };
 use zeroize::Zeroizing;
 
@@ -112,7 +112,13 @@ impl Supervisor {
             .body
             .primary_device_ref
             .clone();
-        observe_primary(&store, &primary)?;
+        // Stage D3: an agent whose binding moved to a new primary is paused. Its open session is
+        // closed through the account.lock path, and the advance below never activates it.
+        for entry in observe_primary(&store, &primary)? {
+            if matches!(entry.binding, RebindBinding::RebindPending | RebindBinding::Committed) {
+                self.lock_account_session(&entry.agent_account_id).await?;
+            }
+        }
         let mut steps = SupervisorSteps { supervisor: self, human: human.to_owned() };
         advance_all(&mut steps, &store, now).await
     }

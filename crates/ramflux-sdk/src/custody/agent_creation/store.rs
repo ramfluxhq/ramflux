@@ -136,8 +136,10 @@ impl AgentCreationStore {
             let Some(request_id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
                 continue;
             };
+            // A rebind request names the agent too, but it is never the agent's creation record.
             if let Some(record) = self.load(request_id)?
                 && record.account_id.as_deref() == Some(account_id)
+                && !super::rebind_plan::is_rebind(&record)
             {
                 return Ok(Some(record));
             }

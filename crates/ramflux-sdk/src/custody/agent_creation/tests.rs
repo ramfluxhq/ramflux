@@ -46,12 +46,12 @@ pub(crate) const HUMAN: &str = "human";
 /// The human primary phone: vault holds its self-signing key and branch seeds, plus one armed
 /// presence approval per plan hash.
 pub(crate) struct Phone {
-    vault: MemoryPrimaryVault,
-    primary_ref: String,
-    branch_ref: String,
-    primary_public: String,
-    branch_public: String,
-    primary_device: DeviceRef,
+    pub(crate) vault: MemoryPrimaryVault,
+    pub(crate) primary_ref: String,
+    pub(crate) branch_ref: String,
+    pub(crate) primary_public: String,
+    pub(crate) branch_public: String,
+    pub(crate) primary_device: DeviceRef,
 }
 
 /// The capability list of a node that advertises agent custody authorization.
@@ -787,8 +787,8 @@ fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() ->
 }
 
 /// Principal and device names of the human fixture: the primary phone and a paired desktop.
-const HUMAN_PRINCIPAL: &str = "principal-human";
-const HUMAN_PRIMARY_DEVICE: &str = "primary";
+pub(crate) const HUMAN_PRINCIPAL: &str = "principal-human";
+pub(crate) const HUMAN_PRIMARY_DEVICE: &str = "primary";
 
 /// A live human account on a fresh data root with two active devices in its authority: the primary
 /// (genesis, signed by the human primary key) and the desktop, a successor record signed by the
@@ -796,9 +796,9 @@ const HUMAN_PRIMARY_DEVICE: &str = "primary";
 pub(crate) struct HumanFixture {
     pub(crate) root: crate::custody::tests::Root,
     pub(crate) now: u64,
-    anchor: String,
-    primary: DeviceRef,
-    head: String,
+    pub(crate) anchor: String,
+    pub(crate) primary: DeviceRef,
+    pub(crate) head: String,
 }
 
 /// The desktop device of the human fixture, with a branch signed by the human primary key.
@@ -856,9 +856,79 @@ pub(crate) fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>
     human_fixture_with(None)
 }
 
+/// The sibling device of the rebind fixture: a third active device with a `sync` branch, signed by
+/// the human primary key. It is the device a primary transfer names as its destination.
+pub(crate) const SIBLING_DEVICE: &str = "sibling-device";
+
+/// The sibling's branch seeds: signing `[33; 32]`, agreement `[34; 32]`.
+pub(crate) const SIBLING_SIGNING_SEED: [u8; 32] = [33_u8; 32];
+pub(crate) const SIBLING_AGREEMENT_SEED: [u8; 32] = [34_u8; 32];
+
+fn with_sibling_device(
+    primary: &SelfSigningKey,
+    base: &Envelope<DeviceSet>,
+    now: u64,
+) -> Result<Envelope<DeviceSet>, Box<dyn std::error::Error>> {
+    let branch = create_device_branch_from_seed(
+        HUMAN_PRINCIPAL,
+        SIBLING_DEVICE,
+        1,
+        &Zeroizing::new(SIBLING_SIGNING_SEED),
+    );
+    let signing = encode_base64url(branch.signing_key.verifying_key().to_bytes());
+    let agreement = encode_base64url(X25519KeyPair::from_seed(SIBLING_AGREEMENT_SEED).public);
+    let (signing_commitment, agreement_commitment) =
+        ramflux_crypto::device_key_commitments(&signing, &agreement)?;
+    let branch_cert = primary.certify_branch(BranchCertificate {
+        schema: domain::CUSTODY_BRANCH_CERTIFICATE.into(),
+        version: 1,
+        account_anchor: base.body.account_anchor.clone(),
+        master_certificate_hash: object_hash(&base.body.master_certificate)?,
+        device_id: SIBLING_DEVICE.into(),
+        device_epoch: 1,
+        principal_kind: PrincipalKind::Human,
+        branch_signing_public_key: signing,
+        agreement_identity_public_key: agreement,
+        capabilities: ["call", "group", "message", "register", "sync"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        not_before: now,
+        expires_at: now + MAX_BRANCH_LEASE_SECONDS,
+        cert_id: encode_base64url([35_u8; 32]),
+    })?;
+    let mut body = base.body.clone();
+    body.devices.push(Device {
+        device_id: SIBLING_DEVICE.into(),
+        device_epoch: 1,
+        signing_key_commitment: signing_commitment,
+        agreement_key_commitment: agreement_commitment,
+        status: DeviceSetStatus::Active,
+        revoked_at: None,
+        branch_certificate: Some(branch_cert),
+        message_layer: None,
+        migration_state: MigrationState::Native,
+    });
+    body.devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    Ok(primary.sign_record(body)?)
+}
+
+/// The human fixture with a third device (`SIBLING_DEVICE`) in its authority. Persisted on the root
+/// like `human_fixture`; the sibling is the destination of the rebind tests' primary transfer.
+pub(crate) fn human_fixture_with_sibling() -> Result<HumanFixture, Box<dyn std::error::Error>> {
+    build_human(None, true)
+}
+
 /// The human fixture, sealed with `data_secret` when given (the human account can then unlock).
 pub(crate) fn human_fixture_with(
     data_secret: Option<&[u8]>,
+) -> Result<HumanFixture, Box<dyn std::error::Error>> {
+    build_human(data_secret, false)
+}
+
+fn build_human(
+    data_secret: Option<&[u8]>,
+    sibling: bool,
 ) -> Result<HumanFixture, Box<dyn std::error::Error>> {
     let root = crate::custody::tests::Root::new()?;
     let vault = crate::custody::tests::TestVault::default();
@@ -886,7 +956,10 @@ pub(crate) fn human_fixture_with(
             external_human_primary: None,
         },
     )?;
-    let record = with_desktop_device(&primary, &base, now)?;
+    let mut record = with_desktop_device(&primary, &base, now)?;
+    if sibling {
+        record = with_sibling_device(&primary, &record, now)?;
+    }
     let mut seeds = Zeroizing::new([0_u8; 64]);
     seeds[..32].copy_from_slice(&signing_seed[..]);
     seeds[32..].copy_from_slice(&[24_u8; 32]);
@@ -1538,7 +1611,7 @@ fn assert_items_present(vault: &MemoryPrimaryVault, refs: &[String]) -> TestResu
 
 /// The human authority on the desktop root/// A phone whose vault holds the human fixture's own primary and branch keys, so its decisions
 /// verify against the branch that the fixture authority publishes.
-fn fixture_phone() -> Result<Phone, Box<dyn std::error::Error>> {
+pub(crate) fn fixture_phone() -> Result<Phone, Box<dyn std::error::Error>> {
     let vault = MemoryPrimaryVault::default();
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([22_u8; 32]));
     let primary_ref = encode_base64url([1_u8; 32]);

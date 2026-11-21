@@ -7,6 +7,7 @@
 //! store or send effect.
 use super::agent_custody::AgentCustodySend;
 use crate::custody::PrimaryVault;
+use crate::custody::agent_creation::check_decision_context;
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
     PrimarySigning, begin, desktop_is_enrolled, primary_branch_public_key, primary_sign_decision,
@@ -258,9 +259,8 @@ impl RamfluxClient {
             return Err(refuse("creation_plan_changed"));
         }
         let human = self.human_authority()?;
-        if plan.human_primary != human.local || plan.human_primary != human.primary {
-            return Err(refuse("creation_not_primary"));
-        }
+        // Stage D3: the plan names the exact current human head, and this device is the primary.
+        check_decision_context(&plan, human.record, &human.local).map_err(refuse)?;
         let wanted = if approved { RegisterOutcome::Approve } else { RegisterOutcome::Deny };
         if let Some(saved) = record.decision_bytes()? {
             let decided =

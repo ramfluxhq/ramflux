@@ -6,10 +6,26 @@
 //! Every step is idempotent: a request already past a step skips it, and a failed step leaves the
 //! request in the state it had, so the next advance (unlock, or an operation read) repeats it.
 
+use super::rebind::RebindBinding;
+use super::rebind_plan::is_rebind;
 use super::state::AgentCreationState;
 use super::store::{AgentCreationRecord, AgentCreationStore};
 use crate::SdkError;
 use std::future::Future;
+
+/// Whether the agent of this record has a paused binding (rebind pending or committed) in the
+/// inventory. Such an agent is neither activated nor connected by an advance.
+fn binding_is_paused(
+    store: &AgentCreationStore,
+    record: &AgentCreationRecord,
+) -> Result<bool, SdkError> {
+    let Some(account_id) = record.account_id.as_deref() else {
+        return Ok(false);
+    };
+    Ok(store.load_rebind(account_id)?.is_some_and(|entry| {
+        matches!(entry.binding, RebindBinding::RebindPending | RebindBinding::Committed)
+    }))
+}
 
 /// One store step that the human account's runtime performs for a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +70,11 @@ pub async fn advance_one<S: AgentSteps>(
     now: u64,
 ) -> Result<AgentCreationState, SdkError> {
     let mut record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+    // Stage D3: a rebind request is not a creation (stage D4 commits it), and an agent whose
+    // binding is paused (rebind pending) or committed-but-unpublished is never activated here.
+    if is_rebind(&record) || binding_is_paused(store, &record)? {
+        return Ok(record.state);
+    }
     if record.state == AgentCreationState::Authorized {
         record = steps.commit(request_id, now).await?;
     }

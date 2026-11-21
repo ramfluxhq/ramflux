@@ -499,6 +499,6 @@ fn agent_passphrase() -> Result<Zeroizing<String>, SdkError> {
     Ok(text)
 }
 
-fn random_id() -> Result<String, SdkError> {
+pub(super) fn random_id() -> Result<String, SdkError> {
     Ok(encode_base64url(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?))
 }

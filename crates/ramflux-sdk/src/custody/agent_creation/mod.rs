@@ -10,6 +10,7 @@ mod machine;
 mod publish;
 mod rebind;
 mod rebind_observe;
+mod rebind_plan;
 mod receive_checks;
 mod receive_decision;
 mod state;
@@ -17,6 +18,8 @@ mod store;
 
 #[cfg(test)]
 mod e2e_tests;
+#[cfg(test)]
+mod rebind_plan_tests;
 #[cfg(test)]
 mod rebind_tests;
 #[cfg(test)]
@@ -36,6 +39,8 @@ pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub use rebind::{RebindBinding, RebindEntry};
 pub use rebind_observe::observe_primary;
+pub(crate) use rebind_plan::check_decision_context;
+pub use rebind_plan::{RebindInput, begin_rebind, stored_profile};
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };

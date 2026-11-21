@@ -774,6 +774,31 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Closes an open account session the way the `account.lock` route does: the lock request, then
+    /// stop, the index unlock flag, and the removal from the account, subscriber and attended maps.
+    /// Does nothing when the account is not open. Stage D3 pauses an agent through it.
+    pub(super) async fn lock_account_session(&self, id: &str) -> Result<(), SdkError> {
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(());
+        };
+        let (outbound, _receiver) = mpsc::channel(1);
+        let connection = LocalBusConnectionState::new(0, outbound);
+        let lock = LocalBusFrame::request(
+            "rebind-pause-lock",
+            Some(id.to_owned()),
+            "account",
+            "account.lock",
+            serde_json::json!({}),
+        );
+        actor.request(command(lock, &connection)).await?;
+        actor.stop().await?;
+        self.set_unlocked(id, false).await?;
+        self.accounts.borrow_mut().remove(id);
+        self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id.as_str() != id);
+        self.attended.borrow_mut().retain(|_, account| account.as_str() != id);
+        Ok(())
+    }
+
     async fn set_unlocked(&self, id: &str, unlocked: bool) -> Result<(), SdkError> {
         let index = self.index.clone();
         let id = id.to_owned();
