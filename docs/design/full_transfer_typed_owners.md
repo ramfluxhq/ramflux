@@ -64,7 +64,7 @@ keys, but no source path/ciphertext/cache progress. Grants remain inert. Ordinar
 B authorization owns retrieval/rewrap; local-only live attachments return
 AttachmentNotRemote until normal upload completes.
 
-The fixed-width encoder/union's small scratch and 16-KiB row spool are not generic
+The fixed-width encoder/union's small scratch and bounded row spool are not generic
 history limits. Variable records must use bounded streamed/encrypted owners with
 checked offsets, counts and disk quota. No unbounded peer-sized allocations and
 no plaintext temporary files. Do not raise limits without implementing the owner.
@@ -129,3 +129,15 @@ One module and one PR. Commit each checkpoint. Open the PR after checkpoint 1;
 keep it unready until checkpoint 5 and exact-head CI are green. Tests use semantic
 barriers/bounded deadlines. No fixture-only or manually driven courier success
 stands in for the process proof. No deployment or test-node operation by this lane.
+
+## Contact denial owners
+
+The shared metadata row resolver uses compiled composite keys and explicit bounded
+SQL text/enum/integer codecs. It does not accept generic JSON or signed payloads.
+Message fence retention takes the later deadline, retirement takes the later retry
+bound, and request fences keep the stronger state (blocked over declined) and an
+indefinite lifetime (zero) from either contributor. These unions never lift consent.
+A retained message deadline without its contributor's matching fence, or a timed
+fence colliding with an independently untimed fence, refuses TransferConflict
+before DataVerified. This stricter choice avoids assigning an expiry to an
+independent denial; no wall-clock guess or fabricated deadline repairs the rows.

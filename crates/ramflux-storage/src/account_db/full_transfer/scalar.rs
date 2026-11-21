@@ -90,6 +90,7 @@ pub fn copy_full_scalar_record(
                 | CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlMacSubkeys
                 | CodecRule::SqlDeviceRef
+                | CodecRule::SqlEnum { .. }
         ) && *kind != CellType::Null
         {
             let count = usize::try_from(length.0).map_err(|_| invalid())?;
@@ -150,6 +151,8 @@ fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<()
                 | CodecRule::SqlBytes { .. }
                 | CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlI64 { .. }
+                | CodecRule::SqlText { .. }
+                | CodecRule::SqlEnum { .. }
         ) {
             return Err(invalid());
         }
@@ -283,6 +286,14 @@ fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result
             (kind == CellType::Utf8 && length == expected)
                 || (kind == CellType::Null && *nullable && length == 0)
         }
+        CodecRule::SqlText { min_bytes, max_bytes, nullable } => {
+            (kind == CellType::Utf8 && (min_bytes.0..=max_bytes.0).contains(&length))
+                || (kind == CellType::Null && *nullable && length == 0)
+        }
+        CodecRule::SqlEnum { values, nullable } => {
+            (kind == CellType::Utf8 && values.iter().any(|value| value.len() as u64 == length))
+                || (kind == CellType::Null && *nullable && length == 0)
+        }
         _ => true,
     };
     if valid { Ok(()) } else { Err(invalid()) }
@@ -294,6 +305,11 @@ fn validate_sql_value(codec: &CodecRule, kind: CellType, bytes: &[u8]) -> Result
     }
     if matches!(codec, CodecRule::SqlDeviceRef) {
         super::super::mac_subkeys::full::decode_source_ref(bytes)?;
+    }
+    if let CodecRule::SqlEnum { values, .. } = codec
+        && !values.iter().any(|value| value.as_bytes() == bytes)
+    {
+        return Err(invalid());
     }
     if let CodecRule::SqlBase64 { decoded_bytes, .. } = codec {
         let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;

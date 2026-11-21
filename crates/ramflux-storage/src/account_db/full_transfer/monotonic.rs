@@ -13,29 +13,59 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Clone, Copy)]
 enum Merge {
+    Immutable,
+    Denial { state: usize, until: usize },
     Maxima(&'static [usize]),
     EpochHash { epoch: usize, hash: usize, until: usize },
 }
 pub(super) struct Owner {
     family: &'static str,
     names: &'static [&'static str],
+    keys: &'static [usize],
     merge: Merge,
 }
 static OWNERS: &[Owner] = &[
     Owner {
         family: "sql/account_erasure_generation",
         names: &["singleton", "generation"],
+        keys: &[0],
         merge: Merge::Maxima(&[1]),
     },
     Owner {
         family: "sql/contact_request_authority_floor",
         names: &["root", "epoch", "record_hash", "until"],
+        keys: &[0],
         merge: Merge::EpochHash { epoch: 1, hash: 2, until: 3 },
     },
     Owner {
         family: "sql/receive_erased_input",
         names: &["selector", "bundle_id", "expires_at"],
+        keys: &[0],
         merge: Merge::Maxima(&[2]),
+    },
+    Owner {
+        family: "sql/contact_message_request_fence",
+        names: &["sender_identity", "message_id"],
+        keys: &[0, 1],
+        merge: Merge::Immutable,
+    },
+    Owner {
+        family: "sql/contact_message_fence_retention",
+        names: &["sender_identity", "message_id", "until"],
+        keys: &[0, 1],
+        merge: Merge::Maxima(&[2]),
+    },
+    Owner {
+        family: "sql/contact_request_retirement",
+        names: &["root", "direction", "next_at"],
+        keys: &[0, 1],
+        merge: Merge::Maxima(&[2]),
+    },
+    Owner {
+        family: "sql/contact_request_fence",
+        names: &["root", "state", "until"],
+        keys: &[0],
+        merge: Merge::Denial { state: 1, until: 2 },
     },
 ];
 pub(super) fn owner(family: &str) -> Option<&'static Owner> {
@@ -62,8 +92,12 @@ impl Owner {
             || !rule.restrictive
             || rule.cells.len() != self.names.len()
             || !matches!(rule.selector,FamilySelector::Table(value) if value==table)
-            || rule.key.len() != 1
-            || rule.key.first() != self.names.first()
+            || rule.key.len() != self.keys.len()
+            || rule
+                .key
+                .iter()
+                .zip(self.keys)
+                .any(|(name, index)| self.names.get(*index) != Some(name))
             || rule.cells.iter().zip(self.names).any(|(cell, name)| cell.name != *name)
         {
             return Err(invalid());
@@ -72,7 +106,28 @@ impl Owner {
     }
     fn resolve(&self, left: &Cells, right: &Cells) -> Result<Cells, StorageError> {
         let mut result = left.clone();
+        for index in self.keys {
+            if left.bytes(*index)? != right.bytes(*index)? {
+                return Err(conflict());
+            }
+        }
         match self.merge {
+            Merge::Immutable => {
+                for index in 0..self.names.len() {
+                    if left.bytes(index)? != right.bytes(index)? {
+                        return Err(conflict());
+                    }
+                }
+            }
+            Merge::Denial { state, until } => {
+                // A block dominates a decline irrespective of untrusted wall-clock ordering.
+                if right.text(state)? == "blocked" {
+                    result.copy_cell(state, right)?;
+                }
+                let a = left.integer(until)?;
+                let b = right.integer(until)?;
+                result.set_integer(until, if a == 0 || b == 0 { 0 } else { a.max(b) })?;
+            }
             Merge::Maxima(indices) => {
                 for index in 0..self.names.len() {
                     if indices.contains(&index) {
@@ -106,7 +161,7 @@ impl Owner {
     }
     fn decode(&self, rule: &FamilyRule, bytes: &[u8]) -> Result<Cells, StorageError> {
         self.check(rule)?;
-        if bytes.len() > 262_144 {
+        if bytes.len() > super::fixed_union::MAX_METADATA_BYTES {
             return Err(invalid());
         }
         let mut input = bytes;
@@ -146,10 +201,23 @@ impl Owner {
         key: &Cells,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
         let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
-        let column = self.names.first().ok_or_else(invalid)?;
-        let sql = format!("SELECT {} FROM \"{table}\" WHERE \"{column}\" IS ?1", self.columns());
+        let predicate = self
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(position, index)| {
+                self.names
+                    .get(*index)
+                    .map(|name| format!("\"{name}\" IS ?{}", position + 1))
+                    .ok_or_else(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" AND ");
+        let sql = format!("SELECT {} FROM \"{table}\" WHERE {predicate}", self.columns());
+        let values =
+            self.keys.iter().map(|index| key.value(*index)).collect::<Result<Vec<_>, _>>()?;
         let result = db
-            .query_row(&sql, [key.value(0)?], |row| {
+            .query_row(&sql, params_from_iter(values), |row| {
                 let mut bytes = Zeroizing::new(Vec::new());
                 Ok(write_full_scalar_sql_row(rule, row, &mut *bytes).map(|_| bytes))
             })
@@ -171,20 +239,39 @@ impl Owner {
             None => incoming.clone(),
         };
         let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
-        let key = self.names.first().ok_or_else(invalid)?;
+        let keys = self
+            .keys
+            .iter()
+            .map(|index| {
+                self.names.get(*index).map(|name| format!("\"{name}\"")).ok_or_else(invalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
         let placeholders =
             (1..=self.names.len()).map(|index| format!("?{index}")).collect::<Vec<_>>().join(",");
         let assignments = self
             .names
             .iter()
-            .skip(1)
-            .map(|name| format!("\"{name}\"=excluded.\"{name}\""))
+            .enumerate()
+            .filter(|(index, _)| !self.keys.contains(index))
+            .map(|(_, name)| format!("\"{name}\"=excluded.\"{name}\""))
             .collect::<Vec<_>>()
             .join(",");
+        let action = if assignments.is_empty() {
+            "DO NOTHING".to_owned()
+        } else {
+            format!("DO UPDATE SET {assignments}")
+        };
         let values = (0..self.names.len())
             .map(|index| merged.value(index))
             .collect::<Result<Vec<_>, _>>()?;
-        db.execute(&format!("INSERT INTO \"{table}\"({}) VALUES({placeholders}) ON CONFLICT(\"{key}\") DO UPDATE SET {assignments}",self.columns()),params_from_iter(values))?;
+        db.execute(
+            &format!(
+                "INSERT INTO \"{table}\"({}) VALUES({placeholders}) ON CONFLICT({keys}) {action}",
+                self.columns()
+            ),
+            params_from_iter(values),
+        )?;
         Ok(())
     }
     fn normalize_key(
@@ -222,6 +309,17 @@ pub(super) fn normalize(
     nonce: &[u8; 32],
     private: &BackupDatabase,
 ) -> Result<(), StorageError> {
+    // A fence with no retained deadline must not acquire another device's expiry.
+    // Retention rows without their own fence have no denial provenance either. Refuse
+    // both inconsistent shapes rather than silently shortening a durable restriction.
+    let incompatible: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM full_union_record t WHERE t.generation_nonce=?1 AND t.family='sql/contact_message_fence_retention' AND (
+            NOT EXISTS(SELECT 1 FROM full_union_record f WHERE f.generation_nonce=t.generation_nonce AND f.owner=t.owner AND f.family='sql/contact_message_request_fence' AND f.key=t.key)
+            OR EXISTS(SELECT 1 FROM full_union_record f WHERE f.generation_nonce=t.generation_nonce AND f.family='sql/contact_message_request_fence' AND f.key=t.key AND NOT EXISTS(SELECT 1 FROM full_union_record r WHERE r.generation_nonce=f.generation_nonce AND r.owner=f.owner AND r.family='sql/contact_message_fence_retention' AND r.key=f.key))))",
+        [nonce.as_slice()], |row|row.get(0))?;
+    if incompatible {
+        return Err(conflict());
+    }
     for owner in OWNERS {
         let rule = full_transfer_catalog()
             .iter()

@@ -19,9 +19,12 @@ fn conflict() -> StorageError {
     StorageError::PairingField("TransferConflict")
 }
 
+/// The metadata owner path never buffers payload bodies. Each input is size-checked
+/// before allocation; content owners require their separate streaming path.
+pub(super) const MAX_METADATA_BYTES: usize = 262_144;
 #[derive(Clone)]
 pub(super) struct Cells {
-    bytes: Zeroizing<[u8; 1024]>,
+    bytes: Zeroizing<Vec<u8>>,
     ranges: [std::ops::Range<usize>; 16],
     kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType; 16],
     count: usize,
@@ -41,8 +44,13 @@ impl Cells {
         if header.op != RecordOp::Put || header.cell_lengths.len() > 16 {
             return Err(unsupported());
         }
+        let size = header.cell_lengths.iter().try_fold(0_usize, |sum, length| {
+            sum.checked_add(usize::try_from(length.0).map_err(|_| unsupported())?)
+                .filter(|size| *size <= MAX_METADATA_BYTES)
+                .ok_or_else(unsupported)
+        })?;
         let mut value = Self {
-            bytes: Zeroizing::new([0; 1024]),
+            bytes: Zeroizing::new(vec![0; size]),
             ranges: std::array::from_fn(|_| 0..0),
             kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType::Null; 16],
             count: header.cell_lengths.len(),
@@ -92,12 +100,29 @@ impl Cells {
     }
     pub(super) fn copy_cell(&mut self, index: usize, other: &Self) -> Result<(), StorageError> {
         let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
-        let bytes = self.bytes.get_mut(range).ok_or_else(unsupported)?;
         let source = other.bytes(index)?;
-        if bytes.len() != source.len() {
-            return Err(unsupported());
+        let size = self
+            .bytes
+            .len()
+            .checked_sub(range.len())
+            .and_then(|size| size.checked_add(source.len()))
+            .filter(|size| *size <= MAX_METADATA_BYTES)
+            .ok_or_else(unsupported)?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(size));
+        bytes.extend_from_slice(self.bytes.get(..range.start).ok_or_else(unsupported)?);
+        bytes.extend_from_slice(source);
+        bytes.extend_from_slice(self.bytes.get(range.end..).ok_or_else(unsupported)?);
+        self.bytes = bytes;
+        *self.kinds.get_mut(index).ok_or_else(unsupported)? =
+            *other.kinds.get(index).ok_or_else(unsupported)?;
+        let mut end = range.start;
+        for position in index..self.count {
+            let old = self.ranges.get(position).ok_or_else(unsupported)?.clone();
+            let length = if position == index { source.len() } else { old.len() };
+            let next = end.checked_add(length).ok_or_else(unsupported)?;
+            *self.ranges.get_mut(position).ok_or_else(unsupported)? = end..next;
+            end = next;
         }
-        bytes.copy_from_slice(source);
         Ok(())
     }
     pub(super) fn value(&self, index: usize) -> Result<BoundValue<'_>, StorageError> {

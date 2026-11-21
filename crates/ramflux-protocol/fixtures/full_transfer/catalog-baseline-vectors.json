@@ -1,5 +1,5 @@
 {
-  "census_hash": "cRO_Z4qUIJQ21_9iadr19xPV_aBLw9c1eez7YItMU9Q",
+  "census_hash": "3X6qC3-Te8wasLW4U-YqvTvoHf7v88i0Gyw71wHinCk",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -55,7 +55,7 @@
       "id": "sql/contact_link_decision"
     },
     {
-      "hash": "MgJm-gJDk1Cjs47H8MoIDM5PwIQ6xFD8LgAPsPpohPU",
+      "hash": "U5ctmZdA8LhDJ5JQz-1_S_EoPk16Iz_EsTR8MvO4f2A",
       "id": "sql/contact_message_fence_retention"
     },
     {
@@ -63,7 +63,7 @@
       "id": "sql/contact_message_request"
     },
     {
-      "hash": "lG9YBJoilkMDF7jExIyYoRQavqyk09PMfubputV52TQ",
+      "hash": "Hv69QffLtFbbn90vkOc6Tfi7eJo9Z1ko9W6-0jwMWG0",
       "id": "sql/contact_message_request_fence"
     },
     {
@@ -79,7 +79,7 @@
       "id": "sql/contact_request_delivery"
     },
     {
-      "hash": "ACSK9Ofx5Ml4HJoHcYwjQcb6-zwJJKpldJVMXbYp2pY",
+      "hash": "DrcM_QWmRpuHVrR9_KEsQqNGMZD45sPXSGOnJ17fQxc",
       "id": "sql/contact_request_fence"
     },
     {
@@ -91,7 +91,7 @@
       "id": "sql/contact_request_rate"
     },
     {
-      "hash": "dH-eXh5yQ4DreQhAJYbByPlU6bicFpZ3mCBQtrum1rA",
+      "hash": "tH4DkIer6IdVm73iVnYZkMI5H8qHw5oORV3YsvjAo8w",
       "id": "sql/contact_request_retirement"
     },
     {

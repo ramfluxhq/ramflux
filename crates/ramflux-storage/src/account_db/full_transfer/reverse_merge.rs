@@ -80,6 +80,8 @@ impl FullTransferStage<'_> {
                 .try_fold(0_u64, |sum, length| sum.checked_add(length.0).ok_or_else(wrong))?;
             let bound = if rule.id == super::message_denial::FAMILY {
                 super::message_denial::MAX_BODY_BYTES
+            } else if super::monotonic::owner(rule.id).is_some() {
+                super::fixed_union::MAX_METADATA_BYTES as u64
             } else {
                 1024
             };

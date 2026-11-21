@@ -56,10 +56,7 @@ pub(super) const RULE_11: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_message_fence_retention",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "message_id",
@@ -67,7 +64,7 @@ pub(super) const RULE_11: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "until",
@@ -75,8 +72,8 @@ pub(super) const RULE_11: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 
@@ -172,10 +169,7 @@ pub(super) const RULE_13: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_message_request_fence",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
         ),
         (
             "message_id",
@@ -183,8 +177,8 @@ pub(super) const RULE_13: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
-        ),
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(32768), nullable: false }
+        )
     ]
 );
 
@@ -329,7 +323,7 @@ pub(super) const RULE_17: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "contact_request_fence", cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "state",
@@ -337,7 +331,7 @@ pub(super) const RULE_17: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlEnum { values: &["blocked", "declined"], nullable: false }
         ),
         (
             "until",
@@ -345,8 +339,8 @@ pub(super) const RULE_17: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 
@@ -478,10 +472,7 @@ pub(super) const RULE_20: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_request_retirement",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "direction",
@@ -489,7 +480,7 @@ pub(super) const RULE_20: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlEnum { values: &["inbound", "outbound"], nullable: false }
         ),
         (
             "next_at",
@@ -497,8 +488,8 @@ pub(super) const RULE_20: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
-        ),
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
+        )
     ]
 );
 

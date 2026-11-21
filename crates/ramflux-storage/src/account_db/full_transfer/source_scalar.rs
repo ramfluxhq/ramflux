@@ -4,8 +4,7 @@
 //! Encrypted, fixed-owner base-row spool. SQLite key order is the protocol's encoded order.
 use super::source_owner::SourceContext;
 use super::{
-    CodecRule, FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog,
-    write_full_scalar_sql_row,
+    FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog, write_full_scalar_sql_row,
 };
 use crate::{StorageError, database::Connection};
 use ramflux_protocol::custody::pairing::full_transfer::{Disposition, read_record_header};
@@ -35,14 +34,7 @@ pub(super) fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError
     if rule.disposition != Disposition::Transfer
         || rule.codec.iter().any(|field| {
             field.disposition == Disposition::Transfer
-                && !matches!(
-                    field.codec,
-                    CodecRule::SqlMacSubkeys
-                        | CodecRule::SqlDeviceRef
-                        | CodecRule::SqlBytes { .. }
-                        | CodecRule::SqlBase64 { .. }
-                        | CodecRule::SqlI64 { .. }
-                )
+                && !super::catalog::scalar_sql_codec(&field.codec)
         })
     {
         return Err(invalid());
