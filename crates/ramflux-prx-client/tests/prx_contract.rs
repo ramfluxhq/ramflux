@@ -44,6 +44,7 @@ const SENTINEL: &str = "sk-rf-contract-sentinel-0001";
 /// A dummy key for the default provider; it is never a real credential.
 const DEFAULT_PROVIDER_KEY: &str = "test-key-not-real";
 const GROQ_ROUTE: &str = "\n[[model_routes]]\nhint = \"fast\"\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\ncredential_ref = \"cred-groq\"\n";
+const HAND_WRITTEN_AGENT: &str = "\n[agents.worker1]\nprovider = \"openrouter\"\nmodel = \"openai/gpt-4o-mini\"\n";
 const MODEL_ROW: &str = "\n[[providers.models]]\nprovider = \"ollama\"\nmodel = \"qwen3:8b\"\noperations = [\"chat\"]\n";
 
 fn prx_binary() -> PathBuf {
@@ -457,7 +458,8 @@ async fn k_ac1a_agent_rows() {
     bounded(async {
         // Pairing is refused while Main is readonly (PRX gates POST /pair by Main's level), so
         // pair first, then set Main to readonly for K-AC1a-6 and the rows after it.
-        let mut daemon = Daemon::prepare("");
+        // A hand-written agent (not rf-derived) that the list must also return.
+        let mut daemon = Daemon::prepare(HAND_WRITTEN_AGENT);
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -590,6 +592,21 @@ async fn k_ac1a_agent_rows() {
         assert!(!names.contains(&"main"), "K-AC1a-11: Main is not a named agent");
         assert!(listed.agents.iter().all(|a| !a.incarnation.is_empty()), "K-AC1a-11: incarnation on each entry");
         report("K-AC1a-11");
+
+        // Fact 3 (AC-1a1 notes): the hand-written agent is listed, and it is not rf-derived.
+        let worker = listed.agents.iter().find(|a| a.name.as_str() == "worker1");
+        assert!(worker.is_some_and(|w| !w.name.is_rf_derived()), "fact 3: hand-written agent listed, not rf-derived");
+        report("FACT3-hand-written-listed");
+
+        // Fact 1: a PUT that repeats the stored config still changes the config revision.
+        let before = list_revision(&client, &caps).await;
+        let repeated = client
+            .put(&caps, &name, &config("ollama", "codellama", None, Tools::All, true), &before, false)
+            .await
+            .expect("fact 1: identical PUT is accepted");
+        assert_eq!(repeated.kind, PutKind::Replaced, "fact 1: identical PUT replaces");
+        assert_ne!(repeated.readback.revision, before, "fact 1: the revision changes on an identical PUT");
+        report("FACT1-revision-changes-on-identical-put");
 
         // Retirement, prompt and tool round trips, and the size bound
         let rev = list_revision(&client, &caps).await;
