@@ -328,6 +328,15 @@
     {
       "bridge_allowed": true,
       "capability": "agent",
+      "key_export": false,
+      "name": "agent.access.set",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
       "key_export": true,
       "name": "agent.create",
       "secret_input": false,
@@ -347,7 +356,34 @@
       "bridge_allowed": true,
       "capability": "agent",
       "key_export": false,
+      "name": "agent.get",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.list",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
       "name": "agent.operation.get",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.persona.edit",
       "secret_input": false,
       "secret_output": false,
       "show_once": false

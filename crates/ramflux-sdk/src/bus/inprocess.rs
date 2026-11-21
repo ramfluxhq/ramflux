@@ -140,6 +140,10 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "agent.create",
         "agent.creation.decide",
         "agent.operation.get",
+        "agent.list",
+        "agent.get",
+        "agent.persona.edit",
+        "agent.access.set",
         "subscription.close",
     ]);
     names.sort_unstable();

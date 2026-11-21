@@ -268,3 +268,108 @@ async fn decide_case(pair: &mut Pair) -> TestResult {
     desk_server.await??;
     Ok(())
 }
+
+/// The `AgentConfigResult` a successful agent method returns in its body.
+fn config_result(response: &LocalBusFrame) -> TestResult<g::AgentConfigResult> {
+    Ok(serde_json::from_value(response.body.clone())?)
+}
+
+#[test]
+fn agent_record_methods_answer_on_the_owner_device_and_edit_only_when_confirmed() -> TestResult {
+    let mut pair = pair("bus-record")?;
+    run(record_case(&mut pair))
+}
+
+/// AGENT-IDENTITY-01 E4: `agent.list`, `agent.get`, `agent.persona.edit` and `agent.access.set` run on
+/// the owner's own device through the real dispatcher. The record is the E2 fixture (`seed_for_test`
+/// writes the record the completing desktop would write). An edit without `confirmed` changes nothing;
+/// with `confirmed` it is stored and the stored identity moves on.
+async fn record_case(pair: &mut Pair) -> TestResult {
+    let desk_id = pair.laptop.client.account_db()?.local_account_id.clone();
+    let agent = ramflux_protocol::encode_base64url([12_u8; 32]);
+    let at = now()?;
+    let author = pair.laptop.client.own_device_ref()?;
+    crate::agent_record::seed_for_test(
+        &pair.laptop.client.agent_record_store()?,
+        &agent,
+        &author,
+        at,
+    )?;
+    let desk_sup = serve_one(&super::root("agent-record-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
+    let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
+
+    let listed = call(
+        &bus,
+        "agent.list",
+        request("list-desk", &desk_id, "agent.list", serde_json::json!({"limit": 10})),
+    )
+    .await?;
+    let Some(g::agent_config_result::Value::Page(page)) = config_result(&listed)?.value else {
+        return Err("test: agent.list did not return a page".into());
+    };
+    assert_eq!(page.records.len(), 1, "one record is listed");
+    assert_eq!(page.records[0].agent_anchor, agent, "the listed record is the agent");
+
+    let got = call(
+        &bus,
+        "agent.get",
+        request("get-desk", &desk_id, "agent.get", serde_json::json!({"agent_anchor": agent})),
+    )
+    .await?;
+    assert!(matches!(
+        config_result(&got)?.value,
+        Some(g::agent_config_result::Value::Record(ref record)) if record.agent_anchor == agent
+    ));
+
+    let persona = serde_json::json!({"name": "renamed", "avatar": "", "responsibility": "answers"});
+    let unconfirmed = call(
+        &bus,
+        "agent.persona.edit",
+        request(
+            "edit-unconfirmed",
+            &desk_id,
+            "agent.persona.edit",
+            serde_json::json!({"agent_anchor": agent, "persona": persona}),
+        ),
+    )
+    .await?;
+    assert!(refusal_code(&unconfirmed).is_some(), "an edit without confirmed is refused");
+    assert_eq!(pair.laptop.client.agent_record_get(&agent)?.persona.name, "seeded");
+
+    let edited = call(
+        &bus,
+        "agent.persona.edit",
+        request(
+            "edit-confirmed",
+            &desk_id,
+            "agent.persona.edit",
+            serde_json::json!({"agent_anchor": agent, "persona": persona, "confirmed": true}),
+        ),
+    )
+    .await?;
+    assert!(refusal_code(&edited).is_none(), "a confirmed edit succeeds: {edited:?}");
+    assert_eq!(pair.laptop.client.agent_record_get(&agent)?.persona.name, "renamed");
+
+    let base = serde_json::to_value(&pair.laptop.client.agent_record_get(&agent)?.identity)?;
+    let access = call(
+        &bus,
+        "agent.access.set",
+        request(
+            "access-confirmed",
+            &desk_id,
+            "agent.access.set",
+            serde_json::json!({
+                "agent_anchor": agent,
+                "access": {"dm": "contacts", "group_inviters": "owner", "allowed_humans": []},
+                "base": base,
+                "confirmed": true,
+            }),
+        ),
+    )
+    .await?;
+    assert!(refusal_code(&access).is_none(), "a confirmed access set succeeds: {access:?}");
+    assert_eq!(pair.laptop.client.agent_record_get(&agent)?.access.dm, "contacts");
+    drop(bus);
+    server.await??;
+    Ok(())
+}

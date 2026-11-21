@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 /// Upper bound on one record file.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
+/// Upper bound on the records of one `agent.list` page.
+const MAX_PAGE: usize = 100;
 
 pub(crate) struct AgentRecordStore {
     dir: PathBuf,
@@ -60,6 +62,40 @@ impl AgentRecordStore {
             &format!("{}.json", record.agent_anchor),
             &bytes,
         )
+    }
+
+    /// One page of the records of this owner in agent-anchor order, after `after` when given. `next`
+    /// names the last anchor of the page when more records follow it. An empty or missing directory
+    /// is an empty page.
+    /// # Errors
+    /// `CustodyVaultUnavailable` for a listing failure; the refusals of `load` for a bad record.
+    pub(crate) fn page(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<StoredAgentRecord>, Option<String>), SdkError> {
+        let mut anchors: Vec<String> = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
+                .collect(),
+            Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(SdkError::CustodyVaultUnavailable),
+        };
+        anchors.sort_unstable();
+        let start =
+            after.map_or(0, |cursor| anchors.partition_point(|anchor| anchor.as_str() <= cursor));
+        let rest = anchors.get(start..).unwrap_or_default();
+        let take = limit.clamp(1, MAX_PAGE);
+        let mut records = Vec::new();
+        for anchor in rest.iter().take(take) {
+            if let Some(record) = self.load(anchor)? {
+                records.push(record);
+            }
+        }
+        let next = if rest.len() > take { rest.get(take.saturating_sub(1)).cloned() } else { None };
+        Ok((records, next))
     }
 }
 

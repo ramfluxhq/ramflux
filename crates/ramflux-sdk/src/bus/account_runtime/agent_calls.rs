@@ -47,7 +47,7 @@ impl AccountRuntime {
         &self,
         call: super::super::agent_methods::AgentCall,
         reply: tokio::sync::oneshot::Sender<
-            Result<ramflux_protocol::message::AgentCustodyStatus, SdkError>,
+            Result<ramflux_protocol::message::AgentConfigResult, SdkError>,
         >,
     ) {
         if !reply.is_closed() {
@@ -69,23 +69,79 @@ impl AccountRuntime {
     pub(super) fn agent_call(
         &self,
         call: super::super::agent_methods::AgentCall,
-    ) -> Result<ramflux_protocol::message::AgentCustodyStatus, SdkError> {
+    ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
         use super::super::agent_methods::AgentCall;
+        use ramflux_protocol::message as g;
         let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
         let vault = super::super::custody_setup::primary_provider(&self.state.config);
-        match call {
-            AgentCall::Create(body) => account.client.agent_create(
-                vault.as_ref(),
-                &body,
-                super::super::custody_setup::now()?,
-            ),
-            AgentCall::Decide(body) => account.client.agent_creation_decide(
-                vault.as_ref(),
-                &body,
-                super::super::custody_setup::now()?,
-            ),
-            AgentCall::Get(operation_id) => account.client.agent_operation_status(&operation_id),
-        }
+        let custody = |status: g::AgentCustodyStatus| g::AgentConfigResult {
+            value: Some(g::agent_config_result::Value::Custody(status)),
+        };
+        let now = super::super::custody_setup::now()?;
+        let result = match call {
+            AgentCall::Create(body) => {
+                custody(account.client.agent_create(vault.as_ref(), &body, now)?)
+            }
+            AgentCall::Decide(body) => {
+                custody(account.client.agent_creation_decide(vault.as_ref(), &body, now)?)
+            }
+            AgentCall::Get(operation_id) => {
+                custody(account.client.agent_operation_status(&operation_id)?)
+            }
+            AgentCall::List(list) => {
+                let (records, next) =
+                    account.client.agent_record_page(list.cursor.as_deref(), list.limit)?;
+                g::AgentConfigResult {
+                    value: Some(g::agent_config_result::Value::Page(g::AgentPage {
+                        records: records.iter().map(crate::agent_record::to_wire).collect(),
+                        next,
+                        // No journal exists before `agent.watch` (stage E4, not built here).
+                        journal_cursor: String::new(),
+                    })),
+                }
+            }
+            AgentCall::Record(agent) => g::AgentConfigResult {
+                value: Some(g::agent_config_result::Value::Record(crate::agent_record::to_wire(
+                    &account.client.agent_record_get(&agent)?,
+                ))),
+            },
+            AgentCall::PersonaEdit(edit) => {
+                let persona =
+                    edit.persona.ok_or(SdkError::AgentCreationRefused("persona_invalid"))?;
+                // The contract's persona edit carries no base: the stored identity is the base.
+                let current = account.client.agent_record_get(&edit.agent_anchor)?;
+                let record = account.client.agent_persona_edit(
+                    &edit.agent_anchor,
+                    &current.identity,
+                    persona,
+                    edit.confirmed,
+                    now,
+                )?;
+                g::AgentConfigResult {
+                    value: Some(g::agent_config_result::Value::Record(
+                        crate::agent_record::to_wire(&record),
+                    )),
+                }
+            }
+            AgentCall::AccessSet(set) => {
+                let access =
+                    set.access.ok_or(SdkError::AgentCreationRefused("access_policy_invalid"))?;
+                let base = set.base.ok_or(SdkError::AgentCreationRefused("stale_base"))?;
+                let record = account.client.agent_access_set(
+                    &set.agent_anchor,
+                    &base,
+                    access,
+                    set.confirmed,
+                    now,
+                )?;
+                g::AgentConfigResult {
+                    value: Some(g::agent_config_result::Value::Record(
+                        crate::agent_record::to_wire(&record),
+                    )),
+                }
+            }
+        };
+        Ok(result)
     }
 
     /// The home node of this human account: the value `native_account::unlock` persists as

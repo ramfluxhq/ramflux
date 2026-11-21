@@ -1,26 +1,43 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Connection-level entry of the agent creation methods (AGENT-IDENTITY-01 C3). Like `account.create.*`,
+//! Connection-level entry of the agent methods (AGENT-IDENTITY-01 C3 and E4). Like `account.create.*`,
 //! these frames never enter the method table: the connection layer decodes the `ProtoJSON` body, the
 //! human account's runtime performs the account-scoped work by private command, and the supervisor
 //! advances a creation on read (controller decision r9 item 2, r10 item 1). Remote packets cannot
-//! reach this path, so no remote source can start a creation.
+//! reach this path, so no remote source can start a creation or edit a record.
 use super::actor::AccountActor;
 use super::supervisor::Supervisor;
 use crate::{LocalBusFrame, LocalBusFrameKind, SdkError};
 use ramflux_protocol::message as g;
 use zeroize::Zeroizing;
 
-/// One account-scoped call of the agent creation methods, run by the human account's runtime.
+/// One account-scoped call of the agent methods, run by the human account's runtime.
 pub(super) enum AgentCall {
     Create(Box<g::AgentCreate>),
-    Decide(g::AgentCreationDecide),
+    Decide(Box<g::AgentCreationDecide>),
     Get(String),
+    /// `agent.list` (contract 2 `AgentList`).
+    List(Box<g::AgentList>),
+    /// `agent.get` (contract 2 `AgentGet`): one stored record by anchor.
+    Record(String),
+    /// `agent.persona.edit` (contract 2 `AgentPersonaEdit`).
+    PersonaEdit(Box<g::AgentPersonaEdit>),
+    /// `agent.access.set` (contract 2 `AgentAccessSet`).
+    AccessSet(Box<g::AgentAccessSet>),
 }
 
 pub(super) fn handles(method: &str) -> bool {
-    matches!(method, "agent.create" | "agent.creation.decide" | "agent.operation.get")
+    matches!(
+        method,
+        "agent.create"
+            | "agent.creation.decide"
+            | "agent.operation.get"
+            | "agent.list"
+            | "agent.get"
+            | "agent.persona.edit"
+            | "agent.access.set"
+    )
 }
 
 pub(super) async fn respond(
@@ -32,10 +49,7 @@ pub(super) async fn respond(
     // that is the first request on a supervisor would otherwise wait for the actor forever.
     supervisor.start_event_router();
     match apply(request, supervisor).await {
-        Ok(status) => super::custody_response::success(
-            request,
-            g::AgentConfigResult { value: Some(g::agent_config_result::Value::Custody(status)) },
-        ),
+        Ok(result) => super::custody_response::success(request, result),
         Err(error) => super::custody_response::error(request, &error),
     }
 }
@@ -43,7 +57,7 @@ pub(super) async fn respond(
 async fn apply(
     request: &mut LocalBusFrame,
     supervisor: &Supervisor,
-) -> Result<g::AgentCustodyStatus, SdkError> {
+) -> Result<g::AgentConfigResult, SdkError> {
     super::custody_setup::validate_headers(request, &mut None)?;
     super::requests::deadline(request)?;
     if request.kind != LocalBusFrameKind::Request || request.operation_id.is_some() {
@@ -57,26 +71,33 @@ async fn apply(
     let body = std::mem::take(&mut request.body);
     let call = match request.method.as_str() {
         "agent.create" => AgentCall::Create(Box::new(decode(body)?)),
-        "agent.creation.decide" => AgentCall::Decide(decode(body)?),
+        "agent.creation.decide" => AgentCall::Decide(Box::new(decode(body)?)),
         "agent.operation.get" => {
             let get: g::AgentOperationGet = decode(body)?;
             AgentCall::Get(get.operation_id)
         }
+        "agent.list" => AgentCall::List(Box::new(decode(body)?)),
+        "agent.get" => {
+            let get: g::AgentGet = decode(body)?;
+            AgentCall::Record(get.agent_anchor)
+        }
+        "agent.persona.edit" => AgentCall::PersonaEdit(Box::new(decode(body)?)),
+        "agent.access.set" => AgentCall::AccessSet(Box::new(decode(body)?)),
         _ => return Err(SdkError::CustodySetupInvalid),
     };
     let read_id = match &call {
         AgentCall::Get(id) => Some(id.clone()),
-        AgentCall::Create(_) | AgentCall::Decide(_) => None,
+        _ => None,
     };
-    let status = actor.agent_call(call).await?;
+    let result = actor.agent_call(call).await?;
     match read_id {
-        Some(id) if advances_on_read_state(&status.state) => {
+        Some(id) if advances_on_read(&result) => {
             // A failed advance leaves the request where it was; the reread reports that state.
             let now = super::custody_setup::now()?;
             let _ = supervisor.advance_agent_creations(&account_id, now).await;
             actor.agent_call(AgentCall::Get(id)).await
         }
-        _ => Ok(status),
+        _ => Ok(result),
     }
 }
 
@@ -84,9 +105,17 @@ fn decode<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> Result<T, 
     serde_json::from_value(body).map_err(|_| SdkError::CustodySetupInvalid)
 }
 
-/// The states in which `agent.operation.get` advances the creation (contract 7.3).
-fn advances_on_read_state(state: &str) -> bool {
-    matches!(state, "authorized" | "publication_pending" | "publication_unknown")
+/// Whether an operation read advances the creation: only the custody states of contract 7.3 do.
+fn advances_on_read(result: &g::AgentConfigResult) -> bool {
+    match &result.value {
+        Some(g::agent_config_result::Value::Custody(status)) => {
+            matches!(
+                status.state.as_str(),
+                "authorized" | "publication_pending" | "publication_unknown"
+            )
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

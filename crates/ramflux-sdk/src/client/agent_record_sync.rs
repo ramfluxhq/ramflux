@@ -62,7 +62,6 @@ impl RamfluxClient {
     /// # Errors
     /// `confirmation_required` without `confirmed`, `stale_base`, `agent_not_found`,
     /// `agent_retired`, and the persona refusals of `check_persona`.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
     pub(crate) fn agent_persona_edit(
         &self,
         agent: &str,
@@ -84,7 +83,6 @@ impl RamfluxClient {
     /// Access edit on this device (contract 2 `AgentAccessSet`), broadcast like the persona edit.
     /// # Errors
     /// As `agent_persona_edit`, with `access_policy_invalid` for a policy outside the closed shapes.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
     pub(crate) fn agent_access_set(
         &self,
         agent: &str,
@@ -126,7 +124,6 @@ impl RamfluxClient {
     /// (`metadata`, the own-device `stage`). The recipient names this root only.
     /// # Errors
     /// Refuses a clock outside `i64`, a missing owner, or a failed stage.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
     pub(crate) fn stage_agent_metadata(
         &self,
         record: &StoredAgentRecord,
@@ -162,6 +159,26 @@ impl RamfluxClient {
             },
             None,
         )
+    }
+
+    /// One page of the agent records of this root (contract 2 `AgentList`).
+    /// # Errors
+    /// The store's listing and record refusals.
+    pub(crate) fn agent_record_page(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<StoredAgentRecord>, Option<String>), SdkError> {
+        self.agent_record_store()?.page(cursor, usize::try_from(limit).unwrap_or(usize::MAX))
+    }
+
+    /// One stored agent record (contract 2 `AgentGet`).
+    /// # Errors
+    /// `agent_not_found` for no record of that agent on this root.
+    pub(crate) fn agent_record_get(&self, agent: &str) -> Result<StoredAgentRecord, SdkError> {
+        self.agent_record_store()?
+            .load(agent)?
+            .ok_or(SdkError::AgentCreationRefused("agent_not_found"))
     }
 
     /// Applies one authorized metadata body to this device's store (`EventOrder`, see

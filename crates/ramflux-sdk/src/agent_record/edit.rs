@@ -93,7 +93,6 @@ pub(crate) fn record_completed(dir: PathBuf, record: &AgentCreationRecord) -> Re
 /// # Errors
 /// `agent_not_found` for no record, `agent_retired` for a retired one, `stale_base` for a base that
 /// is not the stored identity, and the store's own refusals.
-#[cfg_attr(not(test), allow(dead_code, reason = "the bus methods of stage E4 are the callers"))]
 pub(crate) fn edit_record(
     store: &AgentRecordStore,
     agent: &str,

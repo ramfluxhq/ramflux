@@ -16,6 +16,9 @@ mod policy;
 mod store;
 #[cfg(test)]
 mod tests;
+mod wire;
+
+pub(crate) use wire::to_wire;
 
 pub(crate) use apply::{apply_metadata, metadata_of};
 #[cfg(test)]

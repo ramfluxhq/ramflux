@@ -45,7 +45,7 @@ pub(super) enum PrivateCommand {
     },
     AgentCall {
         call: super::agent_methods::AgentCall,
-        reply: oneshot::Sender<Result<ramflux_protocol::message::AgentCustodyStatus, SdkError>>,
+        reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
     },
     AuthorizeBackup {
         generation: i64,
@@ -274,7 +274,7 @@ impl AccountActor {
     pub(super) async fn agent_call(
         &self,
         call: super::agent_methods::AgentCall,
-    ) -> Result<ramflux_protocol::message::AgentCustodyStatus, SdkError> {
+    ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::AgentCall { call, reply })?;
         response.await.map_err(|_| stopped())?
