@@ -14,6 +14,10 @@ mod state;
 mod store;
 
 #[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 pub(crate) mod tests;
 
 pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
