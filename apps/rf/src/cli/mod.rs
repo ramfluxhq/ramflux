@@ -10,6 +10,7 @@ pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 mod a2i_a2ui;
 mod account;
 mod admin;
+mod agent;
 mod attachment;
 mod call_bot;
 mod contact;
@@ -35,6 +36,7 @@ pub(crate) use task::*;
 pub(crate) use a2i_a2ui::*;
 pub(crate) use account::*;
 pub(crate) use admin::*;
+pub(crate) use agent::*;
 pub(crate) use attachment::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;
@@ -76,6 +78,8 @@ pub(crate) enum Command {
     Device(DeviceCommand),
     /// Native SAS pairing preview (default-off).
     Pairing(PairingCommand),
+    /// Agent accounts: create, decide, list, show, edit, access, delete, status (desktop bus).
+    Agent(AgentCommand),
     /// Full-account primary transfer preview (default-off).
     Transfer(TransferCommand),
     Dm(DmCommand),
