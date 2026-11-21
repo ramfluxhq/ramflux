@@ -22,19 +22,8 @@ impl SurfacePlan {
             if let Intent::AppendText(append) = intent {
                 streams.insert(append.path.clone(), append.final_);
             }
-            let frame = intent.frame(conversation, &state)?;
-            let wire = frame.wire_bytes().map_err(|_| Error::State)?;
-            state = state
-                .apply(
-                    &ramflux_protocol::SurfaceEvent::from_wire_bytes(&wire)
-                        .map_err(|_| Error::State)?,
-                )
-                .map_err(|error| match error {
-                    ramflux_protocol::SurfaceReject::Limit => {
-                        Error::SurfaceRefused(ramflux_sdk::SurfaceRefusalCode::TooLarge)
-                    }
-                    _ => Error::State,
-                })?;
+            let (_, next) = intent.frame(conversation, &state)?;
+            state = next;
         }
         Ok(Self {
             target: state.content().ok_or(Error::State)?.clone(),

@@ -151,8 +151,7 @@ impl SurfaceState {
                 next
             }
         };
-        next.validate()?;
-        let hash = next.hash()?;
+        let hash = next.validate()?;
         if verify_hash && hash != frame.new_surface_hash {
             return Err(Reject::Integrity);
         }
@@ -167,7 +166,17 @@ impl SurfaceState {
     /// Compute the resulting hash for local author intent, then perform normal admission.
     /// # Errors
     /// Refuses any invalid transition or state; never normalizes received wire bytes.
-    pub fn prepare_event(&self, mut frame: EventFrame) -> Result<EventFrame, Reject> {
+    pub fn prepare_event(&self, frame: EventFrame) -> Result<EventFrame, Reject> {
+        self.prepare_event_and_apply(frame).map(|(frame, _)| frame)
+    }
+
+    /// Prepare a local event and retain the result of its normal admission.
+    /// # Errors
+    /// Refuses the same invalid transitions and framing as `prepare_event` and `apply`.
+    pub fn prepare_event_and_apply(
+        &self,
+        mut frame: EventFrame,
+    ) -> Result<(EventFrame, Self), Reject> {
         if let Some(resync) = &frame.resync {
             let Mutation::CreateSurface(create) = &resync.a2ui.mutation else {
                 return Err(Reject::Encoding);
@@ -181,16 +190,15 @@ impl SurfaceState {
             if create.metadata != frame.metadata {
                 return Err(Reject::Integrity);
             }
-            snapshot.validate()?;
-            frame.new_surface_hash = snapshot.hash()?;
+            frame.new_surface_hash = snapshot.validate()?;
         } else {
             frame.new_surface_hash = "pending".into();
-            let event = SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?;
+            let event = SurfaceEvent::from_wire_bytes(&canonical(&frame)?)?;
             let next = self.apply_inner(&event, false)?;
             frame.new_surface_hash = next.hash.ok_or(Reject::NotCreated)?;
         }
-        self.apply(&SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
-        Ok(frame)
+        let next = self.apply(&SurfaceEvent::from_wire_bytes(&canonical(&frame)?)?)?;
+        Ok((frame, next))
     }
     #[must_use]
     pub fn stream_states(&self) -> std::collections::BTreeMap<String, SurfaceStreamState> {
@@ -219,8 +227,7 @@ impl SurfaceState {
             if create.metadata != frame.metadata {
                 return Err(Reject::Integrity);
             }
-            snapshot.validate()?;
-            let hash = snapshot.hash()?;
+            let hash = snapshot.validate()?;
             if hash != frame.new_surface_hash {
                 return Err(Reject::Integrity);
             }
@@ -264,7 +271,7 @@ impl SurfaceState {
                 }
             }
         }
-        let bytes = frame.wire_bytes()?;
+        let bytes = canonical(frame)?;
         Self::validate_proof(&SurfaceEvent::from_wire_bytes(&bytes)?)
     }
     /// Build a v3 resync containing exactly the current signed base and finality.
@@ -331,11 +338,10 @@ impl SurfaceState {
             return Err(Reject::Encoding);
         }
         let before = checkpoint.snapshot.clone();
-        checkpoint.snapshot.validate()?;
+        let hash = checkpoint.snapshot.validate()?;
         if before != checkpoint.snapshot {
             return Err(Reject::Integrity);
         }
-        let hash = checkpoint.snapshot.hash()?;
         Ok(Self {
             snapshot: Some(checkpoint.snapshot),
             hash: Some(hash),
@@ -378,7 +384,7 @@ impl SurfaceSnapshot {
         }
         Ok(crate::hash_base64url("ramflux.a2ui.surface_hash.v2", &bytes))
     }
-    fn validate(&mut self) -> Result<(), Reject> {
+    fn validate(&mut self) -> Result<String, Reject> {
         validate_identifier(&self.surface_id)?;
         if self.catalog_id != CATALOG_ID
             || self.fallback_text.trim().is_empty()
@@ -403,8 +409,7 @@ impl SurfaceSnapshot {
         });
         self.validate_finality()?;
         validate_depth(&serde_json::to_value(&*self).map_err(|_| Reject::Encoding)?, 0)?;
-        self.hash()?;
-        Ok(())
+        self.hash()
     }
     fn validate_finality(&self) -> Result<(), Reject> {
         if self.final_.len() > MAX_FINAL_RECORDS {

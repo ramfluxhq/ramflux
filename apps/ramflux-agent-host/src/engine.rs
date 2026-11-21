@@ -93,7 +93,11 @@ impl Intent {
             Self::CloseSurface(c) => &c.surface_id,
         })
     }
-    pub(crate) fn frame(&self, conversation: &str, state: &SurfaceState) -> Result<EventFrame> {
+    pub(crate) fn frame(
+        &self,
+        conversation: &str,
+        state: &SurfaceState,
+    ) -> Result<(EventFrame, SurfaceState)> {
         if let Self::ReplaceSurface(snapshot) = self {
             let mut frame = state.resync_frame().map_err(|_| Error::State)?;
             frame.surface_version = state.version().checked_add(1).ok_or(Error::Limit)?;
@@ -105,7 +109,7 @@ impl Intent {
             frame.resync = Some(ramflux_protocol::Resync {
                 a2ui: MutationMessage::new(Mutation::CreateSurface(snapshot.create())),
             });
-            return state.prepare_event(frame).map_err(|error| match error {
+            return state.prepare_event_and_apply(frame).map_err(|error| match error {
                 ramflux_protocol::SurfaceReject::Limit => Error::Limit,
                 _ => Error::State,
             });
@@ -136,7 +140,7 @@ impl Intent {
             }
             Self::ReplyText(_) | Self::ReplaceSurface(_) => return Err(Error::State),
         }
-        state.prepare_event(frame).map_err(|error| match error {
+        state.prepare_event_and_apply(frame).map_err(|error| match error {
             ramflux_protocol::SurfaceReject::Limit => Error::Limit,
             _ => Error::State,
         })
@@ -416,10 +420,11 @@ mod surface_intent_tests {
             final_: Vec::new(),
             closed: false,
         };
-        let frame =
+        let (frame, prepared) =
             Intent::CreateSurface(snapshot).frame("conversation", &SurfaceState::default())?;
         let initial = SurfaceState::default()
             .apply(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
+        assert_eq!(prepared, initial, "prepared create must match independent wire admission");
         let mut replacement = initial.content().ok_or("initial snapshot")?.clone();
         replacement.components.reverse();
         replacement
@@ -427,9 +432,14 @@ mod surface_intent_tests {
             .as_object_mut()
             .ok_or("model object")?
             .insert("text".into(), json!("new"));
-        let frame = Intent::ReplaceSurface(replacement).frame("conversation", &initial)?;
+        let (frame, prepared) =
+            Intent::ReplaceSurface(replacement).frame("conversation", &initial)?;
         let committed = initial
             .apply(&ramflux_protocol::SurfaceEvent::from_wire_bytes(&frame.wire_bytes()?)?)?;
+        assert_eq!(
+            prepared, committed,
+            "prepared replacement must match independent wire admission"
+        );
         assert_eq!(
             committed.content().ok_or("replacement")?.data_model.get("text"),
             Some(&json!("new")),

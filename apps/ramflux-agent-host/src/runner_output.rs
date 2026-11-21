@@ -19,14 +19,8 @@ pub(crate) fn surface_outputs(
     let mut state = initial.clone();
     let mut outputs = Vec::new();
     for intent in intents {
-        let frame = intent.frame(conversation, &state)?;
-        let wire = frame.wire_bytes().map_err(|_| Error::State)?;
-        state = state
-            .apply(
-                &ramflux_protocol::SurfaceEvent::from_wire_bytes(&wire)
-                    .map_err(|_| Error::State)?,
-            )
-            .map_err(|_| Error::State)?;
+        let (frame, next) = intent.frame(conversation, &state)?;
+        state = next;
         let request = ramflux_sdk::SurfaceSendRequest::event(&frame).map_err(|_| Error::Limit)?;
         outputs.push(Output {
             method: "surface.send".into(),
