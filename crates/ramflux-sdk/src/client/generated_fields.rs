@@ -101,7 +101,10 @@ fn shape(name: &str, value: &Value, generated: bool, depth: usize) -> Result<Val
     }
     if !generated {
         native_defaults(name, &descriptor, &mut result);
-        if name == "SurfaceEvent" && !result.contains_key("resync") {
+        if name == "SurfaceEvent"
+            && !result.contains_key("resync")
+            && result.get("final").and_then(Value::as_array).is_some_and(Vec::is_empty)
+        {
             result.remove("final");
         }
     }

@@ -94,6 +94,11 @@ fn validate_carrier(carrier: &g::SurfaceCarrier) -> Result<(), SdkError> {
 }
 
 fn validate_event(event: &g::SurfaceEvent) -> Result<(), SdkError> {
+    if !event.r#final.is_empty()
+        && !matches!(event.operation, Some(g::surface_event::Operation::Resync(_)))
+    {
+        return Err(refused("finality records require a full resync"));
+    }
     let mut value = serde_json::json!({"schema":event.schema,"conversationId":event.conversation_id,"surfaceVersion":event.surface_version,"newSurfaceHash":event.new_surface_hash});
     let object = value.as_object_mut().ok_or_else(|| refused("event object missing"))?;
     for (key, field) in [

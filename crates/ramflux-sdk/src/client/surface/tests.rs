@@ -27,15 +27,6 @@ struct Fixture {
     root: ramflux_test_support::TestPath,
     vault: std::sync::Arc<crate::custody::tests::TestVault>,
 }
-fn client(root: &std::path::Path, id: &str, seed: u8) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.create_identity_root(id, [seed; 32]);
-    client.create_device_branch(id, &format!("{id}-device"), 1, [seed + 1; 32]);
-    client.open_account_index(root)?;
-    client.create_account(id, "surface-test-commitment")?;
-    client.unlock_account(id, b"surface-test-secret")?;
-    Ok(client)
-}
 impl Fixture {
     async fn new() -> TestResult<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);

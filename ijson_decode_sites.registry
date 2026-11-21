@@ -190,8 +190,6 @@ apps/rf/src/handlers/object.rs | handle_object | 1 | E | excluded=decode is not 
 apps/rf/src/handlers/pairing.rs | invoke | 1 | C | admission=crates/ramflux-sdk/src/bus/io.rs#read_local_bus_frame#1
 apps/rf/src/handlers/pairing/registry.rs | load | 1 | E | excluded=closed device-local pairing registry, selection, reference or display metadata outside signed Envelope/Ack/Nack closure
 apps/rf/src/handlers/pairing/sas/comparison.rs | peer_matches | 1 | E | excluded=closed device-local pairing registry, selection, reference or display metadata outside signed Envelope/Ack/Nack closure
-apps/rf/src/handlers/surface.rs | handle_surface | 1 | A | strict=parse_i_json; admission=rf CLI surface action file parsed through the strict I-JSON helper
-apps/rf/src/handlers/surface.rs | handle_surface | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/task.rs | body_file | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/keychain.rs | decode_keychain_secret | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/utils.rs | media_content | 1 | A | strict=parse_i_json; admission=rf CLI media descriptor file parsed through the strict I-JSON helper
@@ -735,12 +733,7 @@ crates/ramflux-sdk/src/client/shared_group/own_consent.rs | canonical_leaf | 1 |
 crates/ramflux-sdk/src/client/shared_group/routes.rs | shared_group_member_routes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/shared_group/snapshot_generated.rs | generated_snapshot_packet | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
 crates/ramflux-sdk/src/client/surface/authored.rs | reuse_authored_surface | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/surface/carrier.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/surface/control.rs | receive_surface_control_from | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/surface/own_delivery.rs | prepare_own_surface_context | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/surface/own_history.rs | surface_export_decisions | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/surface/resync_request.rs | receive_surface_resync_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/surface/resync_request.rs | receive_surface_resync_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/surface/snapshot.rs | prepare_surface_resync | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/surface/task_action_read.rs | retained_task_surface_actions | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/surface/task_decision.rs | task_surface_receipt | 1 | D | admitted-before-persist; stored row is not an ingress decoder
@@ -996,3 +989,8 @@ crates/ramflux-transport/src/quic_gateway.rs | decode_quic_gateway_response | 1 
 crates/ramflux-transport/src/quic_gateway.rs | read_gateway_session_json | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_quic_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
+crates/ramflux-sdk/src/client/surface/generated.rs | action | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
+crates/ramflux-sdk/src/client/surface/generated.rs | event | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
+crates/ramflux-sdk/src/client/surface/generated.rs | rpc | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
+crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
+crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 2 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder

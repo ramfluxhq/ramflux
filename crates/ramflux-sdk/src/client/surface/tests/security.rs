@@ -222,34 +222,48 @@ async fn retry_keeps_the_signed_snapshot_after_the_authored_version_has_advanced
 #[tokio::test]
 async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> TestResult {
     let f = Fixture::new().await?;
-    let mut outsider = client(&f.root.join("outsider"), "outsider", 61)?;
-    outsider.create_device_branch("outsider", "author-device", 1, [62; 32]);
-    f.human.persist_root_verified_directory(
-        &crate::client::identity_authority::test_support::public_manifest(&outsider)?,
-    )?;
+    let outsider_fixture = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+        "outsider",
+        "author-device",
+        "outsider",
+    ))
+    .await?;
+    let outsider = &outsider_fixture.client;
+    f.human.persist_observed_identity_directory_now(&outsider_fixture.manifest)?;
     let good =
         carrier(&f.author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
     f.human.verify_surface_carrier(&good, "author", "author-device")?;
     assert!(project(&f.human, &good, "honest")?.accepted);
     let other = carrier(
-        &outsider,
+        outsider,
         PayloadKind::Event,
         "outsider",
         &event(1, C::CreateSurface(snapshot()))?,
     )?;
     f.human.verify_surface_carrier(&other, "outsider", "author-device")?;
-    assert!(!project(&f.human, &other, "outsider")?.accepted);
+    assert!(
+        project(&f.human, &other, "outsider")?.accepted,
+        "a verified foreign author retains its fallback despite the colliding device name"
+    );
+    assert!(
+        f.human.surface_state_scoped("thread", "outsider", "s")?.is_none(),
+        "a colliding peer device name must not grant renderer authority"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn third_party_authors_have_only_quoted_fallback_and_never_rpc_or_card_state() -> TestResult {
     let f = Fixture::new().await?;
-    let outsider = client(&f.root.join("foreign-author"), "outsider", 83)?;
-    f.human.persist_root_verified_directory(
-        &crate::client::identity_authority::test_support::public_manifest(&outsider)?,
-    )?;
-    let event = signed_in(&outsider, "outsider", "thread", "foreign-create", "Plain fallback")?;
+    let outsider_fixture = Box::pin(crate::client::native_test_support::Fixture::with_principal(
+        "outsider",
+        "outsider-device",
+        "outsider",
+    ))
+    .await?;
+    let outsider = &outsider_fixture.client;
+    f.human.persist_observed_identity_directory_now(&outsider_fixture.manifest)?;
+    let event = signed_in(outsider, "outsider", "thread", "foreign-create", "Plain fallback")?;
     assert!(
         project(&f.human, &event, "foreign")?.accepted,
         "authenticated foreign authors retain their plain fallback"

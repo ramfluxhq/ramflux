@@ -274,3 +274,33 @@ fn duplicate_json_members_and_legacy_generated_wire_are_refused() -> TestResult 
     );
     Ok(())
 }
+
+#[test]
+fn ordinary_event_cannot_hide_finality_records_during_generated_conversion() -> TestResult {
+    let mut event = create()?;
+    let mut signed = carrier(surface_carrier::Payload::Event(event.clone()));
+    signed.schema = ramflux_protocol::domain::SURFACE_CARRIER.into();
+    signed.content_type = "surface".into();
+    signed.message_id = "finality-conversion".into();
+    signed.sender_device_id = "alice-device".into();
+    assert!(
+        crate::client::surface::Carrier::from_generated(&signed).is_ok(),
+        "control: an ordinary generated create must reach native admission"
+    );
+    event
+        .r#final
+        .push(g::SurfaceFinalEntry { pointer: "/text".into(), text_hash: "forbidden".into() });
+    signed.payload = Some(surface_carrier::Payload::Event(event.clone()));
+    assert!(
+        crate::client::surface::Carrier::from_generated(&signed).is_err(),
+        "generated conversion must retain and refuse illegal finality rather than erase it"
+    );
+    assert!(
+        RamfluxClient::validate_generated_surface(&delivery(surface_carrier::Payload::Event(
+            event
+        )))
+        .is_err(),
+        "the public generated admission must refuse the same illegal finality"
+    );
+    Ok(())
+}
