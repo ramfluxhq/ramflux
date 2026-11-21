@@ -501,13 +501,29 @@ impl HttpRelay {
     /// # Errors
     /// Rejects a malformed extra root CA or a client that cannot be built.
     pub fn from_config(config: &PairingConfig) -> Result<Self, SdkError> {
+        Self::build(config, None)
+    }
+
+    /// Use the selected local node's configured CA in addition to ordinary HTTPS roots.
+    /// The invitation supplies no trust root; native node-key binding is checked separately.
+    /// # Errors
+    /// Rejects malformed configured certificates or a client that cannot be built.
+    pub fn for_node_profile(
+        config: &PairingConfig,
+        profile: &crate::NodeProfile,
+    ) -> Result<Self, SdkError> {
+        let pem = (!profile.ca_cert_pem.is_empty()).then_some(profile.ca_cert_pem.as_str());
+        Self::build(config, pem)
+    }
+
+    fn build(config: &PairingConfig, node_ca_pem: Option<&str>) -> Result<Self, SdkError> {
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_DEADLINE)
             .pool_max_idle_per_host(0);
-        if let Some(pem) = &config.extra_root_ca_pem {
+        for pem in [config.extra_root_ca_pem.as_deref(), node_ca_pem].into_iter().flatten() {
             let cert = reqwest::Certificate::from_pem(pem.as_bytes())
                 .map_err(|error| SdkError::LocalBus(error.to_string()))?;
             builder = builder.add_root_certificate(cert);

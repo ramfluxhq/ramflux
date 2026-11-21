@@ -1,5 +1,5 @@
 {
-  "census_hash": "Al4oj7N2byb1sRCnNELWpXktmnm0j6tKRtGJ294Tjno",
+  "census_hash": "yPmMnvfM8_WZARTV40U7pEF3T1dUVxpORtaYJ_nOWho",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -51,11 +51,11 @@
       "id": "sql/bot_trust_pin"
     },
     {
-      "hash": "Age-yuHNcUlrTfXJlzr7tIBXHkt9v9SC_h36PkLOB_E",
+      "hash": "JZEvbqMJC5clV9NIAdJIAfFx3J6s782zzrmNV0da7QE",
       "id": "sql/contact_link_decision"
     },
     {
-      "hash": "MgJm-gJDk1Cjs47H8MoIDM5PwIQ6xFD8LgAPsPpohPU",
+      "hash": "U5ctmZdA8LhDJ5JQz-1_S_EoPk16Iz_EsTR8MvO4f2A",
       "id": "sql/contact_message_fence_retention"
     },
     {
@@ -63,27 +63,27 @@
       "id": "sql/contact_message_request"
     },
     {
-      "hash": "lG9YBJoilkMDF7jExIyYoRQavqyk09PMfubputV52TQ",
+      "hash": "Hv69QffLtFbbn90vkOc6Tfi7eJo9Z1ko9W6-0jwMWG0",
       "id": "sql/contact_message_request_fence"
     },
     {
-      "hash": "OmEGU-wk3o9YEyYCfS7yd69m-Yjrg-65ELDFAdnjn-8",
+      "hash": "PyfgchAefkdjQ7f6_4h5DZ6ek0h7k4XM-VDPo8GUg0U",
       "id": "sql/contact_request_authority_floor"
     },
     {
-      "hash": "SnDgBtYuP3LwKjE8SnjvnwksLbEBKL6WN99D_iMbT44",
+      "hash": "S4rzPBDy-E91AgM436yKER0P6Y1drKyNSzXJ2y8ECGY",
       "id": "sql/contact_request_decision"
     },
     {
-      "hash": "AOjylVX9XEVw51jjApeZTRKMo2mxIRTr3Beu5hZp4zY",
+      "hash": "2Pv5HyuwACdzITf4OahUumLBbmJQNQRxuHvrbvpMbE8",
       "id": "sql/contact_request_delivery"
     },
     {
-      "hash": "ACSK9Ofx5Ml4HJoHcYwjQcb6-zwJJKpldJVMXbYp2pY",
+      "hash": "DrcM_QWmRpuHVrR9_KEsQqNGMZD45sPXSGOnJ17fQxc",
       "id": "sql/contact_request_fence"
     },
     {
-      "hash": "kXM2TlyjluViTKzrOIxXie9_r8_sGGAnleMBQNZF_10",
+      "hash": "GHiqes-OOu2Wg09mmq1JefDEM_00OP4kudFDF_jh2v8",
       "id": "sql/contact_request_projection"
     },
     {
@@ -91,7 +91,7 @@
       "id": "sql/contact_request_rate"
     },
     {
-      "hash": "dH-eXh5yQ4DreQhAJYbByPlU6bicFpZ3mCBQtrum1rA",
+      "hash": "tH4DkIer6IdVm73iVnYZkMI5H8qHw5oORV3YsvjAo8w",
       "id": "sql/contact_request_retirement"
     },
     {
@@ -103,11 +103,11 @@
       "id": "sql/conversation_delivery_state"
     },
     {
-      "hash": "AjasEk7S65bQc67q5OrJinkgDfZ7wZlLJnIbLg8t7QQ",
+      "hash": "SKT4folId_f1N6-fA1J0ASMSBiY82Q6-Hze8Ui0CyWg",
       "id": "sql/conversation_disappearing_policy"
     },
     {
-      "hash": "iA5uGwzgfYwtrV2Bl25__-H03S_mnRPlV51c2CR3p2k",
+      "hash": "Oz9tTiKyAkNm1asCFIn8hHuvQZXHLTD8c6Q1JdKLp-4",
       "id": "sql/conversation_list_state"
     },
     {
@@ -159,16 +159,36 @@
       "id": "sql/event_tombstone"
     },
     {
-      "hash": "9iF8IrEVUS4xTmP6HRG_AO4htYYM02gRtH4deZQfuog",
+      "hash": "k2e5QCBdElmmYcQaxl0IUhO4xNapFViBlPK1P-bMcO4",
       "id": "sql/friend_link_projection"
     },
     {
-      "hash": "h3utYsd5NXs-hrjPNbWx4zsRZdv-aHqM6-Avm3ab7CA",
+      "hash": "j6bYbxxQmPBhkuxsQ6iO6bZS1yC2L90kdpZHHvNeYGE",
       "id": "sql/friend_projection"
     },
     {
       "hash": "ezixSXeCB9XhUBgWY7vGHpldkVvA5dEja6VRY0o90TY",
       "id": "sql/full_imported_mac_bundle"
+    },
+    {
+      "hash": "Yw22znQ8x9TL7yoqZfq00bHpKeHYiz247UDhIVvQGOU",
+      "id": "sql/gateway_ack_intent"
+    },
+    {
+      "hash": "f3EPpwFi6cHKEc82kKtEAemrCuiVhVe1N-qdYBkGP3k",
+      "id": "sql/gateway_inbox_loss"
+    },
+    {
+      "hash": "VkOFzEEUYB5Q2eKyAffDHnEZglJRgR0ms396yw83zE4",
+      "id": "sql/gateway_receive_epoch"
+    },
+    {
+      "hash": "F9tguiMuPPIk_kUd8xypnrH25_RmTPW-90WbULTmkZI",
+      "id": "sql/gateway_receive_receipt"
+    },
+    {
+      "hash": "0J3WFcNWQa7YVpHn0CIghAEt6ruqQYUshIGYTACaTc4",
+      "id": "sql/gateway_receive_work"
     },
     {
       "hash": "FicoBUdSzUTlTiYzIbVrGQJd2SDpkDe5ZlkKRm4xybM",
@@ -307,7 +327,7 @@
       "id": "sql/message_projection"
     },
     {
-      "hash": "fPvdoO-j03_a4ygs0tMlojAkMlRsSobTVckOLvtpwmw",
+      "hash": "bDSu-4lcL86ccELGVXDYjdl0qJsQxhijcigmt73tGxk",
       "id": "sql/message_tombstone_projection"
     },
     {
@@ -519,7 +539,7 @@
       "id": "sql/receipt_projection"
     },
     {
-      "hash": "5SGDB4WvY5LmHg_yn_i535aQcF0bYhz94eVvfg2ooxY",
+      "hash": "fmc2_2rWJ2FmX6zTPsSuOWAL2beX_rvfxKeQwBRVX1U",
       "id": "sql/receive_erased_input"
     },
     {

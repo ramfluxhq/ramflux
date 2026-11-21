@@ -8,7 +8,7 @@ use crate::prelude::*;
 /// Read-only, account-wide summary of a conversation for list views.
 ///
 /// Fields mirror exactly what the storage schema persists: the conversation
-/// id, derived message activity, and the archived/pinned list flags. The
+/// id, derived message activity, archived/pinned flags and the mute deadline. The
 /// schema has no peer/display-name column and no reader-scoped unread count
 /// without a reader id, so neither is exposed here.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -19,6 +19,8 @@ pub struct ConversationSummary {
     pub last_activity_at: Option<i64>,
     pub is_archived: bool,
     pub pin_order: Option<i64>,
+    /// Exact decimal seconds; preserves the permanent-mute sentinel above 2^53.
+    pub mute_until: Option<String>,
 }
 
 impl From<ConversationSummaryRecord> for ConversationSummary {
@@ -30,6 +32,7 @@ impl From<ConversationSummaryRecord> for ConversationSummary {
             last_activity_at: record.last_activity_at,
             is_archived: record.is_archived,
             pin_order: record.pin_order,
+            mute_until: record.mute_until.map(|deadline| deadline.to_string()),
         }
     }
 }
@@ -414,7 +417,18 @@ mod tests {
             created_at: 1_900_000_050,
         })?;
 
+        client.mute_conversation("conv_two", i64::MAX)?;
         let summaries = client.conversation_list()?;
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|row| row.conversation_id == "conv_two")
+                .and_then(|row| row.mute_until.as_deref()),
+            Some("9223372036854775807"),
+            "test: permanent mute must survive the ordinary summary without an unsafe JSON integer",
+        );
+        let _: serde_json::Value =
+            ramflux_protocol::parse_i_json(&serde_json::to_vec(&summaries)?)?;
         assert!(summaries.iter().any(|summary| summary.conversation_id == "conv_one"
             && summary.message_count == 2
             && summary.last_message_id.as_deref() == Some("msg_one_b")

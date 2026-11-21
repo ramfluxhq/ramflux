@@ -17,59 +17,14 @@ pub(crate) mod producer;
 #[cfg(test)]
 mod producer_tests;
 
-pub(crate) struct Author {
-    pub(crate) root: String,
-    pub(crate) device: ramflux_crypto::RootQualifiedDeviceRef,
-}
+pub(crate) use ramflux_crypto::native_origin::Author;
 
 pub(crate) fn authority(
     outer: &Value,
     manifest: &g::NativeCustodyManifest,
     identity: &g::EventIdentity,
 ) -> Result<Author, SdkError> {
-    let bad = EvidenceError::OriginCommitmentMismatch;
-    let manifest: ramflux_protocol::custody::CustodyManifest =
-        ramflux_protocol::custody::decode(&manifest.canonical, 5 * 1024 * 1024).map_err(|_| bad)?;
-    let issued = outer["created_at"].as_u64().ok_or(bad)?;
-    let verified = crate::custody::verify_public_authority(
-        &manifest.publication,
-        manifest.custodian_publication.as_ref(),
-        issued,
-    )
-    .map_err(|_| bad)?;
-    let root = &verified.envelope().body.account_anchor;
-    let author = identity.author.as_ref().ok_or(bad)?;
-    if author.account_anchor != *root
-        || outer["source_device_id"].as_str() != Some(author.device_id.as_str())
-        || outer["source_principal_id"].as_str()
-            != Some(verified.envelope().body.principal_id.as_str())
-        || outer["ext"]["source_root_commitment"].as_str() != Some(root.as_str())
-    {
-        return Err(bad.into());
-    }
-    let device = ramflux_protocol::custody::DeviceRef {
-        account_anchor: root.clone(),
-        device_id: author.device_id.clone(),
-        device_epoch: author.device_epoch,
-    };
-    let certified = verified.authorize(&device, "message", issued).map_err(|_| bad)?;
-    if identity.group_id.is_some() {
-        verified.authorize(&device, "group", issued).map_err(|_| bad)?;
-    }
-    ramflux_protocol::verify_sender_signature(
-        outer,
-        ramflux_protocol::SenderTranscriptMode::Evidence,
-        &certified.branch_signing_public_key,
-    )
-    .map_err(|_| bad)?;
-    Ok(Author {
-        root: root.clone(),
-        device: ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
-            &verified,
-            &author.device_id,
-        )
-        .map_err(|_| bad)?,
-    })
+    Ok(ramflux_crypto::native_origin::authority(outer, manifest, identity)?)
 }
 
 fn verify_edit_origin(

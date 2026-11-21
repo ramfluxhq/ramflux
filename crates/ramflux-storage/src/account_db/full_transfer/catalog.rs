@@ -46,6 +46,12 @@ pub struct VariantRule {
     pub tag: &'static str,
     pub fields: &'static [FieldRule],
 }
+/// Closed small-metadata projections, never arbitrary JSON or native content fallback.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlProjection {
+    ContactRequestMetadataV1,
+}
 /// Descriptor only: interpretation is performed by the field's typed owner. `SignedExact`
 /// forbids rewriting a signed document; a present excluded nested value makes it refuse.
 #[derive(Clone, Copy, Serialize)]
@@ -76,8 +82,17 @@ pub enum CodecRule {
     },
     /// Exactly 192 account MAC subkey bytes, SHA256-bound to the `bundle_id` key.
     SqlMacSubkeys,
+    /// Closed metadata with explicit nested public/execution field assignments.
+    SqlJsonProjection {
+        projection: SqlProjection,
+        fields: &'static [FieldRule],
+    },
     /// Closed canonical public `DeviceRef` JSON text (at most 512 bytes), not opaque JSON.
     SqlDeviceRef,
+    /// Canonical root-qualified public device lookup key; never an authority object.
+    SqlQualifiedDeviceKey,
+    /// Closed five-column message-erasure projection, interpreted by its semantic owner.
+    SqlMessageTombstone,
     /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
     SqlBytes {
         length: U64,
@@ -94,6 +109,17 @@ pub enum CodecRule {
         max: &'static str,
         nullable: bool,
     },
+    /// Bounded plain SQLite UTF-8 metadata; never a JSON or native-document fallback.
+    SqlText {
+        min_bytes: U64,
+        max_bytes: U64,
+        nullable: bool,
+    },
+    /// Closed SQLite text tokens, distinct from a JSON enum encoding.
+    SqlEnum {
+        values: &'static [&'static str],
+        nullable: bool,
+    },
     Object {
         fields: &'static [FieldRule],
     },
@@ -107,6 +133,20 @@ pub enum CodecRule {
     SignedExact {
         body: &'static Self,
     },
+}
+pub(super) fn scalar_sql_codec(codec: &CodecRule) -> bool {
+    matches!(
+        codec,
+        CodecRule::SqlMacSubkeys
+            | CodecRule::SqlJsonProjection { .. }
+            | CodecRule::SqlDeviceRef
+            | CodecRule::SqlQualifiedDeviceKey
+            | CodecRule::SqlBytes { .. }
+            | CodecRule::SqlBase64 { .. }
+            | CodecRule::SqlI64 { .. }
+            | CodecRule::SqlText { .. }
+            | CodecRule::SqlEnum { .. }
+    )
 }
 /// Exact OVP-08 + A5.M3 hash operands. All references originate in compiled constants.
 /// Runtime row counts/lengths are absent; they never alter the schema commitment.
@@ -214,6 +254,7 @@ impl FamilyRule {
         {
             return Err(unsupported());
         }
+        self.validate_projection_owners()?;
         self.validate_cells()?;
         for (index, name) in self.excluded.iter().enumerate() {
             if !identifier(name, false)
@@ -257,16 +298,38 @@ impl FamilyRule {
         }
         Ok(())
     }
+    fn validate_projection_owners(&self) -> Result<(), StorageError> {
+        for field in self.codec {
+            if matches!(field.codec, CodecRule::SqlJsonProjection { .. })
+                && (self.id != super::contact_request_history::FAMILY
+                    || !matches!(
+                        self.selector,
+                        FamilySelector::Table("contact_request_projection")
+                    )
+                    || field.name != "request_json")
+            {
+                return Err(unsupported());
+            }
+        }
+        Ok(())
+    }
     fn validate_cells(&self) -> Result<(), StorageError> {
+        if self.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlMessageTombstone)) {
+            super::message_denial::require_rule(self)?;
+        }
         if matches!(self.selector, FamilySelector::ActorPrefix(_))
             && self.codec.iter().any(|field| {
                 matches!(
                     field.codec,
                     CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlJsonProjection { .. }
                         | CodecRule::SqlDeviceRef
+                        | CodecRule::SqlQualifiedDeviceKey
                         | CodecRule::SqlBytes { .. }
                         | CodecRule::SqlBase64 { .. }
                         | CodecRule::SqlI64 { .. }
+                        | CodecRule::SqlText { .. }
+                        | CodecRule::SqlEnum { .. }
                 )
             })
         {
@@ -288,8 +351,15 @@ impl FamilyRule {
                 CodecRule::Scalar { cell_type } | CodecRule::RequiresOwner { cell_type, .. } => {
                     Some(cell_type)
                 }
-                CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
-                CodecRule::SqlBase64 { .. } | CodecRule::SqlDeviceRef => Some(CellType::Utf8),
+                CodecRule::SqlMacSubkeys
+                | CodecRule::SqlBytes { .. }
+                | CodecRule::SqlJsonProjection { .. } => Some(CellType::Bytes),
+                CodecRule::SqlBase64 { .. }
+                | CodecRule::SqlDeviceRef
+                | CodecRule::SqlQualifiedDeviceKey
+                | CodecRule::SqlMessageTombstone
+                | CodecRule::SqlText { .. }
+                | CodecRule::SqlEnum { .. } => Some(CellType::Utf8),
                 CodecRule::SqlI64 { .. } => Some(CellType::I64),
                 _ => None,
             };
@@ -403,10 +473,20 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
-        CodecRule::SqlMacSubkeys | CodecRule::SqlDeviceRef => {
+        CodecRule::SqlMacSubkeys
+        | CodecRule::SqlDeviceRef
+        | CodecRule::SqlQualifiedDeviceKey
+        | CodecRule::SqlMessageTombstone => {
             if depth != 1 {
                 return Err(unsupported());
             }
+        }
+        CodecRule::SqlJsonProjection { projection, fields } => {
+            if depth != 1 {
+                return Err(unsupported());
+            }
+            projection.require_fields(fields)?;
+            validate_fields(fields, depth + 1, remaining)?;
         }
         CodecRule::SqlBase64 { decoded_bytes, .. } => {
             if depth != 1 || decoded_bytes.0 != 32 {
@@ -423,6 +503,22 @@ fn validate_codec(
                 return Err(unsupported());
             }
             sql_i64_bounds(min, max)?;
+        }
+        CodecRule::SqlText { min_bytes, max_bytes, .. } => {
+            if depth != 1
+                || min_bytes.0 > max_bytes.0
+                || max_bytes.0 == 0
+                || max_bytes.0
+                    > ramflux_protocol::custody::pairing::full_transfer::MAX_STABLE_KEY_BYTES as u64
+            {
+                return Err(unsupported());
+            }
+        }
+        CodecRule::SqlEnum { values, .. } => {
+            if depth != 1 {
+                return Err(unsupported());
+            }
+            validate_tokens(values, 128)?;
         }
         CodecRule::Generated { cell_type, hidden, expression } => {
             if *cell_type == CellType::Null
@@ -444,20 +540,7 @@ fn validate_codec(
                 return Err(unsupported());
             }
         }
-        CodecRule::Enum { values } => {
-            if values.is_empty() || values.len() > 256 {
-                return Err(unsupported());
-            }
-            for (index, value) in values.iter().enumerate() {
-                if value.is_empty()
-                    || value.len() > 1024
-                    || value.chars().any(char::is_control)
-                    || values[..index].contains(value)
-                {
-                    return Err(unsupported());
-                }
-            }
-        }
+        CodecRule::Enum { values } => validate_tokens(values, 1024)?,
         CodecRule::Scalar { cell_type } => {
             if *cell_type == CellType::Null {
                 return Err(unsupported());
@@ -480,6 +563,21 @@ fn validate_codec(
         }
         CodecRule::Array { element } | CodecRule::SignedExact { body: element } => {
             validate_codec(element, depth + 1, remaining)?;
+        }
+    }
+    Ok(())
+}
+fn validate_tokens(values: &[&str], max_bytes: usize) -> Result<(), StorageError> {
+    if values.is_empty() || values.len() > 256 {
+        return Err(unsupported());
+    }
+    for (index, value) in values.iter().enumerate() {
+        if value.is_empty()
+            || value.len() > max_bytes
+            || value.chars().any(char::is_control)
+            || values.get(..index).ok_or_else(unsupported)?.contains(value)
+        {
+            return Err(unsupported());
         }
     }
     Ok(())
@@ -553,6 +651,21 @@ macro_rules! table_rule {
     (@version "full_imported_mac_bundle",Transfer) => { U64(2) };
     (@version "runtime_inbox_recovery",$mode:ident) => { U64(2) };
     (@version "pairing_adoption",$mode:ident) => { U64(2) };
+    (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
+    (@version "receive_erased_input",$mode:ident) => { U64(2) };
+    (@version "contact_request_authority_floor",$mode:ident) => { U64(2) };
+    (@version "conversation_list_state",$mode:ident) => { U64(2) };
+    (@version "conversation_disappearing_policy",$mode:ident) => { U64(2) };
+    (@version "friend_link_projection",$mode:ident) => { U64(2) };
+    (@version "friend_projection",$mode:ident) => { U64(2) };
+    (@version "contact_request_delivery",$mode:ident) => { U64(2) };
+    (@version "contact_request_projection",$mode:ident) => { U64(2) };
+    (@version "contact_link_decision",$mode:ident) => { U64(2) };
+    (@version "contact_request_decision",$mode:ident) => { U64(2) };
+    (@version "contact_message_fence_retention",$mode:ident) => { U64(2) };
+    (@version "contact_message_request_fence",$mode:ident) => { U64(2) };
+    (@version "contact_request_fence",$mode:ident) => { U64(2) };
+    (@version "contact_request_retirement",$mode:ident) => { U64(2) };
     (@version $other:literal,$mode:ident) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {
@@ -587,6 +700,7 @@ mod pairing;
 mod progress;
 mod receipts;
 mod receive;
+pub(super) mod receive_local;
 mod recovery;
 mod routing;
 mod runtime;
@@ -643,6 +757,11 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     contacts::RULE_37,      // sql/friend_link_projection
     contacts::RULE_38,      // sql/friend_projection
     keys::RULE_159,         // sql/full_imported_mac_bundle
+    receive_local::ACK,
+    receive_local::LOSS,
+    receive_local::EPOCH,
+    receive_local::RECEIPT,
+    receive_local::WORK,
     groups::RULE_39,        // sql/group_ban_projection
     groups::RULE_40,        // sql/group_control_event_seen
     groups::RULE_41,        // sql/group_invite_projection

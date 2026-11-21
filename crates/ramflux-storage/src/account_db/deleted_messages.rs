@@ -224,7 +224,8 @@ impl AccountDb {
     }
 
     fn persist_deletion_marker(&self, message: &str) -> Result<(), StorageError> {
-        self.persist_actor_state(&self.deletion_marker_key(message)?, &json!({"version":2}))?;
+        let owned = message.to_owned();
+        self.connection.call(move |db| Ok(retain_deletion_marker_on(db, &owned)))??;
         self.remove_actor_state(&legacy_deletion_marker_key(message))
     }
 
@@ -289,20 +290,30 @@ impl AccountDb {
         self.connection.call(move |raw| Ok(super::mac_subkeys::all_macs(raw, &info, &value)))?
     }
 
-    fn deletion_hash(&self, message: &str) -> Result<String, StorageError> {
-        self.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())
-    }
-
-    fn deletion_marker_key(&self, message: &str) -> Result<String, StorageError> {
-        Ok(format!("message/deleted/{}", self.deletion_hash(message)?))
-    }
-
     fn deleted_envelope_marker_key(&self, envelope: &str) -> Result<String, StorageError> {
         Ok(format!(
             "message/deleted-envelope/{}",
             self.account_mac(b"ramflux/deleted-envelope/v1", envelope.as_bytes())?
         ))
     }
+}
+
+/// Retain a content-free sticky denial under this database's own current MAC owner.
+/// The full-transfer importer uses the same marker as ordinary local erasure, including
+/// when the destination never held the deleted message. No source marker is adopted.
+pub(in crate::account_db) fn retain_deletion_marker_on(
+    db: &rusqlite::Connection,
+    message: &str,
+) -> Result<(), StorageError> {
+    let mac = super::mac_subkeys::current_mac(db, b"ramflux/tombstone-key/v1", message.as_bytes())?;
+    let key = format!("message/deleted/{mac}");
+    db.execute(
+        "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)
+         ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json
+         WHERE state_json<>excluded.state_json",
+        params![key, b"{\"version\":2}".as_slice()],
+    )?;
+    Ok(())
 }
 
 fn legacy_deletion_hash(message: &str) -> String {

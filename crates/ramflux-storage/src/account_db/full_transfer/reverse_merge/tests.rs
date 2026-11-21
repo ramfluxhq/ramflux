@@ -104,3 +104,43 @@ fn pairing_full_linked_reverse_merge_replays_committed_record_and_signs_only_aft
     );
     Ok(())
 }
+
+#[test]
+fn full_contact_reverse_denial_restricts_actual_old_primary_before_receipt() -> TestResult {
+    let (_root, db, reference, hash) =
+        super::super::reverse_validation::tests::staged_with_seed(false, 0, |a, b| {
+            a.establish_friend_link("link", "self", "peer")?;
+            b.connection
+                .execute("INSERT INTO contact_link_decision VALUES('link','blocked',100000)", [])?;
+            Ok(())
+        })?;
+    let work = db
+        .open_full_stage_reference(reference.clone(), PairingRole::Initiator, 1000)?
+        .into_reverse_validation_work(&hash)?;
+    let proof = work.validate()?;
+    let mut stage = db.open_full_stage_reference(reference, PairingRole::Initiator, 1000)?;
+    stage.accept_validated_reverse_input(&proof)?;
+    assert_eq!(
+        db.friend_link("link")?.state,
+        "accepted",
+        "test: byte validation alone mutated A friendship"
+    );
+    let mut complete = false;
+    for _ in 0..3 {
+        if stage.apply_restrictive_reverse_batch(&hash, 32)? {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "test: bounded reverse contact batch did not complete");
+    let link = db.friend_link("link")?;
+    assert_eq!(link.state, "blocked", "test: reverse decision left A contact active");
+    assert!(link.blocked, "test: reverse decision omitted product block flag");
+    assert_eq!(
+        link.capability_revoked_at,
+        Some(100),
+        "test: reverse decision omitted capability cutoff"
+    );
+    stage.prepare_applied_reverse_receipt(1000)?;
+    Ok(())
+}

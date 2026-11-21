@@ -66,28 +66,35 @@ impl Contributions {
                 )?;
                 continue;
             }
-            let mut bytes = Zeroizing::new(Vec::new());
-            write_record_header(&mut *bytes, &header.0).map_err(|_| invalid())?;
-            let body = bytes.len();
-            super::super::copy_full_scalar_record(rule, &header.0, &mut input, &mut *bytes)?;
             if header.0.op == RecordOp::Absent {
-                // Union/max restrictions outlive their absence at A. Content may remove
-                // only A's row and may never erase an independently retained B value.
+                super::super::copy_full_scalar_record(
+                    rule,
+                    &header.0,
+                    &mut input,
+                    &mut std::io::sink(),
+                )?;
+                // Absence removes only this source's content contribution; independent
+                // B rows and retained denials survive their own compiled owner rules.
                 if !rule.restrictive {
                     self.absent(tx, private, &header.0)?;
                 }
                 continue;
             }
-            private.apply_full_fixed_base_record(
-                &source,
-                &header.0,
-                &mut bytes.get(body..).ok_or_else(invalid)?,
+            let candidate = super::super::record_spool::Candidate::input(
+                tx,
+                rule,
+                header.0.clone(),
+                &mut input,
             )?;
-            if rule.id == "sql/account_erasure_generation" {
-                tx.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![self.nonce.as_slice(),self.owners[0],header.0.family,header.0.key,bytes.as_slice()])?;
-            } else {
-                retain(tx, &self.nonce, &self.owners[0], &bytes)?;
+            candidate.apply(private, &source)?;
+            if super::removable(rule.id) {
+                candidate.retain_original(&self.nonce, &self.owners[0])?;
             }
+            candidate.retain_union(
+                &self.nonce,
+                &self.owners[0],
+                super::super::monotonic::owner(rule.id).is_some(),
+            )?;
         }
         Ok(())
     }
@@ -97,12 +104,10 @@ impl Contributions {
         private: &BackupDatabase,
         header: &RecordHeader,
     ) -> Result<(), StorageError> {
-        // This is the currently declared nonrestrictive fixed owner. New owners must
-        // supply their own deletion/rebuild semantics rather than a generic SQL fallback.
-        if header.family != "sql/object_payload_dependency" {
+        if !super::removable(&header.family) {
             return Err(invalid());
         }
-        let old:Option<Vec<u8>>=tx.query_row("SELECT record FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key],|r|r.get(0)).optional()?;
+        let old:Option<Vec<u8>>=tx.query_row("SELECT coalesce(i.record,r.record) FROM full_union_record r LEFT JOIN full_union_input i USING(generation_nonce,owner,family,key) WHERE r.generation_nonce=?1 AND r.owner=?2 AND r.family=?3 AND r.key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key],|r|r.get(0)).optional()?;
         let Some(old) = old.map(Zeroizing::new) else {
             return Ok(());
         };
@@ -114,10 +119,14 @@ impl Contributions {
             &original.0,
             &mut input,
         )?;
+        if super::super::monotonic::retain_absent(&header.family, &cells)? {
+            return Ok(());
+        }
         tx.execute("DELETE FROM full_union_record WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key])?;
+        tx.execute("DELETE FROM full_union_input WHERE generation_nonce=?1 AND owner=?2 AND family=?3 AND key=?4",params![self.nonce.as_slice(),self.owners[0],header.family,header.key])?;
         let retained:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3)",params![self.nonce.as_slice(),header.family,header.key],|r|r.get(0))?;
         if !retained {
-            private.db.execute("DELETE FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",params![cells.text(0)?,cells.text(1)?])?;
+            super::remove_materialized(private, header, &cells)?;
         }
         Ok(())
     }

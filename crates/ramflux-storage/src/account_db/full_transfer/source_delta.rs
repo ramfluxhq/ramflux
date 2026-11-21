@@ -226,7 +226,7 @@ fn key<'a>(row: &'a rusqlite::Row<'_>) -> Result<&'a str, StorageError> {
 }
 fn record<'a>(row: &'a rusqlite::Row<'_>) -> Result<&'a [u8], StorageError> {
     let bytes = row.get_ref(1)?.as_blob().map_err(|_| invalid())?;
-    if bytes.len() > 16384 {
+    if bytes.len() > 262_144 {
         return Err(invalid());
     }
     Ok(bytes)

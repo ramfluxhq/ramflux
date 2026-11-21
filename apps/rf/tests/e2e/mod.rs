@@ -8,6 +8,14 @@ mod ceremony_screen;
 #[cfg(windows)]
 mod conpty;
 #[cfg(unix)]
+pub mod pairing_tls;
+#[cfg(unix)]
+pub mod primary_transfer;
+#[cfg(unix)]
+pub mod primary_transfer_pairing;
+#[cfg(unix)]
+pub mod primary_transfer_vertical;
+#[cfg(unix)]
 #[path = "proc.rs"]
 mod proc;
 #[cfg(windows)]
@@ -142,9 +150,13 @@ pub fn boot_stack_with_wal(wal: bool) -> Result<Stack> {
 
 /// Boot an independent node, including its own CA, signing identity and stores.
 pub fn boot_node(node_id: &str, wal: bool) -> Result<Stack> {
+    boot_node_with_env(node_id, wal, &[])
+}
+
+fn boot_node_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) -> Result<Stack> {
     let mut last = None;
     for attempt in 1..=BOOT_ATTEMPTS {
-        match boot_stack_once(node_id, wal) {
+        match boot_stack_once_with_env(node_id, wal, extra) {
             Ok(stack) => return Ok(stack),
             Err(error) if attempt < BOOT_ATTEMPTS && is_addr_in_use(&error) => {
                 last = Some(error);
@@ -166,11 +178,7 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
 /// # Errors
 /// Returns configuration, child-process or readiness failures.
 pub fn boot_pairing_stack(extra: &[(&str, &str)]) -> Result<Stack> {
-    boot_stack_once_with_env(NODE_ID, true, extra)
-}
-
-fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
-    boot_stack_once_with_env(node_id, wal, &[])
+    boot_node_with_env(NODE_ID, true, extra)
 }
 
 /// Boot the ordinary stack plus a real `ramflux-relay` serving the native attachment plane.
@@ -1337,10 +1345,24 @@ fn poll_json(
     timeout: Duration,
     ready: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
+    poll_value(
+        args.first().copied().unwrap_or("unknown command"),
+        timeout,
+        || rf_json(&daemon.socket, args),
+        ready,
+    )
+}
+
+fn poll_value(
+    label: &str,
+    timeout: Duration,
+    mut read: impl FnMut() -> Result<Value>,
+    ready: impl Fn(&Value) -> bool,
+) -> Result<Value> {
     let deadline = Instant::now() + timeout;
     let mut reported_failure = false;
     loop {
-        match rf_json(&daemon.socket, args) {
+        match read() {
             Ok(value) if ready(&value) => return Ok(value),
             Ok(value) if Instant::now() >= deadline => {
                 return Err(format!("timed out waiting for CLI JSON; last={value}").into());
@@ -1350,10 +1372,7 @@ fn poll_json(
             }
             Err(error) if !reported_failure => {
                 let reason = error.to_string().chars().take(768).collect::<String>();
-                eprintln!(
-                    "CLI poll {} first refusal: {reason}",
-                    args.first().copied().unwrap_or("unknown command"),
-                );
+                eprintln!("CLI poll {label} first refusal: {reason}");
                 reported_failure = true;
             }
             _ => {}

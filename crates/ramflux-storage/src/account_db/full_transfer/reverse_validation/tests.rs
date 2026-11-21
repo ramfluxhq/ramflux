@@ -25,11 +25,19 @@ pub(in crate::account_db::full_transfer) fn staged_with_vetoes(
     false_counts: bool,
     vetoes: u8,
 ) -> ResultOf<Staged> {
+    staged_with_seed(false_counts, vetoes, |_, _| Ok(()))
+}
+pub(in crate::account_db::full_transfer) fn staged_with_seed(
+    false_counts: bool,
+    vetoes: u8,
+    seed: fn(&AccountDb, &AccountDb) -> ResultOf<()>,
+) -> ResultOf<Staged> {
     let (initial, _, _) = super::super::stage_tests::fixture()?;
     let root = tempfile::tempdir()?;
     let b_root = tempfile::tempdir()?;
     let db = open(root.path(), &initial.grant.source_ref.account_anchor)?;
     let b = open(b_root.path(), &initial.grant.destination_ref.account_anchor)?;
+    seed(&db, &b)?;
     for value in 0..vetoes {
         b.connection.execute(
             "INSERT INTO object_erasure_fence VALUES(?1)",

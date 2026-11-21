@@ -19,10 +19,21 @@ fn conflict() -> StorageError {
     StorageError::PairingField("TransferConflict")
 }
 
+/// The metadata owner path never buffers payload bodies. Each input is size-checked
+/// before allocation; content owners require their separate streaming path.
+pub(super) const MAX_METADATA_BYTES: usize = 262_144;
+#[derive(Clone)]
 pub(super) struct Cells {
-    bytes: Zeroizing<[u8; 1024]>,
-    ranges: [std::ops::Range<usize>; 3],
+    bytes: Zeroizing<Vec<u8>>,
+    ranges: [std::ops::Range<usize>; 16],
+    kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType; 16],
     count: usize,
+}
+pub(super) struct BoundValue<'a>(rusqlite::types::ValueRef<'a>);
+impl rusqlite::ToSql for BoundValue<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(self.0))
+    }
 }
 impl Cells {
     pub(super) fn read(
@@ -30,12 +41,18 @@ impl Cells {
         header: &RecordHeader,
         input: &mut impl Read,
     ) -> Result<Self, StorageError> {
-        if header.op != RecordOp::Put || header.cell_lengths.len() > 3 {
+        if header.op != RecordOp::Put || header.cell_lengths.len() > 16 {
             return Err(unsupported());
         }
+        let size = header.cell_lengths.iter().try_fold(0_usize, |sum, length| {
+            sum.checked_add(usize::try_from(length.0).map_err(|_| unsupported())?)
+                .filter(|size| *size <= MAX_METADATA_BYTES)
+                .ok_or_else(unsupported)
+        })?;
         let mut value = Self {
-            bytes: Zeroizing::new([0; 1024]),
+            bytes: Zeroizing::new(vec![0; size]),
             ranges: std::array::from_fn(|_| 0..0),
+            kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType::Null; 16],
             count: header.cell_lengths.len(),
         };
         let mut end = 0_usize;
@@ -46,7 +63,9 @@ impl Cells {
             if next > value.bytes.len() {
                 return Err(unsupported());
             }
-            value.ranges[index] = end..next;
+            *value.ranges.get_mut(index).ok_or_else(unsupported)? = end..next;
+            *value.kinds.get_mut(index).ok_or_else(unsupported)? =
+                *header.cell_types.get(index).ok_or_else(unsupported)?;
             end = next;
         }
         let mut output = Cursor::new(value.bytes.as_mut_slice());
@@ -60,13 +79,88 @@ impl Cells {
         if index >= self.count {
             return Err(unsupported());
         }
-        self.bytes.get(self.ranges[index].clone()).ok_or_else(unsupported)
+        self.bytes
+            .get(self.ranges.get(index).ok_or_else(unsupported)?.clone())
+            .ok_or_else(unsupported)
     }
     pub(super) fn text(&self, index: usize) -> Result<&str, StorageError> {
         std::str::from_utf8(self.bytes(index)?).map_err(|_| unsupported())
     }
-    fn integer(&self, index: usize) -> Result<i64, StorageError> {
+    pub(super) fn integer(&self, index: usize) -> Result<i64, StorageError> {
         Ok(i64::from_be_bytes(self.bytes(index)?.try_into().map_err(|_| unsupported())?))
+    }
+    pub(super) fn set_integer(&mut self, index: usize, value: i64) -> Result<(), StorageError> {
+        self.replace(
+            index,
+            ramflux_protocol::custody::pairing::full_transfer::CellType::I64,
+            &value.to_be_bytes(),
+        )
+    }
+    pub(super) fn kind(
+        &self,
+        index: usize,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::CellType, StorageError> {
+        if index >= self.count {
+            return Err(unsupported());
+        }
+        self.kinds.get(index).copied().ok_or_else(unsupported)
+    }
+    pub(super) fn set_text(&mut self, index: usize, text: &str) -> Result<(), StorageError> {
+        self.replace(
+            index,
+            ramflux_protocol::custody::pairing::full_transfer::CellType::Utf8,
+            text.as_bytes(),
+        )
+    }
+    pub(super) fn copy_cell(&mut self, index: usize, other: &Self) -> Result<(), StorageError> {
+        self.replace(index, other.kind(index)?, other.bytes(index)?)
+    }
+    fn replace(
+        &mut self,
+        index: usize,
+        kind: ramflux_protocol::custody::pairing::full_transfer::CellType,
+        source: &[u8],
+    ) -> Result<(), StorageError> {
+        if index >= self.count {
+            return Err(unsupported());
+        }
+        let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
+        let size = self
+            .bytes
+            .len()
+            .checked_sub(range.len())
+            .and_then(|size| size.checked_add(source.len()))
+            .filter(|size| *size <= MAX_METADATA_BYTES)
+            .ok_or_else(unsupported)?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(size));
+        bytes.extend_from_slice(self.bytes.get(..range.start).ok_or_else(unsupported)?);
+        bytes.extend_from_slice(source);
+        bytes.extend_from_slice(self.bytes.get(range.end..).ok_or_else(unsupported)?);
+        self.bytes = bytes;
+        *self.kinds.get_mut(index).ok_or_else(unsupported)? = kind;
+        let mut end = range.start;
+        for position in index..self.count {
+            let old = self.ranges.get(position).ok_or_else(unsupported)?.clone();
+            let length = if position == index { source.len() } else { old.len() };
+            let next = end.checked_add(length).ok_or_else(unsupported)?;
+            *self.ranges.get_mut(position).ok_or_else(unsupported)? = end..next;
+            end = next;
+        }
+        Ok(())
+    }
+    pub(super) fn value(&self, index: usize) -> Result<BoundValue<'_>, StorageError> {
+        use ramflux_protocol::custody::pairing::full_transfer::CellType;
+        use rusqlite::types::ValueRef;
+        if index >= self.count {
+            return Err(unsupported());
+        }
+        Ok(BoundValue(match self.kinds.get(index).ok_or_else(unsupported)? {
+            CellType::Null => ValueRef::Null,
+            CellType::I64 => ValueRef::Integer(self.integer(index)?),
+            CellType::Utf8 => ValueRef::Text(self.bytes(index)?),
+            CellType::Bytes => ValueRef::Blob(self.bytes(index)?),
+            CellType::F64 => return Err(unsupported()),
+        }))
     }
 }
 
@@ -110,18 +204,18 @@ pub(super) fn apply_fixed_base_in_transaction(
     if root != source.account_anchor {
         return Err(unsupported());
     }
+    if header.family == super::message_denial::FAMILY {
+        return super::message_denial::apply(db, header, input);
+    }
     let rule = full_transfer_catalog()
         .iter()
         .find(|rule| rule.id == header.family)
         .ok_or_else(unsupported)?;
     let cells = Cells::read(rule, header, input)?;
+    if let Some(owner) = super::monotonic::owner(rule.id) {
+        return owner.apply(db, rule, &cells);
+    }
     match rule.id {
-        "sql/account_erasure_generation" => {
-            let changed=db.execute("UPDATE account_erasure_generation SET generation=max(generation,?1) WHERE singleton=1",params![cells.integer(1)?])?;
-            if changed != 1 {
-                return Err(StorageError::PairingField("SchemaMismatch"));
-            }
-        }
         "sql/object_erasure_fence" => {
             db.execute(
                 "INSERT INTO object_erasure_fence(commitment) VALUES(?1) ON CONFLICT DO NOTHING",

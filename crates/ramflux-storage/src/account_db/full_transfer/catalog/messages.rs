@@ -309,17 +309,7 @@ pub(super) const RULE_73: FamilyRule = table_rule!(
     true,
     ["tombstone_id"],
     [
-        (
-            "tombstone_id",
-            Utf8,
-            true,
-            Transfer,
-            Immutable,
-            CodecRule::RequiresOwner {
-                owner: "message_tombstone_projection",
-                cell_type: CellType::Utf8
-            }
-        ),
+        ("tombstone_id", Utf8, true, Transfer, Immutable, CodecRule::SqlMessageTombstone),
         (
             "conversation_id",
             Utf8,

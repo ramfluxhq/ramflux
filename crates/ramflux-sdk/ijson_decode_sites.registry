@@ -273,8 +273,6 @@ crates/ramflux-sdk/src/client/own_device_copy.rs | own_copy_target_messages | 1 
 crates/ramflux-sdk/src/client/own_sent_message/unsupported.rs | reparse_own_sent_attestation | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/private_prekeys.rs | legacy_owned_private_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/private_prekeys.rs | optional_owned_private_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/raw_inner_origin.rs | verify | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
-crates/ramflux-sdk/src/client/raw_inner_origin.rs | verify | 2 | C | admission=crates/ramflux-sdk/src/client/raw_inner_origin.rs#verify#1
 crates/ramflux-sdk/src/client/raw_inner_reparse.rs | prepare_raw_reparse | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/raw_inner_reparse.rs | prepare_raw_reparse | 2 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
 crates/ramflux-sdk/src/client/raw_inner_reparse.rs | prepare_raw_reparse | 3 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority

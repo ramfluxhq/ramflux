@@ -11,7 +11,7 @@ use crate::{AccountDbKey, BackupDatabase, StorageError};
 use ramflux_protocol::custody::pairing::full_transfer::{RecordHeader, read_record_header};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroize as _;
 
 mod verification_file;
 
@@ -76,13 +76,22 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
         Ok(())
     }
     fn expected(&self, db: &Connection) -> Result<(), StorageError> {
-        let mut statement = db.prepare("SELECT owner,record FROM full_union_record WHERE generation_nonce=?1 ORDER BY owner COLLATE BINARY,family COLLATE BINARY,key COLLATE BINARY")?;
+        let mut statement = db.prepare("SELECT owner,family,key,rowid,length(record) FROM full_union_record WHERE generation_nonce=?1 ORDER BY owner COLLATE BINARY,family COLLATE BINARY,key COLLATE BINARY")?;
         let mut rows = statement.query(params![self.encoding.generation_nonce.as_slice()])?;
         while let Some(row) = rows.next()? {
             self.stage.require_io()?;
             let owner = row.get_ref(0)?.as_str().map_err(|_| mismatch())?;
-            let mut input = row.get_ref(1)?.as_blob().map_err(|_| mismatch())?;
-            let bytes = input;
+            let rule = compiled(row.get_ref(1)?.as_str().map_err(|_| mismatch())?)?;
+            let key = row.get_ref(2)?.as_str().map_err(|_| mismatch())?;
+            let rowid = row.get::<_, i64>(3)?;
+            let mut input = super::record_spool::checked_blob(
+                db,
+                "full_union_record",
+                rowid,
+                row.get(4)?,
+                rule,
+                key,
+            )?;
             let header = Header(
                 read_record_header(&mut input).map_err(|_| mismatch())?.ok_or_else(mismatch)?,
             );
@@ -92,17 +101,8 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
                     &header.0,
                     &mut input,
                 )?;
-                let rule = compiled("sql/full_imported_mac_bundle")?;
-                let mut normalized = Zeroizing::new(Vec::new());
-                db.query_row(
-                    "SELECT ?1 AS source_ref,?2 AS bundle_id,?3 AS subkeys",
-                    params![owner, cells.text(0)?, cells.bytes(1)?],
-                    |row| Ok(super::write_full_scalar_sql_row(rule, row, &mut *normalized)),
-                )??;
-                retain_expected(db, &normalized)?;
-            } else {
-                retain_expected(db, bytes)?;
-            }
+                super::record_spool::expected_imported_mac(db,owner,&cells)?;
+            } else if db.execute("INSERT INTO verifier.materialized_record(family,key,record) SELECT family,key,record FROM full_union_record WHERE rowid=?1 ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE verifier.materialized_record.record=excluded.record",[rowid])? != 1 {return Err(mismatch());}
         }
         Ok(())
     }
@@ -113,6 +113,7 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
         )?;
         crate::encryption::apply_key(&read, self.private_key)?;
         read.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
+        super::sql_projection::require_private(&self.private.db, full_transfer_catalog())?;
         let schema = super::inventory::inspect(&read, full_transfer_catalog())?;
         schema.require_typed_owners(full_transfer_catalog())?;
         for (family, rule) in schema.families.iter().zip(full_transfer_catalog()) {
@@ -138,14 +139,7 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
             let mut count = 0_u64;
             while let Some(row) = rows.next()? {
                 self.stage.require_io()?;
-                let mut encoded = Zeroizing::new(Vec::new());
-                super::write_full_scalar_sql_row(rule, row, &mut *encoded)?;
-                let header = Header(
-                    read_record_header(&mut encoded.as_slice())
-                        .map_err(|_| mismatch())?
-                        .ok_or_else(mismatch)?,
-                );
-                if db.execute("UPDATE verifier.materialized_record SET seen=1 WHERE family=?1 AND key=?2 AND record=?3",params![header.0.family,header.0.key,encoded.as_slice()])? != 1 { return Err(mismatch()); }
+                super::record_spool::Comparison::sql(db, rule, row)?.mark()?;
                 count = count.checked_add(1).ok_or_else(mismatch)?;
             }
             if count != family.source_rows.0 {
@@ -154,11 +148,4 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
         }
         Ok(())
     }
-}
-fn retain_expected(db: &Connection, bytes: &[u8]) -> Result<(), StorageError> {
-    let mut input = bytes;
-    let header =
-        Header(read_record_header(&mut input).map_err(|_| mismatch())?.ok_or_else(mismatch)?);
-    if db.execute("INSERT INTO verifier.materialized_record(family,key,record) VALUES(?1,?2,?3) ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE verifier.materialized_record.record=excluded.record",params![header.0.family,header.0.key,bytes])? != 1 { return Err(mismatch()); }
-    Ok(())
 }

@@ -3807,6 +3807,8 @@ dependencies = [
  "ramflux-sync",
  "ramflux-test-support",
  "rustix",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",

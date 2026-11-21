@@ -99,7 +99,7 @@ impl FullPinnedReceiverBase {
     pub fn copy(self) -> Result<FullReceiverBaseCopy, StorageError> {
         let path = self.scratch.path.join("private.db");
         let snapshot = self.cut.write_private_snapshot(&path, self.cancelled.clone())?;
-        let private = BackupDatabase::open_full_receiver_copy(&path, &snapshot.key)?;
+        let mut private = BackupDatabase::open_full_receiver_copy(&path, &snapshot.key)?;
         let contributions = super::receiver_contributions::Contributions::capture(
             &self.scratch.path.join("contributions.db"),
             &snapshot.key,
@@ -108,6 +108,9 @@ impl FullPinnedReceiverBase {
             &self.cancelled,
             &self.schema,
         )?;
+        let transaction = private.db.transaction()?;
+        super::sql_projection::canonicalize_private(&transaction, super::full_transfer_catalog())?;
+        transaction.commit()?;
         drop(private);
         Ok(FullReceiverBaseCopy {
             projected: None,
@@ -268,5 +271,7 @@ impl FullReceiverBaseCopy {
     }
 }
 
+#[cfg(test)]
+pub(in crate::account_db::full_transfer) mod owner_tests;
 #[cfg(test)]
 mod tests;

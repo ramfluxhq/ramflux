@@ -21,7 +21,7 @@ pub(super) const RULE_120: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "receive_erased_input", cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "bundle_id",
@@ -29,7 +29,7 @@ pub(super) const RULE_120: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "expires_at",
@@ -37,7 +37,7 @@ pub(super) const RULE_120: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

@@ -8,7 +8,7 @@ use super::{
 use crate::{AccountDbKey, BackupDatabase, StorageError};
 use ramflux_protocol::custody::{
     DeviceRef,
-    pairing::full_transfer::{RecordHeader, read_record_header, write_record_header},
+    pairing::full_transfer::{RecordHeader, read_record_header},
 };
 use rusqlite::{Connection, params};
 use std::{
@@ -58,31 +58,10 @@ pub(super) fn open(path: &Path, key: &AccountDbKey) -> Result<Connection, Storag
         hex.as_str()
     ));
     db.execute_batch(&pragma)?;
+    super::union_encoding::require_existing_format(&db)?;
     Ok(db)
 }
-fn retain(
-    db: &Connection,
-    nonce: &[u8; 32],
-    owner: &str,
-    bytes: &[u8],
-) -> Result<(), StorageError> {
-    if bytes.len() > 16384 {
-        return Err(invalid());
-    }
-    let mut input = bytes;
-    let header =
-        Header(read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?);
-    let rule = compiled(&header.0.family)?;
-    super::copy_full_scalar_record(rule, &header.0, &mut input, &mut std::io::sink())?;
-    if !input.is_empty() {
-        return Err(invalid());
-    }
-    let changed = db.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record WHERE full_union_record.record=excluded.record", params![nonce.as_slice(),owner,header.0.family,header.0.key,bytes])?;
-    if changed != 1 {
-        return Err(StorageError::PairingField("TransferConflict"));
-    }
-    Ok(())
-}
+
 impl Contributions {
     pub(super) fn capture(
         path: &Path,
@@ -131,9 +110,11 @@ impl Contributions {
                         return Err(invalid());
                     }
                 }
-                let mut record = Zeroizing::new(Vec::new());
-                super::write_full_scalar_sql_row(rule, row, &mut *record)?;
-                retain(&tx, &value.nonce, &value.owners[1], &record)?;
+                super::record_spool::Candidate::sql(&tx, rule, row)?.retain_union(
+                    &value.nonce,
+                    &value.owners[1],
+                    false,
+                )?;
                 count = count.checked_add(1).ok_or_else(invalid)?;
             }
             if count != family.source_rows.0 {
@@ -162,12 +143,12 @@ impl Contributions {
         let mut input = stage.forward_reader(hash)?;
         while let Some(header) = read_record_header(&mut input).map_err(|_| invalid())? {
             stage.require_io()?;
-            let header = Header(header);
-            let rule = compiled(&header.0.family)?;
-            let mut record = Zeroizing::new(Vec::new());
-            write_record_header(&mut *record, &header.0).map_err(|_| invalid())?;
-            super::copy_full_scalar_record(rule, &header.0, &mut input, &mut *record)?;
-            retain(&tx, &self.nonce, &self.owners[0], &record)?;
+            let rule = compiled(&header.family)?;
+            super::record_spool::Candidate::input(&tx, rule, header, &mut input)?.retain_union(
+                &self.nonce,
+                &self.owners[0],
+                false,
+            )?;
         }
         let encoding = self.root(&tx, private, stage)?;
         tx.commit()?;
@@ -182,16 +163,7 @@ impl Contributions {
         private: &BackupDatabase,
         stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullUnionEncoding, StorageError> {
-        // The only mutable fixed base owner is the declared erasure-generation maximum.
-        // Both contribution records must describe the actual normalized prepared value.
-        let rule = compiled("sql/account_erasure_generation")?;
-        let mut normalized = Zeroizing::new(Vec::new());
-        private.db.query_row(
-            "SELECT singleton,generation FROM account_erasure_generation WHERE singleton=1",
-            [],
-            |row| Ok(super::write_full_scalar_sql_row(rule, row, &mut *normalized)),
-        )??;
-        tx.execute("UPDATE full_union_record SET record=?1 WHERE generation_nonce=?2 AND family='sql/account_erasure_generation'",params![normalized.as_slice(),self.nonce.as_slice()])?;
+        super::monotonic::normalize(tx, &self.nonce, private, &self.owners)?;
         let guard = stage.source_guard();
         let (records, total) = super::union_encoding::visit(
             tx,
@@ -215,5 +187,26 @@ impl Contributions {
             total_bytes: total,
             chunks_root: root,
         })
+    }
+}
+
+// Only explicitly registered content owners can remove an absent contribution. Excluded
+// local execution, imported MAC denial capabilities and restrictions are never deleted here.
+fn removable(family: &str) -> bool {
+    family == "sql/object_payload_dependency"
+        || super::monotonic::owner(family).is_some_and(super::monotonic::Owner::removable)
+}
+fn remove_materialized(
+    private: &BackupDatabase,
+    header: &RecordHeader,
+    cells: &super::fixed_union::Cells,
+) -> Result<(), StorageError> {
+    if let Some(owner) = super::monotonic::owner(&header.family) {
+        owner.remove(&private.db, cells)
+    } else if header.family == "sql/object_payload_dependency" {
+        private.db.execute("DELETE FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",params![cells.text(0)?,cells.text(1)?])?;
+        Ok(())
+    } else {
+        Err(invalid())
     }
 }

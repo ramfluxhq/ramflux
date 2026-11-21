@@ -50,7 +50,7 @@ pub(super) fn seed(
             _ => return Err(wrong()),
         };
         let record = row.get_ref(1)?.as_blob().map_err(|_| wrong())?;
-        if record.len() > 16_384 {
+        if record.len() > 262_144 {
             return Err(wrong());
         }
         let record = Zeroizing::new(record.to_vec());

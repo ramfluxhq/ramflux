@@ -32,6 +32,7 @@ pub struct ConversationSummaryRecord {
     pub last_activity_at: Option<i64>,
     pub is_archived: bool,
     pub pin_order: Option<i64>,
+    pub mute_until: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

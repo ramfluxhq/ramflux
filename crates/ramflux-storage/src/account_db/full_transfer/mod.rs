@@ -41,12 +41,18 @@ pub use reverse_source::{FullReverseSourceDraft, FullReverseSourceWork};
 mod reverse_merge;
 mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
+mod contact_projection;
+mod contact_request_history;
+mod input_denial;
+mod message_denial;
+mod monotonic;
 mod scalar;
 mod scalar_sql;
 mod source_base;
 mod source_cut;
 mod source_delta;
 mod source_successor;
+mod sql_projection;
 pub use source_successor::{FullSourceDeltaDraft, FullSourceSuccessorWork};
 mod data_terminal;
 mod install_reconciliation;
@@ -57,6 +63,7 @@ mod source_primary_owner;
 mod source_reconciliation;
 mod source_retirement;
 pub use source_primary_owner::FullSourcePrimaryOwner;
+mod record_spool;
 mod source_owner;
 mod source_preparation;
 mod source_receipt;
@@ -102,8 +109,8 @@ pub use union_encoding::{FullUnionEncoding, FullUnionEncodingBuilder};
 mod stage_tests;
 
 pub use catalog::{
-    CellRule, CodecRule, FamilyRule, FamilySelector, FieldRule, MergeRule, VariantRule,
-    full_census_hash, full_transfer_catalog,
+    CellRule, CodecRule, FamilyRule, FamilySelector, FieldRule, MergeRule, SqlProjection,
+    VariantRule, full_census_hash, full_transfer_catalog,
 };
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 
 //! Real retained A/B union plus later independent B writes, without another base copy.
 use super::*;
+use crate::account_db::full_transfer::receiver_copy::owner_tests::seed_delivery;
 use crate::account_db::full_transfer::receiver_projection::tests::{input, seed};
 use crate::{AccountDb, AccountDbKey, AccountIndex};
 use ramflux_protocol::{custody::pairing::full_transfer::CHUNK_BYTES, encode_base64url};
@@ -30,6 +31,9 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&b.path, std::fs::Permissions::from_mode(0o640))?;
     }
+    seed_delivery(&a, "shared-delivery", 500)?;
+    seed_delivery(&b, "shared-delivery", 100)?;
+    seed_delivery(&b, "b-only-delivery", 300)?;
     let (record, manifest, bytes) =
         input(&a).map_err(|error| format!("test: incremental source input: {error}"))?;
     let hash = record.base_manifest_hash.clone();
@@ -50,6 +54,7 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
         .map_err(|error| format!("test: source ledger before B refresh: {error}"))?;
     // Removing B's copy of a dependency removes only B's qualified contribution.
     b.connection.execute("DELETE FROM object_payload_dependency", [])?;
+    b.connection.execute("DELETE FROM contact_request_delivery", [])?;
     seed(&b, 31, 10)?;
     b.connection.execute("INSERT INTO pairing_own_sync(operation_id,fingerprint,response_json,operation_kind) VALUES('b-local','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','pairing_own_sync_v1')",[])?;
     b.with_full_transfer_install_fence(|| copy.rebase_current_target(&stage))
@@ -112,6 +117,7 @@ fn pairing_full_fourth_rebase_keeps_union_owner_and_applies_only_b_changes() -> 
             "test: private rebase changed original B permissions"
         );
     }
+    assert_remaining_delivery(&copy)?;
     copy.verify_materialization(&stage)
         .map_err(|error| format!("test: final retained B union verification: {error}"))?;
     Ok(())
@@ -129,4 +135,21 @@ fn source_rows(copy: &FullReceiverBaseCopy) -> TestResult<Vec<Vec<u8>>> {
             |row| row.get(0),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn assert_remaining_delivery(copy: &FullReceiverBaseCopy) -> TestResult {
+    let private =
+        BackupDatabase::open_full_receiver_copy(&copy.scratch.path.join("private.db"), &copy.key)?;
+    let mut query = private.db.prepare(
+        "SELECT request_id,submitted_at FROM contact_request_delivery ORDER BY request_id",
+    )?;
+    let rows = query
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        rows,
+        vec![("shared-delivery".to_owned(), 500)],
+        "test: B absence removed independent A evidence or retained B-only delivery history"
+    );
+    Ok(())
 }
