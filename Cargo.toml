@@ -24,6 +24,7 @@ default-members = [
 members = [
     "crates/ramflux-test-support",
     "crates/ramflux-card",
+    "crates/ramflux-prx-client",
     "tools/message-schema",
     "crates/ramflux-client-model",
     "crates/ramflux-core",

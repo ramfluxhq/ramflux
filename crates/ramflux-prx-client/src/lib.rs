@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Typed client for the PRX management API.
+//!
+//! The client talks to a PRX daemon on loopback with a bearer token. It knows
+//! nothing about ramflux accounts, custody or the bus. Every route is
+//! documented in PRX's token document (`docs/rf-contract/capability-tokens.md`
+//! at the pinned commit); unknown 2xx fields and malformed bodies fail closed.
+
+mod client;
+mod error;
+mod revision;
+mod transport;
+
+pub use client::PrxClient;
+pub use error::{ApiCode, PrxError};
+pub use revision::{CatalogRevision, ConfigRevision};
+pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};
