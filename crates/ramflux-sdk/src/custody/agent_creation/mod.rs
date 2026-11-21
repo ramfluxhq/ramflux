@@ -19,6 +19,7 @@ pub(crate) mod tests;
 pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
 pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
+pub(crate) use commit::desktop_is_enrolled;
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,

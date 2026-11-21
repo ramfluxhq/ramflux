@@ -54,7 +54,7 @@ fn refused(reason: &str) -> SdkError {
 }
 
 impl RamfluxClient {
-    fn device_epoch_of(&self, device: &RootQualifiedDeviceRef) -> Result<u64, SdkError> {
+    pub(super) fn device_epoch_of(&self, device: &RootQualifiedDeviceRef) -> Result<u64, SdkError> {
         self.account_db()?
             .client_device_record(device)?
             .and_then(|record| record["device_epoch"].as_u64())

@@ -156,7 +156,7 @@ fn agent_profile_bytes(
 /// Desktop enrollment (contract 7.2 step 4): the sending desktop must still be an active device of
 /// the human account, with a branch that is valid at `now` and holds the `sync` capability. Checked
 /// in the same compare-and-set as the human head and the primary.
-pub(super) fn desktop_is_enrolled(
+pub(crate) fn desktop_is_enrolled(
     record: &Envelope<DeviceSet>,
     desktop: &DeviceRef,
     now: u64,

@@ -309,6 +309,7 @@ fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
+        SdkError::AgentCreationRefused(token) => token,
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
         SdkError::CustodyConfirmRejected(reason) => reason.family(),
         SdkError::CustodyExpired => "CustodyExpired",

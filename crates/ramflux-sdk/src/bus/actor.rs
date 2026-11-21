@@ -43,6 +43,10 @@ pub(super) enum PrivateCommand {
     AgentHomeNode {
         reply: oneshot::Sender<Result<Option<String>, SdkError>>,
     },
+    AgentCall {
+        call: super::agent_methods::AgentCall,
+        reply: oneshot::Sender<Result<ramflux_protocol::message::AgentCustodyStatus, SdkError>>,
+    },
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -264,6 +268,15 @@ impl AccountActor {
     ) -> Result<crate::custody::agent_creation::AgentCreationRecord, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::AgentCreation { step, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// One account-scoped call of the agent creation methods, run by this human account's runtime.
+    pub(super) async fn agent_call(
+        &self,
+        call: super::agent_methods::AgentCall,
+    ) -> Result<ramflux_protocol::message::AgentCustodyStatus, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::AgentCall { call, reply })?;
         response.await.map_err(|_| stopped())?
     }
     /// The stored home node of this human account (`account/node-id`), read by its runtime.

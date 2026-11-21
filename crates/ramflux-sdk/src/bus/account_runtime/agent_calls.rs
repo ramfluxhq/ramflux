@@ -26,6 +26,52 @@ impl AccountRuntime {
         }
     }
 
+    /// Answer one agent creation call by private command; a closed reply channel skips the work.
+    pub(super) fn reply_agent_call(
+        &self,
+        call: super::super::agent_methods::AgentCall,
+        reply: tokio::sync::oneshot::Sender<
+            Result<ramflux_protocol::message::AgentCustodyStatus, SdkError>,
+        >,
+    ) {
+        if !reply.is_closed() {
+            let _ = reply.send(self.agent_call(call));
+        }
+    }
+
+    /// Answer the home-node read by private command; a closed reply channel skips the read.
+    pub(super) fn reply_agent_home_node(
+        &self,
+        reply: tokio::sync::oneshot::Sender<Result<Option<String>, SdkError>>,
+    ) {
+        if !reply.is_closed() {
+            let _ = reply.send(self.agent_home_node());
+        }
+    }
+
+    /// One account-scoped call of the agent creation methods on this human account.
+    pub(super) fn agent_call(
+        &self,
+        call: super::super::agent_methods::AgentCall,
+    ) -> Result<ramflux_protocol::message::AgentCustodyStatus, SdkError> {
+        use super::super::agent_methods::AgentCall;
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        let vault = super::super::custody_setup::primary_provider(&self.state.config);
+        match call {
+            AgentCall::Create(body) => account.client.agent_create(
+                vault.as_ref(),
+                &body,
+                super::super::custody_setup::now()?,
+            ),
+            AgentCall::Decide(body) => account.client.agent_creation_decide(
+                vault.as_ref(),
+                &body,
+                super::super::custody_setup::now()?,
+            ),
+            AgentCall::Get(operation_id) => account.client.agent_operation_status(&operation_id),
+        }
+    }
+
     /// The home node of this human account: the value `native_account::unlock` persists as
     /// `account/node-id`. `None` when the account has none yet.
     pub(super) fn agent_home_node(&self) -> Result<Option<String>, SdkError> {

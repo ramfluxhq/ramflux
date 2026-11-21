@@ -29,6 +29,10 @@ pub(crate) struct TestVault {
     pub(crate) fail_branch: AtomicBool,
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
     commit_obstacle: Mutex<Option<PathBuf>>,
+    /// The plan hash whose one-shot agent decision approval is armed (test presence).
+    agent_approval: Mutex<Option<String>>,
+    /// Agent master and pending provisioning items, held by the memory vault (test only).
+    agent_items: crate::custody::memory_vault::MemoryPrimaryVault,
 }
 impl TestVault {
     pub(crate) fn entry_count(&self) -> std::result::Result<usize, SdkError> {
@@ -69,12 +73,74 @@ impl TestVault {
         Ok(())
     }
 }
+impl TestVault {
+    /// Arm the one-shot agent decision approval for one plan hash (test presence).
+    pub(crate) fn arm_agent_decision(&self, plan_hash: &str) -> std::result::Result<(), SdkError> {
+        *self.agent_approval.lock().map_err(|_| SdkError::CustodyVaultUnavailable)? =
+            Some(plan_hash.into());
+        Ok(())
+    }
+}
 impl PrimaryVault for TestVault {
+    fn store_agent_master(
+        &self,
+        reference: &str,
+        master: &ramflux_crypto::custody::MasterKey,
+    ) -> std::result::Result<(), SdkError> {
+        PrimaryVault::store_agent_master(&self.agent_items, reference, master)
+    }
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: ramflux_crypto::custody::AgentMasterRequest,
+    ) -> std::result::Result<
+        ramflux_protocol::custody::Envelope<ramflux_protocol::custody::MasterCertificate>,
+        SdkError,
+    > {
+        PrimaryVault::certify_agent_master(&self.agent_items, reference, request)
+    }
+    fn delete_agent_master(
+        &self,
+        reference: &str,
+        last_range: u64,
+    ) -> std::result::Result<(), SdkError> {
+        PrimaryVault::delete_agent_master(&self.agent_items, reference, last_range)
+    }
+    /// Same rules as the memory vault: the primary key must match, the one-shot approval for this
+    /// plan hash is consumed, then the primary branch signs the body.
+    fn sign_agent_register_decision(
+        &self,
+        request: crate::custody::AgentDecisionSigning<'_>,
+    ) -> std::result::Result<ramflux_protocol::custody::RegisterDecision, SdkError> {
+        let body = ramflux_protocol::custody::register_decision_body(request.request)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let primary = self.load_primary(request.primary_reference)?;
+        if primary.public_key() != request.expected_primary_public_key {
+            return Err(SdkError::CustodyVaultUnavailable);
+        }
+        {
+            let mut armed =
+                self.agent_approval.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+            if armed.as_deref() != Some(request.request.plan_hash.as_str()) {
+                return Err(SdkError::CustodyVaultUnavailable);
+            }
+            *armed = None;
+        }
+        let branch = self.load_branch(
+            request.branch_reference,
+            request.principal_id,
+            &request.request.signer,
+        )?;
+        ramflux_crypto::custody::sign_register_decision(&branch.signing, body)
+            .map_err(|_| SdkError::CustodyVaultUnavailable)
+    }
     fn delete(&self, reference: &str) -> std::result::Result<(), SdkError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(SdkError::CustodyVaultUnavailable);
         }
         self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
+        // Pending agent items live in the memory store; an absent item is not an error here.
+        let _ = PrimaryVault::delete(&self.agent_items, reference);
         Ok(())
     }
     fn preflight(&self) -> std::result::Result<(), SdkError> {

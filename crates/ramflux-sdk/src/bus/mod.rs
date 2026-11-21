@@ -7,6 +7,7 @@ pub(crate) use account_runtime::apply_ack_flush;
 mod ack_cache;
 mod actor;
 mod agent_advance;
+mod agent_methods;
 pub(crate) mod attachment_plane;
 mod attachment_scheduler;
 pub(crate) mod backup_jobs;
