@@ -88,6 +88,78 @@ impl NativeCallAccount {
         Box::pin(self.deliver_into(target, config, manifest, content)).await
     }
 
+    /// The independent client authors one generated Message to this account through real native
+    /// sealing; this account receives it durably and the client projects its own copy, exactly as
+    /// the ordinary send path leaves it before any sibling exists.
+    /// # Errors
+    /// Propagates ordinary content validation, authority, crypto, and store failures.
+    pub async fn receive_message_from_client(
+        &mut self,
+        source: &RamfluxClient,
+        source_config: &GatewaySessionConfig,
+        content: &g::Message,
+    ) -> Result<(String, String), SdkError> {
+        let manifest: crate::SdkDeviceManifestResponse =
+            serde_json::from_value(self.manifest.clone())?;
+        let reference = self.client.owned_device_identity()?;
+        // A born-v3 session config carries no signing branch; the ordinary send path signs with
+        // the account's own branch, so the fixture envelope does too.
+        let mut source_config = source_config.clone();
+        source_config.device_branch = Some(std::sync::Arc::new(
+            source.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+        ));
+        source_config.source_identity = Some(source.owned_device_identity()?);
+        let source_config = &source_config;
+        let mut message = GatewayDirectMessage {
+            conversation_id: source.generated_direct_conversation_id(&reference)?,
+            message_id: "native-own-authored-operation".into(),
+            envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+            source_principal_id: source_config.principal_id.clone(),
+            sender_id: source_config.device_id.clone(),
+            recipient_device_id: Some(self.config.device_id.clone()),
+            recipient_principal_commitment: Some(self.client.own_account_anchor()?),
+            target_delivery_id: self.config.target_delivery_id.clone(),
+            encrypted_body: Vec::new(),
+            created_at: crate::time::now_unix_timestamp(),
+            ttl: source.content_ttl()?,
+        };
+        let prepared = source.prepare_authored_content(
+            &mut message,
+            None,
+            &g::Content { value: Some(g::content::Value::Message(content.clone())) },
+        )?;
+        let sealed = source.seal_generated_routed_prepared(
+            source_config,
+            &message,
+            &prepared.wire,
+            Route::direct(),
+            SendMaterial {
+                manifest: Some((reference.root_commitment().into(), manifest)),
+                bundle: Some(self.client.load_x3dh_private_state(&reference)?.bundle),
+            },
+        )?;
+        let envelope =
+            crate::dm::gateway_generated_envelope_from_sealed(source_config, &mut message, sealed)?;
+        source.project_authored_message(&message, &prepared.exact, &[])?;
+        let entry = crate::GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 2,
+            target_delivery_id: self.config.target_delivery_id.clone(),
+            envelope,
+        };
+        let mut engine = crate::GatewaySessionEngine::with_test_transport(
+            self.config.clone(),
+            Box::new(NoNetwork),
+        );
+        let pool = ramflux_transport::RelayQuicPool::new(
+            ramflux_transport::RelayQuicPoolConfig::functional_default().map_err(|error| {
+                SdkError::LocalBus(format!("native message fixture relay configuration: {error}"))
+            })?,
+        );
+        self.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
+        Ok((message.conversation_id, message.message_id))
+    }
+
     async fn deliver_into(
         &self,
         target_client: &mut RamfluxClient,

@@ -8,6 +8,9 @@ use ramflux_sdk::{NodeGateway, NodePinSource, NodeProfile, NodeRelay};
 #[path = "history/objects.rs"]
 mod objects;
 pub(super) const BODY: &[u8] = b"existing DM authored on phone before enrollment";
+const OWN_HISTORY_WAIT_SECS: u64 = 60;
+/// The primary's own reply in the same conversation, authored before enrollment.
+pub(super) const OWN_BODY: &[u8] = b"own reply authored on phone before enrollment";
 
 struct Network {
     _front: TlsFront,
@@ -141,11 +144,17 @@ async fn run(late: bool) -> TestResult {
     let mut source = Box::pin(a.connect_network(&network.profile, &network.stack)).await?;
     let (conversation, message) = a.history.clone().ok_or("test: seeded history id")?;
     let text = std::str::from_utf8(BODY)?;
+    let (own_conversation, own_message) =
+        a.own_history.clone().ok_or("test: seeded own-authored history id")?;
     let source_sessions = source.pairing_pair_sessions()?;
     assert!(!source_sessions.is_empty(), "test: the source holds no live pair secret to protect");
     assert!(
         !target.has_pairing_history(&conversation, &message)?,
         "test: recipient already owned the pre-enrollment DM"
+    );
+    assert!(
+        !target.has_pairing_history(&own_conversation, &own_message)?,
+        "test: recipient already owned the owner's own pre-enrollment DM"
     );
     assert!(
         Box::pin(source.pairing_history_attempt()).await?,
@@ -156,6 +165,7 @@ async fn run(late: bool) -> TestResult {
         "test: the history job finished before any page was durably accepted"
     );
     Box::pin(target.wait_pairing_history(&mut source, &conversation, &message, text)).await?;
+    Box::pin(wait_own_history(&mut target, &mut source, (&own_conversation, &own_message))).await?;
     Box::pin(source.settle_pairing_history()).await?;
     assert_eq!(
         (network.objects.puts.load(Ordering::SeqCst), network.objects.gets.load(Ordering::SeqCst)),
@@ -193,6 +203,28 @@ async fn run(late: bool) -> TestResult {
     recipient.lock().await?;
     network.objects.stop().await?;
     Ok(())
+}
+/// The owner's own text is not driven by hand: the source's real background children (the
+/// authored-history courier) deliver it while both writers are serviced under a bound.
+async fn wait_own_history(
+    target: &mut ramflux_sdk::AccountSessionHarness,
+    source: &mut ramflux_sdk::AccountSessionHarness,
+    own: (&str, &str),
+) -> TestResult {
+    let text = std::str::from_utf8(OWN_BODY)?;
+    let waited = tokio::time::timeout(
+        Duration::from_secs(OWN_HISTORY_WAIT_SECS),
+        Box::pin(target.wait_pairing_history(source, own.0, own.1, text)),
+    )
+    .await;
+    if let Ok(result) = waited {
+        return Ok(result?);
+    }
+    let (captures, pending, staged) = source.pairing_authored_history_counts()?;
+    Err(format!(
+        "test: the enrolled device never showed the owner's own pre-enrollment DM within {OWN_HISTORY_WAIT_SECS} s (source captures={captures} pending={pending} staged={staged})"
+    )
+    .into())
 }
 fn branch_identity(device: &device::Device) -> TestResult<([u8; 32], [u8; 32], DeviceRef)> {
     let native = custody::load_account(device.root.path(), &device.id, wall()?)?;

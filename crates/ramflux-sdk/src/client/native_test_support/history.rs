@@ -200,11 +200,12 @@ pub(crate) async fn author_first_hand(
     peer: &mut Fixture,
     conversation: &str,
     text: &str,
+    sequence: u64,
 ) -> TestResult<g::EventIdentity> {
     peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     let mut message = GatewayDirectMessage {
         conversation_id: conversation.into(),
-        message_id: "own-first-hand-operation".into(),
+        message_id: format!("own-first-hand-operation-{sequence}"),
         envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
         source_principal_id: source.config.principal_id.clone(),
         sender_id: source.config.device_id.clone(),
@@ -222,7 +223,9 @@ pub(crate) async fn author_first_hand(
     )?;
     let envelope = source.seal_inner_to_with_id(peer, &prepared.wire, &message.envelope_id)?;
     source.client.project_authored_message(&message, &prepared.exact, &[])?;
-    peer.receive(envelope, 1).await.map_err(|error| format!("peer receive of own DM: {error}"))?;
+    peer.receive(envelope, sequence)
+        .await
+        .map_err(|error| format!("peer receive of own DM: {error}"))?;
     let inner = g::Inner::decode(prepared.exact.as_slice())?;
     Ok(inner.identity.ok_or("test: authored identity")?)
 }

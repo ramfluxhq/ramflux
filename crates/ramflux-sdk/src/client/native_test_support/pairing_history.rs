@@ -16,6 +16,7 @@ use std::sync::Arc;
 const GROUP: &str = "enrollment-history-group";
 const THREAD: &str = "enrollment-history-thread";
 const DM_TEXT: &str = "native first-hand history";
+const ERASED_DM_TEXT: &str = "own-authored message erased before pairing";
 const OWN_DM_TEXT: &str = "own-authored history before pairing";
 const GROUP_TEXT: &str = "historical group message";
 const MAX_STEPS: usize = 16;
@@ -25,6 +26,7 @@ pub(crate) struct Seeded {
     peer: Fixture,
     dm_id: Vec<u8>,
     own_dm_id: Vec<u8>,
+    erased_dm_id: Vec<u8>,
     dm_conversation: String,
     group_owner: String,
     group_state: ramflux_crypto::VerifiedGroupState,
@@ -60,8 +62,24 @@ impl Fixture {
 pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> TestResult<Seeded> {
     let mut peer = Fixture::new("enrollment-history-peer").await?;
     let (dm, _, dm_conversation) = Box::pin(history::receive_first_hand(source, &peer)).await?;
-    let own_dm = Box::pin(history::author_first_hand(source, &mut peer, &dm_conversation, OWN_DM_TEXT))
-        .await?;
+    let own_dm =
+        Box::pin(history::author_first_hand(source, &mut peer, &dm_conversation, OWN_DM_TEXT, 1))
+            .await?;
+    // An own message erased before pairing must never reach the enrolled device.
+    let erased = Box::pin(history::author_first_hand(
+        source,
+        &mut peer,
+        &dm_conversation,
+        ERASED_DM_TEXT,
+        2,
+    ))
+    .await?;
+    source.client.account_db()?.delete_direct_message(
+        &dm_conversation,
+        &ramflux_protocol::encode_base64url(&erased.id),
+        "everyone",
+        &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+    )?;
     let primary = source
         .client
         .born_v3_account
@@ -99,7 +117,16 @@ pub(crate) async fn seed(source: &mut Fixture, vault: &dyn PrimaryVault) -> Test
     )?;
     let peer_sessions = source.client.account_db()?.actor_state_keys("dm-pair/")?;
     assert!(!peer_sessions.is_empty(), "test: the source holds no live pair session to protect");
-    Ok(Seeded { peer, dm_id: dm.id, own_dm_id: own_dm.id, dm_conversation, group_owner, group_state, peer_sessions })
+    Ok(Seeded {
+        peer,
+        dm_id: dm.id,
+        own_dm_id: own_dm.id,
+        erased_dm_id: erased.id,
+        dm_conversation,
+        group_owner,
+        group_state,
+        peer_sessions,
+    })
 }
 
 fn due(client: &RamfluxClient) -> TestResult {
@@ -163,6 +190,10 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         source.client.start_generated_history_transfer(&target.config.device_id)?,
         "test: no history transfer was staged for the enrolled device"
     );
+    assert!(
+        source.client.prepare_authored_history(&source.config)?.is_none(),
+        "test: an authored copy was prepared while the history pages for its target are pending"
+    );
     let pages = deliver_pages(source, target, None, 1).await?;
     assert!(pages > 0, "test: no history page reached the enrolled device");
     assert_eq!(
@@ -170,6 +201,12 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         Some(true),
         "test: the transfer row is not done after every page was accepted"
     );
+    // The enrollment job ends once every page is accepted, which is what releases authored copies.
+    let db = source.client.account_db()?;
+    if let Some(job) = db.next_pairing_own_sync()? {
+        assert!(db.claim_pairing_own_sync(&job)?, "test: the enrollment history job was claimed");
+        db.finish_pairing_own_sync(&job, None)?;
+    }
     let dm_owner = ramflux_protocol::encode_base64url(&seeded.dm_id);
     let dm = target.client.generated_message_detail(&seeded.dm_conversation, &dm_owner)?;
     assert_eq!(
@@ -206,13 +243,7 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         Some(GROUP_TEXT),
         "test: the enrolled device cannot read the pre-enrollment group message"
     );
-    let own_owner = ramflux_protocol::encode_base64url(&seeded.own_dm_id);
-    let own_dm = target.client.generated_message_detail(&seeded.dm_conversation, &own_owner)?;
-    assert_eq!(
-        own_dm.message.text.as_deref(),
-        Some(OWN_DM_TEXT),
-        "test: the enrolled device cannot read the owner's own pre-enrollment DM"
-    );
+    assert_own_history(source, target, seeded)?;
     let target_sessions = target.client.account_db()?.actor_state_keys("dm-pair/")?;
     for session in &seeded.peer_sessions {
         assert!(
@@ -231,6 +262,40 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
     assert!(
         !seeded.peer.client.own_account_anchor()?.is_empty(),
         "test: the peer fixture stayed alive for the whole proof"
+    );
+    Ok(())
+}
+
+/// The owner's own pre-enrollment text is present, an erased one is absent, and the enrolled
+/// conversation keeps the source's own and peer order.
+fn assert_own_history(source: &Fixture, target: &Fixture, seeded: &Seeded) -> TestResult {
+    let own_owner = ramflux_protocol::encode_base64url(&seeded.own_dm_id);
+    let own_dm = target.client.generated_message_detail(&seeded.dm_conversation, &own_owner)?;
+    assert_eq!(
+        own_dm.message.text.as_deref(),
+        Some(OWN_DM_TEXT),
+        "test: the enrolled device cannot read the owner's own pre-enrollment DM"
+    );
+    let erased_owner = ramflux_protocol::encode_base64url(&seeded.erased_dm_id);
+    assert!(
+        target.client.direct_message_by_id(&erased_owner)?.is_none_or(|row| row.deleted),
+        "test: an own message erased before pairing reappeared on the enrolled device"
+    );
+    let texts = |fixture: &Fixture| -> TestResult<Vec<String>> {
+        Ok(fixture
+            .client
+            .generated_message_view_page(&seeded.dm_conversation, None, 10)?
+            .messages
+            .into_iter()
+            .filter_map(|message| message.text)
+            .collect())
+    };
+    let enrolled = texts(target)?;
+    assert_eq!(enrolled.len(), 2, "test: the enrolled conversation must hold exactly two rows");
+    assert_eq!(
+        enrolled,
+        texts(source)?,
+        "test: own and peer rows must keep the source's order on the enrolled device"
     );
     Ok(())
 }
