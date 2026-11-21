@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "crates/ramflux-prx-client/tests/prx_contract.rs", call = "tokio::time::sleep", duration = "(std::time::Duration::from_millis ( 500 ))", count = 3, owner = "ramflux-prx-client", reason = "Poll interval while a real prx daemon becomes ready, issues its pairing code or hot-reloads; each wait has a WAIT_DEADLINE assert", expires = "2026-12-12" },
+  { path = "crates/ramflux-prx-client/tests/prx_contract.rs", call = "tokio::time::sleep", duration = "(std::time::Duration::from_secs ( 2 ))", count = 1, owner = "ramflux-prx-client", reason = "Spaced catalog poll (the API has a shared rate limit); bounded by WAIT_DEADLINE", expires = "2026-12-12" },
+  { path = "crates/ramflux-prx-client/tests/prx_contract.rs", call = "tokio::time::timeout", duration = "(std::time::Duration::from_secs ( 600 ))", count = 1, owner = "ramflux-prx-client", reason = "Outer deadline of each contract test so a stuck daemon cannot hang the lane", expires = "2026-12-12" },
+]

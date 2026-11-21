@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# path | enclosing fn | ordinal | class | admission provenance or exclusion reason
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | merge_pending_edit_registers | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | merge_pending_edit_registers | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_edit_register.rs | registers | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_generated_identity.rs | counter | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_generated_identity.rs | counter | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_generated_identity.rs | merge_generated_identity_floors | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_generated_identity.rs | merge_generated_identity_floors | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_merge.rs | check_backup_pins | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_merge.rs | check_backup_pins | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_object_erasure.rs | scan_copies | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_object_metadata.rs | references | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 1 | A | strict=parse_i_json; independently verified immutable header boundary
+crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 2 | A | strict=parse_i_json; independently verified immutable header boundary
+crates/ramflux-storage/src/account_db/backup_original_header.rs | verified_preimage | 3 | C | admission=crates/ramflux-storage/src/account_db/backup_original_header.rs#verified_preimage#2
+crates/ramflux-storage/src/account_db/backup_reaction.rs | order | 1 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_reaction.rs | require_reaction_receipts_agree | 1 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_reaction.rs | require_reaction_receipts_agree | 2 | E | excluded=typed Reaction register or receipt metadata; not an Envelope/Ack/Nack admission
+crates/ramflux-storage/src/account_db/backup_selector_admission.rs | validate_graph | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_selector_admission.rs | validate_graph | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_selector_admission/placeholders.rs | legacy_target_identity | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_selector_admission/preservation.rs | prepare | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_selector_admission/writer.rs | import_reference_actors | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | load | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | merge_read_registers | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | merge_read_registers | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | merge_read_registers | 3 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | message_order | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | refresh_references | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | refresh_references | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | rows | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_self_sync.rs | state_pair | 3 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/backup_shared_groups.rs | group_backup_value | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/device_metadata.rs | client_device_record_by_name | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/full_transfer/completion.rs | full_completion | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/duplex.rs | verified_duplex | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/install_reconciliation.rs | full_recipient_recovery_identity | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/install_reconciliation.rs | open_full_recipient_install_stage | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/keys.rs | from_file_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded closed canonical local stage-key ciphertext wrapper before guarded DB-key AEAD open
+crates/ramflux-storage/src/account_db/full_transfer/native_floor.rs | native_floor | 1 | A | strict=parse_i_json; admission=encrypted device-local native pins after guarded stage-key and account-reference authentication; only verified records enter through observe_full_native_head; never peer pin state or native authority
+crates/ramflux-storage/src/account_db/full_transfer/preservation.rs | has_expired_source_full_preservation | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/preservation.rs | read_preservation | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/preservation.rs | replace_expired_preservation | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/preservation.rs | source_published_candidate_hash | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/preservation.rs | source_published_candidate_hash | 2 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/receiver_copy/generation/selection.rs | check_selection | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/receiver_copy/generation/selection/recovery.rs | pin_generation_recovery | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/receiver_copy/rebase.rs | require_before_selection | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/source_primary_owner.rs | full_source_retirement_owner | 1 | E | excluded=closed device-local pairing registry, selection, reference or display metadata outside signed Envelope/Ack/Nack closure
+crates/ramflux-storage/src/account_db/full_transfer/source_primary_owner.rs | full_source_retirement_owner | 2 | E | excluded=closed device-local pairing registry, selection, reference or display metadata outside signed Envelope/Ack/Nack closure
+crates/ramflux-storage/src/account_db/full_transfer/source_reconciliation.rs | reconcile_full_source_retirement | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/tail.rs | commit_source_ack_and_pin_tail | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/full_transfer/tail.rs | commit_source_ack_and_pin_tail | 2 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/home_migration.rs | home_migration_transition | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/home_migration.rs | row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/home_migration.rs | valid_progress | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/journal/inbox_policy.rs | apply_inbox_failure_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/journal/mod.rs | row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/local_search/sources.rs | search_message_input | 1 | E | excluded=locally stored accepted Edit revision scalar; outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mac_subkeys/full.rs | decode_source_ref | 1 | E | excluded=closed public DeviceRef metadata is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_audit | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_grant | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_grants | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_standing_approvals | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_tools | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | load_recent_mcp_audit | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | set_mcp_grant_revoked | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/mcp.rs | set_mcp_standing_approval_revoked | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/message_edit_retirement.rs | message_actor_entries | 1 | D | admitted-before-persist; private provenance, repair fingerprint or retirement metadata is read without granting fresh authority
+crates/ramflux-storage/src/account_db/message_footprint/migration.rs | register_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/message_footprint/mod.rs | message_copy_actor_states | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/message_footprint/replay_reference.rs | register | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/messages.rs | all_direct_messages | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/messages.rs | direct_message_by_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/messages.rs | direct_messages | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/messages.rs | generated_message_identities | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/account_db/messages.rs | message_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object.rs | object_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object.rs | object_transfer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object.rs | object_transfer | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object.rs | set_object_tombstoned_with_revocation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_payload.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_payload.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_payload.rs | decode | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_payload.rs | decode | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_payload.rs | decode | 5 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_retention/legacy.rs | discover_reference | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_retention/legacy.rs | discover_reference | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/full_reference.rs | decode_reference | 1 | A | strict=parse_i_json; admission=bounded local stage-reference discriminator followed by closed canonical arm; legacy contexts retain their original closed decoder
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_ack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_context | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_context | 2 | A | strict=parse_i_json; admission=closed local frozen full-v3 or legacy-v2 role contexts after bounded schema discriminator
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_context | 3 | A | strict=parse_i_json; admission=closed local frozen full-v3 or legacy-v2 role contexts after bounded schema discriminator
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_descriptor | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_publication | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_ref | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/own_sync.rs | own_sync_stored | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/pairing/own_sync.rs | queue_enrollment_own_sync_inner | 1 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/pairing/own_sync.rs | queue_enrollment_own_sync_inner | 2 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/pairing/own_sync.rs | queue_enrollment_own_sync_inner | 3 | A | strict=parse_i_json; admission=retained pairing publication or signed receipt bytes decoded before current native verification and scoped recovery
+crates/ramflux-storage/src/account_db/pairing/recovery.rs | commit_pairing_invitation | 1 | A | strict=parse_i_json; admission=durable signed invitation descriptor
+crates/ramflux-storage/src/account_db/read_model.rs | client_audit_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/receive/erased_capture.rs | tuple_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/receive/hold.rs | load_holds | 1 | E | excluded=local hold rows written by this crate; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/loss.rs | pending_loss_outbox_for | 1 | E | excluded=local receive-loss index keys; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/migrate.rs | seq_from_entry | 1 | D | admitted-before-persist; legacy inbox row written by this crate is not an ingress decoder
+crates/ramflux-storage/src/account_db/receive/mod.rs | retired_incarnations | 1 | E | excluded=local retired-incarnation storage metadata; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/settle.rs | settle_retained_for | 1 | E | excluded=local retained-work rows written by this crate; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/stage.rs | bind_receive_entry | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-storage/src/account_db/replay_markers.rs | canonical_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/runtime/control.rs | list_actor_states | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/runtime/control.rs | load_actor_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/runtime/operations.rs | lookup_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/runtime/operations.rs | reserve_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/runtime/outbox.rs | pending_outbox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/shared_group_delivery.rs | next_shared_group_intent | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/shared_group_delivery.rs | prune_shared_group_boundaries | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/surface.rs | surface_export_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/surface.rs | surface_history_page | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/surface.rs | surface_recent_records | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/surface.rs | surface_record_page | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/task.rs | read_task_lifecycle_rows | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/task.rs | task_pending_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/task.rs | task_record_page | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/task.rs | unindexed_task_histories | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/voice.rs | voice_call_rows | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_index/operations.rs | lookup_supervisor_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_index/operations.rs | reserve_supervisor_operation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/conversation_helpers.rs | generated_unread_after_read | 1 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/conversation_helpers.rs | generated_unread_after_read | 2 | E | excluded=typed identity, relationship or register metadata; no Envelope/Ack/Nack is admitted and restore validates its floors before merge
+crates/ramflux-storage/src/row_mappers.rs | pending_recovery_approval_from_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/row_mappers.rs | pending_recovery_from_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/row_mappers.rs | pending_recovery_from_row | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/schema_device_namespace.rs | metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
