@@ -1037,7 +1037,7 @@ impl Supervisor {
         self.start_event_router();
     }
 
-    fn start_event_router(&self) {
+    pub(super) fn start_event_router(&self) {
         if self.backup_expiry.borrow().is_none() {
             let jobs = self.backup_jobs.clone();
             *self.backup_expiry.borrow_mut() = Some(tokio::task::spawn_local(async move {

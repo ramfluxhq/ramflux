@@ -27,6 +27,10 @@ pub(super) async fn respond(
     request: &mut LocalBusFrame,
     supervisor: &Supervisor,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+    // Every account-scoped request starts the event router in `Supervisor::route`. An account
+    // actor publishes its pending outbox through that router while it starts, so an agent call
+    // that is the first request on a supervisor would otherwise wait for the actor forever.
+    supervisor.start_event_router();
     match apply(request, supervisor).await {
         Ok(status) => super::custody_response::success(
             request,
