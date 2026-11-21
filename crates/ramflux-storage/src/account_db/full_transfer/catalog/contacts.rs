@@ -202,10 +202,7 @@ pub(super) const RULE_14: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "contact_request_authority_floor",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "epoch",
@@ -213,7 +210,7 @@ pub(super) const RULE_14: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9007199254740991", nullable: false }
         ),
         (
             "record_hash",
@@ -221,7 +218,7 @@ pub(super) const RULE_14: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "until",
@@ -229,7 +226,7 @@ pub(super) const RULE_14: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

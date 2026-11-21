@@ -83,7 +83,7 @@ impl Contributions {
                 &header.0,
                 &mut bytes.get(body..).ok_or_else(invalid)?,
             )?;
-            if matches!(rule.id, "sql/account_erasure_generation" | "sql/receive_erased_input") {
+            if super::super::monotonic::owner(rule.id).is_some() {
                 tx.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![self.nonce.as_slice(),self.owners[0],header.0.family,header.0.key,bytes.as_slice()])?;
             } else {
                 retain(tx, &self.nonce, &self.owners[0], &bytes)?;

@@ -1,5 +1,5 @@
 {
-  "census_hash": "RJHnGN4yecGQbgtR0APRtG5DsiszYv4Hsbd7YooVNb0",
+  "census_hash": "cRO_Z4qUIJQ21_9iadr19xPV_aBLw9c1eez7YItMU9Q",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -67,7 +67,7 @@
       "id": "sql/contact_message_request_fence"
     },
     {
-      "hash": "OmEGU-wk3o9YEyYCfS7yd69m-Yjrg-65ELDFAdnjn-8",
+      "hash": "PyfgchAefkdjQ7f6_4h5DZ6ek0h7k4XM-VDPo8GUg0U",
       "id": "sql/contact_request_authority_floor"
     },
     {

@@ -182,17 +182,7 @@ impl Contributions {
         private: &BackupDatabase,
         stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullUnionEncoding, StorageError> {
-        super::input_denial::normalize(tx, &self.nonce, private)?;
-        // The only mutable fixed base owner is the declared erasure-generation maximum.
-        // Both contribution records must describe the actual normalized prepared value.
-        let rule = compiled("sql/account_erasure_generation")?;
-        let mut normalized = Zeroizing::new(Vec::new());
-        private.db.query_row(
-            "SELECT singleton,generation FROM account_erasure_generation WHERE singleton=1",
-            [],
-            |row| Ok(super::write_full_scalar_sql_row(rule, row, &mut *normalized)),
-        )??;
-        tx.execute("UPDATE full_union_record SET record=?1 WHERE generation_nonce=?2 AND family='sql/account_erasure_generation'",params![normalized.as_slice(),self.nonce.as_slice()])?;
+        super::monotonic::normalize(tx, &self.nonce, private)?;
         let guard = stage.source_guard();
         let (records, total) = super::union_encoding::visit(
             tx,

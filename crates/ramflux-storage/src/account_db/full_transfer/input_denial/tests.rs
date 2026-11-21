@@ -3,10 +3,15 @@
 
 //! Real erased-input capture and imported-verifier denial, with independent A/B keys.
 use super::*;
+use crate::BackupDatabase;
+use crate::account_db::full_transfer::{full_transfer_catalog, write_full_scalar_sql_row};
 use crate::account_db::receive::erased_input::ErasedTuple;
 use crate::{AccountDb, AccountDbKey, AccountIndex};
+use ramflux_protocol::custody::{DeviceRef, pairing::full_transfer::read_record_header};
 use ramflux_protocol::{Envelope, encode_base64url};
+use rusqlite::params;
 use std::sync::{Arc, atomic::AtomicBool};
+use zeroize::Zeroizing;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn database(label: &str) -> TestResult<(tempfile::TempDir, AccountDb)> {

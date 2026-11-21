@@ -19,10 +19,18 @@ fn conflict() -> StorageError {
     StorageError::PairingField("TransferConflict")
 }
 
+#[derive(Clone)]
 pub(super) struct Cells {
     bytes: Zeroizing<[u8; 1024]>,
-    ranges: [std::ops::Range<usize>; 3],
+    ranges: [std::ops::Range<usize>; 16],
+    kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType; 16],
     count: usize,
+}
+pub(super) struct BoundValue<'a>(rusqlite::types::ValueRef<'a>);
+impl rusqlite::ToSql for BoundValue<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(self.0))
+    }
 }
 impl Cells {
     pub(super) fn read(
@@ -30,12 +38,13 @@ impl Cells {
         header: &RecordHeader,
         input: &mut impl Read,
     ) -> Result<Self, StorageError> {
-        if header.op != RecordOp::Put || header.cell_lengths.len() > 3 {
+        if header.op != RecordOp::Put || header.cell_lengths.len() > 16 {
             return Err(unsupported());
         }
         let mut value = Self {
             bytes: Zeroizing::new([0; 1024]),
             ranges: std::array::from_fn(|_| 0..0),
+            kinds: [ramflux_protocol::custody::pairing::full_transfer::CellType::Null; 16],
             count: header.cell_lengths.len(),
         };
         let mut end = 0_usize;
@@ -46,7 +55,9 @@ impl Cells {
             if next > value.bytes.len() {
                 return Err(unsupported());
             }
-            value.ranges[index] = end..next;
+            *value.ranges.get_mut(index).ok_or_else(unsupported)? = end..next;
+            *value.kinds.get_mut(index).ok_or_else(unsupported)? =
+                *header.cell_types.get(index).ok_or_else(unsupported)?;
             end = next;
         }
         let mut output = Cursor::new(value.bytes.as_mut_slice());
@@ -60,13 +71,48 @@ impl Cells {
         if index >= self.count {
             return Err(unsupported());
         }
-        self.bytes.get(self.ranges[index].clone()).ok_or_else(unsupported)
+        self.bytes
+            .get(self.ranges.get(index).ok_or_else(unsupported)?.clone())
+            .ok_or_else(unsupported)
     }
     pub(super) fn text(&self, index: usize) -> Result<&str, StorageError> {
         std::str::from_utf8(self.bytes(index)?).map_err(|_| unsupported())
     }
     pub(super) fn integer(&self, index: usize) -> Result<i64, StorageError> {
         Ok(i64::from_be_bytes(self.bytes(index)?.try_into().map_err(|_| unsupported())?))
+    }
+    pub(super) fn set_integer(&mut self, index: usize, value: i64) -> Result<(), StorageError> {
+        let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
+        let bytes = self.bytes.get_mut(range).ok_or_else(unsupported)?;
+        if bytes.len() != 8 {
+            return Err(unsupported());
+        }
+        bytes.copy_from_slice(&value.to_be_bytes());
+        Ok(())
+    }
+    pub(super) fn copy_cell(&mut self, index: usize, other: &Self) -> Result<(), StorageError> {
+        let range = self.ranges.get(index).ok_or_else(unsupported)?.clone();
+        let bytes = self.bytes.get_mut(range).ok_or_else(unsupported)?;
+        let source = other.bytes(index)?;
+        if bytes.len() != source.len() {
+            return Err(unsupported());
+        }
+        bytes.copy_from_slice(source);
+        Ok(())
+    }
+    pub(super) fn value(&self, index: usize) -> Result<BoundValue<'_>, StorageError> {
+        use ramflux_protocol::custody::pairing::full_transfer::CellType;
+        use rusqlite::types::ValueRef;
+        if index >= self.count {
+            return Err(unsupported());
+        }
+        Ok(BoundValue(match self.kinds.get(index).ok_or_else(unsupported)? {
+            CellType::Null => ValueRef::Null,
+            CellType::I64 => ValueRef::Integer(self.integer(index)?),
+            CellType::Utf8 => ValueRef::Text(self.bytes(index)?),
+            CellType::Bytes => ValueRef::Blob(self.bytes(index)?),
+            CellType::F64 => return Err(unsupported()),
+        }))
     }
 }
 
@@ -118,16 +164,10 @@ pub(super) fn apply_fixed_base_in_transaction(
         .find(|rule| rule.id == header.family)
         .ok_or_else(unsupported)?;
     let cells = Cells::read(rule, header, input)?;
+    if let Some(owner) = super::monotonic::owner(rule.id) {
+        return owner.apply(db, rule, &cells);
+    }
     match rule.id {
-        "sql/receive_erased_input" => {
-            super::input_denial::apply(db, source, &cells)?;
-        }
-        "sql/account_erasure_generation" => {
-            let changed=db.execute("UPDATE account_erasure_generation SET generation=max(generation,?1) WHERE singleton=1",params![cells.integer(1)?])?;
-            if changed != 1 {
-                return Err(StorageError::PairingField("SchemaMismatch"));
-            }
-        }
         "sql/object_erasure_fence" => {
             db.execute(
                 "INSERT INTO object_erasure_fence(commitment) VALUES(?1) ON CONFLICT DO NOTHING",

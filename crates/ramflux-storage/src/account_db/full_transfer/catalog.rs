@@ -562,6 +562,7 @@ macro_rules! table_rule {
     (@version "pairing_adoption",$mode:ident) => { U64(2) };
     (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
     (@version "receive_erased_input",$mode:ident) => { U64(2) };
+    (@version "contact_request_authority_floor",$mode:ident) => { U64(2) };
     (@version $other:literal,$mode:ident) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {

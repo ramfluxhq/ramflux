@@ -43,6 +43,7 @@ mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
 mod input_denial;
 mod message_denial;
+mod monotonic;
 mod scalar;
 mod scalar_sql;
 mod source_base;

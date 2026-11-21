@@ -269,4 +269,6 @@ impl FullReceiverBaseCopy {
 }
 
 #[cfg(test)]
+pub(in crate::account_db::full_transfer) mod owner_tests;
+#[cfg(test)]
 mod tests;
