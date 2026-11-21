@@ -191,14 +191,14 @@ async fn start_server_with_connections(
     )
     .await
 }
-/// Starts a real TLS custody server that accepts exactly `connections` connections, with at most one
-/// armed `fault`. The server ends when every accepted connection has closed.
+/// Starts a real TLS custody server that accepts exactly `connections` connections (at most five, the
+/// bound of the rebind test), with at most one armed `fault`. The server ends when every accepted connection has closed.
 pub(crate) async fn start_server_with_faults(
     root: &Root,
     fault: Option<ReplyFault>,
     connections: u8,
 ) -> Result<(std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<Result>)> {
-    if connections == 0 || connections > 4 {
+    if connections == 0 || connections > 5 {
         return Err("test: TLS fixture connection bound".into());
     }
     let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
