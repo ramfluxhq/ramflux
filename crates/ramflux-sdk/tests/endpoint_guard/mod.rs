@@ -431,6 +431,18 @@ struct ResourceContract {
 }
 
 impl<'ast> Visit<'ast> for ResourceContract {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if item_attrs(item).and_then(active).is_ok_and(|enabled| enabled) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        if expr_attrs(expr).and_then(active).is_ok_and(|enabled| enabled) {
+            visit::visit_expr(self, expr);
+        }
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         if schema_builder(&call.receiver, 0) {
             if call.method == "with_resource" && call.args.len() == 2 {
@@ -677,6 +689,45 @@ impl Scan<'_> {
 }
 
 impl<'ast> Visit<'ast> for Scan<'_> {
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs = match item {
+            syn::ImplItem::Const(item) => Ok(item.attrs.as_slice()),
+            syn::ImplItem::Fn(item) => Ok(item.attrs.as_slice()),
+            syn::ImplItem::Type(item) => Ok(item.attrs.as_slice()),
+            syn::ImplItem::Macro(item) => Ok(item.attrs.as_slice()),
+            _ => Err("unsupported impl item syntax".into()),
+        };
+        if self.enabled(attrs) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs = match item {
+            syn::TraitItem::Const(item) => Ok(item.attrs.as_slice()),
+            syn::TraitItem::Fn(item) => Ok(item.attrs.as_slice()),
+            syn::TraitItem::Type(item) => Ok(item.attrs.as_slice()),
+            syn::TraitItem::Macro(item) => Ok(item.attrs.as_slice()),
+            _ => Err("unsupported trait item syntax".into()),
+        };
+        if self.enabled(attrs) {
+            visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        let attrs = match item {
+            syn::ForeignItem::Fn(item) => Ok(item.attrs.as_slice()),
+            syn::ForeignItem::Static(item) => Ok(item.attrs.as_slice()),
+            syn::ForeignItem::Type(item) => Ok(item.attrs.as_slice()),
+            syn::ForeignItem::Macro(item) => Ok(item.attrs.as_slice()),
+            _ => Err("unsupported foreign item syntax".into()),
+        };
+        if self.enabled(attrs) {
+            visit::visit_foreign_item(self, item);
+        }
+    }
+
     fn visit_item(&mut self, item: &'ast Item) {
         if !self.enabled(item_attrs(item)) {
             return;

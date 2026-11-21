@@ -378,6 +378,7 @@ fn embedded_resource_contract_rejects_data_registration_and_resolver_drift() {
     for (index, from, to) in [
         (0, "default-features = false", "default-features = true"),
         (1, ".with_resource(BASE,", ".with_resource(OTHER,"),
+        (1, "fn build(", "#[cfg(test)] fn build("),
         (1, "../../catalogs/rf-card-v1.json", "../../catalogs/other.json"),
         (
             2,
