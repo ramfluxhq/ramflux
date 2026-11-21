@@ -183,6 +183,7 @@ apps/rf/src/handlers/a2ui.rs | handle_a2ui | 2 | E | excluded=decode is not an i
 apps/rf/src/handlers/a2ui.rs | handle_a2ui | 3 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/account_backup.rs | job | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/account_backup.rs | wait | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/rf/src/handlers/agent.rs | request_of | 1 | E | excluded=decode is not an ingress admission; the JSON is a local command-line argument, no signed envelope is admitted here
 apps/rf/src/handlers/bot.rs | handle_bot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/bot.rs | handle_bot | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/rf/src/handlers/daemon.rs | handle_daemon | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
