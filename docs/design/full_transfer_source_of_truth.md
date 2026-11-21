@@ -15,6 +15,7 @@ milestones. Ordinary product reads and authorization checks decide acceptance.
 | Own-authored history | `ramflux-crypto::native_origin::OwnAuthoredCapture`; SDK `client/own_sent_message/authored.rs` (`capture_own_authored_revision`), `own-history/capture/{owner}` | Keep original/current identities and exact authored content in their own evidence class. The original author's account anchor determines own-authorship; B's new branch name does not replace A's author. A missing peer-origin record is not repaired by inventing one. |
 | Own-copy attestation | `client/own_sent_message/attestation.rs` (`OwnSentAttestation`) | Preserve the exact enclosing own-copy and its origin evidence. Its commitment authenticates the enclosing copy, not a fabricated first-hand receipt of the nested Message. |
 | Event order | `crates/ramflux-protocol/src/message/identity.rs` (`EventOrder`, `order_key`); native readers in SDK `client/typed_messages.rs`, `client/typed_read_model.rs` | Preserve HLC, original account/device/epoch/sequence and event id as original event identity. Compare the ordinary reader's own and peer order, including after a tail and restart. Do not relabel the author as B. |
+| Original header after Edit | `ramflux-crypto::native_origin::OriginalHeader` (`verify_header`); SDK `generated_history.rs` capture and `generated_edit_retirement.rs` retention | The exact original identity and body-free signed metadata authenticate the original HLC independently of retired plaintext/report opening. SDK edited history reuses this shared verifier. Current group membership remains separately checked. Complete erasure deletes this evidence and keeps only the narrow identity/tombstone data; do not manufacture header proof from that data. |
 | Local change cursor | Storage `account_db/journal/mod.rs:58`, `message_footprint/schema.rs:359`; `account_db/messages.rs:194` | `runtime_message_sequence.seq` comes from local journal `NEW.seq`. It is not the original event order or an imported B counter. Rebuild under B's journal/generation owner. An already-running B consumer must observe imported history without accepting A's cursor. |
 | SQL read path | Storage `account_db/messages.rs` (`direct_messages`, `generated_message_identities`), SDK native readers above | The direct SQL list sorts `created_at,message_id`; native readers also use original EventOrder. Codec or SQL row order alone proves neither CLI ordering nor live-consumer refresh. The process slice must assert actual product output. |
 | Raw copy identity | Storage `account_db/raw_inner/writer.rs`, `schema.rs`, `reparse.rs` | Preserve copy id, exact digest/bytes, qualified source and per-copy provenance. Four declared kinds have distinct native limits. Stage parent/child dependencies; a generic BLOB copy or raised helper cap is insufficient. |
@@ -27,7 +28,7 @@ milestones. Ordinary product reads and authorization checks decide acceptance.
 
 ## Shared native evidence boundary
 
-The closed `RetainedOrigin`, `OwnSentAttestation`, `Routing` and receive
+The closed `RetainedOrigin`, `OriginalHeader`, `OwnSentAttestation`, `Routing` and receive
 `Provenance` data contracts and original-evidence verifiers live in
 `ramflux-crypto::native_origin`, a dependency both storage and SDK already use.
 SDK ingestion, own-copy attestation and history replay reuse that verifier; SDK

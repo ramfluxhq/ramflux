@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Original group membership and exact per-message opening.
-use super::*;
+use super::{Author, EvidenceError, Kind, RetainedOrigin, g};
+use prost::Message as _;
 
 impl RetainedOrigin {
     pub(super) fn verify_group_binding(
@@ -54,15 +55,5 @@ impl RetainedOrigin {
         crate::verify_group_message_opening(&mut working, &self.evidence.group_plaintext, sealed)
             .map_err(|_| bad)?;
         Ok(())
-    }
-}
-
-impl Drop for RetainedOrigin {
-    fn drop(&mut self) {
-        use zeroize::Zeroize as _;
-        self.evidence.report_opening.zeroize();
-        self.evidence.group_opening.zeroize();
-        self.evidence.group_plaintext.zeroize();
-        self.reported_inner.zeroize();
     }
 }

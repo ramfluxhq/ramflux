@@ -234,8 +234,6 @@ crates/ramflux-sdk/src/client/dm.rs | receive_gateway_plaintext_deliveries | 1 |
 crates/ramflux-sdk/src/client/generated_fields.rs | shape | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/generated_fields.rs | shape | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/generated_fields.rs | shape | 3 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/generated_history.rs | matches | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
-crates/ramflux-sdk/src/client/generated_history.rs | matches | 2 | C | admission=crates/ramflux-sdk/src/client/generated_history.rs#matches#1
 crates/ramflux-sdk/src/client/generated_history.rs | verify_edit_origin | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
 crates/ramflux-sdk/src/client/generated_history.rs | verify_edit_origin | 2 | C | admission=crates/ramflux-sdk/src/client/generated_history.rs#verify_edit_origin#1
 crates/ramflux-sdk/src/client/generated_history/bootstrap.rs | bootstrap_generated_edited_target | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary

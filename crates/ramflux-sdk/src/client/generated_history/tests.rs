@@ -165,6 +165,60 @@ fn item_with_message(
 }
 
 #[test]
+fn original_signed_header_keeps_order_without_retired_or_current_plaintext() -> TestResult {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let author = sender(&root, "header-order", now)?;
+    let mut history = item(&author, &author, now)?;
+    let header = OriginalHeader {
+        exact_identity: history.exact_original_identity.clone(),
+        evidence: history.original_metadata_evidence.take().ok_or("original header evidence")?,
+    };
+    history.exact_inner.clear();
+    history.source_evidence = None;
+    let verified = header.verify_header()?;
+    let original = identity(&author, 1)?;
+    assert_eq!(verified.identity(), &original, "original identity changed after body retirement");
+    assert_eq!(
+        verified.order_key()?,
+        g::identity::order_key(&original)?,
+        "original signed order was replaced by current edit or receive order"
+    );
+    assert_eq!(
+        verified.author().root,
+        author.author.account_anchor,
+        "original header was attributed to another account"
+    );
+    Ok(())
+}
+
+#[test]
+fn original_signed_header_refuses_clock_layer_and_authority_substitution() -> TestResult {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let author = sender(&root, "header-original", now)?;
+    let foreign = sender(&root, "header-foreign", now)?;
+    let history = item(&author, &author, now)?;
+    let header = OriginalHeader {
+        exact_identity: history.exact_original_identity,
+        evidence: history.original_metadata_evidence.ok_or("original header evidence")?,
+    };
+    let mut clock = header.clone();
+    let mut changed = g::original_header::decode_identity(&clock.exact_identity)?;
+    changed.hlc += 1;
+    g::identity::verify(&changed)?; // Event-id derivation alone does not bind HLC.
+    clock.exact_identity = changed.encode_to_vec();
+    assert!(clock.verify_header().is_err(), "unsigned clock replaced original signed order");
+    let mut layer = header.clone();
+    layer.evidence.layer += 1;
+    assert!(layer.verify_header().is_err(), "original signed layer was substituted");
+    let mut authority = header;
+    authority.evidence.source_authority = Some(foreign.manifest);
+    assert!(authority.verify_header().is_err(), "foreign custody authorized the original header");
+    Ok(())
+}
+
+#[test]
 fn edited_import_refuses_cross_author_edit() -> TestResult {
     let root = Root::new()?;
     let now = crate::custody::network_now()?;

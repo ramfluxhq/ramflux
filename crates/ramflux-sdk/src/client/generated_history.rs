@@ -17,7 +17,7 @@ pub(crate) mod producer;
 #[cfg(test)]
 mod producer_tests;
 
-pub(crate) use ramflux_crypto::native_origin::Author;
+pub(crate) use ramflux_crypto::native_origin::{Author, OriginalHeader};
 
 pub(crate) fn authority(
     outer: &Value,
@@ -92,14 +92,12 @@ impl RamfluxClient {
         }
         let original_evidence =
             item.original_metadata_evidence.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?;
-        let original = authority(
-            &checked.original_outer,
-            original_evidence
-                .source_authority
-                .as_ref()
-                .ok_or(EvidenceError::OriginEvidenceMissing)?,
-            &checked.identity,
-        )?;
+        let original = OriginalHeader {
+            exact_identity: item.exact_original_identity.clone(),
+            evidence: original_evidence.clone(),
+        }
+        .verify_header()?
+        .into_author();
         let edit_author = verify_edit_origin(item, &checked.edit_identity)?;
         if original.root != edit_author.root {
             return Err(EvidenceError::EditAuthorMismatch.into());
@@ -177,12 +175,6 @@ impl RamfluxClient {
 
 #[cfg(test)]
 mod tests;
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct OriginalHeader {
-    pub exact_identity: Vec<u8>,
-    pub evidence: g::HistoryOriginalMetadataEvidence,
-}
 
 impl RamfluxClient {
     pub(crate) fn capture_generated_original_header(
@@ -346,18 +338,6 @@ impl RamfluxClient {
             &target,
         )?;
         Ok(())
-    }
-}
-
-impl OriginalHeader {
-    fn matches(&self, other: &Self) -> Result<bool, SdkError> {
-        let left: Value = ramflux_protocol::parse_i_json(&self.evidence.canonical_sender_envelope)?;
-        let right: Value =
-            ramflux_protocol::parse_i_json(&other.evidence.canonical_sender_envelope)?;
-        Ok(self.exact_identity == other.exact_identity
-            && self.evidence.layer == other.evidence.layer
-            && left["ext"][g::original_header::EXT_KEY]
-                == right["ext"][g::original_header::EXT_KEY])
     }
 }
 
