@@ -153,4 +153,20 @@ mod tests {
             Err(PrxError::Protocol { .. })
         ));
     }
+
+    #[test]
+    fn null_targeted_fields_are_refused() {
+        let literal =
+            r#"{"revision":"HEX","configured":true,"effective":true,"restart_required":false}"#
+                .replace("HEX", HEX);
+        for pointer in ["/configured", "/effective", "/restart_required", "/revision"] {
+            crate::test_support::assert_null_refused(&literal, pointer, TargetedAgents::from_body);
+        }
+    }
+
+    #[test]
+    fn null_reload_success_is_refused() {
+        let literal = r#"{"success":true,"message":"reloaded"}"#;
+        crate::test_support::assert_null_refused(literal, "/success", ReloadReport::from_body);
+    }
 }

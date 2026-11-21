@@ -8,7 +8,7 @@
 use crate::autonomy::Autonomy;
 use crate::capabilities::{AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, Capabilities, require};
 use crate::client::PrxClient;
-use crate::error::{ApiCode, PrxError, decode_ok, local_refusal, protocol};
+use crate::error::{ApiCode, PrxError, decode_ok, local_refusal, present, protocol};
 use crate::name::AgentName;
 use crate::revision::ConfigRevision;
 use reqwest::Method;
@@ -106,7 +106,7 @@ fn autonomy_wire(level: Autonomy) -> &'static str {
 struct WireConfig {
     provider: String,
     model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     prompt: Option<String>,
     autonomy: Autonomy,
     tools: Vec<String>,
@@ -602,5 +602,74 @@ mod tests {
         );
         let deleted = client.retire(&caps, &name(), &revision).await;
         assert!(matches!(deleted, Err(PrxError::Unsupported { .. })));
+    }
+
+    #[test]
+    fn null_prompt_is_refused() {
+        let literal = readback(
+            r#"{"provider":"ollama","model":"m","prompt":"x","autonomy":"readonly","tools":[],"enabled":false}"#,
+            "disabled",
+        );
+        crate::test_support::assert_null_refused(&literal, "/config/prompt", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_enabled_is_refused() {
+        let literal = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true}"#,
+            "active",
+        );
+        crate::test_support::assert_null_refused(&literal, "/config/enabled", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_tools_is_refused() {
+        let literal = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true}"#,
+            "active",
+        );
+        crate::test_support::assert_null_refused(&literal, "/config/tools", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_status_is_refused() {
+        let literal = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true}"#,
+            "active",
+        );
+        crate::test_support::assert_null_refused(&literal, "/status", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_incarnation_is_refused() {
+        let literal = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true}"#,
+            "active",
+        );
+        crate::test_support::assert_null_refused(&literal, "/incarnation", |b| {
+            AgentReadback::from_body(b, &name())
+        });
+    }
+
+    #[test]
+    fn null_list_revision_is_refused() {
+        let literal = r#"{"revision":"HEX","agents":[]}"#.replace("HEX", HEX);
+        crate::test_support::assert_null_refused(&literal, "/revision", AgentList::from_body);
+    }
+
+    #[test]
+    fn null_retire_revision_is_refused() {
+        let literal = r#"{"name":"NAME","status":"retired","revision":"HEX"}"#.replace("NAME", NAME).replace("HEX", HEX);
+        crate::test_support::assert_null_refused(&literal, "/revision", |b| {
+            Retired::from_body(b, &name())
+        });
     }
 }

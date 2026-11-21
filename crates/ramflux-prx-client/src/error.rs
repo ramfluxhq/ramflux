@@ -108,15 +108,25 @@ struct CodedTop {
     error: CodedBody,
 }
 
+/// Deserializes a field that is present. JSON `null` is refused (fail closed); an absent key
+/// is handled by `#[serde(default)]`.
+pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 struct CodedBody {
     code: String,
     // Present by contract; never parsed for meaning.
     #[serde(rename = "message")]
     _message: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     current_revision: Option<ConfigRevision>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     revision: Option<ConfigRevision>,
 }
 
@@ -329,5 +339,29 @@ mod tests {
             Err(PrxError::Protocol { .. })
         ));
         assert!(matches!(decode_ok::<Strict>(br#"{"ok":"true"}"#), Err(PrxError::Protocol { .. })));
+    }
+
+    #[test]
+    fn null_current_revision_is_refused() {
+        let body = r#"{"error":{"code":"revision_conflict","message":"m","current_revision":"d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"}}"#;
+        crate::test_support::assert_null_refused(body, "/error/current_revision", |b| {
+            match decode_api_error(409, b) {
+                e @ PrxError::Protocol { .. } => Err(e),
+                _ => Ok(()),
+            }
+        });
+    }
+
+    #[test]
+    fn null_revision_is_refused() {
+        let body = r#"{"error":{"code":"confirmation_required","message":"m","revision":"d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"}}"#;
+        crate::test_support::assert_null_refused(
+            body,
+            "/error/revision",
+            |b| match decode_api_error(428, b) {
+                e @ PrxError::Protocol { .. } => Err(e),
+                _ => Ok(()),
+            },
+        );
     }
 }

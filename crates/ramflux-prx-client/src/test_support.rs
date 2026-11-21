@@ -36,3 +36,23 @@ pub(crate) fn caps_with(tokens: &[&str]) -> Capabilities {
         available: BTreeSet::new(),
     }
 }
+
+/// Decodes a literal, valid body, then the same body with the field at `pointer` set to JSON
+/// `null`. The valid body must decode; the `null` one must be a `Protocol` error (fail closed).
+pub(crate) fn assert_null_refused<T>(
+    body: &str,
+    pointer: &str,
+    decode: impl Fn(&[u8]) -> Result<T, crate::error::PrxError>,
+) {
+    assert!(decode(body.as_bytes()).is_ok(), "control: the literal body decodes");
+    let mut value: serde_json::Value =
+        serde_json::from_str(body).expect("test: literal body is JSON");
+    let slot =
+        value.pointer_mut(pointer).expect("test: the pointer names a field of the literal body");
+    *slot = serde_json::Value::Null;
+    let mutated = value.to_string();
+    assert!(
+        matches!(decode(mutated.as_bytes()), Err(crate::error::PrxError::Protocol { .. })),
+        "JSON null at {pointer} must be a Protocol error"
+    );
+}

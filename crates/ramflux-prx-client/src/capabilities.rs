@@ -174,4 +174,12 @@ mod tests {
             other => panic!("test: expected Unsupported, got {other:?}"),
         }
     }
+
+    #[test]
+    fn null_capabilities_fields_are_refused() {
+        let literal = body(SHA, "");
+        for pointer in ["/commit", "/api", "/capabilities", "/available", "/prx_version"] {
+            crate::test_support::assert_null_refused(&literal, pointer, Capabilities::from_body);
+        }
+    }
 }

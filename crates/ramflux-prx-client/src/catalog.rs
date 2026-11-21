@@ -33,7 +33,7 @@ pub struct Catalog {
 pub struct CatalogModel {
     pub provider: String,
     pub model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::error::present")]
     pub credentials_ready: Option<bool>,
 }
 
@@ -137,5 +137,25 @@ mod tests {
     fn non_hex_catalog_revision_fails_closed() {
         let bad = body("", "full", "C3C3");
         assert!(matches!(Catalog::from_body(bad.as_bytes()), Err(PrxError::Protocol { .. })));
+    }
+
+    #[test]
+    fn null_credentials_ready_is_refused() {
+        let literal = body("", "full", HEX);
+        crate::test_support::assert_null_refused(
+            &literal,
+            "/models/0/credentials_ready",
+            Catalog::from_body,
+        );
+    }
+
+    #[test]
+    fn null_model_provider_is_refused() {
+        let literal = body("", "full", HEX);
+        crate::test_support::assert_null_refused(
+            &literal,
+            "/models/0/provider",
+            Catalog::from_body,
+        );
     }
 }
