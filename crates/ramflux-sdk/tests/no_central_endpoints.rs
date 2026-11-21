@@ -374,11 +374,46 @@ fn module_graph_excludes_tests_without_trusting_filenames() {
             "production or orphan source hidden: {name}"
         );
     }
+    std::fs::write(src.join("orphan_owner.rs"), "#[path = \"fixtures.rs\"] mod active;")
+        .expect("test: unknown owner also references test-declared file");
+    let sources = endpoint_guard::sources_under(dir.path(), &["src"])
+        .expect("test: conservative orphan module ownership");
+    assert!(
+        sources.iter().any(|(path, _)| path.ends_with("fixtures.rs")),
+        "unknown production owner was hidden by another test-only declaration"
+    );
     std::fs::write(src.join("lib.rs"), "mod missing;").expect("test: unresolved module fixture");
     assert!(
         endpoint_guard::sources_under(dir.path(), &["src"]).is_err(),
         "unresolved module source silently skipped"
     );
+}
+
+#[test]
+fn uncertain_module_ownership_is_rejected() {
+    for source in [
+        r#"fn run() { #[path = "fixtures.rs"] mod active; }"#,
+        r#"#[path = "alternate"] mod inline { mod active; }"#,
+        r#"#[cfg_attr(feature = "x", path = "alternate.rs")] mod active;"#,
+        r#"#[path = "fixtures.rs"] #[path = "alternate.rs"] mod active;"#,
+    ] {
+        let dir = tempfile::TempDir::new().expect("test: isolated ownership ambiguity");
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).expect("test: ownership source directory");
+        for relative in
+            ["fixtures.rs", "alternate.rs", "active.rs", "inline/active.rs", "alternate/active.rs"]
+        {
+            let destination = src.join(relative);
+            std::fs::create_dir_all(destination.parent().expect("test: candidate module parent"))
+                .expect("test: candidate module directory");
+            std::fs::write(destination, "").expect("test: candidate module source");
+        }
+        std::fs::write(src.join("lib.rs"), source).expect("test: ambiguous module declarations");
+        assert!(
+            endpoint_guard::sources_under(dir.path(), &["src"]).is_err(),
+            "unsupported module ownership was silently accepted: {source}"
+        );
+    }
 }
 
 #[test]

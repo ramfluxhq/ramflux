@@ -226,6 +226,15 @@ struct ModuleGraph {
     seen: BTreeSet<(PathBuf, bool)>,
 }
 
+#[derive(Default)]
+struct LocalModules(bool);
+
+impl<'ast> Visit<'ast> for LocalModules {
+    fn visit_item_mod(&mut self, _module: &'ast syn::ItemMod) {
+        self.0 = true;
+    }
+}
+
 impl ModuleGraph {
     fn walk(
         &mut self,
@@ -239,9 +248,24 @@ impl ModuleGraph {
             return Err("module nesting limit".into());
         }
         for item in items {
-            let Item::Mod(module) = item else { continue };
+            let Item::Mod(module) = item else {
+                if included && active(item_attrs(item)?)? {
+                    let mut local = LocalModules::default();
+                    local.visit_item(item);
+                    if local.0 {
+                        return Err("local module declarations are unsupported".into());
+                    }
+                }
+                continue;
+            };
+            if module.attrs.iter().filter(|attr| attr.path().is_ident("path")).count() > 1 {
+                return Err("multiple module path overrides are unsupported".into());
+            }
             let enabled = included && active(&module.attrs)?;
             if let Some((_, children)) = &module.content {
+                if module.attrs.iter().any(|attr| attr.path().is_ident("path")) {
+                    return Err("inline module path overrides are unsupported".into());
+                }
                 self.walk(
                     children,
                     (&dir.join(module.ident.to_string()), &dir.join(module.ident.to_string())),
@@ -361,6 +385,32 @@ pub fn sources_under(root: &Path, roots: &[&str]) -> Result<Vec<(PathBuf, String
                 0,
             )?;
         }
+    }
+    // Unknown owners can reference files also reached through test-only declarations.
+    // Traverse them conservatively before deciding which external files to exclude.
+    let orphans: Vec<_> = graph
+        .files
+        .keys()
+        .filter(|path| {
+            !graph.seen.contains(&((*path).clone(), false))
+                && !graph.seen.contains(&((*path).clone(), true))
+        })
+        .cloned()
+        .collect();
+    for path in orphans {
+        let file = graph.files.get(&path).ok_or("orphan source missing")?.clone();
+        let included = active(&file.attrs)?;
+        graph.seen.insert((path.clone(), included));
+        let parent = path.parent().ok_or("orphan parent missing")?;
+        let child = if path
+            .file_name()
+            .is_some_and(|name| name == "mod.rs" || name == "lib.rs" || name == "main.rs")
+        {
+            parent.to_owned()
+        } else {
+            path.with_extension("")
+        };
+        graph.walk(&file.items, (&child, parent), included, 0)?;
     }
     let ModuleGraph { texts, seen, .. } = graph;
     // Unreferenced files are scanned, never presumed to be tests from their names.
