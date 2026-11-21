@@ -8,6 +8,7 @@ mod capability;
 mod commit;
 mod machine;
 mod publish;
+mod rebind;
 mod receive_checks;
 mod receive_decision;
 mod state;
@@ -15,6 +16,8 @@ mod store;
 
 #[cfg(test)]
 mod e2e_tests;
+#[cfg(test)]
+mod rebind_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -30,6 +33,7 @@ pub use machine::{
 };
 pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
+pub use rebind::{RebindBinding, RebindEntry};
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };

@@ -74,7 +74,7 @@ impl AgentCreationRecord {
 #[derive(Clone, Debug)]
 pub struct AgentCreationStore {
     root: PathBuf,
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
 }
 
 impl AgentCreationStore {
@@ -209,22 +209,54 @@ impl AgentCreationStore {
         check_consistency(record)?;
         check_account_id(record)?;
         let bytes = serde_json::to_vec(record).map_err(|_| SdkError::CustodySetupInvalid)?;
-        let path = self.path(&record.request_id)?;
-        let tmp = self.dir.join(format!("{}.json.tmp", record.request_id));
-        {
-            let mut file =
-                std::fs::File::create(&tmp).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-            file.write_all(&bytes).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-            file.sync_all().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        write_json_atomic(&self.dir, &format!("{}.json", record.request_id), &bytes)
+    }
+
+    /// Every record in this directory, oldest request id first. Used by the rebind observation,
+    /// which needs the complete agents, not only the pending ones.
+    /// # Errors
+    /// Refuses a directory that cannot be read and any record that fails [`Self::load`].
+    pub fn records(&self) -> Result<Vec<AgentCreationRecord>, SdkError> {
+        let entries =
+            std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| SdkError::CustodyVaultUnavailable)?;
+            let name = entry.file_name();
+            let Some(request_id) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if let Some(record) = self.load(request_id)? {
+                records.push(record);
+            }
         }
-        std::fs::rename(&tmp, &path).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        crate::platform::fs::sync_path(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)
+        records.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+        Ok(records)
     }
 
     fn path(&self, request_id: &str) -> Result<PathBuf, SdkError> {
         crate::custody::valid_id(request_id)?;
         Ok(self.dir.join(format!("{request_id}.json")))
     }
+}
+
+/// Write `bytes` to `dir/file_name` through a temporary file, `sync_all`, an atomic rename and a
+/// directory sync. A reader sees the old file or the new one, never a partial write.
+pub(super) fn write_json_atomic(
+    dir: &std::path::Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), SdkError> {
+    let path = dir.join(file_name);
+    let tmp = dir.join(format!("{file_name}.tmp"));
+    {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        file.write_all(bytes).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        file.sync_all().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    }
+    std::fs::rename(&tmp, &path).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    crate::platform::fs::sync_path(dir).map_err(|_| SdkError::CustodyVaultUnavailable)
 }
 
 fn check_account_id(record: &AgentCreationRecord) -> Result<(), SdkError> {
