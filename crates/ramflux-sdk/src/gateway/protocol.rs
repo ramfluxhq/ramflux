@@ -195,6 +195,8 @@ impl GatewaySessionConfig {
         }
         #[cfg(not(all(feature = "http-connect-proxy", not(windows))))]
         {
+            // Preserve the instance API when this build cannot configure a proxy.
+            let _ = self;
             false
         }
     }

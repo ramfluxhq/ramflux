@@ -14,7 +14,7 @@ use ramflux_transport::{
     GatewaySessionFrameSource, GatewayTcpTlsStream, MeshTlsConfig, custody_tcp_exporter,
     dial_gateway,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -166,7 +166,8 @@ async fn quic_wins_when_udp_works_and_no_second_connection_is_left_open() -> Tes
     .await?
 }
 
-async fn read_http_head<S: AsyncRead + Unpin>(stream: &mut S) -> TestResult<String> {
+#[cfg(all(feature = "http-connect-proxy", not(windows)))]
+async fn read_http_head<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> TestResult<String> {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
