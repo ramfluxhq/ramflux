@@ -17,15 +17,14 @@ use super::super::test_support::{
 use crate::SdkError;
 use crate::custody::CustodyConnection;
 use crate::custody::agent_creation::{
-    AgentCreationState, AgentFailure, apply_decision, commit_approved,
-    first_action, load_publishing, primary_branch_public_key, receive_plan,
-    require_agent_custody_authorization,
+    AgentCreationState, AgentFailure, apply_decision, commit_approved, first_action,
+    load_publishing, primary_branch_public_key, receive_plan, require_agent_custody_authorization,
 };
 use crate::time::FixedClock;
 use ramflux_protocol::custody::{
-    CustodyProofAction, CustodyRefusal, CustodyServerFrame, DeviceRef,
-    RegisterPlan, RegisterPurpose, decode_register_decision, decode_register_plan,
-    encode_register_decision, encode_register_plan, register_plan_hash,
+    CustodyProofAction, CustodyRefusal, CustodyServerFrame, DeviceRef, RegisterPlan,
+    RegisterPurpose, decode_register_decision, decode_register_plan, encode_register_decision,
+    encode_register_plan, register_plan_hash,
 };
 use ramflux_protocol::{PrincipalKind, encode_base64url};
 
@@ -129,7 +128,8 @@ async fn altered_fields_case(pair: &mut Pair) -> TestResult {
     for (name, changed) in &mutations {
         let mut altered = approved.clone();
         altered.plan_b64 = encode_base64url(
-            ramflux_protocol::canonical_json_bytes(changed).map_err(|_| "test: the plan serialises")?,
+            ramflux_protocol::canonical_json_bytes(changed)
+                .map_err(|_| "test: the plan serialises")?,
         );
         std::fs::write(&file, serde_json::to_vec(&altered)?)?;
         assert!(store.load(&record.request_id).is_err(), "an altered `{name}` is refused");
@@ -163,30 +163,54 @@ async fn decision_case(pair: &mut Pair) -> TestResult {
         &decide_body(&first.request_id, &hash, Some(true)),
         now()?,
     )?;
-    let phone_store = store_of(&root_of(&pair.phone)?, &pair.phone.client.account_db()?.local_account_id)?;
-    let decision = phone_store.load(&first.request_id)?.ok_or("test: the phone decision")?.decision_bytes()?.ok_or("test: the decision is saved")?;
+    let phone_store =
+        store_of(&root_of(&pair.phone)?, &pair.phone.client.account_db()?.local_account_id)?;
+    let decision = phone_store
+        .load(&first.request_id)?
+        .ok_or("test: the phone decision")?
+        .decision_bytes()?
+        .ok_or("test: the decision is saved")?;
     let second = desk_create(pair, vault.as_ref(), at)?;
     let store = desk_store(pair)?;
     let plan = decode_register_plan(&first.plan_bytes()?)?;
-    let key = primary_branch_public_key(pair.laptop.client.born_v3_account.as_deref().ok_or("test: the human record")?.record(), &plan.human_primary, now()?)?;
+    let key = primary_branch_public_key(
+        pair.laptop.client.born_v3_account.as_deref().ok_or("test: the human record")?.record(),
+        &plan.human_primary,
+        now()?,
+    )?;
     let at_decision = now()?;
 
-    let replayed = apply_decision(&store, vault.as_ref(), &second.request_id, &decision, &key, at_decision);
+    let replayed =
+        apply_decision(&store, vault.as_ref(), &second.request_id, &decision, &key, at_decision);
     assert!(replayed.is_err(), "a decision for one request is not accepted for another");
-    assert_eq!(desk_record(pair, &second.request_id)?.state, AgentCreationState::AuthorizationPending);
+    assert_eq!(
+        desk_record(pair, &second.request_id)?.state,
+        AgentCreationState::AuthorizationPending
+    );
 
-    let forger_key = ramflux_crypto::create_device_branch_from_seed("forger", "forger-device", 1, &[0x66; 32]);
+    let forger_key =
+        ramflux_crypto::create_device_branch_from_seed("forger", "forger-device", 1, &[0x66; 32]);
     let genuine = decode_register_decision(&decision)?;
     let forged_envelope =
         ramflux_crypto::custody::sign_register_decision(&forger_key, genuine.body.clone())?;
     let forged_bytes = encode_register_decision(&forged_envelope)?;
-    assert!(apply_decision(&store, vault.as_ref(), &first.request_id, &forged_bytes, &key, at_decision).is_err());
+    assert!(
+        apply_decision(&store, vault.as_ref(), &first.request_id, &forged_bytes, &key, at_decision)
+            .is_err()
+    );
 
     let swapped = encode_base64url([0x42; 32]);
-    assert!(apply_decision(&store, vault.as_ref(), &first.request_id, &decision, &swapped, at_decision).is_err());
-    assert_eq!(desk_record(pair, &first.request_id)?.state, AgentCreationState::AuthorizationPending);
+    assert!(
+        apply_decision(&store, vault.as_ref(), &first.request_id, &decision, &swapped, at_decision)
+            .is_err()
+    );
+    assert_eq!(
+        desk_record(pair, &first.request_id)?.state,
+        AgentCreationState::AuthorizationPending
+    );
 
-    let accepted = apply_decision(&store, vault.as_ref(), &first.request_id, &decision, &key, at_decision)?;
+    let accepted =
+        apply_decision(&store, vault.as_ref(), &first.request_id, &decision, &key, at_decision)?;
     assert_eq!(accepted.state, AgentCreationState::Authorized, "the genuine decision authorizes");
     Ok(())
 }
@@ -229,7 +253,8 @@ fn signer_case(pair: &mut Pair) -> TestResult {
         let signed = primary_decision_as(&pair.phone, &phone_root, &plan_bytes, signer, at);
         assert!(signed.is_err(), "a decision for {signer:?} is not the plan's primary");
     }
-    let primary = primary_decision_as(&pair.phone, &phone_root, &plan_bytes, &plan.human_primary, at);
+    let primary =
+        primary_decision_as(&pair.phone, &phone_root, &plan_bytes, &plan.human_primary, at);
     assert!(primary.is_ok(), "the plan's own primary signs with the same approval");
     Ok(())
 }
@@ -258,7 +283,8 @@ async fn stale_head_case(pair: &mut Pair) -> TestResult {
     stale.request_hash = register_plan_hash(&plan)?;
     store.save(&stale)?;
     let human = pair.laptop.client.account_db()?.local_account_id.clone();
-    let refused = commit_approved(&store, vault.as_ref(), &human, &record.request_id, &capable(), now()?);
+    let refused =
+        commit_approved(&store, vault.as_ref(), &human, &record.request_id, &capable(), now()?);
     assert!(refused.is_err(), "a stale human head is not committed");
     let closed = store.load(&record.request_id)?.ok_or("test: the closed record")?;
     assert_eq!(closed.state, AgentCreationState::Refused);
@@ -291,7 +317,8 @@ async fn capability_case(pair: &mut Pair) -> TestResult {
     let other = vec!["agent_custody_authorization_v0".to_owned()];
     for advertised in [&empty, &other] {
         assert!(require_agent_custody_authorization(advertised).is_err());
-        let refused = commit_approved(&store, vault.as_ref(), &human, &record.request_id, advertised, now()?);
+        let refused =
+            commit_approved(&store, vault.as_ref(), &human, &record.request_id, advertised, now()?);
         assert!(matches!(refused, Err(SdkError::AgentCustodyUnsupported)), "{refused:?}");
         assert_eq!(desk_record(pair, &record.request_id)?.state, AgentCreationState::Authorized);
         assert_no_account(&root, &agent_id, now()?);
@@ -325,7 +352,14 @@ async fn node_case(pair: &mut Pair) -> TestResult {
     let plan = decode_register_plan(&record.plan_bytes()?)?;
     let node = TestNode::start(2, None).await?;
     node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault).await?;
-    commit_approved(&desk_store(pair)?, vault.as_ref(), &human, &record.request_id, &capable(), now()?)?;
+    commit_approved(
+        &desk_store(pair)?,
+        vault.as_ref(),
+        &human,
+        &record.request_id,
+        &capable(),
+        now()?,
+    )?;
     let mut proof = CustodyConnection::connect_for_proof(
         node.config(&laptop_root, &agent_id, &plan.agent_device.device_id),
         vault.clone(),
@@ -336,14 +370,23 @@ async fn node_case(pair: &mut Pair) -> TestResult {
         first_action(PrincipalKind::HeadlessAi, None, &publication),
         Err(SdkError::CustodyNetwork(CustodyRefusal::AgentAuthorizationRequired))
     ));
-    let plain_result = proof.prove(CustodyProofAction::Publish { publication: Box::new(publication.clone()) }).await;
+    let plain_result = proof
+        .prove(CustodyProofAction::Publish { publication: Box::new(publication.clone()) })
+        .await;
     assert!(
-        matches!(plain_result, Err(SdkError::CustodyNetwork(CustodyRefusal::AgentAuthorizationRequired))),
+        matches!(
+            plain_result,
+            Err(SdkError::CustodyNetwork(CustodyRefusal::AgentAuthorizationRequired))
+        ),
         "the node refuses a plain publish of a headless record: {plain_result:?}"
     );
     let saved = load_publishing(&laptop_root, proof.account())?.ok_or("the saved approval")?;
-    let CustodyProofAction::AgentPublish { publication: pub_box, agent_profile, plan: plan_box, authorization } =
-        saved.publish_action(&publication)
+    let CustodyProofAction::AgentPublish {
+        publication: pub_box,
+        agent_profile,
+        plan: plan_box,
+        authorization,
+    } = saved.publish_action(&publication)
     else {
         return Err("test: the saved approval builds an AgentPublish".into());
     };
@@ -356,7 +399,10 @@ async fn node_case(pair: &mut Pair) -> TestResult {
         authorization: Box::new(bad_hash),
     };
     let refused = proof.prove(bad_hash_action).await;
-    assert!(matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
+        "{refused:?}"
+    );
     let (_, agent_credentials) =
         proof.account().credentials(vault.as_ref(), &plan.agent_device.device_id, now()?)?;
     let as_agent = ramflux_crypto::custody::sign_register_decision(
@@ -370,7 +416,10 @@ async fn node_case(pair: &mut Pair) -> TestResult {
         authorization: Box::new(as_agent),
     };
     let refused = proof.prove(non_primary).await;
-    assert!(matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))),
+        "{refused:?}"
+    );
     {
         let _clock = FixedClock::set(i64::try_from(plan.expires_at + 1)?);
         let expired = proof
@@ -381,7 +430,10 @@ async fn node_case(pair: &mut Pair) -> TestResult {
                 authorization: authorization.clone(),
             })
             .await;
-        assert!(matches!(expired, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))), "{expired:?}");
+        assert!(
+            matches!(expired, Err(SdkError::CustodyNetwork(CustodyRefusal::InvalidInput))),
+            "{expired:?}"
+        );
     }
     let admitted = proof
         .prove(CustodyProofAction::AgentPublish {
@@ -414,18 +466,42 @@ fn remote_confirm_case(pair: &mut Pair) -> TestResult {
     let plan_bytes = record.plan_bytes()?;
     let mut with_flag: serde_json::Value = serde_json::from_slice(&plan_bytes)?;
     with_flag["confirmed"] = true.into();
-    let phone_store = store_of(&root_of(&pair.phone)?, &pair.phone.client.account_db()?.local_account_id)?;
+    let phone_store =
+        store_of(&root_of(&pair.phone)?, &pair.phone.client.account_db()?.local_account_id)?;
     assert!(receive_plan(&phone_store, &serde_json::to_vec(&with_flag)?, at).is_err());
     assert!(phone_store.load(&record.request_id)?.is_none(), "the phone stores nothing");
     let hash = record.request_hash.clone();
     let fixture = pair.phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?;
     fixture.vault.arm_agent_decision(&hash)?;
-    let signed = primary_decision_as(&pair.phone, &root_of(&pair.phone)?, &plan_bytes, &decode_register_plan(&plan_bytes)?.human_primary, at)?;
+    let signed = primary_decision_as(
+        &pair.phone,
+        &root_of(&pair.phone)?,
+        &plan_bytes,
+        &decode_register_plan(&plan_bytes)?.human_primary,
+        at,
+    )?;
     let mut body_flag: serde_json::Value = serde_json::from_slice(&signed)?;
     body_flag["body"]["confirmed"] = true.into();
     let store = desk_store(pair)?;
-    let key = primary_branch_public_key(pair.laptop.client.born_v3_account.as_deref().ok_or("test: the human record")?.record(), &decode_register_plan(&plan_bytes)?.human_primary, at)?;
-    assert!(apply_decision(&store, vault.as_ref(), &record.request_id, &serde_json::to_vec(&body_flag)?, &key, at).is_err());
-    assert_eq!(desk_record(pair, &record.request_id)?.state, AgentCreationState::AuthorizationPending);
+    let key = primary_branch_public_key(
+        pair.laptop.client.born_v3_account.as_deref().ok_or("test: the human record")?.record(),
+        &decode_register_plan(&plan_bytes)?.human_primary,
+        at,
+    )?;
+    assert!(
+        apply_decision(
+            &store,
+            vault.as_ref(),
+            &record.request_id,
+            &serde_json::to_vec(&body_flag)?,
+            &key,
+            at
+        )
+        .is_err()
+    );
+    assert_eq!(
+        desk_record(pair, &record.request_id)?.state,
+        AgentCreationState::AuthorizationPending
+    );
     Ok(())
 }

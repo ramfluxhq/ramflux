@@ -25,20 +25,20 @@ use crate::client::shared_group::tests::{
     install_native_directories, native_person, native_sibling,
 };
 use crate::custody::agent_creation::{
-    AgentCreationRecord, AgentCreationStore, AgentSteps, BeginInput,
-    BeginOutcome, PrimarySigning, begin, commit_approved, complete_with_receipt,
-    primary_sign_decision,
+    AgentCreationRecord, AgentCreationStore, AgentSteps, BeginInput, BeginOutcome, PrimarySigning,
+    begin, commit_approved, complete_with_receipt, primary_sign_decision,
 };
-use crate::custody::vault::AGENT_MASTER_PREFIX;
 use crate::custody::load_account;
 use crate::custody::network_tests::{ReplyFault, Root, start_server_with_faults};
+use crate::custody::vault::AGENT_MASTER_PREFIX;
 use crate::custody::{CustodyConnection, CustodyNetworkConfig, PrimaryVault};
 use crate::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError};
 use ramflux_node_core::{RouterCore, RouterRedbStore};
 use ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY;
 use ramflux_protocol::custody::{
-    AgentPublishReceipt, BindingMode, CustodyProofAction, CustodyServerFrame, DeviceRef, Publication,
-    RegisterOutcome, RegisterPlan, decode_register_plan, object_hash, register_plan_hash,
+    AgentPublishReceipt, BindingMode, CustodyProofAction, CustodyServerFrame, DeviceRef,
+    Publication, RegisterOutcome, RegisterPlan, decode_register_plan, object_hash,
+    register_plan_hash,
 };
 use ramflux_protocol::message as g;
 use std::net::SocketAddr;
@@ -385,7 +385,11 @@ pub(crate) fn primary_decision_as(
 // Request and state helpers of the end-to-end tests: the creation on the desktop, the phone's
 // decision through the router, and the closed-request probes.
 /// Creates a request on the desktop with `vault` and returns its saved desktop record.
-pub(crate) fn desk_create(pair: &Pair, vault: &dyn PrimaryVault, at: u64) -> TestResult<AgentCreationRecord> {
+pub(crate) fn desk_create(
+    pair: &Pair,
+    vault: &dyn PrimaryVault,
+    at: u64,
+) -> TestResult<AgentCreationRecord> {
     let laptop_root = root_of(&pair.laptop)?;
     let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
     let status = pair.laptop.client.agent_create(vault, &create_body(Some(true)), at)?;
@@ -429,7 +433,11 @@ pub(crate) fn item_present(vault: &dyn PrimaryVault, plan: &RegisterPlan, refere
 }
 
 /// The request holds its pending items before it closes.
-pub(crate) fn assert_items_present(vault: &dyn PrimaryVault, plan: &RegisterPlan, before: &[String]) {
+pub(crate) fn assert_items_present(
+    vault: &dyn PrimaryVault,
+    plan: &RegisterPlan,
+    before: &[String],
+) {
     assert!(
         before.iter().any(|reference| item_present(vault, plan, reference)),
         "the open request holds its pending items"
@@ -501,4 +509,3 @@ pub(crate) fn desk_record(pair: &Pair, request_id: &str) -> TestResult<AgentCrea
         .load(request_id)?
         .ok_or_else(|| "test: the desktop record".into())
 }
-

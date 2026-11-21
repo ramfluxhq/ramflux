@@ -12,15 +12,15 @@
 //! which is emptied only when every delete, master included, succeeded.
 use super::super::test_support::{
     DesktopSteps, OwnRouter, Pair, TestNode, TestResult, assert_items_gone, assert_items_present,
-    assert_no_account, assert_retry_creates_no_second_anchor, desk_create, desk_record,
-    now, phone_decides, pair, root_of, saved_receipt, store_of, vault_of,
+    assert_no_account, assert_retry_creates_no_second_anchor, desk_create, desk_record, now, pair,
+    phone_decides, root_of, saved_receipt, store_of, vault_of,
 };
-use crate::custody::agent_creation::{AgentCreationState, AgentFailure, advance_one, load_publishing, resume_request};
-use crate::custody::network_tests::ReplyFault;
 use crate::custody::CustodyConnection;
-use ramflux_protocol::custody::{
-    CustodyServerFrame, REGISTER_TTL_SECONDS, decode_register_plan,
+use crate::custody::agent_creation::{
+    AgentCreationState, AgentFailure, advance_one, load_publishing, resume_request,
 };
+use crate::custody::network_tests::ReplyFault;
+use ramflux_protocol::custody::{CustodyServerFrame, REGISTER_TTL_SECONDS, decode_register_plan};
 
 fn scenario(case: impl std::future::Future<Output = TestResult>) -> TestResult {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -188,7 +188,11 @@ fn clock_case(pair: &mut Pair) -> TestResult {
     let before = record.vault_refs.clone();
     assert_items_present(vault.as_ref(), &plan, &before);
     let behind = resume_request(&store, vault.as_ref(), &record.request_id, record.issued_at - 1)?;
-    assert_eq!(behind.state, AgentCreationState::Expired, "a clock behind the issue time expires it");
+    assert_eq!(
+        behind.state,
+        AgentCreationState::Expired,
+        "a clock behind the issue time expires it"
+    );
     assert_items_gone(vault.as_ref(), &plan, &before, &behind);
     let agent_id = record.account_id.clone().ok_or("test: the request reserves its account")?;
     assert_no_account(&laptop_root, &agent_id, at);
@@ -234,8 +238,8 @@ fn cleanup_case(pair: &mut Pair) -> TestResult {
 }
 
 #[test]
-fn lost_agent_publish_reply_is_publication_unknown_then_reconciles_to_the_saved_receipt() -> TestResult
-{
+fn lost_agent_publish_reply_is_publication_unknown_then_reconciles_to_the_saved_receipt()
+-> TestResult {
     let mut pair = pair("refusal-lost-reply")?;
     scenario(lost_reply_case(&mut pair))
 }

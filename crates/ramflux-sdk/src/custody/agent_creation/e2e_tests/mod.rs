@@ -5,6 +5,6 @@
 //! scenario group. Shared support, what is real and what is a fixture: `../test_support.rs`.
 //! Every test waits through a bounded deadline, and no test sleeps for expiry: time is passed as
 //! an explicit `now`.
-mod primary_phone;
 mod authorization_binding;
+mod primary_phone;
 mod refusal_timeout;

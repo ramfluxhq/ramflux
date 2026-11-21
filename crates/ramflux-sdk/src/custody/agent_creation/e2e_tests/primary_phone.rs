@@ -107,7 +107,15 @@ async fn round_trip(pair: &mut Pair) -> TestResult {
         phone_store.load(&created.request_id)?.ok_or("phone record")?.account_id.is_none(),
         "the phone never receives an agent account"
     );
-    Box::pin(node_view(&node, pair, (&phone_root, &laptop_root), &agent_id, &complete, desk_vault.clone())).await?;
+    Box::pin(node_view(
+        &node,
+        pair,
+        (&phone_root, &laptop_root),
+        &agent_id,
+        &complete,
+        desk_vault.clone(),
+    ))
+    .await?;
 
     drop(steps);
     node.finish().await
@@ -142,9 +150,14 @@ async fn node_view(
 
     // (ii) A different decision for the same request id: the node refuses as an idempotency
     // conflict, and the stored receipt still returns for the identical publication afterwards.
-    let later = later_primary_decision(&pair.phone, phone_root, &complete.plan_bytes()?, now()? + 1)?;
-    let CustodyProofAction::AgentPublish { publication: pub_box, agent_profile, plan: plan_box, .. } =
-        saved.publish_action(&publication)
+    let later =
+        later_primary_decision(&pair.phone, phone_root, &complete.plan_bytes()?, now()? + 1)?;
+    let CustodyProofAction::AgentPublish {
+        publication: pub_box,
+        agent_profile,
+        plan: plan_box,
+        ..
+    } = saved.publish_action(&publication)
     else {
         return Err("test: the saved approval builds an AgentPublish".into());
     };
@@ -156,7 +169,10 @@ async fn node_view(
     };
     let conflict = proof.prove(other).await;
     assert!(
-        matches!(conflict, Err(crate::SdkError::CustodyNetwork(CustodyRefusal::IdempotencyConflict))),
+        matches!(
+            conflict,
+            Err(crate::SdkError::CustodyNetwork(CustodyRefusal::IdempotencyConflict))
+        ),
         "the node refuses a second decision for the same request: {conflict:?}"
     );
     let again = proof.prove(saved.publish_action(&publication)).await?;

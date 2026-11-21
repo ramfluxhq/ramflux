@@ -17,10 +17,10 @@ use crate::bus::dispatch::surface_transport::fixture::RecordingGateway;
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::supervisor::Supervisor;
 use crate::client::native_test_support::bus::Material;
+use crate::custody::PrimaryVault;
 use crate::custody::agent_creation::test_support::{
     OwnRouter, Pair, TestResult, create_body, decide_body, now, pair, root_of, store_of, vault_of,
 };
-use crate::custody::PrimaryVault;
 use crate::{GatewaySessionEngine, LocalBusClient, LocalBusConfig, LocalBusFrame, RamfluxClient};
 use ramflux_protocol::message as g;
 use std::path::Path;
@@ -80,14 +80,19 @@ fn serve_one(
 ) -> TestResult<Rc<Supervisor>> {
     let initializer = reopened(account, passphrase)?;
     let id = account.client.account_db()?.local_account_id.clone();
-    let vault = Arc::clone(&account.client.native_bus_fixture.as_ref().ok_or("native fixture")?.vault);
+    let vault =
+        Arc::clone(&account.client.native_bus_fixture.as_ref().ok_or("native fixture")?.vault);
     let mut config = LocalBusConfig::new(dir.join("bus.sock"), dir);
     config.custody_vault = Some(vault as Arc<dyn PrimaryVault>);
     Ok(Supervisor::from_initializers(&config, vec![(id, initializer)], None)?)
 }
 
 /// Sends one request through the socket and waits for its response, bounded by `HANG`.
-async fn call(bus: &LocalBusClient, method: &str, frame: LocalBusFrame) -> TestResult<LocalBusFrame> {
+async fn call(
+    bus: &LocalBusClient,
+    method: &str,
+    frame: LocalBusFrame,
+) -> TestResult<LocalBusFrame> {
     tokio::time::timeout(HANG, bus.request_frame_response(frame))
         .await
         .map_err(|_| format!("test: {method} did not return within the hang guard"))?
@@ -135,24 +140,22 @@ async fn create_case(phone: LocalBusAccountState, laptop: LocalBusAccountState) 
     let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
     let (phone_bus, phone_server) = client(Rc::clone(&phone_sup), 2).await?;
     let body = serde_json::to_value(create_body(Some(true)))?;
-    let created = call(
-        &bus,
-        "agent.create",
-        request("create-desk", &desk_id, "agent.create", body.clone()),
-    )
-    .await?;
+    let created =
+        call(&bus, "agent.create", request("create-desk", &desk_id, "agent.create", body.clone()))
+            .await?;
     assert!(created.error.is_none(), "the desktop accepts the creation: {:?}", created.error);
     let status = custody_status(&created)?;
     assert_eq!(status.state, "authorization_pending");
     assert!(!status.request_id.is_empty(), "the operation names its request");
-    let refused = call(
-        &phone_bus,
-        "agent.create",
-        request("create-phone", &phone_id, "agent.create", body),
-    )
-    .await?;
+    let refused =
+        call(&phone_bus, "agent.create", request("create-phone", &phone_id, "agent.create", body))
+            .await?;
     assert_eq!(refused.kind, crate::LocalBusFrameKind::Error);
-    assert_eq!(refusal_code(&refused), Some("desktop_required"), "the phone cannot start a creation");
+    assert_eq!(
+        refusal_code(&refused),
+        Some("desktop_required"),
+        "the phone cannot start a creation"
+    );
     drop(bus);
     drop(phone_bus);
     server.await??;
@@ -173,7 +176,8 @@ async fn get_case(pair: &mut Pair) -> TestResult {
     let desk_id = pair.laptop.client.account_db()?.local_account_id.clone();
     let phone_id = pair.phone.client.account_db()?.local_account_id.clone();
     let vault = vault_of(&pair.laptop.client)?;
-    let created = pair.laptop.client.agent_create(vault.as_ref(), &create_body(Some(true)), now()?)?;
+    let created =
+        pair.laptop.client.agent_create(vault.as_ref(), &create_body(Some(true)), now()?)?;
     OwnRouter::new()?.route(&mut pair.laptop, &mut pair.phone, 1).await?;
     let desk_sup = serve_one(&super::root("agent-get-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
     let phone_sup = serve_one(&super::root("agent-get-phone"), &pair.phone, PHONE_PASSPHRASE)?;
@@ -224,7 +228,8 @@ async fn decide_case(pair: &mut Pair) -> TestResult {
     let desk_id = pair.laptop.client.account_db()?.local_account_id.clone();
     let phone_id = pair.phone.client.account_db()?.local_account_id.clone();
     let vault = vault_of(&pair.laptop.client)?;
-    let created = pair.laptop.client.agent_create(vault.as_ref(), &create_body(Some(true)), now()?)?;
+    let created =
+        pair.laptop.client.agent_create(vault.as_ref(), &create_body(Some(true)), now()?)?;
     OwnRouter::new()?.route(&mut pair.laptop, &mut pair.phone, 1).await?;
     let hash = store_of(&root_of(&pair.laptop)?, &desk_id)?
         .load(&created.request_id)?

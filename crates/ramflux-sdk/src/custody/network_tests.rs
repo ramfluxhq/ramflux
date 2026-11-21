@@ -107,11 +107,7 @@ fn drop_reply_fault(faults: &ReplyFaults, response: &CustodyServerFrame) -> bool
 }
 
 /// Applies the armed fault to one reply, consuming it.
-fn apply_reply_fault(
-    faults: &ReplyFaults,
-    replacement: bool,
-    response: &mut CustodyServerFrame,
-) {
+fn apply_reply_fault(faults: &ReplyFaults, replacement: bool, response: &mut CustodyServerFrame) {
     let mut armed = faults.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let (Some(ReplyFault::CorruptRecoveryAck), CustodyServerFrame::Published { record_hash }) =
         (*armed, response)
