@@ -346,7 +346,7 @@ fn stage_secrets(
     let signing_seed = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
     let agreement_seed =
         Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
-    let provisioning = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
+    let provisioning = agent_passphrase()?;
     let branch = create_device_branch_from_seed(&input.principal_id, &device_id, 1, &signing_seed);
     let agreement = X25519KeyPair::from_seed_ref(&agreement_seed);
 
@@ -358,7 +358,7 @@ fn stage_secrets(
         .zip(signing_seed.iter().chain(agreement_seed.iter()))
         .for_each(|(slot, byte)| *slot = *byte);
     vault.store_branch(&refs.branch, &seeds)?;
-    vault.store_provisioning_secret(&refs.provisioning, &provisioning[..])?;
+    vault.store_provisioning_secret(&refs.provisioning, provisioning.as_bytes())?;
 
     let expires_at = now
         .checked_add(REGISTER_TTL_SECONDS)
@@ -487,6 +487,16 @@ fn outcome(record: &AgentCreationRecord) -> Result<BeginOutcome, SdkError> {
         plan_bytes: record.plan_bytes()?,
         state: record.state,
     })
+}
+
+/// The agent's data passphrase: 32 random bytes as unpadded base64url text (43 characters), the
+/// form `creation_confirm` gives agents. It is the sealed data secret and the activation
+/// passphrase of the committed account, so it passes the same policy check as a new passphrase.
+fn agent_passphrase() -> Result<Zeroizing<String>, SdkError> {
+    let bytes = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
+    let text = Zeroizing::new(encode_base64url(*bytes));
+    crate::passphrase::check_new_passphrase(&text)?;
+    Ok(text)
 }
 
 fn random_id() -> Result<String, SdkError> {

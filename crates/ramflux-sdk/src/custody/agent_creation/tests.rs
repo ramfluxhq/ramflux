@@ -1030,6 +1030,46 @@ fn commit_writes_the_bundle_once_after_a_verified_approval() -> TestResult {
 }
 
 #[test]
+fn committed_agent_secret_unlocks_its_sealed_data_and_exports_as_text() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-secret", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let account_id = account_id_of(&authorized)?;
+    let committed =
+        commit_approved(&store, &desk, HUMAN, "req-secret", &capable(), fixture.now + 2)?;
+    let reference = committed
+        .vault_refs
+        .iter()
+        .find(|reference| reference.starts_with("agent-provisioning:"))
+        .ok_or("the committed request names its provisioning secret")?;
+    let secret = desk.load_provisioning_secret(reference)?;
+    let text = std::str::from_utf8(&secret)?;
+    assert_eq!(text.len(), 43, "32 random bytes as unpadded base64url");
+    assert!(crate::passphrase::check_new_passphrase(text).is_ok());
+
+    // The sealed data of the committed account opens with the stored secret, through the same
+    // check the recovery path uses. The account is not live yet, so the activation-only unlock
+    // (`RamfluxClient::unlock_account`) is not exercised here.
+    crate::client::account::verify_stored_data_secret(&fixture.root.0, &account_id, text.as_bytes())?;
+    assert!(
+        crate::client::account::verify_stored_data_secret(
+            &fixture.root.0,
+            &account_id,
+            b"not the agent secret"
+        )
+        .is_err()
+    );
+
+    // The export path reads the stored bytes with `from_utf8` (`custody::store`
+    // `export_agent_credentials`). It refuses a non-live account, so only the conversion is checked.
+    assert_eq!(std::str::from_utf8(&secret)?, text);
+    Ok(())
+}
+
+#[test]
 fn deny_cancel_and_expiry_after_the_commit_delete_nothing() -> TestResult {
     let fixture = human_fixture()?;
     let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
