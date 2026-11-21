@@ -16,18 +16,19 @@ use super::commit::{agent_profile_bytes, agent_record_bytes, desktop_is_enrolled
 use super::machine::finish;
 use super::rebind::{RebindBinding, RebindEntry};
 use super::rebind_plan::{check_decision_context, is_rebind};
+use super::receive_decision::primary_branch_public_key;
 use super::state::{AgentCreationState, AgentFailure};
 use super::store::{AgentCreationRecord, AgentCreationStore};
 use crate::SdkError;
 use crate::custody::vault::AGENT_MASTER_PREFIX;
 use crate::custody::{PrimaryVault, store as custody_store};
 use ramflux_crypto::custody::{
-    AgentMasterPurpose, AgentMasterRequest, SelfSigningKey, verify_record,
+    AgentMasterPurpose, AgentMasterRequest, SelfSigningKey, verify_record, verify_register_decision,
 };
 use ramflux_protocol::PrincipalKind;
 use ramflux_protocol::custody::{
-    DeviceSet, Envelope, MasterCertificate, RegisterPlan, decode_register_plan, encode_epoch,
-    object_hash,
+    DeviceSet, Envelope, MasterCertificate, RegisterOutcome, RegisterPlan, RegisterPurpose,
+    decode_register_decision, decode_register_plan, encode_epoch, object_hash,
 };
 
 /// Commit an authorized rebind of one agent against the verified current human authority `human`.
@@ -83,7 +84,8 @@ pub fn commit_rebind(
         return Err(SdkError::AgentCreationRefused("creation_primary_changed"));
     }
     let verified_human = verify_record(human, now, None, None)?;
-    let stored = custody_store::stored_record_unverified(store.root(), &account_id)?;
+    let proof = verify_rebind_decision(human, &record, now)?;
+    let stored = read_stored_agent(&proof, store.root(), &account_id)?;
     // A crash after the authority was written, before the commit point: the stored agent is already
     // the rebound record. Only the commit point is missing.
     if stored.body.master_certificate.body.range_index == plan.next_range
@@ -144,6 +146,54 @@ pub fn commit_rebind(
     commit_point(store, record, &plan)
 }
 
+/// Proof that the new primary's decision for this rebind plan was verified (stage D R2b). Only
+/// [`verify_rebind_decision`] creates one, and the stored agent of a rebind is read only with one.
+pub(in crate::custody::agent_creation) struct VerifiedRebindDecision(());
+
+/// Verifies the stored decision of a rebind against the new primary's branch key: an approval of
+/// this exact plan, issued by the plan's primary to the plan's desktop, unexpired at `now`.
+/// # Errors
+/// `CustodySetupInvalid` for a record that is not a rebind, a missing or mismatched decision, or a
+/// signature that does not verify; `CustodyExpired` when the decision expired at `now`.
+pub(super) fn verify_rebind_decision(
+    human: &Envelope<DeviceSet>,
+    record: &AgentCreationRecord,
+    now: u64,
+) -> Result<VerifiedRebindDecision, SdkError> {
+    let plan =
+        decode_register_plan(&record.plan_bytes()?).map_err(|_| SdkError::CustodySetupInvalid)?;
+    if plan.purpose != RegisterPurpose::Rebind {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    let bytes = record.decision_bytes()?.ok_or(SdkError::CustodySetupInvalid)?;
+    let decision = decode_register_decision(&bytes).map_err(|_| SdkError::CustodySetupInvalid)?;
+    if decision.body.request_id != plan.request_id
+        || decision.body.request_hash != record.request_hash
+        || decision.body.decision != RegisterOutcome::Approve
+        || decision.body.signer != plan.human_primary
+    {
+        return Err(SdkError::CustodySetupInvalid);
+    }
+    let primary_key = primary_branch_public_key(human, &plan.human_primary, now)?;
+    verify_register_decision(&primary_key, &decision).map_err(|_| SdkError::CustodySetupInvalid)?;
+    if decision.body.expires_at <= now {
+        return Err(SdkError::CustodyExpired);
+    }
+    Ok(VerifiedRebindDecision(()))
+}
+
+/// The stored agent `DeviceSet` of a rebind, read WITHOUT the custodian check: the stored agent
+/// names the previous primary and no longer verifies against the human. Its only caller is
+/// `commit_rebind`, after [`verify_rebind_decision`]; the predecessor hashes of the approved plan
+/// then authenticate it (`check_predecessors`) and the rebound record is fully verified.
+fn read_stored_agent(
+    _proof: &VerifiedRebindDecision,
+    root: &std::path::Path,
+    account_id: &str,
+) -> Result<Envelope<DeviceSet>, SdkError> {
+    custody_store::stored_record_unverified(root, account_id)
+}
+
 /// The commit point: the record moves to `publication_pending` and the inventory says `committed`.
 /// Both are written after the authority, so a restart finds the authority in place.
 fn commit_point(
@@ -166,7 +216,10 @@ fn commit_point(
 }
 
 /// The predecessors the plan names must be the stored agent's head and certificate.
-fn check_predecessors(plan: &RegisterPlan, stored: &Envelope<DeviceSet>) -> Result<(), SdkError> {
+pub(super) fn check_predecessors(
+    plan: &RegisterPlan,
+    stored: &Envelope<DeviceSet>,
+) -> Result<(), SdkError> {
     let head = object_hash(stored).map_err(|_| SdkError::CustodySetupInvalid)?;
     let certificate =
         object_hash(&stored.body.master_certificate).map_err(|_| SdkError::CustodySetupInvalid)?;

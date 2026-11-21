@@ -204,3 +204,88 @@ fn guard_detector_flags_master_seam_uses_only() -> TestResult {
     )?);
     Ok(())
 }
+
+/// The one production file allowed to read a rebind's stored agent without the custodian check.
+const STORED_AGENT_READER: &str = "crates/ramflux-sdk/src/custody/agent_creation/rebind_commit.rs";
+
+/// The unverified stored-agent read. Only `rebind_commit` may call it (stage D R2b).
+const UNVERIFIED_READ: &str = "stored_record_unverified";
+
+/// Counts calls of [`UNVERIFIED_READ`] outside test-only items.
+#[derive(Default)]
+struct ReadCalls {
+    in_test: usize,
+    production_calls: usize,
+}
+
+impl ReadCalls {
+    fn enter(&mut self, test: bool) {
+        if test {
+            self.in_test += 1;
+        }
+    }
+    fn leave(&mut self, test: bool) {
+        if test {
+            self.in_test -= 1;
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ReadCalls {
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        let test = is_test_only(&item.attrs);
+        self.enter(test);
+        syn::visit::visit_item_mod(self, item);
+        self.leave(test);
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        let test = is_test_only(&item.attrs);
+        self.enter(test);
+        syn::visit::visit_item_fn(self, item);
+        self.leave(test);
+    }
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        let test = is_test_only(&item.attrs);
+        self.enter(test);
+        syn::visit::visit_impl_item_fn(self, item);
+        self.leave(test);
+    }
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if self.in_test == 0
+            && let syn::Expr::Path(path) = call.func.as_ref()
+            && path.path.segments.last().is_some_and(|segment| segment.ident == UNVERIFIED_READ)
+        {
+            self.production_calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+/// The unverified stored-agent read has exactly one production caller, the commit of a rebind.
+#[test]
+fn stored_agent_read_has_one_production_caller() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize()?;
+    let mut files = Vec::new();
+    collect(&root.join("crates"), 0, &mut files)?;
+    collect(&root.join("apps"), 0, &mut files)?;
+    let mut callers = Vec::new();
+    for file in &files {
+        let relative = file.strip_prefix(&root)?.to_string_lossy().replace('\\', "/");
+        if is_test_file(&relative) {
+            continue;
+        }
+        let source = std::fs::read_to_string(file)?;
+        let parsed = syn::parse_file(&source)?;
+        let mut visitor = ReadCalls::default();
+        visitor.visit_file(&parsed);
+        for _ in 0..visitor.production_calls {
+            callers.push(relative.clone());
+        }
+    }
+    assert_eq!(
+        callers,
+        vec![STORED_AGENT_READER.to_owned()],
+        "the unverified stored-agent read must be called from rebind_commit only"
+    );
+    Ok(())
+}

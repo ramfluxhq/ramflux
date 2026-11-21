@@ -289,3 +289,59 @@ fn the_creation_commit_never_commits_a_rebind() -> TestResult {
     assert_eq!(kept.state, AgentCreationState::Authorized);
     Ok(())
 }
+
+/// Stage D R2b: the stored agent of a rebind is read only after a verified decision, and a stored
+/// agent that does not match the approved plan or was altered on disk is refused without writes.
+#[test]
+fn a_tampered_stored_agent_is_refused_and_nothing_is_written() -> TestResult {
+    let setup = setup()?;
+    authorize(&setup)?;
+    let path = authority_path(&setup);
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let issued = value["record"]["body"]["issued_at"].as_u64().ok_or("test: issued_at")?;
+    value["record"]["body"]["issued_at"] = serde_json::json!(issued + 1);
+    std::fs::write(&path, serde_json::to_vec(&value)?)?;
+    let before = std::fs::read(&path)?;
+    assert!(commit(&setup).is_err(), "a tampered stored agent is refused");
+    assert_eq!(std::fs::read(&path)?, before, "the authority is not rewritten");
+    let record = setup.store.load(REQUEST_REBIND)?.ok_or("test: the rebind record")?;
+    assert_eq!(record.state, AgentCreationState::Authorized, "the request stays authorized");
+    Ok(())
+}
+
+/// A stored agent whose hash differs from the plan's predecessor head is refused by the check that
+/// every read goes through (`check_predecessors`).
+#[test]
+fn a_stored_agent_that_differs_from_the_approved_plan_is_refused() -> TestResult {
+    let setup = setup()?;
+    let outcome = begin(&setup, REQUEST_REBIND, &setup.desktop)?;
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    let mut other = agent_authority(&setup)?;
+    other.body.issued_at += 1;
+    assert!(super::rebind_commit::check_predecessors(&plan, &agent_authority(&setup)?).is_ok());
+    assert!(super::rebind_commit::check_predecessors(&plan, &other).is_err());
+    Ok(())
+}
+
+/// The stored agent is read only after `verify_rebind_decision` accepted the new primary's
+/// decision: a genuine approval passes, and an approval whose signed body was changed does not.
+#[test]
+fn the_stored_agent_is_read_only_after_a_verified_rebind_decision() -> TestResult {
+    let setup = setup()?;
+    authorize(&setup)?;
+    let record = setup.store.load(REQUEST_REBIND)?.ok_or("test: the rebind record")?;
+    let now = now_of(&setup);
+    assert!(super::rebind_commit::verify_rebind_decision(&setup.transferred, &record, now).is_ok());
+
+    let genuine = record.decision_bytes()?.ok_or("test: the decision is stored")?;
+    let mut decision = ramflux_protocol::custody::decode_register_decision(&genuine)?;
+    decision.body.expires_at += 1;
+    let mut forged = record.clone();
+    forged.decision_b64 =
+        Some(encode_base64url(ramflux_protocol::custody::encode_register_decision(&decision)?));
+    assert!(
+        super::rebind_commit::verify_rebind_decision(&setup.transferred, &forged, now).is_err(),
+        "a changed signed body is not a verified decision"
+    );
+    Ok(())
+}

@@ -58,6 +58,14 @@ pub trait AgentSteps {
     ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
         std::future::ready(Err(SdkError::CustodySetupInvalid))
     }
+    /// Publish the rebind of a committed agent through a proof-only connection (stage D R2). The
+    /// default refuses: an implementation without a proof path cannot bind the agent.
+    fn publish_rebind(
+        &mut self,
+        _request_id: &str,
+    ) -> impl Future<Output = Result<AgentCreationRecord, SdkError>> {
+        std::future::ready(Err(SdkError::NetworkingPending))
+    }
     /// Whether the agent account is already open (live), so activation can be skipped.
     fn is_live(&self, account_id: &str) -> bool;
     /// Activate the agent account; its ordinary connection runs the registration.
@@ -111,9 +119,9 @@ pub async fn advance_one<S: AgentSteps>(
     Ok(record.state)
 }
 
-/// Advances one rebind request (stage D4): commit when authorized, then publish its own binding
-/// through the activation of the agent (its `AgentPublish` is the reconcile step of contract 7.6)
-/// and complete it. A paused agent is connected only for this publication, never for a creation.
+/// Advances one rebind request. Stage D4: commit when authorized. Stage D R2: the committed bundle is
+/// published through a proof-only connection (`AgentPublish` alone, no session), and the agent is
+/// activated only after the receipt is verified and the request is complete (binding B).
 async fn advance_rebind<S: AgentSteps>(
     steps: &mut S,
     mut record: AgentCreationRecord,
@@ -123,10 +131,14 @@ async fn advance_rebind<S: AgentSteps>(
         let request_id = record.request_id.clone();
         record = steps.commit_rebind(&request_id, now).await?;
     }
-    if !matches!(
+    if matches!(
         record.state,
         AgentCreationState::PublicationPending | AgentCreationState::PublicationUnknown
     ) {
+        let request_id = record.request_id.clone();
+        record = steps.publish_rebind(&request_id).await?;
+    }
+    if record.state != AgentCreationState::Complete {
         return Ok(record.state);
     }
     let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;

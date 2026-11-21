@@ -151,6 +151,40 @@ impl CustodyConnection<GatewayTcpTlsStream> {
     ) -> Result<Self, SdkError> {
         Box::pin(Self::connect_inner(config, vault, true)).await
     }
+    /// Stage D R2 (contract 7.5): the rebind publication of a paused agent. The connection is
+    /// proof-only and its single proof action is the rebind `AgentPublish`. No `Register` and no
+    /// `OpenSession` is sent here. The receipt is compared and saved, and the request becomes
+    /// `complete` (binding B), before the caller may activate the agent.
+    /// # Errors
+    /// Connection and proof refusals. A lost or mismatched reply leaves the publication unknown, so
+    /// the next attempt sends the identical `AgentPublish` and the node returns the saved receipt.
+    // The supervisor's proof path for paused agents is not wired yet (open question in the lane
+    // memory); the rebind test drives this function through the desktop's steps.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn publish_rebind(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+    ) -> Result<Self, SdkError> {
+        let mut connection = Self::connect_for_proof(config, vault).await?;
+        let saved = connection.publishing.clone().ok_or_else(invalid)?;
+        let action = saved.publish_action(&connection.account().publication());
+        let frame = match connection.prove(action).await {
+            Ok(frame) => frame,
+            Err(error) => {
+                if !super::retry::is_busy(&error) {
+                    mark_publication_unknown(connection.publishing.clone()).await?;
+                }
+                return Err(error);
+            }
+        };
+        let CustodyServerFrame::AgentPublished { receipt } = frame else {
+            mark_publication_unknown(connection.publishing.clone()).await?;
+            return Err(invalid());
+        };
+        connection.accept_receipt(*receipt).await?;
+        complete_publication(connection.publishing.clone()).await?;
+        Ok(connection)
+    }
     async fn connect_inner(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,

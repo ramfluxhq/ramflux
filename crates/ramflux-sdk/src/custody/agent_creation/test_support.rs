@@ -17,19 +17,15 @@
 //! accounts is `network_tests::node` (the test node), not the native fixture's key.
 
 use crate::bus::dispatch::surface_transport::fixture::RecordingGateway;
-use crate::client::shared_group::tests::native_person_keeping_phrase;
-use ramflux_crypto::custody::{
-    CooperativeTransferInput, MasterKey, RecoveryPhrase, SelfSigningKey, cooperative_transfer_preserving_devices,
-    verify_record,
-};
-use ramflux_protocol::custody::{DeviceSet, Envelope};
-use zeroize::Zeroizing;
 use crate::bus::own_device_copy;
 use crate::bus::state::LocalBusAccountState;
 use crate::client::native_test_support::bus::receive_copy;
-use crate::client::native_test_support::router::publish_router_envelope;
 use crate::client::native_test_support::bus::seed_pair;
-use crate::client::shared_group::tests::{install_native_directories, native_person, native_sibling};
+use crate::client::native_test_support::router::publish_router_envelope;
+use crate::client::shared_group::tests::native_person_keeping_phrase;
+use crate::client::shared_group::tests::{
+    install_native_directories, native_person, native_sibling,
+};
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationStore, AgentSteps, BeginInput, BeginOutcome, PrimarySigning,
     begin, commit_approved, complete_with_receipt, primary_sign_decision,
@@ -39,6 +35,10 @@ use crate::custody::network_tests::{ReplyFault, Root, start_server_with_faults};
 use crate::custody::vault::AGENT_MASTER_PREFIX;
 use crate::custody::{CustodyConnection, CustodyNetworkConfig, PrimaryVault};
 use crate::{GatewayInboxEntry, GatewaySessionEngine, RamfluxClient, SdkError};
+use ramflux_crypto::custody::{
+    CooperativeTransferInput, MasterKey, RecoveryPhrase, SelfSigningKey,
+    cooperative_transfer_preserving_devices, verify_record,
+};
 use ramflux_node_core::{RouterCore, RouterRedbStore};
 use ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY;
 use ramflux_protocol::custody::{
@@ -46,11 +46,13 @@ use ramflux_protocol::custody::{
     Publication, RegisterOutcome, RegisterPlan, decode_register_plan, object_hash,
     register_plan_hash,
 };
+use ramflux_protocol::custody::{DeviceSet, Envelope};
 use ramflux_protocol::message as g;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -147,7 +149,7 @@ pub(crate) struct TestNode {
 }
 
 impl TestNode {
-    /// Starts the node for exactly `connections` client connections (at most 4).
+    /// Starts the node for exactly `connections` client connections (at most 5).
     pub(crate) async fn start(connections: u8, fault: Option<ReplyFault>) -> TestResult<Self> {
         let temporary = ramflux_test_support::TestPath::new()?;
         let root = Root(temporary.child("node"));
@@ -332,6 +334,40 @@ impl AgentSteps for DesktopSteps<'_> {
         let result = store_of(self.root, self.human)
             .and_then(|store| complete_with_receipt(&store, request_id));
         std::future::ready(result)
+    }
+
+    fn commit_rebind(
+        &mut self,
+        request_id: &str,
+        now: u64,
+    ) -> impl std::future::Future<Output = Result<AgentCreationRecord, SdkError>> {
+        let result = (|| {
+            let store = store_of(self.root, self.human)?;
+            let human = load_account(self.root, self.human, now)?;
+            crate::custody::agent_creation::commit_rebind(
+                &store,
+                self.vault.as_ref(),
+                human.record(),
+                request_id,
+                &capable(),
+                now,
+            )
+        })();
+        std::future::ready(result)
+    }
+
+    /// Stage D R2: the rebind publication through the proof-only connection. The connection is kept
+    /// in `connections` so the test can see that it opened no session.
+    async fn publish_rebind(&mut self, request_id: &str) -> Result<AgentCreationRecord, SdkError> {
+        let store = store_of(self.root, self.human)?;
+        let record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
+        let plan: RegisterPlan = decode_register_plan(&record.plan_bytes()?)
+            .map_err(|_| SdkError::CustodySetupInvalid)?;
+        let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let config = self.node.config(self.root, &account_id, &plan.agent_device.device_id);
+        let connection = CustodyConnection::publish_rebind(config, self.vault.clone()).await?;
+        self.connections.push(connection);
+        store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)
     }
 }
 
@@ -544,14 +580,10 @@ pub(crate) fn transfer_fixture(id: &str) -> TestResult<Transfer> {
     let newest = load_account(&phone_root, &phone_id, now)?.record().clone();
     crate::custody::store::replace_rebound_authority(&laptop_root, &laptop_id, &newest, None, now)?;
     refresh(&mut laptop.client, &laptop_root, &laptop_id, now)?;
-    let manifest = phone
-        .client
-        .native_bus_fixture
-        .as_ref()
-        .ok_or("test: the phone fixture")?
-        .manifest
-        .clone();
-    laptop.client.native_bus_fixture.as_mut().ok_or("test: the laptop fixture")?.manifest = manifest;
+    let manifest =
+        phone.client.native_bus_fixture.as_ref().ok_or("test: the phone fixture")?.manifest.clone();
+    laptop.client.native_bus_fixture.as_mut().ok_or("test: the laptop fixture")?.manifest =
+        manifest;
     install_native_directories(&[&phone, &laptop, &new_primary])?;
     seed_pair(&phone.client, &laptop.client)?;
     seed_pair(&phone.client, &new_primary.client)?;
