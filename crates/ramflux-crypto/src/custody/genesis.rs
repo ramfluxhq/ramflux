@@ -167,7 +167,9 @@ fn assemble(
     expected_body_hash: &str,
 ) -> Result<Envelope<DeviceSet>, CryptoError> {
     if hash_of(&master_cert.body)? != expected_body_hash {
-        return Err(CryptoError::IdentityAuthority("master certificate differs from the genesis body"));
+        return Err(CryptoError::IdentityAuthority(
+            "master certificate differs from the genesis body",
+        ));
     }
     let (signing_key_commitment, agreement_key_commitment) = crate::device_key_commitments(
         &draft.branch_signing_public_key,
@@ -364,8 +366,12 @@ mod tests {
             ISSUED_AT + MAX_BRANCH_LEASE_SECONDS,
         );
         assert!(
-            create_genesis_from_draft::<CryptoError>(|body| master.certify(body), &primary, &at_max)
-                .is_ok(),
+            create_genesis_from_draft::<CryptoError>(
+                |body| master.certify(body),
+                &primary,
+                &at_max
+            )
+            .is_ok(),
             "a branch lease of exactly MAX_BRANCH_LEASE_SECONDS is the existing maximum and must pass"
         );
     }

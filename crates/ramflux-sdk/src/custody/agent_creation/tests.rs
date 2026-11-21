@@ -6,11 +6,12 @@
 use super::commit::desktop_is_enrolled;
 use super::{
     AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
-    BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_request,
-    check_sender, commit_approved, expected_scope, first_action, load_publishing,
-    primary_sign_decision, receive_plan, resume_request,
+    BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_decision,
+    check_received_request, check_sender, commit_approved, expected_scope, first_action,
+    load_publishing, primary_sign_decision, receive_decision, receive_plan, resume_request,
 };
 use crate::SdkError;
+use crate::custody::store as custody_store;
 use crate::custody::store::GenesisMaterial;
 use crate::custody::vault::agent_master_item::AgentMasterCells;
 use crate::custody::{CreateInput, PrimaryVault, memory_vault::MemoryPrimaryVault};
@@ -1478,5 +1479,183 @@ fn assert_items_present(vault: &MemoryPrimaryVault, refs: &[String]) -> TestResu
         };
         assert!(present, "committed vault item {reference} must still exist");
     }
+    Ok(())
+}
+
+/// The human authority on the desktop root/// A phone whose vault holds the human fixture's own primary and branch keys, so its decisions
+/// verify against the branch that the fixture authority publishes.
+fn fixture_phone() -> Result<Phone, Box<dyn std::error::Error>> {
+    let vault = MemoryPrimaryVault::default();
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([22_u8; 32]));
+    let primary_ref = encode_base64url([1_u8; 32]);
+    let branch_ref = format!("branch:{}", encode_base64url([2_u8; 32]));
+    vault.store_new(&primary_ref, &primary)?;
+    let mut seeds = Zeroizing::new([0_u8; 64]);
+    seeds[..32].copy_from_slice(&[23_u8; 32]);
+    seeds[32..].copy_from_slice(&[24_u8; 32]);
+    vault.store_branch(&branch_ref, &seeds)?;
+    let branch = create_device_branch_from_seed(
+        HUMAN_PRINCIPAL,
+        HUMAN_PRIMARY_DEVICE,
+        1,
+        &Zeroizing::new([23_u8; 32]),
+    );
+    Ok(Phone {
+        vault,
+        primary_ref,
+        branch_ref,
+        primary_public: primary.public_key(),
+        branch_public: encode_base64url(branch.signing_key.verifying_key().to_bytes()),
+        primary_device: DeviceRef {
+            account_anchor: owner_anchor(),
+            device_id: HUMAN_PRIMARY_DEVICE.into(),
+            device_epoch: 1,
+        },
+    })
+}
+
+/// The human authority on the desktop root, as the desktop reads it when a decision arrives.
+fn human_record_of(
+    fixture: &HumanFixture,
+    store: &AgentCreationStore,
+) -> Result<Envelope<DeviceSet>, Box<dyn std::error::Error>> {
+    let account = custody_store::load_account(store.root(), HUMAN, fixture.now)?;
+    Ok(account.record().clone())
+}
+
+#[test]
+fn received_deny_refuses_and_cleans_up_on_the_desktop() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = fixture_phone()?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-recv-deny", None)?;
+    let refs = saved_refs(&store, "req-recv-deny")?;
+    let human = human_record_of(&fixture, &store)?;
+    phone.vault.approve_agent_decision_once_for_test(&outcome.request_hash)?;
+    let deny = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &fixture.primary),
+        &outcome.plan_bytes,
+        RegisterOutcome::Deny,
+        fixture.now + 1,
+    )?;
+    let record = receive_decision(&store, &desk, &human, &deny, fixture.now + 1)?;
+    assert_eq!(record.state, AgentCreationState::Refused, "a received deny refuses the request");
+    assert_eq!(record.failure, Some(AgentFailure::AuthorizationRefused));
+    assert_items_gone(&desk, &refs)?;
+    Ok(())
+}
+
+#[test]
+fn received_approve_authorizes_and_an_unknown_request_refuses() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = fixture_phone()?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-recv-ok", None)?;
+    let human = human_record_of(&fixture, &store)?;
+    phone.vault.approve_agent_decision_once_for_test(&outcome.request_hash)?;
+    let approve = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &fixture.primary),
+        &outcome.plan_bytes,
+        RegisterOutcome::Approve,
+        fixture.now + 1,
+    )?;
+    let record = receive_decision(&store, &desk, &human, &approve, fixture.now + 1)?;
+    assert_eq!(record.state, AgentCreationState::Authorized, "a received approve authorizes");
+    // The same approval for a request this desktop never stored is refused.
+    let other = begin_for_human(&fixture, &store, &desk, "req-recv-other", None)?;
+    phone.vault.approve_agent_decision_once_for_test(&other.request_hash)?;
+    let other_approve = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &fixture.primary),
+        &other.plan_bytes,
+        RegisterOutcome::Approve,
+        fixture.now + 1,
+    )?;
+    let unknown_store = AgentCreationStore::open(dir_for_unknown(&fixture)?, HUMAN)?;
+    assert!(
+        receive_decision(&unknown_store, &desk, &human, &other_approve, fixture.now + 1).is_err(),
+        "a decision for a request this store never saw refuses"
+    );
+    Ok(())
+}
+
+fn dir_for_unknown(
+    fixture: &HumanFixture,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let dir = fixture.root.0.join("unknown-desktop");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+#[test]
+fn received_decision_must_come_from_the_plan_primary_to_its_desktop() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = fixture_phone()?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-recv-scope", None)?;
+    phone.vault.approve_agent_decision_once_for_test(&outcome.request_hash)?;
+    let approve = primary_sign_decision(
+        &phone.vault,
+        &signing(&phone, &fixture.primary),
+        &outcome.plan_bytes,
+        RegisterOutcome::Approve,
+        fixture.now + 1,
+    )?;
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    let scope = expected_scope(&fixture.anchor, &plan.agent_anchor)?;
+    let root = fixture.anchor.as_str();
+    assert!(
+        check_received_decision(
+            &plan,
+            &approve,
+            &scope,
+            root,
+            (root, HUMAN_PRIMARY_DEVICE),
+            DESKTOP_DEVICE
+        )
+        .is_ok(),
+        "the primary's decision to the desktop in the agent scope is accepted"
+    );
+    assert!(
+        check_received_decision(
+            &plan,
+            &approve,
+            &scope,
+            root,
+            (root, "other-device"),
+            DESKTOP_DEVICE
+        )
+        .is_err(),
+        "a decision from a device other than the plan primary is refused"
+    );
+    assert!(
+        check_received_decision(
+            &plan,
+            &approve,
+            &scope,
+            root,
+            (root, HUMAN_PRIMARY_DEVICE),
+            "other-desktop"
+        )
+        .is_err(),
+        "a decision that is not addressed to the plan desktop is refused"
+    );
+    assert!(
+        check_received_decision(
+            &plan,
+            &approve,
+            "wrong-scope",
+            root,
+            (root, HUMAN_PRIMARY_DEVICE),
+            DESKTOP_DEVICE
+        )
+        .is_err(),
+        "a decision outside the agent scope is refused"
+    );
     Ok(())
 }

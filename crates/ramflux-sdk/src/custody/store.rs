@@ -486,6 +486,16 @@ impl BornAccount {
     pub(crate) fn custodian_account_id(&self) -> Option<&str> {
         self.stored.custodian_account_id.as_deref()
     }
+    /// The agent creation store of this human account, opened on its data root.
+    /// # Errors
+    /// `CustodySetupInvalid` when the networking path is not under a data root;
+    /// `CustodyVaultUnavailable` when the store directory cannot be created.
+    pub(crate) fn agent_creation_store(
+        &self,
+    ) -> Result<super::agent_creation::AgentCreationStore, SdkError> {
+        let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        super::agent_creation::AgentCreationStore::open(root, self.local_account_id())
+    }
     pub(crate) fn local_device_id(&self) -> Result<&str, SdkError> {
         let id = if self.stored.local_device_id.is_empty() {
             match self.record().body.devices.as_slice() {

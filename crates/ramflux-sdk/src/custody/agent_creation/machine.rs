@@ -90,7 +90,8 @@ pub fn begin(
     let account_id = random_id()?;
     // The final references of the committed account. Pending secrets are stored under them from
     // the start, so commit only writes the registry entry that points at them (no promotion).
-    let reference = crate::custody::store::custody_vault_reference(store.root(), &account_id, &anchor)?;
+    let reference =
+        crate::custody::store::custody_vault_reference(store.root(), &account_id, &anchor)?;
     let refs = PendingRefs {
         master: format!("{AGENT_MASTER_PREFIX}{reference}"),
         primary: reference.clone(),
@@ -378,11 +379,7 @@ fn stage_secrets(
         desktop: input.desktop.clone(),
         agent_anchor: anchor.clone(),
         principal_id: input.principal_id.clone(),
-        agent_device: DeviceRef {
-            account_anchor: anchor,
-            device_id,
-            device_epoch: 1,
-        },
+        agent_device: DeviceRef { account_anchor: anchor, device_id, device_epoch: 1 },
         master_public_key: master.public_key(),
         self_signing_public_key: self_signing.public_key(),
         branch_signing_public_key: encode_base64url(branch.signing_key.verifying_key().to_bytes()),

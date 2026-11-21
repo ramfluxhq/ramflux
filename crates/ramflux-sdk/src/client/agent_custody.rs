@@ -9,12 +9,25 @@ use crate::bus::own_device_copy;
 use crate::client::identity_authority::HeadUse;
 use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
 use crate::client::routed::Opened;
-use crate::custody::agent_creation::{check_received_request, expected_scope};
+use crate::custody::agent_creation::{
+    AgentCreationStore, check_received_decision, check_received_request, expected_scope,
+    receive_decision, receive_plan,
+};
 use crate::error::GeneratedRefusalCode;
+use crate::prelude::now_unix_timestamp;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_crypto::RootQualifiedDeviceRef;
+use ramflux_protocol::custody::{decode_register_decision, decode_register_plan};
 use ramflux_protocol::message as g;
+
+/// The custody body of one authorized packet, ready for its receive step.
+pub(crate) enum CustodyBody {
+    /// Canonical plan bytes (the primary stores them).
+    Plan(Vec<u8>),
+    /// Canonical decision bytes (the desktop consumes them).
+    Decision(Vec<u8>),
+}
 
 /// Domain of the local message id of one custody control.
 const SEND_DOMAIN: &str = "ramflux.sdk.agent_custody_packet.v1";
@@ -49,15 +62,17 @@ impl RamfluxClient {
             .ok_or_else(|| refused("agent custody device epoch missing"))
     }
 
-    /// Receive authorization of one `AgentHostPacket`. Refuses before any effect.
+    /// Receive authorization of one `AgentHostPacket`. Refuses before any effect. A plan must name
+    /// this device as its human primary. A decision must answer a plan stored on this root and come
+    /// from that plan's primary to its desktop. Cancel and receipt bodies are refused in this stage.
     /// # Errors
-    /// Refuses endpoint, epoch, body, plan or scope mismatches.
+    /// Refuses endpoint, epoch, body, plan, decision or scope mismatches.
     pub(crate) fn authorize_generated_agent_sync(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
         packet: &g::AgentHostPacket,
-    ) -> Result<(), SdkError> {
+    ) -> Result<CustodyBody, SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let local = self.owned_device_identity()?;
         let own_root = self.own_account_anchor()?;
@@ -81,35 +96,85 @@ impl RamfluxClient {
         let Some(g::agent_host_packet::Body::Custody(custody)) = packet.body.as_ref() else {
             return Err(refused("agent custody body missing"));
         };
-        let Some(g::agent_custody_packet::Value::RequestJson(plan_bytes)) = custody.value.as_ref()
-        else {
-            return Err(refused(
-                "agent custody packet needs its stored plan; admitted from stage C3",
-            ));
-        };
-        check_received_request(
-            plan_bytes,
-            &opened.routing.conversation_id,
-            &own_root,
-            source.root_commitment(),
-            source.device_id(),
-            local.device_id(),
-        )?;
-        Ok(())
+        let conversation = opened.routing.conversation_id.as_str();
+        match custody.value.as_ref() {
+            Some(g::agent_custody_packet::Value::RequestJson(plan_bytes)) => {
+                check_received_request(
+                    plan_bytes,
+                    conversation,
+                    &own_root,
+                    source.root_commitment(),
+                    source.device_id(),
+                    local.device_id(),
+                )?;
+                Ok(CustodyBody::Plan(plan_bytes.clone()))
+            }
+            Some(g::agent_custody_packet::Value::DecisionJson(decision_bytes)) => {
+                let request_id = decode_register_decision(decision_bytes)
+                    .map_err(|_| refused("agent custody decision does not decode"))?
+                    .body
+                    .request_id;
+                let stored = self
+                    .agent_creation_store()?
+                    .load(&request_id)?
+                    .ok_or_else(|| refused("agent custody decision names no stored request"))?;
+                let plan = decode_register_plan(&stored.plan_bytes()?)
+                    .map_err(|_| refused("agent custody stored plan does not decode"))?;
+                check_received_decision(
+                    &plan,
+                    decision_bytes,
+                    conversation,
+                    &own_root,
+                    (source.root_commitment(), source.device_id()),
+                    local.device_id(),
+                )?;
+                Ok(CustodyBody::Decision(decision_bytes.clone()))
+            }
+            Some(_) => Err(refused("agent custody cancel and receipt are not applied yet")),
+            None => Err(refused("agent custody body missing")),
+        }
     }
 
-    /// Durable apply of an authorized custody packet. Until stage C3 opens the creation store, an
-    /// authorized packet is refused with no store, UI or signature effect.
+    /// The creation store of the unlocked human account of this client.
     /// # Errors
-    /// Every authorization refusal, then the typed unavailability of the creation store.
+    /// Refuses a client without an unlocked human account.
+    pub(crate) fn agent_creation_store(&self) -> Result<AgentCreationStore, SdkError> {
+        let account = self
+            .born_v3_account
+            .as_deref()
+            .ok_or_else(|| refused("agent custody needs the unlocked human account"))?;
+        account.agent_creation_store()
+    }
+
+    /// Apply one authorized custody packet. A plan is stored on the primary (`authorization_pending`,
+    /// no secret). A decision is verified against the stored plan and consumed on the desktop:
+    /// approve moves the request to `authorized`, deny refuses it and cleans up.
+    /// # Errors
+    /// Every authorization refusal, then the store and vault refusals of the receive step.
     pub(crate) fn apply_generated_agent_sync(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
         packet: &g::AgentHostPacket,
     ) -> Result<(), SdkError> {
-        self.authorize_generated_agent_sync(opened, entry, packet)?;
-        Err(refused("agent creation custody is unavailable until the creation store is opened"))
+        let body = self.authorize_generated_agent_sync(opened, entry, packet)?;
+        let now = u64::try_from(now_unix_timestamp())
+            .map_err(|_| refused("agent custody clock range"))?;
+        let store = self.agent_creation_store()?;
+        match body {
+            CustodyBody::Plan(plan_bytes) => receive_plan(&store, &plan_bytes, now).map(|_| ()),
+            CustodyBody::Decision(decision_bytes) => {
+                let account = self
+                    .born_v3_account
+                    .as_deref()
+                    .ok_or_else(|| refused("agent custody needs the unlocked human account"))?;
+                let vault = self
+                    .born_v3_vault
+                    .as_deref()
+                    .ok_or_else(|| refused("agent custody needs the custody vault"))?;
+                receive_decision(&store, vault, account.record(), &decision_bytes, now).map(|_| ())
+            }
+        }
     }
 
     /// Send one custody packet point-to-point to a sibling of this root (the paired primary).

@@ -124,8 +124,12 @@ impl AgentCreationStore {
     /// The record whose agent account has this local id, if any. Scans this directory only.
     /// # Errors
     /// Propagates [`Self::load`] failures and refuses a directory that cannot be read.
-    pub fn find_by_account(&self, account_id: &str) -> Result<Option<AgentCreationRecord>, SdkError> {
-        let entries = std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    pub fn find_by_account(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<AgentCreationRecord>, SdkError> {
+        let entries =
+            std::fs::read_dir(&self.dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
         for entry in entries {
             let entry = entry.map_err(|_| SdkError::CustodyVaultUnavailable)?;
             let name = entry.file_name();

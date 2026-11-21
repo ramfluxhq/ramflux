@@ -8,6 +8,7 @@ mod commit;
 mod machine;
 mod publish;
 mod receive_checks;
+mod receive_decision;
 mod state;
 mod store;
 
@@ -20,9 +21,10 @@ pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,
 };
+pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };
-pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
+pub use receive_decision::{check_received_decision, primary_branch_public_key, receive_decision};
 pub use state::{AgentCreationState, AgentFailure};
 pub use store::{AgentCreationRecord, AgentCreationStore};
