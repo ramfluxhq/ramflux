@@ -42,7 +42,12 @@ async fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_recei
         &event(4, C::DeleteSurface(DeleteSurface { surface_id: "s".into() }))?,
     )?;
     for signed in [&three, &four] {
-        f.human.send_direct_message("thread", &signed.message_id, "author-device", b"encrypted")?;
+        f.human.send_direct_message(
+            "thread",
+            &signed.message_id,
+            f.author.owned_device_identity()?.device_id(),
+            b"encrypted",
+        )?;
         let result = project(&f.human, signed, &signed.message_id)?;
         assert!(!result.accepted && result.retryable && result.queued);
     }
@@ -65,7 +70,12 @@ async fn reordered_versions_catch_up_without_redelivery_or_terminal_reject_recei
 async fn future_event_survives_restart_and_waits_for_create() -> TestResult {
     let mut f = Fixture::new().await?;
     let two = stream(&f.author, "early", 2, "arrived early")?;
-    f.human.send_direct_message("thread", "early", "author-device", b"encrypted")?;
+    f.human.send_direct_message(
+        "thread",
+        "early",
+        f.author.owned_device_identity()?.device_id(),
+        b"encrypted",
+    )?;
     let held = project(&f.human, &two, "early")?;
     assert!(held.retryable && held.queued);
     assert_eq!(f.human.surface_get("s", 0, None)?["version"], 0);
@@ -96,7 +106,12 @@ async fn conflicting_pending_message_cannot_replace_the_verified_original() -> T
     let two = stream(&f.author, "v2", 2, "")?;
     let first = stream(&f.author, "future", 3, "original")?;
     let conflict = stream(&f.author, "future", 3, "replacement")?;
-    f.human.send_direct_message("thread", "future", "author-device", b"encrypted")?;
+    f.human.send_direct_message(
+        "thread",
+        "future",
+        f.author.owned_device_identity()?.device_id(),
+        b"encrypted",
+    )?;
     assert!(project(&f.human, &first, "future")?.queued);
     let rejected = project(&f.human, &conflict, "conflict")?;
     assert!(!rejected.accepted);
@@ -113,7 +128,12 @@ async fn bounded_queue_reports_backpressure_and_rejected_gap_can_be_retried() ->
     for version in 3..=35 {
         let id = format!("future-{version}");
         let signed = stream(&f.author, &id, version, "x")?;
-        f.human.send_direct_message("thread", &id, "author-device", b"encrypted")?;
+        f.human.send_direct_message(
+            "thread",
+            &id,
+            f.author.owned_device_identity()?.device_id(),
+            b"encrypted",
+        )?;
         let result = project(&f.human, &signed, &id)?;
         assert!(result.retryable);
         assert_eq!(result.queued, version < 35);
@@ -134,7 +154,12 @@ async fn expired_gap_is_visible_then_recovers_from_explicit_author_resync() -> T
     create(&f)?;
     let two = stream(&f.author, "v2", 2, "one")?;
     let three = stream(&f.author, "v3", 3, "two")?;
-    f.human.send_direct_message("thread", "v3", "author-device", b"encrypted")?;
+    f.human.send_direct_message(
+        "thread",
+        "v3",
+        f.author.owned_device_identity()?.device_id(),
+        b"encrypted",
+    )?;
     assert!(project(&f.human, &three, "v3")?.queued);
     let pending_key = super::super::pending::pending_key(&three)?;
     let mut row: Value = f.human.account_db()?.load_actor_state(&pending_key)?.ok_or("pending")?;
@@ -202,7 +227,7 @@ async fn holdback_byte_budget_and_original_envelope_expiry_are_enforced() -> Tes
         "expired",
         crate::client::surface::SurfaceSender {
             principal: "author",
-            device: "author-device",
+            device: f.author.owned_device_identity()?.device_id(),
             envelope_id: "expired",
             expires_at: Some(0),
             group_epoch: None,

@@ -23,7 +23,7 @@ async fn invalid_signatures_never_reserve_another_senders_receipt() -> TestResul
 async fn deferred_group_sender_principal_comes_from_the_verified_device_record() -> TestResult {
     let f = Fixture::new().await?;
     f.author.persist_root_verified_directory(&f.human.local_own_copy_manifest()?)?;
-    f.author.create_group("g", "author-device")?;
+    f.author.create_group("g", f.author.owned_device_identity()?.storage_key())?;
     f.author.add_group_member("g", f.human.owned_device_identity()?.storage_key(), "member")?;
     f.author.account_db()?.persist_client_record(
         "conversation",
@@ -224,7 +224,7 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
     let f = Fixture::new().await?;
     let outsider_fixture = Box::pin(crate::client::native_test_support::Fixture::with_principal(
         "outsider",
-        "author-device",
+        f.author.owned_device_identity()?.device_id(),
         "outsider",
     ))
     .await?;
@@ -232,7 +232,11 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
     f.human.persist_observed_identity_directory_now(&outsider_fixture.manifest)?;
     let good =
         carrier(&f.author, PayloadKind::Event, "honest", &event(1, C::CreateSurface(snapshot()))?)?;
-    f.human.verify_surface_carrier(&good, "author", "author-device")?;
+    f.human.verify_surface_carrier(
+        &good,
+        "author",
+        f.author.owned_device_identity()?.device_id(),
+    )?;
     assert!(project(&f.human, &good, "honest")?.accepted);
     let other = carrier(
         outsider,
@@ -240,7 +244,11 @@ async fn colliding_peer_names_do_not_block_the_original_surface_signer() -> Test
         "outsider",
         &event(1, C::CreateSurface(snapshot()))?,
     )?;
-    f.human.verify_surface_carrier(&other, "outsider", "author-device")?;
+    f.human.verify_surface_carrier(
+        &other,
+        "outsider",
+        f.author.owned_device_identity()?.device_id(),
+    )?;
     assert!(
         !project(&f.human, &other, "outsider")?.accepted,
         "a colliding peer device name must not authorize another principal's surface"

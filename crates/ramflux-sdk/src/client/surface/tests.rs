@@ -339,12 +339,20 @@ async fn author_consumes_a_decision_once_across_message_and_payload_replays() ->
     assert!(project(&f.author, &signed, "first")?.accepted);
     assert!(project(&f.author, &signed, "duplicate")?.accepted);
     assert_eq!(f.author.surface_get("s", 0, None)?["actions"].as_array().map(Vec::len), Some(1));
+    let author_account = f.author.account_db()?.local_account_id.clone();
+    let author_device = f.author.owned_device_identity()?.device_id().to_owned();
+    let primary_reference =
+        f.author.born_v3_account.as_ref().ok_or("author account")?.primary_vault_ref();
+    let author_passphrase = crate::custody::PrimaryVault::load_provisioning_secret(
+        f.vault.as_ref(),
+        &format!("agent-provisioning:{primary_reference}"),
+    )?;
     f.author = RamfluxClient::new();
     f.author.open_account_index(&f.root)?;
-    f.author.unlock_account("author", b"surface-test-secret")?;
+    f.author.unlock_account(&author_account, &author_passphrase)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        f.author.initialize_born_v3_branch("author-device", f.vault.clone()),
+        f.author.initialize_born_v3_branch(&author_device, f.vault.clone()),
     )
     .await??;
     let repeat =
@@ -436,7 +444,12 @@ async fn deferred_group_content_is_validated_before_fallback_is_published() -> T
         "deferred",
         &event(1, C::CreateSurface(snapshot()))?,
     )?;
-    f.human.send_direct_message("thread", "deferred", "author-device", b"encrypted")?;
+    f.human.send_direct_message(
+        "thread",
+        "deferred",
+        f.author.owned_device_identity()?.device_id(),
+        b"encrypted",
+    )?;
     f.human.account_db()?.store_message_content("thread", "deferred", &signed.bytes()?)?;
     f.human.project_deferred_surface("thread", "deferred")?;
     assert_eq!(
@@ -473,7 +486,10 @@ async fn replay_still_requires_authenticated_transport_bindings() -> TestResult 
         f.human.surface_message_fallback("second")?.ok_or("reference")?.1,
         super::fallback::render("author", "Working")
     );
-    for (conversation, device) in [("other-thread", "author-device"), ("thread", "other-device")] {
+    let author_identity = f.author.owned_device_identity()?;
+    for (conversation, device) in
+        [("other-thread", author_identity.device_id()), ("thread", "other-device")]
+    {
         let rejected = f
             .human
             .project_surface_message(

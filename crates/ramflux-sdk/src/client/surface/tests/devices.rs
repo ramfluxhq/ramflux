@@ -134,7 +134,7 @@ async fn two_terminals_per_identity_share_one_action_executor_and_decision_body(
     for terminal in [b1, b2, a1, a2] {
         let view = terminal.surface_get("s", 0, None)?;
         assert_eq!(view["version"], 1);
-        assert_eq!(view["executor_device_id"], "author-device");
+        assert_eq!(view["executor_device_id"], b1.owned_device_identity()?.device_id());
     }
     let hash = b1.surface_get("s", 0, None)?["surface_hash"].as_str().ok_or("hash")?.to_owned();
     let first = action(a1, "decision-one", 1, &hash)?;
@@ -207,13 +207,14 @@ async fn own_forwarding_requires_the_same_root_even_if_principal_label_matches_b
 
     c = b1.sign_surface_carrier(c)?;
     let db = b2.account_db()?;
-    let mut record = db.client_record("device", "author-device")?.ok_or("device")?;
+    let mut record =
+        db.client_record("device", b1.owned_device_identity()?.device_id())?.ok_or("device")?;
     db.remove_actor_state(&format!(
         "directory/device/{}",
         b1.owned_device_identity()?.storage_key()
     ))?;
     record["principal_commitment"] = json!("another-root");
-    db.persist_client_record("device", "author-device", &record)?;
+    db.persist_client_record("device", b1.owned_device_identity()?.device_id(), &record)?;
     assert!(own_forward(b1, b2, &c).is_err());
     assert!(b2.surface_get("s", 0, None)?.is_null());
     Ok(())
@@ -271,7 +272,7 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
 -> TestResult {
     let t = Box::pin(Terminals::new()).await?;
     let source = &t.clients[0];
-    source.create_group("g", "author-device")?;
+    source.create_group("g", source.owned_device_identity()?.storage_key())?;
     let db = source.account_db()?;
     db.persist_client_record("conversation", "thread", &json!({"kind":"group","group_id":"g"}))?;
     let mut first =
@@ -283,7 +284,7 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
         "group-create",
         super::super::SurfaceSender {
             principal: "author",
-            device: "author-device",
+            device: source.owned_device_identity()?.device_id(),
             envelope_id: "group-create",
             expires_at: None,
             group_epoch: Some(1),
@@ -292,7 +293,15 @@ async fn own_surface_history_omits_group_state_below_the_current_membership_floo
         false,
     )?;
     assert_eq!(source.own_surface_history_export(None)?.checkpoints.len(), 1);
-    db.upsert_group_local_membership_snapshot("g", 5, 128, "none", "author-device", "owner", 5)?;
+    db.upsert_group_local_membership_snapshot(
+        "g",
+        5,
+        128,
+        "none",
+        source.owned_device_identity()?.storage_key(),
+        "owner",
+        5,
+    )?;
     assert_eq!(source.own_surface_history_controls()?.len(), 0);
     Ok(())
 }

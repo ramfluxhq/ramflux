@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Phrase-created human/agent authority for v3 surface tests; no ownership flags are forged.
+//! Native human and primary-approved agent authority for v3 surface tests.
 use crate::custody::tests::{TestVault, words};
 use crate::custody::{CreateInput, CreationCeremony, PrimaryVault};
 use crate::{RamfluxClient, SdkError};
@@ -43,32 +43,35 @@ pub(crate) async fn owned_pair_with_vault(
         b"surface-test-secret",
     )?;
     crate::custody::tests::mark_live(root, human, now)?;
-    let mut ceremony = CreationCeremony::begin(
-        root,
-        input(agent, PrincipalKind::HeadlessAi, Some(human.into())),
+    let created = crate::custody::agent_creation::test_agent::create_test_agent(
+        &crate::custody::agent_creation::test_agent::AgentRequest {
+            root,
+            human_account_id: human,
+            human_principal: human,
+            human_vault: vault.as_ref(),
+            arm_approval: &|plan_hash| vault.arm_agent_decision(plan_hash),
+            agent_vault: vault.as_ref(),
+            agent_principal: agent,
+            display_name: agent,
+            request_id: "surface-agent",
+        },
         now,
     )?;
-    let phrase = ceremony.show_once()?;
-    let positions = ceremony.hidden_challenge()?;
-    ceremony.confirm_with_passphrase(
-        &words(&phrase, positions)?,
-        vault.as_ref(),
-        now,
-        b"surface-test-secret",
-    )?;
-    let initialize = async |id: &str| -> TestResult<RamfluxClient> {
-        let mut client = RamfluxClient::new();
-        client.open_account_index(root)?;
-        client.unlock_account(id, b"surface-test-secret")?;
-        let vault: Arc<dyn PrimaryVault> = vault.clone();
-        client.initialize_born_v3_branch(&format!("{id}-device"), vault).await?;
-        Ok(client)
-    };
+    let initialize =
+        async |id: &str, device: &str, passphrase: &[u8]| -> TestResult<RamfluxClient> {
+            let mut client = RamfluxClient::new();
+            client.open_account_index(root)?;
+            client.unlock_account(id, passphrase)?;
+            let vault: Arc<dyn PrimaryVault> = vault.clone();
+            client.initialize_born_v3_branch(device, vault).await?;
+            Ok(client)
+        };
     let (human_client, agent_client) =
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             Ok::<_, Box<dyn std::error::Error>>((
-                initialize(human).await?,
-                initialize(agent).await?,
+                initialize(human, &format!("{human}-device"), b"surface-test-secret").await?,
+                initialize(&created.account_id, &created.device_id, created.passphrase.as_bytes())
+                    .await?,
             ))
         })
         .await??;
