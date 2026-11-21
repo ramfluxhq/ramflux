@@ -5,7 +5,10 @@
 
 Implementation contract for PRIMARY-TRANSFER-PROOF-01, controller decision r2.
 The approved support envelope is 71 previously incomplete SQL declarations and
-public agent metadata. Seventeen optional/history declarations remain refused.
+public agent metadata. The process seed additionally exposed five native receive
+schema tables: four local operational declarations and one further required
+loss-history owner, so current required coverage has denominator72. Seventeen
+optional/history declarations remain refused; loss history is not an extra deferral.
 The [source census](full_transfer_owner_census.md) records field assignments,
 literal SQL writers and conservative actor call sites at checkpoint 0. It is a
 worklist, not evidence of complete semantic implementation. Each activated owner

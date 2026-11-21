@@ -97,3 +97,19 @@ One neutral-title draft PR opens now and receives every owner group. It stays
 unready until checkpoint5 and CI pass. The current metadata storage witnesses are
 not a received/own-native-message process proof. No assertion is removed to make
 that proof pass. A source-of-truth gap is an explicit open item, never a fallback.
+
+## Native receive coordinates and pending input
+
+The process seed exposed five schema15 receive tables absent from the baseline
+transfer catalog. gateway_receive_epoch, gateway_receive_receipt,
+gateway_receive_work and gateway_ack_intent are explicitly declared local
+Rebuild state. They are not original message order, denial evidence or permission
+to adopt A's endpoint/incarnation/cursor. Current B state remains owned by B's
+generation/runtime owner. Every exact inspected cut refuses SnapshotBusy if
+there is work or a staged/held receipt, including an orphan held receipt. No
+work is deleted or manually drained by the transfer proof.
+
+gateway_inbox_loss is separate required inert history, not an execution cursor.
+Its newly declared RequiresOwner placeholder refuses when nonempty until its
+owner lands; it is not a new permanent deferral. This increases the required
+worklist by one beyond the original71, without changing the17 deferred categories.

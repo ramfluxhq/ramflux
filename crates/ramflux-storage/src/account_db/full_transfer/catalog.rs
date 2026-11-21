@@ -661,6 +661,7 @@ mod pairing;
 mod progress;
 mod receipts;
 mod receive;
+pub(super) mod receive_local;
 mod recovery;
 mod routing;
 mod runtime;
@@ -717,6 +718,11 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     contacts::RULE_37,      // sql/friend_link_projection
     contacts::RULE_38,      // sql/friend_projection
     keys::RULE_159,         // sql/full_imported_mac_bundle
+    receive_local::ACK,
+    receive_local::LOSS,
+    receive_local::EPOCH,
+    receive_local::RECEIPT,
+    receive_local::WORK,
     groups::RULE_39,        // sql/group_ban_projection
     groups::RULE_40,        // sql/group_control_event_seen
     groups::RULE_41,        // sql/group_invite_projection

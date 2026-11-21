@@ -64,3 +64,20 @@ fn primary_transfer_native_independent_recipient() -> e2e::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "populated source eligibility; requires the branch's rf and node service binaries"]
+fn primary_transfer_native_populated_source_preflight() -> e2e::Result<()> {
+    let network = e2e::primary_transfer_pairing::Network::open()?;
+    let seed = e2e::primary_transfer::Seed::create(&network.stack)?;
+    let (target, account) =
+        e2e::primary_transfer_pairing::enroll(&network.stack, &seed.source, &seed.account)?;
+    let _independent = e2e::primary_transfer_vertical::Independent::populate(
+        &network.stack,
+        &seed,
+        &target,
+        &account,
+    )?;
+    e2e::primary_transfer_vertical::begin_transfer(&network.stack, &seed, &account)?;
+    Ok(())
+}

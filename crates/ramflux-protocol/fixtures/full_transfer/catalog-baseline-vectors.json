@@ -1,5 +1,5 @@
 {
-  "census_hash": "tpDtbdJMWgY3esY7QunrQq6AWPSsq-0_g5NWV8Q1_xg",
+  "census_hash": "XpT5gWmUH3yoIdERTDxjK7Y6_YP3XmQpI_TNrVpGpjk",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -169,6 +169,26 @@
     {
       "hash": "ezixSXeCB9XhUBgWY7vGHpldkVvA5dEja6VRY0o90TY",
       "id": "sql/full_imported_mac_bundle"
+    },
+    {
+      "hash": "Yw22znQ8x9TL7yoqZfq00bHpKeHYiz247UDhIVvQGOU",
+      "id": "sql/gateway_ack_intent"
+    },
+    {
+      "hash": "f3EPpwFi6cHKEc82kKtEAemrCuiVhVe1N-qdYBkGP3k",
+      "id": "sql/gateway_inbox_loss"
+    },
+    {
+      "hash": "VkOFzEEUYB5Q2eKyAffDHnEZglJRgR0ms396yw83zE4",
+      "id": "sql/gateway_receive_epoch"
+    },
+    {
+      "hash": "F9tguiMuPPIk_kUd8xypnrH25_RmTPW-90WbULTmkZI",
+      "id": "sql/gateway_receive_receipt"
+    },
+    {
+      "hash": "0J3WFcNWQa7YVpHn0CIghAEt6ruqQYUshIGYTACaTc4",
+      "id": "sql/gateway_receive_work"
     },
     {
       "hash": "FicoBUdSzUTlTiYzIbVrGQJd2SDpkDe5ZlkKRm4xybM",

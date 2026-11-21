@@ -598,3 +598,28 @@ All persist_actor_state call sites outside test-named files are listed, includin
 | crates/ramflux-sdk/src/bus/dispatch/surface_own_tests/followups.rs:193 | `&key` |
 | crates/ramflux-sdk/src/bus/dispatch/surface_own_tests/followups.rs:418 | `&format!("own-device/committed-packet/budget-{i:05}")` |
 | crates/ramflux-sdk/src/bus/dispatch/surface_own_tests/retry.rs:78 | `&key` |
+
+## Native receive schema correction from the process seed
+
+The original88 RequiresOwner declarations covered the compiled baseline catalog,
+not every schema installed by a live native account. The real populated seed
+proved168 physical tables against163 declared tables, before owner admission.
+The missing five are installed by the ordinary receive path
+(`account_db/receive/migrate.rs`, `schema.rs`). Their columns are now explicit in
+`full_transfer/catalog/receive_local.rs`; no prefix/schema bypass is permitted.
+
+| Table | Normal rows | Transfer treatment |
+| --- | --- | --- |
+| gateway_receive_epoch | always after native activation | Rebuild local endpoint/incarnation/cursor state; never adopt A coordinates or counters. |
+| gateway_receive_receipt | often | Rebuild local terminal transport bookkeeping; message erasure remains its separate restrictive owner. Any staged/held receipt blocks the cut. |
+| gateway_receive_work | transient | Rebuild only after the exact cut has no work. Return SnapshotBusy while any retained input remains; no row is deleted to unblock. |
+| gateway_ack_intent | transient | Rebuild local acknowledgement execution; no imported acknowledgement or replay permission. |
+| gateway_inbox_loss | rare | Required inert loss history. Additional typed owner pending; nonempty history remains UnsupportedRecord rather than being discarded. |
+
+Coverage therefore has two explicit parts: the approved71 required declarations
+and one newly discovered required loss-history declaration. The latter is not
+an eighteenth deferred category. The four operational declarations export no
+portable cells. Every pinned A cut and current-B inspection applies the same
+work/staged/held gate; only ordinary receive settlement can clear it. Source
+rows and endpoint state stay intact. Native schema/census changes require the
+existing typed SchemaMismatch refusal between differing catalogs.

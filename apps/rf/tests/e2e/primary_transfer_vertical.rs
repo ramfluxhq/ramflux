@@ -233,7 +233,8 @@ pub fn begin_transfer(stack: &super::Stack, seed: &Seed, target: &Account) -> Re
             "--invitation-out",
             invitation.to_str().ok_or("full invitation path")?,
         ],
-    )?;
+    )
+    .map_err(|error| format!("{error}; {}", super::dump_logs(stack, &[&seed.source])))?;
     if begun.get("operation_id").and_then(Value::as_str).is_none() || !invitation.is_file() {
         return Err("populated source did not produce a full-transfer invitation".into());
     }

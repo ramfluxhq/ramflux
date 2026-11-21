@@ -35,7 +35,14 @@ impl FullTransferSchema {
                 return Err(schema());
             }
             if family.source_rows.0 > 0 {
-                rule.require_typed_codec()?;
+                rule.require_typed_codec().inspect_err(|_| {
+                    // Compiled local category only: neither row content nor a peer
+                    // supplied name is logged or added to a remote error frame.
+                    tracing::warn!(
+                        category = rule.id,
+                        "full transfer source has an unsupported nonempty category"
+                    );
+                })?;
             }
         }
         Ok(())
@@ -52,7 +59,13 @@ impl AccountDb {
         rules: &'static [FamilyRule],
     ) -> Result<FullTransferSchema, StorageError> {
         self.require_full_stage_unlock()?;
-        let output = inspect(&self.connection, rules)?;
+        let output = inspect(&self.connection, rules).inspect_err(|error| {
+            let code = match error {
+                StorageError::PairingField(code) => *code,
+                _ => "StorageFailure",
+            };
+            tracing::warn!(code, "full transfer local schema inspection refused");
+        })?;
         super::source_scalar::SourceGuard::new(self, None)
             .require_remote_attachments(&self.connection)?;
         self.require_full_stage_unlock()?;
@@ -81,6 +94,13 @@ pub(in crate::account_db) fn inspect(
     )?;
     let long:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND length(CAST(name AS BLOB))>128)",[],|row|row.get(0))?;
     if long || count > declared.len() as u64 {
+        tracing::warn!(
+            reason = "table_inventory_bound",
+            count,
+            declared = declared.len(),
+            long,
+            "full transfer local schema inspection refused"
+        );
         return Err(unsupported());
     }
     let actual:BTreeSet<String>=connection.call(|db| {
@@ -88,11 +108,21 @@ pub(in crate::account_db) fn inspect(
             .query_map([],|row|row.get::<_,String>(0))?.collect()
     })?;
     if actual.iter().any(|table| !declared.contains(table.as_str())) {
+        tracing::warn!(
+            reason = "undeclared_table",
+            "full transfer local schema inspection refused"
+        );
         return Err(unsupported());
     }
     let mut families = Vec::with_capacity(rules.len());
     for rule in rules {
-        let mut family = rule.manifest_family()?;
+        let mut family = rule.manifest_family().inspect_err(|_| {
+            tracing::warn!(
+                category = rule.id,
+                reason = "declaration",
+                "full transfer local schema inspection refused"
+            );
+        })?;
         match rule.selector {
             FamilySelector::Table(table) if actual.contains(table) => {
                 validate_columns(connection, table, rule)?;
@@ -111,11 +141,19 @@ pub(in crate::account_db) fn inspect(
                     connection,
                     rule,
                     actual.contains("runtime_actor_state"),
-                )?);
+                )
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        category = rule.id,
+                        reason = "local_actor",
+                        "full transfer local schema inspection refused"
+                    );
+                })?);
             }
         }
         families.push(family);
     }
+    super::catalog::receive_local::require_quiescent(connection, &actual)?;
     Ok(FullTransferSchema { census_hash, families })
 }
 pub(super) fn validate_columns(
