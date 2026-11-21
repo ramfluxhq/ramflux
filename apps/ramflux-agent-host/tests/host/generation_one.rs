@@ -14,6 +14,8 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 struct Bus {
     native: NativeMessageBus,
     exact_reads: usize,
+    /// The local account id the agent creation flow chose.
+    agent_id: String,
 }
 impl AgentBus for Bus {
     async fn request(&mut self, method: &str, body: Value, _: Option<&str>) -> Result<Value> {
@@ -28,7 +30,7 @@ impl AgentBus for Bus {
             .native
             .request(LocalBusFrame::request(
                 "agent-consumer",
-                Some("agent".into()),
+                Some(self.agent_id.clone()),
                 method.split('.').next().unwrap_or(""),
                 method,
                 body,
@@ -81,7 +83,7 @@ async fn generation_one_native_message_reaches_headless_engine_through_durable_r
         let f = Fixture::new()?;
         let account_root = f.root.join("native");
         let mut human = NativeCallAccount::new(&account_root, "human").await?;
-        let mut agent = NativeCallAccount::headless(&account_root, "agent", &human).await?;
+        let mut agent = NativeCallAccount::headless(&account_root, "agent", &mut human).await?;
         agent.prepare_call_peer(human.manifest.clone())?;
         human.prepare_call_peer(agent.manifest.clone())?;
         let content = ramflux_protocol::message::Message {
@@ -95,12 +97,15 @@ async fn generation_one_native_message_reaches_headless_engine_through_durable_r
             ..Default::default()
         };
         let (conversation, message) = human.deliver_message(&mut agent, &content).await?;
+        let agent_id = agent.account_id().to_owned();
         let native = agent.into_message_bus()?;
-        let event = native.received_event("agent", &message)?;
+        let event = native.received_event(&agent_id, &message)?;
         let sequence = event.seq.ok_or("test: committed receive event sequence")?;
-        let mut bus = Bus { native, exact_reads: 0 };
+        let mut bus = Bus { native, exact_reads: 0, agent_id: agent_id.clone() };
         let probe = Probe(Rc::new(RefCell::new(Vec::new())));
-        let mut host = AgentHost::new(f.config.clone(), probe.clone())?;
+        let mut config = f.config.clone();
+        config.account_id.clone_from(&agent_id);
+        let mut host = AgentHost::new(config, probe.clone())?;
         Box::pin(host.apply(&mut bus, event.clone(), 1000)).await?;
         assert_eq!(
             *probe.0.borrow(),

@@ -300,6 +300,32 @@ pub(crate) fn mark_live(root: &Path, id: &str, now: u64) -> Result {
     account.mark_live(root)?;
     Ok(())
 }
+/// An agent created for the human account `human` on `root` through the real approved creation
+/// flow (decision D6). `vault` holds the human's keys and receives the agent's. The agent's local
+/// account id and data passphrase are in the result.
+pub(crate) fn create_agent(
+    root: &Path,
+    human: &str,
+    vault: &TestVault,
+    name: &str,
+    now: u64,
+) -> Result<super::agent_creation::test_agent::CreatedAgent> {
+    use super::agent_creation::test_agent::{AgentRequest, create_test_agent};
+    Ok(create_test_agent(
+        &AgentRequest {
+            root,
+            human_account_id: human,
+            human_principal: &format!("principal-{human}"),
+            human_vault: vault,
+            arm_approval: &|plan_hash| vault.arm_agent_decision(plan_hash),
+            agent_vault: vault,
+            agent_principal: &format!("principal-{name}"),
+            display_name: "Example Agent",
+            request_id: &format!("agent-{name}"),
+        },
+        now,
+    )?)
+}
 #[test]
 fn custody_preparation_does_not_persist_recovery_material() -> Result {
     let root = Root::new()?;
@@ -414,30 +440,20 @@ fn custody_vault_failure_removes_the_reservation_and_creates_no_legacy_manifest(
     Ok(())
 }
 #[test]
-fn custody_nonhuman_genesis_requires_current_local_human_custody() -> Result {
+fn custody_agent_genesis_is_bound_to_the_human_primary_through_the_approved_flow() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
     let now = super::network_now()?;
     let human = create(&root.0, "human", &vault, now)?;
     mark_live(&root.0, "human", now)?;
-    let mut input = input("service");
-    input.principal_kind = PrincipalKind::HeadlessAi;
-    assert!(CreationCeremony::begin(&root.0, input.clone(), now).is_err());
-    input.custodian_account_id = Some("human".into());
-    let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
-    let phrase = ceremony.show_once()?;
-    let positions = ceremony.hidden_challenge()?;
-    let account = ceremony.confirm_with_passphrase(
-        &words(&phrase, positions)?,
-        &vault,
-        now,
-        b"headless data passphrase",
-    )?;
+    let created = create_agent(&root.0, "human", &vault, "service", now)?;
+    let agent = load_account(&root.0, &created.account_id, now + 3)?;
     assert_eq!(
-        account.record().body.master_certificate.body.primary_device_ref.account_anchor,
-        human.record().body.account_anchor
+        agent.record().body.master_certificate.body.primary_device_ref.account_anchor,
+        human.record().body.account_anchor,
+        "the agent names the human primary it was approved by"
     );
-    load_account(&root.0, "service", now)?;
+    assert_eq!(agent.custodian_account_id(), Some("human"));
     Ok(())
 }
 
@@ -450,50 +466,47 @@ fn agent_bundle_is_private_custodian_bound_and_one_shot() -> Result {
     let now = super::network_now()?;
     create(&root.0, "human", &vault, now)?;
     mark_live(&root.0, "human", now)?;
-    let mut input = input("agent");
-    input.principal_kind = PrincipalKind::HeadlessAi;
-    input.custodian_account_id = Some("human".into());
-    let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
-    let phrase = ceremony.show_once()?;
-    let positions = ceremony.hidden_challenge()?;
-    let secret = b"daemon-generated-agent-data-passphrase";
-    ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
-    mark_live(&root.0, "agent", now)?;
-    let listed = super::store::list_accounts(&root.0, now)?;
-    let agent = listed
-        .iter()
-        .find(|row| row["local_account_id"] == "agent")
-        .ok_or("agent summary missing")?;
+    let created = create_agent(&root.0, "human", &vault, "agent", now)?;
+    let id = created.account_id.as_str();
+    let secret = created.passphrase.as_bytes();
+    let listed = super::store::list_accounts(&root.0, now + 3)?;
+    let agent =
+        listed.iter().find(|row| row["local_account_id"] == id).ok_or("agent summary missing")?;
     assert_eq!(agent["custodian_account_id"], "human");
     assert!(!agent.to_string().contains("provisioning_vault_ref"));
     let path = root.0.join("agent.bundle");
-    super::store::export_agent_credentials(&root.0, "human", "agent", &path, &vault, now)?;
+    super::store::export_agent_credentials(&root.0, "human", id, &path, &vault, now + 3)?;
     #[cfg(unix)]
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     let bytes = std::fs::read(&path)?;
     let bundle: super::store::AgentProvisioningBundle = serde_json::from_slice(&bytes)?;
-    assert_eq!(bundle.account_id, "agent");
+    assert_eq!(bundle.account_id, id);
     assert_eq!(bundle.data_passphrase.as_bytes(), secret);
-    assert!(!std::str::from_utf8(&bytes)?.contains(phrase.as_str()));
+    let fields: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        fields.as_object().map(serde_json::Map::len),
+        Some(2),
+        "the bundle carries only the account id and the data passphrase"
+    );
     assert!(
         super::store::export_agent_credentials(
             &root.0,
             "human",
-            "agent",
+            id,
             &root.0.join("second.bundle"),
             &vault,
-            now,
+            now + 3,
         )
         .is_err()
     );
     assert!(
         super::store::export_agent_credentials(
             &root.0,
-            "agent",
-            "agent",
+            id,
+            id,
             &root.0.join("invalid.bundle"),
             &vault,
-            now,
+            now + 3,
         )
         .is_err()
     );
@@ -555,43 +568,41 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
     create(&root.0, "human", &vault, now)?;
     mark_live(&root.0, "human", now)?;
     // Setup first (no observed buffers), then one scoped Session per exported case.
-    let cases: [(&str, &[u8], bool); 2] = [
-        ("agent-a", b"\xff\xfe-not-utf8-passphrase", false),
-        ("agent-b", b"valid-agent-data-passphrase", true),
-    ];
-    for (account, secret, occupied) in cases {
-        let mut input = input(account);
-        input.principal_kind = PrincipalKind::HeadlessAi;
-        input.custodian_account_id = Some("human".into());
-        let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
-        let phrase = ceremony.show_once()?;
-        let positions = ceremony.hidden_challenge()?;
-        // Create through the validated public path, then model corrupted vault bytes
-        // to reach the export UTF-8 cleanup branch independently of creation validation.
-        let born = ceremony.confirm_with_passphrase(
-            &words(&phrase, positions)?,
-            &vault,
-            now,
-            b"valid-agent-data-passphrase",
-        )?;
+    let mut cases: Vec<(String, &[u8], bool)> = Vec::new();
+    for (name, secret, occupied) in [
+        ("agent-a", &b"\xff\xfe-not-utf8-passphrase"[..], false),
+        ("agent-b", &b"valid-agent-data-passphrase"[..], true),
+    ] {
+        // Create through the approved creation flow, then model corrupted vault bytes to reach
+        // the export UTF-8 cleanup branch independently of creation validation.
+        let created = create_agent(&root.0, "human", &vault, name, now)?;
+        let account = created.account_id;
+        let born = load_account(&root.0, &account, now + 3)?;
         let reference = format!("agent-provisioning:{}", born.primary_vault_ref());
         vault.delete(&reference)?;
         vault.store_provisioning_secret(&reference, secret)?;
-        mark_live(&root.0, account, now)?;
         if occupied {
             // Destination failure after the passphrase String was built.
             std::fs::write(root.0.join(format!("{account}.bundle")), b"occupied")?;
         }
+        cases.push((account, secret, occupied));
     }
     for (account, secret, occupied) in cases {
+        let account = account.as_str();
         let _session = super::observer::begin(&[
             "p07-export-utf8",
             "p07-export-passphrase",
             "p07-export-serializer",
         ]);
         let path = root.0.join(format!("{account}.bundle"));
-        let outcome =
-            super::store::export_agent_credentials(&root.0, "human", account, &path, &vault, now);
+        let outcome = super::store::export_agent_credentials(
+            &root.0,
+            "human",
+            account,
+            &path,
+            &vault,
+            now + 3,
+        );
         if occupied {
             // Destination failure: the exact I/O class, not any error.
             assert!(

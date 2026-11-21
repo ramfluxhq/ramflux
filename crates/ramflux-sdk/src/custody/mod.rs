@@ -110,6 +110,8 @@ mod seam_guard_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(feature = "test-support")]
+pub(crate) mod agent_fixture;
 #[cfg(any(test, feature = "itest-memory-vault"))]
 pub(crate) mod memory_vault;
 #[cfg(feature = "itest-memory-vault")]

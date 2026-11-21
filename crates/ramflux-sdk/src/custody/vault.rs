@@ -12,6 +12,7 @@ pub use reason::CustodyVaultReason;
 #[cfg(any(
     test,
     feature = "itest-memory-vault",
+    feature = "test-support",
     target_os = "linux",
     target_os = "macos",
     windows

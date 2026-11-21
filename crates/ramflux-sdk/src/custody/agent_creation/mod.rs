@@ -27,6 +27,8 @@ mod rebind_commit_tests;
 mod rebind_plan_tests;
 #[cfg(test)]
 mod rebind_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_agent;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
