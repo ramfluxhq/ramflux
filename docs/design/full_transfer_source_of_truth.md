@@ -52,6 +52,29 @@ trust root. HTTPS validation, redirects refusal and native node-key binding rema
 required, including staged recipient resume. The process seed exposed `UnknownCA`
 when these bus installation paths used only the default HTTPS root set.
 
+The independent-recipient seed in `primary_transfer_vertical.rs` waits for the
+ordinary directory courier to backfill A's accepted contact to B. The accepted
+relationship has no new contact-request execution state on B; the seed requires
+an accepted, unblocked relationship and a null request state. It then creates a
+B-local erasure while A still reads the body, a B-authored native message, and a
+local mute. A retained ordinary bus client consumes B's initial message change
+batch and keeps that connection/cursor for the later installation witness. The
+current seed establishes this baseline; it does not yet prove crossing a full
+transfer installation.
+
+`own_device_copy/background.rs::seal_generated` takes signing attribution from
+the currently admitted session and checks its route. The saved account gateway
+configuration is deliberately unbound after native role refresh and cannot seal
+a new signed own-device copy. Current native-operation authorization and exact A0
+comparison still apply. Using the unbound config caused the process witness's
+`source_authority` refusal and prevented automatic contact backfill.
+
+The ordinary conversation summary exposes `mute_until` as a nullable exact
+decimal string. The storage value remains a signed integer, including the
+permanent-mute sentinel `i64::MAX`; the public summary never emits that sentinel
+as an unsafe I-JSON number. This is a read projection, not an imported timer or
+an execution grant.
+
 Checkpoint0 is the committed census and cut/install contract. Checkpoint1 now has
 an early vertical gate, then expansion; checkpoints2–5 keep their numbers:
 

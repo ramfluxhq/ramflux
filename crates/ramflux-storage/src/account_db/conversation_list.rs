@@ -153,7 +153,8 @@ impl AccountDb {
                       ORDER BY m.created_at DESC, m.message_id DESC
                       LIMIT 1) AS last_activity_at,
                     ls.archived AS archived,
-                    ls.pin_order AS pin_order
+                    ls.pin_order AS pin_order,
+                    ls.mute_until AS mute_until
                FROM (
                     SELECT conversation_id FROM direct_message_projection
                     UNION
@@ -171,6 +172,7 @@ impl AccountDb {
                 last_activity_at: row.get(3)?,
                 is_archived: row.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
                 pin_order: row.get(5)?,
+                mute_until: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StorageError::from)

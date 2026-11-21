@@ -45,3 +45,22 @@ fn primary_transfer_native_existing_recipient() -> e2e::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "independent native recipient seed; requires the branch's rf and node service binaries"]
+fn primary_transfer_native_independent_recipient() -> e2e::Result<()> {
+    let network = e2e::primary_transfer_pairing::Network::open()?;
+    let seed = e2e::primary_transfer::Seed::create(&network.stack)?;
+    let (target, account) =
+        e2e::primary_transfer_pairing::enroll(&network.stack, &seed.source, &seed.account)?;
+    let independent = e2e::primary_transfer_vertical::Independent::populate(
+        &network.stack,
+        &seed,
+        &target,
+        &account,
+    )?;
+    if independent.consumer.cursor == 0 {
+        return Err("vertical slice has no independently running B consumer".into());
+    }
+    Ok(())
+}

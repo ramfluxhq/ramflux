@@ -23,7 +23,14 @@ pub struct Network {
 pub fn start_device(stack: &Stack, name: &str) -> Result<Daemon> {
     let root = stack.root.join(format!("daemon-{name}"));
     std::fs::create_dir_all(&root)?;
-    super::spawn_daemon(root.join("cli.sock"), root)
+    super::spawn_daemon_with_env(
+        root.join("cli.sock"),
+        root,
+        &[(
+            "RUST_LOG",
+            "info,ramflux_sdk::bus::couriers::directory=debug,ramflux_sdk::bus::couriers::layer_publish=debug",
+        )],
+    )
 }
 
 impl Network {
