@@ -110,6 +110,9 @@ pub(super) fn apply_fixed_base_in_transaction(
     if root != source.account_anchor {
         return Err(unsupported());
     }
+    if header.family == super::message_denial::FAMILY {
+        return super::message_denial::apply(db, header, input);
+    }
     let rule = full_transfer_catalog()
         .iter()
         .find(|rule| rule.id == header.family)

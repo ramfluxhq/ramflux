@@ -34,6 +34,9 @@ pub fn write_full_scalar_sql_row(
     row: &rusqlite::Row<'_>,
     writer: &mut impl Write,
 ) -> Result<u64, StorageError> {
+    if rule.id == super::message_denial::FAMILY {
+        return super::message_denial::encode(rule, row, writer);
+    }
     rule.require_typed_codec()?;
     if !matches!(rule.selector, FamilySelector::Table(_))
         || rule.key.is_empty()

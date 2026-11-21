@@ -32,6 +32,9 @@ pub fn copy_full_scalar_record(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> Result<(), StorageError> {
+    if rule.id == super::message_denial::FAMILY {
+        return super::message_denial::copy(rule, header, reader, writer);
+    }
     validate_scalar_schema(rule, header)?;
     let raw = canonical_key(header)?;
     validate_key_grammar(rule, &raw)?;

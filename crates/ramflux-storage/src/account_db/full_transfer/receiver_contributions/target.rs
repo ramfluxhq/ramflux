@@ -20,7 +20,7 @@ impl Contributions {
     ) -> Result<super::FullUnionEncoding, StorageError> {
         let mut db = open(path, key)?;
         let tx = db.transaction()?;
-        tx.execute_batch("CREATE TEMP TABLE current_target(family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL CHECK(length(record)<=16384),PRIMARY KEY(family,key)) WITHOUT ROWID;")?;
+        tx.execute_batch("CREATE TEMP TABLE current_target(family TEXT NOT NULL,key TEXT NOT NULL,record BLOB NOT NULL CHECK(length(record)<=262144),PRIMARY KEY(family,key)) WITHOUT ROWID;")?;
         Self::capture_target(&tx, rows.current, rows.schema, stage)?;
         self.remove_target_absences(&tx, private, stage)?;
         let mut query = tx.prepare("SELECT fresh.record FROM current_target AS fresh LEFT JOIN full_union_record AS old ON old.generation_nonce=?1 AND old.owner=?2 AND old.family=fresh.family AND old.key=fresh.key WHERE old.record IS NOT fresh.record ORDER BY CASE WHEN fresh.family='sql/object_payload_dependency' THEN 1 ELSE 0 END,fresh.family,fresh.key")?;
@@ -29,7 +29,7 @@ impl Contributions {
         while let Some(row) = rows.next()? {
             stage.require_io()?;
             let bytes = row.get_ref(0)?.as_blob().map_err(|_| invalid())?;
-            if bytes.len() > 16384 {
+            if bytes.len() > 262_144 {
                 return Err(invalid());
             }
             let mut input = bytes;

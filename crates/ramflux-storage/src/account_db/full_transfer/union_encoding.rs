@@ -16,7 +16,7 @@ use std::io::Write;
 use zeroize::{Zeroize as _, Zeroizing};
 
 pub(super) const SCHEMA:&str="
-CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 16384),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS full_union_record(generation_nonce BLOB NOT NULL CHECK(length(generation_nonce)=32),owner TEXT NOT NULL COLLATE BINARY,family TEXT NOT NULL COLLATE BINARY,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(generation_nonce,owner,family,key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS full_union_encoding(generation_nonce BLOB PRIMARY KEY CHECK(length(generation_nonce)=32),records INTEGER NOT NULL CHECK(records>=0),total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),chunks_root BLOB NOT NULL CHECK(length(chunks_root)=32));";
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
@@ -106,7 +106,7 @@ impl FullUnionEncodingBuilder<'_, '_> {
         let rule = compiled(family)?;
         let mut record = Zeroizing::new(Vec::new());
         write_full_scalar_sql_row(rule, row, &mut *record)?;
-        if record.len() > 16384 {
+        if record.len() > 262_144 {
             return Err(invalid());
         }
         let header = read_record_header(&mut record.as_slice())
@@ -184,7 +184,7 @@ pub(super) fn visit(
         let family = row.get_ref(1)?.as_str().map_err(|_| invalid())?;
         let key = row.get_ref(2)?.as_str().map_err(|_| invalid())?;
         let bytes = row.get_ref(3)?.as_blob().map_err(|_| invalid())?;
-        if bytes.len() > 16384 || !owners.iter().any(|allowed| allowed == owner) {
+        if bytes.len() > 262_144 || !owners.iter().any(|allowed| allowed == owner) {
             return Err(invalid());
         }
         let rule = compiled(family)?;

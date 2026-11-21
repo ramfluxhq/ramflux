@@ -78,6 +78,8 @@ pub enum CodecRule {
     SqlMacSubkeys,
     /// Closed canonical public `DeviceRef` JSON text (at most 512 bytes), not opaque JSON.
     SqlDeviceRef,
+    /// Closed five-column message-erasure projection, interpreted by its semantic owner.
+    SqlMessageTombstone,
     /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
     SqlBytes {
         length: U64,
@@ -258,6 +260,9 @@ impl FamilyRule {
         Ok(())
     }
     fn validate_cells(&self) -> Result<(), StorageError> {
+        if self.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlMessageTombstone)) {
+            super::message_denial::require_rule(self)?;
+        }
         if matches!(self.selector, FamilySelector::ActorPrefix(_))
             && self.codec.iter().any(|field| {
                 matches!(
@@ -289,7 +294,9 @@ impl FamilyRule {
                     Some(cell_type)
                 }
                 CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
-                CodecRule::SqlBase64 { .. } | CodecRule::SqlDeviceRef => Some(CellType::Utf8),
+                CodecRule::SqlBase64 { .. }
+                | CodecRule::SqlDeviceRef
+                | CodecRule::SqlMessageTombstone => Some(CellType::Utf8),
                 CodecRule::SqlI64 { .. } => Some(CellType::I64),
                 _ => None,
             };
@@ -403,7 +410,7 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
-        CodecRule::SqlMacSubkeys | CodecRule::SqlDeviceRef => {
+        CodecRule::SqlMacSubkeys | CodecRule::SqlDeviceRef | CodecRule::SqlMessageTombstone => {
             if depth != 1 {
                 return Err(unsupported());
             }
@@ -553,6 +560,7 @@ macro_rules! table_rule {
     (@version "full_imported_mac_bundle",Transfer) => { U64(2) };
     (@version "runtime_inbox_recovery",$mode:ident) => { U64(2) };
     (@version "pairing_adoption",$mode:ident) => { U64(2) };
+    (@version "message_tombstone_projection",$mode:ident) => { U64(2) };
     (@version $other:literal,$mode:ident) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {

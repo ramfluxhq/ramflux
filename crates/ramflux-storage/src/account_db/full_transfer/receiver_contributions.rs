@@ -66,7 +66,7 @@ fn retain(
     owner: &str,
     bytes: &[u8],
 ) -> Result<(), StorageError> {
-    if bytes.len() > 16384 {
+    if bytes.len() > 262_144 {
         return Err(invalid());
     }
     let mut input = bytes;

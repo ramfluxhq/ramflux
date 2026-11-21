@@ -41,6 +41,7 @@ pub use reverse_source::{FullReverseSourceDraft, FullReverseSourceWork};
 mod reverse_merge;
 mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
+mod message_denial;
 mod scalar;
 mod scalar_sql;
 mod source_base;

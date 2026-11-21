@@ -21,13 +21,17 @@ impl Drop for PrivateHeader {
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS source_scalar_family(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,rule_hash BLOB NOT NULL CHECK(length(rule_hash)=32),records INTEGER NOT NULL,encoded_bytes INTEGER NOT NULL,PRIMARY KEY(snapshot_id,family));
-CREATE TABLE IF NOT EXISTS source_scalar_row(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 16384),PRIMARY KEY(snapshot_id,family,key));";
+CREATE TABLE IF NOT EXISTS source_scalar_row(snapshot_id TEXT NOT NULL,family TEXT NOT NULL,key TEXT NOT NULL COLLATE BINARY,record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144),PRIMARY KEY(snapshot_id,family,key));";
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
 pub(super) fn compiled(family: &str) -> Result<&'static FamilyRule, StorageError> {
     let rule = full_transfer_catalog().iter().find(|rule| rule.id == family).ok_or_else(invalid)?;
     rule.require_typed_codec()?;
+    if rule.id == super::message_denial::FAMILY {
+        super::message_denial::require_rule(rule)?;
+        return Ok(rule);
+    }
     if rule.disposition != Disposition::Transfer
         || rule.codec.iter().any(|field| {
             field.disposition == Disposition::Transfer
@@ -236,7 +240,7 @@ fn build(
         }
         let mut record = Zeroizing::new(Vec::new());
         let bytes = write_full_scalar_sql_row(rule, row, &mut *record)?;
-        if record.len() > 16384 {
+        if record.len() > 262_144 {
             return Err(invalid());
         }
         let header = read_record_header(&mut record.as_slice())
@@ -277,7 +281,7 @@ fn write_sorted<W: Write>(
         source_guard.require()?;
         let key = row.get_ref(0)?.as_str().map_err(|_| invalid())?;
         let record = row.get_ref(1)?.as_blob().map_err(|_| invalid())?;
-        if record.len() > 16384 {
+        if record.len() > 262_144 {
             return Err(invalid());
         }
         let mut input = record;
