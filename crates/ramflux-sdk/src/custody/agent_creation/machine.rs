@@ -50,6 +50,7 @@ struct PendingRefs {
     master: String,
     primary: String,
     branch: String,
+    provisioning: String,
 }
 
 /// Inputs of the primary side that signs a decision.
@@ -62,9 +63,9 @@ pub struct PrimarySigning<'a> {
     pub principal_id: &'a str,
 }
 
-/// Start a creation request: keep the pending agent secrets in the vault and persist the plan.
-/// A repeated request id returns the saved request (after the deadline check) and creates no
-/// second anchor.
+/// Start a creation request: choose the agent account id and its final vault references, keep the
+/// pending agent secrets under those references and persist the plan. A repeated request id returns
+/// the saved request (after the deadline check) and creates no second anchor.
 /// # Errors
 /// `CustodyExpired` when the primary branch is already invalid at `now`; typed vault refusals
 /// when a pending secret cannot be stored (the request closes and its items are cleaned up).
@@ -84,27 +85,40 @@ pub fn begin(
     }
     let display_name = normalize_profile_display_name(&input.display_name)
         .map_err(|_| SdkError::CustodySetupInvalid)?;
+    let master = MasterKey::generate().map_err(|_| SdkError::CustodyRandomUnavailable)?;
+    let anchor = master_anchor(&master).map_err(|_| SdkError::CustodySetupInvalid)?;
+    let account_id = random_id()?;
+    // The final references of the committed account. Pending secrets are stored under them from
+    // the start, so commit only writes the registry entry that points at them (no promotion).
+    let reference = crate::custody::store::custody_vault_reference(store.root(), &account_id, &anchor)?;
     let refs = PendingRefs {
-        master: format!("{AGENT_MASTER_PREFIX}{}", random_id()?),
-        primary: random_id()?,
-        branch: format!("branch:{}", random_id()?),
+        master: format!("{AGENT_MASTER_PREFIX}{reference}"),
+        primary: reference.clone(),
+        branch: format!("branch:{reference}"),
+        provisioning: format!("agent-provisioning:{reference}"),
     };
     // Record the references before any secret is written, so cleanup can always find them.
     let mut record = AgentCreationRecord {
         request_id: input.request_id.clone(),
+        account_id: Some(account_id),
         request_hash: String::new(),
         plan_b64: String::new(),
         state: AgentCreationState::Preparing,
         issued_at: now,
         expires_at: now,
-        vault_refs: vec![refs.master.clone(), refs.primary.clone(), refs.branch.clone()],
+        vault_refs: vec![
+            refs.master.clone(),
+            refs.primary.clone(),
+            refs.branch.clone(),
+            refs.provisioning.clone(),
+        ],
         intended: None,
         failure: None,
         decision_b64: None,
     };
     store.save(&record)?;
 
-    let plan = match stage_secrets(vault, &refs, input, display_name, now) {
+    let plan = match stage_secrets(vault, &refs, input, display_name, &master, now) {
         Ok(plan) => plan,
         Err(error) => {
             finish(
@@ -117,6 +131,7 @@ pub fn begin(
             return Err(error);
         }
     };
+    drop(master);
     let plan_bytes = encode_register_plan(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
     record.request_hash = register_plan_hash(&plan).map_err(|_| SdkError::CustodySetupInvalid)?;
     record.plan_b64 = encode_base64url(&plan_bytes);
@@ -214,6 +229,7 @@ pub fn receive_plan(
     }
     let record = AgentCreationRecord {
         request_id: plan.request_id.clone(),
+        account_id: None,
         request_hash: hash,
         plan_b64: encode_base64url(plan_bytes),
         state: AgentCreationState::AuthorizationPending,
@@ -307,26 +323,27 @@ pub fn primary_sign_decision(
     encode_register_decision(&signed).map_err(|_| SdkError::CustodySetupInvalid)
 }
 
-/// Build the plan and create every pending secret, in the vault, under the recorded references.
+/// Build the plan and create every pending secret, in the vault, under the final references.
 fn stage_secrets(
     vault: &dyn PrimaryVault,
     refs: &PendingRefs,
     input: &BeginInput,
     display_name: String,
+    master: &MasterKey,
     now: u64,
 ) -> Result<RegisterPlan, SdkError> {
-    let master = MasterKey::generate().map_err(|_| SdkError::CustodyRandomUnavailable)?;
-    let anchor = master_anchor(&master).map_err(|_| SdkError::CustodySetupInvalid)?;
+    let anchor = master_anchor(master).map_err(|_| SdkError::CustodySetupInvalid)?;
     let self_signing =
         SelfSigningKey::generate().map_err(|_| SdkError::CustodyRandomUnavailable)?;
     let device_id = format!("device-{}", random_id()?);
     let signing_seed = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
     let agreement_seed =
         Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
+    let provisioning = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
     let branch = create_device_branch_from_seed(&input.principal_id, &device_id, 1, &signing_seed);
     let agreement = X25519KeyPair::from_seed_ref(&agreement_seed);
 
-    vault.store_agent_master(&refs.master, &master)?;
+    vault.store_agent_master(&refs.master, master)?;
     vault.store_new(&refs.primary, &self_signing)?;
     let mut seeds = Zeroizing::new([0_u8; 64]);
     seeds
@@ -334,6 +351,7 @@ fn stage_secrets(
         .zip(signing_seed.iter().chain(agreement_seed.iter()))
         .for_each(|(slot, byte)| *slot = *byte);
     vault.store_branch(&refs.branch, &seeds)?;
+    vault.store_provisioning_secret(&refs.provisioning, &provisioning[..])?;
 
     let expires_at = now
         .checked_add(REGISTER_TTL_SECONDS)
@@ -354,7 +372,11 @@ fn stage_secrets(
         desktop: input.desktop.clone(),
         agent_anchor: anchor.clone(),
         principal_id: input.principal_id.clone(),
-        agent_device: DeviceRef { account_anchor: anchor, device_id, device_epoch: 1 },
+        agent_device: DeviceRef {
+            account_anchor: anchor,
+            device_id,
+            device_epoch: 1,
+        },
         master_public_key: master.public_key(),
         self_signing_public_key: self_signing.public_key(),
         branch_signing_public_key: encode_base64url(branch.signing_key.verifying_key().to_bytes()),
@@ -382,7 +404,7 @@ fn deadline_passed(record: &AgentCreationRecord, now: u64) -> bool {
 }
 
 /// Apply the stored deadline and finish a cleanup that a previous run left pending.
-fn resume(
+pub(super) fn resume(
     store: &AgentCreationStore,
     vault: &dyn PrimaryVault,
     record: AgentCreationRecord,
@@ -392,6 +414,9 @@ fn resume(
         AgentCreationState::CleanupPending => {
             let target = record.intended.ok_or(SdkError::CustodySetupInvalid)?;
             finish(store, vault, record, target, None)
+        }
+        AgentCreationState::Authorized if store.committed(&record)? => {
+            mark_publication_pending(store, record)
         }
         AgentCreationState::AuthorizationPending | AgentCreationState::Authorized
             if deadline_passed(&record, now) =>
@@ -404,7 +429,7 @@ fn resume(
 
 /// Close a request: persist `cleanup_pending`, delete every pending vault item, then persist the
 /// target state. A failed delete leaves the request in `cleanup_pending` and is never success.
-fn finish(
+pub(super) fn finish(
     store: &AgentCreationStore,
     vault: &dyn PrimaryVault,
     mut record: AgentCreationRecord,
@@ -431,6 +456,17 @@ fn finish(
         record.vault_refs = remaining;
         record.state = AgentCreationState::CleanupPending;
     }
+    store.save(&record)?;
+    Ok(record)
+}
+
+/// The account authority exists: the commit happened (a crash came before the record was
+/// updated). Nothing is cleaned up from here on; only the state moves on.
+pub(super) fn mark_publication_pending(
+    store: &AgentCreationStore,
+    mut record: AgentCreationRecord,
+) -> Result<AgentCreationRecord, SdkError> {
+    record.state = AgentCreationState::PublicationPending;
     store.save(&record)?;
     Ok(record)
 }

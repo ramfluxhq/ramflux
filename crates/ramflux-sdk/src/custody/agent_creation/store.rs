@@ -20,6 +20,9 @@ const MAX_RECORD_BYTES: u64 = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct AgentCreationRecord {
     pub request_id: String,
+    /// Local account id the agent account is committed under. Chosen at begin on the initiating
+    /// desktop; `None` on the receiving primary, which never creates the account.
+    pub account_id: Option<String>,
     /// Empty only while `state` is `preparing`.
     pub request_hash: String,
     pub plan_b64: String,
@@ -55,20 +58,57 @@ impl AgentCreationRecord {
     }
 }
 
-/// Directory of creation records, one file per request id.
+/// Directory of creation records, one file per request id. It lives inside the data directory
+/// of the human account that owns the request (`custody_accounts/<human>/agent_creation`), on
+/// the desktop (initiator) and on the primary (receiver) alike.
 #[derive(Debug)]
 pub struct AgentCreationStore {
+    root: PathBuf,
     dir: PathBuf,
 }
 
 impl AgentCreationStore {
-    /// Open (and create) the record directory.
+    /// Open (and create) the record directory of one human account under its data root.
     /// # Errors
-    /// `CustodyVaultUnavailable` when the directory cannot be created.
-    pub fn open(dir: impl Into<PathBuf>) -> Result<Self, SdkError> {
-        let dir = dir.into();
+    /// `CustodyVaultUnavailable` when the directory cannot be created; `CustodySetupInvalid` for
+    /// an invalid human account id.
+    pub fn open(root: impl Into<PathBuf>, human_account_id: &str) -> Result<Self, SdkError> {
+        crate::custody::valid_id(human_account_id)?;
+        let root = root.into();
+        let dir = root.join("custody_accounts").join(human_account_id).join("agent_creation");
         std::fs::create_dir_all(&dir).map_err(|_| SdkError::CustodyVaultUnavailable)?;
-        Ok(Self { dir })
+        Ok(Self { root, dir })
+    }
+
+    /// True when the agent account of this local id has published its authority: the commit point
+    /// of a creation. Read from the data root, so a restart sees a commit even when the record
+    /// still says `authorized`.
+    /// # Errors
+    /// `CustodyVaultUnavailable` when the account directory cannot be inspected.
+    pub fn account_committed(&self, account_id: &str) -> Result<bool, SdkError> {
+        crate::custody::valid_id(account_id)?;
+        self.root
+            .join("custody_accounts")
+            .join(account_id)
+            .join("authority.json")
+            .try_exists()
+            .map_err(|_| SdkError::CustodyVaultUnavailable)
+    }
+
+    /// Whether the record's agent account has its authority on this root (false without an id).
+    /// # Errors
+    /// Propagates [`Self::account_committed`] failures.
+    pub(super) fn committed(&self, record: &AgentCreationRecord) -> Result<bool, SdkError> {
+        match &record.account_id {
+            Some(account_id) => self.account_committed(account_id),
+            None => Ok(false),
+        }
+    }
+
+    /// Data root that the agent account is committed under.
+    #[must_use]
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     /// Load one record. `Ok(None)` when no record exists for the id.
@@ -94,6 +134,7 @@ impl AgentCreationStore {
         if record.request_id != request_id {
             return Err(SdkError::CustodySetupInvalid);
         }
+        check_account_id(&record)?;
         check_consistency(&record)?;
         Ok(Some(record))
     }
@@ -103,6 +144,7 @@ impl AgentCreationStore {
     /// Refuses an inconsistent record and reports I/O failures without partial writes.
     pub fn save(&self, record: &AgentCreationRecord) -> Result<(), SdkError> {
         check_consistency(record)?;
+        check_account_id(record)?;
         let bytes = serde_json::to_vec(record).map_err(|_| SdkError::CustodySetupInvalid)?;
         let path = self.path(&record.request_id)?;
         let tmp = self.dir.join(format!("{}.json.tmp", record.request_id));
@@ -119,6 +161,13 @@ impl AgentCreationStore {
     fn path(&self, request_id: &str) -> Result<PathBuf, SdkError> {
         crate::custody::valid_id(request_id)?;
         Ok(self.dir.join(format!("{request_id}.json")))
+    }
+}
+
+fn check_account_id(record: &AgentCreationRecord) -> Result<(), SdkError> {
+    match &record.account_id {
+        Some(account_id) => crate::custody::valid_id(account_id),
+        None => Ok(()),
     }
 }
 

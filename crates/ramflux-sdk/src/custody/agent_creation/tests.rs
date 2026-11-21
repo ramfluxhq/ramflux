@@ -4,9 +4,10 @@
 //! Stage B exit tests: the vault operations and the creation state machine, driven by the real
 //! `MemoryPrimaryVault`, real key generation and a `TempDir` store. Time is always an argument.
 use super::{
-    AgentCreationState, AgentCreationStore, AgentFailure, BeginInput, PrimarySigning,
-    apply_decision, begin, cancel, check_received_request, check_sender, expected_scope,
-    primary_sign_decision, receive_plan, resume_request,
+    AgentCreationRecord, AgentCreationState, AgentCreationStore, AgentFailure, BeginInput,
+    BeginOutcome, PrimarySigning, apply_decision, begin, cancel, check_received_request,
+    check_sender, commit_approved, expected_scope, primary_sign_decision, receive_plan,
+    resume_request,
 };
 use crate::SdkError;
 use crate::custody::vault::agent_master_item::AgentMasterCells;
@@ -30,6 +31,8 @@ const NOW: u64 = 1_000;
 const PRIMARY_DEVICE: &str = "primary-device";
 const PRINCIPAL: &str = "agent-principal-1";
 const DESKTOP_DEVICE: &str = "desktop-device";
+/// The human account whose data directory holds the creation records in these tests.
+const HUMAN: &str = "human";
 
 /// The human primary phone: vault holds its self-signing key and branch seeds, plus one armed
 /// presence approval per plan hash.
@@ -113,7 +116,7 @@ fn signing<'a>(phone: &'a Phone, device: &'a DeviceRef) -> PrimarySigning<'a> {
 
 /// Desktop side of a request: a fresh store directory and an in-memory desktop vault.
 fn desktop(dir: &TempDir) -> Result<(AgentCreationStore, MemoryPrimaryVault), SdkError> {
-    Ok((AgentCreationStore::open(dir.path().join("creation"))?, MemoryPrimaryVault::default()))
+    Ok((AgentCreationStore::open(dir.path(), HUMAN)?, MemoryPrimaryVault::default()))
 }
 
 /// Pending item references of a request, read back from its saved record.
@@ -139,6 +142,8 @@ fn assert_items_gone(vault: &MemoryPrimaryVault, refs: &[String]) -> TestResult 
             vault.store_agent_master(reference, &MasterKey::generate()?).is_ok()
         } else if reference.starts_with("branch:") {
             vault.load_branch(reference, PRINCIPAL, &device).is_err()
+        } else if reference.starts_with("agent-provisioning:") {
+            vault.load_provisioning_secret(reference).is_err()
         } else {
             vault.load_primary(reference).is_err()
         };
@@ -410,7 +415,7 @@ fn cancel_cleans_up_pending_items_and_tombstones() -> TestResult {
 fn failing_vault_delete_gives_cleanup_pending_then_retries_to_terminal() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new()?;
-    let store = AgentCreationStore::open(dir.path().join("creation"))?;
+    let store = AgentCreationStore::open(dir.path(), HUMAN)?;
     let vault_dir = dir.path().join("vault");
     std::fs::create_dir_all(&vault_dir)?;
     let desk = MemoryPrimaryVault::persist_at(vault_dir.join("items.json"))?;
@@ -456,7 +461,7 @@ fn reopening_after_restart_keeps_the_original_deadline() -> TestResult {
     )?;
     let original_expiry = outcome_expiry(&outcome)?;
     drop(store);
-    let reopened = AgentCreationStore::open(dir.path().join("creation"))?;
+    let reopened = AgentCreationStore::open(dir.path(), HUMAN)?;
     let again = begin(
         &reopened,
         &desk,
@@ -716,7 +721,7 @@ fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() ->
     let phone = phone(&owner_anchor())?;
     let (store, desk, outcome) = custody_request(&dir, "req-replay", &phone)?;
     let phone_dir = TempDir::new()?;
-    let phone_store = AgentCreationStore::open(phone_dir.path().join("phone"))?;
+    let phone_store = AgentCreationStore::open(phone_dir.path(), HUMAN)?;
     let first = receive_plan(&phone_store, &outcome.plan_bytes, NOW + 1)?;
     assert_eq!(first.state, AgentCreationState::AuthorizationPending);
     let replay = receive_plan(&phone_store, &outcome.plan_bytes, NOW + 2)?;
@@ -730,7 +735,7 @@ fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() ->
     );
     let plan = decode_register_plan(&outcome.plan_bytes)?;
     let late_dir = TempDir::new()?;
-    let late = AgentCreationStore::open(late_dir.path().join("phone"))?;
+    let late = AgentCreationStore::open(late_dir.path(), HUMAN)?;
     assert!(
         matches!(
             receive_plan(&late, &outcome.plan_bytes, plan.expires_at),
@@ -764,5 +769,240 @@ fn custody_plan_and_decision_apply_once_and_replays_return_the_saved_record() ->
         NOW + 4,
     );
     assert!(second.is_err(), "a consumed plan approval must not sign a second decision");
+    Ok(())
+}
+
+/// A live human account on a fresh data root; its keys live in its own vault (not used here).
+struct HumanFixture {
+    root: crate::custody::tests::Root,
+    now: u64,
+    anchor: String,
+    primary: DeviceRef,
+    head: String,
+}
+
+fn human_fixture() -> Result<HumanFixture, Box<dyn std::error::Error>> {
+    let root = crate::custody::tests::Root::new()?;
+    let vault = crate::custody::tests::TestVault::default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(60);
+    let human = crate::custody::tests::create(&root.0, HUMAN, &vault, now)?;
+    crate::custody::tests::mark_live(&root.0, HUMAN, now)?;
+    let record = human.record();
+    Ok(HumanFixture {
+        anchor: record.body.account_anchor.clone(),
+        primary: record.body.master_certificate.body.primary_device_ref.clone(),
+        head: object_hash(record)?,
+        root,
+        now,
+    })
+}
+
+/// Begin a request against the human fixture; `head` overrides the human head hash when given.
+fn begin_for_human(
+    fixture: &HumanFixture,
+    store: &AgentCreationStore,
+    desk: &MemoryPrimaryVault,
+    request_id: &str,
+    head: Option<&str>,
+) -> Result<BeginOutcome, Box<dyn std::error::Error>> {
+    let mut input =
+        begin_input(request_id, &fixture.anchor, &fixture.primary, fixture.now + 10_000);
+    input.human_head_hash = head.unwrap_or(&fixture.head).to_owned();
+    Ok(begin(store, desk, &input, fixture.now)?)
+}
+
+/// One approval from the human primary (presence armed for this plan), applied to the request.
+fn approve_for_human(
+    fixture: &HumanFixture,
+    phone: &Phone,
+    store: &AgentCreationStore,
+    desk: &MemoryPrimaryVault,
+    outcome: &BeginOutcome,
+) -> Result<AgentCreationRecord, Box<dyn std::error::Error>> {
+    phone.vault.approve_agent_decision_once_for_test(&outcome.request_hash)?;
+    let approve = primary_sign_decision(
+        &phone.vault,
+        &signing(phone, &fixture.primary),
+        &outcome.plan_bytes,
+        RegisterOutcome::Approve,
+        fixture.now + 1,
+    )?;
+    Ok(apply_decision(
+        store,
+        desk,
+        &outcome.request_id,
+        &approve,
+        &phone.branch_public,
+        fixture.now + 1,
+    )?)
+}
+
+fn agent_account_dir(root: &std::path::Path, account_id: &str) -> std::path::PathBuf {
+    root.join("custody_accounts").join(account_id)
+}
+
+fn account_id_of(record: &AgentCreationRecord) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(record.account_id.clone().ok_or("the desktop record names its account")?)
+}
+
+#[test]
+fn commit_refuses_before_approval_and_writes_no_account() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-unapproved", None)?;
+    let account_id = account_id_of(&store.load("req-unapproved")?.ok_or("record")?)?;
+    assert!(commit_approved(&store, &desk, HUMAN, "req-unapproved", fixture.now + 2).is_err());
+    assert!(
+        !agent_account_dir(&fixture.root.0, &account_id).exists(),
+        "no account directory before a verified approval"
+    );
+    assert_eq!(outcome.state, AgentCreationState::AuthorizationPending);
+    Ok(())
+}
+
+#[test]
+fn commit_writes_the_bundle_once_after_a_verified_approval() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-commit", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    assert_eq!(authorized.state, AgentCreationState::Authorized);
+    let account_id = account_id_of(&authorized)?;
+    assert!(!store.committed(&authorized)?, "approval alone is not a commit");
+
+    let committed = commit_approved(&store, &desk, HUMAN, "req-commit", fixture.now + 2)?;
+    assert_eq!(committed.state, AgentCreationState::PublicationPending);
+    assert!(store.account_committed(&account_id)?, "the commit writes the authority");
+    let again = commit_approved(&store, &desk, HUMAN, "req-commit", fixture.now + 3)?;
+    assert_eq!(again, committed, "a second commit returns the saved record and writes nothing");
+    let account =
+        crate::custody::store::load_account(&fixture.root.0, &account_id, fixture.now + 3)?;
+    assert_eq!(account.local_account_id(), account_id);
+    assert_eq!(account.record().body.principal_kind, ramflux_protocol::PrincipalKind::HeadlessAi);
+    let plan = decode_register_plan(&outcome.plan_bytes)?;
+    assert_eq!(account.record().body.account_anchor, plan.agent_anchor);
+    Ok(())
+}
+
+#[test]
+fn deny_cancel_and_expiry_after_the_commit_delete_nothing() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-late", None)?;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let committed = commit_approved(&store, &desk, HUMAN, "req-late", fixture.now + 2)?;
+    let refs = committed.vault_refs.clone();
+    assert!(!refs.is_empty(), "the committed request still names its vault items");
+
+    // The approval is one-shot per plan hash, so no second decision can be signed. An exact
+    // replay of the saved approval is accepted without effect; altered bytes are refused.
+    let saved = committed.decision_bytes()?.ok_or("the approval must be saved")?;
+    let replay =
+        apply_decision(&store, &desk, "req-late", &saved, &phone.branch_public, fixture.now + 3)?;
+    assert_eq!(replay.state, AgentCreationState::PublicationPending, "a replay changes nothing");
+    let mut altered = saved.clone();
+    let last = altered.last_mut().ok_or("the decision is not empty")?;
+    *last ^= 0x01;
+    assert!(
+        apply_decision(&store, &desk, "req-late", &altered, &phone.branch_public, fixture.now + 3)
+            .is_err(),
+        "a different decision after the commit is not applied"
+    );
+    let cancel_bytes = encode_register_cancel(&RegisterCancel {
+        request_id: "req-late".into(),
+        request_hash: outcome.request_hash.clone(),
+    })?;
+    assert!(cancel(&store, &desk, &cancel_bytes, fixture.now + 3).is_err());
+    let expired_at = decode_register_plan(&outcome.plan_bytes)?.expires_at + 1;
+    let after = resume_request(&store, &desk, "req-late", expired_at)?;
+    assert_eq!(after.state, AgentCreationState::PublicationPending, "expiry never cleans a commit");
+    assert_eq!(after.vault_refs, refs, "no pending item is removed after the commit");
+    assert_items_present(&desk, &refs)?;
+    assert!(store.committed(&committed)?);
+    Ok(())
+}
+
+#[test]
+fn restart_in_publication_pending_keeps_the_bundle() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-restart", None)?;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    let committed = commit_approved(&store, &desk, HUMAN, "req-restart", fixture.now + 2)?;
+    let reopened = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let resumed = resume_request(&reopened, &desk, "req-restart", fixture.now + 4)?;
+    assert_eq!(resumed.state, AgentCreationState::PublicationPending);
+    assert_items_present(&desk, &committed.vault_refs)?;
+    assert!(reopened.committed(&committed)?);
+    Ok(())
+}
+
+#[test]
+fn a_crash_after_the_authority_write_is_recovered_as_committed() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-crash", None)?;
+    let authorized = approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    commit_approved(&store, &desk, HUMAN, "req-crash", fixture.now + 2)?;
+    // Simulate the crash window: the authority exists but the record still says authorized.
+    store.save(&AgentCreationRecord { state: AgentCreationState::Authorized, ..authorized })?;
+    let expired_at = decode_register_plan(&outcome.plan_bytes)?.expires_at + 1;
+    let recovered = resume_request(&store, &desk, "req-crash", expired_at)?;
+    assert_eq!(recovered.state, AgentCreationState::PublicationPending);
+    assert_items_present(&desk, &recovered.vault_refs)?;
+    Ok(())
+}
+
+#[test]
+fn commit_refuses_a_changed_human_head_and_cleans_up_before_the_commit() -> TestResult {
+    let fixture = human_fixture()?;
+    let store = AgentCreationStore::open(fixture.root.0.to_path_buf(), HUMAN)?;
+    let desk = MemoryPrimaryVault::default();
+    let phone = phone(&owner_anchor())?;
+    let stale = encode_base64url([0x5a_u8; 32]);
+    let outcome = begin_for_human(&fixture, &store, &desk, "req-head", Some(stale.as_str()))?;
+    let refs = store.load("req-head")?.ok_or("record")?.vault_refs;
+    approve_for_human(&fixture, &phone, &store, &desk, &outcome)?;
+    assert!(commit_approved(&store, &desk, HUMAN, "req-head", fixture.now + 2).is_err());
+    let refused = store.load("req-head")?.ok_or("record")?;
+    assert_eq!(refused.state, AgentCreationState::Refused);
+    assert_eq!(refused.failure, Some(AgentFailure::CreationPrimaryChanged));
+    assert_items_gone(&desk, &refs)?;
+    Ok(())
+}
+
+/// Every named vault item of a committed bundle must still be present.
+fn assert_items_present(vault: &MemoryPrimaryVault, refs: &[String]) -> TestResult {
+    assert!(!refs.is_empty(), "the bundle must name its vault items");
+    let device = DeviceRef {
+        account_anchor: owner_anchor(),
+        device_id: DESKTOP_DEVICE.into(),
+        device_epoch: 1,
+    };
+    for reference in refs {
+        let present = if reference.starts_with("agent-master:") {
+            // Storing succeeds only when the item is absent; a refusal means it is present.
+            vault.store_agent_master(reference, &MasterKey::generate()?).is_err()
+        } else if reference.starts_with("branch:") {
+            vault.load_branch(reference, PRINCIPAL, &device).is_ok()
+        } else if reference.starts_with("agent-provisioning:") {
+            vault.load_provisioning_secret(reference).is_ok()
+        } else {
+            vault.load_primary(reference).is_ok()
+        };
+        assert!(present, "committed vault item {reference} must still exist");
+    }
     Ok(())
 }

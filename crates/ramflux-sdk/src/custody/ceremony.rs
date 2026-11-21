@@ -339,10 +339,11 @@ impl CreationCeremony {
             super::store::GenesisMaterial {
                 record,
                 primary: &primary,
-                branch: &branch_seeds,
+                branch: Some(&branch_seeds),
                 now,
                 data_secret,
                 commit_gate: self.commit_gate.as_deref(),
+                pre_staged: false,
             },
             vault,
         )

@@ -883,10 +883,15 @@ fn create_private_temp(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 pub(super) struct GenesisMaterial<'a> {
     pub record: Envelope<DeviceSet>,
     pub primary: &'a ramflux_crypto::custody::SelfSigningKey,
-    pub branch: &'a Zeroizing<[u8; 64]>,
+    /// Branch seeds to store. Required unless `pre_staged`.
+    pub branch: Option<&'a Zeroizing<[u8; 64]>>,
     pub now: u64,
     pub data_secret: Option<&'a [u8]>,
     pub commit_gate: Option<&'a super::CommitGate>,
+    /// True when the primary, branch and provisioning secrets already sit in the vault under the
+    /// final references (agent creation stages them at begin). Persist then writes no vault item
+    /// and rolls back none.
+    pub pre_staged: bool,
 }
 pub(super) fn persist(
     root: &Path,
@@ -894,7 +899,8 @@ pub(super) fn persist(
     material: GenesisMaterial<'_>,
     vault: &dyn PrimaryVault,
 ) -> Result<BornAccount, SdkError> {
-    let GenesisMaterial { record, primary: key, branch, now, data_secret, commit_gate } = material;
+    let GenesisMaterial { record, primary: key, branch, now, data_secret, commit_gate, pre_staged } =
+        material;
     let human =
         input.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
     let verified = verify_record(&record, now, None, human.as_ref())?;
@@ -923,14 +929,17 @@ pub(super) fn persist(
     let mut branch_written = false;
     let mut provisioning_written = false;
     let result = (|| {
-        vault.store_new(&reference, key)?;
-        primary_written = true;
-        vault.store_branch(&branch_reference, branch)?;
-        branch_written = true;
-        if let Some(agent_reference) = &agent_provisioning_reference {
-            let secret = data_secret.ok_or_else(invalid)?;
-            vault.store_provisioning_secret(agent_reference, secret)?;
-            provisioning_written = true;
+        if !pre_staged {
+            let branch = branch.ok_or_else(invalid)?;
+            vault.store_new(&reference, key)?;
+            primary_written = true;
+            vault.store_branch(&branch_reference, branch)?;
+            branch_written = true;
+            if let Some(agent_reference) = &agent_provisioning_reference {
+                let secret = data_secret.ok_or_else(invalid)?;
+                vault.store_provisioning_secret(agent_reference, secret)?;
+                provisioning_written = true;
+            }
         }
         if let Some(secret) = data_secret {
             let mut data = crate::RamfluxClient::new();
