@@ -317,6 +317,10 @@ fn schema_identifiers_are_exact_and_usage_scoped() {
     }
     for source in [
         r#"fn f() { fetch("https://a2ui.org/specification/v1_0/catalog.json"); }"#,
+        r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json"; fn f() { fetch(BASE); }"#,
+        r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json"; fn f() { fetch(r#BASE); }"#,
+        r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json"; fn f() { fetch!(BASE); }"#,
+        r#"fn f() { let _ = #[endpoint("https://updates.vendor.com/v1")] jsonschema::options().with_base_uri("https://a2ui.org/specification/v1_0/validation.json"); }"#,
         r#"fn f() { jsonschema::options().with_base_uri("https://a2ui.org/telemetry"); }"#,
         r#"fn f() { jsonschema::options().with_resource("https://a2ui.org/specification/v1_0/common_types.json", jsonschema::Resource::from_contents(other.clone())); }"#,
         r#"const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json"; const URL: &str = "https://a2ui.org/telemetry";"#,

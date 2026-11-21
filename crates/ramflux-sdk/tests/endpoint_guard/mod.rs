@@ -423,6 +423,17 @@ fn schema_builder(expr: &Expr, depth: usize) -> bool {
     }
 }
 
+fn catalog_overlay(call: &syn::ExprMethodCall) -> bool {
+    call.method == "insert"
+        && path_is(&call.receiver, "map")
+        && call.args.len() == 2
+        && matches!(call.args.first(), Some(Expr::MethodCall(key))
+                if key.method == "into" && key.args.is_empty()
+                && literal(&key.receiver).is_some_and(|v| v.value() == "$id"))
+        && matches!(call.args.iter().nth(1), Some(Expr::Macro(value))
+                if value.attrs.is_empty() && value.mac.path.is_ident("json") && value.mac.tokens.to_string() == "BASE")
+}
+
 #[derive(Default)]
 struct ResourceContract {
     registrations: BTreeSet<String>,
@@ -465,15 +476,7 @@ impl<'ast> Visit<'ast> for ResourceContract {
                 self.registrations.insert(VALIDATION.into());
             }
         }
-        if call.method == "insert"
-            && path_is(&call.receiver, "map")
-            && call.args.len() == 2
-            && matches!(call.args.first(), Some(Expr::MethodCall(key))
-                if key.method == "into" && key.args.is_empty()
-                && literal(&key.receiver).is_some_and(|v| v.value() == "$id"))
-            && matches!(call.args.iter().nth(1), Some(Expr::Macro(value))
-                if value.mac.path.is_ident("json") && value.mac.tokens.to_string() == "BASE")
-        {
+        if catalog_overlay(call) {
             self.catalog_id = true;
         }
         visit::visit_expr_method_call(self, call);
@@ -653,6 +656,16 @@ impl Scan<'_> {
         }
     }
 
+    fn token_text(&mut self, token: &str) {
+        if self.schema && token.strip_prefix("r#").unwrap_or(token) == "BASE" {
+            self.errors.push(
+                "schema BASE used outside resource registration or catalog identity construction"
+                    .into(),
+            );
+        }
+        self.text(token, token);
+    }
+
     fn tokens(&mut self, input: ParseStream<'_>, depth: usize) -> syn::Result<()> {
         if depth > MAX_DEPTH {
             return Err(input.error("macro nesting limit"));
@@ -677,7 +690,7 @@ impl Scan<'_> {
                     cursor
                         .token_tree()
                         .map(|(token, next)| {
-                            self.text(&token.to_string(), &token.to_string());
+                            self.token_text(&token.to_string());
                             ((), next)
                         })
                         .ok_or_else(|| cursor.error("unsupported macro token"))
@@ -773,13 +786,26 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if self.schema && schema_builder(&call.receiver, 0) {
+        if self.schema && call.attrs.is_empty() && catalog_overlay(call) {
+            self.visit_expr(&call.receiver);
+            for arg in call.args.iter().take(1) {
+                self.visit_expr(arg);
+            }
+            return;
+        }
+        if self.schema && call.attrs.is_empty() && schema_builder(&call.receiver, 0) {
             let first = call.args.first().and_then(literal).map(syn::LitStr::value);
             let allowed = if call.method == "with_base_uri" && call.args.len() == 1 {
                 first.as_deref() == Some(VALIDATION)
             } else if call.method == "with_resource" && call.args.len() == 2 {
-                matches!(first.as_deref(), Some(COMMON | BASIC_COMMON))
-                    && call.args.iter().nth(1).is_some_and(|arg| resource(arg, "common", true))
+                (matches!(first.as_deref(), Some(COMMON | BASIC_COMMON))
+                    && call.args.iter().nth(1).is_some_and(|arg| resource(arg, "common", true)))
+                    || (call.args.first().is_some_and(|arg| path_is(arg, "BASE"))
+                        && call
+                            .args
+                            .iter()
+                            .nth(1)
+                            .is_some_and(|arg| resource(arg, "catalog", false)))
             } else {
                 false
             };
@@ -815,7 +841,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_ident(&mut self, ident: &'ast syn::Ident) {
-        self.text(&ident.to_string(), &ident.to_string());
+        self.token_text(&ident.to_string());
     }
 }
 
