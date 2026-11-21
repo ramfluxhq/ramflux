@@ -272,7 +272,8 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             finish(account, &key, &work, "not_needed")?;
             continue;
         }
-        let manifest = if !sealed(&work) && work.local_manifest {
+        // The cached own manifest is tried once; a retry fetches the node's current one.
+        let manifest = if !sealed(&work) && work.local_manifest && work.attempts <= 1 {
             account.client.prepare_own_copy_manifest_refresh()?
         } else {
             None
@@ -363,6 +364,13 @@ fn draft(
         result => result?,
     };
     let Some(mut draft) = prepared else {
+        // A cached manifest can predate a sibling's registration. The root's authority still names
+        // an authorized sibling, so the copy is not unneeded: retry against a fetched manifest.
+        if plan.cached_manifest && account.client.own_sent_has_siblings()? {
+            return Err(SdkError::InboundPending(
+                "own-device cached manifest lists no sibling; refetch".into(),
+            ));
+        }
         finish(account, &plan.key, &plan.work, "not_needed")?;
         return Ok(None);
     };

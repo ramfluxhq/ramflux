@@ -76,6 +76,14 @@ fn agent_lifecycle_is_driven_through_rf_with_two_daemons() -> Result<()> {
             .is_ok_and(|shown| shown["persona"]["name"] == "Renamed Agent")
     })?;
 
+    // The human's own device list survived the agent's creation on both devices: an own-device
+    // copy needs it on the sender, so an edit in each direction reaching the other proves it.
+    agent::edit(primary, owner, &anchor, "Renamed Twice", "answers the demo questions")?;
+    wait_for(|| {
+        agent::show(desktop, owner, &anchor)
+            .is_ok_and(|shown| shown["persona"]["name"] == "Renamed Twice")
+    })?;
+
     // A second creation that the primary denies ends with the typed refusal on the desktop.
     let second = agent::create(desktop, owner, "Denied Agent", "never approved")?;
     let waiting = agent::wait_pending(primary, owner)?;

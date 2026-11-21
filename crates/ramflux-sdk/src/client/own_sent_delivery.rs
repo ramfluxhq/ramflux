@@ -30,32 +30,6 @@ impl RamfluxClient {
                 ));
             }
             self.require_cached_root_authority(HeadUse::NewAuthorization, &local)?;
-            // The signed record can be current while the device entries projected beside it
-            // predate a sibling's registration. A cache that lacks a sibling this root
-            // authorizes would make the copy look unneeded and drop it: refresh instead.
-            let now = crate::custody::network_now()?;
-            let missing = current.envelope().body.devices.iter().any(|entry| {
-                entry.device_id != local.device_id()
-                    && ["message", "sync"].iter().all(|capability| {
-                        current
-                            .authorize(
-                                &ramflux_protocol::custody::DeviceRef {
-                                    account_anchor: local.root_commitment().into(),
-                                    device_id: entry.device_id.clone(),
-                                    device_epoch: entry.device_epoch,
-                                },
-                                capability,
-                                now,
-                            )
-                            .is_ok()
-                    })
-                    && !manifest.devices.iter().any(|device| device.device_id == entry.device_id)
-            });
-            if missing {
-                return Err(SdkError::InboundPending(
-                    "own-device local manifest needs refresh".into(),
-                ));
-            }
         } else if manifest.signed_device_set != self.observed_device_set(local.root_commitment())? {
             return Err(SdkError::InboundPending("own-device local manifest needs refresh".into()));
         }
