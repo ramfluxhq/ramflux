@@ -472,6 +472,15 @@ impl LocalBusAccountState {
         Ok(SessionClient::new(handle, metadata, deadline))
     }
 
+    /// Signing attribution belongs to the admitted session, not the saved account route.
+    pub(crate) fn current_signing_config(&self) -> Result<GatewaySessionConfig, SdkError> {
+        let session = self.live_session_client()?;
+        if !self.session_route_matches(&session.config) {
+            return Err(SdkError::NetworkingPending);
+        }
+        Ok(session.config)
+    }
+
     pub(crate) fn finish_restored_resume_checkpoint(&self, restored: bool) -> Result<(), SdkError> {
         if restored {
             self.client.set_projection_checkpoint(Self::GATEWAY_RESUME_CHECKPOINT, "")?;

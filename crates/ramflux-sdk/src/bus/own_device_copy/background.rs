@@ -380,11 +380,7 @@ fn seal_generated(
 ) -> Result<Option<SendPlan>, SdkError> {
     // The saved account route may have been cleared by a native role refresh.
     // Only the currently admitted session supplies the runtime signing identity.
-    let session = account.live_session_client()?;
-    if !account.session_route_matches(&session.config) {
-        return Err(SdkError::NetworkingPending);
-    }
-    plan.config = session.config;
+    plan.config = account.current_signing_config()?;
     let context_delivery = draft.packet.context_delivery.clone();
     let result = account.client.seal_own_copy_generated(&plan.config, draft, materials?);
     let generated = match result {

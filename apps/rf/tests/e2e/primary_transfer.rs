@@ -132,6 +132,41 @@ pub fn read(
     Ok(value)
 }
 
+/// Observe automatic receipt delivery through the same durable product reader.
+pub fn delivered(
+    daemon: &Daemon,
+    account: &Account,
+    conversation: &str,
+    message: &str,
+    receiver: &Account,
+) -> Result<Value> {
+    wait_json(
+        daemon,
+        &[
+            "dm",
+            "list",
+            "--account",
+            &account.id,
+            "--conversation",
+            conversation,
+            "--message",
+            message,
+        ],
+        |value| {
+            value.pointer("/message/receipts").and_then(Value::as_array).is_some_and(|receipts| {
+                receipts.iter().any(|receipt| {
+                    receipt.get("device_id").and_then(Value::as_str)
+                        == Some(receiver.device_id.as_str())
+                        && receipt.get("principal_commitment").and_then(Value::as_str)
+                            == Some(receiver.principal_commitment.as_str())
+                        && receipt.get("state").and_then(Value::as_str) == Some("delivered")
+                        && receipt.get("delivered_at").and_then(Value::as_i64).is_some()
+                })
+            })
+        },
+    )
+}
+
 pub fn erase(daemon: &Daemon, account: &Account, conversation: &str, message: &str) -> Result<()> {
     rf_json(
         &daemon.socket,

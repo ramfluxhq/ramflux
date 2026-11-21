@@ -66,6 +66,30 @@ fn primary_transfer_native_independent_recipient() -> e2e::Result<()> {
 }
 
 #[test]
+#[ignore = "native receipt after enrollment; requires the branch's rf and node service binaries"]
+fn primary_transfer_native_receipt_after_enrollment() -> e2e::Result<()> {
+    let network = e2e::primary_transfer_pairing::Network::open()?;
+    let seed = e2e::primary_transfer::Seed::create(&network.stack)?;
+    let (_target, _account) =
+        e2e::primary_transfer_pairing::enroll(&network.stack, &seed.source, &seed.account)?;
+    let text = "native receipt after source role refresh";
+    let message =
+        e2e::primary_transfer::send(&seed.peer, &seed.peer_account, &seed.conversation, text)?;
+    e2e::primary_transfer::read(&seed.source, &seed.account, &seed.conversation, &message, text)?;
+    e2e::primary_transfer::delivered(
+        &seed.peer,
+        &seed.peer_account,
+        &seed.conversation,
+        &message,
+        &seed.account,
+    )
+    .map_err(|error| {
+        format!("{error}; {}", e2e::dump_logs(&network.stack, &[&seed.source, &seed.peer]))
+    })?;
+    Ok(())
+}
+
+#[test]
 #[ignore = "populated source eligibility; requires the branch's rf and node service binaries"]
 fn primary_transfer_native_populated_source_preflight() -> e2e::Result<()> {
     let network = e2e::primary_transfer_pairing::Network::open()?;

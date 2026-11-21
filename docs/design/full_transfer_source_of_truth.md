@@ -83,6 +83,15 @@ a new signed own-device copy. Current native-operation authorization and exact A
 comparison still apply. Using the unbound config caused the process witness's
 `source_authority` refusal and prevented automatic contact backfill.
 
+`LocalBusAccountState::current_signing_config` supplies the same live-generation
+and route check to own-copy and delivery-receipt sealing. Saved account routing
+metadata can be deliberately unbound after enrollment; it cannot supply signing
+attribution for a fresh receipt. Already sealed receipt packets retain their
+original bytes. Row fingerprint, erasure, retry and submission checks still apply.
+The post-enrollment receipt witness sends a new native message, reads it normally
+on A, then observes the qualified receiver's delivered receipt on the sender via
+`dm list`; no courier is flushed or manually driven.
+
 The ordinary conversation summary exposes `mute_until` as a nullable exact
 decimal string. The storage value remains a signed integer, including the
 permanent-mute sentinel `i64::MAX`; the public summary never emits that sentinel

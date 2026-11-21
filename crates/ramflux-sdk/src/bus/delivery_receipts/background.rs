@@ -284,18 +284,15 @@ fn seal(
         if let Some(packet) = &plan.work.packet {
             return Ok(packet.clone());
         }
+        let config = account.current_signing_config()?;
         let sealed = account.client.seal_routed_prepared(
-            &account.gateway_config,
+            &config,
             &plan.message,
             &plan.body,
             crate::client::routed::Route::receipt(),
             material,
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(
-            &account.gateway_config,
-            &mut plan.message,
-            sealed,
-        )
+        crate::dm::gateway_generated_envelope_from_sealed(&config, &mut plan.message, sealed)
     });
     let packet = match prepared {
         Ok(packet) => packet,
