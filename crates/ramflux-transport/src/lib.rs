@@ -13,8 +13,12 @@ mod candidate_outer;
 mod compio_gateway;
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 mod compio_mesh;
+mod connection_policy;
 mod error;
+mod gateway_dial;
 mod gateway_frame_reader;
+#[cfg(all(feature = "http-connect-proxy", not(windows)))]
+mod http_connect_proxy;
 mod loopback;
 mod mesh_authority;
 mod mesh_http;
@@ -58,7 +62,17 @@ pub use compio_mesh::{
     CompioMeshQuicPostcardAcceptedRequest, CompioMeshQuicServer,
     compio_mesh_quic_post_json_with_peer_ca_pems,
 };
+pub use connection_policy::{
+    AUTO_RACE_STAGGER, CarrierKind, DialInputs, DialLeg, DialPlan, NetworkDigest,
+    PATH_MEMORY_MAX_NETWORKS, PATH_MEMORY_TTL, PathMemory, SESSION_KEEP_ALIVE_INTERVAL,
+    SESSION_MAX_IDLE_TIMEOUT, bind_addr_for_peer,
+};
 pub use error::TransportError;
+pub use gateway_dial::{DialError, DialedGateway, GatewayDialTarget, dial_gateway};
+#[cfg(all(feature = "http-connect-proxy", not(windows)))]
+pub use http_connect_proxy::{
+    HTTP_CONNECT_MAX_RESPONSE_HEAD_BYTES, HttpConnectProxy, ProxyCredentials,
+};
 pub use loopback::transport_submit_result;
 pub use mesh_http::{
     MeshHttpClient, RawMeshPost, RawMeshResponse, close_mesh_server_stream, mesh_http_get_json,
@@ -117,7 +131,7 @@ pub use relay_quic_pool::{
 };
 pub use tls_config::{
     mesh_server_config, quic_gateway_client_config, quic_gateway_server_config,
-    tcp_gateway_client_config, tcp_gateway_server_config,
+    quic_gateway_session_client_config, tcp_gateway_client_config, tcp_gateway_server_config,
 };
 pub use types::{
     AckFrame, AuthRequest, BackendKind, BackendProductionStatus, CursorFrame, DeliveryFrame,

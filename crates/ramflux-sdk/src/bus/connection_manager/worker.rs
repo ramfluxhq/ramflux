@@ -158,8 +158,12 @@ async fn run_account(
     stopping: &mut watch::Receiver<bool>,
 ) {
     let AccountLoop { config, engine, connector, retry, children } = state;
-    loop {
+    let mut networks = config.network_monitor.subscribe();
+    'account: loop {
         if *stopping.borrow() {
+            break;
+        }
+        if !wait_for_network(&mut networks, stopping).await {
             break;
         }
         if engine.is_none() {
@@ -168,6 +172,7 @@ async fn run_account(
                 tokio::select! {
                     biased;
                     _=stopping.changed()=>break,
+                    _=networks.changed()=>continue 'account,
                     ()=tokio::time::sleep_until(not_before)=>{},
                     call=calls.recv()=>{if let Some(call)=call {let _=call.reply.send(Err(handle.pending()));}}
                     child=registrations.recv()=>{if let Some(child)=child {children.factories.insert(child.name,child.factory);}}
@@ -179,9 +184,12 @@ async fn run_account(
             if *stopping.borrow() {
                 break;
             }
-            let Some(result) =
-                connect_attempt(handle, config, connector, timeouts, stopping, retry).await
-            else {
+            let result = tokio::select! {
+                biased;
+                _ = networks.changed() => continue,
+                result = connect_attempt(handle, config, connector, timeouts, stopping, retry) => result,
+            };
+            let Some(result) = result else {
                 break;
             };
             match result {
@@ -214,11 +222,12 @@ async fn run_account(
         let generation = handle.generation();
         let session = announce_live(handle, &mut resident, config.previous_session_id.is_some());
         children.start(handle, &session);
-        let exit = super::session_host::run(
+        let (exit, network_changed) = session_or_network(
             handle,
             &mut resident,
             super::session_host::HostIo { calls, registrations, children, stopping },
             timeouts,
+            &mut networks,
         )
         .await;
         children.stop().await;
@@ -233,19 +242,61 @@ async fn run_account(
                 .unwrap_or(DisconnectReason::Stop),
             super::session_host::HostExit::Retired(reason) => reason,
         };
-        retire_inbox(handle, reason);
-        if let Some(host) = &resident.host {
-            host.hub.disconnect(reason);
-        }
-        disconnected(handle, reason, resident.terminal_why.as_deref(), generation);
+        retire_resident(handle, &resident, reason, generation);
         drop(resident);
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
+        }
+        if network_changed {
+            // A new path should dial immediately; server-directed admission cooldowns are
+            // still enforced inside connect_attempt by the existing retry owner.
+            continue;
         }
         let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
         retry.record(&error, Instant::now());
         failed(handle, retry, &error);
     }
+}
+
+async fn wait_for_network(
+    networks: &mut watch::Receiver<crate::NetworkSnapshot>,
+    stopping: &mut watch::Receiver<bool>,
+) -> bool {
+    while matches!(networks.borrow_and_update().kind, crate::NetworkChangeKind::Lost) {
+        tokio::select! {
+            biased;
+            _ = stopping.changed() => return false,
+            changed = networks.changed() => if changed.is_err() { return false; },
+        }
+    }
+    true
+}
+
+async fn session_or_network(
+    handle: &ConnectionHandle,
+    resident: &mut GatewaySessionEngine,
+    io: super::session_host::HostIo<'_>,
+    timeouts: &RuntimeTimeouts,
+    networks: &mut watch::Receiver<crate::NetworkSnapshot>,
+) -> (super::session_host::HostExit, bool) {
+    tokio::select! {
+        biased;
+        _ = networks.changed() => (super::session_host::HostExit::Retired(DisconnectReason::Transport), true),
+        exit = super::session_host::run(handle, resident, io, timeouts) => (exit, false),
+    }
+}
+
+fn retire_resident(
+    handle: &ConnectionHandle,
+    resident: &GatewaySessionEngine,
+    reason: DisconnectReason,
+    generation: u64,
+) {
+    retire_inbox(handle, reason);
+    if let Some(host) = &resident.host {
+        host.hub.disconnect(reason);
+    }
+    disconnected(handle, reason, resident.terminal_why.as_deref(), generation);
 }
 
 fn retire_inbox(handle: &ConnectionHandle, reason: DisconnectReason) {

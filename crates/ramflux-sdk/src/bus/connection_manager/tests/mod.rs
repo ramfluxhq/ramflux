@@ -19,6 +19,7 @@ mod ephemeral_host;
 mod events;
 mod host;
 mod lifecycle;
+mod network;
 #[cfg(feature = "itest-fingerprint")]
 mod partial_frame;
 mod resume;

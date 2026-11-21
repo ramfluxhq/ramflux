@@ -193,6 +193,43 @@ async fn history_preserves_created_at() -> TestResult {
     Ok(())
 }
 
+/// The owner authors one DM to an established peer through the production authored-content
+/// preparation, sealing and projection, and the peer receives it.
+pub(crate) async fn author_first_hand(
+    source: &Fixture,
+    peer: &mut Fixture,
+    conversation: &str,
+    text: &str,
+    sequence: u64,
+) -> TestResult<g::EventIdentity> {
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: conversation.into(),
+        message_id: format!("own-first-hand-operation-{sequence}"),
+        envelope_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
+        source_principal_id: source.config.principal_id.clone(),
+        sender_id: source.config.device_id.clone(),
+        recipient_device_id: Some(peer.config.device_id.clone()),
+        recipient_principal_commitment: Some(peer.client.own_account_anchor()?),
+        target_delivery_id: peer.config.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: crate::time::now_unix_timestamp(),
+        ttl: 300,
+    };
+    let prepared = source.client.prepare_authored_message(
+        &mut message,
+        None,
+        &g::Message { text: text.into(), ..Default::default() },
+    )?;
+    let envelope = source.seal_inner_to_with_id(peer, &prepared.wire, &message.envelope_id)?;
+    source.client.project_authored_message(&message, &prepared.exact, &[])?;
+    peer.receive(envelope, sequence)
+        .await
+        .map_err(|error| format!("peer receive of own DM: {error}"))?;
+    let inner = g::Inner::decode(prepared.exact.as_slice())?;
+    Ok(inner.identity.ok_or("test: authored identity")?)
+}
+
 pub(crate) async fn receive_first_hand(
     source: &mut Fixture,
     peer: &Fixture,

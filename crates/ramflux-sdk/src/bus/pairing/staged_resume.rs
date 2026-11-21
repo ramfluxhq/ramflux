@@ -5,7 +5,7 @@
 use super::{
     Arc, FreshPairingNative, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
     HttpRelay, LocalPairingParticipant, Mutex, NativePairingPublication, NativePairingQuery,
-    PairingActor, PairingIdentity, PairingNative, PairingWire, SdkError, install_actor_with_writer,
+    PairingActor, PairingIdentity, PairingWire, SdkError, install_actor_with_writer,
     provider_for_account,
 };
 use crate::custody::pairing::{
@@ -195,10 +195,9 @@ pub(super) async fn install(
     }
     let vault = super::super::custody_setup::primary_provider(&config);
     let gateway = gateway(&config, account, &profile, &unlocked.grant, vault.clone()).await?;
-    let mut network = crate::gateway::proof_network_config(&gateway)?;
-    network.gateway_address = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
-    let node = crate::custody::CustodyConnection::discover_pairing_node(network.clone()).await?;
-    let proof: Arc<dyn PairingNative> = Arc::new(FreshPairingNative::new(network, vault.clone()));
+    let network = crate::gateway::proof_network_config(&gateway)?;
+    let node = crate::gateway::discover_node(network.clone(), &gateway).await?;
+    let proof = FreshPairingNative::for_gateway(network, vault.clone(), gateway.clone());
     let runtime = tokio::runtime::Handle::current();
     let participant = Arc::new(LocalPairingParticipant {
         root: root.clone(),
@@ -252,15 +251,16 @@ async fn gateway(
         )
         .await?;
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
-    Ok(GatewaySessionConfig::auto(endpoint).with_tcp_gateway_addr(tcp).with_native_custody(
-        GatewayCustodyConfig {
+    Ok(GatewaySessionConfig::auto(endpoint)
+        .with_host_network(config)
+        .with_tcp_gateway_addr(tcp)
+        .with_native_custody(GatewayCustodyConfig {
             account_root: config.data_root.clone(),
             account_id: account.into(),
             node_id: profile.node_id.clone(),
             node_public_key: profile.node_public_key.clone(),
             vault,
-        },
-    ))
+        }))
 }
 
 #[cfg(test)]

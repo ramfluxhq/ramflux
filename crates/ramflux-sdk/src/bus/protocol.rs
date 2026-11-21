@@ -7,6 +7,12 @@ use crate::prelude::*;
 
 #[derive(Clone)]
 pub struct LocalBusConfig {
+    /// Shared host network reports; retain a clone to notify running account sessions.
+    pub network_monitor: crate::NetworkMonitor,
+    /// Auto ordering for every account owned by this daemon.
+    pub connection_race: crate::ConnectionRace,
+    #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+    pub http_proxy: Option<std::sync::Arc<ramflux_transport::HttpConnectProxy>>,
     /// Frozen pairing configuration; None reads the strict default-off environment once at startup.
     pub pairing: Option<crate::custody::pairing::PairingConfig>,
     #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
@@ -1109,9 +1115,21 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 impl LocalBusConfig {
+    /// Use this explicitly configured proxy for account gateway connections.
+    #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+    #[must_use]
+    pub fn with_http_proxy(mut self, proxy: ramflux_transport::HttpConnectProxy) -> Self {
+        self.http_proxy = Some(std::sync::Arc::new(proxy));
+        self
+    }
+
     #[must_use]
     pub fn new(socket_path: impl Into<PathBuf>, data_root: impl Into<PathBuf>) -> Self {
         Self {
+            network_monitor: crate::NetworkMonitor::new(),
+            connection_race: crate::ConnectionRace::default(),
+            #[cfg(all(feature = "http-connect-proxy", not(windows)))]
+            http_proxy: None,
             pairing: None,
             #[cfg(any(test, feature = "itest-memory-vault", feature = "c-abi"))]
             custody_vault: None,

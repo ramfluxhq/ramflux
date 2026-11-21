@@ -17,6 +17,8 @@ pub(super) struct Device {
     pub(super) phrase: Option<Zeroizing<String>>,
     /// Conversation and message id of the generation-1 DM seeded before enrollment.
     pub(super) history: Option<(String, String)>,
+    /// Conversation and message id of the DM the primary authored before enrollment.
+    pub(super) own_history: Option<(String, String)>,
     _peer: Option<tempfile::TempDir>,
     local: Arc<Local>,
 }
@@ -128,7 +130,16 @@ impl Device {
         actor.set_participant(participant.clone());
         Ok((
             actor,
-            Self { client, participant, credential, phrase, history: None, _peer: None, local },
+            Self {
+                client,
+                participant,
+                credential,
+                phrase,
+                history: None,
+                own_history: None,
+                _peer: None,
+                local,
+            },
         ))
     }
     pub(super) fn full_frontend(

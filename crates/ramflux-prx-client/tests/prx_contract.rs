@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 1d78eb6273eee650de96637fab62d2b6a8e3ee30>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 67c5274ef9ee0eefa1521e45bdf9100ef8719fba>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -21,7 +21,7 @@
 use ramflux_prx_client::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentStatus,
     ApiCode, ApplyOutcome, Autonomy, BuildCommit, CAPABILITIES_V1, Capabilities, ClientConfig,
-    ConfigRevision, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, Tools,
+    ConfigRevision, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, ReloadStatus, Tools,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "1d78eb6273eee650de96637fab62d2b6a8e3ee30";
+const PIN: &str = "67c5274ef9ee0eefa1521e45bdf9100ef8719fba";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -41,6 +41,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SLOW_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const SENTINEL: &str = "sk-rf-contract-sentinel-0001";
+/// Upper bound of requests in K-AC2-12 (the API limit is 60 a minute by default).
+const PROBE_LIMIT: usize = 120;
 /// A dummy key for the default provider; it is never a real credential.
 const DEFAULT_PROVIDER_KEY: &str = "test-key-not-real";
 const GROQ_ROUTE: &str = "\n[[model_routes]]\nhint = \"fast\"\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\ncredential_ref = \"cred-groq\"\n";
@@ -71,6 +73,16 @@ struct Daemon {
 impl Daemon {
     /// A fresh state: `config.toml` with the gateway on a free loopback port, plus `extra`.
     fn prepare(extra: &str) -> Self {
+        Self::prepare_state(extra, true)
+    }
+
+    /// Like `prepare`, but the default provider has no stored credential: the daemon starts
+    /// with its turn runtime not ready (the state a fresh install is in).
+    fn prepare_without_credential(extra: &str) -> Self {
+        Self::prepare_state(extra, false)
+    }
+
+    fn prepare_state(extra: &str, default_credential: bool) -> Self {
         let bin = prx_binary();
         let dir = TempDir::new().expect("test: temp dir");
         std::fs::create_dir_all(dir.path().join("cfg")).expect("test: config dir");
@@ -80,7 +92,6 @@ impl Daemon {
                 std::net::TcpListener::bind("127.0.0.1:0").expect("test: free loopback port");
             listener.local_addr().expect("test: local addr").port()
         };
-        // The gateway component refuses to start without a credential for the default provider.
         let config = format!(
             "default_provider = \"openrouter\"\ndefault_model = \"openai/gpt-4o-mini\"\n\n[gateway]\nhost = \"127.0.0.1\"\nport = {port}\nrequire_pairing = true\n{extra}"
         );
@@ -91,7 +102,9 @@ impl Daemon {
             .build()
             .expect("test: http client");
         let daemon = Self { bin, dir, port, child: None, http };
-        daemon.credential_set("openrouter", DEFAULT_PROVIDER_KEY);
+        if default_credential {
+            daemon.credential_set("openrouter", DEFAULT_PROVIDER_KEY);
+        }
         daemon
     }
 
@@ -258,6 +271,25 @@ impl Daemon {
         self.raw(method, path, &headers, body).await
     }
 
+    /// One turn request (`POST /api/sessions/{id}/message`). The turn readiness check runs
+    /// before the body is read, so any session id probes it. A request still running when the
+    /// client deadline passes returns status 0: a running turn is not a refusal.
+    async fn send_turn(&self) -> (u16, String) {
+        let request = self
+            .http
+            .post(format!("{}/api/sessions/contract-probe/message", self.base()))
+            .header("Authorization", format!("Bearer {}", self.token()))
+            .json(&serde_json::json!({ "message": "contract probe" }));
+        match request.send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                (status, resp.text().await.unwrap_or_default())
+            }
+            Err(error) if error.is_timeout() => (0, String::new()),
+            Err(error) => panic!("test: turn request must answer or time out: {error}"),
+        }
+    }
+
     async fn catalog_revision(&self) -> String {
         self.client().catalog().await.expect("test: catalog reads").revision.as_str().to_owned()
     }
@@ -311,6 +343,11 @@ fn set_main_level(path: &Path, level: &str) {
 fn error_code(text: &str) -> Option<String> {
     let value: Value = serde_json::from_str(text).ok()?;
     value.pointer("/error/code")?.as_str().map(str::to_owned)
+}
+
+fn error_reason(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    value.pointer("/error/reason")?.as_str().map(str::to_owned)
 }
 
 fn config(
@@ -507,6 +544,175 @@ async fn k_ac2_6_stored_credential_for_non_default_provider() {
         assert_eq!(read.config, agent, "K-AC2-6: config round-trips");
         assert_eq!(read.status, AgentStatus::Active, "K-AC2-6: enabled agent is active");
         report("K-AC2-6");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-AC2-7 to K-AC2-11 (repin rows, PRX main 67c5274ef): a daemon with NO provider credential,
+/// then the credential PUT without a reload, then the reload. Also: /health while not ready,
+/// and the two tool names the catalog no longer lists.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+#[allow(clippy::too_many_lines)]
+async fn k_ac2_no_credential_store_then_reload() {
+    bounded(async {
+        let mut daemon = Daemon::prepare_without_credential("");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+
+        // K-AC2-7: capabilities and catalog serve; a turn route refuses with its reason
+        assert!(
+            caps.has(CAPABILITIES_V1) && caps.has(AGENT_CATALOG_V1),
+            "K-AC2-7: documented tokens advertised with no credential"
+        );
+        let catalog = client.catalog().await.expect("K-AC2-7: catalog reads with no credential");
+        let anthropic: Vec<_> =
+            catalog.models.iter().filter(|m| m.provider == "anthropic").collect();
+        assert!(
+            !anthropic.is_empty() && anthropic.iter().all(|m| m.credentials_ready == Some(false)),
+            "K-AC2-7: rows without a stored credential are not ready"
+        );
+        let (status, text) = daemon.send_turn().await;
+        assert_eq!(
+            (status, error_code(&text).as_deref(), error_reason(&text).as_deref()),
+            (503, Some("provider_not_ready"), Some("missing_provider_credential")),
+            "K-AC2-7: turn route answers 503 provider_not_ready with its reason"
+        );
+        report("K-AC2-7");
+
+        // K-AC2-10: /health stays ok while the turn runtime is not ready
+        let (status, text) = daemon.raw(reqwest::Method::GET, "/health", &[], None).await;
+        let health: Value = serde_json::from_str(&text).expect("K-AC2-10: health body is JSON");
+        assert_eq!(
+            (status, health.get("status").and_then(Value::as_str)),
+            (200, Some("ready")),
+            "K-AC2-10: /health answers ready while not ready for turns"
+        );
+        report("K-AC2-10");
+
+        // K-AC2-8: a stored credential shows in the catalog at once; turn routes still refuse
+        let (status, _) = daemon
+            .raw_authorized(
+                reqwest::Method::PUT,
+                "/api/providers/openrouter/credential",
+                None,
+                Some(serde_json::json!({ "name": "openrouter", "value": DEFAULT_PROVIDER_KEY })),
+            )
+            .await;
+        assert_eq!(status, 204, "K-AC2-8: credential PUT answers 204");
+        let catalog = client.catalog().await.expect("K-AC2-8: catalog reads after the PUT");
+        assert!(
+            catalog
+                .models
+                .iter()
+                .any(|m| m.provider == "openrouter" && m.credentials_ready == Some(true)),
+            "K-AC2-8: an openrouter row is ready after the credential PUT"
+        );
+        let (status, text) = daemon.send_turn().await;
+        assert_eq!(
+            (status, error_code(&text).as_deref()),
+            (503, Some("provider_not_ready")),
+            "K-AC2-8: turn route still answers 503 until a reload"
+        );
+        report("K-AC2-8");
+
+        // K-AC2-9: reload answers applied with gateway_turn_runtime rebuilt; turns serve
+        let reloaded = client.reload_config(&caps).await.expect("K-AC2-9: reload answers");
+        assert_eq!(reloaded.status, ReloadStatus::Applied, "K-AC2-9: reload status applied");
+        assert!(
+            reloaded.rebuilt.iter().any(|name| name == "gateway_turn_runtime"),
+            "K-AC2-9: gateway_turn_runtime is rebuilt: {:?}",
+            reloaded.rebuilt
+        );
+        let (status, text) = daemon.send_turn().await;
+        assert!(
+            status == 0 || error_code(&text).as_deref() != Some("provider_not_ready"),
+            "K-AC2-9: turn route no longer answers provider_not_ready (HTTP {status}: {text})"
+        );
+        report("K-AC2-9");
+
+        // K-AC2-11: neither dropped tool is listed, and an agent that names one is refused
+        let catalog = client.catalog().await.expect("K-AC2-11: catalog reads after the reload");
+        assert!(
+            catalog
+                .tools
+                .iter()
+                .all(|tool| tool.name != "capability_search" && tool.name != "stay_silent"),
+            "K-AC2-11: the catalog lists neither capability_search nor stay_silent"
+        );
+        let revision = list_revision(&client, &caps).await;
+        for dropped in ["capability_search", "stay_silent"] {
+            let agent = config(
+                "openrouter",
+                "openai/gpt-4o-mini",
+                None,
+                Tools::List(vec![dropped.to_owned()]),
+                true,
+            );
+            match client.put(&caps, &anchor_name(4), &agent, &revision, false).await {
+                Err(PrxError::Api { status: 400, code: ApiCode::AgentToolsInvalid, .. }) => {}
+                other => panic!(
+                    "K-AC2-11: PUT naming {dropped} must be 400 agent_tools_invalid, got {other:?}"
+                ),
+            }
+        }
+        report("K-AC2-11");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-AC2-12 (repin row): the shared API limit answers the coded 429. The client returns
+/// `RateLimited` with the body's `retry_after_ms`; the raw answer carries the documented
+/// `Retry-After` header as well. The limit is 60 requests a minute, so the probe makes at most
+/// `PROBE_LIMIT` calls.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_ac2_12_rate_limit_is_coded() {
+    bounded(async {
+        let mut daemon = Daemon::prepare("");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let mut limited = None;
+        for _ in 0..PROBE_LIMIT {
+            if let Err(error) = client.capabilities().await {
+                limited = Some(error);
+                break;
+            }
+        }
+        assert_eq!(
+            limited,
+            Some(PrxError::RateLimited { retry_after_ms: Some(60_000) }),
+            "K-AC2-12: the client maps the coded 429 to RateLimited with retry_after_ms 60000"
+        );
+        let resp = daemon
+            .http
+            .get(format!("{}/api/capabilities", daemon.base()))
+            .header("Authorization", format!("Bearer {}", daemon.token()))
+            .send()
+            .await
+            .expect("K-AC2-12: raw request answers");
+        assert_eq!(resp.status().as_u16(), 429, "K-AC2-12: still limited");
+        assert_eq!(
+            resp.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            Some("60"),
+            "K-AC2-12: Retry-After header is 60"
+        );
+        let body: Value = resp.json().await.expect("K-AC2-12: 429 body is JSON");
+        let code = body.pointer("/error/code").and_then(Value::as_str);
+        let retry_after_ms = body.pointer("/error/retry_after_ms").and_then(Value::as_u64);
+        assert_eq!(
+            (code, retry_after_ms),
+            (Some("rate_limited"), Some(60_000)),
+            "K-AC2-12: coded body rate_limited with retry_after_ms"
+        );
+        report("K-AC2-12");
         daemon.stop();
     })
     .await;

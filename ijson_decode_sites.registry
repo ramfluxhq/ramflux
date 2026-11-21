@@ -478,6 +478,7 @@ crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | enroll_desktop | 1
 crates/ramflux-sdk/src/bus/account_runtime/testing_calls.rs | prepare_call_peer | 1 | E | excluded=bounded native fixture directory; no external signed envelope admission
 crates/ramflux-sdk/src/bus/account_runtime/testing_messages.rs | deliver_message | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
 crates/ramflux-sdk/src/bus/account_runtime/testing_messages.rs | deliver_message_to_client | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
+crates/ramflux-sdk/src/bus/account_runtime/testing_messages.rs | receive_message_from_client | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
 crates/ramflux-sdk/src/bus/account_runtime/transient.rs | apply_transient_frame | 1 | A | strict=parse_i_json; canonical native evidence or authenticated application control boundary
 crates/ramflux-sdk/src/bus/agent_methods.rs | decode | 1 | E | excluded=ProtoJSON body of a local bus agent method (AGENT-IDENTITY-01 C3c); the caller is the local bus, no signed envelope is admitted here
 crates/ramflux-sdk/src/bus/backup_jobs/format.rs | load_metadata | 1 | D | admitted-before-persist; stored row is not an ingress decoder
@@ -1004,3 +1005,4 @@ crates/ramflux-sdk/src/client/surface/generated.rs | event | 1 | D | admitted-be
 crates/ramflux-sdk/src/client/surface/generated.rs | rpc | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 1 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
 crates/ramflux-sdk/src/client/surface/history_generated.rs | to_generated | 2 | D | admitted-before-persist; conversion of validated native state or an account-local checkpoint into generated fields, not an ingress byte decoder
+crates/ramflux-sdk/src/prekey.rs | sdk_policy_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_policy_gateway_request#1

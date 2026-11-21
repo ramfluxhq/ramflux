@@ -27,9 +27,14 @@ pub enum PrxError {
     #[error("PRX is unreachable")]
     Unavailable,
     /// PRX answered HTTP 429 (shared API rate limit). Any 429 maps here, whatever its body.
-    /// No retry is built in; the caller decides.
+    /// `retry_after_ms` is the body's `error.retry_after_ms`, else the `Retry-After` header in
+    /// milliseconds. No retry is built in; the caller decides.
     #[error("PRX rate-limited the request")]
-    RateLimited { retry_after_seconds: Option<u64> },
+    RateLimited { retry_after_ms: Option<u64> },
+    /// PRX answered `503 provider_not_ready`: the turn runtime has no usable provider
+    /// credential. Management routes still answer; only turn routes refuse.
+    #[error("PRX turn runtime is not ready: {reason:?} (HTTP {status})")]
+    ProviderNotReady { status: u16, reason: NotReadyReason },
     /// The per-request deadline passed.
     #[error("PRX did not answer before the deadline")]
     Timeout,
@@ -39,6 +44,23 @@ pub enum PrxError {
     /// The PRX build does not advertise the route's capability token.
     #[error("PRX does not advertise {token}")]
     Unsupported { token: String, available_but_off: bool },
+}
+
+/// Why the PRX turn runtime is not ready. `Unknown` keeps a reason this client does not know yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotReadyReason {
+    /// The default provider has no usable credential (the only value so far).
+    MissingProviderCredential,
+    Unknown(String),
+}
+
+impl NotReadyReason {
+    fn from_wire(reason: &str) -> Self {
+        match reason {
+            "missing_provider_credential" => Self::MissingProviderCredential,
+            other => Self::Unknown(other.to_owned()),
+        }
+    }
 }
 
 /// The closed list of error codes in the token document, plus `Unknown` for any other string.
@@ -129,23 +151,30 @@ struct CodedBody {
     current_revision: Option<ConfigRevision>,
     #[serde(default, deserialize_with = "present")]
     revision: Option<ConfigRevision>,
+    /// Present on `provider_not_ready` only.
+    #[serde(default, deserialize_with = "present")]
+    reason: Option<String>,
 }
 
-/// Builds the rate-limit error for an HTTP 429. `Retry-After` (seconds) wins over a numeric
-/// `retry_after` in the body, top level or inside `error` (the future coded shape).
+/// Builds the rate-limit error for an HTTP 429. The body's `error.retry_after_ms` wins; the
+/// `Retry-After` header (seconds, converted to milliseconds) is the fallback.
 pub(crate) fn rate_limited(header_seconds: Option<u64>, body: &[u8]) -> PrxError {
-    let body_seconds = ramflux_protocol::parse_i_json::<Value>(body).ok().and_then(|value| {
-        value
-            .get("retry_after")
-            .or_else(|| value.pointer("/error/retry_after"))
-            .and_then(Value::as_u64)
-    });
-    PrxError::RateLimited { retry_after_seconds: header_seconds.or(body_seconds) }
+    let body_ms = ramflux_protocol::parse_i_json::<Value>(body)
+        .ok()
+        .and_then(|value| value.pointer("/error/retry_after_ms").and_then(Value::as_u64));
+    let header_ms = header_seconds.map(|seconds| seconds.saturating_mul(1000));
+    PrxError::RateLimited { retry_after_ms: body_ms.or(header_ms) }
 }
 
 /// Decodes a non-2xx body. A body that is not the coded shape is a contract violation.
 pub(crate) fn decode_api_error(status: u16, body: &[u8]) -> PrxError {
     match decode_ok::<CodedTop>(body) {
+        Ok(top) if top.error.code == "provider_not_ready" => match top.error.reason {
+            Some(reason) => {
+                PrxError::ProviderNotReady { status, reason: NotReadyReason::from_wire(&reason) }
+            }
+            None => protocol("provider_not_ready without its reason"),
+        },
         Ok(top) => PrxError::Api {
             status,
             code: ApiCode::from_wire(&top.error.code),
@@ -164,40 +193,70 @@ mod tests {
     const HEX_B: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
 
     #[test]
-    fn rate_limit_today_body_gives_body_retry_after() {
-        let body = br#"{"error":"Too many API requests. Please retry later.","retry_after":60}"#;
+    fn rate_limit_documented_body_gives_body_retry_after_ms() {
+        // PRX token document, General errors: 429 rate_limited with retry_after_ms and Retry-After.
+        let body = br#"{"error":{"code":"rate_limited","message":"Too many API requests. Please retry later.","retry_after_ms":60000}}"#;
         assert_eq!(
-            rate_limited(None, body),
-            PrxError::RateLimited { retry_after_seconds: Some(60) }
-        );
-    }
-
-    #[test]
-    fn rate_limit_future_coded_body_decodes_to_same_variant() {
-        let body = br#"{"error":{"code":"rate_limited","message":"slow down","retry_after":30}}"#;
-        assert_eq!(
-            rate_limited(None, body),
-            PrxError::RateLimited { retry_after_seconds: Some(30) }
+            rate_limited(Some(60), body),
+            PrxError::RateLimited { retry_after_ms: Some(60_000) },
+            "the body value wins over the header"
         );
         assert_eq!(ApiCode::from_wire("rate_limited"), ApiCode::RateLimited);
     }
 
     #[test]
-    fn rate_limit_header_wins_over_body() {
-        let body = br#"{"error":"x","retry_after":60}"#;
+    fn rate_limit_falls_back_to_the_header_in_milliseconds() {
         assert_eq!(
-            rate_limited(Some(5), body),
-            PrxError::RateLimited { retry_after_seconds: Some(5) }
+            rate_limited(Some(60), br#"{"code":"rate_limited","error":"upstream"}"#),
+            PrxError::RateLimited { retry_after_ms: Some(60_000) },
+            "a 429 in another shape keeps the header value"
+        );
+        assert_eq!(
+            rate_limited(Some(7), b"not json"),
+            PrxError::RateLimited { retry_after_ms: Some(7_000) }
         );
     }
 
     #[test]
-    fn rate_limit_with_only_header_or_nothing() {
+    fn rate_limit_with_neither_value_is_still_rate_limited() {
+        assert_eq!(rate_limited(None, b""), PrxError::RateLimited { retry_after_ms: None });
         assert_eq!(
-            rate_limited(Some(7), b"not json"),
-            PrxError::RateLimited { retry_after_seconds: Some(7) }
+            rate_limited(None, br#"{"error":{"code":"rate_limited","message":"m"}}"#),
+            PrxError::RateLimited { retry_after_ms: None }
         );
-        assert_eq!(rate_limited(None, b""), PrxError::RateLimited { retry_after_seconds: None });
+    }
+
+    #[test]
+    fn provider_not_ready_decodes_its_reason() {
+        let body = br#"{"error":{"code":"provider_not_ready","message":"store its credential","reason":"missing_provider_credential"}}"#;
+        assert_eq!(
+            decode_api_error(503, body),
+            PrxError::ProviderNotReady {
+                status: 503,
+                reason: NotReadyReason::MissingProviderCredential,
+            }
+        );
+    }
+
+    #[test]
+    fn provider_not_ready_keeps_an_unknown_reason() {
+        let body =
+            br#"{"error":{"code":"provider_not_ready","message":"m","reason":"future_reason"}}"#;
+        assert_eq!(
+            decode_api_error(503, body),
+            PrxError::ProviderNotReady {
+                status: 503,
+                reason: NotReadyReason::Unknown("future_reason".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_not_ready_without_reason_or_with_null_reason_fails_closed() {
+        let absent = br#"{"error":{"code":"provider_not_ready","message":"m"}}"#;
+        assert!(matches!(decode_api_error(503, absent), PrxError::Protocol { .. }));
+        let null = br#"{"error":{"code":"provider_not_ready","message":"m","reason":null}}"#;
+        assert!(matches!(decode_api_error(503, null), PrxError::Protocol { .. }));
     }
 
     #[test]

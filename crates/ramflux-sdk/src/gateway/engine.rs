@@ -9,6 +9,7 @@ use crate::prelude::*;
 pub struct GatewaySessionEngine {
     pub(crate) config: GatewaySessionConfig,
     _transport: GatewaySessionClientTransport,
+    active_transport_kind: GatewaySessionTransportKind,
     pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     pub(crate) session: GatewaySessionState,
     request_counter: u64,
@@ -295,6 +296,7 @@ impl GatewaySessionEngine {
             } else {
                 opener.open(config.clone(), limits.transport_open).await?
             };
+        let requested_transport_kind = config.transport_kind;
         config.transport_kind = active_transport_kind;
         config.refresh_auth_window();
         let open = gateway_fresh_open_frame(&config)?;
@@ -326,10 +328,12 @@ impl GatewaySessionEngine {
                 )));
             }
         };
+        config.transport_kind = requested_transport_kind;
         let ephemeral_inbox = crate::ephemeral::session::SessionInbox::new();
         let mut engine = Self {
             config,
             _transport: transport,
+            active_transport_kind,
             stream,
             session,
             request_counter: 1,
@@ -363,10 +367,12 @@ impl GatewaySessionEngine {
         stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     ) -> Self {
         let ephemeral_inbox = crate::ephemeral::session::SessionInbox::new();
+        let active_transport_kind = config.transport_kind;
         Self {
             config,
             stream,
             _transport: GatewaySessionClientTransport::Injected,
+            active_transport_kind,
             session: GatewaySessionState {
                 call_session_generation: None,
                 session_id: "test-session".to_owned(),
@@ -415,7 +421,7 @@ impl GatewaySessionEngine {
 
     #[must_use]
     pub const fn active_transport_kind(&self) -> GatewaySessionTransportKind {
-        self.config.transport_kind
+        self.active_transport_kind
     }
 
     /// # Errors
@@ -1136,7 +1142,15 @@ pub(crate) async fn open_gateway_session_transport(
     ),
     SdkError,
 > {
+    if config.has_http_proxy() {
+        return super::auto_dial::open_through_http_proxy(config).await;
+    }
     match config.transport_kind {
+        GatewaySessionTransportKind::Auto
+            if config.connection_race == super::ConnectionRace::Raced =>
+        {
+            super::auto_dial::open_auto_raced(config).await
+        }
         GatewaySessionTransportKind::Auto => {
             match open_quic_gateway_session_transport(config, config.quic_fallback_timeout).await {
                 Ok((transport, stream)) => {

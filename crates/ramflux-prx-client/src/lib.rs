@@ -36,8 +36,8 @@ pub use capabilities::{
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;
-pub use error::{ApiCode, PrxError};
+pub use error::{ApiCode, NotReadyReason, PrxError};
 pub use name::AgentName;
 pub use revision::{CatalogRevision, ConfigRevision};
-pub use targeted::{ReloadReport, TargetedAgents};
+pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
 pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};

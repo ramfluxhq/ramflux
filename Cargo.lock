@@ -3967,6 +3967,7 @@ name = "ramflux-transport"
 version = "0.2.3"
 dependencies = [
  "arc-swap",
+ "base64",
  "blake3",
  "bytes",
  "compio",

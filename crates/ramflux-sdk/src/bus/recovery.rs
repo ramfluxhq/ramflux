@@ -234,7 +234,9 @@ async fn refresh_checkpoints(config: &crate::LocalBusConfig, id: &str) -> Result
         };
         let gateway = crate::GatewaySessionConfig::auto(
             profile.gateway_config(&config.data_root, endpoint).await?,
-        );
+        )
+        .with_host_network(config)
+        .with_tcp_gateway_addr(crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?);
         let result = crate::prekey::sdk_gateway_get_json::<
             Option<crate::prekey::SdkDeviceManifestResponse>,
         >(&gateway, &format!("/mvp1/device-manifest/{anchor}"))

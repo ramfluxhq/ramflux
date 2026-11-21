@@ -199,6 +199,7 @@ async fn restore_local_bus_account_impl(
         client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
     )?;
+    gateway = gateway.with_host_network(&state.config);
     if let Some(addr) = manifest.node_tcp_addr {
         gateway = gateway.with_tcp_gateway_addr(addr);
     }
