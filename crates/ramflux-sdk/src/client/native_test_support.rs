@@ -30,6 +30,20 @@ impl Fixture {
     pub(crate) async fn with_device(id: &str, device: &str) -> TestResult<Self> {
         Box::pin(Self::with_device_at(id, device, crate::custody::network_now()?)).await
     }
+    /// A phrase-created native fixture that also returns its recovery words, so a test can derive
+    /// the master key and sign a primary transfer. Test support only; production never keeps them.
+    pub(crate) async fn with_device_keeping_phrase(
+        id: &str,
+        device: &str,
+    ) -> TestResult<(Self, zeroize::Zeroizing<String>)> {
+        let root = Root::new()?;
+        let vault = Arc::new(TestVault::default());
+        let now = crate::custody::network_now()?;
+        let (account, phrase) =
+            crate::custody::tests::create_with_device_and_phrase(&root.0, id, device, vault.as_ref(), now)?;
+        let record = account.record().clone();
+        Ok((Self::finish_creation(root, vault, id, device, record).await?, phrase))
+    }
     pub(super) async fn with_device_at(id: &str, device: &str, now: u64) -> TestResult<Self> {
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());

@@ -12,6 +12,7 @@ mod rebind;
 mod rebind_commit;
 mod rebind_observe;
 mod rebind_plan;
+mod rebind_send;
 mod receive_checks;
 mod receive_decision;
 mod state;
@@ -45,6 +46,7 @@ pub use rebind_commit::commit_rebind;
 pub use rebind_observe::observe_primary;
 pub(crate) use rebind_plan::check_decision_context;
 pub use rebind_plan::{RebindInput, begin_rebind, stored_profile};
+pub use rebind_send::{PreparedRebind, prepare_rebind_request};
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,
 };

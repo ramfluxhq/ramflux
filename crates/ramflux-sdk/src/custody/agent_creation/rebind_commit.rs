@@ -12,7 +12,7 @@
 //! Pattern copied: `commit.rs` `commit_approved` (checks before any write, write-ahead of the range,
 //! profile saved before the authority, the record state as the commit point).
 use super::capability::require_agent_custody_authorization;
-use super::commit::{agent_profile_bytes, desktop_is_enrolled};
+use super::commit::{agent_profile_bytes, agent_record_bytes, desktop_is_enrolled};
 use super::machine::finish;
 use super::rebind::{RebindBinding, RebindEntry};
 use super::rebind_plan::{check_decision_context, is_rebind};
@@ -132,6 +132,7 @@ pub fn commit_rebind(
     // The profile is saved before the authority, so a crash after the authority still finds it.
     record.profile_b64 =
         Some(agent_profile_bytes(&self_signing, &plan, &rebound, &verified_human, now)?);
+    record.agent_record_b64 = Some(agent_record_bytes(&rebound)?);
     store.save(&record)?;
     custody_store::replace_rebound_authority(
         store.root(),

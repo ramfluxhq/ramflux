@@ -17,13 +17,19 @@
 //! accounts is `network_tests::node` (the test node), not the native fixture's key.
 
 use crate::bus::dispatch::surface_transport::fixture::RecordingGateway;
+use crate::client::shared_group::tests::native_person_keeping_phrase;
+use ramflux_crypto::custody::{
+    CooperativeTransferInput, MasterKey, RecoveryPhrase, SelfSigningKey, cooperative_transfer_preserving_devices,
+    verify_record,
+};
+use ramflux_protocol::custody::{DeviceSet, Envelope};
+use zeroize::Zeroizing;
 use crate::bus::own_device_copy;
 use crate::bus::state::LocalBusAccountState;
 use crate::client::native_test_support::bus::receive_copy;
 use crate::client::native_test_support::router::publish_router_envelope;
-use crate::client::shared_group::tests::{
-    install_native_directories, native_person, native_sibling,
-};
+use crate::client::native_test_support::bus::seed_pair;
+use crate::client::shared_group::tests::{install_native_directories, native_person, native_sibling};
 use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationStore, AgentSteps, BeginInput, BeginOutcome, PrimarySigning,
     begin, commit_approved, complete_with_receipt, primary_sign_decision,
@@ -508,4 +514,123 @@ pub(crate) fn desk_record(pair: &Pair, request_id: &str) -> TestResult<AgentCrea
     store_of(&root_of(&pair.laptop)?, &laptop_id)?
         .load(request_id)?
         .ok_or_else(|| "test: the desktop record".into())
+}
+
+/// Device id of the second sibling that becomes the new primary in a transfer test.
+pub(crate) const NEW_PRIMARY_DEVICE: &str = "primary-two";
+
+/// A human with three devices: the primary phone (old primary), the paired desktop and a second
+/// sibling that becomes the new primary. The phone's recovery words are kept so the master signs
+/// the transfer. FIXTURE: the three devices are native fixtures (`native_person`, `native_sibling`).
+pub(crate) struct Transfer {
+    pub(crate) pair: Pair,
+    pub(crate) new_primary: LocalBusAccountState,
+    pub(crate) master: MasterKey,
+    pub(crate) successor: SelfSigningKey,
+}
+
+/// Builds the three devices of one human. Nothing is transferred yet. The laptop was enrolled
+/// before the second sibling, so after that enrollment it follows the human's newest authority and
+/// manifest (FIXTURE: the store write of `replace_rebound_authority`, not the pairing refresh).
+pub(crate) fn transfer_fixture(id: &str) -> TestResult<Transfer> {
+    let (mut phone, phrase) = native_person_keeping_phrase(&format!("owner-{id}"), "phone")?;
+    let mut laptop = native_sibling(&mut phone, &format!("laptop-{id}"), "laptop")?;
+    let new_primary = native_sibling(&mut phone, &format!("primary-two-{id}"), NEW_PRIMARY_DEVICE)?;
+    let now = now()?;
+    let phone_root = root_of(&phone)?;
+    let phone_id = phone.client.account_db()?.local_account_id.clone();
+    let laptop_root = root_of(&laptop)?;
+    let laptop_id = laptop.client.account_db()?.local_account_id.clone();
+    let newest = load_account(&phone_root, &phone_id, now)?.record().clone();
+    crate::custody::store::replace_rebound_authority(&laptop_root, &laptop_id, &newest, None, now)?;
+    refresh(&mut laptop.client, &laptop_root, &laptop_id, now)?;
+    let manifest = phone
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("test: the phone fixture")?
+        .manifest
+        .clone();
+    laptop.client.native_bus_fixture.as_mut().ok_or("test: the laptop fixture")?.manifest = manifest;
+    install_native_directories(&[&phone, &laptop, &new_primary])?;
+    seed_pair(&phone.client, &laptop.client)?;
+    seed_pair(&phone.client, &new_primary.client)?;
+    seed_pair(&laptop.client, &new_primary.client)?;
+    let master = MasterKey::from_phrase(&RecoveryPhrase::parse(phrase.as_str())?)?;
+    let successor = SelfSigningKey::from_vault_seed(&Zeroizing::new([31_u8; 32]));
+    Ok(Transfer { pair: Pair { phone, laptop }, new_primary, master, successor })
+}
+
+/// The real primary transfer P0 -> P1 (`cooperative_transfer_preserving_devices`). The transferred
+/// authority is written to all three roots with `replace_rebound_authority`, the new primary's vault
+/// holds the successor primary key, and each client re-reads its unlocked human account from disk.
+/// FIXTURE: the disk write is the store function, not the pairing refresh (`pairing/activate.rs`).
+pub(crate) fn transfer_primary(t: &mut Transfer, now: u64) -> TestResult<Envelope<DeviceSet>> {
+    let phone_root = root_of(&t.pair.phone)?;
+    let phone_id = t.pair.phone.client.account_db()?.local_account_id.clone();
+    let current_account = load_account(&phone_root, &phone_id, now)?;
+    let current = verify_record(current_account.record(), now, None, None)?;
+    let anchor = current_account.record().body.account_anchor.clone();
+    let epoch = current_account
+        .record()
+        .body
+        .devices
+        .iter()
+        .find(|entry| entry.device_id == NEW_PRIMARY_DEVICE)
+        .map(|entry| entry.device_epoch)
+        .ok_or("test: the new primary is a device of the human")?;
+    let transferred = cooperative_transfer_preserving_devices(
+        &t.master,
+        &t.successor,
+        &current,
+        CooperativeTransferInput {
+            destination: DeviceRef {
+                account_anchor: anchor.clone(),
+                device_id: NEW_PRIMARY_DEVICE.into(),
+                device_epoch: epoch,
+            },
+            fresh_destination: None,
+            highest_observed_range: 0,
+            issued_at: now + 1,
+            master_cert_id: ramflux_protocol::encode_base64url([36_u8; 32]),
+        },
+    )?;
+    let new_root = root_of(&t.new_primary)?;
+    let new_id = t.new_primary.client.account_db()?.local_account_id.clone();
+    let reference = crate::custody::custody_vault_reference(&new_root, &new_id, &anchor)?;
+    vault_of(&t.new_primary.client)?.store_new(&reference, &t.successor)?;
+    let desk_root = root_of(&t.pair.laptop)?;
+    let desk_id = t.pair.laptop.client.account_db()?.local_account_id.clone();
+    for (root, id) in [(&phone_root, &phone_id), (&desk_root, &desk_id), (&new_root, &new_id)] {
+        crate::custody::store::replace_rebound_authority(root, id, &transferred, None, now)?;
+    }
+    refresh(&mut t.pair.phone.client, &phone_root, &phone_id, now)?;
+    refresh(&mut t.pair.laptop.client, &desk_root, &desk_id, now)?;
+    refresh(&mut t.new_primary.client, &new_root, &new_id, now)?;
+    adopt(&mut t.pair.phone.client, &transferred)?;
+    adopt(&mut t.pair.laptop.client, &transferred)?;
+    adopt(&mut t.new_primary.client, &transferred)?;
+    Ok(transferred)
+}
+
+/// Re-reads the unlocked human account of one client from its root.
+fn refresh(client: &mut RamfluxClient, root: &Path, id: &str, now: u64) -> TestResult {
+    client.born_v3_account = Some(Box::new(load_account(root, id, now)?));
+    Ok(())
+}
+
+/// Puts the transferred authority into the client's own directory cache: its native manifest
+/// carries the human record, and the directory observes it (the cache must not stay behind the
+/// durable authority, `identity_authority/custody_directory.rs` `require_owned_custody_floor`).
+fn adopt(client: &mut RamfluxClient, transferred: &Envelope<DeviceSet>) -> TestResult {
+    let manifest = {
+        let material = client.native_bus_fixture.as_mut().ok_or("test: the native fixture")?;
+        let mut custody = material.manifest.custody.as_deref().cloned().ok_or("test: custody")?;
+        custody.publication.record = transferred.clone();
+        let rebuilt = crate::prekey::SdkDeviceManifestResponse::from_native(custody)?;
+        material.manifest = rebuilt.clone();
+        rebuilt
+    };
+    client.persist_observed_identity_directory_now(&manifest)?;
+    Ok(())
 }

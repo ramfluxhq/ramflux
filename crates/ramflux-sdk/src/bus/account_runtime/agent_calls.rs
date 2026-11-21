@@ -29,6 +29,16 @@ impl AccountRuntime {
             AgentStep::Complete { request_id } => {
                 crate::custody::agent_creation::complete_with_receipt(&store, &request_id)
             }
+            AgentStep::SendRebind { agent_account_id, now } => {
+                let account =
+                    self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+                account.client.agent_rebind_send(&agent_account_id, now)?;
+                let request_id = store
+                    .load_rebind(&agent_account_id)?
+                    .and_then(|entry| entry.request_id)
+                    .ok_or(SdkError::CustodySetupInvalid)?;
+                store.load(&request_id)?.ok_or(SdkError::CustodySetupInvalid)
+            }
         }
     }
 

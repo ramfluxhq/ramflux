@@ -157,6 +157,20 @@ impl Supervisor {
             if matches!(entry.binding, RebindBinding::RebindPending | RebindBinding::Committed) {
                 self.lock_account_session(&entry.agent_account_id).await?;
             }
+            // Stage D R1: a paused agent whose request is not frozen yet sends its rebind plan to
+            // the new primary. A refusal (the desktop left the human) keeps the agent paused, and the
+            // next advance tries again.
+            if entry.binding == RebindBinding::RebindPending
+                && entry.request_id.is_none()
+                && let Some(actor) = self.account_actor(human).filter(super::actor::AccountActor::is_open)
+            {
+                let _ = actor
+                    .agent_creation_step(AgentStep::SendRebind {
+                        agent_account_id: entry.agent_account_id.clone(),
+                        now,
+                    })
+                    .await;
+            }
         }
         let mut steps =
             SupervisorSteps { supervisor: self, human: human.to_owned(), store: store.clone() };

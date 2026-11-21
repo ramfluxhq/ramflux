@@ -119,6 +119,7 @@ pub fn begin(
         master_range: 0,
         profile_b64: None,
         receipt_b64: None,
+        agent_record_b64: None,
     };
     store.save(&record)?;
 
@@ -246,6 +247,7 @@ pub fn receive_plan(
         master_range: 0,
         profile_b64: None,
         receipt_b64: None,
+        agent_record_b64: None,
     };
     store.save(&record)?;
     Ok(record)

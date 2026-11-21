@@ -33,6 +33,17 @@ pub(crate) fn native_person(id: &str, device: &str) -> Result<LocalBusAccountSta
     })
 }
 
+/// `native_person`, also returning the recovery words the fixture was created with.
+pub(crate) fn native_person_keeping_phrase(
+    id: &str,
+    device: &str,
+) -> Result<(LocalBusAccountState, zeroize::Zeroizing<String>), SdkError> {
+    native_block_on(async move {
+        let (fixture, phrase) = Native::with_device_keeping_phrase(id, device).await?;
+        Ok((fixture.into_bus(), phrase))
+    })
+}
+
 /// A laptop sibling of `phone`. It carries the account primary, as the phone holds it.
 pub(crate) fn native_sibling(
     phone: &mut LocalBusAccountState,

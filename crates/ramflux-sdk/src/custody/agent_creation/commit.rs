@@ -94,6 +94,7 @@ pub fn commit_approved(
     // The profile is saved before the bundle exists, so a crash after the commit still finds it.
     record.profile_b64 =
         Some(agent_profile_bytes(&primary_key, &plan, &genesis, account.verified(), now)?);
+    record.agent_record_b64 = Some(agent_record_bytes(&genesis)?);
     store.save(&record)?;
     let account_id = record.account_id.clone().ok_or(SdkError::CustodySetupInvalid)?;
     let input = CreateInput {
@@ -126,6 +127,14 @@ const GENESIS_RANGE: u64 = 1;
 
 /// The signed agent profile of the approved plan, bound to the exact genesis record and to the
 /// human record. It is signed by the agent primary key; the phone signs only the decision.
+/// The committed agent `DeviceSet` as the record copy: JSON of the envelope, base64url.
+/// # Errors
+/// `CustodySetupInvalid` when the envelope does not serialize.
+pub(super) fn agent_record_bytes(record: &Envelope<DeviceSet>) -> Result<String, SdkError> {
+    let bytes = serde_json::to_vec(record).map_err(|_| SdkError::CustodySetupInvalid)?;
+    Ok(encode_base64url(bytes))
+}
+
 pub(super) fn agent_profile_bytes(
     primary: &SelfSigningKey,
     plan: &RegisterPlan,

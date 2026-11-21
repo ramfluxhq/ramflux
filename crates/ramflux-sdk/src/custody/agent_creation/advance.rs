@@ -36,6 +36,8 @@ pub enum AgentStep {
     CommitRebind { request_id: String, capabilities: Vec<String>, now: u64 },
     /// Mark a request complete once its receipt is saved (no-op before the receipt).
     Complete { request_id: String },
+    /// Freeze the rebind plan of one paused agent and send it to the new primary (stage D R1).
+    SendRebind { agent_account_id: String, now: u64 },
 }
 
 /// The effects an advance needs. The human runtime implements the store steps; the supervisor

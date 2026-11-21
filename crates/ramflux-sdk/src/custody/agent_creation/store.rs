@@ -47,6 +47,11 @@ pub struct AgentCreationRecord {
     /// Publication receipt (canonical bytes), written once the receipt has been compared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_b64: Option<String>,
+    /// The committed agent `DeviceSet` (JSON of the envelope, base64url), written with the commit
+    /// bundle. A rebind request names its predecessors from this copy (stage D R1), so the desktop
+    /// never reads the agent's authority file to freeze a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_record_b64: Option<String>,
 }
 
 impl AgentCreationRecord {

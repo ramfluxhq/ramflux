@@ -7,4 +7,5 @@
 //! an explicit `now`.
 mod authorization_binding;
 mod primary_phone;
+mod rebind;
 mod refusal_timeout;
