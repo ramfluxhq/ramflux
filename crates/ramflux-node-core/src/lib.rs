@@ -246,7 +246,7 @@ mod home_migration_release;
 pub use home_migration_release::{HOME_MIGRATION_RELEASE_GATE, home_migration_enabled};
 mod device_pairing_release;
 pub use device_pairing_release::{
-    DEVICE_PAIRING_CAPABILITY, DEVICE_PAIRING_RELEASE_GATE, device_pairing_enabled,
+    DEVICE_PAIRING_CAPABILITY, PRIMARY_TRANSFER_FULL_CAPABILITY, device_pairing_enabled,
 };
 mod gateway_client_capabilities;
 pub use gateway_client_capabilities::{

@@ -202,16 +202,22 @@ fn pairing_failure_class_is_allow_listed_and_never_echoes_received_text() {
         (RfError::Sdk(SdkError::GatewayWriterBusy), "GatewayWriterBusy"),
         (refused("local_bus_error", "x"), "local_bus_error"),
         (refused("SECRET-TOKEN", "x"), "unknown"),
+        (refused("Busy", "x"), "Busy"),
+        (refused("ValidationFailed", "pairing NotFound"), "unknown (ValidationFailed)"),
+        (
+            refused("ValidationFailed", "SECRET-TOKEN pairing NotFound"),
+            "unknown (ValidationFailed)",
+        ),
         (
             refused("local_bus_error", "local bus error: pairing HTTPS status 400 Bad Request"),
             "HTTP 400",
         ),
         (refused("local_bus_error", "pairing HTTPS status 400 SECRET TOKEN"), "HTTP 400"),
-        (refused("x", "pairing HTTPS status 4000"), "unknown"),
-        (refused("x", "pairing HTTPS status 99 low"), "unknown"),
-        (refused("x", "pairing HTTPS status 600"), "unknown"),
-        (refused("x", "pairing HTTPS status 40a"), "unknown"),
-        (refused("x", "pairing HTTPS status SECRET-TOKEN"), "unknown"),
+        (refused("x", "pairing HTTPS status 4000"), "unknown (x)"),
+        (refused("x", "pairing HTTPS status 99 low"), "unknown (x)"),
+        (refused("x", "pairing HTTPS status 600"), "unknown (x)"),
+        (refused("x", "pairing HTTPS status 40a"), "unknown (x)"),
+        (refused("x", "pairing HTTPS status SECRET-TOKEN"), "unknown (x)"),
         (
             RfError::Sdk(SdkError::CustodyNetwork(
                 ramflux_protocol::custody::CustodyRefusal::BindingRefused,

@@ -231,6 +231,12 @@ Initialization recovers missing generated trust files using the same saved keys.
 path and mode defaults. Required keyring-provider inputs include
 `RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
 and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
+The gateway's attachment authority calls reach the relay over the compose network:
+`RAMFLUX_RELAY_ATTACHMENT_ADDR=0.0.0.0:7443` (relay listener, set on the relay service)
+and `RAMFLUX_RELAY_ATTACHMENT_ENDPOINT=ramflux-relay:7443` (gateway, set on the gateway
+service). Without the endpoint the gateway refuses every attachment call with
+`authority_unavailable`. Both values are written by `up`, so an existing node picks
+them up on its next `up`.
 The wrapper also supplies the matching `RF_COMPOSE_*` inputs for these concrete runtime values.
 The actual-provider regression renders the complete generated project and rejects
 unresolved `${...}` expressions anywhere in the result. Run it without a container
@@ -620,7 +626,8 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
-Device pairing has its own opt-in, off by default: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
+Device pairing is released for clients (on by default). A node serves pairing and advertises
+`device_pairing_v2` only when its operator opts in: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
 (operator env, `0` or `1`) and run `up`. It requires the custody inputs
 (`RAMFLUX_CUSTODY_NODE_RECORD_FILE`) and `certs/node-identity/node-signing.key` (mode 0640 or
 stricter), sets the switch on the router and federation only, and mounts that single key file
@@ -647,7 +654,8 @@ non-loopback `DEMO_FEDERATION_BIND_ADDR` together with an origin, and refuses tr
 that loopback publication holds. The other public ports keep `DEMO_BIND_ADDR`. An nftables accept rule
 for the federation HTTP port may stay (the closed loopback binding makes it unreachable); the operator
 may also remove it.
-It does not change discovery advertisement (compile-time release gate).
+Discovery follows the same opt-in: an enabled node advertises `device_pairing_v2` and
+`primary_transfer_full_v1`, and a node without it advertises neither.
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing

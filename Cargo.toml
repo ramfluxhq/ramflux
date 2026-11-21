@@ -24,6 +24,7 @@ default-members = [
 members = [
     "crates/ramflux-test-support",
     "crates/ramflux-card",
+    "crates/ramflux-prx-client",
     "tools/message-schema",
     "crates/ramflux-client-model",
     "crates/ramflux-core",
@@ -48,24 +49,24 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.99.0"
-version = "0.2.1"
+version = "0.2.3"
 license = "BSD-3-Clause"
 repository = "https://github.com/ramfluxhq/ramflux"
 
 [workspace.dependencies]
 tempfile = "3"
-ramflux-test-support = { version = "0.2.1", path = "crates/ramflux-test-support" }
-ramflux-core = { version = "0.2.1", path = "crates/ramflux-core" }
-ramflux-protocol = { version = "0.2.1", path = "crates/ramflux-protocol" }
-ramflux-crypto = { version = "0.2.1", path = "crates/ramflux-crypto" }
-ramflux-storage = { version = "0.2.1", path = "crates/ramflux-storage" }
-ramflux-transport = { version = "0.2.1", path = "crates/ramflux-transport" }
-ramflux-sync = { version = "0.2.1", path = "crates/ramflux-sync" }
-ramflux-sdk = { version = "0.2.1", path = "crates/ramflux-sdk" }
-ramflux-node-core = { version = "0.2.1", path = "crates/ramflux-node-core" }
-ramflux-relay = { version = "0.2.1", path = "apps/ramflux-relay" }
-ramflux-client-model = { version = "0.2.1", path = "crates/ramflux-client-model" }
-ramflux-card = { version = "0.2.1", path = "crates/ramflux-card" }
+ramflux-test-support = { version = "0.2.3", path = "crates/ramflux-test-support" }
+ramflux-core = { version = "0.2.3", path = "crates/ramflux-core" }
+ramflux-protocol = { version = "0.2.3", path = "crates/ramflux-protocol" }
+ramflux-crypto = { version = "0.2.3", path = "crates/ramflux-crypto" }
+ramflux-storage = { version = "0.2.3", path = "crates/ramflux-storage" }
+ramflux-transport = { version = "0.2.3", path = "crates/ramflux-transport" }
+ramflux-sync = { version = "0.2.3", path = "crates/ramflux-sync" }
+ramflux-sdk = { version = "0.2.3", path = "crates/ramflux-sdk" }
+ramflux-node-core = { version = "0.2.3", path = "crates/ramflux-node-core" }
+ramflux-relay = { version = "0.2.3", path = "apps/ramflux-relay" }
+ramflux-client-model = { version = "0.2.3", path = "crates/ramflux-client-model" }
+ramflux-card = { version = "0.2.3", path = "crates/ramflux-card" }
 anyhow = "1.0"
 aes-gcm = "0.10"
 arc-swap = "1.8.2"
@@ -90,7 +91,7 @@ jsonwebtoken = { version = "10.2", default-features = false, features = ["aws_lc
 keyring = "3"
 p256 = { version = "0.14", default-features = false, features = ["ecdh", "getrandom"] }
 parking_lot = "0.12"
-postcard = { version = "1.1", features = ["alloc"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 prost = "0.14"
 quinn = { version = "0.11.9", default-features = false, features = [
     "bloom",

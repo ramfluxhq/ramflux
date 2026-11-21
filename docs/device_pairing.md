@@ -1,16 +1,18 @@
-# Device pairing preview / CLI only
+# Device pairing
 
-Native SAS device pairing is a preview for the SDK and reference CLI. It remains
-default-off. Desktop and mobile pairing companions are unavailable; this preview
-does not establish their readiness or enable pairing for ordinary clients.
-The node release gate also suppresses discovery advertisement while the feature
-is dormant. Setting an environment opt-in does not override that release gate.
+Native SAS device pairing is released. Clients pair by default
+(`RAMFLUX_DEVICE_PAIRING_ENABLED` unset or `1`; `0` turns it off). A node serves
+the pairing routes and advertises `device_pairing_v2` and `primary_transfer_full_v1`
+only when its operator sets `RAMFLUX_DEVICE_PAIRING_ENABLED=1`; a node without the
+opt-in advertises neither. A client refuses to start a ceremony with a node whose
+discovery record does not advertise `device_pairing_v2`. Desktop and mobile pairing
+companions are not covered by this release.
 
 The product follows a phone-first account model: the phone is the primary device,
 desktop clients mainly host agents, and the web client is a linked secondary.
 Primary authority follows the verified native device role and keys; a desktop
 session is not a prerequisite for pairing. The SDK and reference CLI exercise
-this shared flow while the phone companion remains outside this preview.
+this shared flow while the phone companion remains outside this release.
 
 Pairing enrolls a separately generated device branch. Each device keeps its own
 signing and agreement keys, local encrypted store and data passphrase. Pairing
@@ -48,10 +50,10 @@ not fall back to phrase recovery, legacy root signing or a weaker relay route.
 Full-account primary transfer uses the `full_account_data_v1` profile, committed
 inside the v3 SAS context on both devices. It transfers supported logical account
 data through an encrypted, resumable stream; device secrets remain local. The
-preview refuses an unsupported persisted record with `UnsupportedRecord` before
+client refuses an unsupported persisted record with `UnsupportedRecord` before
 issuing an invitation. It never silently skips a record or falls back to the
 older bounded handover payload. This full transfer workflow is still under
-development and is not enabled for ordinary clients.
+development.
 
 A durable chunk receipt confirms encrypted staging on the receiving device. It
 does not confirm that data was applied, that a primary change was published, or

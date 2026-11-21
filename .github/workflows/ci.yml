@@ -1351,3 +1351,44 @@ jobs:
       - name: Reject leaked test temporary files
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python3 -B scripts/ci/test-tmp.py check
+
+  prx-contract:
+    name: PRX contract (real prx daemon at the pinned commit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Checkout PRX at the pinned commit (public repository, no credential)
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          repository: openprx/prx
+          ref: eaf91764c566267eb579436c82c5cd3b445dd7bf
+          path: prx
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          workspaces: |
+            . -> target
+            prx -> target
+
+      - name: Build prx at the pinned commit
+        working-directory: prx
+        env:
+          PRX_BUILD_COMMIT: eaf91764c566267eb579436c82c5cd3b445dd7bf
+        run: cargo build --bin prx
+
+      - name: Contract tests against the real daemon
+        env:
+          RAMFLUX_PRX_BIN: ${{ github.workspace }}/prx/target/debug/prx
+        run: cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1

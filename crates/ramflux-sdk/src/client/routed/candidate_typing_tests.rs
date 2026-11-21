@@ -273,3 +273,43 @@ async fn typing_failed_commit_exposes_no_ciphertext_and_rolls_back_ratchet_and_a
     assert_eq!(db.load_actor_state::<u16>(&key)?, Some(count.unwrap_or(0) + 1));
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn clear_without_live_indicator_is_idle() -> Result<(), SdkError> {
+    let (a, _b) = Box::pin(prepared_pair()).await?;
+    a.client.set_typing_focus(Some("c"))?;
+    let mut config = a.config()?;
+    config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
+    let request = ramflux_protocol::message::MessageRequest {
+        request_id: "clear".into(),
+        account_id: a.client.account_db()?.local_account_id.clone(),
+        action: Some(ramflux_protocol::message::message_request::Action::Send(
+            ramflux_protocol::message::SendMessage {
+                conversation_id: "c".into(),
+                operation_id: vec![7; 16],
+                reply_to: None,
+                content: Some(ramflux_protocol::message::Content {
+                    value: Some(ramflux_protocol::message::content::Value::Typing(
+                        ramflux_protocol::message::Typing { active: false, expires_at: 0 },
+                    )),
+                }),
+            },
+        )),
+    };
+    let update = Box::pin(a.client.send_generated_typing_request(&mut engine, &request)).await?;
+    assert!(
+        matches!(
+            update.state,
+            Some(ramflux_protocol::message::message_update::State::Content(ref content))
+                if matches!(
+                    content.value,
+                    Some(ramflux_protocol::message::content::Value::Typing(ref typing))
+                        if !typing.active
+                )
+        ),
+        "test: a clear with no live indicator returns an idle typing update"
+    );
+    Ok(())
+}

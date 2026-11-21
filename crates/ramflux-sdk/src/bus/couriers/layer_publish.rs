@@ -107,6 +107,35 @@ fn error_code(error: &SdkError) -> &'static str {
     }
 }
 
+/// Stable typed code of the underlying failure. Message text, payloads and key material never
+/// reach it; a variant without a stable code reports `Unclassified`.
+fn detail_code(error: &SdkError) -> &str {
+    match error {
+        SdkError::PairingCode(code) => code,
+        SdkError::NetworkingPending => "NetworkingPending",
+        SdkError::GatewayWriterBusy => "GatewayWriterBusy",
+        SdkError::CustodyPublicationFailed => "CustodyPublicationFailed",
+        SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
+            code.reason_code()
+        }
+        SdkError::LocalBusRefused { code, .. } => code.as_str(),
+        SdkError::NodeUnreachable { source, .. } => detail_code(source),
+        SdkError::NodeTimeout { .. } => "NodeTimeout",
+        _ => "Unclassified",
+    }
+}
+
+/// Logs a failed prepare or publish with its stable outer code and the underlying typed code.
+/// `last_error_code` keeps the outer code; the detail exists only in this log line.
+fn log_failure(stage: &'static str, error: &SdkError) {
+    tracing::warn!(
+        stage,
+        code = error_code(error),
+        detail = detail_code(error),
+        "layer declaration renewal failed"
+    );
+}
+
 /// The signed-off exchange for one candidate; all fields are public bytes or handles.
 pub(crate) struct Plan {
     publication: Publication,
@@ -175,7 +204,7 @@ where
         Ok(plan) => plan,
         Err(error) if not_ready(&error) => return Ok(false),
         Err(error) => {
-            tracing::debug!(code = error_code(&error), detail = %error, "layer declaration prepare deferred");
+            log_failure("prepare", &error);
             let code = error_code(&error);
             let _ = writer
                 .apply(move |account| {
@@ -204,7 +233,7 @@ where
     match result {
         Ok(()) => Ok(true),
         Err(error) => {
-            tracing::debug!(code = error_code(&error), detail = %error, "layer declaration publish deferred");
+            log_failure("publish", &error);
             let code = error_code(&error);
             let _ = writer
                 .apply(move |account| {

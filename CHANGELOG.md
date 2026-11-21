@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3] - 2026-11-21
+
+- Device pairing is released: nodes with pairing enabled advertise it and clients pair by default; typing: an expired typing clear is idle and typing submit works without the raw-message capability; typed client for the PRX management API.
+
+## [0.2.2] - 2026-11-21
+
+- Node tooling gives the gateway its attachment authority endpoint, so attachments can be imported, revoked and erased on deployed nodes; `rf pairing` prints the code of an unlisted refusal; a failed layer declaration publish logs its cause; dependency update that removes heapless 0.7.
+
 ## [0.2.1] - 2026-11-17
 
 - Send a file in a direct message or a group.
@@ -54,6 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+- Device pairing is released: nodes with pairing enabled advertise it; clients pair by default.
 
 - Add dormant account-local encrypted search to the Rust SDK and local bus, with
   exact-word/CJK matching, bounded paging, cancellation and synchronous privacy
