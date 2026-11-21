@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.2] - 2026-11-21
+
+- Node tooling gives the gateway its attachment authority endpoint, so attachments can be imported, revoked and erased on deployed nodes; `rf pairing` prints the code of an unlisted refusal; a failed layer declaration publish logs its cause; dependency update that removes heapless 0.7.
+
 ## [0.2.1] - 2026-11-17
 
 - Send a file in a direct message or a group.
