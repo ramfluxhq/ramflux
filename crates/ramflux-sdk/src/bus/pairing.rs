@@ -18,6 +18,7 @@ use ramflux_protocol::custody::pairing::{
 use ramflux_protocol::custody::{DeviceRef, object_hash};
 use std::sync::{Arc, Mutex};
 
+mod capability;
 pub(in crate::bus) mod events;
 mod staged_resume;
 #[cfg(test)]
@@ -159,6 +160,7 @@ async fn install_source(
     let saved = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let profile =
         state.nodes.selected(saved.as_deref(), saved.is_some())?.ok_or(SdkError::NoNodeSelected)?;
+    capability::require_for_new_ceremony(&profile, resume.is_none())?;
     let old = &account.gateway_config;
     let endpoint = profile
         .gateway_config(
@@ -412,6 +414,7 @@ async fn install_new_recipient(
         return Err(SdkError::PairingCode("Busy"));
     }
     let profile = state.nodes.selected(None, false)?.ok_or(SdkError::NoNodeSelected)?;
+    capability::require_device_pairing(&profile)?;
     let invitation = &join.token.invitation.body;
     let tcp = crate::node::resolve_node_addr(&profile.gateway.tcp_addr).await?;
     let vault = super::custody_setup::primary_provider(&state.config);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Default-off preview release contract in isolated child environments.
+//! Node opt-in release contract in isolated child environments.
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -11,7 +11,7 @@ mod tests {
     async fn pairing_activation_is_complete_and_old_paths_stay_safe() -> TestResult {
         tokio::time::timeout(std::time::Duration::from_secs(60), Box::pin(check()))
             .await
-            .map_err(|_| "test: default-off release contract exceeded its deadline")?
+            .map_err(|_| "test: node opt-in release contract exceeded its deadline")?
     }
     async fn check() -> TestResult {
         if std::env::var_os(CHILD).is_none() {
@@ -47,7 +47,9 @@ mod tests {
                 "test: node accepted an invalid pairing startup selector"
             );
         } else {
-            require_dormant_discovery()?;
+            require_discovery(
+                std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").as_deref() == Ok("1"),
+            )?;
             if std::env::var_os("RAMFLUX_DEVICE_PAIRING_ENABLED").is_none() {
                 require_absent_routes()?;
                 super::super::super::continuity_tests::native_issue_refused_when_disabled()?;
@@ -75,7 +77,7 @@ mod tests {
         );
         Ok(())
     }
-    fn require_dormant_discovery() -> TestResult {
+    fn require_discovery(enabled: bool) -> TestResult {
         let config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(
             serde_json::json!({
                 "node_id":"preview", "service_id":"ramflux-federation", "redb_path":"unused.redb",
@@ -91,18 +93,21 @@ mod tests {
         let client = surface.client_record()?;
         let server = surface.well_known_record()?;
         for capabilities in [&client.client_capabilities, &server.node_capabilities] {
-            assert!(
-                !capabilities.iter().any(|value| matches!(
-                    value.as_str(),
-                    "device_pairing_v2" | "primary_transfer_full_v1"
-                )),
-                "test: preview discovery advertised an unaccepted pairing capability"
+            let advertised = capabilities.iter().any(|value| value == "device_pairing_v2");
+            assert_eq!(
+                advertised, enabled,
+                "test: discovery must advertise device_pairing_v2 exactly when the node enables pairing"
             );
             assert!(
                 capabilities.iter().any(|value| value == "opaque_delivery"),
-                "test: preview pairing interlock removed ordinary discovery capabilities"
+                "test: pairing opt-in removed ordinary discovery capabilities"
             );
         }
+        assert_eq!(
+            server.node_capabilities.iter().any(|value| value == "primary_transfer_full_v1"),
+            enabled,
+            "test: full transfer must be advertised exactly when the node enables pairing"
+        );
         ramflux_node_core::verify_federation_server_record(&server, server.updated_at)?;
         ramflux_crypto::verify_canonical_signature(
             &ramflux_protocol::client_discovery_signing_bytes(&client)?,

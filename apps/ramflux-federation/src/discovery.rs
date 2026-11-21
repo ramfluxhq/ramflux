@@ -59,6 +59,10 @@ pub(crate) fn federation_discovery_surface(
     if ramflux_node_core::home_migration_enabled().unwrap_or(false) {
         surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
+    if ramflux_node_core::device_pairing_enabled().unwrap_or(false) {
+        surface.node_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
+        surface.node_capabilities.push(ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY.into());
+    }
     surface
 }
 
@@ -141,9 +145,7 @@ impl FederationDiscoverySurface {
         {
             record.client_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
         }
-        if ramflux_node_core::DEVICE_PAIRING_RELEASE_GATE
-            && ramflux_node_core::device_pairing_enabled().unwrap_or(false)
-        {
+        if ramflux_node_core::device_pairing_enabled().unwrap_or(false) {
             record.client_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
         }
         let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
@@ -157,6 +159,7 @@ impl FederationDiscoverySurface {
         &self,
     ) -> Result<ramflux_node_core::FederationServerRecord, ramflux_node_core::NodeCoreError> {
         let now = now_unix_seconds()?;
+        let pairing_enabled = ramflux_node_core::device_pairing_enabled().unwrap_or(false);
         let mut record = ramflux_node_core::FederationServerRecord {
             schema: "ramflux.well_known_server.v1".to_owned(),
             node_id: self.node_id.clone(),
@@ -169,10 +172,11 @@ impl FederationDiscoverySurface {
                 .node_capabilities
                 .iter()
                 .filter(|cap| {
-                    (ramflux_node_core::DEVICE_PAIRING_RELEASE_GATE
+                    (pairing_enabled
                         || !matches!(
                             cap.as_str(),
-                            "device_pairing_v2" | "primary_transfer_full_v1"
+                            ramflux_node_core::DEVICE_PAIRING_CAPABILITY
+                                | ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY
                         ))
                         && (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
                             || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
@@ -476,6 +480,84 @@ mod gateway_capability_tests {
             push_at.is_some_and(|push_at| ephemeral_at.is_some_and(|at| push_at < at)),
             "ephemeral follows session push"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pairing_capability_tests {
+    const CHILD: &str = "RAMFLUX_PAIRING_DISCOVERY_CHILD";
+    const NAME: &str = "discovery::pairing_capability_tests::pairing_capability_is_advertised_only_when_the_node_enables_pairing";
+
+    #[test]
+    fn pairing_capability_is_advertised_only_when_the_node_enables_pairing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(CHILD).is_none() {
+            for flag in [None, Some("0"), Some("1")] {
+                let mut child = std::process::Command::new(std::env::current_exe()?);
+                child
+                    .args(["--exact", NAME])
+                    .env(CHILD, "1")
+                    .env_remove("RAMFLUX_DEVICE_PAIRING_ENABLED");
+                if let Some(flag) = flag {
+                    child.env("RAMFLUX_DEVICE_PAIRING_ENABLED", flag);
+                }
+                let output = child.output()?;
+                assert!(
+                    output.status.success(),
+                    "test: pairing discovery child for {flag:?} failed: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                    "test: pairing discovery child for {flag:?} ran no test"
+                );
+            }
+            return Ok(());
+        }
+        let config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(
+            serde_json::json!({
+                "node_id": "A", "service_id": "ramflux-federation", "redb_path": "unused.redb",
+                "mesh": {"listen_addr": "127.0.0.1:0", "ca_cert": "unused.pem", "service_cert": "unused.pem", "service_key": "unused.key", "allowed_service_ids": [], "endpoints": {}}
+            }),
+        )?;
+        let enabled = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").as_deref() == Ok("1");
+        let mut surface = super::federation_discovery_surface(&config, [8; 32]);
+        surface.node_ca_cert_pem = "test-ca".into();
+        // A surface that carries the names by other means must still obey the node opt-in.
+        surface.node_capabilities.extend([
+            ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into(),
+            ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY.into(),
+        ]);
+        let client = surface.client_record()?;
+        let server = surface.well_known_record()?;
+        let has = |caps: &[String], name: &str| caps.iter().any(|cap| cap == name);
+        assert_eq!(
+            has(&client.client_capabilities, ramflux_node_core::DEVICE_PAIRING_CAPABILITY),
+            enabled,
+            "test: client discovery must advertise device_pairing_v2 exactly when the node enables pairing"
+        );
+        for name in [
+            ramflux_node_core::DEVICE_PAIRING_CAPABILITY,
+            ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY,
+        ] {
+            assert_eq!(
+                has(&server.node_capabilities, name),
+                enabled,
+                "test: federation record must advertise {name} exactly when the node enables pairing"
+            );
+        }
+        assert!(
+            has(&client.client_capabilities, "opaque_delivery"),
+            "test: pairing opt-in removed ordinary client discovery capabilities"
+        );
+        ramflux_node_core::verify_federation_server_record(&server, server.updated_at)?;
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::client_discovery_signing_bytes(&client)?,
+            &client.signature,
+            &client.node_public_key,
+        )?;
         Ok(())
     }
 }

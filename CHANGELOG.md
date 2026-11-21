@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Device pairing is released: nodes with pairing enabled advertise it; clients pair by default.
+
 - Add dormant account-local encrypted search to the Rust SDK and local bus, with
   exact-word/CJK matching, bounded paging, cancellation and synchronous privacy
   purges. Capability and engine qualification remain disabled; activation and

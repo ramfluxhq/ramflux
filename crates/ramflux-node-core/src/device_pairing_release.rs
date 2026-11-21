@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Release interlock shared by pairing HTTP/native admission and capability discovery.
-//! A later activation card may enable discovery after companion acceptance.
+//! Device pairing capability and node opt-in, shared by pairing HTTP/native admission and
+//! capability discovery. A node enables pairing with `RAMFLUX_DEVICE_PAIRING_ENABLED=1`; only an
+//! enabled node serves the pairing routes and advertises `device_pairing_v2` (with
+//! `primary_transfer_full_v1`). A disabled node advertises neither.
 pub const DEVICE_PAIRING_CAPABILITY: &str = "device_pairing_v2";
-/// Discovery stays off in the preview module. Routes require the explicit env opt-in.
-pub const DEVICE_PAIRING_RELEASE_GATE: bool = false;
+/// Full-transfer capability that a pairing-enabled node advertises alongside pairing.
+pub const PRIMARY_TRANSFER_FULL_CAPABILITY: &str = "primary_transfer_full_v1";
 
 /// Validates the opt-in before any service startup mutation.
 /// # Errors
