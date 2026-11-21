@@ -314,4 +314,17 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn typing_clear_after_the_indicator_ttl_is_not_a_live_target() -> TestResult {
+        let mut sender = TypingSender::default();
+        let start = Instant::now();
+        sender.focus(Some("c"))?;
+        assert!(sender.admit("c", "peer", true, start)?, "test: the start is admitted");
+        sender.sealed("c", "peer", true, start);
+        assert!(
+            !sender.admit("c", "peer", false, start + Duration::from_secs(5))?,
+            "test: five seconds later the indicator is gone and the clear is not sent"
+        );
+        Ok(())
+    }
 }

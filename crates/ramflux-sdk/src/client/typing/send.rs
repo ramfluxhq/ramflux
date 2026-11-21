@@ -18,6 +18,26 @@ fn refused(code: GeneratedErrorCode, reason: &str) -> SdkError {
     AdapterError::new(code, reason).into()
 }
 
+/// A clear is idle when no target still has a live indicator. An active send
+/// with no target, or a clear that was admitted and then lost, stays unavailable.
+fn typing_target_miss(active: bool, admitted: bool) -> Result<(), GeneratedErrorCode> {
+    if !active && !admitted { Ok(()) } else { Err(GeneratedErrorCode::EphemeralUnavailable) }
+}
+
+fn idle_typing_clear(account_id: &str, conversation_id: &str) -> g::MessageUpdate {
+    g::MessageUpdate {
+        account_id: account_id.to_owned(),
+        journal_sequence: 0,
+        identity: Some(g::EventIdentity {
+            conversation_id: conversation_id.to_owned(),
+            ..Default::default()
+        }),
+        state: Some(g::message_update::State::Content(g::Content {
+            value: Some(g::content::Value::Typing(g::Typing { active: false, expires_at: 0 })),
+        })),
+    }
+}
+
 fn bound_direct_peer(
     row: &serde_json::Value,
     conversation: &str,
@@ -119,6 +139,7 @@ impl RamfluxClient {
         // live target first makes the next stop look like there was never a target.
         let mut clear_not_delivered = false;
         let mut terminal_clear = false;
+        let mut admitted = false;
         for target in targets {
             let now = Instant::now();
             let storage_key = target.storage_key();
@@ -130,6 +151,7 @@ impl RamfluxClient {
             )? {
                 continue;
             }
+            admitted = true;
             let message = self.typing_outbound_message(&send.conversation_id, &target, active)?;
             let (envelope, update) =
                 self.prepare_typing_update_delivery(engine, &message, active)?;
@@ -189,6 +211,12 @@ impl RamfluxClient {
         }
         if terminal_clear {
             self.typing_sender.borrow_mut().mark_sealed(&send.operation_id);
+        }
+        // The indicator TTL is five seconds. A later clear has nothing left to retract,
+        // and reporting that as unavailable makes the composer stop sending.
+        if typing_target_miss(active, admitted).is_ok() {
+            let account_id = self.account_db()?.local_account_id.clone();
+            return Ok(idle_typing_clear(&account_id, &send.conversation_id));
         }
         Err(refused(GeneratedErrorCode::EphemeralUnavailable, "no eligible live typing target"))
     }
@@ -348,10 +376,12 @@ fn typing_created_at(active: bool, now_ms: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::typing_created_at;
+    use super::{idle_typing_clear, typing_created_at, typing_target_miss};
+    use crate::bindings::GeneratedErrorCode;
     use ramflux_protocol::ephemeral::{
         EPHEMERAL_FUTURE_TOLERANCE_MS, EphemeralModeError, deadline,
     };
+    use ramflux_protocol::message as g;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
 
     fn envelope(created_at: i64, ttl: u32) -> Envelope {
@@ -380,6 +410,33 @@ mod tests {
             collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
             report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         }
+    }
+
+    #[test]
+    fn expired_typing_clear_is_idle_and_an_active_miss_stays_unavailable() {
+        assert!(
+            typing_target_miss(false, false).is_ok(),
+            "test: a clear with no live indicator is idle"
+        );
+        assert_eq!(
+            typing_target_miss(true, false),
+            Err(GeneratedErrorCode::EphemeralUnavailable),
+            "test: an active send with no target stays unavailable"
+        );
+        assert_eq!(
+            typing_target_miss(false, true),
+            Err(GeneratedErrorCode::EphemeralUnavailable),
+            "test: a clear that was admitted and then lost stays unavailable"
+        );
+        let update = idle_typing_clear("account", "conversation");
+        let typing = match update.state {
+            Some(g::message_update::State::Content(content)) => content.value,
+            _ => None,
+        };
+        assert!(
+            matches!(typing, Some(g::content::Value::Typing(typing)) if !typing.active),
+            "test: the idle clear tells the caller typing is off"
+        );
     }
 
     #[test]
