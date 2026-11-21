@@ -78,6 +78,23 @@ impl Driver {
             connection: ramflux_protocol::encode_base64url([seed; 32]),
         })
     }
+    /// Build a driver around a publication the test assembled itself (for example an agent).
+    pub(crate) fn from_parts(
+        publication: crate::CustodyPublication,
+        branch: ramflux_crypto::DeviceBranch,
+        reference: DeviceRef,
+        connection_seed: u8,
+    ) -> Result<Self> {
+        let (node, proxy) = node()?;
+        Ok(Self {
+            publication,
+            branch,
+            reference,
+            node,
+            proxy,
+            connection: ramflux_protocol::encode_base64url([connection_seed; 32]),
+        })
+    }
     pub(crate) fn publish(&self) -> CustodyProofAction {
         CustodyProofAction::Publish {
             publication: Box::new(Publication {

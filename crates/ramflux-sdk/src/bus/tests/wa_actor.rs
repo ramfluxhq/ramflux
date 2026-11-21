@@ -1547,9 +1547,10 @@ async fn submit_peer_through_gateway(
     let mut queued_entries = Vec::new();
     for envelope in envelopes {
         transport.push(envelope.envelope_id.clone());
-        let queued =
-            super::fixture::publish_router_envelope(&router.0, &router.1, &source, envelope)
-                .await?;
+        let queued = crate::client::native_test_support::router::publish_router_envelope(
+            &router.0, &router.1, &source, envelope,
+        )
+        .await?;
         queued_entries.push(queued);
     }
     let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;

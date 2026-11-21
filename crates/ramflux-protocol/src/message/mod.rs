@@ -47,5 +47,8 @@ mod registry_tests;
 
 #[cfg(test)]
 mod boundary_tests;
+
+#[cfg(test)]
+mod agent_body_tests;
 #[cfg(test)]
 mod slot_layer_tests;

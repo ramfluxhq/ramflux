@@ -7,6 +7,8 @@
 #[cfg(panic = "abort")]
 compile_error!("C ABI v2 requires panic=unwind; build with --profile ffi-release");
 
+#[cfg(test)]
+mod agent_tests;
 mod buffer;
 mod card;
 #[cfg(test)]

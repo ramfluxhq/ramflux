@@ -8,6 +8,7 @@ pub(crate) mod account;
 mod account_backup;
 mod account_ceremony;
 pub(crate) mod admin;
+pub(crate) mod agent;
 pub(crate) mod attachment;
 pub(crate) mod bot;
 pub(crate) mod call;

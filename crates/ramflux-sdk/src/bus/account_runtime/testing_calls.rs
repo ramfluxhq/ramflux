@@ -16,10 +16,14 @@ use std::{
 use zeroize::Zeroizing;
 
 #[derive(Default)]
-struct Vault(Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>);
+struct Vault {
+    rows: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
+    /// Agent master items and the one-shot decision approval (AGENT-IDENTITY-01 F4).
+    agent: crate::custody::agent_fixture::AgentVaultParts,
+}
 impl Vault {
     fn put(&self, key: &str, value: &[u8]) -> Result<(), SdkError> {
-        let mut rows = self.0.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let mut rows = self.rows.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         if rows.len() >= 4 || rows.contains_key(key) {
             return Err(SdkError::CustodyVaultUnavailable);
         }
@@ -35,7 +39,7 @@ impl PrimaryVault for Vault {
         self.put(reference, secret)
     }
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        self.0
+        self.rows
             .lock()
             .map_err(|_| SdkError::CustodyVaultUnavailable)?
             .get(reference)
@@ -46,7 +50,7 @@ impl PrimaryVault for Vault {
         self.put(reference, &*key.vault_seed())
     }
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError> {
-        let rows = self.0.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let rows = self.rows.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         let bytes = rows
             .get(reference)
             .filter(|v| v.len() == 32)
@@ -56,11 +60,37 @@ impl PrimaryVault for Vault {
         Ok(SelfSigningKey::from_vault_seed(&seed))
     }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
-        self.0.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
+        self.rows.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
         Ok(())
     }
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError> {
         self.put(reference, &**seeds)
+    }
+    fn store_agent_master(
+        &self,
+        reference: &str,
+        master: &ramflux_crypto::custody::MasterKey,
+    ) -> Result<(), SdkError> {
+        self.agent.store_master(reference, master)
+    }
+    fn certify_agent_master(
+        &self,
+        reference: &str,
+        request: ramflux_crypto::custody::AgentMasterRequest,
+    ) -> Result<
+        ramflux_protocol::custody::Envelope<ramflux_protocol::custody::MasterCertificate>,
+        SdkError,
+    > {
+        self.agent.certify(reference, request)
+    }
+    fn delete_agent_master(&self, reference: &str, last_range: u64) -> Result<(), SdkError> {
+        self.agent.delete_master(reference, last_range)
+    }
+    fn sign_agent_register_decision(
+        &self,
+        request: crate::custody::AgentDecisionSigning<'_>,
+    ) -> Result<ramflux_protocol::custody::RegisterDecision, SdkError> {
+        self.agent.sign(self, &request)
     }
     fn load_branch(
         &self,
@@ -68,7 +98,7 @@ impl PrimaryVault for Vault {
         principal: &str,
         device: &DeviceRef,
     ) -> Result<BranchCredentials, SdkError> {
-        let rows = self.0.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let rows = self.rows.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
         let bytes = rows
             .get(reference)
             .filter(|v| v.len() == 64)
@@ -79,13 +109,19 @@ impl PrimaryVault for Vault {
     }
 }
 
+const NATIVE_PASSPHRASE: &[u8] = b"native call fixture passphrase";
+
 struct Names {
     principal: String,
     device: String,
 }
 
-/// Phrase-created account with real native authority and private prekeys.
+/// Account with real native authority and private prekeys. A human is phrase-created; an agent
+/// comes from the real agent creation flow with the custodian's approval (decision D6).
 pub struct NativeCallAccount {
+    vault: Arc<Vault>,
+    id: String,
+    principal: String,
     pub(super) client: RamfluxClient,
     pub config: GatewaySessionConfig,
     pub manifest: serde_json::Value,
@@ -119,17 +155,50 @@ impl NativeCallAccount {
             .await
     }
 
-    /// Create a genuinely custodian-authorized headless account for consumer tests.
+    /// Create a genuinely custodian-authorized agent account for consumer tests, through the real
+    /// agent creation flow: the custodian's primary approves the plan and the desktop commits the
+    /// account. The agent's published principal is `<name>.example`; its local account id and
+    /// device id are chosen by the flow (read them with [`Self::account_id`]).
     /// # Errors
     /// Returns custody, vault, or account-store failures.
-    pub async fn headless(root: &Path, id: &str, custodian: &Self) -> Result<Self, SdkError> {
+    pub async fn headless(root: &Path, name: &str, custodian: &mut Self) -> Result<Self, SdkError> {
+        custodian.enroll_desktop(root)?;
         Self::create(
             root,
-            id,
+            name,
             Some(custodian),
-            &Names { principal: format!("{id}.example"), device: "primary".into() },
+            &Names { principal: format!("{name}.example"), device: String::new() },
         )
         .await
+    }
+
+    /// Enrols the desktop sibling in this human's authority (the agent creation flow needs one) and
+    /// refreshes the publication and manifest this fixture hands to its peers.
+    fn enroll_desktop(&mut self, root: &Path) -> Result<(), SdkError> {
+        let now = crate::custody::network_now()?;
+        crate::custody::agent_creation::test_agent::enroll_desktop(
+            root,
+            &self.id,
+            &self.principal,
+            self.vault.as_ref(),
+            now,
+        )?;
+        let account = crate::custody::load_account(root, &self.id, now + 1)?;
+        self.publication = account.publication();
+        let mut manifest: crate::SdkDeviceManifestResponse =
+            serde_json::from_value(self.manifest.clone())?;
+        manifest.custody.as_mut().ok_or(SdkError::CustodySetupInvalid)?.publication =
+            self.publication.clone();
+        // The owner's own directory cache must not stay behind its durable authority.
+        self.client.persist_observed_identity_directory_now(&manifest)?;
+        self.manifest = serde_json::to_value(manifest)?;
+        Ok(())
+    }
+
+    /// The local account id of this fixture (chosen by the creation flow for an agent).
+    #[must_use]
+    pub fn account_id(&self) -> &str {
+        &self.id
     }
 
     async fn create(
@@ -140,12 +209,33 @@ impl NativeCallAccount {
     ) -> Result<Self, SdkError> {
         std::fs::create_dir_all(root)?;
         let vault = Arc::new(Vault::default());
-        let account = Self::create_authority(root, id, custodian, names, vault.as_ref())?;
-        let publication = Publication { record: account.record().clone(), compacted_ids: None };
-        let anchor = account.record().body.account_anchor.clone();
+        let (id, device, passphrase, record) = match custodian {
+            None => {
+                let account = Self::create_authority(root, id, names, vault.as_ref())?;
+                (
+                    id.to_owned(),
+                    names.device.clone(),
+                    Zeroizing::new(NATIVE_PASSPHRASE.to_vec()),
+                    account.record().clone(),
+                )
+            }
+            Some(custodian) => {
+                let created = Self::create_agent(root, id, names, custodian, &vault)?;
+                (
+                    created.account_id,
+                    created.device_id,
+                    Zeroizing::new(created.passphrase.as_bytes().to_vec()),
+                    created.record,
+                )
+            }
+        };
+        let names = &Names { principal: names.principal.clone(), device };
+        let id = id.as_str();
+        let publication = Publication { record: record.clone(), compacted_ids: None };
+        let anchor = record.body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
-        client.unlock_account(id, b"native call fixture passphrase")?;
+        client.unlock_account(id, &passphrase)?;
         client
             .initialize_born_v3_branch(&names.device, Arc::clone(&vault) as Arc<dyn PrimaryVault>)
             .await?;
@@ -182,7 +272,7 @@ impl NativeCallAccount {
                 account_id: id.into(),
                 node_id: "fixture-node".into(),
                 node_public_key: ramflux_protocol::encode_base64url([7; 32]),
-                vault,
+                vault: Arc::clone(&vault) as Arc<dyn PrimaryVault>,
             })
             .with_account_identity(&client)?;
         config.device_branch = Some(Arc::new(
@@ -190,6 +280,9 @@ impl NativeCallAccount {
         ));
         config.source_identity = Some(identity.clone());
         Ok(Self {
+            vault,
+            id: id.to_owned(),
+            principal: names.principal.clone(),
             client,
             config,
             manifest: serde_json::to_value(manifest)?,
@@ -198,18 +291,42 @@ impl NativeCallAccount {
         })
     }
 
+    /// The agent through the real creation flow, with `custodian` as the human whose primary
+    /// approves.
+    fn create_agent(
+        root: &Path,
+        name: &str,
+        names: &Names,
+        custodian: &Self,
+        vault: &Arc<Vault>,
+    ) -> Result<crate::custody::agent_creation::test_agent::CreatedAgent, SdkError> {
+        use crate::custody::agent_creation::test_agent::{AgentRequest, create_test_agent};
+        let now = crate::custody::network_now()?;
+        crate::custody::load_account(root, &custodian.id, now)?.mark_live_for_test(root)?;
+        let created = create_test_agent(
+            &AgentRequest {
+                root,
+                human_account_id: &custodian.id,
+                human_principal: &custodian.principal,
+                human_vault: custodian.vault.as_ref(),
+                arm_approval: &|plan_hash| custodian.vault.agent.arm(plan_hash),
+                agent_vault: vault.as_ref(),
+                agent_principal: &names.principal,
+                display_name: "Call Fixture",
+                request_id: &format!("agent-{name}"),
+            },
+            now,
+        )?;
+        Ok(created)
+    }
+
     fn create_authority(
         root: &Path,
         id: &str,
-        custodian: Option<&Self>,
         names: &Names,
         vault: &dyn PrimaryVault,
     ) -> Result<crate::custody::BornAccount, SdkError> {
         let now = crate::custody::network_now()?;
-        if let Some(custodian) = custodian {
-            let id = &custodian.client.account_db()?.local_account_id;
-            crate::custody::load_account(root, id, now)?.mark_live_for_test(root)?;
-        }
         let mut ceremony = CreationCeremony::begin(
             root,
             CreateInput {
@@ -217,16 +334,8 @@ impl NativeCallAccount {
                 principal_id: names.principal.clone(),
                 device_id: names.device.clone(),
                 display_name: "Call Fixture".into(),
-                principal_kind: if custodian.is_some() {
-                    ramflux_protocol::PrincipalKind::HeadlessAi
-                } else {
-                    ramflux_protocol::PrincipalKind::Human
-                },
-                custodian_account_id: custodian
-                    .map(|account| {
-                        account.client.account_db().map(|db| db.local_account_id.clone())
-                    })
-                    .transpose()?,
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                custodian_account_id: None,
             },
             now,
         )?;
@@ -246,16 +355,7 @@ impl NativeCallAccount {
                     .to_owned(),
             );
         }
-        let mut account = ceremony.confirm_with_passphrase(
-            &words,
-            vault,
-            now,
-            b"native call fixture passphrase",
-        )?;
-        if custodian.is_some() {
-            account.mark_live_for_test(root)?;
-        }
-        Ok(account)
+        ceremony.confirm_with_passphrase(&words, vault, now, NATIVE_PASSPHRASE)
     }
 
     /// Install an established pair session between this account and `peer`, so a durable DM
@@ -317,7 +417,7 @@ impl NativeCallAccount {
     pub fn reopen_snapshot(root: &Path, id: &str) -> Result<String, SdkError> {
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
-        client.unlock_account(id, b"native call fixture passphrase")?;
+        client.unlock_account(id, NATIVE_PASSPHRASE)?;
         let db = client.account_db()?;
         Ok(format!(
             "{:?}|{:?}|{:?}|{:?}",

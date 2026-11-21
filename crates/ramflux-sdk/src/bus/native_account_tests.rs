@@ -891,18 +891,13 @@ fn capacity_refusal_uses_the_node_busy_reason() {
     );
 }
 
-fn create_refusal_account(
+fn create_human_account(
     root: &std::path::Path,
     vault: &dyn crate::custody::PrimaryVault,
     now: u64,
     id: &str,
-    kind: ramflux_protocol::PrincipalKind,
-    custodian: Option<&str>,
 ) -> Result {
-    let mut input = input(id);
-    input.principal_kind = kind;
-    input.custodian_account_id = custodian.map(str::to_owned);
-    let mut ceremony = CreationCeremony::begin(root, input, now)?;
+    let mut ceremony = CreationCeremony::begin(root, input(id), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
     ceremony.confirm_with_passphrase(
@@ -914,16 +909,37 @@ fn create_refusal_account(
     Ok(())
 }
 
+/// An agent account created through the real approved creation flow for the human `owner`
+/// (decision D6): its local id and data passphrase are chosen by the flow.
+struct AgentAccount {
+    id: String,
+    passphrase: String,
+}
+
+fn create_agent_account(
+    root: &std::path::Path,
+    vault: &TestVault,
+    now: u64,
+) -> Result<AgentAccount> {
+    let created = crate::custody::tests::create_agent(root, "owner", vault, "agent", now)?;
+    Ok(AgentAccount { id: created.account_id, passphrase: created.passphrase.to_string() })
+}
+
 async fn refuse_untrusted_custodians(socket: &std::path::Path) -> Result {
     let mut locked = connect_creation(socket)
         .await
         .map_err(|error| format!("locked creation connect: {error}"))?;
-    assert!(locked.begin_headless("Locked owner", "owner").await.is_err());
-    assert!(locked.begin_headless_with_envelope("No owner envelope", "owner", None).await.is_err());
+    assert!(
+        locked.begin("Locked owner", ramflux_protocol::PrincipalKind::HeadlessAi).await.is_err()
+    );
     Ok(())
 }
 
-async fn refuse_open_custodians(root: &std::path::Path, socket: &std::path::Path) -> Result {
+async fn refuse_open_custodians(
+    root: &std::path::Path,
+    socket: &std::path::Path,
+    agent: &AgentAccount,
+) -> Result {
     let mut bus = connect(socket).await.map_err(|error| format!("unlock connect: {error}"))?;
     bus.request(
         Some("owner".into()),
@@ -938,31 +954,29 @@ async fn refuse_open_custodians(root: &std::path::Path, socket: &std::path::Path
             Some("owner".into()),
             "account",
             "account.export_agent_credentials",
-            json!({"account":"agent","path":root.join("locked.bundle")}),
+            json!({"account":agent.id,"path":root.join("locked.bundle")}),
         ))
         .await?;
     assert!(locked_export.error.is_some());
-    for id in ["owner", "other", "pending", "agent"] {
-        bus.request(
-            Some(id.into()),
-            "account",
-            "account.unlock",
-            json!({"passphrase":format!("{id}-data-passphrase")}),
-        )
-        .await?;
+    for (id, passphrase) in [
+        ("owner", "owner-data-passphrase".to_owned()),
+        ("other", "other-data-passphrase".to_owned()),
+        ("pending", "pending-data-passphrase".to_owned()),
+        (agent.id.as_str(), agent.passphrase.clone()),
+    ] {
+        bus.request(Some(id.into()), "account", "account.unlock", json!({"passphrase":passphrase}))
+            .await?;
     }
     let mut creation = connect_creation(socket)
         .await
         .map_err(|error| format!("untrusted owner creation connect: {error}"))?;
-    assert!(
-        creation
-            .begin_headless_with_envelope("Non-owner session", "owner", Some("other"))
-            .await
-            .is_err()
-    );
-    assert!(creation.begin_headless("Pending owner", "pending").await.is_err());
-    assert!(creation.begin_headless("Non-human owner", "agent").await.is_err());
-    refuse_untrusted_exports(root, &mut bus).await?;
+    for name in ["Non-owner session", "Pending owner", "Non-human owner"] {
+        assert!(
+            creation.begin(name, ramflux_protocol::PrincipalKind::HeadlessAi).await.is_err(),
+            "the phrase ceremony never creates an agent: {name}"
+        );
+    }
+    refuse_untrusted_exports(root, &mut bus, &agent.id).await?;
     let mut legacy = connect_custody(socket)
         .await
         .map_err(|error| format!("legacy custody connect: {error}"))?;
@@ -973,8 +987,12 @@ async fn refuse_open_custodians(root: &std::path::Path, socket: &std::path::Path
     Ok(())
 }
 
-async fn refuse_untrusted_exports(root: &std::path::Path, bus: &mut LocalBusClient) -> Result {
-    for owner in ["other", "pending", "agent"] {
+async fn refuse_untrusted_exports(
+    root: &std::path::Path,
+    bus: &mut LocalBusClient,
+    agent: &str,
+) -> Result {
+    for owner in ["other", "pending", agent] {
         bus.request(
             Some(owner.into()),
             "stream",
@@ -988,7 +1006,7 @@ async fn refuse_untrusted_exports(root: &std::path::Path, bus: &mut LocalBusClie
                 Some(owner.into()),
                 "account",
                 "account.export_agent_credentials",
-                json!({"account":"agent","path":root.join(format!("{owner}.bundle"))}),
+                json!({"account":agent,"path":root.join(format!("{owner}.bundle"))}),
             ))
             .await?;
         assert!(refused.error.is_some(), "export unexpectedly accepted for {owner}");
@@ -1014,7 +1032,12 @@ async fn refuse_wrong_daemon_creation(root: &Root, socket: &std::path::Path) -> 
         let mut ceremony = connect_creation(socket)
             .await
             .map_err(|error| format!("wrong-daemon creation connect: {error}"))?;
-        assert!(ceremony.begin_headless("Wrong daemon", "owner").await.is_err());
+        assert!(
+            ceremony
+                .begin("Wrong daemon", ramflux_protocol::PrincipalKind::HeadlessAi)
+                .await
+                .is_err()
+        );
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = tokio::join!(
@@ -1063,21 +1086,18 @@ async fn refuse_wrong_daemon_export(root: &Root, socket: &std::path::Path) -> Re
 async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
     use std::sync::Arc;
     let root = Root::new()?;
-    let vault: Arc<dyn crate::custody::PrimaryVault + Send + Sync> = Arc::new(TestVault::default());
+    let test_vault = Arc::new(TestVault::default());
+    let vault: Arc<dyn crate::custody::PrimaryVault + Send + Sync> = test_vault.clone();
     let now = crate::custody::network_now()?;
-    for (id, kind, custodian, live) in [
-        ("owner", ramflux_protocol::PrincipalKind::Human, None, true),
-        ("other", ramflux_protocol::PrincipalKind::Human, None, true),
-        ("pending", ramflux_protocol::PrincipalKind::Human, None, false),
-        ("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner"), true),
-    ] {
-        create_refusal_account(&root.0, vault.as_ref(), now, id, kind, custodian)
+    for (id, live) in [("owner", true), ("other", true), ("pending", false)] {
+        create_human_account(&root.0, vault.as_ref(), now, id)
             .map_err(|error| format!("create {id}: {error}"))?;
         if live {
             crate::custody::tests::mark_live(&root.0, id, now)
                 .map_err(|error| format!("mark {id} live: {error}"))?;
         }
     }
+    let agent = create_agent_account(&root.0, test_vault.as_ref(), now)?;
     let socket = root.0.join("headless-refusals.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
     config.custody_vault = Some(Arc::clone(&vault));
@@ -1094,7 +1114,7 @@ async fn headless_creation_refuses_every_untrusted_custodian_entry() -> Result {
     let (stop, receiver) = watch::channel(false);
     let flow = async {
         let _stop = Stop(stop);
-        refuse_open_custodians(&root.0, &socket).await
+        refuse_open_custodians(&root.0, &socket, &agent).await
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
     accept_refusal_server(server, "open custodian refusal server failed")?;
@@ -1172,14 +1192,11 @@ async fn native_fenced_account_opens_data_actor_and_refuses_legacy_proof_after_r
 async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Result {
     let root = Root::new()?;
     let now = crate::custody::network_now()?;
-    let vault: Arc<dyn crate::custody::PrimaryVault + Send + Sync> = Arc::new(TestVault::default());
-    for (id, kind, owner) in [
-        ("owner", ramflux_protocol::PrincipalKind::Human, None),
-        ("agent", ramflux_protocol::PrincipalKind::HeadlessAi, Some("owner")),
-    ] {
-        create_refusal_account(&root.0, vault.as_ref(), now, id, kind, owner)?;
-        crate::custody::tests::mark_live(&root.0, id, now)?;
-    }
+    let test_vault = Arc::new(TestVault::default());
+    let vault: Arc<dyn crate::custody::PrimaryVault + Send + Sync> = test_vault.clone();
+    create_human_account(&root.0, vault.as_ref(), now, "owner")?;
+    crate::custody::tests::mark_live(&root.0, "owner", now)?;
+    let agent = create_agent_account(&root.0, test_vault.as_ref(), now)?;
     let socket = root.0.join("agent-export.sock");
     let mut config = LocalBusConfig::new(&socket, &root.0);
     config.custody_vault = Some(vault);
@@ -1187,23 +1204,25 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
     let flow = async {
         let _stop = Stop(stop);
         let mut bus = connect(&socket).await?;
-        for id in ["owner", "agent"] {
+        for (id, passphrase) in
+            [("owner", "owner-data-passphrase"), (agent.id.as_str(), agent.passphrase.as_str())]
+        {
             bus.request(
                 Some(id.into()),
                 "account",
                 "account.unlock",
-                json!({"passphrase":format!("{id}-data-passphrase")}),
+                json!({"passphrase":passphrase}),
             )
             .await?;
         }
-        bus.request(Some("agent".into()), "account", "account.switch", json!({})).await?;
+        bus.request(Some(agent.id.clone()), "account", "account.switch", json!({})).await?;
         let listed = bus.request(None, "account", "account.list", json!({})).await?;
-        assert_eq!(listed["active_account_id"], "agent");
-        let agent = listed["account_details"]
+        assert_eq!(listed["active_account_id"], agent.id.as_str());
+        let record = listed["account_details"]
             .as_array()
-            .and_then(|rows| rows.iter().find(|row| row["id"] == "agent"))
+            .and_then(|rows| rows.iter().find(|row| row["id"] == agent.id.as_str()))
             .ok_or("agent record missing")?;
-        let owner = agent["custodian_account_id"].as_str().ok_or("custodian record missing")?;
+        let owner = record["custodian_account_id"].as_str().ok_or("custodian record missing")?;
         bus.request(
             Some(owner.into()),
             "stream",
@@ -1217,16 +1236,20 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
                 Some(owner.into()),
                 "account",
                 "account.export_agent_credentials",
-                json!({"account":"agent","path":path}),
+                json!({"account":agent.id,"path":path}),
             )
             .await?;
         assert_eq!(result["exported"], true);
         let bundle: crate::custody::AgentProvisioningBundle =
             serde_json::from_slice(&std::fs::read(path)?)?;
-        assert_eq!(bundle.account_id, "agent");
-        assert_eq!(bundle.data_passphrase, "agent-data-passphrase");
+        assert_eq!(bundle.account_id, agent.id);
+        assert_eq!(bundle.data_passphrase, agent.passphrase);
         let listed = bus.request(None, "account", "account.list", json!({})).await?;
-        assert_eq!(listed["active_account_id"], "agent", "export must not switch accounts");
+        assert_eq!(
+            listed["active_account_id"],
+            agent.id.as_str(),
+            "export must not switch accounts"
+        );
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);

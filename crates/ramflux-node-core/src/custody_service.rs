@@ -92,6 +92,10 @@ pub(crate) fn publication_failure(error: crate::NodeCoreError) -> ProofFailure {
         }
         crate::NodeCoreError::Capacity { .. } => CustodyRefusal::Capacity.into(),
         crate::NodeCoreError::PrincipalIdTaken => CustodyRefusal::PrincipalIdTaken.into(),
+        crate::NodeCoreError::AgentAuthorizationRequired => {
+            CustodyRefusal::AgentAuthorizationRequired.into()
+        }
+        crate::NodeCoreError::AgentPublishRefused(refusal) => refusal.into(),
         error => persistence(error).into(),
     }
 }

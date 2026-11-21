@@ -158,6 +158,7 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
+            super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
                     let result = self.capture_backup();

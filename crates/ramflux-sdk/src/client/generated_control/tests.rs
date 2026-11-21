@@ -150,7 +150,29 @@ fn samples() -> Result<Vec<Control>, SdkError> {
         own_group_consent()?,
         own_message_copy_sent()?,
         friend()?,
+        agent_sync()?,
     ])
+}
+
+fn agent_sync() -> Result<Control, SdkError> {
+    let endpoint = |device: &str| ramflux_protocol::message::QualifiedDevice {
+        account_anchor: "owner".into(),
+        device_id: device.into(),
+        device_epoch: 1,
+    };
+    control_from_payload(control::Payload::AgentSync(ramflux_protocol::message::AgentHostPacket {
+        owner_anchor: "owner".into(),
+        source: Some(endpoint("desktop")),
+        recipient: Some(endpoint("phone")),
+        correlation_id: "agent-create".into(),
+        body: Some(ramflux_protocol::message::agent_host_packet::Body::Custody(
+            ramflux_protocol::message::AgentCustodyPacket {
+                value: Some(ramflux_protocol::message::agent_custody_packet::Value::RequestJson(
+                    b"{}".to_vec(),
+                )),
+            },
+        )),
+    }))
 }
 
 fn group_key() -> Result<Control, SdkError> {
@@ -249,11 +271,11 @@ fn friend() -> Result<Control, SdkError> {
 }
 
 fn round_trip_all_operations() -> TestResult {
-    assert_eq!(CONTROLS.len(), 16);
+    assert_eq!(CONTROLS.len(), 17);
     let operations: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.operation).collect();
     let tags: BTreeSet<u32> = CONTROLS.iter().map(|binding| binding.tag).collect();
-    assert_eq!(operations, (1..=16).collect());
-    assert_eq!(tags, (16..=31).collect());
+    assert_eq!(operations, (1..=17).collect());
+    assert_eq!(tags, (16..=32).collect());
     let mut events = stream();
     let mut seen = BTreeSet::new();
     for (index, control) in samples()?.into_iter().enumerate() {
@@ -291,7 +313,7 @@ fn round_trip_all_operations() -> TestResult {
         );
         RamfluxClient::validate_generated_control(&decoded_control)?;
     }
-    assert_eq!(seen.len(), 16);
+    assert_eq!(seen.len(), 17);
     Ok(())
 }
 

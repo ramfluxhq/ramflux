@@ -119,10 +119,16 @@ fn populated(descriptor: &prost_reflect::MessageDescriptor, depth: usize) -> Dyn
         return message;
     }
     for oneof in descriptor.oneofs().filter(|oneof| !oneof.is_synthetic()) {
-        if let Some(field) = oneof.fields().next()
-            && let Kind::Message(child) = field.kind()
-        {
-            message.set_field(&field, Value::Message(populated(&child, depth + 1)));
+        let Some(field) = oneof.fields().next() else {
+            continue;
+        };
+        match field.kind() {
+            Kind::Message(child) => {
+                message.set_field(&field, Value::Message(populated(&child, depth + 1)));
+            }
+            // A bytes-first choice (AgentCustodyPacket) is populated with one byte.
+            Kind::Bytes => message.set_field(&field, Value::Bytes(vec![1].into())),
+            _ => {}
         }
     }
     if descriptor.name() == "Control" {

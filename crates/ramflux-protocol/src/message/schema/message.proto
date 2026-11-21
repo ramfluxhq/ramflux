@@ -255,6 +255,7 @@ enum ControlOperation {
   CONTROL_OWN_GROUP_CONSENT = 14;
   CONTROL_OWN_MESSAGE_COPY = 15;
   CONTROL_FRIEND = 16;
+  CONTROL_AGENT_SYNC = 17;
 }
 message Control {
   ControlOperation operation = 1;
@@ -278,8 +279,169 @@ message Control {
     OwnGroupConsent own_group_consent = 29;
     OwnMessageCopy own_message_copy = 30;
     FriendControl friend = 31;
+    AgentHostPacket agent_sync = 32;
   }
 }
+// Agent creation custody traffic between the paired Human's own devices (AGENT-IDENTITY-01).
+message AgentHostPacket {
+  string owner_anchor = 1;
+  QualifiedDevice source = 2;
+  QualifiedDevice recipient = 3;
+  string correlation_id = 4;
+  // Body tags 5-9, 11 and 12 belong to other agent-host stages; they stay reserved by number and
+  // name so no other meaning can take them. Tag 10 is the owner metadata broadcast (E1).
+  reserved 5 to 9;
+  reserved 11 to 12;
+  reserved "request", "result", "feed", "snapshot", "error", "group_head", "mirror";
+  oneof body {
+    AgentMetadata metadata = 10;
+    AgentCustodyPacket custody = 13;
+  }
+}
+message AgentCustodyPacket {
+  oneof value {
+    bytes request_json = 1;
+    bytes decision_json = 2;
+    bytes cancel_json = 3;
+    bytes receipt_json = 4;
+  }
+}
+// Bus bodies of the agent creation methods (AGENT-CONFIG-01 contract 1 and 2; AGENT-IDENTITY-01 C3).
+// Requests and results are these messages as ProtoJSON. Field numbers are permanent.
+message AgentPersona {
+  string name = 1;
+  string avatar = 2;
+  string responsibility = 3;
+}
+message AgentAccessPolicy {
+  string dm = 1;
+  string group_inviters = 2;
+  repeated string allowed_humans = 3;
+}
+message AgentLimits {
+  optional uint32 max_concurrent_turns = 1;
+  optional uint64 max_cost_per_day_cents = 2;
+}
+message AgentConfigData {
+  string provider = 1;
+  string model = 2;
+  optional string prompt = 3;
+  string autonomy = 4;
+  repeated string tools = 5;
+  reserved 6;
+  reserved "memory";
+  optional bool enabled = 7;
+  optional AgentLimits limits = 8;
+}
+message AgentHostRef {
+  QualifiedDevice device = 1;
+  string agent_name = 2;
+  optional string incarnation = 3;
+}
+message AgentCreate {
+  AgentPersona persona = 1;
+  optional AgentHostRef host = 2;
+  optional AgentConfigData config = 3;
+  optional bool confirmed = 4;
+  AgentAccessPolicy access = 5;
+  string role = 6;
+}
+message AgentCreationDecide {
+  string request_id = 1;
+  string request_hash = 2;
+  optional bool approved = 3;
+}
+message AgentOperationGet { string operation_id = 1; }
+message AgentFailure {
+  string reason_code = 1;
+  optional string current_revision = 2;
+  optional uint64 retry_after_ms = 3;
+  string effects = 4;
+  optional bool restored = 5;
+  optional uint32 http_status = 6;
+  optional string current_incarnation = 7;
+}
+message AgentCustodyStatus {
+  string request_id = 1;
+  string state = 2;
+  optional string agent_anchor = 3;
+  optional uint64 expires_at = 4;
+  optional bytes request_json = 5;
+  optional bytes receipt_json = 6;
+  optional AgentFailure error = 7;
+}
+// The result arms of this module: list (page), get and edit (record), watch (ack) and creation
+// custody. Arms 4-8 belong to later agent stages.
+message AgentConfigResult {
+  oneof value {
+    AgentPage page = 1;
+    AgentRecord record = 2;
+    AgentWatchAck watch = 3;
+    AgentCustodyStatus custody = 9;
+  }
+}
+
+// The agent record (AGENT-CONFIG-01 contract 1). `host`, `config`, `revision`, `observation` and
+// `cleanup` belong to the bound-runtime stages: they are present in the message but always absent or
+// empty in this module. `access` is RF-owned and validated by the record store.
+message AgentRecord {
+  string agent_anchor = 1;
+  string custodian_anchor = 2;
+  AgentPersona persona = 3;
+  optional AgentHostRef host = 4;
+  optional AgentConfigData config = 5;
+  optional string revision = 6;
+  string lifecycle = 7;
+  string observation = 8;
+  string cleanup = 9;
+  AgentAccessPolicy access = 10;
+  string role = 11;
+}
+
+// The owner metadata broadcast (contract 4): RF-owned persona, access and identity, ordered by the
+// native EventOrder of `identity`.
+message AgentMetadata {
+  string agent_anchor = 1;
+  string custodian_anchor = 2;
+  AgentPersona persona = 3;
+  optional AgentHostRef host = 4;
+  optional bool identity_retired = 5;
+  EventIdentity identity = 6;
+  AgentAccessPolicy access = 7;
+  string role = 8;
+}
+
+// Bus bodies of the remaining agent methods (contract 2; AGENT-IDENTITY-01 E1). ProtoJSON, closed.
+message AgentList {
+  optional string cursor = 1;
+  uint32 limit = 2;
+}
+message AgentGet { string agent_anchor = 1; }
+message AgentWatch { string journal_cursor = 1; }
+message AgentPersonaEdit {
+  string agent_anchor = 1;
+  AgentPersona persona = 2;
+  optional bool confirmed = 3;
+}
+message AgentAccessSet {
+  string agent_anchor = 1;
+  AgentAccessPolicy access = 2;
+  EventIdentity base = 3;
+  optional bool confirmed = 4;
+}
+// Used by `agent.delete` (state U only in this module).
+message AgentMutation {
+  string agent_anchor = 1;
+  optional string base_revision = 2;
+  optional string incarnation = 3;
+  optional bool confirmed = 4;
+}
+message AgentPage {
+  repeated AgentRecord records = 1;
+  optional string next = 2;
+  string journal_cursor = 3;
+}
+message AgentWatchAck { string journal_cursor = 1; }
 message PairReset { uint64 rejected_bootstrap_floor = 1; }
 message PairResetAck { uint64 rejected_bootstrap_floor = 1; }
 message ContactControl { NativeContactConsent consent = 1; }

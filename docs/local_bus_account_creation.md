@@ -86,36 +86,40 @@ envelope string fields longer than 128 bytes before producing secret output.
 Secret output uses a fixed 8192-byte buffer that cannot reallocate after writing
 secret bytes. Creation requests cannot carry retry operation identifiers.
 
-## Headless participant creation
+## Agent (headless participant) creation
 
-A trusted frontend for an unlocked, live native human owner may create a
-`headless_ai` account. On the exclusive ceremony connection, send
-`account.create.begin` with the owner as both the envelope `account_id` and
-`custodian_account`:
+The phrase ceremony above creates human accounts only. `account.create.begin` with
+`principal_kind` other than `human`, and any request that names a custodian, is
+refused with `CustodySetupInvalid`; the daemon never shows a recovery phrase for an
+agent. An agent account is created by the approved agent creation flow:
 
-```json
-{
-  "display_name": "Demo Assistant",
-  "principal_kind": "headless_ai",
-  "custodian_account": "account-owner"
-}
-```
+1. On a paired desktop (a non-primary device of the human account) the owner sends
+   `agent.create` with the persona, access policy and `confirmed: true`. The desktop
+   generates the agent's keys, keeps the agent master only in its vault, and sends a
+   public creation plan to the human's primary phone over the end-to-end encrypted
+   own-device channel. The reply is an operation id in the state
+   `authorization_pending`.
+2. On the primary phone the owner reviews the plan and approves or denies it with
+   `agent.creation.decide` (one confirm action, signed with the primary device key).
+   A deny, a timeout of 300 seconds or a cancel removes every pending secret.
+3. After the verified approval the desktop commits the account bundle once and
+   publishes the agent to its home node. The node accepts the first publication of
+   an agent, or a change of its custodian primary, only together with that signed
+   approval. `agent.operation.get` reports the state until it is `complete`.
 
-Creation without a custodian, with a non-human custodian, with an authority-blocked
-or networking-pending custodian, or with different envelope/body custodians is
-refused. The owner completes the same show-once phrase and hidden-word challenge.
-Each service has its own phrase, which is shown only in this owner ceremony. For
-`headless_ai`, `account.create.confirm` contains only `words`; the daemon generates
-the independent random data passphrase. Neither the agent process nor the confirm
-response receives the phrase or passphrase.
+After a primary transfer the agent is paused and re-certified to the new primary with
+a new approval; its identity does not change. `agent.list`, `agent.get`,
+`agent.persona.edit`, `agent.access.set` and `agent.delete` read and edit the agent
+record on any owner device. Deleting an agent closes its session and removes its
+local state and vault items; the published custody record stays on the node.
 
 After the agent account is live, the attended owner connection sends
 `account.export_agent_credentials {"account":"account-agent","path":"/private/path"}`.
 The target must be a native `headless_ai` account governed by that exact owner. The
 daemon refuses an existing destination and creates a 0600 file containing only
 `account_id` and `data_passphrase`. The credential is exportable once. Human
-accounts are always refused. If the bundle is lost or an import fails, use the owner's
-saved service recovery phrase; the daemon will not export the same credential again.
+accounts are always refused. If the bundle is lost or an import fails, the daemon will
+not export the same credential again; create a new agent with `rf agent create`.
 
 Start `ramflux-agent-host --provisioning-bundle /private/path`. It checks that the
 file is private and matches the configured account, imports the passphrase into the
@@ -144,10 +148,11 @@ Only the public account result goes to stdout. There are no seed, phrase, accoun
 identifier or passphrase arguments for creation, and no environment-variable or
 piped-input creation flow. The old `account login` seed-taking alias is removed.
 
-For a headless participant, keep the native human custodian unlocked and active, then
-run `rf account create --display-name "Service" --kind headless_ai --custodian <owner>`.
-The same attended terminal displays and clears the service phrase, while rfd generates
-the data passphrase. Once registration is Live, run
+For an agent, run `rf agent create --persona ... --confirm` on the paired desktop,
+then `rf agent decide --request-id <id> --request-hash <hash> --approved true` on the primary
+phone's daemon, and
+follow the operation with `rf agent status`. No agent phrase is ever shown. Once the
+agent is `complete`, run
 `rf account export-agent-credentials --account <agent> --out <private-path>`. The export
 resolves the human custodian from the agent's durable custody record, regardless
 of which account is active. The owner must remain unlocked and Live; export does

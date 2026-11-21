@@ -7,12 +7,8 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn contact_and_identity_warn_about_confusable_names_without_rejecting_non_latin_names()
 -> TestResult {
-    let alice =
-        crate::client::native_test_support::Fixture::headless("alice", "alice", "phone", "Alice")
-            .await?;
-    let impostor =
-        crate::client::native_test_support::Fixture::headless("other", "other", "phone", "Alіce")
-            .await?;
+    let alice = crate::client::native_test_support::Fixture::headless("alice", "Alice").await?;
+    let impostor = crate::client::native_test_support::Fixture::headless("other", "Alіce").await?;
     let reader = crate::client::native_test_support::Fixture::new("reader").await?;
     reader.client.persist_observed_identity_directory_now(&alice.manifest)?;
     reader.client.persist_observed_identity_directory_now(&impostor.manifest)?;
@@ -205,9 +201,7 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
 #[tokio::test]
 async fn confusable_name_lookup_includes_contacts_after_the_storage_page_limit() -> TestResult {
     let reader = crate::client::native_test_support::Fixture::new("reader").await?;
-    let owner =
-        crate::client::native_test_support::Fixture::headless("owner", "owner", "phone", "Alіce")
-            .await?;
+    let owner = crate::client::native_test_support::Fixture::headless("owner", "Alіce").await?;
     let db = reader.client.account_db()?;
     for index in 0..110 {
         let id = format!("a-{index:03}");

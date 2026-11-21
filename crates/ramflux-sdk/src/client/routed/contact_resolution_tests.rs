@@ -384,7 +384,7 @@ async fn born_headless_bus(ids: &[&str]) -> Result<(Directory, LocalBusDaemonSta
     let mut fixtures = Vec::new();
     for id in ids {
         fixtures.push(
-            crate::client::native_test_support::Fixture::headless(id, id, id, "Example Human")
+            crate::client::native_test_support::Fixture::headless(id, "Example Human")
                 .await
                 .map_err(native_account)?,
         );
@@ -400,7 +400,9 @@ async fn assemble_born(
     let mut directory = Directory::from_records(&root, manifests).await?;
     let mut accounts = BTreeMap::new();
     for mut fixture in fixtures {
-        let id = fixture.client.account_db()?.local_account_id.clone();
+        // Agents get their local account id from the creation flow, so the tests address them
+        // by their published principal, which they choose.
+        let id = fixture.manifest.principal_id.clone();
         accounts.insert(id, install_born(&directory, &mut fixture));
         directory.anchors.push(fixture.root);
     }

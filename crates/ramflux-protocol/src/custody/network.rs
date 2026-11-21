@@ -3,10 +3,12 @@
 
 //! Framed born-v3 registration/session requests; these never carry a legacy branch proof.
 
+use super::agent_register::{AgentPublishReceipt, RegisterDecision, RegisterPlan};
 use super::{
     BindingMode, BranchChallenge, BranchProofV3, DeviceRef, DeviceSet, Envelope,
     NodeIdentityRecord, RelayAcceptance,
 };
+use crate::agent_profile::AgentProfileEnvelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -93,6 +95,14 @@ pub enum CustodyProofAction {
     PairingDataLease {
         request: Box<super::pairing::full_transfer::lease::LeaseRequest>,
     },
+    /// Agent first birth or custodian-primary rebind, admitted only with a current primary
+    /// decision over the exact plan. Appended last; capability `register`.
+    AgentPublish {
+        publication: Box<Publication>,
+        agent_profile: Box<AgentProfileEnvelope>,
+        plan: Box<RegisterPlan>,
+        authorization: Box<RegisterDecision>,
+    },
 }
 impl CustodyProofAction {
     #[must_use]
@@ -104,7 +114,8 @@ impl CustodyProofAction {
             | Self::RegisterUpdate { .. }
             | Self::PairingIssue { .. }
             | Self::PairingCreate { .. }
-            | Self::PairingDataLease { .. } => "register",
+            | Self::PairingDataLease { .. }
+            | Self::AgentPublish { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
@@ -231,6 +242,8 @@ pub enum CustodyRefusal {
     PayloadTooLarge,
     /// The connection served its frame budget and will not read another request.
     FrameLimit,
+    /// A headless record's first birth or changed custodian primary needs `AgentPublish`.
+    AgentAuthorizationRequired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -331,6 +344,10 @@ pub enum CustodyServerFrame {
     PairingDataLease {
         lease: Box<Envelope<super::pairing::full_transfer::lease::DataLease>>,
     },
+    /// Receipt of an admitted `AgentPublish`; an exact replay returns the stored one.
+    AgentPublished {
+        receipt: Box<AgentPublishReceipt>,
+    },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
 /// absent: only the listener holding the actual TLS connection may supply it.
@@ -389,6 +406,7 @@ impl CustodyRefusal {
             Self::IdempotencyConflict => "IdempotencyConflict",
             Self::PayloadTooLarge => "PayloadTooLarge",
             Self::FrameLimit => "FrameLimit",
+            Self::AgentAuthorizationRequired => "AgentAuthorizationRequired",
         }
     }
 }
@@ -547,5 +565,38 @@ mod native_carrier {
     pub(super) fn serialize_update<S: Serializer>(value: &str, s: S) -> Result<S::Ok, S::Error> {
         validate(value, true).map_err(serde::ser::Error::custom)?;
         s.serialize_str(value)
+    }
+}
+
+#[cfg(test)]
+mod agent_publish_wire_tests {
+    use super::*;
+
+    #[test]
+    fn agent_refusal_and_receipt_frame_names_are_stable() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_eq!(
+            CustodyRefusal::AgentAuthorizationRequired.reason_code(),
+            "AgentAuthorizationRequired"
+        );
+        let frame = CustodyServerFrame::AgentPublished {
+            receipt: Box::new(AgentPublishReceipt {
+                request_id: "request".into(),
+                request_hash: "hash".into(),
+                record_hash: "record".into(),
+                profile_hash: "profile".into(),
+                custodian_head_hash: "head".into(),
+                custodian_primary: DeviceRef {
+                    account_anchor: "anchor".into(),
+                    device_id: "phone".into(),
+                    device_epoch: 1,
+                },
+                accepted_at: 1,
+            }),
+        };
+        let value = serde_json::to_value(&frame)?;
+        assert_eq!(value["frame_type"], "agent_published");
+        assert_eq!(serde_json::from_value::<CustodyServerFrame>(value)?, frame);
+        Ok(())
     }
 }

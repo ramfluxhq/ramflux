@@ -278,6 +278,15 @@ pub(crate) async fn dispatch_local_bus_request(
         "itest.migration.approve_once" => {
             crate::bus::dispatch::itest_migration::approve_once(request, state)
         }
+        #[cfg(all(
+            feature = "itest-memory-vault",
+            ramflux_itest,
+            not(ramflux_release_profile),
+            not(ramflux_production)
+        ))]
+        "itest.agent.approve_once" => {
+            crate::bus::dispatch::itest_agent::approve_once(request, state)
+        }
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }

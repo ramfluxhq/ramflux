@@ -104,6 +104,7 @@ impl CustodyService {
         }
         let publication = match &attempt.action {
             CustodyProofAction::Publish { publication }
+            | CustodyProofAction::AgentPublish { publication, .. }
             | CustodyProofAction::HomeMigration { publication, .. } => CustodyPublication {
                 record: publication.record.clone(),
                 compacted_ids: publication.compacted_ids.clone(),
@@ -163,8 +164,10 @@ impl CustodyService {
         )
         .map_err(|_| CustodyRefusal::BindingRefused)?;
         let source = challenge.source.parse().map_err(invalid)?;
-        if matches!(attempt.action, CustodyProofAction::Publish { .. })
-            && !router.custody_anchor_known(&publication.record.body.account_anchor)
+        if matches!(
+            attempt.action,
+            CustodyProofAction::Publish { .. } | CustodyProofAction::AgentPublish { .. }
+        ) && !router.custody_anchor_known(&publication.record.body.account_anchor)
             && let Err(error) = store.check_custody_new_principal_budget(source, now)
         {
             self.leases().reject(&proof.body.challenge_nonce);
@@ -193,7 +196,10 @@ impl CustodyService {
         binding_mode: BindingMode,
         now: u64,
     ) -> Result<VerifiedRecord, CustodyRefusal> {
-        let current = !matches!(*action, CustodyProofAction::Publish { .. });
+        let current = !matches!(
+            *action,
+            CustodyProofAction::Publish { .. } | CustodyProofAction::AgentPublish { .. }
+        );
         if matches!(*action, CustodyProofAction::HomeMigration { .. }) {
             if self.migration.is_none() || binding_mode == BindingMode::NoChannelBinding {
                 return Err(CustodyRefusal::BindingRefused);
@@ -324,6 +330,15 @@ impl CustodyService {
                     record_hash: object_hash(&publication.record).map_err(invalid)?,
                 })
             }
+            CustodyProofAction::AgentPublish { agent_profile, plan, authorization, .. } => {
+                let input = crate::custody_authority::AgentPublishInput {
+                    publication,
+                    agent_profile: &agent_profile,
+                    plan: &plan,
+                    authorization: &authorization,
+                };
+                agent_publish_frame(router, store, now, source, &input)
+            }
             CustodyProofAction::Register { prekey_bundle } => {
                 validate_bundle(
                     authority,
@@ -340,25 +355,35 @@ impl CustodyService {
                 })
             }
             CustodyProofAction::OpenSession => {
-                let delivery = target(&proof.body.device_ref)?;
-                let bundle = store
-                    .custody_prekey(&delivery)
-                    .map_err(persistence)?
-                    .ok_or(CustodyRefusal::AuthorityUnavailable)?;
-                validate_bundle(authority, &proof.body.device_ref, &bundle, "message", now)?;
-                let session = CustodySession {
-                    session_id: String::new(),
-                    target_delivery_id: delivery,
-                    device_ref: proof.body.device_ref.clone(),
-                    record_hash: proof.body.record_hash.clone(),
-                    proof_hash: object_hash(&proof).map_err(invalid)?,
-                    binding_mode: proof.body.binding_mode,
-                    expires_at: proof.body.expires_at.min(now.saturating_add(300)),
-                };
-                let session = self.leases().open(session, holder, now, tick)?;
-                Ok(CustodyServerFrame::SessionEstablished { session })
+                self.finish_open_session(store, authority, &proof, holder, (now, tick))
             }
         }
+    }
+    fn finish_open_session(
+        &self,
+        store: &crate::RouterRedbStore,
+        authority: &VerifiedRecord,
+        proof: &Envelope<BranchProofV3>,
+        holder: String,
+        (now, tick): (u64, std::time::Instant),
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        let delivery = target(&proof.body.device_ref)?;
+        let bundle = store
+            .custody_prekey(&delivery)
+            .map_err(persistence)?
+            .ok_or(CustodyRefusal::AuthorityUnavailable)?;
+        validate_bundle(authority, &proof.body.device_ref, &bundle, "message", now)?;
+        let session = CustodySession {
+            session_id: String::new(),
+            target_delivery_id: delivery,
+            device_ref: proof.body.device_ref.clone(),
+            record_hash: proof.body.record_hash.clone(),
+            proof_hash: object_hash(proof).map_err(invalid)?,
+            binding_mode: proof.body.binding_mode,
+            expires_at: proof.body.expires_at.min(now.saturating_add(300)),
+        };
+        let session = self.leases().open(session, holder, now, tick)?;
+        Ok(CustodyServerFrame::SessionEstablished { session })
     }
     fn finish_pairing_data_lease(
         &self,
@@ -660,6 +685,19 @@ impl CustodyService {
     }
 }
 
+fn agent_publish_frame(
+    router: &crate::RouterCore,
+    store: &crate::RouterRedbStore,
+    now: u64,
+    source: std::net::IpAddr,
+    input: &crate::custody_authority::AgentPublishInput<'_>,
+) -> Result<CustodyServerFrame, super::ProofFailure> {
+    let receipt = router
+        .publish_agent_custody_record(input, now, store, source)
+        .map_err(super::publication_failure)?;
+    Ok(CustodyServerFrame::AgentPublished { receipt: Box::new(receipt) })
+}
+
 fn require_current_primary(
     device_ref: &DeviceRef,
     authority: &VerifiedRecord,
@@ -702,6 +740,9 @@ fn pairing_failure(error: crate::pairing_relay::PairingRelayError) -> CustodySer
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod agent_publish_tests;
 
 #[cfg(test)]
 mod population_tests;

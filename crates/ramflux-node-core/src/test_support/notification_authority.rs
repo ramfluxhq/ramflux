@@ -284,6 +284,97 @@ use crate::{
     ApnsProviderCredential, DevicePushRoute, ProviderCredential, PushProviderKind, RouterCore,
 };
 pub type FixtureResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// The agent profile the agent's own primary key signs over the agent and custodian records.
+fn agent_profile(
+    agent: &NativeDevice,
+    agent_verified: &ramflux_crypto::custody::VerifiedRecord,
+    human_verified: &ramflux_crypto::custody::VerifiedRecord,
+    now: u64,
+) -> FixtureResult<ramflux_protocol::agent_profile::AgentProfileEnvelope> {
+    use ramflux_protocol::agent_profile::AgentProfileV1;
+    let record = &agent.publication.record;
+    let human_body = &human_verified.envelope().body;
+    let body = AgentProfileV1 {
+        schema: ramflux_protocol::domain::AGENT_PROFILE.into(),
+        version: 1,
+        agent_anchor: record.body.account_anchor.clone(),
+        agent_custody_hash: ramflux_protocol::custody::object_hash(record)?,
+        custodian_anchor: human_body.account_anchor.clone(),
+        custodian_primary: human_body.master_certificate.body.primary_device_ref.clone(),
+        kind: "headless_ai".into(),
+        profile_epoch: 1,
+        responsibility: "Research".into(),
+        provider: "local".into(),
+        model: "model".into(),
+        persona_version: 1,
+        persona_hash: ramflux_protocol::encode_base64url([7; 32]),
+    };
+    Ok(agent.primary.sign_agent_profile(body, agent_verified, human_verified, now)?)
+}
+
+/// The create plan for `agent`, every field copied from the agent's genesis record.
+fn agent_plan(
+    human: &NativeDevice,
+    agent: &NativeDevice,
+    now: u64,
+) -> FixtureResult<ramflux_protocol::custody::RegisterPlan> {
+    use ramflux_protocol::custody::{
+        AgentRegisterProfile, DeviceRef, REGISTER_PLAN_SCHEMA, RegisterPlan, RegisterPurpose,
+        object_hash,
+    };
+    let human_body = &human.publication.record.body;
+    let record = &agent.publication.record;
+    let device = record.body.devices.first().ok_or("test: agent device")?;
+    let branch = &device.branch_certificate.as_ref().ok_or("test: agent branch")?.body;
+    let certificate = &record.body.master_certificate.body;
+    let agent_anchor = record.body.account_anchor.clone();
+    Ok(RegisterPlan {
+        schema: REGISTER_PLAN_SCHEMA.into(),
+        version: 1,
+        request_id: "native-agent-request".into(),
+        purpose: RegisterPurpose::Create,
+        owner_anchor: human_body.account_anchor.clone(),
+        human_head_hash: object_hash(&human.publication.record)?,
+        human_primary: human_body.master_certificate.body.primary_device_ref.clone(),
+        desktop: DeviceRef {
+            account_anchor: human_body.account_anchor.clone(),
+            device_id: "desktop".into(),
+            device_epoch: 1,
+        },
+        agent_anchor: agent_anchor.clone(),
+        principal_id: record.body.principal_id.clone(),
+        agent_device: DeviceRef {
+            account_anchor: agent_anchor,
+            device_id: device.device_id.clone(),
+            device_epoch: device.device_epoch,
+        },
+        master_public_key: certificate.master_public_key.clone(),
+        self_signing_public_key: certificate.self_signing_public_key.clone(),
+        branch_signing_public_key: branch.branch_signing_public_key.clone(),
+        agreement_public_key: branch.agreement_identity_public_key.clone(),
+        capabilities: branch.capabilities.clone(),
+        display_name: record.body.profile.display_name.clone(),
+        certificate_issued_at: certificate.issued_at,
+        branch_not_before: branch.not_before,
+        branch_expires_at: branch.expires_at,
+        master_cert_id: certificate.cert_id.clone(),
+        branch_cert_id: branch.cert_id.clone(),
+        profile: AgentRegisterProfile {
+            responsibility: "Research".into(),
+            provider: "local".into(),
+            model: "model".into(),
+            persona_version: 1,
+            persona_hash: ramflux_protocol::encode_base64url([7; 32]),
+            profile_epoch: 1,
+        },
+        issued_at: now,
+        expires_at: now + ramflux_protocol::custody::REGISTER_TTL_SECONDS,
+        previous_agent_head_hash: None,
+        previous_master_certificate_hash: None,
+        next_range: 1,
+    })
+}
 pub struct NativeScenario {
     pub router: Arc<RouterCore>,
     pub router_store: Arc<RouterRedbStore>,
@@ -345,6 +436,54 @@ impl NativeScenario {
     /// Returns the real native component or durable store error.
     pub fn publish(&self, device: &NativeDevice, now: u64) -> FixtureResult {
         self.router.publish_custody_record(&device.publication, now, &self.router_store)?;
+        Ok(())
+    }
+    /// Publishes `agent`, a headless record whose custodian is `human` (already published), through
+    /// the real `AgentPublish` admission. The profile, plan and decision are built with the real
+    /// agent-profile and register-decision signers; nothing is mocked.
+    /// # Errors
+    /// Returns the real crypto, protocol or admission refusal.
+    pub fn publish_agent(
+        &self,
+        human: &NativeDevice,
+        agent: &NativeDevice,
+        now: u64,
+    ) -> FixtureResult {
+        use crate::custody_authority::agent_publish::AgentPublishInput;
+        use ramflux_protocol::custody::{
+            AgentDecisionRequest, RegisterOutcome, encode_register_plan, register_plan_hash,
+        };
+        let human_verified =
+            ramflux_crypto::custody::verify_record(&human.publication.record, now, None, None)?;
+        let record = &agent.publication.record;
+        let agent_verified =
+            ramflux_crypto::custody::verify_record(record, now, None, Some(&human_verified))?;
+        let profile = agent_profile(agent, &agent_verified, &human_verified, now)?;
+        let plan = agent_plan(human, agent, now)?;
+        let ttl = ramflux_protocol::custody::REGISTER_TTL_SECONDS;
+        let decision = ramflux_crypto::custody::sign_register_decision_request(
+            &human.branch,
+            &AgentDecisionRequest {
+                plan_bytes: encode_register_plan(&plan)?,
+                plan_hash: register_plan_hash(&plan)?,
+                decision: RegisterOutcome::Approve,
+                signer: plan.human_primary.clone(),
+                issued_at: now,
+                expires_at: now + ttl,
+            },
+        )?;
+        let input = AgentPublishInput {
+            publication: &agent.publication,
+            agent_profile: &profile,
+            plan: &plan,
+            authorization: &decision,
+        };
+        self.router.publish_agent_custody_record(
+            &input,
+            now,
+            &self.router_store,
+            std::net::IpAddr::from([127, 0, 0, 1]),
+        )?;
         Ok(())
     }
     /// # Errors

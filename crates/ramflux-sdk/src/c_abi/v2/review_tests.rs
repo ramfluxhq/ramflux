@@ -256,8 +256,10 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
             "device.sync.export",
             "account.create.show_once",
             "account.custody.show_once",
+            "agent.create",
+            "agent.creation.decide",
         ]),
-        "only key/backup disclosure operations require export permission"
+        "only key/backup disclosure and agent creation operations require export permission"
     );
     assert_eq!(
         fixture.result(fixture.submit("account.list", deadline()))["code"],

@@ -11,6 +11,75 @@ pub use a2i_control_event_type_types::*;
 #[path = "a2i_control_event_type_control.rs"]
 mod a2i_control_event_type_control_types;
 pub use a2i_control_event_type_control_types::*;
+#[path = "agent_access_policy.rs"]
+mod agent_access_policy_types;
+pub use agent_access_policy_types::*;
+#[path = "agent_access_set.rs"]
+mod agent_access_set_types;
+pub use agent_access_set_types::*;
+#[path = "agent_config_data.rs"]
+mod agent_config_data_types;
+pub use agent_config_data_types::*;
+#[path = "agent_config_result.rs"]
+mod agent_config_result_types;
+pub use agent_config_result_types::*;
+#[path = "agent_create.rs"]
+mod agent_create_types;
+pub use agent_create_types::*;
+#[path = "agent_creation_decide.rs"]
+mod agent_creation_decide_types;
+pub use agent_creation_decide_types::*;
+#[path = "agent_custody_packet.rs"]
+mod agent_custody_packet_types;
+pub use agent_custody_packet_types::*;
+#[path = "agent_custody_status.rs"]
+mod agent_custody_status_types;
+pub use agent_custody_status_types::*;
+#[path = "agent_failure.rs"]
+mod agent_failure_types;
+pub use agent_failure_types::*;
+#[path = "agent_get.rs"]
+mod agent_get_types;
+pub use agent_get_types::*;
+#[path = "agent_host_packet.rs"]
+mod agent_host_packet_types;
+pub use agent_host_packet_types::*;
+#[path = "agent_host_ref.rs"]
+mod agent_host_ref_types;
+pub use agent_host_ref_types::*;
+#[path = "agent_limits.rs"]
+mod agent_limits_types;
+pub use agent_limits_types::*;
+#[path = "agent_list.rs"]
+mod agent_list_types;
+pub use agent_list_types::*;
+#[path = "agent_metadata.rs"]
+mod agent_metadata_types;
+pub use agent_metadata_types::*;
+#[path = "agent_mutation.rs"]
+mod agent_mutation_types;
+pub use agent_mutation_types::*;
+#[path = "agent_operation_get.rs"]
+mod agent_operation_get_types;
+pub use agent_operation_get_types::*;
+#[path = "agent_page.rs"]
+mod agent_page_types;
+pub use agent_page_types::*;
+#[path = "agent_persona.rs"]
+mod agent_persona_types;
+pub use agent_persona_types::*;
+#[path = "agent_persona_edit.rs"]
+mod agent_persona_edit_types;
+pub use agent_persona_edit_types::*;
+#[path = "agent_record.rs"]
+mod agent_record_types;
+pub use agent_record_types::*;
+#[path = "agent_watch.rs"]
+mod agent_watch_types;
+pub use agent_watch_types::*;
+#[path = "agent_watch_ack.rs"]
+mod agent_watch_ack_types;
+pub use agent_watch_ack_types::*;
 #[path = "contact_control.rs"]
 mod contact_control_types;
 pub use contact_control_types::*;

@@ -47,6 +47,7 @@ pub mod attachment_renewal;
 pub mod attachment_retirement;
 mod attachment_send;
 pub use attachment_send::PlaintextDigester;
+mod agent_record;
 pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
