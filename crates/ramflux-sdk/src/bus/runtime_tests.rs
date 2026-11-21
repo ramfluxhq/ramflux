@@ -1467,6 +1467,8 @@ mod native_busy;
 
 mod contact_verification;
 
+mod agent_routing;
+
 #[cfg(unix)]
 mod lifecycle;
 mod lifecycle_registry;
