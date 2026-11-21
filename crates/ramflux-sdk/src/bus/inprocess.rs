@@ -145,6 +145,7 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "agent.persona.edit",
         "agent.access.set",
         "agent.watch",
+        "agent.delete",
         "subscription.close",
     ]);
     names.sort_unstable();

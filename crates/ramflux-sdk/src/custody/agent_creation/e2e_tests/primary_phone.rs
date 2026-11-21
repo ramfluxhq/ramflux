@@ -11,7 +11,9 @@ use super::super::test_support::{
     DesktopSteps, OwnRouter, Pair, TestNode, TestResult, create_body, decide_body,
     later_primary_decision, now, pair, root_of, saved_receipt, store_of, vault_of,
 };
-use crate::custody::agent_creation::{AgentCreationState, advance_one, load_publishing};
+use crate::custody::agent_creation::{
+    AgentCreationRecord, AgentCreationState, advance_one, load_publishing,
+};
 use crate::custody::{CreationState, CustodyConnection, PrimaryVault};
 use ramflux_protocol::custody::{
     CustodyProofAction, CustodyRefusal, CustodyServerFrame, decode_register_decision,
@@ -34,6 +36,42 @@ fn agent_creation_primary_phone_round_trip() -> TestResult {
 async fn round_trip(pair: &mut Pair) -> TestResult {
     let phone_root = root_of(&pair.phone)?;
     let laptop_root = root_of(&pair.laptop)?;
+    let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
+    let desk_vault: Arc<dyn PrimaryVault> = vault_of(&pair.laptop.client)?;
+    // The node takes four client connections: this publication, the agent's activation, one
+    // proof connection and one directory lookup.
+    let node = TestNode::start(4, None).await?;
+    let mut steps = DesktopSteps {
+        node: &node,
+        root: &laptop_root,
+        human: &laptop_id,
+        vault: desk_vault.clone(),
+        connections: Vec::new(),
+    };
+    let (agent_id, complete, _router) = complete_agent(pair, &node, &mut steps).await?;
+    Box::pin(node_view(
+        &node,
+        pair,
+        (&phone_root, &laptop_root),
+        &agent_id,
+        &complete,
+        desk_vault.clone(),
+    ))
+    .await?;
+    drop(steps);
+    node.finish().await
+}
+
+/// Runs one agent creation from `agent.create` to `complete` on the real node, through the real
+/// router and the primary phone's approval. Returns the agent account id, the completed record and
+/// the router that carried the packets (`delete_in_u` routes more packets through it).
+pub(super) async fn complete_agent(
+    pair: &mut Pair,
+    node: &TestNode,
+    steps: &mut DesktopSteps<'_>,
+) -> TestResult<(String, AgentCreationRecord, OwnRouter)> {
+    let phone_root = root_of(&pair.phone)?;
+    let laptop_root = root_of(&pair.laptop)?;
     let phone_id = pair.phone.client.account_db()?.local_account_id.clone();
     let laptop_id = pair.laptop.client.account_db()?.local_account_id.clone();
     let phone_device = pair.phone.client.owned_device_identity()?.device_id().to_owned();
@@ -41,9 +79,6 @@ async fn round_trip(pair: &mut Pair) -> TestResult {
     let desk_vault: Arc<dyn PrimaryVault> = vault_of(&pair.laptop.client)?;
 
     // The human account reaches the test node first: the phone publishes its current record.
-    // The node takes four client connections: this publication, the agent's activation, one
-    // proof connection and one directory lookup.
-    let node = TestNode::start(4, None).await?;
     node.publish_current(&phone_root, &phone_id, &phone_device, phone_vault.clone()).await?;
 
     // The desktop starts the creation. Nothing is listed before the receipt.
@@ -88,14 +123,8 @@ async fn round_trip(pair: &mut Pair) -> TestResult {
     assert_eq!(authorized.state, AgentCreationState::Authorized);
 
     // The desktop commits the agent and the real node admits its AgentPublish.
-    let mut steps = DesktopSteps {
-        node: &node,
-        root: &laptop_root,
-        human: &laptop_id,
-        vault: desk_vault.clone(),
-        connections: Vec::new(),
-    };
-    let state = advance_one(&mut steps, &desk_store, &created.request_id, now()?).await?;
+
+    let state = advance_one(steps, &desk_store, &created.request_id, now()?).await?;
     assert_eq!(state, AgentCreationState::Complete);
     let agent = crate::custody::load_account(&laptop_root, &agent_id, now()?)?;
     assert_eq!(agent.state(), CreationState::Live, "the agent account is live after the receipt");
@@ -107,18 +136,7 @@ async fn round_trip(pair: &mut Pair) -> TestResult {
         phone_store.load(&created.request_id)?.ok_or("phone record")?.account_id.is_none(),
         "the phone never receives an agent account"
     );
-    Box::pin(node_view(
-        &node,
-        pair,
-        (&phone_root, &laptop_root),
-        &agent_id,
-        &complete,
-        desk_vault.clone(),
-    ))
-    .await?;
-
-    drop(steps);
-    node.finish().await
+    Ok((agent_id, complete, router))
 }
 
 /// What the real node holds for the completed agent: the identical publication answered with the

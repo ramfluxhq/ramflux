@@ -9,6 +9,9 @@ use crate::custody::agent_creation::{
     AgentCreationRecord, AgentCreationStore, AgentStep, commit_approved,
 };
 
+/// `AgentRecord.cleanup` of a deleted agent: the published custody record stays on the node.
+const NODE_RECORD_RETAINED: &str = "node_record_retained";
+
 impl AccountRuntime {
     pub(super) fn agent_creation_step(
         &self,
@@ -99,6 +102,18 @@ impl AccountRuntime {
                         journal_cursor: head.to_string(),
                     })),
                 }
+            }
+            AgentCall::Delete(mutation) => {
+                let record = account.client.agent_delete(
+                    vault.as_ref(),
+                    &mutation.agent_anchor,
+                    mutation.confirmed,
+                    now,
+                )?;
+                let mut wire = crate::agent_record::to_wire(&record);
+                // The custody record published on the home node is not retired by this module.
+                wire.cleanup = NODE_RECORD_RETAINED.into();
+                g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(wire)) }
             }
             AgentCall::Watch(watch) => {
                 let changes = account.client.agent_record_changes(&watch.journal_cursor)?;

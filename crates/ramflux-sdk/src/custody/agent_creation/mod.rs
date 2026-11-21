@@ -6,6 +6,7 @@
 mod advance;
 mod capability;
 mod commit;
+mod delete;
 mod machine;
 mod publish;
 mod rebind;
@@ -35,6 +36,7 @@ pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
 pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
 pub(crate) use commit::desktop_is_enrolled;
+pub(crate) use delete::retire_agent_material;
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,

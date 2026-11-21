@@ -24,6 +24,10 @@ pub(crate) fn create_from_plan(
     intent: &AgentIntent,
 ) -> Result<StoredAgentRecord, SdkError> {
     if let Some(existing) = store.load(&plan.agent_anchor)? {
+        if existing.lifecycle == LIFECYCLE_RETIRED {
+            // A retired anchor is never created again on this device (AGENT-IDENTITY-01 E4).
+            return Err(SdkError::AgentCreationRefused("agent_retired"));
+        }
         return Ok(existing);
     }
     check_persona(&intent.persona)?;
@@ -126,7 +130,6 @@ pub(crate) fn edit_record(
 /// is returned unchanged, so a replayed delete mints nothing new.
 /// # Errors
 /// `agent_not_found` for no record, `stale_base` for a base that is not the stored identity.
-#[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
 pub(crate) fn retire(
     store: &AgentRecordStore,
     agent: &str,

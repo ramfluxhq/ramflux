@@ -35,6 +35,15 @@ pub(crate) struct TestVault {
     agent_items: crate::custody::memory_vault::MemoryPrimaryVault,
 }
 impl TestVault {
+    /// Whether the agent master seed or one of its certificate items is still held (test presence:
+    /// the agent items live in the memory store, see `agent_items`).
+    pub(crate) fn agent_item_present(
+        &self,
+        reference: &str,
+    ) -> std::result::Result<bool, SdkError> {
+        use crate::custody::vault::agent_master_item::AgentMasterCells;
+        Ok(self.agent_items.read_item(reference)?.is_some())
+    }
     pub(crate) fn entry_count(&self) -> std::result::Result<usize, SdkError> {
         Ok(self.secrets.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.len())
     }

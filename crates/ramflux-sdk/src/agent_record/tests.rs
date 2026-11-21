@@ -184,3 +184,18 @@ fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors
     }
     Ok(())
 }
+
+#[test]
+fn a_retired_anchor_is_never_created_again_on_this_device() -> TestResult {
+    let (plan, records) = planned()?;
+    let intent = AgentIntent { persona: persona(), access: owner_access() };
+    let first = create_from_plan(&records, &plan, &intent)?;
+    retire(&records, &plan.agent_anchor, &first.identity, &plan.desktop, 2)?;
+    let again = create_from_plan(&records, &plan, &intent);
+    assert!(
+        matches!(again, Err(SdkError::AgentCreationRefused("agent_retired"))),
+        "a replayed creation of a retired anchor refuses"
+    );
+    assert_eq!(records.load(&plan.agent_anchor)?.ok_or("the tombstone stays")?.lifecycle, "X");
+    Ok(())
+}

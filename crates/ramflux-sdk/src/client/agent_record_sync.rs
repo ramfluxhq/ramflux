@@ -6,13 +6,15 @@
 //! `AgentHostPacket.metadata` on the `AgentSync` control. A receiver applies it through
 //! `agent_record::apply_metadata`, after `client/agent_custody.rs` authorized the sender.
 use crate::agent_record::{
-    AgentRecordStore, Changes, StoredAgentRecord, apply_metadata, edit_record, metadata_of,
-    parse_cursor, retire,
+    AgentRecordStore, Changes, LIFECYCLE_ACTIVE, StoredAgentRecord, apply_metadata, edit_record,
+    metadata_of, parse_cursor, retire,
 };
 use crate::bus::own_device_copy;
 use crate::client::generated_control::control_from_payload;
 use crate::client::own_device_copy::{OwnMessageInput, OwnPayloadKind};
+use crate::custody::PrimaryVault;
 use crate::custody::agent_creation::expected_scope;
+use crate::custody::agent_creation::retire_agent_material;
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::custody::DeviceRef;
@@ -102,11 +104,31 @@ impl RamfluxClient {
         Ok(record)
     }
 
-    /// Retires the record on this device and broadcasts the retirement (`identity_retired`). The
-    /// native revocations and vault cleanup of `agent.delete` are the caller's (stage E4).
+    /// `agent.delete` (contract 2 `AgentMutation`, decision r22 item 2): only a record in state `U`
+    /// can be deleted. The agent's vault items and local account go first (repeatable), then the
+    /// retirement is written and broadcast (`identity_retired`).
+    /// # Errors
+    /// `confirmation_required` without `confirmed`; `unsupported` for any state but `U`;
+    /// `agent_not_found`; the vault and store refusals.
+    pub(crate) fn agent_delete(
+        &self,
+        vault: &dyn PrimaryVault,
+        agent: &str,
+        confirmed: Option<bool>,
+        now: u64,
+    ) -> Result<StoredAgentRecord, SdkError> {
+        require_confirmed(confirmed)?;
+        let current = self.agent_record_get(agent)?;
+        if current.lifecycle != LIFECYCLE_ACTIVE {
+            return Err(SdkError::AgentCreationRefused("unsupported"));
+        }
+        retire_agent_material(&self.agent_creation_store()?, vault, agent)?;
+        self.agent_retire(agent, &current.identity, Some(true), now)
+    }
+
+    /// Retires the record on this device and broadcasts the retirement (`identity_retired`).
     /// # Errors
     /// As `agent_persona_edit`.
-    #[cfg_attr(not(test), allow(dead_code, reason = "the bus method of stage E4 is the caller"))]
     pub(crate) fn agent_retire(
         &self,
         agent: &str,
