@@ -73,6 +73,10 @@ pub(super) fn project_fixed(
     let counts = stage.index_forward_scalar_records(hash, full_transfer_catalog())?;
     private.db.execute_batch("BEGIN IMMEDIATE")?;
     let mut pending = Projection { private, committed: false };
+    // B's original public contribution was captured before entering this private
+    // projection. Reset excluded execution fields in the same rollback boundary
+    // as the restrictive-first import; never open a second transaction owner.
+    super::sql_projection::canonicalize_private(&pending.private.db, full_transfer_catalog())?;
     for restrictive in [true, false] {
         project_pass(stage, hash, &mut pending, restrictive)?;
     }
