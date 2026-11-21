@@ -46,6 +46,12 @@ pub struct VariantRule {
     pub tag: &'static str,
     pub fields: &'static [FieldRule],
 }
+/// Closed small-metadata projections, never arbitrary JSON or native content fallback.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlProjection {
+    ContactRequestMetadataV1,
+}
 /// Descriptor only: interpretation is performed by the field's typed owner. `SignedExact`
 /// forbids rewriting a signed document; a present excluded nested value makes it refuse.
 #[derive(Clone, Copy, Serialize)]
@@ -76,6 +82,11 @@ pub enum CodecRule {
     },
     /// Exactly 192 account MAC subkey bytes, SHA256-bound to the `bundle_id` key.
     SqlMacSubkeys,
+    /// Closed metadata with explicit nested public/execution field assignments.
+    SqlJsonProjection {
+        projection: SqlProjection,
+        fields: &'static [FieldRule],
+    },
     /// Closed canonical public `DeviceRef` JSON text (at most 512 bytes), not opaque JSON.
     SqlDeviceRef,
     /// Canonical root-qualified public device lookup key; never an authority object.
@@ -127,6 +138,7 @@ pub(super) fn scalar_sql_codec(codec: &CodecRule) -> bool {
     matches!(
         codec,
         CodecRule::SqlMacSubkeys
+            | CodecRule::SqlJsonProjection { .. }
             | CodecRule::SqlDeviceRef
             | CodecRule::SqlQualifiedDeviceKey
             | CodecRule::SqlBytes { .. }
@@ -242,6 +254,7 @@ impl FamilyRule {
         {
             return Err(unsupported());
         }
+        self.validate_projection_owners()?;
         self.validate_cells()?;
         for (index, name) in self.excluded.iter().enumerate() {
             if !identifier(name, false)
@@ -285,6 +298,21 @@ impl FamilyRule {
         }
         Ok(())
     }
+    fn validate_projection_owners(&self) -> Result<(), StorageError> {
+        for field in self.codec {
+            if matches!(field.codec, CodecRule::SqlJsonProjection { .. })
+                && (self.id != super::contact_request_history::FAMILY
+                    || !matches!(
+                        self.selector,
+                        FamilySelector::Table("contact_request_projection")
+                    )
+                    || field.name != "request_json")
+            {
+                return Err(unsupported());
+            }
+        }
+        Ok(())
+    }
     fn validate_cells(&self) -> Result<(), StorageError> {
         if self.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlMessageTombstone)) {
             super::message_denial::require_rule(self)?;
@@ -294,6 +322,7 @@ impl FamilyRule {
                 matches!(
                     field.codec,
                     CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlJsonProjection { .. }
                         | CodecRule::SqlDeviceRef
                         | CodecRule::SqlQualifiedDeviceKey
                         | CodecRule::SqlBytes { .. }
@@ -322,7 +351,9 @@ impl FamilyRule {
                 CodecRule::Scalar { cell_type } | CodecRule::RequiresOwner { cell_type, .. } => {
                     Some(cell_type)
                 }
-                CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
+                CodecRule::SqlMacSubkeys
+                | CodecRule::SqlBytes { .. }
+                | CodecRule::SqlJsonProjection { .. } => Some(CellType::Bytes),
                 CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlDeviceRef
                 | CodecRule::SqlQualifiedDeviceKey
@@ -449,6 +480,13 @@ fn validate_codec(
             if depth != 1 {
                 return Err(unsupported());
             }
+        }
+        CodecRule::SqlJsonProjection { projection, fields } => {
+            if depth != 1 {
+                return Err(unsupported());
+            }
+            projection.require_fields(fields)?;
+            validate_fields(fields, depth + 1, remaining)?;
         }
         CodecRule::SqlBase64 { decoded_bytes, .. } => {
             if depth != 1 || decoded_bytes.0 != 32 {
@@ -621,6 +659,7 @@ macro_rules! table_rule {
     (@version "friend_link_projection",$mode:ident) => { U64(2) };
     (@version "friend_projection",$mode:ident) => { U64(2) };
     (@version "contact_request_delivery",$mode:ident) => { U64(2) };
+    (@version "contact_request_projection",$mode:ident) => { U64(2) };
     (@version "contact_link_decision",$mode:ident) => { U64(2) };
     (@version "contact_request_decision",$mode:ident) => { U64(2) };
     (@version "contact_message_fence_retention",$mode:ident) => { U64(2) };

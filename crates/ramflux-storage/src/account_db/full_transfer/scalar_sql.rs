@@ -26,6 +26,7 @@ enum Cell<'a> {
     Integer([u8; 8]),
     Text(&'a [u8]),
     Bytes(&'a [u8]),
+    Projected(Zeroizing<Vec<u8>>),
 }
 impl Cell<'_> {
     fn kind(&self) -> CellType {
@@ -33,7 +34,7 @@ impl Cell<'_> {
             Self::Null => CellType::Null,
             Self::Integer(_) => CellType::I64,
             Self::Text(_) => CellType::Utf8,
-            Self::Bytes(_) => CellType::Bytes,
+            Self::Bytes(_) | Self::Projected(_) => CellType::Bytes,
         }
     }
     fn bytes(&self) -> &[u8] {
@@ -41,6 +42,7 @@ impl Cell<'_> {
             Self::Null => &[],
             Self::Integer(bytes) => bytes,
             Self::Text(bytes) | Self::Bytes(bytes) => bytes,
+            Self::Projected(bytes) => bytes,
         }
     }
 }
@@ -71,6 +73,20 @@ fn cells<'a>(rule: &FamilyRule, row: &'a rusqlite::Row<'_>) -> Result<Vec<Cell<'
             ValueRef::Text(bytes) if declared.cell_type == CellType::Utf8 => Cell::Text(bytes),
             ValueRef::Blob(bytes) if declared.cell_type == CellType::Bytes => Cell::Bytes(bytes),
             _ => return Err(unsupported()),
+        };
+        let codec = &rule
+            .codec
+            .iter()
+            .find(|field| field.name == declared.name)
+            .ok_or_else(unsupported)?
+            .codec;
+        let cell = if let super::catalog::CodecRule::SqlJsonProjection { projection, .. } = codec {
+            if cell.kind() != CellType::Bytes {
+                return Err(unsupported());
+            }
+            Cell::Projected(projection.source(cell.bytes())?)
+        } else {
+            cell
         };
         cells.push(cell);
     }

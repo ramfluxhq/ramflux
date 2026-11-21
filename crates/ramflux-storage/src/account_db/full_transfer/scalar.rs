@@ -84,16 +84,7 @@ pub fn copy_full_scalar_record(
             .find(|field| field.name == rule.cells[index].name)
             .ok_or_else(schema)?
             .codec;
-        if matches!(
-            codec,
-            CodecRule::SqlI64 { .. }
-                | CodecRule::SqlBase64 { .. }
-                | CodecRule::SqlMacSubkeys
-                | CodecRule::SqlDeviceRef
-                | CodecRule::SqlQualifiedDeviceKey
-                | CodecRule::SqlEnum { .. }
-        ) && *kind != CellType::Null
-        {
+        if bounded_value(codec) && *kind != CellType::Null {
             let count = usize::try_from(length.0).map_err(|_| invalid())?;
             let mut bytes = Zeroizing::new([0; 2048]);
             let value = bytes.get_mut(..count).ok_or_else(invalid)?;
@@ -133,6 +124,18 @@ pub fn copy_full_scalar_record(
     }
     Ok(())
 }
+fn bounded_value(codec: &CodecRule) -> bool {
+    matches!(
+        codec,
+        CodecRule::SqlJsonProjection { .. }
+            | CodecRule::SqlI64 { .. }
+            | CodecRule::SqlBase64 { .. }
+            | CodecRule::SqlMacSubkeys
+            | CodecRule::SqlDeviceRef
+            | CodecRule::SqlQualifiedDeviceKey
+            | CodecRule::SqlEnum { .. }
+    )
+}
 fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<(), StorageError> {
     rule.require_typed_codec()?;
     header.validate().map_err(|_| invalid())?;
@@ -148,6 +151,7 @@ fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<()
             field.codec,
             CodecRule::Scalar { .. }
                 | CodecRule::SqlMacSubkeys
+                | CodecRule::SqlJsonProjection { .. }
                 | CodecRule::SqlDeviceRef
                 | CodecRule::SqlQualifiedDeviceKey
                 | CodecRule::SqlBytes { .. }
@@ -274,6 +278,9 @@ fn validate_key_grammar(rule: &FamilyRule, mut key: &[u8]) -> Result<(), Storage
 fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result<(), StorageError> {
     let valid = match codec {
         CodecRule::SqlMacSubkeys => kind == CellType::Bytes && length == 192,
+        CodecRule::SqlJsonProjection { projection, .. } => {
+            kind == CellType::Bytes && length > 0 && length <= projection.max_bytes() as u64
+        }
         CodecRule::SqlDeviceRef => kind == CellType::Utf8 && (1..=512).contains(&length),
         CodecRule::SqlQualifiedDeviceKey => kind == CellType::Utf8 && (1..=2048).contains(&length),
         CodecRule::SqlBytes { length: expected, nullable } => {
@@ -305,6 +312,9 @@ fn validate_sql_value(codec: &CodecRule, kind: CellType, bytes: &[u8]) -> Result
     validate_sql_header(codec, kind, bytes.len() as u64)?;
     if kind == CellType::Null {
         return Ok(());
+    }
+    if let CodecRule::SqlJsonProjection { projection, .. } = codec {
+        projection.portable(bytes)?;
     }
     if matches!(codec, CodecRule::SqlQualifiedDeviceKey) {
         let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;

@@ -113,3 +113,20 @@ gateway_inbox_loss is separate required inert history, not an execution cursor.
 Its newly declared RequiresOwner placeholder refuses when nonempty until its
 owner lands; it is not a new permanent deferral. This increases the required
 worklist by one beyond the original71, without changing the17 deferred categories.
+
+## Contact request public history versus reply execution
+
+contact_request_projection stores compact unsigned consent metadata produced by
+SDK client/contact_requests/metadata.rs. The old wrapping Control read fallback
+is not a portable format. The typed owner accepts only the closed current nonce,
+issued_at and note projection, with needs_reply explicitly excluded. The original
+requester/nonce hash and seven-day expiry are checked in exact-cut inspection and
+private application; these are data bindings, not fresh device/key authorization.
+
+The actual private file must contain the portable metadata, not merely encode as
+that projection. receiver_copy captures B's original public contribution before
+resetting its copied execution field; receiver_materialization validates the
+stored form independently. No old reply/approval is resumed, and live B retains
+its original state. Whole-version request selection preserves independent denial
+and prevents mixed request/decision timestamps. This activates one required SQL
+owner; it does not prove native message or complete transfer installation.

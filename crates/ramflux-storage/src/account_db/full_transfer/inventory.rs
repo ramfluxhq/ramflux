@@ -154,6 +154,7 @@ pub(in crate::account_db) fn inspect(
         families.push(family);
     }
     super::catalog::receive_local::require_quiescent(connection, &actual)?;
+    super::contact_request_history::require_source(connection, rules)?;
     Ok(FullTransferSchema { census_hash, families })
 }
 pub(super) fn validate_columns(
@@ -199,7 +200,9 @@ pub(super) fn validate_columns(
             CodecRule::Scalar { cell_type }
             | CodecRule::RequiresOwner { cell_type, .. }
             | CodecRule::Generated { cell_type, .. } => Some(cell_type),
-            CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
+            CodecRule::SqlMacSubkeys
+            | CodecRule::SqlBytes { .. }
+            | CodecRule::SqlJsonProjection { .. } => Some(CellType::Bytes),
             CodecRule::SqlQualifiedDeviceKey
             | CodecRule::SqlBase64 { .. }
             | CodecRule::SqlText { .. }

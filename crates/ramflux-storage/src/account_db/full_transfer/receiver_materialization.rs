@@ -113,6 +113,7 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
         )?;
         crate::encryption::apply_key(&read, self.private_key)?;
         read.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
+        super::sql_projection::require_private(&self.private.db, full_transfer_catalog())?;
         let schema = super::inventory::inspect(&read, full_transfer_catalog())?;
         schema.require_typed_owners(full_transfer_catalog())?;
         for (family, rule) in schema.families.iter().zip(full_transfer_catalog()) {

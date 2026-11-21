@@ -189,3 +189,31 @@ zero means disabled and the shortest positive timer wins. Incompatible scopes
 refuse TransferConflict; no wider deletion context is synthesized. Source absences
 retain visibility denials and positive expiry policy. These metadata witnesses do
 not yet establish native message expiry/ordering or binary transfer acceptance.
+
+
+Contact request history uses the shared small SQL JSON projection machinery. Its
+closed compact metadata contains the original nonce, issue time and optional
+note; the descriptor explicitly excludes needs_reply. Legacy/wrapped controls,
+unknown members, duplicate members, unsafe integers and oversized metadata refuse.
+Request ids bind the original requester (peer for inbound, own root for outbound)
+and nonce; expiry keeps the original seven-day lifetime. This metadata grants no
+device/key authority or old native approval.
+
+Projection encoding alone cannot establish inert execution state: original B
+public contributions are captured first, the private copy is then canonicalized
+in a transaction, and materialization independently requires the stored metadata
+to be the closed portable form. A leftover needs_reply field fails actual-file
+validation even though source projection could omit it. Live B is untouched.
+The same compiled projection adapter serves source rows, contribution capture,
+receiver reset and independent validation; it is not a native-body/opaque-JSON
+fallback. Original native signed evidence keeps its separate crypto verifier.
+
+The shared history resolver chooses a complete contributor version: denial state
+first (blocked, declined, expired, accepted, pending), then its own update stamp.
+It never combines a nonce/body from one request with another request's decision.
+For the same request id, original metadata/expiry must be exact or conflict;
+distinct versions keep their common root/direction/principal/link immutable.
+Root/link denial decisions close over the result without importing a lift.
+An absence retains blocked/declined/expired history; fresh local consent is
+required to lift an independent denial. The original A and B contributions stay
+separate from normalized output.

@@ -15,10 +15,38 @@ use zeroize::{Zeroize as _, Zeroizing};
 enum Merge {
     Columns(&'static [Column]),
     Immutable,
+    History(History),
     Decision { state: usize, stamp: usize },
     Denial { state: usize, until: usize },
     Maxima(&'static [usize]),
     EpochHash { epoch: usize, hash: usize, until: usize },
+}
+#[derive(Clone, Copy)]
+struct History {
+    id: usize,
+    state: usize,
+    stamp: usize,
+    states: &'static [&'static str],
+    same: &'static [usize],
+    common: &'static [usize],
+}
+impl History {
+    fn resolve(&self, left: &Cells, right: &Cells) -> Result<Cells, StorageError> {
+        let extra = if left.bytes(self.id)? == right.bytes(self.id)? { self.same } else { &[] };
+        for index in self.common.iter().chain(extra) {
+            if left.kind(*index)? != right.kind(*index)?
+                || left.bytes(*index)? != right.bytes(*index)?
+            {
+                return Err(conflict());
+            }
+        }
+        let (a, b) = (rank(left, self.state, self.states)?, rank(right, self.state, self.states)?);
+        Ok(if b > a || b == a && right.integer(self.stamp)? > left.integer(self.stamp)? {
+            right.clone()
+        } else {
+            left.clone()
+        })
+    }
 }
 #[derive(Clone, Copy)]
 enum Column {
@@ -109,6 +137,30 @@ static OWNERS: &[Owner] = &[
         restrictive: false,
         keys: &[0, 1],
         merge: Merge::Maxima(&[3]),
+    },
+    Owner {
+        family: "sql/contact_request_projection",
+        names: &[
+            "contact_identity_commitment",
+            "direction",
+            "request_id",
+            "principal_id",
+            "link_id",
+            "state",
+            "request_json",
+            "expires_at",
+            "updated_at",
+        ],
+        restrictive: false,
+        keys: &[0, 1],
+        merge: Merge::History(History {
+            id: 2,
+            state: 5,
+            stamp: 8,
+            states: &["pending", "accepted", "expired", "declined", "blocked"],
+            same: &[2, 6, 7],
+            common: &[0, 1, 3, 4],
+        }),
     },
     Owner {
         family: "sql/friend_link_projection",
@@ -253,6 +305,7 @@ impl Owner {
                     }
                 }
             }
+            Merge::History(history) => return history.resolve(left, right),
             Merge::Decision { state, stamp } => {
                 let rank = |value| match value {
                     "blocked" => Ok(2),
@@ -412,10 +465,11 @@ impl Owner {
         if self.family == super::input_denial::FAMILY {
             super::input_denial::require_bundle(db, incoming.text(1)?)?;
         }
-        let merged = match self.current(db, rule, incoming)? {
+        let mut merged = match self.current(db, rule, incoming)? {
             Some(bytes) => self.resolve(&self.decode(rule, &bytes)?, incoming)?,
             None => incoming.clone(),
         };
+        super::contact_request_history::derive(db, self.family, &mut merged)?;
         self.store(db, &merged)?;
         if self.family == "sql/contact_link_decision" {
             super::contact_projection::apply_decision(db, &merged)?;
@@ -480,6 +534,7 @@ impl Owner {
         }
         let mut expected = expected.ok_or_else(invalid)?;
         super::contact_projection::derive(&private.db, self.family, &mut expected)?;
+        super::contact_request_history::derive(&private.db, self.family, &mut expected)?;
         // Nonrestrictive rows are reconstructed from the retained original contributors.
         // Normalizing a previous union into B's original would otherwise preserve A's
         // metadata after an A-only absence. Restrictions deliberately stay monotonic.
@@ -572,7 +627,8 @@ pub(super) fn retain_absent(family: &str, value: &Cells) -> Result<bool, Storage
             }
         }
     }
-    super::contact_projection::retain_absent(family, value)
+    Ok(super::contact_projection::retain_absent(family, value)?
+        || super::contact_request_history::retain_absent(family, value)?)
 }
 
 pub(super) fn normalize(
