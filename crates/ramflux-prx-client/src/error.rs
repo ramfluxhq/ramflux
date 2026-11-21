@@ -191,7 +191,7 @@ mod tests {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);
             match decode_api_error(400, body.as_bytes()) {
                 PrxError::Api { code, .. } => {
-                    assert_eq!(code, expected, "wire code {wire} must map")
+                    assert_eq!(code, expected, "wire code {wire} must map");
                 }
                 other => panic!("test: {wire} must decode as Api, got {other:?}"),
             }

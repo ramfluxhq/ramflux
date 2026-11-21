@@ -751,7 +751,7 @@ async fn apply_helper_against_real_concurrent_changes() {
             .expect("apply: same agent changed");
         match outcome {
             ApplyOutcome::NeedsReview { current: Some(current) } => {
-                assert_eq!(current.config, a3, "apply: shows the changed config")
+                assert_eq!(current.config, a3, "apply: shows the changed config");
             }
             other => panic!("apply: expected NeedsReview with the current config, got {other:?}"),
         }
