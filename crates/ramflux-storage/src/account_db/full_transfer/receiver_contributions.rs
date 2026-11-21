@@ -61,24 +61,6 @@ pub(super) fn open(path: &Path, key: &AccountDbKey) -> Result<Connection, Storag
     super::union_encoding::require_existing_format(&db)?;
     Ok(db)
 }
-fn retain(
-    db: &Connection,
-    nonce: &[u8; 32],
-    owner: &str,
-    bytes: &[u8],
-) -> Result<(), StorageError> {
-    if bytes.len() > super::record_spool::RECORD_LIMIT {
-        return Err(invalid());
-    }
-    let mut input = bytes;
-    let header = read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?;
-    let rule = compiled(&header.family)?;
-    let candidate = super::record_spool::Candidate::input(db, rule, header, &mut input)?;
-    if !input.is_empty() {
-        return Err(invalid());
-    }
-    candidate.retain_union(nonce, owner, false)
-}
 
 impl Contributions {
     pub(super) fn capture(

@@ -3,7 +3,7 @@
 
 //! Successor records change only A's contribution; B's independent rows stay independent.
 use super::*;
-use ramflux_protocol::custody::pairing::full_transfer::{RecordOp, write_record_header};
+use ramflux_protocol::custody::pairing::full_transfer::RecordOp;
 use rusqlite::OptionalExtension as _;
 
 struct Pending<'a>(&'a mut BackupDatabase, bool);
@@ -66,31 +66,35 @@ impl Contributions {
                 )?;
                 continue;
             }
-            let mut bytes = Zeroizing::new(Vec::new());
-            write_record_header(&mut *bytes, &header.0).map_err(|_| invalid())?;
-            let body = bytes.len();
-            super::super::copy_full_scalar_record(rule, &header.0, &mut input, &mut *bytes)?;
             if header.0.op == RecordOp::Absent {
-                // Union/max restrictions outlive their absence at A. Content may remove
-                // only A's row and may never erase an independently retained B value.
+                super::super::copy_full_scalar_record(
+                    rule,
+                    &header.0,
+                    &mut input,
+                    &mut std::io::sink(),
+                )?;
+                // Absence removes only this source's content contribution; independent
+                // B rows and retained denials survive their own compiled owner rules.
                 if !rule.restrictive {
                     self.absent(tx, private, &header.0)?;
                 }
                 continue;
             }
-            private.apply_full_fixed_base_record(
-                &source,
-                &header.0,
-                &mut bytes.get(body..).ok_or_else(invalid)?,
+            let candidate = super::super::record_spool::Candidate::input(
+                tx,
+                rule,
+                header.0.clone(),
+                &mut input,
             )?;
+            candidate.apply(private, &source)?;
             if super::removable(rule.id) {
-                tx.execute("INSERT INTO full_union_input(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![self.nonce.as_slice(),self.owners[0],header.0.family,header.0.key,bytes.as_slice()])?;
+                candidate.retain_original(&self.nonce, &self.owners[0])?;
             }
-            if super::super::monotonic::owner(rule.id).is_some() {
-                tx.execute("INSERT INTO full_union_record(generation_nonce,owner,family,key,record) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![self.nonce.as_slice(),self.owners[0],header.0.family,header.0.key,bytes.as_slice()])?;
-            } else {
-                retain(tx, &self.nonce, &self.owners[0], &bytes)?;
-            }
+            candidate.retain_union(
+                &self.nonce,
+                &self.owners[0],
+                super::super::monotonic::owner(rule.id).is_some(),
+            )?;
         }
         Ok(())
     }

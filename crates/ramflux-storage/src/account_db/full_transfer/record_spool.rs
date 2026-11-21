@@ -18,7 +18,7 @@ use ramflux_protocol::custody::pairing::{
     full_transfer::{RecordHeader, read_record_header},
 };
 use rusqlite::params;
-use std::io::Write;
+use std::io::{Seek as _, SeekFrom, Write};
 use zeroize::{Zeroize as _, Zeroizing};
 
 pub(super) const RECORD_LIMIT: usize = 262_144;
@@ -234,6 +234,34 @@ impl<'db> Candidate<'db> {
         output.finish()?;
         Ok(Self { db, header })
     }
+    pub(super) fn apply(
+        &self,
+        private: &mut crate::BackupDatabase,
+        source: &ramflux_protocol::custody::DeviceRef,
+    ) -> Result<(), StorageError> {
+        let mut input = self.db.blob_open("main", "full_stream_pending", "record", 1, true)?;
+        let header = PrivateHeader(
+            read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?,
+        );
+        private.apply_full_fixed_base_record(source, &header.0, &mut input)?;
+        if input.stream_position()? != input.len() as u64 {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn target(self) -> Result<(), StorageError> {
+        if self.db.execute("INSERT INTO current_target(family,key,record) SELECT ?1,?2,record FROM full_stream_pending WHERE slot=1",params![self.header.0.family,self.header.0.key])? != 1 {return Err(invalid());}
+        self.db.execute("DELETE FROM full_stream_pending WHERE slot=1", [])?;
+        Ok(())
+    }
+    pub(super) fn retain_original(
+        &self,
+        nonce: &[u8; 32],
+        owner: &str,
+    ) -> Result<(), StorageError> {
+        if self.db.execute("INSERT INTO full_union_input(generation_nonce,owner,family,key,record) SELECT ?1,?2,?3,?4,record FROM full_stream_pending WHERE slot=1 ON CONFLICT(generation_nonce,owner,family,key) DO UPDATE SET record=excluded.record",params![nonce.as_slice(),owner,self.header.0.family,self.header.0.key])? != 1 {return Err(invalid());}
+        Ok(())
+    }
     pub(super) fn retain_union(
         self,
         nonce: &[u8; 32],
@@ -261,7 +289,6 @@ pub(super) fn checked_blob<'db>(
     rule: &super::FamilyRule,
     key: &str,
 ) -> Result<rusqlite::blob::Blob<'db>, StorageError> {
-    use std::io::{Seek as _, SeekFrom};
     if length == 0 || length > RECORD_LIMIT as u64 {
         return Err(invalid());
     }
