@@ -62,9 +62,15 @@ pub(crate) fn federation_discovery_surface(
     surface
 }
 
+/// The agent custody capability is advertised unconditionally: the node always admits
+/// `AgentPublish` (AGENT-IDENTITY-01 decision r5 item 2; no release gate, no env switch).
 fn base_client_capabilities(served_gateway: &[String]) -> Vec<String> {
-    let mut capabilities =
-        vec!["opaque_delivery".to_owned(), "prekey".to_owned(), "object_relay".to_owned()];
+    let mut capabilities = vec![
+        "opaque_delivery".to_owned(),
+        "prekey".to_owned(),
+        "object_relay".to_owned(),
+        ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY.to_owned(),
+    ];
     for capability in served_gateway {
         if !capabilities.iter().any(|existing| existing == capability) {
             capabilities.push(capability.clone());
@@ -476,6 +482,25 @@ mod gateway_capability_tests {
             push_at.is_some_and(|push_at| ephemeral_at.is_some_and(|at| push_at < at)),
             "ephemeral follows session push"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_custody_capability_is_advertised_unconditionally()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let name = ramflux_protocol::AGENT_CUSTODY_AUTHORIZATION_CAPABILITY;
+        let unset = client_capabilities(&serde_json::json!({}), None)?;
+        let served = client_capabilities(
+            &serde_json::json!({"gateway": "ramflux-gateway:7443", "router": "ramflux-router:7443"}),
+            Some(&serde_json::json!([])),
+        )?;
+        for advertised in [&unset, &served] {
+            assert_eq!(
+                advertised.iter().filter(|capability| capability.as_str() == name).count(),
+                1,
+                "the node always admits AgentPublish and must advertise it exactly once"
+            );
+        }
         Ok(())
     }
 }

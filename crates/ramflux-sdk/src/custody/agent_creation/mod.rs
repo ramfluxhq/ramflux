@@ -3,6 +3,7 @@
 
 //! Agent creation on the desktop: the request state machine and its durable record. Transport,
 //! node admission and publication are separate stages; this module takes and returns bytes.
+mod capability;
 mod machine;
 mod receive_checks;
 mod state;
@@ -11,6 +12,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+pub use capability::require_agent_custody_authorization;
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,

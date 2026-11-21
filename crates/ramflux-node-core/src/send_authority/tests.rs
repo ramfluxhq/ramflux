@@ -147,7 +147,7 @@ fn custodian_change_fences_native_participant_owner_during_lookup() -> TestResul
         Some(human.publication.record.body.master_certificate.body.primary_device_ref.clone()),
     )?;
     system.publish(&human, now)?;
-    system.publish(&participant, now)?;
+    system.publish_agent(&human, &participant, now)?;
     system.notify.update_provider_credential(&crate::ProviderCredential::Apns(
         crate::ApnsProviderCredential {
             credential_id: "apns".into(),

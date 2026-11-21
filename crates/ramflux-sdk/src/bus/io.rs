@@ -308,6 +308,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
 fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
+        SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
         SdkError::CustodySetupInvalid => "CustodySetupInvalid",
         SdkError::CustodyConfirmRejected(reason) => reason.family(),
         SdkError::CustodyExpired => "CustodyExpired",

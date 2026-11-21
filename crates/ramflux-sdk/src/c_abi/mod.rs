@@ -925,6 +925,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
+        SdkError::AgentCustodyUnsupported => RamfluxErrorCode::UnsupportedVersion,
         SdkError::Search(_)
         | SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending

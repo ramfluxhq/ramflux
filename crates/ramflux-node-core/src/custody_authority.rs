@@ -10,7 +10,7 @@ use ramflux_protocol::custody::{DeviceSet, Envelope};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 
-mod agent_publish;
+pub(crate) mod agent_publish;
 pub(crate) use agent_publish::AgentPublishInput;
 mod directory;
 mod forwarded;
