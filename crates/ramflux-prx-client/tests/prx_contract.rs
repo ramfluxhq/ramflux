@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at eaf91764c...>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 1d78eb6273eee650de96637fab62d2b6a8e3ee30>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "eaf91764c566267eb579436c82c5cd3b445dd7bf";
+const PIN: &str = "1d78eb6273eee650de96637fab62d2b6a8e3ee30";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -47,6 +47,7 @@ const GROQ_ROUTE: &str = "\n[[model_routes]]\nhint = \"fast\"\nprovider = \"groq
 const HAND_WRITTEN_AGENT: &str =
     "\n[agents.worker1]\nprovider = \"openrouter\"\nmodel = \"openai/gpt-4o-mini\"\n";
 const MODEL_ROW: &str = "\n[[providers.models]]\nprovider = \"ollama\"\nmodel = \"qwen3:8b\"\noperations = [\"chat\"]\n";
+const GROQ_MODEL_ROW: &str = "\n[[providers.models]]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\noperations = [\"chat\"]\n";
 
 fn prx_binary() -> PathBuf {
     let raw = std::env::var_os("RAMFLUX_PRX_BIN")
@@ -447,6 +448,65 @@ async fn k_ac2_capabilities_and_catalog() {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
         report("K-AC2-5");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-AC2-6 (repin row): a credential stored for a NON-default provider through the credential
+/// route, then a named agent bound to that provider and one of its catalog models.
+///
+/// `credentials_ready: true` means "a credential is stored and would be used", not "the
+/// credential is valid": an expired or wrong key also reads `true`. This row checks only the
+/// first meaning; it never sends a request to the provider.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_ac2_6_stored_credential_for_non_default_provider() {
+    bounded(async {
+        // Groq is not the default provider (openrouter is); the model row has no route, so the
+        // only credential source is the one stored under `cred-groq`.
+        let mut daemon = Daemon::prepare(GROQ_MODEL_ROW);
+        daemon.credential_set("groq", SENTINEL);
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        let name = anchor_name(2);
+        let agent = AgentConfig {
+            provider: "groq".to_owned(),
+            model: "llama-3.3-70b-versatile".to_owned(),
+            prompt: None,
+            autonomy: Autonomy::Supervised,
+            tools: Tools::All,
+            enabled: true,
+        };
+        let rev = list_revision(&client, &caps).await;
+        let outcome = client
+            .put(&caps, &name, &agent, &rev, false)
+            .await
+            .expect("K-AC2-6: PUT of a groq agent with a stored credential");
+        assert_eq!(outcome.kind, PutKind::Created, "K-AC2-6: first PUT is a create");
+
+        let catalog = client.catalog().await.expect("K-AC2-6: catalog reads");
+        let row = catalog
+            .models
+            .iter()
+            .find(|m| m.provider == "groq" && m.model == "llama-3.3-70b-versatile");
+        assert_eq!(
+            row.map(|m| m.credentials_ready),
+            Some(Some(true)),
+            "K-AC2-6: groq row is ready from the stored cred-groq reference"
+        );
+        let (status, text) =
+            daemon.raw_authorized(reqwest::Method::GET, "/api/agents/catalog", None, None).await;
+        assert_eq!(status, 200, "K-AC2-6: catalog status");
+        assert!(!text.contains(SENTINEL), "K-AC2-6: the stored value appears nowhere in the body");
+
+        let read = client.get(&caps, &name).await.expect("K-AC2-6: agent reads back");
+        assert_eq!(read.config, agent, "K-AC2-6: config round-trips");
+        assert_eq!(read.status, AgentStatus::Active, "K-AC2-6: enabled agent is active");
+        report("K-AC2-6");
         daemon.stop();
     })
     .await;
