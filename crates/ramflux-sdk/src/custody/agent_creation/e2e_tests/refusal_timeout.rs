@@ -209,6 +209,7 @@ fn failed_vault_delete_leaves_cleanup_pending_until_a_later_run_succeeds() -> Te
 
 /// A failed pending-item delete (the real vault directory refuses writes) is `cleanup_pending`,
 /// never success; the next run finishes the deletion and every item is gone.
+#[cfg(unix)]
 fn cleanup_case(pair: &mut Pair) -> TestResult {
     use crate::custody::memory_vault::MemoryPrimaryVault;
     use std::os::unix::fs::PermissionsExt;

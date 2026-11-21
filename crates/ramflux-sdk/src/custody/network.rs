@@ -19,19 +19,20 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// The saved approval of a headless account, shared so the connection futures stay small (the plan,
+/// the decision and the profile would otherwise be copied into every future that holds the
+/// authority).
+type SharedPublishing = Option<Arc<super::agent_creation::AgentPublishing>>;
+
 /// A lost or unreadable publish reply: the record says `publication_unknown` until the identical
 /// `AgentPublish` is answered. Takes owned data, so no connection reference lives across the wait.
-async fn mark_publication_unknown(
-    saved: Option<super::agent_creation::AgentPublishing>,
-) -> Result<(), SdkError> {
+async fn mark_publication_unknown(saved: SharedPublishing) -> Result<(), SdkError> {
     let Some(saved) = saved else { return Ok(()) };
     tokio::task::spawn_blocking(move || saved.mark_unknown()).await.map_err(|_| invalid())?
 }
 
 /// The account is live and its receipt is verified: the headless approval is complete.
-async fn complete_publication(
-    saved: Option<super::agent_creation::AgentPublishing>,
-) -> Result<(), SdkError> {
+async fn complete_publication(saved: SharedPublishing) -> Result<(), SdkError> {
     let Some(saved) = saved else { return Ok(()) };
     tokio::task::spawn_blocking(move || saved.mark_complete()).await.map_err(|_| invalid())?
 }
@@ -40,7 +41,7 @@ struct LocalAuthority {
     account: BornAccount,
     device: DeviceRef,
     credentials: BranchCredentials,
-    publishing: Option<super::agent_creation::AgentPublishing>,
+    publishing: SharedPublishing,
 }
 struct OpenTransport<S = GatewayTcpTlsStream> {
     stream: S,
@@ -75,7 +76,7 @@ pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) session: Option<CustodySession>,
     pub(super) timeout: Duration,
     /// Saved approval of a headless account (plan, decision, profile); `None` for a human account.
-    publishing: Option<super::agent_creation::AgentPublishing>,
+    publishing: SharedPublishing,
     mode: BindingMode,
     audience: String,
     capacity_key: String,
@@ -298,7 +299,8 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
                     account.bind_capacity_node(&root, &node_id, &node_public_key, now()?)?;
                     let (device, credentials) =
                         account.credentials(vault.as_ref(), &device_id, now()?)?;
-                    let publishing = super::agent_creation::load_publishing(&root, &account)?;
+                    let publishing =
+                        super::agent_creation::load_publishing(&root, &account)?.map(Arc::new);
                     Ok::<_, SdkError>(LocalAuthority { account, device, credentials, publishing })
                 })
                 .await
@@ -431,7 +433,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     fn registration_actions(&self) -> Result<Vec<CustodyProofAction>, SdkError> {
         let first = super::agent_creation::first_action(
             self.account.record().body.principal_kind,
-            self.publishing.as_ref(),
+            self.publishing.as_deref(),
             &self.account.publication(),
         )?;
         Ok(vec![

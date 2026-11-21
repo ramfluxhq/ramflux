@@ -158,18 +158,7 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
-            super::super::actor::PrivateCommand::AgentCreation { step, reply } => {
-                if !reply.is_closed() {
-                    let result = self.agent_creation_step(step);
-                    let _ = reply.send(result);
-                }
-            }
-            super::super::actor::PrivateCommand::AgentCall { call, reply } => {
-                self.reply_agent_call(call, reply);
-            }
-            super::super::actor::PrivateCommand::AgentHomeNode { reply } => {
-                self.reply_agent_home_node(reply);
-            }
+            super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
                     let result = self.capture_backup();

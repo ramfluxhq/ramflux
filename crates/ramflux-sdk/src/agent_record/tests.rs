@@ -10,7 +10,9 @@ use super::{AgentIntent, AgentRecordStore};
 use crate::SdkError;
 use crate::agent_record::seed_for_test;
 use crate::custody::agent_creation::AgentCreationStore;
-use crate::custody::agent_creation::tests::{HUMAN, begin_for_human, human_fixture_with};
+use crate::custody::agent_creation::tests::{
+    HUMAN, HumanFixture, begin_for_human, human_fixture_with,
+};
 use crate::custody::memory_vault::MemoryPrimaryVault;
 use ramflux_protocol::custody::decode_register_plan;
 use ramflux_protocol::message::{AgentAccessPolicy, AgentPersona};
@@ -34,21 +36,23 @@ fn owner_access() -> AgentAccessPolicy {
     }
 }
 
-/// A real plan of the human fixture, and the agent record store beside its creation store.
-fn planned()
--> Result<(ramflux_protocol::custody::RegisterPlan, AgentRecordStore), Box<dyn std::error::Error>> {
+/// A real plan of the human fixture, the agent record store beside its creation store, and the
+/// fixture that owns the temporary root: the caller keeps it alive, or the store would recreate
+/// directories inside a root that was already removed.
+type Planned = (ramflux_protocol::custody::RegisterPlan, AgentRecordStore, HumanFixture);
+fn planned() -> Result<Planned, Box<dyn std::error::Error>> {
     let fixture = human_fixture_with(Some(b"human data secret"))?;
     let root = fixture.root.0.to_path_buf();
     let store = AgentCreationStore::open(root, HUMAN)?;
     let desk = Arc::new(MemoryPrimaryVault::default());
     let outcome = begin_for_human(&fixture, &store, &desk, "req-record", None)?;
     let plan = decode_register_plan(&outcome.plan_bytes)?;
-    Ok((plan, AgentRecordStore::at(store.agent_record_dir())))
+    Ok((plan, AgentRecordStore::at(store.agent_record_dir()), fixture))
 }
 
 #[test]
 fn creation_writes_one_record_in_state_u_and_replays_the_first_identity() -> TestResult {
-    let (plan, records) = planned()?;
+    let (plan, records, _fixture) = planned()?;
     let intent = AgentIntent { persona: persona(), access: owner_access() };
     let first = create_from_plan(&records, &plan, &intent)?;
     assert_eq!(first.lifecycle, "U", "the new agent is in state U");
@@ -72,7 +76,7 @@ fn creation_writes_one_record_in_state_u_and_replays_the_first_identity() -> Tes
 
 #[test]
 fn an_invalid_access_policy_or_persona_refuses_and_writes_nothing() -> TestResult {
-    let (plan, records) = planned()?;
+    let (plan, records, _fixture) = planned()?;
     let mut bad_dm = owner_access();
     bad_dm.dm = "everyone".into();
     let refused =
@@ -117,7 +121,7 @@ fn allowed_humans_need_allowlist_and_must_be_unique() -> TestResult {
 
 #[test]
 fn a_record_file_that_names_another_agent_is_refused() -> TestResult {
-    let (plan, records) = planned()?;
+    let (plan, records, _fixture) = planned()?;
     create_from_plan(&records, &plan, &AgentIntent { persona: persona(), access: owner_access() })?;
     let source = records.load(&plan.agent_anchor)?.ok_or("the record")?;
     // The record of one agent planted under another agent's file name.
@@ -133,7 +137,7 @@ fn a_record_file_that_names_another_agent_is_refused() -> TestResult {
 
 #[test]
 fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors() -> TestResult {
-    let (plan, records) = planned()?;
+    let (plan, records, _fixture) = planned()?;
     let intent = AgentIntent { persona: persona(), access: owner_access() };
     let empty = records.changes(parse_cursor("")?)?;
     assert!(empty.records.is_empty() && empty.cursor == 0 && !empty.more, "no record, cursor zero");
@@ -187,7 +191,7 @@ fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors
 
 #[test]
 fn a_retired_anchor_is_never_created_again_on_this_device() -> TestResult {
-    let (plan, records) = planned()?;
+    let (plan, records, _fixture) = planned()?;
     let intent = AgentIntent { persona: persona(), access: owner_access() };
     let first = create_from_plan(&records, &plan, &intent)?;
     retire(&records, &plan.agent_anchor, &first.identity, &plan.desktop, 2)?;

@@ -45,6 +45,20 @@ impl AccountRuntime {
         }
     }
 
+    /// Runs one agent command of this runtime; a closed reply channel skips the work.
+    pub(super) fn apply_agent(&self, command: super::super::actor::AgentPrivate) {
+        use super::super::actor::AgentPrivate;
+        match command {
+            AgentPrivate::Creation { step, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.agent_creation_step(step));
+                }
+            }
+            AgentPrivate::Call { call, reply } => self.reply_agent_call(call, reply),
+            AgentPrivate::HomeNode { reply } => self.reply_agent_home_node(reply),
+        }
+    }
+
     /// Answer one agent creation call by private command; a closed reply channel skips the work.
     pub(super) fn reply_agent_call(
         &self,

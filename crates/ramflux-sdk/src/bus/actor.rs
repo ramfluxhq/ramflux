@@ -12,6 +12,22 @@ use tokio::sync::oneshot;
 pub(super) type AccountInitializer =
     Box<dyn FnOnce(AccountIndex) -> Result<LocalBusAccountState, SdkError> + Send>;
 
+/// The agent commands of a human account's runtime (AGENT-IDENTITY-01).
+pub(super) enum AgentPrivate {
+    Creation {
+        step: crate::custody::agent_creation::AgentStep,
+        reply:
+            oneshot::Sender<Result<crate::custody::agent_creation::AgentCreationRecord, SdkError>>,
+    },
+    HomeNode {
+        reply: oneshot::Sender<Result<Option<String>, SdkError>>,
+    },
+    Call {
+        call: super::agent_methods::AgentCall,
+        reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
+    },
+}
+
 pub(super) enum PrivateCommand {
     SearchRebuild {
         owner: u64,
@@ -35,18 +51,8 @@ pub(super) enum PrivateCommand {
         reply: oneshot::Sender<Result<crate::LocalBusCreatedAccount, SdkError>>,
     },
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
-    AgentCreation {
-        step: crate::custody::agent_creation::AgentStep,
-        reply:
-            oneshot::Sender<Result<crate::custody::agent_creation::AgentCreationRecord, SdkError>>,
-    },
-    AgentHomeNode {
-        reply: oneshot::Sender<Result<Option<String>, SdkError>>,
-    },
-    AgentCall {
-        call: super::agent_methods::AgentCall,
-        reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
-    },
+    /// An agent creation command; boxed so the agent payloads do not grow this enum.
+    Agent(Box<AgentPrivate>),
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -267,7 +273,7 @@ impl AccountActor {
         step: crate::custody::agent_creation::AgentStep,
     ) -> Result<crate::custody::agent_creation::AgentCreationRecord, SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::AgentCreation { step, reply })?;
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Creation { step, reply })))?;
         response.await.map_err(|_| stopped())?
     }
     /// One account-scoped call of the agent creation methods, run by this human account's runtime.
@@ -276,13 +282,13 @@ impl AccountActor {
         call: super::agent_methods::AgentCall,
     ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::AgentCall { call, reply })?;
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Call { call, reply })))?;
         response.await.map_err(|_| stopped())?
     }
     /// The stored home node of this human account (`account/node-id`), read by its runtime.
     pub(super) async fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::AgentHomeNode { reply })?;
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::HomeNode { reply })))?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(
