@@ -5,7 +5,7 @@
 //! response bound. The HTTP stack is the workspace's `reqwest` (same features as
 //! `apps/ramflux-agent-host`).
 
-use crate::error::{config, decode_api_error, protocol, PrxError};
+use crate::error::{PrxError, config, decode_api_error, protocol};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH};
 use reqwest::{Method, Url, redirect};
 use serde_json::Value;
@@ -38,6 +38,7 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     /// A configuration with the default deadline and body bound.
+    #[must_use]
     pub fn new(base_url: impl Into<String>, token_file: impl Into<PathBuf>) -> Self {
         Self {
             base_url: base_url.into(),
@@ -138,22 +139,22 @@ impl Transport {
             request = request.header(IF_MATCH, value);
         }
         if let Some(payload) = body {
-            let bytes = serde_json::to_vec(payload).map_err(|_| protocol("request body could not be encoded"))?;
+            let bytes = serde_json::to_vec(payload)
+                .map_err(|_| protocol("request body could not be encoded"))?;
             request = request.header(CONTENT_TYPE, "application/json").body(bytes);
         }
-        let mut response = request.send().await.map_err(map_transport_error)?;
+        let mut response = request.send().await.map_err(|error| map_transport_error(&error))?;
         let status = response.status().as_u16();
         let mut raw_body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
+        while let Some(chunk) =
+            response.chunk().await.map_err(|error| map_transport_error(&error))?
+        {
             if raw_body.len().saturating_add(chunk.len()) > self.max_body_bytes {
                 return Err(protocol("response body exceeds the client bound"));
             }
             raw_body.extend_from_slice(&chunk);
         }
-        Ok(Raw {
-            status,
-            body: raw_body,
-        })
+        Ok(Raw { status, body: raw_body })
     }
 
     fn authorization(&self) -> Result<HeaderValue, PrxError> {
@@ -161,7 +162,8 @@ impl Transport {
         let mut bytes = Zeroizing::new(Vec::with_capacity(7 + token.len()));
         bytes.extend_from_slice(b"Bearer ");
         bytes.extend_from_slice(token.as_bytes());
-        let mut value = HeaderValue::from_bytes(&bytes).map_err(|_| config("token is not a valid header value"))?;
+        let mut value = HeaderValue::from_bytes(&bytes)
+            .map_err(|_| config("token is not a valid header value"))?;
         value.set_sensitive(true);
         Ok(value)
     }
@@ -174,12 +176,8 @@ impl Transport {
     }
 }
 
-fn map_transport_error(error: reqwest::Error) -> PrxError {
-    if error.is_timeout() {
-        PrxError::Timeout
-    } else {
-        PrxError::Unavailable
-    }
+fn map_transport_error(error: &reqwest::Error) -> PrxError {
+    if error.is_timeout() { PrxError::Timeout } else { PrxError::Unavailable }
 }
 
 /// Accepts only `http://127.0.0.1:<port>` or `http://[::1]:<port>`, with no path, query,
@@ -218,9 +216,7 @@ pub(crate) fn load_token(path: &Path) -> Result<Zeroizing<String>, PrxError> {
     let file = File::open(path).map_err(|_| config("token file cannot be opened"))?;
     let mut limited = file.take(MAX_TOKEN_FILE_BYTES + 1);
     let mut raw = Zeroizing::new(Vec::new());
-    limited
-        .read_to_end(&mut raw)
-        .map_err(|_| config("token file cannot be read"))?;
+    limited.read_to_end(&mut raw).map_err(|_| config("token file cannot be read"))?;
     if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_TOKEN_FILE_BYTES {
         return Err(config("token file is too large"));
     }
@@ -249,7 +245,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("test: chmod token");
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("test: chmod token");
         }
     }
 
@@ -300,7 +297,7 @@ mod tests {
         }
         for bad in [
             "http://localhost:4141",
-            "http://10.0.0.1:4141",
+            "http://203.0.113.7:4141",
             "https://127.0.0.1:4141",
             "http://127.0.0.1:0",
             "http://user:pw@127.0.0.1:4141",
@@ -322,9 +319,11 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("test: temp dir");
         let path = dir.path().join("token");
         std::fs::write(&path, "tok-value\n").expect("test: write token");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("test: chmod");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("test: chmod");
         assert!(matches!(load_token(&path), Err(PrxError::Config { .. })), "0644 must be refused");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("test: chmod");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("test: chmod");
         let token = load_token(&path).expect("test: 0600 token loads");
         assert_eq!(token.as_str(), "tok-value", "token is trimmed of the trailing newline");
     }
@@ -334,9 +333,15 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("test: temp dir");
         let path = dir.path().join("token");
         write_token(&path, " \n");
-        assert!(matches!(load_token(&path), Err(PrxError::Config { .. })), "blank token must be refused");
+        assert!(
+            matches!(load_token(&path), Err(PrxError::Config { .. })),
+            "blank token must be refused"
+        );
         write_token(&path, &"x".repeat(usize::try_from(MAX_TOKEN_FILE_BYTES).unwrap_or(4096) + 1));
-        assert!(matches!(load_token(&path), Err(PrxError::Config { .. })), "oversized token must be refused");
+        assert!(
+            matches!(load_token(&path), Err(PrxError::Config { .. })),
+            "oversized token must be refused"
+        );
     }
 
     #[tokio::test]
@@ -351,7 +356,10 @@ mod tests {
         let settings = ClientConfig::new(format!("http://{addr}"), &token).with_max_body_bytes(16);
         let transport = Transport::new(&settings).expect("test: transport builds");
         let result = transport.call(Method::GET, "/api/capabilities", None, None).await;
-        assert!(matches!(result, Err(PrxError::Protocol { .. })), "over-bound body must be a Protocol error");
+        assert!(
+            matches!(result, Err(PrxError::Protocol { .. })),
+            "over-bound body must be a Protocol error"
+        );
     }
 
     #[tokio::test]

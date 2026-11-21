@@ -18,7 +18,8 @@ pub(crate) fn offline_client() -> (tempfile::TempDir, PrxClient) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("test: chmod token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("test: chmod token");
     }
     let settings = ClientConfig::new("http://127.0.0.1:9", &token);
     let client = PrxClient::new(&settings).expect("test: offline client builds");

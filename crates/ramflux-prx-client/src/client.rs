@@ -18,8 +18,6 @@ impl PrxClient {
     /// # Errors
     /// Returns `PrxError::Config` for any refused setting.
     pub fn new(config: &ClientConfig) -> Result<Self, PrxError> {
-        Ok(Self {
-            transport: Transport::new(config)?,
-        })
+        Ok(Self { transport: Transport::new(config)? })
     }
 }

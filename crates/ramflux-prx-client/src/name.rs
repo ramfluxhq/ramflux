@@ -4,7 +4,7 @@
 //! Agent names: the grammar PRX enforces, the reserved names, and the rf-derived form
 //! `a_` + 52 lowercase base32 characters encoding a 32-byte anchor.
 
-use crate::error::{local_refusal, ApiCode, PrxError};
+use crate::error::{ApiCode, PrxError, local_refusal};
 use serde::{Deserialize, Deserializer};
 
 const NAME_MAX_LEN: usize = 64;
@@ -73,11 +73,7 @@ fn is_grammar(raw: &str) -> bool {
 
 fn symbol(value: u32) -> char {
     let v = u8::try_from(value & 31).unwrap_or(0);
-    if v < 26 {
-        char::from(b'a' + v)
-    } else {
-        char::from(b'2' + (v - 26))
-    }
+    if v < 26 { char::from(b'a' + v) } else { char::from(b'2' + (v - 26)) }
 }
 
 fn symbol_value(byte: u8) -> Option<u32> {
@@ -145,7 +141,11 @@ mod tests {
     #[test]
     fn last_character_carries_the_leftover_bit() {
         let name = AgentName::from_anchor(&[0xff_u8; ANCHOR_BYTES]);
-        assert_eq!(name.as_str(), format!("a_{}q", "7".repeat(51)), "51 full groups then one bit padded to q");
+        assert_eq!(
+            name.as_str(),
+            format!("a_{}q", "7".repeat(51)),
+            "51 full groups then one bit padded to q"
+        );
         assert!(name.is_rf_derived());
     }
 
@@ -153,9 +153,11 @@ mod tests {
     fn non_canonical_or_hand_written_names_are_not_rf_derived() {
         let hand = AgentName::parse("worker1").expect("test: hand-written name parses");
         assert!(!hand.is_rf_derived());
-        let short = AgentName::parse(&format!("a_{}", "a".repeat(51))).expect("test: grammar-valid");
+        let short =
+            AgentName::parse(&format!("a_{}", "a".repeat(51))).expect("test: grammar-valid");
         assert!(!short.is_rf_derived(), "51 characters decode to 31 bytes");
-        let dirty = AgentName::parse(&format!("a_{}b", "a".repeat(51))).expect("test: grammar-valid");
+        let dirty =
+            AgentName::parse(&format!("a_{}b", "a".repeat(51))).expect("test: grammar-valid");
         assert!(!dirty.is_rf_derived(), "non-zero trailing bits are not canonical");
     }
 
@@ -168,7 +170,10 @@ mod tests {
         let too_long = format!("a{}", "b".repeat(64));
         for bad in ["", "1abc", "A_BAD", "a b", "a.b", too_long.as_str()] {
             assert!(
-                matches!(AgentName::parse(bad), Err(PrxError::Api { status: 400, code: ApiCode::AgentInvalid, .. })),
+                matches!(
+                    AgentName::parse(bad),
+                    Err(PrxError::Api { status: 400, code: ApiCode::AgentInvalid, .. })
+                ),
                 "invalid name must be refused as agent_invalid: {bad:?}"
             );
         }
@@ -178,7 +183,10 @@ mod tests {
     fn reserved_names_are_refused_before_any_request() {
         for reserved in RESERVED {
             assert!(
-                matches!(AgentName::parse(reserved), Err(PrxError::Api { code: ApiCode::AgentInvalid, .. })),
+                matches!(
+                    AgentName::parse(reserved),
+                    Err(PrxError::Api { code: ApiCode::AgentInvalid, .. })
+                ),
                 "reserved name must be refused: {reserved}"
             );
         }

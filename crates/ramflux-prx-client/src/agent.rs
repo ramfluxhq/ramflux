@@ -175,11 +175,7 @@ fn check_uuid(raw: &str) -> Result<(), PrxError> {
             8 | 13 | 18 | 23 => b == b'-',
             _ => b.is_ascii_hexdigit(),
         });
-    if shaped {
-        Ok(())
-    } else {
-        Err(protocol("incarnation is not a UUID"))
-    }
+    if shaped { Ok(()) } else { Err(protocol("incarnation is not a UUID")) }
 }
 
 /// `GET /api/agents`: the config revision and every configured named agent, retired included.
@@ -262,10 +258,7 @@ impl AgentList {
             .into_iter()
             .map(WireReadback::into_readback)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            revision: wire.revision,
-            agents,
-        })
+        Ok(Self { revision: wire.revision, agents })
     }
 }
 
@@ -303,10 +296,7 @@ impl Retired {
         if wire.name != *expected || wire.status != "retired" {
             return Err(protocol("delete answer is not a retirement of the named agent"));
         }
-        Ok(Self {
-            name: wire.name,
-            revision: wire.revision,
-        })
+        Ok(Self { name: wire.name, revision: wire.revision })
     }
 }
 
@@ -325,7 +315,11 @@ impl PrxClient {
     ///
     /// # Errors
     /// Returns `Unsupported`, `Api` (for example `agent_unknown`), or a transport or contract error.
-    pub async fn get(&self, caps: &Capabilities, name: &AgentName) -> Result<AgentReadback, PrxError> {
+    pub async fn get(
+        &self,
+        caps: &Capabilities,
+        name: &AgentName,
+    ) -> Result<AgentReadback, PrxError> {
         require(caps, AGENT_CRUD_V1)?;
         let path = format!("/api/agents/{}", name.as_str());
         let raw = self.transport.call(Method::GET, &path, None, None).await?;
@@ -354,10 +348,8 @@ impl PrxClient {
             path.push_str("?confirm_high_risk=true");
         }
         let body = config.to_body();
-        let raw = self
-            .transport
-            .call(Method::PUT, &path, Some(revision.as_str()), Some(&body))
-            .await?;
+        let raw =
+            self.transport.call(Method::PUT, &path, Some(revision.as_str()), Some(&body)).await?;
         let kind = match raw.status {
             201 => PutKind::Created,
             200 => PutKind::Replaced,
@@ -380,10 +372,7 @@ impl PrxClient {
     ) -> Result<Retired, PrxError> {
         require(caps, AGENT_CRUD_V1)?;
         let path = format!("/api/agents/{}", name.as_str());
-        let raw = self
-            .transport
-            .call(Method::DELETE, &path, Some(revision.as_str()), None)
-            .await?;
+        let raw = self.transport.call(Method::DELETE, &path, Some(revision.as_str()), None).await?;
         Retired::from_body(&raw.body, name)
     }
 
@@ -393,10 +382,7 @@ impl PrxClient {
     /// Returns `Unsupported`, the API error, or a transport or contract error.
     pub async fn main(&self, caps: &Capabilities) -> Result<MainReadback, PrxError> {
         require(caps, AGENT_MAIN_READBACK_V1)?;
-        let raw = self
-            .transport
-            .call(Method::GET, "/api/agents/main", None, None)
-            .await?;
+        let raw = self.transport.call(Method::GET, "/api/agents/main", None, None).await?;
         MainReadback::from_body(&raw.body)
     }
 }
@@ -426,7 +412,8 @@ mod tests {
             r#"{"provider":"ollama","model":"codellama","autonomy":"full","tools":["*"],"enabled":true}"#,
             "active",
         );
-        let read = AgentReadback::from_body(body.as_bytes(), &name()).expect("test: documented readback decodes");
+        let read = AgentReadback::from_body(body.as_bytes(), &name())
+            .expect("test: documented readback decodes");
         assert_eq!(read.config.tools, Tools::All);
         assert_eq!(read.config.prompt, None, "absent prompt means PRX composition");
         assert!(read.config.enabled);
@@ -473,7 +460,10 @@ mod tests {
         .replace(r#""status""#, r#""enabled":true,"status""#);
         for bad in [bad_status, bad_autonomy, string_bool, top_enabled] {
             assert!(
-                matches!(AgentReadback::from_body(bad.as_bytes(), &name()), Err(PrxError::Protocol { .. })),
+                matches!(
+                    AgentReadback::from_body(bad.as_bytes(), &name()),
+                    Err(PrxError::Protocol { .. })
+                ),
                 "readback must fail closed: {bad}"
             );
         }
@@ -485,7 +475,10 @@ mod tests {
             r#"{"provider":"p","model":"m","autonomy":"full","tools":["*","read_file"],"enabled":true}"#,
             "active",
         );
-        assert!(matches!(AgentReadback::from_body(body.as_bytes(), &name()), Err(PrxError::Protocol { .. })));
+        assert!(matches!(
+            AgentReadback::from_body(body.as_bytes(), &name()),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[test]
@@ -495,7 +488,10 @@ mod tests {
             r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true}"#,
             "active",
         );
-        assert!(matches!(AgentReadback::from_body(body.as_bytes(), &other), Err(PrxError::Protocol { .. })));
+        assert!(matches!(
+            AgentReadback::from_body(body.as_bytes(), &other),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[test]
@@ -503,23 +499,32 @@ mod tests {
         let body = format!(
             r#"{{"name":"main","config":{{"provider":"kimi-code","model":"k3","autonomy":"full","tools":["*"]}},"revision":"{HEX}","incarnation":"{UUID}"}}"#
         );
-        let main = MainReadback::from_body(body.as_bytes()).expect("test: documented Main shape decodes");
+        let main =
+            MainReadback::from_body(body.as_bytes()).expect("test: documented Main shape decodes");
         assert_eq!(main.autonomy, Autonomy::Full);
         assert_eq!(main.tools, Tools::All);
         let with_enabled = body.replace(r#""tools":["*"]}"#, r#""tools":["*"],"enabled":true}"#);
-        assert!(matches!(MainReadback::from_body(with_enabled.as_bytes()), Err(PrxError::Protocol { .. })));
+        assert!(matches!(
+            MainReadback::from_body(with_enabled.as_bytes()),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[test]
     fn list_and_retire_decode_their_documented_shapes() {
         let list = format!(r#"{{"revision":"{HEX}","agents":[]}}"#);
-        let parsed = AgentList::from_body(list.as_bytes()).expect("test: empty list still carries the revision");
-        assert!(parsed.agents.is_empty());
+        let parsed = AgentList::from_body(list.as_bytes())
+            .expect("test: empty list still carries the revision");
+        assert_eq!(parsed.agents, Vec::new(), "an empty list has no agents");
         let retire = format!(r#"{{"name":"{NAME}","status":"retired","revision":"{HEX}"}}"#);
-        let retired = Retired::from_body(retire.as_bytes(), &name()).expect("test: documented retire decodes");
+        let retired = Retired::from_body(retire.as_bytes(), &name())
+            .expect("test: documented retire decodes");
         assert_eq!(retired.revision.as_str(), HEX);
         let not_retired = retire.replace("retired", "active");
-        assert!(matches!(Retired::from_body(not_retired.as_bytes(), &name()), Err(PrxError::Protocol { .. })));
+        assert!(matches!(
+            Retired::from_body(not_retired.as_bytes(), &name()),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[test]
@@ -536,12 +541,13 @@ mod tests {
         assert!(body.get("prompt").is_none(), "absent prompt is not sent");
         assert_eq!(body.get("tools"), Some(&json!(["*"])));
         assert!(body.get("limits").is_none(), "limits is never sent");
-        let empty = AgentConfig {
-            prompt: Some(String::new()),
-            tools: Tools::List(Vec::new()),
-            ..config
-        };
-        assert_eq!(empty.to_body().get("prompt"), Some(&json!("")), "empty prompt is sent as empty");
+        let empty =
+            AgentConfig { prompt: Some(String::new()), tools: Tools::List(Vec::new()), ..config };
+        assert_eq!(
+            empty.to_body().get("prompt"),
+            Some(&json!("")),
+            "empty prompt is sent as empty"
+        );
         assert_eq!(empty.to_body().get("tools"), Some(&json!([])));
     }
 
@@ -558,10 +564,8 @@ mod tests {
             tools: Tools::All,
             enabled: true,
         };
-        let oversized = AgentConfig {
-            prompt: Some("x".repeat(PROMPT_MAX_BYTES + 1)),
-            ..base.clone()
-        };
+        let oversized =
+            AgentConfig { prompt: Some("x".repeat(PROMPT_MAX_BYTES + 1)), ..base.clone() };
         let duplicate = AgentConfig {
             tools: Tools::List(vec!["read_file".to_owned(), "read_file".to_owned()]),
             ..base.clone()
@@ -592,7 +596,10 @@ mod tests {
         let result = client.list(&caps).await;
         assert!(matches!(result, Err(PrxError::Unsupported { .. })), "list needs agent_crud_v1");
         let main = client.main(&caps).await;
-        assert!(matches!(main, Err(PrxError::Unsupported { .. })), "main needs agent_main_readback_v1");
+        assert!(
+            matches!(main, Err(PrxError::Unsupported { .. })),
+            "main needs agent_main_readback_v1"
+        );
         let deleted = client.retire(&caps, &name(), &revision).await;
         assert!(matches!(deleted, Err(PrxError::Unsupported { .. })));
     }

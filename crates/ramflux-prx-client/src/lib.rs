@@ -8,6 +8,8 @@
 //! documented in PRX's token document (`docs/rf-contract/capability-tokens.md`
 //! at the pinned commit); unknown 2xx fields and malformed bodies fail closed.
 
+#![allow(clippy::module_name_repetitions)]
+
 mod agent;
 mod apply;
 mod autonomy;
@@ -23,13 +25,14 @@ mod test_support;
 mod transport;
 
 pub use agent::{
-    AgentConfig, AgentList, AgentReadback, AgentStatus, MainReadback, PROMPT_MAX_BYTES, PutKind, PutOutcome, Retired,
-    Tools,
+    AgentConfig, AgentList, AgentReadback, AgentStatus, MainReadback, PROMPT_MAX_BYTES, PutKind,
+    PutOutcome, Retired, Tools,
 };
 pub use apply::ApplyOutcome;
 pub use autonomy::Autonomy;
 pub use capabilities::{
-    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, BuildCommit, CAPABILITIES_V1, Capabilities, require,
+    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, BuildCommit, CAPABILITIES_V1,
+    Capabilities, require,
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;

@@ -77,7 +77,24 @@ impl PrxClient {
         config: &AgentConfig,
         reviewed: Option<&AgentConfig>,
     ) -> Result<ApplyOutcome, PrxError> {
-        let mut revision = self.list(caps).await?.revision;
+        let revision = self.list(caps).await?.revision;
+        self.apply_agent_at(caps, name, config, reviewed, &revision).await
+    }
+
+    /// Like [`PrxClient::apply_agent`], but starts from a revision the caller already read
+    /// from `list`. A change between that read and this PUT is what the 409 rule handles.
+    ///
+    /// # Errors
+    /// Returns any error of `get` or `put` that the rule does not handle.
+    pub async fn apply_agent_at(
+        &self,
+        caps: &Capabilities,
+        name: &AgentName,
+        config: &AgentConfig,
+        reviewed: Option<&AgentConfig>,
+        revision: &ConfigRevision,
+    ) -> Result<ApplyOutcome, PrxError> {
+        let mut revision = revision.clone();
         let mut puts: u32 = 0;
         loop {
             puts += 1;
@@ -116,10 +133,7 @@ impl PrxClient {
     ) -> Result<Option<AgentReadback>, PrxError> {
         match self.get(caps, name).await {
             Ok(readback) => Ok(Some(readback)),
-            Err(PrxError::Api {
-                code: ApiCode::AgentUnknown,
-                ..
-            }) => Ok(None),
+            Err(PrxError::Api { code: ApiCode::AgentUnknown, .. }) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -128,8 +142,8 @@ impl PrxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autonomy::Autonomy;
     use crate::agent::Tools;
+    use crate::autonomy::Autonomy;
 
     const HEX: &str = "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6";
     const UUID: &str = "5f1c2a3e-8b4d-4c6a-9e7f-0a1b2c3d4e5f";
@@ -157,21 +171,28 @@ mod tests {
     #[test]
     fn intended_config_already_stored_is_already_applied() {
         let current = readback("codellama", "active");
-        let decision = decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
-        assert_eq!(decision, ConflictDecision::AlreadyApplied, "config equality wins over the review");
+        let decision =
+            decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
+        assert_eq!(
+            decision,
+            ConflictDecision::AlreadyApplied,
+            "config equality wins over the review"
+        );
     }
 
     #[test]
     fn unchanged_since_review_retries() {
         let current = readback("llama3", "active");
-        let decision = decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
+        let decision =
+            decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
         assert_eq!(decision, ConflictDecision::Retry, "another agent changed; this one did not");
     }
 
     #[test]
     fn same_agent_changed_needs_review() {
         let current = readback("mistral", "active");
-        let decision = decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
+        let decision =
+            decide_conflict(Some(&current), &config("codellama"), Some(&config("llama3")));
         assert_eq!(decision, ConflictDecision::NeedsReview);
     }
 

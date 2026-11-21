@@ -64,9 +64,7 @@ impl ReloadReport {
         if !wire.success {
             return Err(protocol("config reload reports success false"));
         }
-        Ok(Self {
-            message: wire.message,
-        })
+        Ok(Self { message: wire.message })
     }
 }
 
@@ -108,10 +106,7 @@ impl PrxClient {
     /// Returns `Unsupported`, the API error, or a transport or contract error.
     pub async fn reload_config(&self, caps: &Capabilities) -> Result<ReloadReport, PrxError> {
         require(caps, AGENT_CRUD_V1)?;
-        let raw = self
-            .transport
-            .call(Method::POST, "/api/config/reload", None, None)
-            .await?;
+        let raw = self.transport.call(Method::POST, "/api/config/reload", None, None).await?;
         ReloadReport::from_body(&raw.body)
     }
 }
@@ -124,17 +119,30 @@ mod tests {
 
     #[test]
     fn decodes_documented_targeted_shape() {
-        let body = format!(r#"{{"revision":"{HEX}","configured":true,"effective":true,"restart_required":false}}"#);
-        let parsed = TargetedAgents::from_body(body.as_bytes()).expect("test: documented shape decodes");
+        let body = format!(
+            r#"{{"revision":"{HEX}","configured":true,"effective":true,"restart_required":false}}"#
+        );
+        let parsed =
+            TargetedAgents::from_body(body.as_bytes()).expect("test: documented shape decodes");
         assert!(parsed.configured && parsed.effective && !parsed.restart_required);
     }
 
     #[test]
     fn extra_or_string_fields_fail_closed() {
-        let extra = format!(r#"{{"revision":"{HEX}","configured":true,"effective":true,"restart_required":false,"x":1}}"#);
-        let string_bool = format!(r#"{{"revision":"{HEX}","configured":"true","effective":true,"restart_required":false}}"#);
-        assert!(matches!(TargetedAgents::from_body(extra.as_bytes()), Err(PrxError::Protocol { .. })));
-        assert!(matches!(TargetedAgents::from_body(string_bool.as_bytes()), Err(PrxError::Protocol { .. })));
+        let extra = format!(
+            r#"{{"revision":"{HEX}","configured":true,"effective":true,"restart_required":false,"x":1}}"#
+        );
+        let string_bool = format!(
+            r#"{{"revision":"{HEX}","configured":"true","effective":true,"restart_required":false}}"#
+        );
+        assert!(matches!(
+            TargetedAgents::from_body(extra.as_bytes()),
+            Err(PrxError::Protocol { .. })
+        ));
+        assert!(matches!(
+            TargetedAgents::from_body(string_bool.as_bytes()),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[test]

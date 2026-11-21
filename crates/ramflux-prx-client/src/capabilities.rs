@@ -4,7 +4,7 @@
 //! `GET /api/capabilities` and the capability gate every agent route checks first.
 
 use crate::client::PrxClient;
-use crate::error::{decode_ok, protocol, PrxError};
+use crate::error::{PrxError, decode_ok, protocol};
 use reqwest::Method;
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -107,10 +107,7 @@ impl PrxClient {
     /// # Errors
     /// Returns the transport, API or contract error of the call.
     pub async fn capabilities(&self) -> Result<Capabilities, PrxError> {
-        let raw = self
-            .transport
-            .call(Method::GET, "/api/capabilities", None, None)
-            .await?;
+        let raw = self.transport.call(Method::GET, "/api/capabilities", None, None).await?;
         Capabilities::from_body(&raw.body)
     }
 }
@@ -129,7 +126,8 @@ mod tests {
 
     #[test]
     fn decodes_a_release_build_and_keeps_unknown_tokens() {
-        let caps = Capabilities::from_body(body(SHA, "").as_bytes()).expect("test: documented shape decodes");
+        let caps = Capabilities::from_body(body(SHA, "").as_bytes())
+            .expect("test: documented shape decodes");
         assert_eq!(caps.commit, BuildCommit::Sha(SHA.to_owned()));
         assert_eq!(caps.api, 1);
         assert!(caps.has("capabilities_v1"));
@@ -138,7 +136,8 @@ mod tests {
 
     #[test]
     fn unknown_commit_is_not_a_sha() {
-        let caps = Capabilities::from_body(body("unknown", "").as_bytes()).expect("test: unknown commit decodes");
+        let caps = Capabilities::from_body(body("unknown", "").as_bytes())
+            .expect("test: unknown commit decodes");
         assert_eq!(caps.commit, BuildCommit::Unknown);
     }
 

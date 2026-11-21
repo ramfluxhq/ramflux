@@ -4,8 +4,8 @@
 //! Revision values. The config revision and the catalog revision are distinct types, so one
 //! cannot be passed where the other is expected.
 
-use crate::error::config;
 use crate::error::PrxError;
+use crate::error::config;
 use serde::{Deserialize, Deserializer};
 
 fn is_sha256_hex(raw: &str) -> bool {

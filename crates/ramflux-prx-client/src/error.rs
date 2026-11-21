@@ -86,12 +86,7 @@ pub(crate) fn config(reason: &'static str) -> PrxError {
 
 /// A refusal the client makes locally, with the code PRX would return (HTTP 400).
 pub(crate) fn local_refusal(code: ApiCode) -> PrxError {
-    PrxError::Api {
-        status: 400,
-        code,
-        current_revision: None,
-        revision: None,
-    }
+    PrxError::Api { status: 400, code, current_revision: None, revision: None }
 }
 
 /// Decodes a 2xx body. Invalid UTF-8, a wrong type and an unknown field all fail closed.
@@ -140,14 +135,18 @@ mod tests {
 
     #[test]
     fn revision_conflict_decodes_current_revision() {
-        let body = format!(r#"{{"error":{{"code":"revision_conflict","message":"stale","current_revision":"{HEX_A}"}}}}"#);
+        let body = format!(
+            r#"{{"error":{{"code":"revision_conflict","message":"stale","current_revision":"{HEX_A}"}}}}"#
+        );
         let error = decode_api_error(409, body.as_bytes());
         assert_eq!(
             error,
             PrxError::Api {
                 status: 409,
                 code: ApiCode::RevisionConflict,
-                current_revision: Some(ConfigRevision::parse(HEX_A).expect("test: literal revision")),
+                current_revision: Some(
+                    ConfigRevision::parse(HEX_A).expect("test: literal revision")
+                ),
                 revision: None,
             }
         );
@@ -155,10 +154,16 @@ mod tests {
 
     #[test]
     fn confirmation_required_decodes_revision() {
-        let body = format!(r#"{{"error":{{"code":"confirmation_required","message":"high risk","revision":"{HEX_B}"}}}}"#);
+        let body = format!(
+            r#"{{"error":{{"code":"confirmation_required","message":"high risk","revision":"{HEX_B}"}}}}"#
+        );
         match decode_api_error(428, body.as_bytes()) {
             PrxError::Api { code, revision, current_revision, .. } => {
-                assert_eq!(code, ApiCode::ConfirmationRequired, "428 must map to confirmation_required");
+                assert_eq!(
+                    code,
+                    ApiCode::ConfirmationRequired,
+                    "428 must map to confirmation_required"
+                );
                 assert_eq!(revision.map(|r| r.as_str().to_owned()), Some(HEX_B.to_owned()));
                 assert_eq!(current_revision, None, "428 carries no current_revision");
             }
@@ -185,7 +190,9 @@ mod tests {
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);
             match decode_api_error(400, body.as_bytes()) {
-                PrxError::Api { code, .. } => assert_eq!(code, expected, "wire code {wire} must map"),
+                PrxError::Api { code, .. } => {
+                    assert_eq!(code, expected, "wire code {wire} must map")
+                }
                 other => panic!("test: {wire} must decode as Api, got {other:?}"),
             }
         }
@@ -196,7 +203,11 @@ mod tests {
         let body = br#"{"error":{"code":"future_code","message":"m"}}"#;
         match decode_api_error(418, body) {
             PrxError::Api { code, .. } => {
-                assert_eq!(code, ApiCode::Unknown("future_code".to_owned()), "unknown code is tolerated");
+                assert_eq!(
+                    code,
+                    ApiCode::Unknown("future_code".to_owned()),
+                    "unknown code is tolerated"
+                );
             }
             other => panic!("test: expected Api error, got {other:?}"),
         }
@@ -205,7 +216,10 @@ mod tests {
     #[test]
     fn extra_fields_inside_error_are_tolerated() {
         let body = br#"{"error":{"code":"field_invalid","message":"m","field":"prompt"}}"#;
-        assert!(matches!(decode_api_error(400, body), PrxError::Api { code: ApiCode::FieldInvalid, .. }));
+        assert!(matches!(
+            decode_api_error(400, body),
+            PrxError::Api { code: ApiCode::FieldInvalid, .. }
+        ));
     }
 
     #[test]
@@ -240,17 +254,21 @@ mod tests {
         );
     }
 
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(deny_unknown_fields)]
+    struct Strict {
+        #[allow(dead_code)]
+        ok: bool,
+    }
+
     #[test]
     fn decode_ok_refuses_unknown_top_level_field() {
         let parsed: Result<serde_json::Value, _> = decode_ok(br#"{"ok":true}"#);
         assert!(parsed.is_ok(), "control: a plain object decodes");
-        #[derive(serde::Deserialize, Debug)]
-        #[serde(deny_unknown_fields)]
-        struct Strict {
-            #[allow(dead_code)]
-            ok: bool,
-        }
-        assert!(matches!(decode_ok::<Strict>(br#"{"ok":true,"x":1}"#), Err(PrxError::Protocol { .. })));
+        assert!(matches!(
+            decode_ok::<Strict>(br#"{"ok":true,"x":1}"#),
+            Err(PrxError::Protocol { .. })
+        ));
         assert!(matches!(decode_ok::<Strict>(br#"{"ok":"true"}"#), Err(PrxError::Protocol { .. })));
     }
 }

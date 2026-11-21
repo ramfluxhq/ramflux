@@ -5,7 +5,7 @@
 
 use crate::autonomy::Autonomy;
 use crate::client::PrxClient;
-use crate::error::{decode_ok, PrxError};
+use crate::error::{PrxError, decode_ok};
 use crate::revision::CatalogRevision;
 use reqwest::Method;
 use serde::Deserialize;
@@ -88,10 +88,7 @@ impl PrxClient {
     /// # Errors
     /// Returns the transport, API or contract error of the call.
     pub async fn catalog(&self) -> Result<Catalog, PrxError> {
-        let raw = self
-            .transport
-            .call(Method::GET, "/api/agents/catalog", None, None)
-            .await?;
+        let raw = self.transport.call(Method::GET, "/api/agents/catalog", None, None).await?;
         Catalog::from_body(&raw.body)
     }
 }
@@ -110,11 +107,16 @@ mod tests {
 
     #[test]
     fn decodes_documented_shape() {
-        let catalog = Catalog::from_body(body("", "full", HEX).as_bytes()).expect("test: documented shape decodes");
+        let catalog = Catalog::from_body(body("", "full", HEX).as_bytes())
+            .expect("test: documented shape decodes");
         assert_eq!(catalog.defaults_autonomy, Autonomy::Full);
         assert_eq!(catalog.revision.as_str(), HEX);
         assert_eq!(catalog.models.first().and_then(|m| m.credentials_ready), Some(true));
-        assert_eq!(catalog.models.get(1).map(|m| m.credentials_ready), Some(None), "missing key is unknown");
+        assert_eq!(
+            catalog.models.get(1).map(|m| m.credentials_ready),
+            Some(None),
+            "missing key is unknown"
+        );
         assert_eq!(catalog.reserved_names, ["catalog", "main"]);
         assert_eq!(catalog.caller_reserved_session_key_prefixes, ["rf-"]);
     }
