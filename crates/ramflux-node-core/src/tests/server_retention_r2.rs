@@ -3,8 +3,9 @@
 
 //! Retention regressions for server time, mailbox progress, WAL recovery and push routes.
 //!
-//! These tests use only long-standing public APIs, so they also run against older revisions.
+//! The sweep scale fixture reopens real encrypted state without replaying every registration.
 use super::*;
+mod sweep_fixture;
 
 fn seq_ack(envelope_id: &str, inbox_seq: u64) -> Ack {
     let mut request = ack(envelope_id);
@@ -237,24 +238,32 @@ fn ownerless_retired_routes_are_refused_in_production() -> Result<(), Box<dyn st
 fn revocation_sweep_bounds_authority_lookups_per_pass() -> Result<(), Box<dyn std::error::Error>> {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let store_directory_4 = temp_store_path("server_retention_revocation_bound")?;
-    let mut store =
-        NotifyRedbStore::open_with_route_key(&store_directory_4, NodeSecret::ephemeral()?)?;
+    let now = now_unix_seconds();
+    let mut store = sweep_fixture::store(&store_directory_4, now)?;
     let counter = std::sync::Arc::clone(&calls);
     store.set_push_route_authorizer(move |_| {
         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(true)
     });
-    let now = now_unix_seconds();
-    for index in 0..1_100 {
-        let target = format!("delivery-{index:04}");
-        store.register_authenticated_push_route(&owner(&target)?, &route_for(&target, now))?;
-    }
     calls.store(0, std::sync::atomic::Ordering::SeqCst);
     store.sweep_push_route_revocations()?;
     let first = calls.swap(0, std::sync::atomic::Ordering::SeqCst);
     assert!(first <= 1_024, "one sweep pass made {first} authority lookups");
     store.sweep_push_route_revocations()?;
-    assert_eq!(first + calls.load(std::sync::atomic::Ordering::SeqCst), 1_100);
+    assert_eq!(
+        first + calls.load(std::sync::atomic::Ordering::SeqCst),
+        1_100,
+        "two bounded passes must check all 1,100 persisted route owners",
+    );
+    let state = store.load_state()?.ok_or("persisted route state")?;
+    for index in 0..1_100 {
+        let target = format!("delivery-{index:04}");
+        assert_eq!(
+            state.push_routes(&target, now).len(),
+            1,
+            "a live persisted route must survive both revocation passes: {target}",
+        );
+    }
     Ok(())
 }
 
