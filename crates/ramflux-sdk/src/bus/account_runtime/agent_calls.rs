@@ -91,12 +91,23 @@ impl AccountRuntime {
             AgentCall::List(list) => {
                 let (records, next) =
                     account.client.agent_record_page(list.cursor.as_deref(), list.limit)?;
+                let head = account.client.agent_record_head()?;
                 g::AgentConfigResult {
                     value: Some(g::agent_config_result::Value::Page(g::AgentPage {
                         records: records.iter().map(crate::agent_record::to_wire).collect(),
                         next,
-                        // No journal exists before `agent.watch` (stage E4, not built here).
-                        journal_cursor: String::new(),
+                        journal_cursor: head.to_string(),
+                    })),
+                }
+            }
+            AgentCall::Watch(watch) => {
+                let changes = account.client.agent_record_changes(&watch.journal_cursor)?;
+                let cursor = changes.cursor.to_string();
+                g::AgentConfigResult {
+                    value: Some(g::agent_config_result::Value::Page(g::AgentPage {
+                        records: changes.records.iter().map(crate::agent_record::to_wire).collect(),
+                        next: changes.more.then(|| cursor.clone()),
+                        journal_cursor: cursor,
                     })),
                 }
             }

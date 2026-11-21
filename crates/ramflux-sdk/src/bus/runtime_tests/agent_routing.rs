@@ -373,3 +373,102 @@ async fn record_case(pair: &mut Pair) -> TestResult {
     server.await??;
     Ok(())
 }
+
+#[test]
+fn agent_watch_answers_the_changes_after_a_cursor_through_the_dispatcher() -> TestResult {
+    let mut pair = pair("bus-watch")?;
+    run(watch_case(&mut pair))
+}
+
+/// AGENT-IDENTITY-01 E4 (decision r22 item 1): `agent.watch` answers the records changed after a
+/// cursor, through the real dispatcher. From empty it sees the stored record; after an edit it sees
+/// only that change, with the new cursor; a cursor that was never issued is refused.
+async fn watch_case(pair: &mut Pair) -> TestResult {
+    let desk_id = pair.laptop.client.account_db()?.local_account_id.clone();
+    let agent = ramflux_protocol::encode_base64url([13_u8; 32]);
+    let at = now()?;
+    let author = pair.laptop.client.own_device_ref()?;
+    crate::agent_record::seed_for_test(
+        &pair.laptop.client.agent_record_store()?,
+        &agent,
+        &author,
+        at,
+    )?;
+    let desk_sup = serve_one(&super::root("agent-watch-desk"), &pair.laptop, SIBLING_PASSPHRASE)?;
+    let (bus, server) = client(Rc::clone(&desk_sup), 1).await?;
+
+    let first = call(
+        &bus,
+        "agent.watch",
+        request("watch-empty", &desk_id, "agent.watch", serde_json::json!({"journal_cursor": ""})),
+    )
+    .await?;
+    let Some(g::agent_config_result::Value::Page(page)) = config_result(&first)?.value else {
+        return Err("test: agent.watch did not return a page".into());
+    };
+    assert_eq!(page.records.len(), 1, "watch from the start sees the stored record");
+    assert!(page.next.is_none(), "one page holds every change");
+    let cursor = page.journal_cursor;
+
+    let quiet = call(
+        &bus,
+        "agent.watch",
+        request(
+            "watch-quiet",
+            &desk_id,
+            "agent.watch",
+            serde_json::json!({"journal_cursor": cursor}),
+        ),
+    )
+    .await?;
+    let Some(g::agent_config_result::Value::Page(quiet)) = config_result(&quiet)?.value else {
+        return Err("test: agent.watch did not return a page".into());
+    };
+    assert!(quiet.records.is_empty(), "nothing changed after the cursor");
+    assert_eq!(quiet.journal_cursor, cursor, "the cursor stays at the head");
+
+    let base = pair.laptop.client.agent_record_get(&agent)?.identity;
+    let persona = ramflux_protocol::message::AgentPersona {
+        name: "watched".into(),
+        avatar: String::new(),
+        responsibility: "answers".into(),
+    };
+    pair.laptop.client.agent_persona_edit(&agent, &base, persona, Some(true), at)?;
+    let changed = call(
+        &bus,
+        "agent.watch",
+        request(
+            "watch-changed",
+            &desk_id,
+            "agent.watch",
+            serde_json::json!({"journal_cursor": cursor}),
+        ),
+    )
+    .await?;
+    let Some(g::agent_config_result::Value::Page(changed)) = config_result(&changed)?.value else {
+        return Err("test: agent.watch did not return a page".into());
+    };
+    assert_eq!(changed.records.len(), 1, "the one edit is the change");
+    assert_eq!(changed.records[0].persona.as_ref().map(|p| p.name.as_str()), Some("watched"));
+    assert_ne!(changed.journal_cursor, cursor, "the cursor moves past the change");
+
+    let future = call(
+        &bus,
+        "agent.watch",
+        request(
+            "watch-future",
+            &desk_id,
+            "agent.watch",
+            serde_json::json!({"journal_cursor": "999999"}),
+        ),
+    )
+    .await?;
+    assert_eq!(
+        refusal_code(&future),
+        Some("journal_cursor_invalid"),
+        "a future cursor is refused: {future:?}"
+    );
+    drop(bus);
+    server.await??;
+    Ok(())
+}

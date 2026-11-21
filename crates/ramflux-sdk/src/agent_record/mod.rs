@@ -25,7 +25,7 @@ pub(crate) use apply::{apply_metadata, metadata_of};
 pub(crate) use edit::seed_for_test;
 pub(crate) use edit::{edit_record, record_completed, retire};
 pub(crate) use policy::{check_access, check_persona};
-pub(crate) use store::AgentRecordStore;
+pub(crate) use store::{AgentRecordStore, Changes, parse_cursor};
 
 /// Lifecycle of an agent that exists with no runtime bound (contract lifecycle state `U`).
 pub(crate) const LIFECYCLE_ACTIVE: &str = "U";
@@ -54,6 +54,9 @@ pub(crate) struct StoredAgentRecord {
     pub(crate) role: String,
     pub(crate) lifecycle: String,
     pub(crate) identity: EventIdentity,
+    /// Change sequence of the last write of this record (AGENT-IDENTITY-01 E4, `agent.watch`). Set by
+    /// `AgentRecordStore::save`; strictly increasing across the records of one owner.
+    pub(crate) change_seq: u64,
 }
 
 /// Refuses a record whose fields are outside the closed shapes of this module.

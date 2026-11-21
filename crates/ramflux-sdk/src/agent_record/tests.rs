@@ -4,9 +4,11 @@
 //! Unit tests of the agent record store and its creation (AGENT-IDENTITY-01 E2). The plan comes from
 //! the real `begin` of the creation store (`custody/agent_creation/tests.rs` fixture); nothing is
 //! stored by hand except the intent and the refused variants.
-use super::edit::create_from_plan;
+use super::edit::{create_from_plan, edit_record, retire};
+use super::store::parse_cursor;
 use super::{AgentIntent, AgentRecordStore};
 use crate::SdkError;
+use crate::agent_record::seed_for_test;
 use crate::custody::agent_creation::AgentCreationStore;
 use crate::custody::agent_creation::tests::{HUMAN, begin_for_human, human_fixture_with};
 use crate::custody::memory_vault::MemoryPrimaryVault;
@@ -126,5 +128,59 @@ fn a_record_file_that_names_another_agent_is_refused() -> TestResult {
         matches!(records.load(other), Err(SdkError::CustodySetupInvalid)),
         "a file under another anchor's name refuses"
     );
+    Ok(())
+}
+
+#[test]
+fn watch_reads_changes_after_a_cursor_across_a_tombstone_and_refuses_bad_cursors() -> TestResult {
+    let (plan, records) = planned()?;
+    let intent = AgentIntent { persona: persona(), access: owner_access() };
+    let empty = records.changes(parse_cursor("")?)?;
+    assert!(empty.records.is_empty() && empty.cursor == 0 && !empty.more, "no record, cursor zero");
+
+    // Change 1: the created agent. Change 2: a second agent. Change 3: an edit of the first.
+    let created = create_from_plan(&records, &plan, &intent)?;
+    let from_start = records.changes(0)?;
+    assert_eq!(from_start.records.len(), 1, "watch from empty sees the created agent");
+    assert_eq!(from_start.cursor, 1, "the cursor is the head");
+    assert_eq!(records.changes(from_start.cursor)?.records.len(), 0, "nothing after the head");
+    seed_for_test(&records, &ramflux_protocol::encode_base64url([7_u8; 32]), &plan.desktop, 1)?;
+    let edited =
+        edit_record(&records, &plan.agent_anchor, &created.identity, &plan.desktop, 2, |r| {
+            r.persona.name = "edited".into();
+        })?;
+    let after_edit = records.changes(from_start.cursor)?;
+    assert_eq!(
+        after_edit.records.len(),
+        2,
+        "the second agent and the edited first one are both changed"
+    );
+    assert_eq!(after_edit.cursor, 3, "the new cursor is the head");
+    assert_eq!(edited.change_seq, 3, "the edit took the next sequence");
+
+    // Change 4: the tombstone of the first agent is delivered as a change too.
+    retire(&records, &plan.agent_anchor, &edited.identity, &plan.desktop, 3)?;
+    let tombstone = records.changes(after_edit.cursor)?;
+    assert_eq!(tombstone.records.len(), 1, "the tombstone is a change");
+    assert_eq!(tombstone.records[0].lifecycle, "X", "and it names the retired state");
+    assert_eq!(tombstone.cursor, 4);
+    assert_eq!(records.changes(tombstone.cursor)?.records.len(), 0, "nothing after the tombstone");
+
+    // A cursor above the head was never issued here: refused, the caller lists again.
+    let future = records.changes(5);
+    assert!(matches!(future, Err(SdkError::AgentCreationRefused("journal_cursor_invalid"))));
+
+    // Only the canonical decimal form is a cursor.
+    assert_eq!(parse_cursor("")?, 0);
+    assert_eq!(parse_cursor("17")?, 17);
+    for bad in ["007", "+7", "-1", "x1", "18446744073709551616", " 1"] {
+        assert!(
+            matches!(
+                parse_cursor(bad),
+                Err(SdkError::AgentCreationRefused("journal_cursor_invalid"))
+            ),
+            "{bad:?} is not a cursor"
+        );
+    }
     Ok(())
 }

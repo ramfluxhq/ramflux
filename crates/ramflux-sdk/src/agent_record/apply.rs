@@ -48,7 +48,7 @@ pub(crate) fn apply_metadata(
         return Err(refused());
     }
     let retired = metadata.identity_retired.unwrap_or(false);
-    let candidate = StoredAgentRecord {
+    let mut candidate = StoredAgentRecord {
         agent_anchor: metadata.agent_anchor.clone(),
         custodian_anchor: metadata.custodian_anchor.clone(),
         persona: metadata.persona.clone().ok_or_else(refused)?,
@@ -56,10 +56,11 @@ pub(crate) fn apply_metadata(
         role: ROLE_NAMED.into(),
         lifecycle: if retired { LIFECYCLE_RETIRED } else { LIFECYCLE_ACTIVE }.into(),
         identity: identity.clone(),
+        change_seq: 0,
     };
     check_record(&candidate).map_err(|_| refused())?;
     let Some(current) = store.load(&metadata.agent_anchor)? else {
-        store.save(&candidate)?;
+        store.save(&mut candidate)?;
         return Ok(true);
     };
     if current.lifecycle == LIFECYCLE_RETIRED {
@@ -69,6 +70,6 @@ pub(crate) fn apply_metadata(
     if incoming <= stored {
         return Ok(false);
     }
-    store.save(&candidate)?;
+    store.save(&mut candidate)?;
     Ok(true)
 }

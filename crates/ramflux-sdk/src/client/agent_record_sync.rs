@@ -6,7 +6,8 @@
 //! `AgentHostPacket.metadata` on the `AgentSync` control. A receiver applies it through
 //! `agent_record::apply_metadata`, after `client/agent_custody.rs` authorized the sender.
 use crate::agent_record::{
-    AgentRecordStore, StoredAgentRecord, apply_metadata, edit_record, metadata_of, retire,
+    AgentRecordStore, Changes, StoredAgentRecord, apply_metadata, edit_record, metadata_of,
+    parse_cursor, retire,
 };
 use crate::bus::own_device_copy;
 use crate::client::generated_control::control_from_payload;
@@ -170,6 +171,21 @@ impl RamfluxClient {
         limit: u32,
     ) -> Result<(Vec<StoredAgentRecord>, Option<String>), SdkError> {
         self.agent_record_store()?.page(cursor, usize::try_from(limit).unwrap_or(usize::MAX))
+    }
+
+    /// The changes of this root after `cursor` (contract 2 `AgentWatch`, decision r22 item 1).
+    /// # Errors
+    /// `journal_cursor_invalid` for a malformed or future cursor, and the store's refusals.
+    pub(crate) fn agent_record_changes(&self, cursor: &str) -> Result<Changes, SdkError> {
+        self.agent_record_store()?.changes(parse_cursor(cursor)?)
+    }
+
+    /// The current change cursor of this root (the head); the value `agent.list` returns so that a
+    /// watch can start where the list ends.
+    /// # Errors
+    /// The store's listing refusals.
+    pub(crate) fn agent_record_head(&self) -> Result<u64, SdkError> {
+        self.agent_record_store()?.head()
     }
 
     /// One stored agent record (contract 2 `AgentGet`).

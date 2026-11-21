@@ -21,6 +21,8 @@ pub(super) enum AgentCall {
     List(Box<g::AgentList>),
     /// `agent.get` (contract 2 `AgentGet`): one stored record by anchor.
     Record(String),
+    /// `agent.watch` (contract 2 `AgentWatch`): the changes after a cursor.
+    Watch(Box<g::AgentWatch>),
     /// `agent.persona.edit` (contract 2 `AgentPersonaEdit`).
     PersonaEdit(Box<g::AgentPersonaEdit>),
     /// `agent.access.set` (contract 2 `AgentAccessSet`).
@@ -35,6 +37,7 @@ pub(super) fn handles(method: &str) -> bool {
             | "agent.operation.get"
             | "agent.list"
             | "agent.get"
+            | "agent.watch"
             | "agent.persona.edit"
             | "agent.access.set"
     )
@@ -81,6 +84,7 @@ async fn apply(
             let get: g::AgentGet = decode(body)?;
             AgentCall::Record(get.agent_anchor)
         }
+        "agent.watch" => AgentCall::Watch(Box::new(decode(body)?)),
         "agent.persona.edit" => AgentCall::PersonaEdit(Box::new(decode(body)?)),
         "agent.access.set" => AgentCall::AccessSet(Box::new(decode(body)?)),
         _ => return Err(SdkError::CustodySetupInvalid),

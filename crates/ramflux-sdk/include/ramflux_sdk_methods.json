@@ -390,6 +390,15 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.watch",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
       "name": "attachment.enable",

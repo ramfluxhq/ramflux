@@ -28,7 +28,7 @@ pub(crate) fn create_from_plan(
     }
     check_persona(&intent.persona)?;
     check_access(&intent.access)?;
-    let record = StoredAgentRecord {
+    let mut record = StoredAgentRecord {
         agent_anchor: plan.agent_anchor.clone(),
         custodian_anchor: plan.human_primary.account_anchor.clone(),
         persona: intent.persona.clone(),
@@ -36,8 +36,9 @@ pub(crate) fn create_from_plan(
         role: ROLE_NAMED.into(),
         lifecycle: LIFECYCLE_ACTIVE.into(),
         identity: mint(None, &plan.agent_anchor, &plan.desktop, plan.issued_at)?,
+        change_seq: 0,
     };
-    store.save(&record)?;
+    store.save(&mut record)?;
     Ok(record)
 }
 
@@ -50,7 +51,7 @@ pub(crate) fn seed_for_test(
     author: &DeviceRef,
     now: u64,
 ) -> Result<StoredAgentRecord, SdkError> {
-    let record = StoredAgentRecord {
+    let mut record = StoredAgentRecord {
         agent_anchor: agent.into(),
         custodian_anchor: author.account_anchor.clone(),
         persona: ramflux_protocol::message::AgentPersona {
@@ -66,8 +67,9 @@ pub(crate) fn seed_for_test(
         role: ROLE_NAMED.into(),
         lifecycle: LIFECYCLE_ACTIVE.into(),
         identity: mint(None, agent, author, now)?,
+        change_seq: 0,
     };
-    store.save(&record)?;
+    store.save(&mut record)?;
     Ok(record)
 }
 
@@ -116,7 +118,7 @@ pub(crate) fn edit_record(
     change(&mut next);
     next.identity = mint(Some(&current.identity), agent, author, now)?;
     check_record(&next)?;
-    store.save(&next)?;
+    store.save(&mut next)?;
     Ok(next)
 }
 
