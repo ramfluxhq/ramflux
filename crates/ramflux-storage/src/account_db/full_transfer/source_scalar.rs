@@ -9,7 +9,8 @@ use super::{
 use crate::{StorageError, database::Connection};
 use ramflux_protocol::custody::pairing::full_transfer::{Disposition, read_record_header};
 use rusqlite::{OptionalExtension as _, params};
-use std::io::Write;
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
+mod blob;
 use zeroize::{Zeroize as _, Zeroizing};
 struct PrivateHeader(ramflux_protocol::custody::pairing::full_transfer::RecordHeader);
 impl Drop for PrivateHeader {
@@ -236,23 +237,15 @@ fn build(
                 return Err(invalid());
             }
         }
-        let mut record = Zeroizing::new(Vec::new());
-        let bytes = write_full_scalar_sql_row(rule, row, &mut *record)?;
-        if record.len() > 262_144 {
+        let mut probe = blob::Probe::new();
+        let bytes = write_full_scalar_sql_row(rule, row, &mut probe)?;
+        let header = probe.header(bytes)?;
+        let mut sink =
+            blob::Sink::create(spool, snapshot, rule.id, &header.0.key, bytes, source_guard)?;
+        if write_full_scalar_sql_row(rule, row, &mut sink)? != bytes {
             return Err(invalid());
         }
-        let header = read_record_header(&mut record.as_slice())
-            .map_err(|_| invalid())?
-            .ok_or_else(invalid)?;
-        let key = Zeroizing::new(header.key);
-        let snapshot = snapshot.to_owned();
-        // Bypass generic Parameters/Row copies for private encoded rows and keys.
-        spool.call(move |db| {
-            db.execute(
-                "INSERT INTO source_scalar_row(snapshot_id,family,key,record) VALUES(?1,?2,?3,?4)",
-                params![snapshot, rule.id, key.as_str(), record.as_slice()],
-            )
-        })?;
+        sink.finish()?;
         total.records = total.records.checked_add(1).ok_or_else(invalid)?;
         total.encoded_bytes = total.encoded_bytes.checked_add(bytes).ok_or_else(invalid)?;
     }
@@ -272,17 +265,20 @@ fn write_sorted<W: Write>(
     if hash.as_slice() != rule.rule_hash()? {
         return Err(invalid());
     }
-    let mut query=db.prepare("SELECT key,record FROM source_scalar_row WHERE snapshot_id=?1 AND family=?2 ORDER BY key COLLATE BINARY")?;
+    let mut query=db.prepare("SELECT key,rowid,length(record) FROM source_scalar_row WHERE snapshot_id=?1 AND family=?2 ORDER BY key COLLATE BINARY")?;
     let mut rows = query.query(params![snapshot, rule.id])?;
     let mut total = FullScalarSourceCounts { records: 0, encoded_bytes: 0 };
     while let Some(row) = rows.next()? {
         source_guard.require()?;
         let key = row.get_ref(0)?.as_str().map_err(|_| invalid())?;
-        let record = row.get_ref(1)?.as_blob().map_err(|_| invalid())?;
-        if record.len() > 262_144 {
+        let length = row.get::<_, u64>(2)?;
+        if length == 0 || length > blob::RECORD_LIMIT as u64 {
             return Err(invalid());
         }
-        let mut input = record;
+        let mut input = db.blob_open("main", "source_scalar_row", "record", row.get(1)?, true)?;
+        if input.len() as u64 != length {
+            return Err(invalid());
+        }
         let header = PrivateHeader(
             read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?,
         );
@@ -290,13 +286,28 @@ fn write_sorted<W: Write>(
             return Err(invalid());
         }
         super::copy_full_scalar_record(rule, &header.0, &mut input, &mut std::io::sink())?;
-        if !input.is_empty() {
+        if input.stream_position()? != length {
             return Err(invalid());
         }
-        writer.write_all(record)?;
+        input.seek(SeekFrom::Start(0))?;
+        let mut buffer = Zeroizing::new([0_u8; 16_384]);
+        let mut copied = 0_u64;
+        loop {
+            source_guard.require()?;
+            let amount = input.read(buffer.as_mut_slice())?;
+            if amount == 0 {
+                break;
+            }
+            let bytes = buffer.get_mut(..amount).ok_or_else(invalid)?;
+            writer.write_all(bytes)?;
+            bytes.zeroize();
+            copied = copied.checked_add(amount as u64).ok_or_else(invalid)?;
+        }
+        if copied != length {
+            return Err(invalid());
+        }
         total.records = total.records.checked_add(1).ok_or_else(invalid)?;
-        total.encoded_bytes =
-            total.encoded_bytes.checked_add(record.len() as u64).ok_or_else(invalid)?;
+        total.encoded_bytes = total.encoded_bytes.checked_add(length).ok_or_else(invalid)?;
     }
     if total.records != expected_records || total.encoded_bytes != expected_bytes {
         return Err(invalid());
