@@ -826,7 +826,7 @@ pub fn scan(file: &Path, source: &str) -> Result<Vec<String>, String> {
     }
     let mut scanner = Scan {
         source,
-        schema: file.ends_with(SCHEMA_FILE),
+        schema: file == Path::new(SCHEMA_FILE),
         errors: Vec::new(),
         depth: 0,
         item_depth: 0,

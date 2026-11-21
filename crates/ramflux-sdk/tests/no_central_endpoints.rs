@@ -132,14 +132,16 @@ fn host_is_not_a_service(host: &str) -> bool {
 
 #[test]
 fn client_sources_name_no_central_or_vendor_endpoint() {
-    let root = workspace_root();
+    let root = workspace_root().canonicalize().expect("test: workspace root must exist");
     endpoint_guard::embedded_resources(&root).expect("test: embedded resource contract");
     let sources =
         endpoint_guard::sources(&root).expect("test: all sources must be readable and parseable");
     assert!(sources.len() > 50, "the scan found too few client sources: {}", sources.len());
     let mut violations = Vec::new();
     for (file, source) in sources {
-        let errors = endpoint_guard::scan(&file, &source).expect("test: source must be decidable");
+        let relative = file.strip_prefix(&root).expect("test: source must belong to workspace");
+        let errors =
+            endpoint_guard::scan(relative, &source).expect("test: source must be decidable");
         violations.extend(errors.into_iter().map(|error| format!("{}:{error}", file.display())));
     }
     assert!(violations.is_empty(), "compiled-in endpoints:\n{}", violations.join("\n"));
@@ -302,6 +304,15 @@ fn schema_identifiers_are_exact_and_usage_scoped() {
                 .expect("test: identifier syntax")
                 .is_empty(),
             "identifier allowed outside schema owner"
+        );
+        assert!(
+            !endpoint_guard::scan(
+                Path::new("apps/rf/src/crates/ramflux-protocol/src/a2ui/schema.rs"),
+                source
+            )
+            .expect("test: nested owner impersonation")
+            .is_empty(),
+            "nested path impersonated the exact schema owner"
         );
     }
     for source in [
