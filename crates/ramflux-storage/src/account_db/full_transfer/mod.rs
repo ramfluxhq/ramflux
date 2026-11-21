@@ -15,6 +15,7 @@ mod keys;
 mod local_unlock;
 pub use local_unlock::FullLocalUnlockGuard;
 mod direct_history;
+mod direct_source;
 mod native_floor;
 mod native_payload;
 pub use direct_history::{FULL_DIRECT_HISTORY_LIMIT, FullDirectHistory};

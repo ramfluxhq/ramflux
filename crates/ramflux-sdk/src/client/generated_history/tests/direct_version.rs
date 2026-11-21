@@ -243,3 +243,6 @@ mod own_copy;
 
 #[path = "direct_version/record.rs"]
 mod record;
+
+#[path = "direct_version/source.rs"]
+mod source;

@@ -93,6 +93,30 @@ receipt. Source-cut export, original-contribution union, restriction-first erasu
 raw ownership closure and independent actual-materialization/product-read gates
 must still use it before the native families are counted complete.
 
+## Actual native snapshot assembly
+
+`AccountDb::read_full_direct_history` groups its reads with the existing account
+read-snapshot owner. The shared `direct_source` assembler bounds native bodies,
+actor payloads and root-pair context before decoding; verifies the stored account
+root and canonical message id; refuses duplicate message projections; and binds
+the resulting original identity/conversation to the selected source row. The
+source-cut pipeline must still call it on its pinned cut under its generation guard.
+
+Evidence selection is explicit: a present authored capture must match the visible
+native body; otherwise exact own-copy attestation or native received evidence is
+required. A conflicting capture cannot disappear behind another proof class.
+Received Edit uses the stored signed original header/current proof. Missing proof
+refuses without rewriting source rows. Deleted rows produce no live record.
+A capture without a runtime body is refused and retained: pending authored data
+needs its separate inert-history owner, not promotion to a completed message.
+The root-pair projection alone does not admit the enclosing directory actor or
+other nested fields. Actor variants and pending execution remain separate owners.
+
+SDK component witnesses apply real signed edited history to keyed account storage,
+read through generated_message_page, assemble and independently decode its source
+record, and verify ordinary erasure/reimport denial. These prove source assembly,
+not a full source stream/import/install or real-binary transfer.
+
 ## Native payload framing versus semantic ownership
 
 Storage `full_transfer/native_payload.rs` defines closed native formats separately

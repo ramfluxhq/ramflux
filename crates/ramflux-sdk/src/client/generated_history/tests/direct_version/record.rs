@@ -9,7 +9,7 @@ const LENGTH_AT: usize = 4 + 1 + 2 * 43;
 const ITEM_AT: usize = LENGTH_AT + 4;
 const TOO_MANY: usize = ramflux_storage::FULL_DIRECT_HISTORY_LIMIT + 1;
 
-fn encode(value: &FullDirectHistory) -> TestResult<Zeroizing<Vec<u8>>> {
+pub(super) fn encode(value: &FullDirectHistory) -> TestResult<Zeroizing<Vec<u8>>> {
     let mut bytes = Zeroizing::new(Vec::new());
     value.write(&mut *bytes)?;
     Ok(bytes)
