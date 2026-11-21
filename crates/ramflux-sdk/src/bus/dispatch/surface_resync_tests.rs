@@ -83,8 +83,8 @@ impl Group {
             source_client.stage_surface_outgoing(&create, Some(epoch))?.accepted,
             "author create"
         );
-        for (index, client) in clients.iter().enumerate() {
-            Self::prepare_peer(&source_client, client, &create, epoch, index, &identities)?;
+        for client in &clients {
+            Self::prepare_peer(&source_client, client, &create, epoch, &identities)?;
         }
         let delta = super::own_tests::append(&source_client, &create, 2)?;
         assert!(
@@ -123,7 +123,6 @@ impl Group {
         client: &RamfluxClient,
         create: &Carrier,
         epoch: u64,
-        index: usize,
         identities: &[ramflux_crypto::RootQualifiedDeviceRef],
     ) -> TestResult {
         let source_identity = source_client.owned_device_identity()?;
@@ -151,26 +150,7 @@ impl Group {
         }
         client.pin_local_group_member("group")?;
         client.pin_joined_group_member("group", source_identity.storage_key())?;
-        let session_secret = [u8::try_from(index + 1)?; 32];
-        let send = ramflux_crypto::DmSession::initiator(
-            session_secret,
-            dm_device_id_hash(&source_device),
-            dm_device_id_hash(&local.device_id),
-            [3; 32],
-        )?;
-        let recv = ramflux_crypto::DmSession::recipient(
-            session_secret,
-            dm_device_id_hash(&local.device_id),
-            dm_device_id_hash(&source_device),
-            [3; 32],
-        )?;
-        source_client.persist_pair(
-            &source_identity,
-            &client.owned_device_identity()?,
-            &[4; 32],
-            &send,
-        )?;
-        client.persist_pair(&client.owned_device_identity()?, &source_identity, &[4; 32], &recv)?;
+        crate::client::native_test_support::bus::seed_pair(source_client, client)?;
         assert!(
             client
                 .project_surface_message(

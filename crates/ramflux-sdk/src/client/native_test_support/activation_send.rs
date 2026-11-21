@@ -796,7 +796,7 @@ pub(crate) mod tests {
         let wire = crate::client::surface::test_support::create_frame(
             &outgoing.conversation_id,
             &crate::client::surface::test_support::text_snapshot(
-                "activation-surface",
+                "activation_surface",
                 "typed surface ready",
                 "ready",
             ),
@@ -810,7 +810,7 @@ pub(crate) mod tests {
             updated_at: None,
             payload_kind: PayloadKind::Event,
             conversation_id: outgoing.conversation_id.clone(),
-            surface_id: "activation-surface".into(),
+            surface_id: "activation_surface".into(),
             message_id: "native-surface-operation".into(),
             sender_principal_id: source.config.principal_id.clone(),
             sender_device_id: source.config.device_id.clone(),
