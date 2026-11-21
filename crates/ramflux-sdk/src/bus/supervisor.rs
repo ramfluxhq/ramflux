@@ -127,14 +127,15 @@ impl Supervisor {
         });
         self.lifecycle_changed.notify_one();
     }
-    /// Client capabilities of the selected node (the node new accounts are created on).
-    pub(super) fn selected_node_capabilities(&self) -> Result<Vec<String>, SdkError> {
-        Ok(self
-            .nodes
+    /// Client capabilities of one named node. A node that is not in the store refuses with
+    /// `NoNodeSelected`; a default node is never substituted.
+    pub(super) fn node_capabilities(&self, node_id: &str) -> Result<Vec<String>, SdkError> {
+        self.nodes
             .borrow()
-            .selected(None, false)?
-            .map(|profile| profile.client_capabilities)
-            .unwrap_or_default())
+            .profiles
+            .get(node_id)
+            .map(|profile| profile.client_capabilities.clone())
+            .ok_or(SdkError::NoNodeSelected)
     }
     pub(super) fn account_is_open(&self, id: &str) -> bool {
         self.accounts.borrow().get(id).is_some_and(AccountActor::is_open)

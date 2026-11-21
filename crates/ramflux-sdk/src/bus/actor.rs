@@ -37,7 +37,11 @@ pub(super) enum PrivateCommand {
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
     AgentCreation {
         step: crate::custody::agent_creation::AgentStep,
-        reply: oneshot::Sender<Result<crate::custody::agent_creation::AgentCreationRecord, SdkError>>,
+        reply:
+            oneshot::Sender<Result<crate::custody::agent_creation::AgentCreationRecord, SdkError>>,
+    },
+    AgentHomeNode {
+        reply: oneshot::Sender<Result<Option<String>, SdkError>>,
     },
     AuthorizeBackup {
         generation: i64,
@@ -260,6 +264,12 @@ impl AccountActor {
     ) -> Result<crate::custody::agent_creation::AgentCreationRecord, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::AgentCreation { step, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// The stored home node of this human account (`account/node-id`), read by its runtime.
+    pub(super) async fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::AgentHomeNode { reply })?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(

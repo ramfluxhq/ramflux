@@ -25,4 +25,11 @@ impl AccountRuntime {
             }
         }
     }
+
+    /// The home node of this human account: the value `native_account::unlock` persists as
+    /// `account/node-id`. `None` when the account has none yet.
+    pub(super) fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        Ok(account.client.account_db()?.load_actor_state::<String>("account/node-id")?)
+    }
 }

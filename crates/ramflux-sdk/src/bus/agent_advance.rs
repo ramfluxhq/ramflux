@@ -26,6 +26,12 @@ impl SupervisorSteps<'_> {
             .filter(super::actor::AccountActor::is_open)
             .ok_or(SdkError::NetworkingPending)
     }
+
+    /// The human account's home node. The agent is homed on it (controller decision r11 item 2).
+    /// A human account without one refuses with the same typed reason as missing networking.
+    async fn home_node(&self) -> Result<String, SdkError> {
+        self.human_actor()?.agent_home_node().await?.ok_or(SdkError::NoNodeSelected)
+    }
 }
 
 impl AgentSteps for SupervisorSteps<'_> {
@@ -34,7 +40,8 @@ impl AgentSteps for SupervisorSteps<'_> {
         request_id: &str,
         now: u64,
     ) -> Result<AgentCreationRecord, SdkError> {
-        let capabilities = self.supervisor.selected_node_capabilities()?;
+        let home = self.home_node().await?;
+        let capabilities = self.supervisor.node_capabilities(&home)?;
         self.human_actor()?
             .agent_creation_step(AgentStep::Commit {
                 request_id: request_id.to_owned(),
@@ -60,7 +67,8 @@ impl AgentSteps for SupervisorSteps<'_> {
         let passphrase = Zeroizing::new(
             std::str::from_utf8(&secret).map_err(|_| SdkError::CustodySetupInvalid)?.to_owned(),
         );
-        self.supervisor.activate_native(&account_id, passphrase, None).await?;
+        let home = self.home_node().await?;
+        self.supervisor.activate_native(&account_id, passphrase, Some(home)).await?;
         Ok(())
     }
 

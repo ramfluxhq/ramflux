@@ -17,13 +17,13 @@ mod store;
 pub(crate) mod tests;
 
 pub use advance::{AgentStep, AgentSteps, advance_all, advance_one};
-pub(crate) use publish::complete_with_receipt;
 pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,
 };
+pub(crate) use publish::complete_with_receipt;
 pub(crate) use publish::{AgentPublishing, first_action, load_publishing};
 pub use receive_checks::{
     check_plan_endpoints, check_received_request, check_scope, check_sender, expected_scope,

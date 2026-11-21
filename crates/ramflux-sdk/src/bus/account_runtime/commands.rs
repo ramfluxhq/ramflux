@@ -164,6 +164,12 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
+            super::super::actor::PrivateCommand::AgentHomeNode { reply } => {
+                if !reply.is_closed() {
+                    let result = self.agent_home_node();
+                    let _ = reply.send(result);
+                }
+            }
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
                     let result = self.capture_backup();
