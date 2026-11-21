@@ -406,8 +406,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("test: bind loopback");
         let addr = listener.local_addr().expect("test: local addr");
         tokio::spawn(async move {
+            // Hold the connection open without answering; the client deadline is what ends the call.
             if let Ok((_stream, _)) = listener.accept().await {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                std::future::pending::<()>().await;
             }
         });
         let dir = tempfile::TempDir::new().expect("test: temp dir");
