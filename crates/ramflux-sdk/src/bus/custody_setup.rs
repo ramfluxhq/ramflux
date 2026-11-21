@@ -256,22 +256,13 @@ async fn begin_native(
         principal_kind: ramflux_protocol::PrincipalKind,
         #[serde(default)]
         node_id: Option<String>,
-        #[serde(default)]
-        custodian_account: Option<String>,
     }
     *ceremony = None;
     let input: Input = serde_json::from_value(std::mem::take(&mut request.body))
         .map_err(|_| SdkError::CustodySetupInvalid)?;
-    let valid = match input.principal_kind {
-        ramflux_protocol::PrincipalKind::Human => input.custodian_account.is_none(),
-        ramflux_protocol::PrincipalKind::HeadlessAi => {
-            request.method == "account.create.begin"
-                && input.custodian_account.is_some()
-                && request.account_id.as_deref() == input.custodian_account.as_deref()
-        }
-        _ => false,
-    };
-    if !valid {
+    // An agent account is never created by this ceremony: it comes from `agent.create` and the
+    // primary's approval (AGENT-IDENTITY-01 decision D6). Any other kind is refused too.
+    if input.principal_kind != ramflux_protocol::PrincipalKind::Human {
         return Err(SdkError::CustodySetupInvalid);
     }
     let display_name = ramflux_protocol::normalize_profile_display_name(&input.display_name)
@@ -291,8 +282,6 @@ async fn begin_native(
     let pending = CreationCeremony::begin_account(
         (&config.data_root, lease),
         display_name,
-        input.principal_kind,
-        input.custodian_account,
         home_node_id,
         now()?,
     )?;

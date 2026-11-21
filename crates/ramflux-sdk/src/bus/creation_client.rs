@@ -126,60 +126,6 @@ impl LocalBusCreationClient {
         })
     }
 
-    /// Begin a custodian-authorized native headless participant ceremony. The daemon generates
-    /// its data passphrase; the owner receives only the normal one-time recovery phrase here.
-    /// # Errors
-    /// Rejects a non-live or non-human custodian and unsupported participant kinds.
-    pub async fn begin_headless(
-        &mut self,
-        display_name: &str,
-        custodian_account: &str,
-    ) -> Result<LocalBusPendingCreation, SdkError> {
-        self.begin_headless_for(display_name, custodian_account, Some(custodian_account)).await
-    }
-
-    async fn begin_headless_for(
-        &mut self,
-        display_name: &str,
-        custodian_account: &str,
-        envelope_account: Option<&str>,
-    ) -> Result<LocalBusPendingCreation, SdkError> {
-        #[derive(Serialize)]
-        struct Input<'a> {
-            display_name: &'a str,
-            principal_kind: PrincipalKind,
-            custodian_account: &'a str,
-        }
-        let body = self
-            .exchange_for(
-                envelope_account,
-                "account.create.begin",
-                Input {
-                    display_name,
-                    principal_kind: PrincipalKind::HeadlessAi,
-                    custodian_account,
-                },
-            )
-            .await?;
-        if body.ceremony.as_deref() != Some("pending") {
-            return Err(SdkError::CustodySetupInvalid);
-        }
-        Ok(LocalBusPendingCreation {
-            ceremony_id: body.ceremony_id.ok_or(SdkError::CustodySetupInvalid)?,
-            expires_in_ms: body.expires_in_ms.ok_or(SdkError::CustodySetupInvalid)?,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn begin_headless_with_envelope(
-        &mut self,
-        display_name: &str,
-        custodian_account: &str,
-        envelope_account: Option<&str>,
-    ) -> Result<LocalBusPendingCreation, SdkError> {
-        self.begin_headless_for(display_name, custodian_account, envelope_account).await
-    }
-
     /// Moves the phrase directly into an erasing buffer. Display once, then drop it before hide.
     /// # Errors
     /// Rejects missing, expired or previously displayed ceremonies.
@@ -216,26 +162,6 @@ impl LocalBusCreationClient {
         }
         let body =
             self.exchange("account.create.confirm", Confirmation { words, passphrase }).await?;
-        Ok(LocalBusCreatedAccount {
-            account_id: body.account_id.ok_or(SdkError::CustodySetupInvalid)?,
-            display_name: body.display_name.ok_or(SdkError::CustodySetupInvalid)?,
-            state: body.state.ok_or(SdkError::CustodySetupInvalid)?,
-            networking: body.networking.ok_or(SdkError::CustodySetupInvalid)?,
-        })
-    }
-
-    /// Confirm a headless participant ceremony without accepting a caller-chosen data passphrase.
-    /// # Errors
-    /// Rejects wrong words, expiry, persistence or account-opening failures.
-    pub async fn confirm_headless(
-        &mut self,
-        words: &[Zeroizing<String>; 3],
-    ) -> Result<LocalBusCreatedAccount, SdkError> {
-        #[derive(Serialize)]
-        struct Confirmation<'a> {
-            words: &'a [Zeroizing<String>; 3],
-        }
-        let body = self.exchange("account.create.confirm", Confirmation { words }).await?;
         Ok(LocalBusCreatedAccount {
             account_id: body.account_id.ok_or(SdkError::CustodySetupInvalid)?,
             display_name: body.display_name.ok_or(SdkError::CustodySetupInvalid)?,

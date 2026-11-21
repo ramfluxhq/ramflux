@@ -16,13 +16,7 @@ pub(crate) async fn handle_account(
             return super::account_ceremony::recover(&socket, &selector.account).await;
         }
         AccountAction::Create(create) => {
-            return super::account_ceremony::create(
-                &socket,
-                &create.display_name,
-                create.kind,
-                create.custodian.as_deref(),
-            )
-            .await;
+            return super::account_ceremony::create(&socket, &create.display_name).await;
         }
         _ => {}
     }

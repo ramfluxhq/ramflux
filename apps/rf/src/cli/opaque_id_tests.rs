@@ -60,17 +60,24 @@ fn other_opaque_message_and_surface_selectors_accept_hyphen_prefixed_values()
 #[test]
 fn native_account_commands_parse_and_unknown_create_aliases_do_not() -> Result<(), clap::Error> {
     Cli::try_parse_from(["rf", "account", "create", "--display-name", "Alice"])?;
-    Cli::try_parse_from([
-        "rf",
-        "account",
-        "create",
-        "--display-name",
-        "Service",
-        "--kind",
-        "headless_ai",
-        "--custodian",
-        "alice",
-    ])?;
+    // The phrase ceremony creates humans only: the agent kind and its custodian are gone.
+    for removed in [["--kind", "headless_ai"], ["--custodian", "alice"]] {
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "account",
+                "create",
+                "--display-name",
+                "Service",
+                removed[0],
+                removed[1],
+            ])
+            .is_err(),
+            "`rf account create {} {}` must not parse",
+            removed[0],
+            removed[1]
+        );
+    }
     Cli::try_parse_from([
         "rf",
         "account",
@@ -204,7 +211,7 @@ selector_group_test!(
 selector_group_test!(
     account_ids_accept_hyphens,
     "account status --account -abc",
-    "account create --display-name agent --kind headless_ai --custodian -abc"
+    "account export-agent-credentials --account -abc --custodian -abc --out out"
 );
 selector_group_test!(
     node_ids_and_public_keys_accept_hyphens,

@@ -260,14 +260,9 @@ async fn recover_with(
 }
 
 /// Show recovery material only on the controlling terminal, then erase before challenging.
-pub(crate) async fn create(
-    socket: &Path,
-    display_name: &str,
-    kind: crate::cli::AccountKind,
-    custodian: Option<&str>,
-) -> Result<(), RfError> {
+pub(crate) async fn create(socket: &Path, display_name: &str) -> Result<(), RfError> {
     let mut terminal = Terminal::open()?;
-    let outcome = create_with(&mut terminal, socket, display_name, kind, custodian).await;
+    let outcome = create_with(&mut terminal, socket, display_name).await;
     finish(&mut terminal, outcome)
 }
 
@@ -275,26 +270,10 @@ async fn create_with(
     terminal: &mut Terminal,
     socket: &Path,
     display_name: &str,
-    kind: crate::cli::AccountKind,
-    custodian: Option<&str>,
 ) -> Result<(), RfError> {
     let mut client = ramflux_sdk::LocalBusCreationClient::connect(socket).await?;
-    let result = match (kind, custodian) {
-        (crate::cli::AccountKind::Human, None) => {
-            client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
-            create_human_confirm(terminal, &mut client).await
-        }
-        (crate::cli::AccountKind::HeadlessAi, Some(custodian)) => {
-            client.begin_headless(display_name, custodian).await?;
-            create_headless_confirm(terminal, &mut client).await
-        }
-        (crate::cli::AccountKind::HeadlessAi, None) => {
-            Err(RfError::Message("Headless AI account creation requires --custodian.".into()))
-        }
-        (crate::cli::AccountKind::Human, Some(_)) => {
-            Err(RfError::Message("Human account creation does not accept --custodian.".into()))
-        }
-    };
+    client.begin(display_name, ramflux_protocol::PrincipalKind::Human).await?;
+    let result = create_human_confirm(terminal, &mut client).await;
     if result.is_err() {
         let _ = client.cancel().await;
     }
@@ -315,14 +294,6 @@ async fn create_human_confirm(
     ramflux_sdk::check_new_passphrase(&passphrase)
         .map_err(|error| RfError::Message(error.user_message()))?;
     Ok(client.confirm(&words, &passphrase).await?)
-}
-
-async fn create_headless_confirm(
-    terminal: &mut Terminal,
-    client: &mut ramflux_sdk::LocalBusCreationClient,
-) -> Result<ramflux_sdk::LocalBusCreatedAccount, RfError> {
-    let words = recovery_challenge(terminal, client).await?;
-    Ok(client.confirm_headless(&words).await?)
 }
 
 async fn recovery_challenge(

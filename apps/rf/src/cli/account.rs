@@ -4,7 +4,7 @@
 #![allow(unused_imports)]
 #![allow(clippy::wildcard_imports)]
 use super::*;
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -55,17 +55,6 @@ pub(crate) struct AccountUnlock {
 pub(crate) struct AccountCreate {
     #[arg(long)]
     pub(crate) display_name: String,
-    #[arg(long, value_enum, default_value = "human")]
-    pub(crate) kind: AccountKind,
-    #[arg(allow_hyphen_values = true, long, requires = "kind")]
-    pub(crate) custodian: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum AccountKind {
-    Human,
-    #[value(name = "headless_ai")]
-    HeadlessAi,
 }
 
 #[derive(Args)]
