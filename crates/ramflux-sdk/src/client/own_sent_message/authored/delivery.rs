@@ -162,9 +162,6 @@ impl RamfluxClient {
         &self,
         config: &GatewaySessionConfig,
     ) -> Result<Option<Plan>, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(None);
-        }
         self.require_backup_outbound_ready()?;
         self.stage_authored_history()?;
         let db = self.account_db()?;

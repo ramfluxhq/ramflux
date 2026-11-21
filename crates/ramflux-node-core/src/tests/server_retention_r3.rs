@@ -108,7 +108,7 @@ fn persisted_rows_without_server_deadlines_are_refused() -> Result<(), Box<dyn s
     store.bootstrap_router(&RouterCore::new())?;
     drop(store);
     // A row written by an older build: no stored deadline, created ten years ahead.
-    let mut envelope = envelope("legacy-future", "legacy-mailbox", DeliveryClass::OpaqueEvent);
+    let mut envelope = envelope("legacy-future", "legacy-mailbox", DeliveryClass::Message);
     envelope.created_at = wall_clock() + 10 * 365 * 86_400;
     envelope.ttl = 604_800;
     let entry = InboxEntry { inbox_seq: 1, target_delivery_id: "legacy-mailbox".into(), envelope };

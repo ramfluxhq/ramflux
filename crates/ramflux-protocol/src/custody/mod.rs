@@ -28,8 +28,8 @@ pub const MAX_REVOKED_LIST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RANGE: u64 = (1 << 21) - 1;
 pub const MAX_REVISION: u64 = (1 << 32) - 1;
 pub const MAX_BRANCH_LEASE_SECONDS: u64 = 2_592_000;
-pub const MAX_MESSAGE_LAYER: u32 = 2;
-pub const MESSAGE_LAYER_FLOOR: u32 = 2;
+pub const MAX_MESSAGE_LAYER: u32 = crate::message::registry::COMPILED_LAYER;
+pub const MESSAGE_LAYER_FLOOR: u32 = crate::message::registry::PROFILE_FLOOR;
 pub const MAX_LAYER_DECLARATION_VALIDITY_SECONDS: u64 = 86_400;
 pub const CLOCK_SKEW_SECONDS: u64 = 300;
 pub const MASTER_SCOPES: [&str; 5] =
@@ -79,11 +79,12 @@ pub fn framed_hash<T: Serialize>(tag: &str, value: &T) -> Result<String, Protoco
     hash.update(&canonical_json_bytes(value)?);
     Ok(encode_base64url(hash.finalize().as_bytes()))
 }
-/// Hash the entire envelope, including its signature.
+/// Hash an entire signed object as persisted, including its signatures.
+/// Signature and schema admission remain the typed caller's responsibility.
 /// # Errors
 /// Returns canonical serialization failures.
-pub fn object_hash<T: Serialize>(envelope: &Envelope<T>) -> Result<String, ProtocolError> {
-    framed_hash(domain::CUSTODY_OBJECT_HASH, envelope)
+pub fn object_hash<T: Serialize>(signed_object: &T) -> Result<String, ProtocolError> {
+    framed_hash(domain::CUSTODY_OBJECT_HASH, signed_object)
 }
 /// Compute all six section hashes without removing nulls or nested signatures.
 /// # Errors

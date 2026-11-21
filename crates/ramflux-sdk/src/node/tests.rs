@@ -27,7 +27,7 @@ fn record(seed: u8) -> Result<WellKnownClientRecord, SdkError> {
     let mut record = WellKnownClientRecord {
         schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
         node_id: "node.example.com".to_owned(),
-        node_public_key: ramflux_crypto::public_key_base64url_from_seed([seed; 32]),
+        node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[seed; 32]),
         node_ca_cert_pem: "test CA".to_owned(),
         gateway_quic_addr: "127.0.0.1:7443".to_owned(),
         gateway_tcp_addr: "127.0.0.1:7444".to_owned(),
@@ -38,6 +38,7 @@ fn record(seed: u8) -> Result<WellKnownClientRecord, SdkError> {
         signaling_turn_addr: "node.example.com:3478".to_owned(),
         protocol_versions: vec!["v1".to_owned()],
         client_capabilities: vec!["prekey".to_owned()],
+        version: "0.2.0 (abcdef123456)".to_owned(),
         updated_at: 1000,
         expires_at: 2000,
         signature: String::new(),
@@ -283,5 +284,154 @@ fn normalized_node_profiles_remain_loadable_when_migration_writeback_fails() -> 
     assert_eq!(loaded.profiles["node.example.com"].node_public_key, pin);
     let saved: NodeStore = serde_json::from_slice(&std::fs::read(root.0.join("nodes.json"))?)?;
     assert_eq!(saved.profiles["node.example.com"].discovery_url, "https://NODE.example.com:443/");
+    Ok(())
+}
+
+fn signed_record(capabilities: Vec<String>) -> Result<WellKnownClientRecord, SdkError> {
+    let now = super::now_unix_timestamp().unsigned_abs();
+    let mut discovered = record(4)?;
+    discovered.protocol_versions.push(ramflux_protocol::MESSAGE_SCHEMA_V1_PROFILE.to_owned());
+    discovered.client_capabilities = capabilities;
+    discovered.gateway_quic_addr = "127.0.0.1:1".to_owned();
+    discovered.gateway_tcp_addr = "127.0.0.1:1".to_owned();
+    discovered.relay_quic_addr = "127.0.0.1:1".to_owned();
+    discovered.prekey_http_url = "https://127.0.0.1:1".to_owned();
+    discovered.updated_at = now;
+    discovered.expires_at = now.saturating_add(3600);
+    discovered.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::client_discovery_signing_bytes(&discovered)?,
+        [4; 32],
+    );
+    Ok(discovered)
+}
+
+const FIXTURE_IO_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+const PROBE_SCENARIO_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+const REQUEST_BUFFER: usize = 2048;
+
+/// One local discovery response. `accept` blocks until a client connects. Drop joins the thread
+/// on every path, including a scenario timeout, by connecting once so `accept` returns.
+struct ServedRecord {
+    origin: String,
+    addr: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<Result<(), std::io::Error>>>,
+}
+
+impl ServedRecord {
+    fn finish(mut self) -> Result<(), SdkError> {
+        self.wake();
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker
+            .join()
+            .map_err(|_| SdkError::LocalBus("discovery fixture thread panicked".to_owned()))??;
+        Ok(())
+    }
+
+    fn wake(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Ok(stream) = std::net::TcpStream::connect(self.addr) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+impl Drop for ServedRecord {
+    fn drop(&mut self) {
+        if self.worker.is_none() {
+            return;
+        }
+        self.wake();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn serve_record(body: &[u8]) -> Result<ServedRecord, SdkError> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let addr = listener.local_addr()?;
+    let payload = body.to_vec();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_thread = std::sync::Arc::clone(&stop);
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept()?;
+        if stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
+        }
+        stream.set_read_timeout(Some(FIXTURE_IO_LIMIT))?;
+        stream.set_write_timeout(Some(FIXTURE_IO_LIMIT))?;
+        let mut buffer = [0_u8; REQUEST_BUFFER];
+        let read = std::io::Read::read(&mut stream, &mut buffer)?;
+        let request = buffer.get(..read).unwrap_or(&[]);
+        if request.is_empty() {
+            return Ok(());
+        }
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        std::io::Write::write_all(&mut stream, header.as_bytes())?;
+        std::io::Write::write_all(&mut stream, &payload)?;
+        Ok(())
+    });
+    Ok(ServedRecord { origin: format!("http://{addr}"), addr, stop, worker: Some(worker) })
+}
+
+#[tokio::test]
+async fn probe_json_includes_fetched_client_capabilities() -> Result<(), SdkError> {
+    tokio::time::timeout(PROBE_SCENARIO_DEADLINE, fetched_client_capabilities())
+        .await
+        .map_err(|_| SdkError::NodeTimeout { retry_after_ms: 5_000 })?
+}
+
+async fn fetched_client_capabilities() -> Result<(), SdkError> {
+    let capabilities = vec![
+        "opaque_delivery".to_owned(),
+        "prekey".to_owned(),
+        "object_relay".to_owned(),
+        ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned(),
+        ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.to_owned(),
+    ];
+    let discovered = signed_record(capabilities.clone())?;
+    let served = serve_record(&serde_json::to_vec(&discovered)?)?;
+    let root = TestRoot::new()?;
+    let mut profile = NodeProfile::from_record(record(4)?, 1);
+    profile.discovery_url = served.origin.clone();
+    profile.client_capabilities = vec!["stored-only".to_owned()];
+    let mut nodes = NodeStore::default();
+    nodes.profiles.insert(profile.node_id.clone(), profile);
+    let mut state = LocalBusDaemonState {
+        config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
+        account_index: None,
+        nodes,
+        accounts: std::collections::BTreeMap::new(),
+        active_account_id: None,
+        attended_accounts: std::collections::BTreeSet::new(),
+        subscribers: std::collections::BTreeMap::new(),
+    };
+    let request = LocalBusFrame::request(
+        "probe-caps",
+        None,
+        "rf",
+        "node.probe",
+        serde_json::json!({"node_id": "node.example.com"}),
+    );
+    let probed = super::probe::dispatch_probe(&request, &mut state).await;
+    let served_result = served.finish();
+    let result = probed?;
+    served_result?;
+    assert_eq!(
+        result.response_body["client_capabilities"],
+        serde_json::json!(capabilities),
+        "probe JSON must copy the fetched record, not the stored profile"
+    );
+    assert_ne!(
+        result.response_body["client_capabilities"],
+        serde_json::json!(["stored-only"]),
+        "a stored profile list must not replace the fetched capabilities"
+    );
     Ok(())
 }

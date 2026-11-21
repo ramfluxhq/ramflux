@@ -135,8 +135,9 @@ are distinct from non-native identities and remain usable as section 13 specifie
 No dual production `identity_seed` path remains after activation. All stateful/networked
 legacy fixtures, including product in-crate behavior tests,
 convert to born-v3 under the single disposition rule and exhaustive inventories in
-section 13. The SDK `itest-legacy-accounts` feature, its account creators, config
-switch and daemon/CLI entry points are removed in card 03. Only inline legacy bytes
+section 13. The SDK seed-taking account feature, its account creators, config
+switch and daemon/CLI entry points are removed. An old method name is an unknown
+method under ordinary dispatch, not a dedicated refusal stub. Only inline legacy bytes
 for pure offline format/proof-negative assertions may remain under `cfg(test)`;
 no legacy account/prekey creation, publish helper or network opt-in survives for them.
 The existing production feature gate already prevents ordinary non-native account
@@ -791,7 +792,7 @@ production builds; product fixture conversion remains required.
 
 | Product files / symbols | Disposition |
 | --- | --- |
-| `crates/ramflux-sdk/Cargo.toml::itest-legacy-accounts`; `crates/ramflux-sdk/src/bus/daemon.rs`; `crates/ramflux-sdk/src/bus/dispatch/account.rs::account.itest_legacy.create`; `crates/ramflux-sdk/src/bus/dispatch/itest_legacy.rs`; `crates/ramflux-sdk/src/bus/dispatch/mod.rs` | Removed by 03 with the seed-taking creator and feature-dispatch branch; old RPC requests return typed native_account_required, never a renamed creation path. |
+| SDK seed-taking account feature, daemon opt-in, dispatch branch, and creator module | Removed. An old method name is rejected by ordinary method dispatch as unknown. There is no renamed creation path and no dedicated refusal stub. |
 | `crates/ramflux-sdk/src/bus/protocol.rs::LocalBusConfig.itest_legacy_accounts`, `with_itest_legacy_accounts`, `LocalBusPersistedAccount::from_create_request`; `crates/ramflux-sdk/src/lib.rs` legacy request exports | Remove the opt-in, legacy constructor and obsolete seed-taking creation exports; preserve native persisted-account/history types and native ceremony APIs. |
 | `crates/ramflux-sdk/src/bus/lifecycle.rs`; `crates/ramflux-sdk/src/bus/supervisor.rs`; `crates/ramflux-sdk/src/bus/read_model/capture.rs`; `crates/ramflux-sdk/src/bus/read_model/mod.rs`; `crates/ramflux-sdk/src/bus/account_error_tests.rs` | Remove legacy switch plumbing and adapt account/error/read-model behavior tests to native fixtures. Pure negative request decoding remains only under the rule above. |
 | `apps/rf/Cargo.toml`; `apps/rf/src/cli/account.rs`; `apps/rf/src/cli/daemon.rs`; `apps/rf/src/handlers/account.rs`; `apps/rf/src/handlers/daemon.rs`; `apps/rf/src/handlers/itest_legacy_account.rs`; `apps/rf/src/handlers/mod.rs`; `apps/rf/src/cli/opaque_id_tests.rs` | Remove the forwarded feature, legacy daemon option, itest-legacy-create handler and RPC creator; adapt CLI parser/error controls and preserve native account ceremony/opaque-ID acceptance. |

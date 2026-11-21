@@ -63,6 +63,7 @@ impl RamfluxClient {
         )?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn resolve_delivery_receipt_message(
         &self,
         recipient: &ramflux_crypto::RootQualifiedDeviceRef,

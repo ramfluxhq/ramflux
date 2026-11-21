@@ -51,7 +51,8 @@ async fn inbound_contact_request_lands_once_admission_succeeds_without_a_client_
                         (own.principal_commitment.clone(), own),
                         (peer.manifest.principal_commitment.clone(), peer.manifest.clone()),
                     ]),
-                    received: Vec::new(),
+                    resumes: 0,
+                    acknowledgements: 0,
                     held_ack: None,
                 });
             let reader = client.account_db()?.open_reader()?;
@@ -72,12 +73,10 @@ async fn inbound_contact_request_lands_once_admission_succeeds_without_a_client_
                     }
                     let acked = {
                         let script = fixture.script.lock().map_err(|_| "script lock")?;
-                        script.ordinary.as_ref().is_some_and(|session| {
-                            session
-                                .received
-                                .iter()
-                                .any(|frame| matches!(frame, crate::GatewayClientFrame::Ack { .. }))
-                        })
+                        script
+                            .ordinary
+                            .as_ref()
+                            .is_some_and(|session| session.acknowledgements == 1)
                     };
                     if reader
                         .contact_request(&peer.manifest.principal_commitment, "inbound")?
@@ -98,20 +97,8 @@ async fn inbound_contact_request_lands_once_admission_succeeds_without_a_client_
                 let script = fixture.script.lock().map_err(|_| "script lock")?;
                 assert_eq!(script.busy_at, vec![Point::Open, Point::Open]);
                 let session = script.ordinary.as_ref().ok_or("session")?;
-                assert_eq!(
-                    session
-                        .received
-                        .iter()
-                        .filter(|frame| matches!(frame, crate::GatewayClientFrame::Ack { .. }))
-                        .count(),
-                    1
-                );
-                assert!(
-                    session
-                        .received
-                        .iter()
-                        .any(|frame| matches!(frame, crate::GatewayClientFrame::Resume { .. }))
-                );
+                assert_eq!(session.acknowledgements, 1);
+                assert_ne!(session.resumes, 0);
             }
             assert_eq!(reader.pending_contact_requests()?.len(), 1);
             let wall = std::time::Instant::now();

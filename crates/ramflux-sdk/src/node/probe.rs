@@ -72,12 +72,14 @@ pub(crate) async fn dispatch_probe(
     if status != "ok" {
         let error = fetched.as_ref().err().map(local_bus_error_body);
         return Ok(local_bus_ok(serde_json::json!({"node_id": id, "healthy": false,
+            "client_capabilities": profile.client_capabilities,
             "discovery": {"status": status, "expires_at": profile.expires_at, "error": error},
             "gateway": {"transport": {"quic": "not_attempted", "tcp": "not_attempted"}, "app": "not_available", "session": "not_attempted", "rtt_ms": 0},
             "relay": {"status": "not_attempted"}, "prekey": {"status": "not_attempted"}, "checked_at": now})));
     }
     let record = fetched?;
     let expires_at = record.expires_at;
+    let node_version = record.version.clone();
     let fresh = NodeProfile::from_record(record, now);
     let ca = fresh.write_ca(&state.config.data_root)?;
     let mut gateway = probe_gateway(&fresh, &ca).await;
@@ -99,7 +101,8 @@ pub(crate) async fn dispatch_probe(
     let relay_error = relay.as_ref().err().map(local_bus_error_body);
     Ok(local_bus_ok(serde_json::json!({"node_id": id,
         "healthy": status == "ok" && gateway.app == "ok" && relay_ok,
-        "discovery": {"status": status, "expires_at": expires_at}, "gateway": gateway,
+        "client_capabilities": fresh.client_capabilities,
+        "discovery": {"status": status, "expires_at": expires_at, "version": node_version}, "gateway": gateway,
         "relay": {"status": if relay_ok {"ok"} else {"failed"}, "error": relay_error},
         "prekey": {"status": if prekey_ok {"ok"} else {"failed"}, "error": prekey_error}, "checked_at": now})))
 }
@@ -239,30 +242,22 @@ async fn app_challenge<T: GatewaySessionFrameSink + GatewaySessionFrameSource>(
     }
 }
 
+fn prekey_http_error(error: reqwest::Error) -> SdkError {
+    ramflux_transport::TransportError::from(error.without_url()).into()
+}
+
+/// Checks the advertised prekey URL with the directory client's trust policy.
+///
+/// Any HTTP response means the handshake finished. The node CA authenticates
+/// gateway and relay only; it is not a prekey issuer.
 async fn probe_prekey_tls(profile: &NodeProfile) -> Result<(), SdkError> {
     let url = reqwest::Url::parse(&profile.prekey_http_url)
         .map_err(|error| node_error(&error.to_string()))?;
     if url.scheme() != "https" {
         return Err(node_error("prekey probe requires HTTPS"));
     }
-    let host = url.host_str().ok_or_else(|| node_error("prekey URL has no host"))?;
-    let port = url.port_or_known_default().ok_or_else(|| node_error("prekey URL has no port"))?;
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut profile.ca_cert_pem.as_bytes()) {
-        roots.add(cert?).map_err(|error| node_error(&error.to_string()))?;
-    }
-    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| node_error(&error.to_string()))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
-        .map_err(|error| node_error(&error.to_string()))?;
-    let tcp = tokio::net::TcpStream::connect((host, port)).await?;
-    let _tls = connector.connect(server_name, tcp).await?;
+    let client = crate::prekey::http_async::client_builder().build().map_err(prekey_http_error)?;
+    client.get(url).send().await.map_err(prekey_http_error)?;
     Ok(())
 }
 
@@ -276,3 +271,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "probe_tls_tests.rs"]
+mod tls_tests;

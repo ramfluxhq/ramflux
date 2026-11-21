@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate, render, snapshot, and restore an isolated production demo project."""
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import sys
 from urllib.parse import urlsplit
 
@@ -17,6 +19,7 @@ SNAPSHOT_ROOT_FILES = (
     "owner.json", "owner.token", "demo-override.json", "deploy-tree.version",
     "identity.env", ".env",
 )
+PAIRING_KEY_PATH = "/etc/ramflux/pairing/node-signing.key"
 SNAPSHOT_DIRECTORIES = ("config", "certs", "secrets")
 SNAPSHOT_REQUIRED = {
     "compose.yml", "runtime.env", "owner.json", "demo-override.json",
@@ -31,6 +34,101 @@ MANUAL_RECOVERY = (
 
 class SnapshotError(Exception):
     """A snapshot cannot be safely captured or restored."""
+
+
+def federation_bind():
+    """Host address that publishes the federation HTTP port.
+
+    A configured public origin means a reverse proxy on this host fronts the node, so the port
+    is published on loopback only, always. A direct (origin-less) demo keeps DEMO_BIND_ADDR.
+    """
+    explicit = os.environ.get("DEMO_FEDERATION_BIND_ADDR", "")
+    if os.environ.get("DEMO_PUBLIC_ORIGIN", ""):
+        if explicit not in ("", "127.0.0.1"):
+            sys.exit("DEMO_FEDERATION_BIND_REFUSED: with DEMO_PUBLIC_ORIGIN the federation HTTP "
+                     "port is published on 127.0.0.1 only (DEMO_FEDERATION_BIND_ADDR must be unset "
+                     "or 127.0.0.1)")
+        return "127.0.0.1"
+    return explicit or os.environ.get("DEMO_BIND_ADDR", "0.0.0.0")
+
+
+# The compose network is the /24 around the federation address. Its upper half is the only range
+# the runtime may allocate dynamically, so addresses .2-.127 can never be taken by another container.
+STATIC_RANGE_END = 128
+
+
+def reject_obsolete_inputs():
+    """Refuse operator inputs that are now derived, in every mode (pairing on or off)."""
+    if os.environ.get("RAMFLUX_FEDERATION_TRUSTED_PROXIES", ""):
+        sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_OBSOLETE: RAMFLUX_FEDERATION_TRUSTED_PROXIES is derived "
+                 "from DEMO_FEDERATION_STATIC_IP and must not be set")
+
+
+def pairing_network_ipam(static_ip):
+    """The compose network's /24 and its dynamic range (upper half), which excludes the pin."""
+    subnet = ipaddress.ip_network(f"{static_ip}/24", strict=False)
+    dynamic = ipaddress.ip_network(f"{str(subnet.network_address).rsplit('.', 1)[0]}.{STATIC_RANGE_END}/25")
+    return str(subnet), str(dynamic)
+
+
+def verify_existing_network():
+    """Refuse an existing compose network whose applied IPAM is not the generated one.
+
+    Compose creates a network only when it is absent and never reconfigures an existing one, so a
+    network created before the address reservation keeps an unrestricted allocation pool. The shell
+    passes the engine's inspection JSON (Docker or Podman shape) in DEMO_EXISTING_NETWORK_INSPECT
+    only when the network exists. Nothing is mutated or adopted; the operator recreates it.
+    """
+    raw = os.environ.get("DEMO_EXISTING_NETWORK_INSPECT", "")
+    if not raw or os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") != "1" \
+            or not os.environ.get("DEMO_FEDERATION_STATIC_IP"):
+        return  # a missing address is refused later by the generator's own input checks
+    subnet, dynamic = pairing_network_ipam(pairing_federation_ip())
+    first, last = ipaddress.ip_network(dynamic)[1], ipaddress.ip_network(dynamic)[-1]
+    found = []
+    try:
+        entry = json.loads(raw)[0]
+        for item in entry.get("subnets") or []:  # Podman: lease range as host addresses
+            lease = item.get("lease_range") or {}
+            found.append((item.get("subnet"), (lease.get("start_ip"), lease.get("end_ip"))))
+        for item in (entry.get("IPAM") or {}).get("Config") or []:  # Docker: the CIDR
+            found.append((item.get("Subnet"), item.get("IPRange")))
+    except (ValueError, IndexError, AttributeError, TypeError):
+        found = []
+    if (subnet, dynamic) in [(a, b) for a, b in found if isinstance(b, str)] or \
+            (subnet, (str(first), str(last))) in [(a, b) for a, b in found if isinstance(b, tuple)]:
+        return
+    sys.exit(f"DEMO_NETWORK_IPAM_MISMATCH: the existing compose network does not have subnet {subnet} "
+             f"with dynamic range {dynamic}, so the pinned federation address is not reserved. It is "
+             "never modified here: stop the node, remove the compose network, and run up again to "
+             "recreate it")
+
+
+def pairing_federation_ip():
+    """The federation's pinned compose-network address, the only proxy peer pairing trusts.
+
+    Rootless port publishing makes every connection to the federation HTTP port arrive from the
+    federation container's own address, and an unpinned address changes on every recreate. The
+    operator names a private IPv4 inside the compose network; the generator pins the federation
+    to it and trusts exactly it.
+    """
+    raw = os.environ.get("DEMO_FEDERATION_STATIC_IP", "")
+    try:
+        if not raw or raw != raw.strip() or not raw.isascii() or "/" in raw or "%" in raw:
+            raise ValueError(raw)
+        address = ipaddress.IPv4Address(raw)
+    except ValueError:
+        sys.exit("DEMO_FEDERATION_STATIC_IP_REQUIRED: pairing needs DEMO_FEDERATION_STATIC_IP, one "
+                 "private IPv4 address inside the compose network (for example 10.89.1.110)")
+    last = int(address) & 0xFF
+    if not address.is_private or address.is_loopback or address.is_link_local or last in (0, 1, 255):
+        sys.exit(f"DEMO_FEDERATION_STATIC_IP_INVALID: {raw} must be a private host address "
+                 "(not the network, gateway or broadcast address)")
+    if last >= STATIC_RANGE_END:
+        sys.exit(f"DEMO_FEDERATION_STATIC_IP_INVALID: {raw} must be in the reserved static part of "
+                 f"its /24 (host .2 to .{STATIC_RANGE_END - 1}); .{STATIC_RANGE_END} and above is the "
+                 "dynamic allocation range of the other services")
+    return str(address)
 
 
 def public_origin():
@@ -278,7 +376,7 @@ def validate_snapshot_overlays(state, reference):
         "RAMFLUX_DEMO_VOICE_UDP_PORT": target_voice_port,
         "DEMO_ADMIN_LOOPBACK_PORT": target_admin_port,
         "RAMFLUX_ROUTER_ADMIN_ENABLED": router_enabled,
-        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) if router_enabled else "",
+        "RAMFLUX_ROUTER_ADMIN_PORT": values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") if router_enabled else "",
     }
     selected = {
         "RAMFLUX_DEMO_VOICE_UDP_PORT": os.environ.get("RAMFLUX_DEMO_VOICE_UDP_PORT", ""),
@@ -458,7 +556,7 @@ def validate_selected_overlay_values(state):
     if os.environ.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") == "1" and (
             not (state / "compose.router-admin.yml").is_file()
             or values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0") != "1"
-            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488")) != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
+            or values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488") != os.environ.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")):
         sys.exit("router admin configuration was not applied by the last up; run up first")
 
 
@@ -493,6 +591,50 @@ def render_files(repo, state, owner):
                        for key in keys if key in custody}
         if environment:
             override["services"][f"ramflux-{service}"]["environment"] = environment
+    # Attachment authority: the gateway forwards calls to the relay listener over the mesh. The
+    # two values are set in runtime.env (relay listener 0.0.0.0:7443, gateway endpoint
+    # ramflux-relay:7443). Without the endpoint every attachment call is refused.
+    override["services"]["ramflux-gateway"].setdefault("environment", {})[
+        "RAMFLUX_RELAY_ATTACHMENT_ENDPOINT"] = "${RAMFLUX_RELAY_ATTACHMENT_ENDPOINT}"
+    override["services"]["ramflux-relay"].setdefault("environment", {})[
+        "RAMFLUX_RELAY_ATTACHMENT_ADDR"] = "${RAMFLUX_RELAY_ATTACHMENT_ADDR}"
+    reject_obsolete_inputs()
+    if os.environ.get("RAMFLUX_DEVICE_PAIRING_ENABLED", "0") == "1":
+        if record is None:
+            sys.exit("DEMO_PAIRING_REQUIRES_CUSTODY: RAMFLUX_CUSTODY_NODE_RECORD_FILE is required")
+        # Tickets and invitations are signed by the pinned node identity key. The router gets
+        # that one file read-only, through the restricted secret group; the key bytes never
+        # enter the environment, this JSON or logs.
+        # `prepare` runs before certificates exist on a first up, so only an existing key is
+        # checked here; a missing key makes the router refuse to start with a typed error.
+        node_key = state / "certs/node-identity/node-signing.key"
+        if node_key.is_symlink() or (node_key.exists() and node_key.stat().st_mode & 0o7137):
+            sys.exit("DEMO_PAIRING_NODE_KEY_MODE: node-signing.key must be a regular file, 0640 or stricter")
+        for service in ("router", "federation"):
+            environment = override["services"][f"ramflux-{service}"].setdefault("environment", {})
+            environment["RAMFLUX_DEVICE_PAIRING_ENABLED"] = "1"
+        # Pairing HTTP is accepted only as TLS: the public reverse proxy terminates it and asserts
+        # X-Forwarded-Proto, which the federation trusts only from the one pinned address it has
+        # on the compose network (never a prefix, never a wildcard).
+        origin = public_origin()
+        if not origin.startswith("https://"):
+            sys.exit("DEMO_PAIRING_REQUIRES_HTTPS_ORIGIN: DEMO_PUBLIC_ORIGIN must be an https origin")
+        if federation_bind() != "127.0.0.1":
+            sys.exit("DEMO_PAIRING_TRUSTED_PROXIES_NEED_LOOPBACK: trusting proxy addresses requires "
+                     "the federation HTTP port to be published on 127.0.0.1 only")
+        static_ip = pairing_federation_ip()
+        for service in ("router", "federation"):
+            override["services"][f"ramflux-{service}"]["environment"][
+                "RAMFLUX_FEDERATION_PUBLIC_ORIGIN"] = origin
+        federation = override["services"]["ramflux-federation"]
+        federation["environment"]["RAMFLUX_FEDERATION_TRUSTED_PROXIES"] = static_ip
+        federation["networks"] = {"default": {"ipv4_address": static_ip}}
+        subnet, dynamic = pairing_network_ipam(static_ip)
+        override["networks"]["default"]["ipam"] = {"config": [{"subnet": subnet, "ip_range": dynamic}]}
+        router = override["services"]["ramflux-router"]
+        router["environment"]["RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE"] = PAIRING_KEY_PATH
+        router.setdefault("volumes", []).append(f"./certs/node-identity/node-signing.key:{PAIRING_KEY_PATH}:ro")
+        router["group_add"] = ["${RAMFLUX_SECRET_GID:-0}"]
     atomic_json(state / "demo-override.json", override)
     refreshed = []
     for filename, source, enabled in (
@@ -590,11 +732,8 @@ def prepare(repo, state, command, validate_only=False):
         custody_inputs(state)
 
     previous_snapshot = owner.get("current_snapshot")
-    capture_legacy_snapshot = bool(
-        marker.exists() and not previous_snapshot and "snapshot_history" not in owner
-    )
-    if capture_legacy_snapshot:
-        previous_snapshot = new_snapshot_reference(owner["settings"]["DEMO_VERSION"])
+    if marker.exists() and not previous_snapshot and "snapshot_history" not in owner:
+        sys.exit("obsolete data directory layout (no snapshot history); no adoption before v1, redeploy into a fresh directory")
 
     if command == "upgrade":
         versions, snapshots = normalize_history(owner, previous_snapshot)
@@ -619,10 +758,9 @@ def prepare(repo, state, command, validate_only=False):
         target_owner = {**owner, "settings": settings, "version_history": versions,
                         "snapshot_history": snapshots, "current_snapshot": target_snapshot}
 
+    verify_existing_network()
     if validate_only:
         return owner
-    if capture_legacy_snapshot:
-        capture_snapshot(state, previous_snapshot)
     atomic_json(pending_marker, target_owner)
     transaction = {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
@@ -674,7 +812,7 @@ def router_admin_settings(state, command):
     values = snapshot_runtime_values(state, reference)
     source, _, _ = read_snapshot_manifest(state, reference)
     token = json.loads((source / "owner.json").read_text())["token"]
-    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", values.get("RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT", "59488"))
+    port = values.get("RAMFLUX_ROUTER_ADMIN_PORT", "59488")
     admin = values.get("RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT", "")
     voice = values.get("RAMFLUX_RELAY_VOICE_UDP_PORT", "").rsplit(":", 1)[-1]
     print(values.get("RAMFLUX_ROUTER_ADMIN_ENABLED", "0"), port or "-", admin or "-", voice or "-", token)
@@ -734,6 +872,187 @@ def recover(state):
     print(owner["settings"]["DEMO_VERSION"])
 
 
+def normalize_product_sha(raw):
+    """First 12 characters of a lowercase hex commit, or None when it is not one."""
+    value = raw.strip()
+    if len(value) < 12 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value[:12]
+
+
+def workspace_product_version(cargo_toml):
+    """Numeric X.Y.Z from [workspace.package], the version compiled into every binary."""
+    section = ""
+    version = None
+    try:
+        lines = Path(cargo_toml).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"cannot read workspace package version: {error}")
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section != "workspace.package":
+            continue
+        match = re.fullmatch(r'version\s*=\s*"([^"]*)"', line)
+        if match:
+            version = match.group(1)
+    if version is None or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    return version
+
+
+def product_sha(repo):
+    """Build commit the same way the binaries do: override, then git, else unknown."""
+    override = os.environ.get("RAMFLUX_GIT_SHA", "")
+    if override.strip():
+        sha = normalize_product_sha(override)
+        if sha is None:
+            sys.exit("RAMFLUX_GIT_SHA must be lowercase hexadecimal of at least 12 characters")
+        return sha
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return normalize_product_sha(result.stdout) or "unknown"
+
+
+PRODUCT_VERSION_LABEL = "org.opencontainers.image.version"
+PRODUCT_REVISION_LABEL = "org.opencontainers.image.revision"
+PRODUCT_SHA_EXACT = re.compile(r"[0-9a-f]{12}|unknown")
+RELEASE_REVISION_EXACT = re.compile(r"[0-9a-f]{12}")
+RUNTIME_PRODUCT_KEYS = (
+    "RAMFLUX_EXPECTED_PRODUCT_VERSION",
+    "RAMFLUX_EXPECTED_PRODUCT_SHA",
+)
+
+
+def label_assignments(text):
+    """Parse label lines. The last assignment of a key wins."""
+    labels = {}
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        key, separator, value = raw.strip().partition("=")
+        if separator != "=" or key == "":
+            sys.exit("release metadata label is missing a value")
+        labels[key] = value
+    return labels
+
+
+def release_image_labels(metadata_text, product_version, revision):
+    """Labels for a release image. Generic metadata cannot overwrite the contract.
+
+    The release tag and the full commit SHA are removed from
+    org.opencontainers.image.version and org.opencontainers.image.revision.
+    The workspace X.Y.Z version and the 12-hex revision are written last.
+    Other metadata labels stay. A release commit always has a sha, so
+    ``unknown`` is refused here.
+    """
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None:
+        sys.exit("workspace package version is not numeric X.Y.Z")
+    if RELEASE_REVISION_EXACT.fullmatch(revision) is None:
+        sys.exit("release revision must be 12 lowercase hexadecimal characters")
+    labels = label_assignments(metadata_text)
+    labels.pop(PRODUCT_VERSION_LABEL, None)
+    labels.pop(PRODUCT_REVISION_LABEL, None)
+    labels[PRODUCT_VERSION_LABEL] = product_version
+    labels[PRODUCT_REVISION_LABEL] = revision
+    return "\n".join(f"{key}={value}" for key, value in labels.items())
+
+
+def image_name(service, version):
+    return f"ghcr.io/ramfluxhq/ramflux-{service}:{version}"
+
+
+def inspected_labels(engine, image):
+    """Labels from `podman image inspect` or `docker image inspect`. No checkout lookup."""
+    try:
+        result = subprocess.run(
+            [engine, "image", "inspect", image],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}: {error}")
+    if result.returncode != 0:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    try:
+        items = json.loads(result.stdout)
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise ValueError("one image")
+        labels = (items[0].get("Config") or {}).get("Labels") or {}
+        if not isinstance(labels, dict):
+            raise ValueError("labels")
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {image}")
+    return labels
+
+
+def image_product_identity(engine, version):
+    """Env lines for the build stamped on the selected image. Never the deploying checkout."""
+    found = []
+    for service in SERVICES:
+        image = image_name(service, version)
+        labels = inspected_labels(engine, image)
+        product_version = labels.get(PRODUCT_VERSION_LABEL)
+        revision = labels.get(PRODUCT_REVISION_LABEL)
+        if (
+            not isinstance(product_version, str) or product_version == ""
+            or not isinstance(revision, str) or revision == ""
+        ):
+            sys.exit(
+                "DEMO_IMAGE_PRODUCT_UNLABELED: "
+                f"{image} is missing {PRODUCT_VERSION_LABEL} or {PRODUCT_REVISION_LABEL}"
+            )
+        if (
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", product_version) is None
+            or PRODUCT_SHA_EXACT.fullmatch(revision) is None
+        ):
+            sys.exit(f"DEMO_IMAGE_PRODUCT_INVALID: {image}")
+        found.append((product_version, revision))
+    if any(item != found[0] for item in found):
+        sys.exit(
+            "DEMO_IMAGE_PRODUCT_MISMATCH: selected images disagree on product version or revision"
+        )
+    product_version, revision = found[0]
+    print(f"RAMFLUX_EXPECTED_PRODUCT_VERSION={product_version}")
+    print(f"RAMFLUX_EXPECTED_PRODUCT_SHA={revision}")
+
+
+def merge_runtime_assignments(state, text):
+    """Replace the product facts in runtime.env with the inspected image lines."""
+    updates = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        if "=" not in line:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        key, value = line.split("=", 1)
+        if key not in RUNTIME_PRODUCT_KEYS:
+            sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+        updates[key] = value
+    if set(updates) != set(RUNTIME_PRODUCT_KEYS):
+        sys.exit("DEMO_IMAGE_PRODUCT_INVALID: runtime assignment")
+    path = state / "runtime.env"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        sys.exit(f"DEMO_IMAGE_PRODUCT_INSPECT_FAILED: {error}")
+    kept = [line for line in current.splitlines() if line.split("=", 1)[0] not in updates]
+    body = "\n".join([
+        *kept,
+        f"RAMFLUX_EXPECTED_PRODUCT_VERSION={updates['RAMFLUX_EXPECTED_PRODUCT_VERSION']}",
+        f"RAMFLUX_EXPECTED_PRODUCT_SHA={updates['RAMFLUX_EXPECTED_PRODUCT_SHA']}",
+    ]) + "\n"
+    atomic_bytes(path, body.encode(), mode=0o600)
+
+
 def set_node_id(state, node_id):
     for config in sorted((state / "config").glob("*.toml")):
         content = config.read_text().replace(
@@ -750,6 +1069,9 @@ def main():
     try:
         if action == "public-origin":
             print(public_origin())
+        elif action == "federation-bind":
+            public_origin()
+            print(federation_bind())
         elif action == "client-runtime":
             print(client_runtime(), end="")
         elif action == "check-pending":
@@ -783,6 +1105,21 @@ def main():
             append_custody_runtime(state, Path(sys.argv[4]))
         elif action == "custody-status":
             print(custody_status(state))
+        elif action == "product-version":
+            print(workspace_product_version(repo / "Cargo.toml"))
+        elif action == "product-revision":
+            print(product_sha(repo))
+        elif action == "release-image-labels":
+            if len(sys.argv) != 6:
+                sys.exit(
+                    "usage: demo-node-config.py REPO STATE "
+                    "release-image-labels VERSION REVISION"
+                )
+            print(release_image_labels(sys.stdin.read(), sys.argv[4], sys.argv[5]))
+        elif action == "image-product-identity":
+            image_product_identity(sys.argv[4], sys.argv[5])
+        elif action == "merge-runtime":
+            merge_runtime_assignments(state, sys.argv[4])
         else:
             sys.exit("invalid demo configuration action")
     except SnapshotError as error:

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
-use crate::client::own_device_sync::tests::client_with_account;
+use crate::client::native_test_support::{Fixture, account::blocking};
 use ramflux_storage::{DirectMessageWrite, MessageMetadata};
 use serde_json::json;
 
@@ -12,9 +12,29 @@ fn value(operation: u32, revision: u64) -> g::SelfSync {
     g::SelfSync { operation, revision, ..Default::default() }
 }
 
+fn fixture_identity(id: &str, hlc: u64) -> g::EventIdentity {
+    let author = g::QualifiedDevice {
+        account_anchor: "peer".into(),
+        device_id: "peer-device".into(),
+        device_epoch: 1,
+    };
+    let sequence = id
+        .bytes()
+        .fold(1_u64, |value, byte| value.saturating_mul(31).saturating_add(u64::from(byte)));
+    g::EventIdentity {
+        id: g::identity::derive(&author, "c", sequence)
+            .expect("test: complete self-sync identity transcript")
+            .to_vec(),
+        conversation_id: "c".into(),
+        author: Some(author),
+        hlc,
+        device_sequence: sequence,
+        ..Default::default()
+    }
+}
 fn reference(id: &str) -> g::MessageRef {
     g::MessageRef {
-        id: blake3::hash(id.as_bytes()).as_bytes().to_vec(),
+        id: fixture_identity(id, 0).id,
         conversation_id: "c".into(),
         author_anchor: "peer".into(),
     }
@@ -30,7 +50,6 @@ fn apply(client: &RamfluxClient, update: &g::SelfSync) -> Result<bool, SdkError>
 }
 
 fn install_read_messages(client: &RamfluxClient) -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let db = client.account_db()?;
     for (id, at) in [("m1", 1), ("m2", 2)] {
         db.import_direct_message_projection(DirectMessageWrite {
@@ -47,30 +66,19 @@ fn install_read_messages(client: &RamfluxClient) -> TestResult {
                 "routed/generated-identity/{}",
                 ramflux_protocol::encode_base64url(reference(id).id)
             ),
-            &g::EventIdentity {
-                id: reference(id).id,
-                conversation_id: "c".into(),
-                author: Some(g::QualifiedDevice {
-                    account_anchor: "peer".into(),
-                    device_id: "peer-device".into(),
-                    device_epoch: 1,
-                }),
-                hlc: u64::try_from(at)?,
-                device_sequence: u64::try_from(at)?,
-                ..Default::default()
-            },
+            &fixture_identity(id, u64::try_from(at)?),
         )?;
     }
     Ok(())
 }
 
-#[test]
-fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, mut client) = client_with_account("self-sync", "principal_sync", "local")?;
+#[tokio::test(flavor = "current_thread")]
+async fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult {
+    let mut fixture = Box::pin(Fixture::with_device("self-sync", "local")).await?;
+    let client = &fixture.client;
     let db = client.account_db()?;
     db.persist_client_record("conversation", "c", &json!({"kind":"direct"}))?;
-    install_read_messages(&client)?;
+    install_read_messages(client)?;
     let draft = g::SelfSync {
         draft: Some(g::Message {
             text: "draft".into(),
@@ -79,7 +87,7 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
         }),
         ..value(2, 1)
     };
-    assert!(apply(&client, &draft)?);
+    assert!(apply(client, &draft)?);
     let competing = g::SelfSync {
         draft: Some(g::Message { text: "equal revision".into(), ..Default::default() }),
         ..draft.clone()
@@ -89,7 +97,7 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
     } else {
         &competing
     };
-    apply(&client, &competing)?;
+    apply(client, &competing)?;
     assert_eq!(
         client.self_sync_state("c", &draft)?.ok_or("draft")?.exact_body,
         expected.encode_to_vec()
@@ -97,9 +105,9 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
     let cleared = client.change_self_sync("c", value(3, 0))?;
     assert_eq!(cleared.revision, 2);
     assert!(client.self_sync_state("c", &draft)?.ok_or("clear")?.value.draft.is_none());
-    assert!(!apply(&client, &draft)?);
-    assert!(apply(&client, &read("m2", 1))?);
-    assert!(apply(&client, &read("m1", 2))?);
+    assert!(!apply(client, &draft)?);
+    assert!(apply(client, &read("m2", 1))?);
+    assert!(apply(client, &read("m1", 2))?);
     let stored = client.self_sync_state("c", &read("m2", 1))?.ok_or("read")?;
     assert_eq!(stored.value.revision, 2);
     assert_eq!(stored.read_marker.ok_or("marker")?.id, reference("m2").id);
@@ -107,67 +115,61 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
         let mut update = value(set, 1);
         update.pin = (set == 4).then(|| reference("m1"));
         update.mute = set == 6;
-        assert!(apply(&client, &update)?);
+        assert!(apply(client, &update)?);
         let mut cleared = update.clone();
         cleared.operation = clear;
         cleared.mute = false;
         assert_eq!(client.change_self_sync("c", cleared)?.revision, 2);
-        assert!(!apply(&client, &update)?);
+        assert!(!apply(client, &update)?);
     }
     assert!(client.change_self_sync("unseen", value(7, 0)).is_ok());
     let mut wrong_ref = read("m1", 10);
     wrong_ref.read_through.as_mut().ok_or("ref")?.conversation_id = "other".into();
-    assert!(apply(&client, &wrong_ref).is_err());
-    // The old fixture seed is shared; use an independently created root for this attack.
-    let mut attacker = RamfluxClient::new();
-    attacker.create_identity_root("attacker", [0xe9; 32]);
-    attacker.create_device_branch("attacker", "bad-device", 1, [0xea; 32]);
-    let source = RootQualifiedDeviceRef::for_owned_account_device(
-        attacker.identity_root.as_ref().ok_or("root")?,
-        "bad-device",
-    )?;
+    assert!(apply(client, &wrong_ref).is_err());
+    // An independently created native account stands in for a different root.
+    let attacker = Box::pin(Fixture::with_device("self-sync-attacker", "bad-device")).await?;
+    let source = attacker.client.owned_device_identity()?;
     assert!(
         client
             .account_db()?
             .write_transaction(|| client.apply_self_sync_in(&source, "c", &value(7, 3)))
             .is_err()
     );
-    client.active_account_db = None;
-    client.unlock_account("acct", b"own-device-sync-test")?;
+    fixture.reopen().await?;
+    let client = &fixture.client;
     assert_eq!(client.self_sync_state("c", &draft)?.ok_or("reopened")?.value.revision, 2);
     client.delete_direct_message(
         "c",
         &ramflux_protocol::encode_base64url(reference("m1").id),
         "local",
-        "self-sync-delete",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"self-sync-delete"),
     )?;
-    assert!(!apply(&client, &g::SelfSync { revision: 10, ..draft.clone() })?);
-    assert!(apply(&client, &value(3, 11))?);
+    assert!(!apply(client, &g::SelfSync { revision: 10, ..draft.clone() })?);
+    assert!(apply(client, &value(3, 11))?);
     let live_draft = g::SelfSync {
         draft: Some(g::Message { text: "erased draft".into(), ..Default::default() }),
         ..value(2, 12)
     };
-    assert!(apply(&client, &live_draft)?);
+    assert!(apply(client, &live_draft)?);
     client.erase_self_sync_conversation("c")?;
     assert!(client.self_sync_state("c", &live_draft)?.is_none());
-    assert!(!apply(&client, &g::SelfSync { revision: 99, ..live_draft.clone() })?);
-    client.active_account_db = None;
-    client.unlock_account("acct", b"own-device-sync-test")?;
-    assert!(!apply(&client, &g::SelfSync { revision: 100, ..live_draft.clone() })?);
+    assert!(!apply(client, &g::SelfSync { revision: 99, ..live_draft.clone() })?);
+    fixture.reopen().await?;
+    let client = &fixture.client;
+    assert!(!apply(client, &g::SelfSync { revision: 100, ..live_draft.clone() })?);
     client.recreate_self_sync_conversation("c")?;
-    assert!(!apply(&client, &live_draft)?);
+    assert!(!apply(client, &live_draft)?);
     assert_eq!(client.change_self_sync("c", value(3, 0))?.revision, 13);
     for operation in [0, 8, u32::MAX] {
         assert!(self_sync::validate(&value(operation, 1)).is_err());
     }
     assert!(self_sync::validate(&g::SelfSync { pin: Some(reference("m1")), ..draft }).is_err());
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = g::SelfSync { mute: true, ..value(6, 6) };
     let b = value(7, 6);
     let c = value(7, 7);
@@ -175,15 +177,16 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
     let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
     let mut winner = None;
     for order in orders {
-        let (root, client) = client_with_account("self-sync-converges", "principal_sync", "local")?;
+        let fixture = blocking("self-sync-converges", "local")?;
+        let client = &fixture.client;
         client.account_db()?.persist_client_record(
             "conversation",
             "c",
             &json!({"kind":"direct"}),
         )?;
         for index in order {
-            apply(&client, &updates[index])?;
-            apply(&client, &updates[index])?;
+            apply(client, &updates[index])?;
+            apply(client, &updates[index])?;
         }
         let state = client.self_sync_state("c", &updates[0])?.ok_or("state")?;
         let bytes = serde_json::to_vec(&state)?;
@@ -192,24 +195,23 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
         } else {
             winner = Some(bytes);
         }
-        drop(client);
-        std::fs::remove_dir_all(root)?;
+        drop(fixture);
     }
     // The equal-revision prefix itself converges too, before revision seven arrives.
     let mut pairs = Vec::new();
     for order in [[0, 1], [1, 0]] {
-        let (root, client) = client_with_account("self-sync-equal", "principal_sync", "local")?;
+        let fixture = blocking("self-sync-equal", "local")?;
+        let client = &fixture.client;
         client.account_db()?.persist_client_record(
             "conversation",
             "c",
             &json!({"kind":"direct"}),
         )?;
         for index in order {
-            apply(&client, &updates[index])?;
+            apply(client, &updates[index])?;
         }
         pairs.push(client.self_sync_state("c", &updates[0])?.ok_or("state")?.exact_body);
-        drop(client);
-        std::fs::remove_dir_all(root)?;
+        drop(fixture);
     }
     assert_eq!(pairs[0], pairs[1]);
     Ok(())
@@ -217,14 +219,13 @@ fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResul
 
 #[test]
 fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut states = Vec::new();
     for order in [[read("m2", 1), read("m1", 2)], [read("m1", 2), read("m2", 1)]] {
-        let (root, client) =
-            client_with_account("self-sync-read-bootstrap", "principal_sync", "local")?;
-        install_read_messages(&client)?;
+        let fixture = blocking("self-sync-read-bootstrap", "local")?;
+        let client = &fixture.client;
+        install_read_messages(client)?;
         for update in order {
-            apply(&client, &update)?;
+            apply(client, &update)?;
         }
         let state = client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?;
         assert_eq!(state.value.revision, 2);
@@ -235,7 +236,7 @@ fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestRe
         );
         let own = client.owned_device_identity()?;
         assert!(matches!(client.bootstrap_self_sync(&own), Err(SdkError::InboundPending(_))));
-        queue_local_repair(&client, &state.value)?;
+        queue_local_repair(client, &state.value)?;
         let repair_keys = client.account_db()?.actor_state_keys("self-sync/repair/")?;
         assert_eq!(repair_keys.len(), 1);
         let repair: serde_json::Value =
@@ -245,8 +246,7 @@ fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestRe
             read("m2", 1).encode_to_vec()
         );
         states.push(serde_json::to_vec(&state)?);
-        drop(client);
-        std::fs::remove_dir_all(root)?;
+        drop(fixture);
     }
     assert_eq!(states[0], states[1]);
     Ok(())
@@ -254,8 +254,8 @@ fn self_sync_local_repair_preserves_read_max_beyond_winning_revision() -> TestRe
 
 #[test]
 fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, client) = client_with_account("self-sync-unseen-limit", "principal_sync", "local")?;
+    let fixture = blocking("self-sync-unseen-limit", "local")?;
+    let client = &fixture.client;
     let own = client.owned_device_identity()?;
     client
         .account_db()?
@@ -295,46 +295,44 @@ fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply(
         "known",
         &value(7, 1)
     ))?);
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, client) = client_with_account("self-sync-read-order", "principal_sync", "local")?;
-    install_read_messages(&client)?;
+    let fixture = blocking("self-sync-read-order", "local")?;
+    let client = &fixture.client;
+    install_read_messages(client)?;
     let db = client.account_db()?;
     let first_id = ramflux_protocol::encode_base64url(reference("m1").id);
     let key = format!("routed/generated-identity/{first_id}");
     let mut identity: g::EventIdentity = db.load_actor_state(&key)?.ok_or("identity")?;
     identity.hlc = 9;
     db.persist_message_actor_state(&first_id, &key, &identity)?;
-    apply(&client, &read("m2", 1))?;
-    apply(&client, &read("m1", 2))?;
+    apply(client, &read("m2", 1))?;
+    apply(client, &read("m1", 2))?;
     let projection = db.conversation_projection("c", Some(&client.owned_device_identity()?))?;
     assert_eq!(projection.read_through_message_id, Some(first_id));
     assert!(!projection.is_unread);
-    assert!(!apply(&client, &read("m2", 1))?);
+    assert!(!apply(client, &read("m2", 1))?);
     assert_eq!(
         client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?.read_marker,
         Some(reference("m1"))
     );
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
-#[test]
-fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, mut client) =
-        client_with_account("self-sync-publication", "principal_sync", "local")?;
-    let update = client.change_self_sync("c", value(7, 0))?;
+#[tokio::test(flavor = "current_thread")]
+async fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> TestResult {
+    let mut fixture = Box::pin(Fixture::with_device("self-sync-publication", "local")).await?;
+    let update = fixture.client.change_self_sync("c", value(7, 0))?;
     for restart in [false, true] {
         if restart {
-            client.active_account_db = None;
-            client.unlock_account("acct", b"own-device-sync-test")?;
+            fixture.reopen().await?;
         }
+        let client = &fixture.client;
         for _ in 0..2 {
             assert!(matches!(
                 client
@@ -348,15 +346,15 @@ fn self_sync_publication_defers_without_identity_across_fanout_and_restart() -> 
             client.self_sync_state("c", &update)?.ok_or("state")?.publication_identity.is_none()
         );
     }
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publication_defers()
 -> TestResult {
-    let (_root, client) =
-        client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
+    let fixture = blocking("self-sync-exact-publication", "local")?;
+    let client = &fixture.client;
     let source = client.owned_device_identity()?;
     let update = value(7, 9);
     let exact = update.encode_to_vec();
@@ -368,10 +366,10 @@ fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publica
         client.account_db()?.write_transaction(|| client.self_sync_publication_inner("c", &update)),
         Err(SdkError::InboundPending(_))
     ));
-    install_read_messages(&client)?;
-    apply(&client, &read("m1", 20))?;
+    install_read_messages(client)?;
+    apply(client, &read("m1", 20))?;
     let greater_read = read("m2", 5);
-    apply(&client, &greater_read)?;
+    apply(client, &greater_read)?;
     let state = client.self_sync_state("c", &greater_read)?.ok_or("read state")?;
     assert_eq!(state.read_marker_body.ok_or("read body")?.exact_body, greater_read.encode_to_vec());
     assert_eq!(state.value.revision, 20);
@@ -381,15 +379,14 @@ fn self_sync_local_state_preserves_exact_body_and_independent_read_while_publica
             .write_transaction(|| client.self_sync_publication_inner("c", &greater_read)),
         Err(SdkError::InboundPending(_))
     ));
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copies() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, client) =
-        client_with_account("self-sync-repair-lifetime", "principal_sync", "local")?;
+    let fixture = blocking("self-sync-repair-lifetime", "local")?;
+    let client = &fixture.client;
     let a = g::SelfSync {
         operation: 2,
         revision: 1,
@@ -406,8 +403,8 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
         (b, a)
     };
     let db = client.account_db()?;
-    apply(&client, &loser)?;
-    queue_local_repair(&client, &loser)?;
+    apply(client, &loser)?;
+    queue_local_repair(client, &loser)?;
     let old_marker =
         db.actor_state_keys("self-sync/repair-sent/")?.pop().ok_or("old repair marker")?;
     let old_repair = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old repair")?;
@@ -416,7 +413,7 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
     ))?;
     let envelope: ramflux_protocol::Envelope = serde_json::from_value(vectors["envelope"].clone())?;
     client.persist_self_sync_delivery("c", &loser, &envelope)?;
-    assert!(apply(&client, &winner)?, "equal-revision greater hash must win");
+    assert!(apply(client, &winner)?, "equal-revision greater hash must win");
     assert!(!db.actor_state_exists(&old_marker)?);
     assert!(
         !serde_json::to_string(&db.pending_outbox(256)?)?.contains(&old_marker),
@@ -424,7 +421,7 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
     );
     assert!(!db.actor_state_exists(&old_repair)?);
     assert_eq!(db.actor_state_usage("self-sync/pending/")?.0, 0);
-    assert!(!apply(&client, &loser)?, "equal-revision losing writer is stale");
+    assert!(!apply(client, &loser)?, "equal-revision losing writer is stale");
     assert_eq!(
         db.actor_state_usage("self-sync/repair/")?.0,
         1,
@@ -436,7 +433,7 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
         serde_json::from_value::<Vec<u8>>(repair["exact_body"].clone())?,
         winner.encode_to_vec()
     );
-    apply(&client, &value(3, 2))?;
+    apply(client, &value(3, 2))?;
     assert_eq!(db.actor_state_usage("self-sync/repair/")?.0, 0);
     assert_eq!(
         db.actor_state_usage("self-sync/repair-sent/")?.0,
@@ -444,24 +441,23 @@ fn self_sync_repair_tracks_equal_revision_winner_and_retires_cleared_draft_copie
         "cleared draft cannot leave a plaintext guessing fingerprint"
     );
     assert!(!db.actor_state_exists(&key)?);
-    queue_local_repair(&client, &value(3, 2))?;
+    queue_local_repair(client, &value(3, 2))?;
     client.erase_self_sync_conversation("c")?;
     assert_eq!(db.actor_state_usage("self-sync/repair-sent/")?.0, 0);
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, client) =
-        client_with_account("self-sync-repair-read-max", "principal_sync", "local")?;
-    install_read_messages(&client)?;
-    apply(&client, &read("m1", 2))?;
-    queue_local_repair(&client, &read("m1", 2))?;
+    let fixture = blocking("self-sync-repair-read-max", "local")?;
+    let client = &fixture.client;
+    install_read_messages(client)?;
+    apply(client, &read("m1", 2))?;
+    queue_local_repair(client, &read("m1", 2))?;
     let db = client.account_db()?;
     let old = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("old read repair")?;
-    assert!(apply(&client, &read("m2", 1))?);
+    assert!(apply(client, &read("m2", 1))?);
     assert!(!db.actor_state_exists(&old)?, "new max read retires an obsolete exact repair body");
     let next = db.actor_state_keys("self-sync/repair/")?.pop().ok_or("updated read repair")?;
     let repair: serde_json::Value = db.load_actor_state(&next)?.ok_or("repair")?;
@@ -469,39 +465,38 @@ fn self_sync_repair_max_read_change_invalidates_old_revision_deduplication() -> 
         serde_json::from_value::<Vec<u8>>(repair["read_marker_body"].clone())?,
         read("m2", 1).encode_to_vec()
     );
-    queue_local_repair(&client, &read("m1", 2))?;
+    queue_local_repair(client, &read("m1", 2))?;
     assert_eq!(db.actor_state_usage("self-sync/repair/")?.0, 1);
     assert_eq!(client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?.value.revision, 2);
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 
 #[test]
 fn self_sync_read_reference_requires_authenticated_author_and_conversation() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_root, client) =
-        client_with_account("self-sync-read-reference", "principal_sync", "local")?;
+    let fixture = blocking("self-sync-read-reference", "local")?;
+    let client = &fixture.client;
     let mut wrong_author = read("m2", 1);
     wrong_author.read_through.as_mut().ok_or("reference")?.author_anchor = "another-root".into();
     // Receipt before the target is a parked register, never an active read marker.
-    assert!(apply(&client, &wrong_author)?);
+    assert!(apply(client, &wrong_author)?);
     assert!(client.self_sync_state("c", &wrong_author)?.ok_or("state")?.read_marker.is_none());
-    install_read_messages(&client)?;
+    install_read_messages(client)?;
     client.account_db()?.write_transaction(|| client.resolve_self_sync_read_references("c"))?;
     let resolved = client.self_sync_state("c", &wrong_author)?.ok_or("resolved")?;
     assert!(resolved.read_marker.is_none(), "wrong root must not activate when the target arrives");
     assert!(resolved.pending_read.is_none(), "known-invalid reference is settled");
     wrong_author.revision = 2;
-    assert!(apply(&client, &wrong_author).is_err());
+    assert!(apply(client, &wrong_author).is_err());
     let mut wrong_conversation = read("m1", 2);
     wrong_conversation.read_through.as_mut().ok_or("reference")?.conversation_id = "other".into();
-    assert!(apply(&client, &wrong_conversation).is_err());
-    assert!(apply(&client, &read("m2", 3))?);
+    assert!(apply(client, &wrong_conversation).is_err());
+    assert!(apply(client, &read("m2", 3))?);
     assert_eq!(
         client.self_sync_state("c", &read("m2", 3))?.ok_or("valid")?.read_marker,
         Some(reference("m2"))
     );
-    drop(client);
+    drop(fixture);
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 
 //! Native admitted receive, winning edits and typed local search over real `SQLCipher` storage.
 use super::*;
+use crate::custody::tests::create_with_device;
 use crate::search::{LocalSearch, SearchError, SearchKind, SearchQuery};
 use ramflux_protocol::message as g;
 use ramflux_storage::local_search::{SearchActivation, SearchControl};
@@ -20,7 +21,7 @@ impl Fixture {
             id,
             "primary",
             vault.as_ref(),
-            crate::custody::network_now()?,
+            crate::custody::network_now()?.saturating_sub(2),
         )?;
         let anchor = account.record().body.account_anchor.clone();
         let mut client = RamfluxClient::new();
@@ -92,11 +93,13 @@ async fn local_search_live_versions_and_scope() -> TestResult {
         std::time::Duration::from_secs(30),
         Box::pin(async {
             let directory = ramflux_test_support::TestPath::new()?;
-            let source = Fixture::search_fixture(&directory, "source").await?;
+            let mut source = Fixture::search_fixture(&directory, "source").await?;
             let mut target = Fixture::search_fixture(&directory, "target").await?;
-            let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-            source.client.persist_fetched_identity_directory(&target.manifest)?;
-            target.client.persist_fetched_identity_directory(&source.manifest)?;
+            // Real media needs an endorsed layer-4 publication on both native devices.
+            super::activation_send::tests::publish_layer_four(&mut source).await?;
+            super::activation_send::tests::publish_layer_four(&mut target).await?;
+            source.client.persist_observed_identity_directory_now(&target.manifest)?;
+            target.client.persist_observed_identity_directory_now(&source.manifest)?;
             let source_anchor = source.client.own_account_anchor()?;
             let target_anchor = target.client.own_account_anchor()?;
             let conversation = g::dm_scope::derive(&source_anchor, &target_anchor)?;
@@ -192,7 +195,6 @@ async fn local_search_epochs_and_pending_completions() -> TestResult {
         Box::pin(async {
             let directory = ramflux_test_support::TestPath::new()?;
             let mut fixture = Fixture::search_fixture(&directory, "epoch-owner").await?;
-            let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
             let runtime =
                 LocalSearch::for_db(fixture.client.account_db()?, SearchActivation::testing())?;
             shared_cancellation_and_lease_ownership(&runtime, &fixture).await?;
@@ -480,19 +482,22 @@ async fn attachment_scope(
         crate::client::generated_identity::now_ms(),
         false,
     )?;
-    let message = ramflux_protocol::encode_base64url(&identity.id);
-    let manifest = ramflux_protocol::encode_base64url([7; 32]);
-    let media =
-        [("search-wire", "/private/parent/reportcanary.pdf"), ("other-wire", "survivorcanary.pdf")]
-            .into_iter()
-            .map(|(wire, name)| g::MediaRef {
-                object_id: wire.into(),
-                manifest_digest: vec![7; 32],
-                mime_type: "application/octet-stream".into(),
-                file_name: Some(name.into()),
-                ..Default::default()
-            })
-            .collect();
+    let prototype = super::activation_send::tests::prepared_media(target)?;
+    let manifest = ramflux_protocol::encode_base64url(&prototype.manifest_digest);
+    let search_wire = ramflux_protocol::encode_base64url([5; 32]);
+    let other_wire = ramflux_protocol::encode_base64url([6; 32]);
+    let media = [
+        (search_wire.as_str(), "/private/parent/reportcanary.pdf"),
+        (other_wire.as_str(), "survivorcanary.pdf"),
+    ]
+    .into_iter()
+    .map(|(wire, name)| {
+        let mut media = prototype.clone();
+        media.object_id = wire.into();
+        media.file_name = Some(name.into());
+        media
+    })
+    .collect();
     let body = RamfluxClient::encode_generated_inner(
         identity,
         &g::Content {
@@ -506,23 +511,26 @@ async fn attachment_scope(
         request.include_snippets = true;
         request
     };
-    for (wire, reference) in
-        [("other-wire", "other-reference"), ("search-wire", "search-reference")]
-    {
-        admit_attachment_reference(target, &message, wire, &manifest, reference)?;
-        rebuild(runtime, &target.client).await?;
-        if wire == "other-wire" {
-            assert!(
-                runtime
-                    .query(&target.client, 1, &query("reportcanary.pdf"))
-                    .await?
-                    .take()?
-                    .items
-                    .is_empty(),
-                "an unrelated admitted attachment must not authorize the requested wire/manifest"
-            );
-        }
-    }
+    // Receive records each media object under its own wire so revocation can
+    // tombstone a never-imported object. That record authorizes the filename.
+    rebuild(runtime, &target.client).await?;
+    assert_one_report_hit(
+        runtime,
+        &target.client,
+        &search_wire,
+        "received media must be searchable under its own wire before any other reference",
+    )
+    .await?;
+    // Same manifest as the received pair, but this wire never went through receive.
+    assert_unreceived_wire_stays_hidden(
+        source,
+        target,
+        runtime,
+        conversation,
+        &other_wire,
+        &manifest,
+    )
+    .await?;
     let page = runtime.query(&target.client, 1, &query("reportcanary.pdf")).await?.take()?;
     let item = page.items.first().ok_or("admitted attachment basename")?;
     assert!(
@@ -535,7 +543,7 @@ async fn attachment_scope(
         runtime.query(&target.client, 1, &scoped).await?.take()?.items.is_empty(),
         "attachment scope must be checked against its owning message"
     );
-    target.client.account_db()?.set_object_tombstoned("search-wire")?;
+    target.client.account_db()?.set_object_tombstoned(&search_wire)?;
     assert!(
         runtime
             .query(&target.client, 1, &query("reportcanary.pdf"))
@@ -559,6 +567,90 @@ async fn attachment_scope(
         runtime.query(&target.client, 1, &query("survivorcanary.pdf")).await?.take()?.items.len(),
         1,
         "revoking one attachment must preserve an independently admitted survivor in the same message"
+    );
+    Ok(())
+}
+
+async fn assert_one_report_hit(
+    runtime: &LocalSearch,
+    client: &RamfluxClient,
+    search_wire: &str,
+    reason: &str,
+) -> TestResult {
+    let mut request = SearchQuery::new("attachment-query", "reportcanary.pdf");
+    request.kinds = vec![SearchKind::Attachment];
+    request.include_snippets = true;
+    let page = runtime.query(client, 1, &request).await?.take()?;
+    assert_eq!(page.items.len(), 1, "{reason}");
+    let item = page.items.first().ok_or("received media filename")?;
+    assert!(item.id.expose().ends_with(&format!("/{search_wire}/0")), "{reason}");
+    Ok(())
+}
+
+async fn assert_unreceived_wire_stays_hidden(
+    source: &Fixture,
+    target: &Fixture,
+    runtime: &LocalSearch,
+    conversation: &str,
+    other_wire: &str,
+    manifest: &str,
+) -> TestResult {
+    let identity = source.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let message = ramflux_protocol::encode_base64url(&identity.id);
+    let mut media = super::activation_send::tests::prepared_media(target)?;
+    let digest = ramflux_protocol::encode_base64url(&media.manifest_digest);
+    assert_eq!(digest.as_str(), manifest, "unreceived media must share the received manifest");
+    let absent_wire = ramflux_protocol::encode_base64url([7; 32]);
+    media.object_id = absent_wire.as_str().into();
+    media.file_name = Some("absentcanary.pdf".into());
+    let body = RamfluxClient::encode_generated_inner(
+        identity.clone(),
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                media: vec![media],
+                ..Default::default()
+            })),
+        },
+    )?;
+    let sender = source.client.own_account_anchor()?;
+    target.client.account_db()?.persist_message_actor_state(
+        &message,
+        &format!("routed/generated-identity/{message}"),
+        &identity,
+    )?;
+    target.client.account_db()?.store_message_content(conversation, &message, &body)?;
+    target.client.account_db()?.send_direct_message_at_with_metadata(
+        ramflux_storage::DirectMessageWrite {
+            conversation_id: conversation,
+            message_id: &message,
+            sender_id: &sender,
+            encrypted_body: &body,
+            metadata: &ramflux_storage::MessageMetadata::default(),
+            created_at: ramflux_storage::unix_now(),
+        },
+    )?;
+    admit_attachment_reference(target, &message, other_wire, manifest, "unreceived-other")?;
+    rebuild(runtime, &target.client).await?;
+    let mut request = SearchQuery::new("absent-attachment", "absentcanary.pdf");
+    request.kinds = vec![SearchKind::Attachment];
+    request.include_snippets = true;
+    let hidden = runtime.query(&target.client, 1, &request).await?.take()?;
+    assert!(
+        hidden.items.is_empty(),
+        "a wire that was not received stays unindexed after admitting other_wire"
+    );
+    admit_attachment_reference(target, &message, &absent_wire, manifest, "unreceived-absent")?;
+    rebuild(runtime, &target.client).await?;
+    let shown = runtime.query(&target.client, 1, &request).await?.take()?;
+    assert_eq!(shown.items.len(), 1, "admitting that unreceived wire must index its filename");
+    let item = shown.items.first().ok_or("absent media filename")?;
+    assert!(
+        item.id.expose().ends_with(&format!("/{absent_wire}/0")),
+        "admitting that unreceived wire must index its filename"
     );
     Ok(())
 }

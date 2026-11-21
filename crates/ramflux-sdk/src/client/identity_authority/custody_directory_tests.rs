@@ -8,13 +8,11 @@ use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, Publicat
 use serde_json::json;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn native_manifest(
-    root: &Root,
-    id: &str,
+fn manifest_for(
+    account: &crate::custody::BornAccount,
     vault: &TestVault,
     now: u64,
 ) -> TestResult<CustodyManifest> {
-    let account = create(&root.0, id, vault, now)?;
     let (reference, credentials) = account.credentials(vault, "primary", now)?;
     let signed = ramflux_crypto::X25519KeyPair::random()?;
     let bundle = ramflux_crypto::create_prekey_bundle(
@@ -38,6 +36,14 @@ fn native_manifest(
         }],
     })
 }
+fn native_manifest(
+    root: &Root,
+    id: &str,
+    vault: &TestVault,
+    now: u64,
+) -> TestResult<CustodyManifest> {
+    manifest_for(&create(&root.0, id, vault, now)?, vault, now)
+}
 fn receiver(root: &Root, vault: &TestVault, now: u64) -> TestResult<RamfluxClient> {
     let account = create(&root.0, "receiver", vault, now)?;
     let mut client = RamfluxClient::new();
@@ -48,6 +54,9 @@ fn receiver(root: &Root, vault: &TestVault, now: u64) -> TestResult<RamfluxClien
         b"test-passphrase",
     )?;
     client.unlock_account("receiver", b"test-passphrase")?;
+    let manifest = manifest_for(&account, vault, now)?;
+    let anchor = account.record().body.account_anchor.clone();
+    client.observe_custody_manifest(&manifest, &anchor, now)?;
     Ok(client)
 }
 #[test]
@@ -68,13 +77,13 @@ fn ordinary_directory_accepts_native_provenance_and_rejects_metadata_or_key_subs
     let identity = client.peer_device_identity(&principal, "primary")?;
     assert_eq!(identity.root_commitment(), anchor);
     assert!(client.require_current_device_authorization(&identity).is_err());
-    client.persist_fetched_identity_directory(&material)?;
+    client.persist_observed_identity_directory_now(&material)?;
     client.require_current_device_authorization(&identity)?;
     // Neither restored evidence nor the public JSON import API can manufacture a fresh fetch.
     *client.native_head_freshness.borrow_mut() = NativeHeadFreshness::default();
     client.observe_device_manifest_json(serde_json::to_value(&material)?, &anchor)?;
     assert!(client.require_current_device_authorization(&identity).is_err());
-    client.persist_fetched_identity_directory(&material)?;
+    client.persist_observed_identity_directory_now(&material)?;
     client.require_current_device_authorization(&identity)?;
     assert_eq!(client.root_asserted_principal_kind(&principal)?, Some(PrincipalKind::Human));
     let profile = client.verified_identity_profile(&principal)?.ok_or("native profile absent")?;
@@ -83,12 +92,12 @@ fn ordinary_directory_accepts_native_provenance_and_rejects_metadata_or_key_subs
     assert_eq!(profile.kind, PrincipalKind::Human);
     let mut mixed = material.clone();
     mixed.root_public_key = ramflux_crypto::fixture_public_key_base64url();
-    assert!(client.persist_fetched_identity_directory(&mixed).is_err());
+    assert!(client.persist_observed_identity_directory_now(&mixed).is_err());
     let mut substituted = native;
     substituted.devices[0].prekey_bundle["device_identity_ed25519_public"] =
         serde_json::json!(ramflux_crypto::fixture_public_key_base64url());
     let substituted = crate::prekey::SdkDeviceManifestResponse::from_native(substituted)?;
-    assert!(client.persist_fetched_identity_directory(&substituted).is_err());
+    assert!(client.persist_observed_identity_directory_now(&substituted).is_err());
     client.require_current_device_authorization(&identity)?;
     Ok(())
 }
@@ -205,7 +214,7 @@ fn native_safety_uses_stable_anchor_comparison_and_separate_roster_stamp() -> Te
     let before = client.contact_safety_number(&anchor)?;
     assert_eq!(before.algorithm_version, 2);
     assert_eq!(before.safety_number, ramflux_crypto::custody::safety_number(&own, &anchor)?);
-    client.mark_contact_safety_verified(&anchor, "primary")?;
+    crate::client::contact_verification_cas::verify_linked_contact(&client, &anchor)?;
     assert_eq!(client.contact_safety_number(&anchor)?.verification_state, "verified");
     let primary = vault.primary_for_public_key(
         &peer.publication.record.body.master_certificate.body.self_signing_public_key,
@@ -220,7 +229,7 @@ fn native_safety_uses_stable_anchor_comparison_and_separate_roster_stamp() -> Te
     let renamed = client.contact_safety_number(&anchor)?;
     assert_eq!(renamed.safety_number, before.safety_number);
     assert_eq!(renamed.contact_device_set_hash, before.contact_device_set_hash);
-    assert_eq!(renamed.verification_state, "verified");
+    assert_eq!(renamed.verification_state, "verification_stale");
     let current = client.current_custody_authority(&anchor, now)?.ok_or("authority")?;
     peer.publication.record = primary.revoke_device(&current, "primary", now)?;
     peer.devices.clear();

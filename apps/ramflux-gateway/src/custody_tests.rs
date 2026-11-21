@@ -11,12 +11,12 @@ use ramflux_protocol::custody::*;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-struct Fixture {
+pub(crate) struct Fixture {
     tls: ramflux_transport::MeshTlsConfig,
     root: ramflux_test_support::TestPath,
 }
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let root = ramflux_test_support::TestPath::new()
             .expect("test: allocate fixture directory")
             .child(format!(
@@ -34,6 +34,10 @@ impl Fixture {
         std::fs::write(&tls.service_cert, cert.cert.pem())?;
         std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
         Ok(Self { tls, root })
+    }
+
+    pub(crate) fn tls(&self) -> &ramflux_transport::MeshTlsConfig {
+        &self.tls
     }
 }
 struct AuthorityFixture {
@@ -212,7 +216,9 @@ fn exercise(
     );
     Ok(())
 }
-async fn tcp_pair(fixture: &Fixture) -> Result<(GatewayTcpTlsStream, GatewayTcpTlsStream)> {
+pub(crate) async fn tcp_pair(
+    fixture: &Fixture,
+) -> Result<(GatewayTcpTlsStream, GatewayTcpTlsStream)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
@@ -510,6 +516,27 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
     let mut mismatched = grant();
     mismatched.session.record_hash = ramflux_protocol::encode_base64url([34; 32]);
     assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
+    assert!(crate::session::native_live_authority_matches(
+        &key,
+        &mismatched,
+        &key.branch_public_key,
+        now
+    ));
+    let mut revoked = key.clone();
+    revoked.revoked = true;
+    assert!(!crate::session::native_live_authority_matches(
+        &revoked,
+        &mismatched,
+        &key.branch_public_key,
+        now
+    ));
+    assert!(!crate::session::native_live_authority_matches(
+        &key,
+        &mismatched,
+        "foreign-branch",
+        now
+    ));
+
     mismatched = grant();
     mismatched.session.device_ref.device_epoch += 1;
     assert!(!crate::session::native_handoff_matches(&key, Some(&mismatched), now)?);
@@ -527,5 +554,5 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
 #[path = "pre_auth_custody_tests.rs"]
 pub(crate) mod pre_auth_matrix;
 
-#[path = "generation_zero_ingress_tests.rs"]
-mod generation_zero_ingress;
+#[path = "schema_activation_ingress_tests.rs"]
+mod schema_activation_ingress;

@@ -198,9 +198,12 @@ impl AgentBus for SurfaceBus {
         operation: Option<&str>,
     ) -> Result<Value> {
         match method {
-            "message.read" => Ok(
-                json!({"messages":[{"conversation_id":"group-thread","message_id":"ping","sender_id":"human-device","body_utf8":"@agent checklist","deleted":false}]}),
-            ),
+            "message.list" => Ok(super::support::message_detail(
+                body["conversation_id"].as_str().ok_or(Error::State)?,
+                body["message_id"].as_str().ok_or(Error::State)?,
+                "@agent checklist",
+                false,
+            )),
             "surface.send" => self.send(body),
             "surface.get" if self.get_failures > 0 => {
                 self.get_failures -= 1;

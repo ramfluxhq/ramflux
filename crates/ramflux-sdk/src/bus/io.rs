@@ -114,36 +114,8 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         current = source.source();
     }
     LocalBusErrorBody {
-        details: match error {
-            SdkError::CustodyForkFenced => Some(Box::new(serde_json::json!({"retryable": false}))),
-            SdkError::CustodyAdmission { retry, .. } => {
-                Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
-            }
-            SdkError::NetworkingPendingContext { networking, .. } => {
-                Some(Box::new(serde_json::json!({"networking":networking})))
-            }
-            SdkError::CustodyCapacity { capacity } => {
-                Some(Box::new(serde_json::json!({"capacity": capacity})))
-            }
-            SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
-            SdkError::ContactConfirmationRequired(change) => {
-                Some(Box::new(serde_json::json!(change)))
-            }
-            _ => None,
-        },
-        reason_code: match error {
-            SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
-            SdkError::ContactInput(reason) => Some(reason.to_string()),
-            SdkError::CustodyVault(reason) => Some(reason.as_str().into()),
-            SdkError::ContactConfirmationRequired(_) => {
-                Some("root_replacement_confirmation_required".into())
-            }
-            SdkError::ContactHomeNodeUnsupported => Some("invalid_card".into()),
-            _ if local_bus_error_code(error) == "transfer_requires_sync" => {
-                Some("head_or_removal_floor_mismatch".into())
-            }
-            _ => None,
-        },
+        details: bus_error_details(error),
+        reason_code: bus_reason_code(error),
         code: local_bus_error_code(error).to_owned(),
         message: if local_bus_error_code(error) == "account_busy" {
             "account in use by another process".into()
@@ -173,6 +145,44 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
     }
 }
 
+fn bus_reason_code(error: &SdkError) -> Option<String> {
+    Some(match error {
+        SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
+        SdkError::ContactInput(reason) => reason.to_string(),
+        SdkError::CustodyVault(reason) => reason.as_str().into(),
+        SdkError::CustodyPublicationFailed => "authority_publication".into(),
+        SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
+        SdkError::CustodyExpired => "deadline".into(),
+        SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
+        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
+        _ if local_bus_error_code(error) == "transfer_requires_sync" => {
+            "head_or_removal_floor_mismatch".into()
+        }
+        _ => return None,
+    })
+}
+
+fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
+    match error {
+        SdkError::CustodyForkFenced => Some(Box::new(serde_json::json!({"retryable": false}))),
+        SdkError::CustodyAdmission { retry, .. } => {
+            Some(Box::new(serde_json::json!({"retry": retry.clamped()})))
+        }
+        SdkError::NetworkingPendingContext { networking, .. } => {
+            Some(Box::new(serde_json::json!({"networking":networking})))
+        }
+        SdkError::CustodyCapacity { capacity } => {
+            Some(Box::new(serde_json::json!({"capacity": capacity})))
+        }
+        SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
+        SdkError::ContactConfirmationRequired(change) => Some(Box::new(serde_json::json!(change))),
+        SdkError::EditConflict { target, expected, received } => Some(Box::new(
+            serde_json::json!({"target": target, "expected": expected, "received": received}),
+        )),
+        _ => None,
+    }
+}
+
 fn generated_error_body(error: &crate::bindings::AdapterError) -> LocalBusErrorBody {
     LocalBusErrorBody {
         details: Some(Box::new(serde_json::json!(error.details))),
@@ -199,7 +209,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
         return "NetworkingPending";
     }
-
     if let SdkError::LifecycleShared(source) = error {
         return local_bus_error_code(source);
     }
@@ -212,10 +221,13 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     if let Some(code) = crate::error_policy::security_code(error) {
         return code;
     }
+    if let Some(code) = custody_unit_code(error) {
+        return code;
+    }
     match error {
         SdkError::GeneratedApi(error) => error.name,
         SdkError::Search(error) => error.code(),
-        SdkError::EditConflict { .. } => "EditConflict",
+        SdkError::EditConflict { .. } => "edit_conflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
         SdkError::DataRootInUse => "DataRootInUse",
         SdkError::CustodyForkFenced => "CustodyForkFenced",
@@ -238,14 +250,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::RestoreSetupRequired => "restore_setup_required",
         SdkError::Storage(StorageError::AuthorizationRejected) => "authorization_rejected",
         SdkError::NoNodeSelected => "NoNodeSelected",
-        SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
-        SdkError::CustodySetupInvalid => "CustodySetupInvalid",
-        SdkError::CustodyExpired => "CustodyExpired",
-        SdkError::CustodyAccountConflict => "CustodyAccountConflict",
-        SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
-        SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
         SdkError::CustodyVault(reason) => reason.wire_code(),
-        SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",
         SdkError::AccountRestorePending(_) => "AccountRestorePending",
@@ -253,6 +258,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::AccountManifestUnreadable => "ManifestUnreadable",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
         SdkError::InvalidOfflineRetention(_) => "InvalidOfflineRetention",
+        SdkError::PassphrasePolicy(error) => error.code(),
         SdkError::Storage(StorageError::Protocol(
             ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
         ))
@@ -292,8 +298,26 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::InboundRejected(code) if code == super::push_receiver::MANAGED_ACK_CODE => {
             super::push_receiver::MANAGED_ACK_CODE
         }
+        SdkError::CustodyNetwork(code) | SdkError::CustodyAdmission { code, .. } => {
+            code.reason_code()
+        }
         _ => "ValidationFailed",
     }
+}
+
+fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
+    Some(match error {
+        SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
+        SdkError::CustodySetupInvalid => "CustodySetupInvalid",
+        SdkError::CustodyConfirmRejected(reason) => reason.family(),
+        SdkError::CustodyExpired => "CustodyExpired",
+        SdkError::CustodyAccountConflict => "CustodyAccountConflict",
+        SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
+        SdkError::CustodyPublicationFailed => "CustodyPublicationFailed",
+        SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
+        SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
+        _ => return None,
+    })
 }
 
 fn storage_error_code(error: &StorageError) -> &'static str {
@@ -457,7 +481,7 @@ where
     R: AsyncRead + Unpin,
 {
     let body = read_encoded_local_bus_frame(reader).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
 }
 
 /// Read one bounded, zeroizing server envelope, including compatibility custody replies.
@@ -473,14 +497,62 @@ where
     if len > MAX_LOCAL_BUS_FRAME_BYTES {
         return Err(SdkError::LocalBus(format!("local bus frame too large: {len}")));
     }
+    if len == 0 {
+        return Err(SdkError::LocalBus("empty local bus frame".into()));
+    }
+    let mut discriminator = [0_u8; 1];
+    reader.read_exact(&mut discriminator).await?;
+    let [discriminator] = discriminator;
+    if discriminator == 0xC1 {
+        // Binary private replies require their connection-owned pending slot.
+        // This generic reader never allocates or forwards their secret payload to JSON.
+        return Err(SdkError::PairingField("credential_channel"));
+    }
+    read_encoded_after_discriminator(reader, len, discriminator).await
+}
+pub(super) async fn read_json_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<LocalBusFrame, SdkError> {
+    let body = read_encoded_after_discriminator(reader, len, discriminator).await?;
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
+}
+async fn read_encoded_after_discriminator<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    discriminator: u8,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    if len == 0 || len > MAX_LOCAL_BUS_FRAME_BYTES {
+        return Err(SdkError::LocalBus("invalid local bus frame length".into()));
+    }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
-    reader.read_exact(&mut body).await?;
+    let (first, remaining) =
+        body.split_first_mut().ok_or_else(|| SdkError::LocalBus("empty local bus frame".into()))?;
+    *first = discriminator;
+    reader.read_exact(remaining).await?;
     Ok(body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pairing_generic_bus_reader_refuses_private_discriminator_before_secret_payload()
+    -> Result<(), SdkError> {
+        let secret = crate::custody::pairing::CredentialOutcome::Provided {
+            passphrase: crate::custody::pairing::SecretUtf8::from_bytes(b"private-json-canary")?,
+            confirmation: None,
+        };
+        let frame =
+            crate::custody::pairing::private_credential::encode_reply(1, "unlock", &secret)?;
+        let mut reader = frame.as_slice();
+        let result = read_local_bus_frame(&mut reader).await;
+        assert_eq!(reader.len(), frame.len() - 5, "generic JSON reader consumed private payload");
+        assert!(matches!(result, Err(SdkError::PairingField("credential_channel"))));
+        Ok(())
+    }
 
     fn test_frame(body: serde_json::Value) -> LocalBusFrame {
         LocalBusFrame {
@@ -500,6 +572,22 @@ mod tests {
             ok: None,
             error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_bus_rejects_duplicate_confirmation_fields_before_typed_dispatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let encoded =
+            serde_json::to_string(&test_frame(serde_json::json!({"operation_id":"one"})))?;
+        let needle = "\"body\":{\"operation_id\":\"one\"}";
+        assert!(encoded.contains(needle));
+        let duplicate =
+            encoded.replace(needle, "\"body\":{\"operation_id\":\"one\",\"operation_id\":\"two\"}");
+        let (mut input, mut output) = tokio::io::duplex(duplicate.len() + 4);
+        input.write_u32(u32::try_from(duplicate.len())?).await?;
+        input.write_all(duplicate.as_bytes()).await?;
+        assert!(read_local_bus_frame(&mut output).await.is_err());
+        Ok(())
     }
 
     // T25-A1: an oversized frame is rejected on the write path BEFORE any byte is emitted.

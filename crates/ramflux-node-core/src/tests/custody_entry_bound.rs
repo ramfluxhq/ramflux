@@ -6,14 +6,14 @@ use super::*;
 #[test]
 fn entry_admission_all_origins_native_custody() -> Result {
     for mode in 0..=1 {
-        for over in [false, true] {
-            let root = temp_store_path(&format!("native-entry-bound-{mode}-{over}"))?;
+        for size_case in 0..3 {
+            let root = temp_store_path(&format!("native-entry-bound-{mode}-{size_case}"))?;
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;
             let (driver, service, session) = publication_session(&router, &store)?;
             let target = session.target_delivery_id.clone();
-            let mut envelope = envelope("native-entry-bound", &target, DeliveryClass::OpaqueEvent);
+            let mut envelope = envelope("native-entry-bound", &target, DeliveryClass::Message);
             envelope.source_principal_id = "alice".into();
             envelope.source_device_id = "primary".into();
             envelope.created_at = i64::try_from(NOW)?;
@@ -21,14 +21,20 @@ fn entry_admission_all_origins_native_custody() -> Result {
                 "source_root_commitment".into(),
                 serde_json::json!(driver.reference.account_anchor),
             );
-            envelope.encrypted_payload.clear();
-            envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-                &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-                [12; 32],
-            );
-            let base = crate::single_entry_frame_size(&envelope)?;
-            envelope.encrypted_payload =
-                "x".repeat(crate::ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
+            envelope.signed.signature = ramflux_protocol::encode_base64url([0; 64]);
+            if size_case > 0 {
+                envelope.ext.ext.insert("frame_padding".into(), serde_json::json!(""));
+                // Canonical signatures have a fixed width; preserve it in the independent size oracle.
+                let base = crate::single_entry_frame_size(&envelope)?;
+                envelope.ext.ext.insert(
+                    "frame_padding".into(),
+                    serde_json::json!(
+                        "x".repeat(
+                            crate::ENTRY_FRAME_BYTE_CAP - base + usize::from(size_case == 2)
+                        )
+                    ),
+                );
+            }
             envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
                 &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
                 [12; 32],
@@ -52,7 +58,7 @@ fn entry_admission_all_origins_native_custody() -> Result {
                 PEER,
                 NOW,
             );
-            if over {
+            if size_case > 0 {
                 assert_eq!(serde_json::to_value(&response)?["code"], "payload_too_large");
                 assert!(
                     matches!(

@@ -19,7 +19,7 @@ async fn fanout_mixed_retry_reuses_children_after_abort_and_restart() -> Result 
             router.mvp1_register_identity(&registration)?;
         }
         store.record_identity_registry(&router.mvp1_identities_snapshot())?;
-        let mut unsigned = envelope("mixed-parent", "unused", DeliveryClass::SelfDeviceControl);
+        let mut unsigned = envelope("mixed-parent", "unused", DeliveryClass::Message);
         unsigned.created_at = i64::try_from(crate::now_unix_seconds())?;
         let envelope = signed_registered_envelope(unsigned, "fanout", "source", 601)?;
         let request = ItestMvp10OwnDeviceFanoutRequest {

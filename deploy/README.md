@@ -59,13 +59,8 @@ COMPOSE_TEST_DOCKER_COMPOSE='docker compose' \
   python3 -m unittest discover -s deploy/scripts/tests -v
 ```
 
-For full remote gateway and relay application probes, build the trust/discovery
-helper from the matching `ramflux-itest` checkout once:
-
-```sh
-cd /path/to/ramflux-itest
-cargo build --locked --release --bin demo-node-tool
-```
+Published discovery is verified with `curl`, Python 3, and OpenSSL 3. LibreSSL
+lacks the required Ed25519 CLI support. No separate helper binary is required.
 
 Create an operator-only env file (replace the paths and advertised DNS name):
 
@@ -73,8 +68,10 @@ Create an operator-only env file (replace the paths and advertised DNS name):
 DEMO_HOST=demo.example.org
 DEMO_PROJECT=ramflux-demo
 DEMO_DATA_DIR=/srv/ramflux-demo
-DEMO_TOOL=/path/to/ramflux-itest/target/release/demo-node-tool
 # Optional defaults:
+# Gateway client capabilities written into router.toml and federation.toml.
+# Unknown names are refused. The default is the pair the gateway build serves:
+# DEMO_GATEWAY_CLIENT_CAPABILITIES=gateway.session_push.v1,gateway.ephemeral.v1
 # Public HTTPS reverse-proxy origin, with no path or trailing slash:
 # DEMO_PUBLIC_ORIGIN=https://demo.example.org
 DEMO_NODE_ID=demo.invalid
@@ -149,14 +146,22 @@ use it for every image:
 cd /path/to/ramflux
 DEMO_VERSION=release-2026-10-27
 sh deploy/scripts/build-prod-images.sh
+product_version=$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-version)
+product_revision=$(python3 deploy/scripts/demo-node-config.py "$PWD" "$PWD" product-revision)
 for service in gateway router notify federation relay signaling retention; do
-  docker build -f deploy/Dockerfile --build-arg "BIN=ramflux-$service" \
+  docker build -f deploy/Dockerfile \
+    --build-arg "BIN=ramflux-$service" \
+    --build-arg "RAMFLUX_PRODUCT_VERSION=$product_version" \
+    --build-arg "RAMFLUX_PRODUCT_REVISION=$product_revision" \
     -t "ghcr.io/ramfluxhq/ramflux-$service:$DEMO_VERSION" .
 done
 
 ```
 
-Use `podman build` instead when Podman is the selected engine. Follow the
+Use `podman build` with the same `--build-arg` values when Podman is the selected
+engine. Those arguments become the image labels
+`org.opencontainers.image.version` and `org.opencontainers.image.revision`.
+Follow the
 one-image-per-archive transfer procedure and image identity checklist in
 [Upgrading or rolling back](#upgrading-or-rolling-back-an-existing-demo-and-private-admin-access).
 Load all seven archives into the same engine/user context used by the wrapper,
@@ -168,12 +173,14 @@ local Cargo build and invokes Compose with `--no-build`. Before Compose starts,
 the wrapper inspects all seven exact `ghcr.io/ramfluxhq/ramflux-<service>:TAG`
 images in the detected engine. It lists every missing image and exits without
 starting the project if any image is absent. It never pulls or substitutes tags.
+It then reads the two product labels with `podman image inspect` or
+`docker image inspect`, snapshots them, and compares discovery with those
+facts. A missing or malformed label is a typed error. The deploying checkout's
+version and commit are not used in their place.
 
-`DEMO_TOOL` remains required for initialization, local `status`, and remote
-verification. A `demo-node-tool` binary may be copied from a build host only when
-it is statically compatible with the target: use the same CPU architecture and a
-compatible glibc (or an intentionally static build). Keep the tool executable and
-set its absolute target-host path as `DEMO_TOOL`.
+Initialization, local `status`, and remote verification use the product scripts
+in this repository (`demo-node-trust.py` and `verify-remote-discovery.py`) plus
+`curl` and OpenSSL 3. Nothing is copied from another repository.
 
 Federation header, body, timeout and connection limits are validated before every
 local command. An invalid value therefore also blocks `status`, `logs`, `down` and
@@ -224,6 +231,12 @@ Initialization recovers missing generated trust files using the same saved keys.
 path and mode defaults. Required keyring-provider inputs include
 `RAMFLUX_FEDERATION_PROVIDER_KEYRING_FILE=/etc/ramflux/federation/provider-keyring.json`
 and `RAMFLUX_RELAY_TRUST_SNAPSHOT_CACHE_FILE=/var/lib/ramflux/relay/trust-snapshot.json`.
+The gateway's attachment authority calls reach the relay over the compose network:
+`RAMFLUX_RELAY_ATTACHMENT_ADDR=0.0.0.0:7443` (relay listener, set on the relay service)
+and `RAMFLUX_RELAY_ATTACHMENT_ENDPOINT=ramflux-relay:7443` (gateway, set on the gateway
+service). Without the endpoint the gateway refuses every attachment call with
+`authority_unavailable`. Both values are written by `up`, so an existing node picks
+them up on its next `up`.
 The wrapper also supplies the matching `RF_COMPOSE_*` inputs for these concrete runtime values.
 The actual-provider regression renders the complete generated project and rejects
 unresolved `${...}` expressions anywhere in the result. Run it without a container
@@ -284,18 +297,12 @@ The public federation HTTP listener exposes only client reads. Administration us
 a separate unpublished listener on the Compose network (port 18084). The demo HTTP
 port remains the upstream listener when a public HTTPS origin is configured. See [the route inventory](../docs/federation_http.md).
 
-`status` checks all seven container health states, then fetches the client record,
-verifies freshness, signature and the saved operator public key, and prints the
-node key fingerprint using the same discovery domain as `node.add`/`node.list`.
-It calls the SDK's pre-account gateway probe: verified QUIC first, then verified
-TCP-TLS fallback if needed, using the signed record's CA and server name. The
-first application frame is Heartbeat; only the protocol-constant
-`first gateway frame must be open` Nack counts as success. No Open or Auth frame
-is sent, and gateway session status remains `requires_account`. The relay check
-continues to use client-facing QUIC `/healthz` and requires status 200. The helper
-prints the selected gateway transport results and relay health; it exits nonzero
-on any failure. Health probes do not prove account creation, DM,
-attachments, or TURN behavior; those require the desktop/controller acceptance.
+`status` checks all seven container health states, then fetches
+`/.well-known/ramflux/client` and verifies its signature, freshness, node
+version, and the operator pin from `identity.env`. Remote `status` does the same
+fetch and does not need Docker or the host data directory. Neither mode probes
+gateway or relay transports, and neither confirms account creation, DM,
+attachments, or TURN behavior. Those require the desktop/controller acceptance.
 
 For a LAN check on another machine, use a local env file with the settings above
 and this additional public value copied over a trusted channel from the host's
@@ -309,13 +316,10 @@ DEMO_EXPECTED_NODE_PUBLIC_KEY=replace_with_public_pin
 sh deploy/scripts/demo-node.sh status /path/to/local-demo.env --remote
 ```
 
-Remote status needs no Docker or host data directory. When `DEMO_TOOL` is unset,
-it verifies the signed record with `curl`, Python 3's standard library and
-OpenSSL 3 (LibreSSL lacks the required Ed25519 CLI support), then prints an explicit notice that gateway and relay application probes
-were skipped. Set `DEMO_TOOL` to the matching executable for the existing
-signed-discovery plus gateway and relay application probes. Remote status cannot
-inspect container health. Neither status mode confirms or changes desktop trust
-pins.
+Remote status needs no Docker or host data directory. It verifies the signed
+record with `curl`, Python 3's standard library, and OpenSSL 3 (LibreSSL lacks
+the required Ed25519 CLI support). Remote status cannot inspect container health.
+Neither status mode confirms or changes desktop trust pins.
 
 All seven service images use an exec-form entrypoint, so the service binary is
 PID 1 and receives SIGTERM directly. Compose allows five seconds for shutdown;
@@ -622,6 +626,36 @@ env and run `up`. This opt-in binds only `127.0.0.1`, even with a public
 to remove the mapping. Production installs can use `docker-compose.admin.yml`
 with `RAMFLUX_FEDERATION_ADMIN_LOOPBACK_PORT`. Router administration has an independent opt-in, off by default:
 set `RAMFLUX_ROUTER_ADMIN_ENABLED=1` in the demo operator env and run `up`.
+Device pairing is released for clients (on by default). A node serves pairing and advertises
+`device_pairing_v2` only when its operator opts in: set `RAMFLUX_DEVICE_PAIRING_ENABLED=1`
+(operator env, `0` or `1`) and run `up`. It requires the custody inputs
+(`RAMFLUX_CUSTODY_NODE_RECORD_FILE`) and `certs/node-identity/node-signing.key` (mode 0640 or
+stricter), sets the switch on the router and federation only, and mounts that single key file
+read-only into the router (`RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE`, router supplementary
+group `RAMFLUX_SECRET_GID`). The router refuses to start when the key is missing, malformed or not
+the node identity key; there is no service-seed fallback and the key never enters env or logs.
+Pairing HTTP is accepted only as TLS asserted by the public reverse proxy, so the opt-in also
+requires an `https://` `DEMO_PUBLIC_ORIGIN` and `DEMO_FEDERATION_STATIC_IP`: one private IPv4 address
+inside the compose network (for example `10.89.1.110`). Rootless port publishing makes every connection
+to the federation HTTP port arrive from the federation container's own address, and an unpinned address
+changes on every recreate, so the generator pins the federation to that address (a compose
+`ipv4_address`, plus the /24 subnet of the project network whose dynamic `ip_range` is its upper half
+`.128/25`, so the address must be host `.2` to `.127` and no dynamically allocated container can take it; an
+occupant explicitly pinned to it by other means is not detected) and sets it as the federation's only trusted
+proxy (`RAMFLUX_FEDERATION_TRUSTED_PROXIES` is derived and refused whenever it is set, pairing on or off). The origin goes to the
+federation and the router. An existing `<project>_default` network keeps the IPAM it was created with, so `up` refuses it
+(`DEMO_NETWORK_IPAM_MISMATCH`, before any managed state is written) unless its subnet and dynamic range
+are exactly the generated /24 and `.128/25`; it is never modified or adopted. Stop the node, remove that
+network (`podman network rm <project>_default`) and run `up` again to recreate it. A wrong address fails closed with `400 tls required`.
+Because rootless port publishing makes every connection to the published federation HTTP port arrive
+from that same peer address, a configured `DEMO_PUBLIC_ORIGIN` (a reverse proxy on this host in front
+of the node) always publishes the federation HTTP port on `127.0.0.1` only; the generator refuses a
+non-loopback `DEMO_FEDERATION_BIND_ADDR` together with an origin, and refuses trusted proxies unless
+that loopback publication holds. The other public ports keep `DEMO_BIND_ADDR`. An nftables accept rule
+for the federation HTTP port may stay (the closed loopback binding makes it unreachable); the operator
+may also remove it.
+Discovery follows the same opt-in: an enabled node advertises `device_pairing_v2` and
+`primary_transfer_full_v1`, and a node without it advertises neither.
 `RAMFLUX_ROUTER_ADMIN_PORT` defaults to 59488 only when enabled. It must
 be 1024–65535 and distinct from the other configured ports. The wrapper refuses
 an occupied port before changing managed state, while allowing the existing
@@ -847,20 +881,14 @@ policy. Apply configuration through the normal operator-managed deployment flow.
 
 Enable the private administration overlay as described above (`DEMO_ADMIN_LOOPBACK_PORT=59487`;
 router administration defaults to loopback TCP 59488), then inspect the router
-through its authenticated mesh admin listener:
-
-```sh
-# Load the private operator environment; never put the token in argv.
-set -a
-. "$DEMO_DATA_DIR/identity.env"
-set +a
-"$DEMO_TOOL" custody-budgets 127.0.0.1:59488 "$DEMO_DATA_DIR/certs" router
-```
+through its authenticated mesh admin listener. The route is `POST /admin/custody/budgets`.
+The JSON body carries `admin_token` set to `RAMFLUX_ROUTER_ADMIN_TOKEN` from
+`identity.env`, and the caller authenticates as the gateway mesh peer. Keep the
+token and the mesh certificate operator-only. Do not put the token on a command line.
 
 Use `RAMFLUX_ROUTER_ADMIN_PORT` instead of 59488 when configured.
-`DEMO_MESH_PORT` reaches federation and does not serve this router route. The tool
-uses the existing gateway mesh certificate and router admin token. Keep both
-operator-only. This path is not forwarded by the public gateway.
+`DEMO_MESH_PORT` reaches federation and does not serve this router route.
+This path is not forwarded by the public gateway.
 The JSON result includes `observed_at` and a row per durable daily/minute window,
 plus the global lifetime ceiling: `scope`, truncated node-keyed `prefix` hash,
 `budget`, `count`, `limit`, and `reset_at` (Unix seconds, UTC). A null reset is a
@@ -883,13 +911,10 @@ client contract and `CHANGELOG.md` for the breaking development wire notice.
 
 Use `RAMFLUX_ROUTER_ADMIN_ENABLED=1` with `RAMFLUX_ROUTER_ADMIN_PORT` for the
 independent loopback router administration listener. The port defaults to 59488
-only when this listener is selected. The demo wrapper accepts the old
-`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` input alias for one release; an explicit
-`RAMFLUX_ROUTER_ADMIN_PORT` takes precedence. New runtime files save the canonical
-name, while immutable historical snapshots keep their original runtime keys and
-frozen Compose inputs. Direct Compose renames
-`RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to `RAMFLUX_ROUTER_ADMIN_PORT` without an
-input alias.
+only when this listener is selected. The demo wrapper refuses the obsolete
+`DEMO_ROUTER_ADMIN_LOOPBACK_PORT` name, and runtime files carry only the canonical
+name. Direct Compose renames `RAMFLUX_ROUTER_ADMIN_LOOPBACK_PORT` to
+`RAMFLUX_ROUTER_ADMIN_PORT` without an input alias.
 
 `up`, `upgrade`, `rollback`, and `recover` share enabled-port validation and the
 same occupied-port refusal. Maintenance inspects the target snapshot read-only

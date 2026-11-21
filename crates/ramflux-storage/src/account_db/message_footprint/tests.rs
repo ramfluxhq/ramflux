@@ -402,7 +402,8 @@ fn sent_copy_envelopes_do_not_claim_an_unrelated_message_owner() -> Result<(), S
     db.persist_message_actor_state(
         "logical",
         "own-device/send/plain",
-        &json!({"intent":{"id":"envelope","owner_record":["message","logical"]}}),
+        &json!({"intent":{"id":"envelope","owner_record":["message","logical"]},
+            "origin":{"routing":{"message_id":"envelope"}}}),
     )?;
     db.persist_actor_state(
         "own-device/send/surface",

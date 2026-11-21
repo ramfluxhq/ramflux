@@ -14,23 +14,7 @@ use ramflux_protocol::custody::{
 };
 
 pub(super) fn decode(bytes: &[u8]) -> Result<Option<Envelope<ContactConsentV2>>, SdkError> {
-    #[derive(serde::Deserialize)]
-    struct Header {
-        body: Schema,
-    }
-    #[derive(serde::Deserialize)]
-    struct Schema {
-        schema: String,
-    }
-    if let Some(consent) = super::generated::decode(bytes)? {
-        return Ok(Some(consent));
-    }
-    if !serde_json::from_slice::<Header>(bytes)
-        .is_ok_and(|header| header.body.schema == ramflux_protocol::domain::CONTACT_REQUEST_V2)
-    {
-        return Ok(None);
-    }
-    Ok(Some(ramflux_protocol::custody::decode(bytes, 8192)?))
+    super::generated::decode(bytes)
 }
 
 struct Carrier<'a> {

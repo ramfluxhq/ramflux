@@ -12,7 +12,7 @@ pub(crate) mod certificate;
 mod checkpoint;
 pub(crate) mod control;
 pub(crate) mod decision;
-mod generated;
+pub(crate) mod generated;
 mod global_capacity;
 mod historical;
 mod intervention;

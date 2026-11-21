@@ -38,9 +38,13 @@ fn validate_row_formats(db: &redb::Database) -> Result<IdentityRegistry, NodeCor
             if let Some(bytes) = table.get(ROUTER_INBOX_SLICE_KEY).map_err(error)? {
                 let _: OpaqueDeviceInbox = serde_json::from_slice(bytes.value()).map_err(error)?;
             }
-            if let Some(bytes) = table.get(crate::ROUTER_HOME_NODE_MIGRATION_KEY).map_err(error)? {
-                let _: std::collections::BTreeMap<String, crate::HomeNodeMigrationRecord> =
-                    serde_json::from_slice(bytes.value()).map_err(error)?;
+            if table.get(crate::ROUTER_HOME_NODE_MIGRATION_KEY).map_err(error)?.is_some() {
+                return Err(NodeCoreError::UnsupportedPersistedFormat(
+                    "home node migration snapshot",
+                ));
+            }
+            if table.get(crate::ROUTER_HOME_NODE_ROUTE_KEY).map_err(error)?.is_some() {
+                return Err(NodeCoreError::UnsupportedPersistedFormat("home node route snapshot"));
             }
             if let Some(bytes) = table.get(ROUTER_REPLAY_GUARD_STATE_KEY).map_err(error)? {
                 let _: NodeReplayGuardState =
@@ -121,7 +125,7 @@ mod tests {
             envelope: crate::test_support::federation_fixtures::envelope(
                 "row",
                 "target",
-                ramflux_protocol::DeliveryClass::OpaqueEvent,
+                ramflux_protocol::DeliveryClass::Message,
             ),
         };
         let db = redb::Database::open(&path)?;
@@ -157,16 +161,14 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn missing_home_migration_version_refuses_before_ordinary_and_maintenance_writes()
+    fn persisted_home_migration_snapshot_is_refused_before_ordinary_and_maintenance_writes()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::TempDir::new()?;
         let path = directory.path().join("router.redb");
         drop(RouterRedbStore::open_without_wal(&path)?);
         let db = redb::Database::open(&path)?;
         let current = serde_json::json!({"format_version":1,"identity_commitment":"root","old_home_node":"old","new_home_node":"new","new_home_node_key_hash":"key","route_record_hash":"route","effective_at":100,"issued_at":90,"migration_proof_hash":"proof","migrated_at":100});
-        let mut retired = current.clone();
-        retired.as_object_mut().ok_or("migration record")?.remove("format_version");
-        let bytes = serde_json::to_vec(&serde_json::json!({"current":current,"retired":retired}))?;
+        let bytes = serde_json::to_vec(&serde_json::json!({"current":current}))?;
         let write = db.begin_write()?;
         write
             .open_table(ROUTER_SNAPSHOT_TABLE)?
@@ -175,8 +177,11 @@ mod tests {
         drop(db);
         let before = image(directory.path())?;
         assert!(
-            RouterRedbStore::open_without_wal(&path).is_err(),
-            "missing migration versions must not default during startup"
+            matches!(
+                RouterRedbStore::open_without_wal(&path),
+                Err(NodeCoreError::UnsupportedPersistedFormat("home node migration snapshot"))
+            ),
+            "a stored home-migration snapshot is not a current format"
         );
         assert_eq!(
             image(directory.path())?,
@@ -192,6 +197,28 @@ mod tests {
             before,
             "migration format refusal changed maintenance state"
         );
+        let route_directory = tempfile::TempDir::new()?;
+        let route_path = route_directory.path().join("router.redb");
+        drop(RouterRedbStore::open_without_wal(&route_path)?);
+        let route_db = redb::Database::open(&route_path)?;
+        let route_write = route_db.begin_write()?;
+        route_write.open_table(ROUTER_SNAPSHOT_TABLE)?.insert(
+            crate::ROUTER_HOME_NODE_ROUTE_KEY,
+            serde_json::to_vec(&serde_json::json!({}))?.as_slice(),
+        )?;
+        route_write.commit()?;
+        drop(route_db);
+        let route_before = image(route_directory.path())?;
+        assert!(
+            matches!(
+                RouterRedbStore::open_without_wal(&route_path),
+                Err(NodeCoreError::UnsupportedPersistedFormat("home node route snapshot"))
+            ),
+            "a stored home-route snapshot is not a current format"
+        );
+        assert_eq!(image(route_directory.path())?, route_before);
+        assert!(RouterRedbStore::rotate_inbox_incarnations_at(&route_path, None, None).is_err());
+        assert_eq!(image(route_directory.path())?, route_before);
         Ok(())
     }
 }

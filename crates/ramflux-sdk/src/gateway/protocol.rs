@@ -4,6 +4,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
+use std::sync::Arc;
 
 const GATEWAY_SESSION_AUTH_TTL_SECONDS: i64 = 300;
 
@@ -15,9 +16,6 @@ const GATEWAY_SESSION_AUTH_TTL_SECONDS: i64 = 300;
 pub(crate) fn admit_candidate_outer_frame(
     frame: &[u8],
 ) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
-    if !ramflux_protocol::schema_profile::schema_v1_live() {
-        return Err(SdkError::InboundRejected("candidate outer is dormant".into()));
-    }
     ramflux_transport::decode_candidate_outer_frame(frame)
         .map_err(|error| SdkError::InboundRejected(error.to_string()))
 }
@@ -81,6 +79,7 @@ impl GatewaySessionTransportKind {
 
 #[derive(Clone, Debug)]
 pub struct GatewaySessionConfig {
+    pub(crate) pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub(crate) custody_networking_pending: bool,
     pub(crate) custody: Option<super::GatewayCustodyConfig>,
     pub transport_kind: GatewaySessionTransportKind,
@@ -200,6 +199,7 @@ impl GatewaySessionConfig {
         Self {
             custody_networking_pending: false,
             custody: None,
+            pairing_admission: None,
             transport_kind: parts.transport_kind,
             bind_addr: parts.bind_addr,
             gateway_addr: parts.gateway_addr,
@@ -272,6 +272,8 @@ impl GatewaySessionConfig {
             self.device_branch = None;
             self.source_identity = None;
             self.custody_networking_pending = false;
+            self.pairing_admission =
+                Some(Arc::new(client.account_db()?.pairing_admission_reader()));
             return Ok(self);
         }
         client.require_legacy_networking()?;
@@ -531,6 +533,7 @@ pub enum GatewayClientFrame {
     PushRouteRegister { request: Box<super::GatewayPushRouteFrame> },
     PushRouteDeregister { request: Box<super::GatewayPushRouteDeregistrationFrame> },
     VoiceLease { request: Box<ramflux_protocol::VoiceLeaseFrame> },
+    Attachment { request: Box<ramflux_protocol::attachment_wire::AttachmentFrame> },
     Open { open: GatewayOpenFrame },
     Auth { auth: GatewayAuthFrame },
     Submit { submit: GatewaySubmitFrame },
@@ -569,6 +572,9 @@ pub enum GatewayServerFrame {
     },
     VoiceLease {
         response: Box<ramflux_protocol::VoiceLeaseResponse>,
+    },
+    Attachment {
+        response: Box<ramflux_protocol::attachment_wire::AttachmentReplyFrame>,
     },
     SessionEstablished {
         session: GatewaySessionEstablishedFrame,

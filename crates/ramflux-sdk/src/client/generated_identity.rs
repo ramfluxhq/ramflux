@@ -55,12 +55,11 @@ impl RamfluxClient {
         now_ms: u64,
         own_only: bool,
     ) -> Result<g::EventIdentity, SdkError> {
-        self.account_db()?.write_transaction(|| {
-            self.allocate_generated_identity_in(conversation, now_ms, own_only)
-        })
+        self.account_db()?
+            .join_write(|| self.allocate_generated_identity_in(conversation, now_ms, own_only))
     }
 
-    fn allocate_generated_identity_in(
+    pub(crate) fn allocate_generated_identity_in(
         &self,
         conversation: &str,
         now_ms: u64,
@@ -71,11 +70,7 @@ impl RamfluxClient {
         let author = g::QualifiedDevice {
             account_anchor: source.root_commitment().into(),
             device_id: source.device_id().into(),
-            device_epoch: self
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .device_epoch,
+            device_epoch: self.owned_author_epoch(&source)?,
         };
         let key = format!(
             "message-identity/counter/{}",
@@ -115,6 +110,28 @@ impl RamfluxClient {
             hlc,
             ..Default::default()
         })
+    }
+
+    fn owned_author_epoch(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<u64, SdkError> {
+        if let Some(branch) = &self.device_branch
+            && branch.device_id == source.device_id()
+        {
+            return Ok(branch.device_epoch);
+        }
+        let authority = self
+            .current_custody_authority(source.root_commitment(), crate::custody::network_now()?)?
+            .ok_or(SdkError::NetworkingPending)?;
+        authority
+            .envelope()
+            .body
+            .devices
+            .iter()
+            .find(|device| device.device_id == source.device_id())
+            .map(|device| device.device_epoch)
+            .ok_or(SdkError::IdentityRootMissing)
     }
 
     pub(crate) fn merge_generated_clock(&self, remote: u64, now_ms: u64) -> Result<(), SdkError> {
@@ -157,13 +174,13 @@ pub(crate) fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::own_device_sync::tests::client_with_account;
+    use crate::client::native_test_support::{Fixture, account::blocking};
 
-    #[test]
-    fn device_sequence_is_durable_per_conversation_and_private_namespace()
+    #[tokio::test(flavor = "current_thread")]
+    async fn device_sequence_is_durable_per_conversation_and_private_namespace()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_root, mut client) =
-            client_with_account("generated-counter", "principal_sync", "local")?;
+        let mut fixture = Box::pin(Fixture::with_device("generated-counter", "local")).await?;
+        let client = &fixture.client;
         let first = client
             .account_db()?
             .write_transaction(|| client.allocate_generated_identity("c", 1000, false))?;
@@ -177,8 +194,8 @@ mod tests {
             Err(SdkError::LocalBus("cancel before outbox commit".into()))
         });
         assert!(rolled_back.is_err());
-        client.active_account_db = None;
-        client.unlock_account("acct", b"own-device-sync-test")?;
+        fixture.reopen().await?;
+        let client = &fixture.client;
         let second = client
             .account_db()?
             .write_transaction(|| client.allocate_generated_identity("c", 1000, false))?;
@@ -191,14 +208,15 @@ mod tests {
                 .device_sequence,
             1
         );
-        drop(client);
+        drop(fixture);
         Ok(())
     }
 
     #[test]
     fn hlc_orders_across_authors_and_clamps_future_values() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (_root, client) = client_with_account("generated-clock", "principal_sync", "local")?;
+        let fixture = blocking("generated-clock", "local")?;
+        let client = &fixture.client;
         let first = client
             .account_db()?
             .write_transaction(|| client.allocate_generated_identity("c", 1000, false))?;
@@ -216,7 +234,7 @@ mod tests {
             .write_transaction(|| client.allocate_generated_identity("c", 1000, false))?;
         assert_eq!(next.hlc, remote + 2);
         assert!(tick(MAX_PHYSICAL_MS, 0x1_0000).is_err());
-        drop(client);
+        drop(fixture);
         Ok(())
     }
 }

@@ -191,8 +191,8 @@ async fn group_origin_signed_wrapper_rejects_altered_plaintext_and_missing_evide
 async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
     let owner = Fixture::with_device("opening-owner", "owner-device").await?;
     let peer = Fixture::with_device("opening-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
     let primary = owner
         .client
         .born_v3_account
@@ -228,7 +228,6 @@ async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
             erasure_nonce: vec![50 + counter; 32],
             ..Default::default()
         };
-        let _effect_profile = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let wrapper = owner.client.encrypt_generated_group_message(
             "opening-group",
             &owner.config.device_id,
@@ -325,7 +324,6 @@ async fn group_reparse_uses_signed_opening_without_retaining_sender_chain() -> T
         Ok(())
     })?;
     // No native sender-key distribution was ever installed: reparse has only the original proof.
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let progress = owner.client.reparse_raw_inner_page()?;
     assert_eq!(progress.projected, 1, "signed group origin did not reparse without chain keys");
     let db = owner.client.account_db()?;

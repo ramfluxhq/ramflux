@@ -4,7 +4,27 @@
 //! Dormant pairing relay allocator: caps, expiry, boot retirement and account isolation.
 //! HTTP dispatch and native Issue/Create stay behind the default-off pairing capability.
 
+mod allocations;
+pub use allocations::{PairingAllocation, PairingAllocations};
 mod bytes;
+mod full_auth;
+pub use full_auth::FullAuthorization;
+mod full_native;
+pub use full_native::FullNativeRelay;
+mod full_claim;
+pub use full_claim::apply_full_claim;
+mod full_budget;
+pub use full_budget::{
+    ChargedFullBody, FullBodyBudget, FullBodyBudgetStats, FullBodyPermit, FullBodySlot,
+    FullDirection, FullMetadataPermit,
+};
+mod full_resume;
+pub use full_resume::{
+    FULL_MESH_ADMIT_PATH, FULL_MESH_FRAME_BYTES, FullAdmittedReply, FullArm, FullControlFrame,
+    FullDataAccepted, FullDataFrame, FullForwardClaim, FullMeshAdmit, FullMeshPermit,
+    FullNativeAdmission, FullResumeChallenge, FullResumeOffer, FullResumeProgress, FullResumeStats,
+    FullResumeToken, FullRoute, FullSendPermit, SecretAuthorization,
+};
 mod http;
 mod limits;
 mod store;

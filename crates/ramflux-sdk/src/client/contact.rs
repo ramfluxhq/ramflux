@@ -53,84 +53,35 @@ impl RamfluxClient {
         &self,
         contact_identity_commitment: &str,
     ) -> Result<SdkContactSafetyNumber, SdkError> {
-        if self.born_v3_account.is_some() {
-            self.require_native_safety_link(contact_identity_commitment)?;
-            return self.native_safety_number(contact_identity_commitment);
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
         }
-        let material = self.contact_safety_material_pair(contact_identity_commitment)?;
-        let fingerprint =
-            ramflux_crypto::safety_fingerprint(&material.self_material, &material.contact_material);
-        let safety_number =
-            ramflux_crypto::safety_number(&material.self_material, &material.contact_material);
-        let device_set_hash = ramflux_crypto::device_set_hash(&material.contact_material.devices);
-        let status = self.contact_safety_verification_state(
-            contact_identity_commitment,
-            Some(&ramflux_protocol::encode_base64url(device_set_hash)),
-        )?;
-        Ok(SdkContactSafetyNumber {
-            algorithm_version: 1,
-            contact_identity_commitment: contact_identity_commitment.to_owned(),
-            self_identity_commitment: material.self_identity_commitment,
-            safety_number,
-            fingerprint_hex: bytes_to_hex(&fingerprint),
-            safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
-            self_device_count: material.self_material.devices.len(),
-            contact_device_count: material.contact_material.devices.len(),
-            contact_device_set_hash: ramflux_protocol::encode_base64url(device_set_hash),
-            contact_lineage_head: ramflux_protocol::encode_base64url(
-                &material.contact_material.lineage_head,
-            ),
-            verification_state: status,
-        })
+        self.require_native_safety_link(contact_identity_commitment)?;
+        self.native_safety_number(contact_identity_commitment)
     }
 
+    /// Fetch both authorities, then return one compared snapshot a host can submit.
+    ///
     /// # Errors
-    /// Returns an error when the contact is not linked or either published device manifest cannot
-    /// be fetched and verified.
-    pub(crate) async fn contact_safety_number_via_gateway(
+    /// Returns link, fetch, and authority errors. Missing authority is [`SdkError::NetworkingPending`].
+    pub(crate) async fn fetch_compared_contact_safety(
         &self,
         gateway: &GatewaySessionConfig,
         contact_identity_commitment: &str,
-    ) -> Result<SdkContactSafetyNumber, SdkError> {
-        if self.born_v3_account.is_some() {
-            self.require_native_safety_link(contact_identity_commitment)?;
-            let own = self.own_account_anchor()?;
-            self.cache_verified_device_manifest(gateway, &own, "contact.safety_number").await?;
-            self.cache_verified_device_manifest(
-                gateway,
-                contact_identity_commitment,
-                "contact.safety_number",
-            )
-            .await?;
-            return self.native_safety_number(contact_identity_commitment);
+    ) -> Result<serde_json::Value, SdkError> {
+        if self.born_v3_account.is_none() {
+            return Err(SdkError::CustodyModeDowngrade);
         }
-        let material = self
-            .contact_safety_material_pair_via_gateway(gateway, contact_identity_commitment)
-            .await?;
-        let fingerprint =
-            ramflux_crypto::safety_fingerprint(&material.self_material, &material.contact_material);
-        let safety_number =
-            ramflux_crypto::safety_number(&material.self_material, &material.contact_material);
-        let device_set_hash = ramflux_crypto::device_set_hash(&material.contact_material.devices);
-        let status = self.contact_safety_verification_state(
+        self.require_native_safety_link(contact_identity_commitment)?;
+        let own = self.own_account_anchor()?;
+        self.cache_verified_device_manifest(gateway, &own, "contact.safety_number").await?;
+        self.cache_verified_device_manifest(
+            gateway,
             contact_identity_commitment,
-            Some(&ramflux_protocol::encode_base64url(device_set_hash)),
-        )?;
-        Ok(SdkContactSafetyNumber {
-            algorithm_version: 1,
-            contact_identity_commitment: contact_identity_commitment.to_owned(),
-            self_identity_commitment: material.self_identity_commitment,
-            safety_number,
-            fingerprint_hex: bytes_to_hex(&fingerprint),
-            safety_number_hash: ramflux_protocol::encode_base64url(fingerprint),
-            self_device_count: material.self_material.devices.len(),
-            contact_device_count: material.contact_material.devices.len(),
-            contact_device_set_hash: ramflux_protocol::encode_base64url(device_set_hash),
-            contact_lineage_head: ramflux_protocol::encode_base64url(
-                &material.contact_material.lineage_head,
-            ),
-            verification_state: status,
-        })
+            "contact.safety_number",
+        )
+        .await?;
+        super::contact_verification_cas::compared_safety_json(self, contact_identity_commitment)
     }
 
     pub(crate) fn contact_safety_verification_state(
@@ -138,14 +89,7 @@ impl RamfluxClient {
         commitment: &str,
         device_set_hash: Option<&str>,
     ) -> Result<String, SdkError> {
-        if let Some(state) = self.native_safety_verification_state(commitment)? {
-            return Ok(state);
-        }
-        super::contact_verification::verification_state(
-            self.account_db()?,
-            commitment,
-            device_set_hash,
-        )
+        super::contact_verification_cas::effective_state(self, commitment, device_set_hash)
     }
 
     /// # Errors
@@ -156,13 +100,15 @@ impl RamfluxClient {
         principal_commitment: &str,
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
+        let started = std::time::Instant::now();
         let manifest: SdkDeviceManifestResponse =
             sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(
                 gateway,
                 &format!("/mvp1/device-manifest/{principal_commitment}"),
             )
             .await?
-            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?;
+            .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?
+            .fetched_from(started);
         self.accept_fetched_device_manifest(manifest, principal_commitment, source)
     }
 
@@ -339,53 +285,17 @@ impl RamfluxClient {
     /// Returns an error when the contact cannot be verified or persisted.
     pub fn mark_contact_safety_verified(
         &self,
-        contact_identity_commitment: &str,
-        verified_by_device_id: &str,
+        _contact_identity_commitment: &str,
+        _verified_by_device_id: &str,
     ) -> Result<ContactVerificationRecord, SdkError> {
-        let safety = self.contact_safety_number(contact_identity_commitment)?;
-        self.record_contact_safety_verified(
-            contact_identity_commitment,
-            verified_by_device_id,
-            &safety,
-        )
+        Err(SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
     }
     pub(crate) fn record_contact_safety_verified(
-        &self,
-        contact_identity_commitment: &str,
-        verified_by_device_id: &str,
-        safety: &SdkContactSafetyNumber,
+        _contact_identity_commitment: &str,
+        _verified_by_device_id: &str,
+        _safety: &SdkContactSafetyNumber,
     ) -> Result<ContactVerificationRecord, SdkError> {
-        self.account_db()?.write_transaction(|| {
-            let result = self.account_db()?.mark_contact_verified(ContactVerificationUpdate {
-                contact_identity_commitment,
-                safety_number_hash: &safety.safety_number_hash,
-                device_set_hash: &safety.contact_device_set_hash,
-                lineage_head: &safety.contact_lineage_head,
-                verified_at: now_unix_timestamp(),
-                verified_by_device_id,
-            })?;
-            if let Some(authority) = self.current_custody_authority(
-                contact_identity_commitment,
-                crate::custody::network_now()?,
-            )? {
-                let current = super::identity_authority::native_authority_fingerprint(&authority)?;
-                if safety.algorithm_version != 2 || safety.contact_device_set_hash != current {
-                    return Err(SdkError::ContactInput(crate::ContactReason::RootConflict));
-                }
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/safety_verified_set/{contact_identity_commitment}"),
-                    &current,
-                )?;
-                return Ok(result);
-            }
-            if let Some(record) = self.observed_device_set(contact_identity_commitment)? {
-                self.account_db()?.persist_actor_state(
-                    &format!("identity/safety_verified_set/{contact_identity_commitment}"),
-                    &super::identity_authority::set_fingerprint(&record)?,
-                )?;
-            }
-            Ok::<_, SdkError>(result)
-        })
+        Err(SdkError::ContactInput(crate::ContactReason::ExpectedSafetyRequired))
     }
 
     /// # Errors
@@ -776,96 +686,6 @@ impl RamfluxClient {
         }
         Ok(())
     }
-
-    fn contact_safety_material_pair(
-        &self,
-        contact_identity_commitment: &str,
-    ) -> Result<SdkContactSafetyMaterialPair, SdkError> {
-        let link = self
-            .friend_links()?
-            .into_iter()
-            .find(|link| {
-                link.state == "accepted"
-                    && (link.requester_id == contact_identity_commitment
-                        || link.target_id == contact_identity_commitment)
-            })
-            .ok_or_else(|| {
-                SdkError::LocalBus(format!("contact is not linked: {contact_identity_commitment}"))
-            })?;
-        let self_identity_commitment = if link.requester_id == contact_identity_commitment {
-            link.target_id
-        } else {
-            link.requester_id
-        };
-        Ok(SdkContactSafetyMaterialPair {
-            self_material: self.cached_contact_safety_material(&self_identity_commitment)?,
-            contact_material: self.cached_contact_safety_material(contact_identity_commitment)?,
-            self_identity_commitment,
-        })
-    }
-
-    fn cached_contact_safety_material(
-        &self,
-        commitment: &str,
-    ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
-        if self.observed_device_set(commitment)?.is_none() {
-            return Ok(contact_safety_material_for(commitment));
-        }
-        let principal = self
-            .account_db()?
-            .client_record("commitment", commitment)?
-            .and_then(|v| v["principal_id"].as_str().map(str::to_owned))
-            .ok_or_else(|| SdkError::LocalBus("verified identity unavailable".into()))?;
-        let manifest = self
-            .account_db()?
-            .load_actor_state::<SdkDeviceManifestResponse>(&format!(
-                "identity/manifest/{principal}"
-            ))?
-            .ok_or_else(|| SdkError::LocalBus("verified manifest unavailable".into()))?;
-        verify_device_manifest(&manifest, commitment)?;
-        complete_safety_material(&manifest)
-    }
-    async fn contact_safety_material_pair_via_gateway(
-        &self,
-        gateway: &GatewaySessionConfig,
-        contact_identity_commitment: &str,
-    ) -> Result<SdkContactSafetyMaterialPair, SdkError> {
-        let link = self
-            .friend_links()?
-            .into_iter()
-            .find(|link| {
-                link.state == "accepted"
-                    && (link.requester_id == contact_identity_commitment
-                        || link.target_id == contact_identity_commitment)
-            })
-            .ok_or_else(|| {
-                SdkError::LocalBus(format!("contact is not linked: {contact_identity_commitment}"))
-            })?;
-        let self_identity_commitment = if link.requester_id == contact_identity_commitment {
-            link.target_id
-        } else {
-            link.requester_id
-        };
-        let self_manifest = self
-            .cache_verified_device_manifest(
-                gateway,
-                &self_identity_commitment,
-                "contact.safety_number",
-            )
-            .await?;
-        let contact_manifest = self
-            .cache_verified_device_manifest(
-                gateway,
-                contact_identity_commitment,
-                "contact.safety_number",
-            )
-            .await?;
-        Ok(SdkContactSafetyMaterialPair {
-            self_material: complete_safety_material(&self_manifest)?,
-            contact_material: complete_safety_material(&contact_manifest)?,
-            self_identity_commitment,
-        })
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -883,69 +703,18 @@ pub struct SdkContactSafetyNumber {
     pub verification_state: String,
 }
 
-struct SdkContactSafetyMaterialPair {
-    self_material: ramflux_crypto::ContactSafetyMaterial,
-    contact_material: ramflux_crypto::ContactSafetyMaterial,
-    self_identity_commitment: String,
-}
-
-pub(super) fn contact_safety_material_for(
-    identity_commitment: &str,
-) -> ramflux_crypto::ContactSafetyMaterial {
-    let identity_bytes = identity_commitment.as_bytes();
-    let device_epoch = 1;
-    ramflux_crypto::ContactSafetyMaterial {
-        identity_commitment: identity_bytes.to_vec(),
-        identity_key_hash: ramflux_crypto::blake3_256(
-            "ramflux.sdk.contact.identity_key_hash.v1",
-            identity_bytes,
-        )
-        .to_vec(),
-        lineage_head: ramflux_crypto::blake3_256(
-            "ramflux.sdk.contact.lineage_head.v1",
-            identity_bytes,
-        )
-        .to_vec(),
-        devices: vec![ramflux_crypto::DeviceSafetyMaterial {
-            device_id_hash: ramflux_crypto::blake3_256(
-                "ramflux.sdk.contact.device_id_hash.v1",
-                identity_bytes,
-            )
-            .to_vec(),
-            device_identity_key_hash: ramflux_crypto::blake3_256(
-                "ramflux.sdk.contact.device_identity_key_hash.v1",
-                identity_bytes,
-            )
-            .to_vec(),
-            device_signing_key_hash: ramflux_crypto::blake3_256(
-                "ramflux.sdk.contact.device_signing_key_hash.v1",
-                identity_bytes,
-            )
-            .to_vec(),
-            device_x25519_identity_key_hash: ramflux_crypto::blake3_256(
-                "ramflux.sdk.contact.device_x25519_identity_key_hash.v1",
-                identity_bytes,
-            )
-            .to_vec(),
-            device_epoch,
-            branch_authorized_event_id: format!(
-                "device.branch_authorized:{identity_commitment}:{device_epoch}"
-            )
-            .into_bytes(),
-        }],
-    }
-}
-
 pub(crate) async fn fetch_verified_device_manifest(
     gateway: &GatewaySessionConfig,
     identity_commitment: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
     let manifest: Option<SdkDeviceManifestResponse> =
         sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{identity_commitment}"))
             .await?;
-    let manifest = manifest.ok_or_else(|| {
+    let mut manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
+    manifest.fetched_after = crate::prekey::FetchStamp(Some(started));
     verify_device_manifest(&manifest, identity_commitment)?;
     Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
@@ -959,11 +728,13 @@ pub(crate) fn fetch_verified_device_manifest_from_url(
     manifest_url: &str,
     identity_commitment: &str,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
     let manifest: Option<SdkDeviceManifestResponse> =
         sdk_http_get_json(manifest_url, &format!("/mvp1/device-manifest/{identity_commitment}"))?;
-    let manifest = manifest.ok_or_else(|| {
+    let mut manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
+    manifest.fetched_after = crate::prekey::FetchStamp(Some(started));
     verify_device_manifest(&manifest, identity_commitment)?;
     Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
@@ -973,15 +744,17 @@ pub(crate) fn fetch_verified_device_manifest_from_url_bounded(
     identity_commitment: &str,
     total_timeout: Duration,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
+    let started = std::time::Instant::now();
     let manifest: Option<SdkDeviceManifestResponse> =
         crate::prekey::sdk_http_get_json_with_deadline(
             manifest_url,
             &format!("/mvp1/device-manifest/{identity_commitment}"),
             total_timeout,
         )?;
-    let manifest = manifest.ok_or_else(|| {
+    let mut manifest = manifest.ok_or_else(|| {
         SdkError::LocalBus(format!("missing device manifest for {identity_commitment}"))
     })?;
+    manifest.fetched_after = crate::prekey::FetchStamp(Some(started));
     verify_device_manifest(&manifest, identity_commitment)?;
     Ok(super::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
@@ -989,6 +762,7 @@ pub(crate) fn fetch_verified_device_manifest_from_url_bounded(
 /// # Errors
 /// Returns an error when the device manifest is missing, fails verification, or does not contain
 /// the expected active device.
+#[cfg(test)]
 pub(crate) async fn assert_manifest_active_device(
     gateway: &GatewaySessionConfig,
     principal_commitment: &str,
@@ -1028,14 +802,6 @@ pub(crate) fn verify_device_manifest(
     super::identity_authority::verify_manifest(manifest, expected)
 }
 
-fn complete_safety_material(
-    manifest: &SdkDeviceManifestResponse,
-) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
-    if manifest.signed_device_set.is_none() {
-        return Err(SdkError::LocalBus("signed authority required for safety verification".into()));
-    }
-    contact_safety_material_from_manifest(manifest)
-}
 pub(crate) fn contact_safety_material_from_manifest(
     manifest: &SdkDeviceManifestResponse,
 ) -> Result<ramflux_crypto::ContactSafetyMaterial, SdkError> {
@@ -1174,6 +940,7 @@ mod tests {
             None,
         )?;
         let mut manifest = SdkDeviceManifestResponse {
+            fetched_after: crate::prekey::FetchStamp::default(),
             custody: None,
             signed_device_set: None,
             principal_id: principal_id.to_owned(),

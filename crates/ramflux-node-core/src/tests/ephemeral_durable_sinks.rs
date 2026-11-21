@@ -55,7 +55,6 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
         "ramflux_protocol::verify_envelope_sender_signature",
         "pure v2 envelope signature and ciphertext binding verification",
     ),
-    ("crate::schema_profile::schema_v1_live", "pure storage-generation predicate (no I/O)"),
     ("crate::message::outer::refuse_live_bridge", "pure named-field bridge refusal (no I/O)"),
     ("crate::message::outer::parse_live_named_delivery_mode", "pure envelope mode parser (no I/O)"),
     ("crate::message::outer::NamedDeliveryMode", "delivery-mode enum (type only)"),
@@ -82,10 +81,7 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("ramflux_protocol::Envelope", "protocol envelope type (no storage)"),
     ("ramflux_protocol::Priority", "protocol priority enum (no storage)"),
     ("ramflux_protocol::ephemeral", "ephemeral mode types and deadline helper (no storage)"),
-    (
-        "ramflux_protocol::message::outer::refuse_named_fields_while_gate_off",
-        "pure gate-off predicate, no storage",
-    ),
+    ("ramflux_protocol::message::outer::refuse_live_bridge", "pure gate-off predicate, no storage"),
     (
         "ramflux_protocol::envelope_sender_signed_bytes",
         "canonical sender-signed bytes (no storage)",

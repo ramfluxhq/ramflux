@@ -187,6 +187,7 @@ impl RamfluxClient {
                             source: &original,
                             imported: None,
                             own_sent: true,
+                            author_submit: false,
                         },
                         conversation,
                         &sent.exact_inner,
@@ -299,6 +300,49 @@ impl RamfluxClient {
         Ok(())
     }
 
+    fn publish_owned_message_update(
+        &self,
+        identity: &g::EventIdentity,
+        id: &str,
+        topic: &str,
+    ) -> Result<(), SdkError> {
+        let row = self.direct_message_by_id(id)?.ok_or_else(|| invalid("own sent row missing"))?;
+        let update = self.generated_message_update(&row, &identity.conversation_id, 0)?;
+        self.account_db()?.append_message_update(
+            &format!("own-sent/{id}"),
+            topic,
+            &update,
+            now_unix_timestamp(),
+        )?;
+        Ok(())
+    }
+
+    fn persist_own_sent_group_content(
+        &self,
+        identity: &g::EventIdentity,
+        sent: &g::OwnSentMessage,
+        id: &str,
+    ) -> Result<(), SdkError> {
+        if identity.group_id.is_none() {
+            return Ok(());
+        }
+        let (_, content) = Self::decode_generated_inner(&sent.exact_inner)?;
+        let Some(g::content::Value::Message(message)) = content.value else {
+            return Err(invalid("own group copy requires a plaintext Message"));
+        };
+        if message.sealed_group.is_some() {
+            return Err(invalid("own group copy cannot project a sealed wrapper"));
+        }
+        let db = self.account_db()?;
+        db.persist_message_actor_state(id, &format!("routed/group-projection/{id}"), &message)?;
+        db.persist_message_actor_state(
+            id,
+            &format!("routed/group-content/{id}"),
+            &message.encode_to_vec(),
+        )?;
+        Ok(())
+    }
+
     pub(super) fn project_generated_own_sent_message(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -328,6 +372,15 @@ impl RamfluxClient {
             {
                 return Err(SdkError::ReplayMismatch);
             }
+            let was_own = self
+                .direct_message_by_id(&id)?
+                .ok_or_else(|| invalid("own sent existing row missing"))?
+                .is_own;
+            db.mark_generated_message_owned(&id, source)?;
+            self.persist_own_sent_group_content(identity, sent, &id)?;
+            if !was_own {
+                self.publish_owned_message_update(identity, &id, topic)?;
+            }
             return Ok(());
         }
         db.import_direct_message_projection(DirectMessageWrite {
@@ -345,6 +398,8 @@ impl RamfluxClient {
             &MessageMetadata::default(),
         )?;
         db.persist_message_actor_state(&id, &format!("routed/generated-identity/{id}"), identity)?;
+        db.mark_generated_message_owned(&id, source)?;
+        self.persist_own_sent_group_content(identity, sent, &id)?;
         db.persist_message_actor_state(
             &id,
             &format!("routed/generated-order/{id}"),

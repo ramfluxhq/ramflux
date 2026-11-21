@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant generated application schema. Native authority checks remain with their owners.
+//! Generated application schema. Native authority checks remain with their owners.
 //!
 //! Prost decoding is not canonical: it accepts reordered tags and overlong
 //! varints (for example `08 81 00` encodes layer 1). Before hashing, signing or
@@ -47,3 +47,5 @@ mod registry_tests;
 
 #[cfg(test)]
 mod boundary_tests;
+#[cfg(test)]
+mod slot_layer_tests;

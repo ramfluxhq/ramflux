@@ -6,6 +6,7 @@
 import base64
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,11 +19,17 @@ PUBLIC_KEY_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 STRING_FIELDS = {
     "schema", "node_id", "node_public_key", "node_ca_cert_pem", "gateway_quic_addr",
     "gateway_tcp_addr", "gateway_server_name", "relay_quic_addr", "relay_server_name",
-    "prekey_http_url", "signaling_turn_addr", "signature",
+    "prekey_http_url", "signaling_turn_addr", "version", "signature",
 }
 LIST_FIELDS = {"protocol_versions", "client_capabilities"}
 INTEGER_FIELDS = {"updated_at", "expires_at"}
 EXPECTED_FIELDS = STRING_FIELDS | LIST_FIELDS | INTEGER_FIELDS
+GATEWAY_CAPABILITY_ASSIGNMENT = re.compile(
+    r"(?m)^gateway_client_capabilities\s*=\s*\[(.*?)\]",
+    re.DOTALL,
+)
+PRODUCT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+PRODUCT_SHA = re.compile(r"[0-9a-f]{12}|unknown")
 
 
 def fail(message):
@@ -60,12 +67,80 @@ def canonical_signing_bytes(record):
     ).encode("utf-8")
 
 
-def verify(record_path, expected_key, now=None):
+def gateway_capability_names(text):
+    matches = list(GATEWAY_CAPABILITY_ASSIGNMENT.finditer(text))
+    if len(matches) != 1:
+        return None
+    return re.findall(r'"([^"]*)"', matches[0].group(1))
+
+
+def env_assignment(text, name):
+    """Last assignment of name, or None when the key is absent."""
+    value = None
+    prefix = name + "="
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):]
+    return value
+
+
+def signed_product_version(version, sha):
+    """Exact discovery version: `0.2.0 (abcdef012345)` or `0.2.0 (unknown)`."""
+    if not isinstance(version, str) or not isinstance(sha, str):
+        return None
+    if PRODUCT_VERSION.fullmatch(version) is None or PRODUCT_SHA.fullmatch(sha) is None:
+        return None
+    return f"{version} ({sha})"
+
+
+def applied_deployment(state):
+    root = Path(state)
+    runtime_path = root / "runtime.env"
+    router_path = root / "config" / "router.toml"
+    federation_path = root / "config" / "federation.toml"
+    if not runtime_path.is_file() or not router_path.is_file() or not federation_path.is_file():
+        fail("applied deployment configuration is incomplete")
+    try:
+        runtime_text = runtime_path.read_text(encoding="utf-8")
+        router_names = gateway_capability_names(router_path.read_text(encoding="utf-8"))
+        federation_names = gateway_capability_names(federation_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as error:
+        fail(f"applied deployment configuration is incomplete: {error}")
+    version = signed_product_version(
+        env_assignment(runtime_text, "RAMFLUX_EXPECTED_PRODUCT_VERSION"),
+        env_assignment(runtime_text, "RAMFLUX_EXPECTED_PRODUCT_SHA"),
+    )
+    if version is None:
+        fail("applied deployment configuration is incomplete")
+    if router_names is None or federation_names is None:
+        fail("applied deployment configuration is incomplete")
+    if any(name == "" for name in router_names + federation_names):
+        fail("applied deployment has an empty gateway capability")
+    if router_names != federation_names:
+        fail("applied router and federation gateway capabilities disagree")
+    return version, router_names
+
+
+def check_applied_deployment(record, deploy_state):
+    version, capabilities = applied_deployment(deploy_state)
+    advertised = [
+        name for name in record["client_capabilities"] if name.startswith("gateway.")
+    ]
+    if advertised != capabilities:
+        fail("discovery capabilities do not match the applied deployment")
+    if record["version"] != version:
+        fail("discovery version does not match the applied deployment")
+
+
+def verify(record_path, expected_key, now=None, deploy_state=None):
     version = subprocess.run(
         ["openssl", "version"], capture_output=True, text=True, check=False
     )
-    if version.returncode != 0 or not version.stdout.startswith("OpenSSL 3."):
-        fail("openssl lacks Ed25519 — install OpenSSL 3 or use demo-node-tool")
+    reported = version.stdout.split()
+    major = reported[1].split(".", 1)[0] if len(reported) > 1 else ""
+    # LibreSSL does not provide this Ed25519 CLI. OpenSSL 3 and newer do.
+    if version.returncode != 0 or reported[:1] != ["OpenSSL"] or not major.isdigit() or int(major) < 3:
+        fail("openssl lacks Ed25519 — install OpenSSL 3")
     try:
         record = json.loads(
             Path(record_path).read_text(encoding="utf-8"), object_pairs_hook=unique_object
@@ -86,6 +161,8 @@ def verify(record_path, expected_key, now=None):
         fail("discovery record contains an invalid capability list")
     if not isinstance(record.get("node_ca_cert_pem"), str) or not record["node_ca_cert_pem"].strip():
         fail("discovery record has no node CA certificate")
+    if not record["version"].strip():
+        fail("discovery record has no node version")
     if record.get("node_public_key") != expected_key:
         fail("discovery public key does not match operator pin")
     updated_at = record.get("updated_at")
@@ -122,11 +199,26 @@ def verify(record_path, expected_key, now=None):
     node_id = record.get("node_id")
     if not isinstance(node_id, str) or not node_id:
         fail("discovery record has no node id")
+    if deploy_state is not None:
+        check_applied_deployment(record, deploy_state)
     print(f"discovery signature, freshness and operator pin: healthy ({node_id})")
     print(f"node public key: {expected_key}")
 
 
+def main(argv):
+    deploy_state = None
+    if len(argv) == 3:
+        record_path, expected_key = argv[1], argv[2]
+    elif len(argv) == 5 and argv[3] == "--deploy-state" and argv[4]:
+        record_path, expected_key = argv[1], argv[2]
+        deploy_state = argv[4]
+    else:
+        fail(
+            "usage: verify-remote-discovery.py RECORD EXPECTED_PUBLIC_KEY "
+            "[--deploy-state STATE]"
+        )
+    verify(record_path, expected_key, deploy_state=deploy_state)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        fail("usage: verify-remote-discovery.py RECORD EXPECTED_PUBLIC_KEY")
-    verify(sys.argv[1], sys.argv[2])
+    main(sys.argv)

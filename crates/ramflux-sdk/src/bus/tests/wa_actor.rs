@@ -10,6 +10,7 @@
 )]
 //! Actor-path WA flush and routed early-return cover (S6b P24b2b r3).
 
+use super::fixture::seal_message as seal;
 use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
     PUSH_E, account_of, acked, open_account, push_engine, runtime_for, stage,
@@ -18,11 +19,12 @@ use crate::bus::connection_manager::{
     NetworkingState, ReceiveTrigger, receive::test_catch_up, receive::test_pass,
     receive::test_pass_anchored,
 };
-use crate::bus::dispatch::task_transport::{Target, seal};
+use crate::bus::dispatch::task_transport::Target;
 use crate::bus::push_receiver::executor::{ExecutorOwner, LedgerExecutor};
 use crate::bus::push_receiver::sweep::SweepSetting;
 use crate::gateway::access::CountingGateway;
 use crate::prelude::*;
+use ramflux_protocol::message as g;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,7 +78,15 @@ async fn start_runtime(
     fixture: &mut Fixture,
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
     let mut runtime = start_runtime_live(fixture)?;
-    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    let peer = fixture.peer.client.owned_device_identity()?;
+    let account = account_of(&runtime)?;
+    Box::pin(account.client.cache_verified_device_manifest(
+        &account.gateway_config,
+        peer.root_commitment(),
+        "wa-actor-live-directory",
+    ))
+    .await?;
+    let handle = account.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await?;
     wait_connected_receive(&mut runtime, &handle).await?;
     Ok(runtime)
@@ -224,7 +234,7 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: fixture.source.target_delivery_id.clone(),
         federation: None,
         own: false,
     };
@@ -244,7 +254,7 @@ async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
         entries.push(GatewayInboxEntry {
             forwarded: false,
             inbox_seq: seq,
-            target_delivery_id: "sender".into(),
+            target_delivery_id: fixture.source.target_delivery_id.clone(),
             envelope: dm.envelope,
         });
     }
@@ -559,9 +569,10 @@ async fn wait_connected_receive(
     .await?;
     if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
         return Err(format!(
-            "Connected receive did not finish: {:?}; trace={:?}",
+            "Connected receive did not finish: {:?}; trace={:?}; networking={:?}",
             handle.test_receive_last_error(),
-            handle.test_receive_trace()
+            handle.test_receive_trace(),
+            handle.snapshot()
         )
         .into());
     }
@@ -650,32 +661,20 @@ async fn connected_and_sweep_real() -> Case {
     stop_peer_session(&mut fixture).await;
     let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    // Pause before Live so Connected I/O is measured on the virtual clock.
+    // The handshake has to park on the wall clock. Pausing first makes this
+    // current-thread loop spin on yield, and the loopback session never
+    // becomes Live. Virtual time starts at Live so the catch-up Resume and
+    // the 900s sweep are still measured on the paused clock.
+    wait_until_live(&mut runtime, &handle).await?;
     tokio::time::pause();
-    let handshake = std::time::Instant::now();
-    let catch_up = Duration::from_millis(SweepSetting::CATCH_UP_MS);
-    handle.notify_receive_wake();
-    while handle.snapshot().state != NetworkingState::Live {
-        if handshake.elapsed() > Duration::from_secs(10) {
-            return Err("session did not become Live".into());
-        }
-        drain_ready(&mut runtime).await?;
-        poll_spawned().await;
-        match runtime.connection_work.try_recv() {
-            Ok(work) => runtime.apply_connection_work(work).await?,
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                return Err("connection work closed".into());
-            }
-        }
-    }
     let live_at = tokio::time::Instant::now();
+    let catch_up = Duration::from_millis(SweepSetting::CATCH_UP_MS);
     handle.notify_receive_wake();
     // spawn_blocking inhibits auto-advance while catch-up waits on redb / a
     // std-thread oneshot, and while the 900s sweep is jumped on a live TCP
     // session. Dropping the hold lets paused-clock auto-advance fire connect
     // timeouts instead of polling the loopback socket.
-    let (release_hold, hold) = std::sync::mpsc::channel::<()>();
+    let (release_hold, hold) = std::sync::mpsc::sync_channel::<()>(1);
     let inhibit = tokio::task::spawn_blocking(move || {
         let _ = hold.recv();
     });
@@ -842,17 +841,22 @@ async fn routed_contact_request_covers_and_acks() -> Case {
 
 async fn contact_request_case() -> Case {
     let mut fixture = Box::pin(Fixture::new("h1-contact")).await?;
-    let mut source_manifest =
-        crate::client::identity_authority::test_support::public_manifest(&fixture.source.client)?;
-    source_manifest.devices.retain(|device| device.device_id == "device-sender");
-    source_manifest.devices[0].target_delivery_id = "sender".into();
+    let source_manifest = fixture
+        .source
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .ok_or("source native manifest")?
+        .manifest
+        .clone();
     {
-        let config =
-            fixture.source.gateway_config.clone().with_account_identity(&fixture.peer.client)?;
-        fixture.peer.gateway_config = config;
+        fixture.peer.gateway_config = crate::client::native_test_support::bus::config_for(
+            &fixture.peer.client,
+            &fixture.source.gateway_config,
+        )?;
         fixture.peer.engine = None;
         fixture.peer.client.stage_contact_request(&source_manifest, "h1-link", None)?;
-        crate::client::contact_requests::flush(&mut fixture.peer).await?;
+        crate::client::contact_requests::native_tests::deliver_pending(&mut fixture.peer).await?;
     }
     let envelope = {
         let served = fixture.gateway.lock().map_err(|_| "gateway")?;
@@ -860,7 +864,7 @@ async fn contact_request_case() -> Case {
             .attempts
             .iter()
             .rev()
-            .find(|envelope| envelope.target_delivery_id == "sender")
+            .find(|envelope| envelope.target_delivery_id == fixture.source.target_delivery_id)
             .cloned()
             .ok_or("contact request submit")?
     };
@@ -870,7 +874,7 @@ async fn contact_request_case() -> Case {
         served.inbox = vec![GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: "sender".into(),
+            target_delivery_id: fixture.source.target_delivery_id.clone(),
             envelope,
         }];
     }
@@ -1036,6 +1040,20 @@ async fn routed_committed_covers_and_acks_case() -> Case {
     let first = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
     {
         let account = account_of(&runtime)?;
+        // Unlock starts a new process-local head clock. The receipt key is a
+        // current observation of the directory this fixture already fetched.
+        for state in [&fixture.source, &fixture.peer] {
+            let manifest = serde_json::from_value(
+                gateway
+                    .lock()
+                    .map_err(|_| "gateway")?
+                    .manifests
+                    .get(&state.principal_commitment)
+                    .cloned()
+                    .ok_or("fetched manifest")?,
+            )?;
+            account.client.persist_observed_identity_directory_now(&manifest)?;
+        }
         let key = account.client.authenticated_committed_key(
             crate::client::identity_authority::HeadUse::NewAuthorization,
             &first,
@@ -1057,10 +1075,12 @@ async fn routed_committed_covers_and_acks_case() -> Case {
             },
         )?;
     }
-    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::IdentityRootMissing);
+    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::InboundPending(
+        "identity authority: current head not cached".into(),
+    ));
     drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     drive_flush(&mut runtime, true).await?;
-    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via IdentityRootMissing");
+    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via identity-authority absence");
     assert_eq!(acked(&gateway)?, 2);
     runtime.stop_connection().await;
     drop(runtime);
@@ -1108,6 +1128,12 @@ async fn reorder_and_gap_case() -> Case {
     Ok(())
 }
 
+/// Real-time failure bound for each phase of the gap catch-up: the Resume request, then the
+/// completed receive pass. The gap deadline and the pass work run on the real clock (only the
+/// timer wake is virtual), so a CPU-starved shared runner needs seconds, not the idle ~1 s. Both
+/// waits return the moment their condition holds; the bound only limits a genuine failure.
+const GAP_PHASE_WALL: Duration = Duration::from_secs(10);
+
 #[tokio::test(flavor = "current_thread")]
 async fn gap_timer() -> Case {
     watch(25, gap_timer_case()).await
@@ -1143,7 +1169,7 @@ async fn gap_timer_case() -> Case {
     tokio::time::advance(Duration::from_millis(1)).await;
     handle.notify_receive_wake();
     let gateway_gap = Arc::clone(&gateway);
-    pump_until(&mut runtime, Duration::from_secs(2), || {
+    pump_until(&mut runtime, GAP_PHASE_WALL, || {
         gateway_gap.lock().is_ok_and(|g| g.resumes.len() > connected)
     })
     .await?;
@@ -1156,14 +1182,16 @@ async fn gap_timer_case() -> Case {
     // A recorded Resume request precedes response intake and actor ApplyPage work.
     // Wait for the completed receive pass, rather than a fixed number of idle yields.
     let completion = handle.clone();
-    pump_until(&mut runtime, Duration::from_secs(2), || {
+    pump_until(&mut runtime, GAP_PHASE_WALL, || {
         completion.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline
     })
     .await?;
     assert!(
         handle.test_receive_trace().iter().filter(|entry| entry.1).count() > receive_baseline,
-        "gap receive pass must finish before the cursor oracle: {:?}",
-        handle.test_receive_trace()
+        "gap receive pass must finish within {GAP_PHASE_WALL:?} before the cursor oracle: \
+         trace={:?} err={:?}",
+        handle.test_receive_trace(),
+        handle.test_receive_last_error()
     );
     assert_eq!(snap(&runtime)?.cursor, 2, "gap catch-up covers the hole");
     runtime.stop_connection().await;
@@ -1341,8 +1369,9 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
             .map_err(|error| SdkError::LocalBus(error.to_string()))?,
     );
     store.bootstrap_router(&router).map_err(|error| SdkError::LocalBus(error.to_string()))?;
-    let incarnation =
-        store.initialize_inbox("sender").map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let incarnation = store
+        .initialize_inbox(&fixture.source.target_delivery_id)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
     {
         let mut gateway = gateway.lock().map_err(|_| "gateway")?;
         for account in [&fixture.source, &fixture.peer, &fixture.sibling] {
@@ -1353,7 +1382,12 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         gateway.router = Some((Arc::clone(&router), Arc::clone(&store)));
     }
 
-    let mut runtime = start_runtime_default_on(&mut fixture).await?;
+    let mut runtime = start_runtime_default_on(&mut fixture).await.map_err(|error| {
+        format!(
+            "initial connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(
         account_of(&runtime)?.client.account_db()?.receive_activation()?,
         ramflux_storage::ReceiveActivation::Activated
@@ -1368,11 +1402,21 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
         "fresh default-on Push binds the gateway incarnation"
     );
     router
-        .prepare_publication_target(&store, "sender")
+        .prepare_publication_target(&store, &fixture.source.target_delivery_id)
         .map_err(|error| SdkError::LocalBus(error.to_string()))?;
-    let first_ids = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
-    drive_flush(&mut runtime, true).await?;
+    let (first_ids, mut ack_ids) = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_flush(&mut runtime, true).await.map_err(|error| {
+        format!(
+            "restart ACK: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(snap(&runtime)?.cursor, 2, "first catch-up applies both live messages");
     assert_eq!(acked(&gateway)?, 2, "WA ACKs both live sequences");
     assert_eq!(
@@ -1400,7 +1444,8 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     runtime.stop_connection().await;
     drop(runtime);
 
-    let pending_ids = submit_peer_through_gateway(&mut fixture, 3, 2).await?;
+    let (pending_ids, pending_acks) = submit_peer_through_gateway(&mut fixture, 3, 2).await?;
+    ack_ids.extend(pending_acks);
     let mut expected = first_ids.clone();
     expected.extend(pending_ids);
 
@@ -1419,9 +1464,24 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     runtime.start_connection()?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await?;
-    wait_connected_receive(&mut runtime, &handle).await?;
-    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
-    drive_flush(&mut runtime, true).await?;
+    wait_connected_receive(&mut runtime, &handle).await.map_err(|error| {
+        format!(
+            "restart connect: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await.map_err(|error| {
+        format!(
+            "catch-up: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
+    drive_flush(&mut runtime, true).await.map_err(|error| {
+        format!(
+            "restart ACK: {error}; gateway errors={:?}",
+            gateway.lock().map(|state| state.protocol_errors.clone())
+        )
+    })?;
     assert_eq!(snap(&runtime)?.cursor, 4, "restart catch-up applies pending messages");
     assert!(snap(&runtime)?.intents.is_empty(), "restart has no leftover ACK intent");
     let applied = applied_message_ids(&runtime)?;
@@ -1433,7 +1493,7 @@ async fn session_push_two_account_restart_catch_up_case() -> Case {
     assert_eq!(applied.len(), 4, "restart application is duplicate-free");
     assert_eq!(acked(&gateway)?, 4, "node ACKs all four sequences on the wire");
     let acked_ids = gateway.lock().map_err(|_| "gateway")?.acked.clone();
-    for id in &expected {
+    for id in &ack_ids {
         assert!(acked_ids.contains(id), "node settled {id}");
     }
     drop(runtime);
@@ -1446,40 +1506,47 @@ async fn submit_peer_through_gateway(
     fixture: &mut Fixture,
     start: u64,
     n: u64,
-) -> Case<Vec<String>> {
+) -> Case<(Vec<String>, Vec<String>)> {
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: fixture.source.target_delivery_id.clone(),
         federation: None,
         own: false,
     };
     let source = fixture.peer.client.owned_device_identity()?;
     let mut engine = fixture.peer.session_client().await?;
     let mut envelopes = Vec::new();
+    let mut ids = Vec::new();
     for offset in 0..n {
         let seq = start.saturating_add(offset);
-        let dm = seal(
+        let (delivery, id) = super::fixture::seal_content_with_identity(
             &fixture.peer,
             &mut engine,
             &target,
-            "healthy",
-            format!("wa-{seq}").as_bytes(),
-            crate::client::routed::Route::direct(),
+            g::Content {
+                value: Some(g::content::Value::Message(g::Message {
+                    text: format!("wa-{seq}"),
+                    ..Default::default()
+                })),
+            },
+            None,
+            None,
         )
         .await?;
-        envelopes.push(dm.envelope);
+        envelopes.push(delivery.envelope);
+        ids.push(id);
     }
     fixture.peer.install_test_session(engine);
     let router = {
         let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
-        gateway.ack_target = "sender".into();
+        gateway.ack_target = fixture.source.target_delivery_id.clone();
         gateway.router.clone().ok_or("router bound to gateway")?
     };
-    let mut ids = Vec::new();
+    let mut transport = Vec::new();
     let mut queued_entries = Vec::new();
     for envelope in envelopes {
-        ids.push(envelope.envelope_id.clone());
+        transport.push(envelope.envelope_id.clone());
         let queued =
             super::fixture::publish_router_envelope(&router.0, &router.1, &source, envelope)
                 .await?;
@@ -1494,7 +1561,7 @@ async fn submit_peer_through_gateway(
             envelope: queued.envelope.clone(),
         });
     }
-    Ok(ids)
+    Ok((ids, transport))
 }
 
 fn applied_message_ids(
@@ -1503,7 +1570,7 @@ fn applied_message_ids(
     let account = account_of(runtime)?;
     Ok(account
         .client
-        .direct_messages("healthy")?
+        .direct_messages(&super::fixture::direct_conversation(&account.client)?)?
         .into_iter()
         .map(|message| message.message_id)
         .collect())
@@ -1522,7 +1589,7 @@ async fn resume_fixture_isolates_target_watermarks() -> Case {
         gateway.inbox.push(other);
     }
     let request = serde_json::json!({ "incarnation_id": PUSH_E,
-        "resume": { "target_delivery_id": "sender", "after_inbox_seq": 2, "limit": 64 } });
+        "resume": { "target_delivery_id": fixture.source.target_delivery_id, "after_inbox_seq": 2, "limit": 64 } });
     let page = super::fixture::resume_page_response(&fixture.gateway, &request)?;
     assert_eq!(page["issued_inbox_seq"], 4);
     assert_eq!(page["covered_through_seq"], 4);
@@ -1531,7 +1598,7 @@ async fn resume_fixture_isolates_target_watermarks() -> Case {
             .as_array()
             .ok_or("entries")?
             .iter()
-            .all(|row| row["entry"]["target_delivery_id"] == "sender")
+            .all(|row| row["entry"]["target_delivery_id"] == fixture.source.target_delivery_id)
     );
     drop(fixture);
     Ok(())
@@ -1597,8 +1664,7 @@ async fn compat_then_push_actor_keeps_receive_live() -> Case {
     .await
 }
 
-/// A Compat application with a lost ACK is re-fetched after C resets from 1 to S=0.
-/// The application receipt and projection claim must survive the epoch change.
+/// A lost ACK on an echoed push session is not reapplied or reprojected on the same epoch.
 #[tokio::test(flavor = "current_thread")]
 async fn compat_ack_lag_reset_does_not_reapply_or_project() -> Case {
     watch(40, compat_ack_lag_reset_case()).await
@@ -1619,7 +1685,7 @@ async fn compat_ack_lag_reset_case() -> Case {
     let mut runtime =
         start_runtime_default_on(&mut fixture).await.map_err(|e| format!("Compat connect: {e}"))?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    assert!(!handle.session_is_push(), "first application must use Compat");
+    assert!(handle.session_is_push(), "advertised push is echoed");
     // ACK transport loss can surface as an error or a committed Uncertain result.
     // The durable cursor/message/intent assertions below pin the required cut.
     let compat_pass = drive_pass(&mut runtime, ReceiveTrigger::Connected).await;
@@ -1662,12 +1728,12 @@ async fn compat_ack_lag_reset_case() -> Case {
     runtime.start_connection().map_err(|e| format!("start Push: {e}"))?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     wait_until_live(&mut runtime, &handle).await.map_err(|e| format!("reconcile Push: {e}"))?;
-    assert_eq!(snap(&runtime)?.cursor, 0, "reset uses S=0 < C_old=1");
+    assert_eq!(snap(&runtime)?.cursor, 1, "same echoed epoch keeps the committed cursor");
     assert_eq!(
         account_of(&runtime)?.client.account_db()?.receive_epoch(&target)?.as_deref(),
         Some(PUSH_E)
     );
-    assert!(snap(&runtime)?.intents.is_empty(), "old-E intent retired before new receive");
+    assert_eq!(snap(&runtime)?.intents, vec![1], "lost ACK stays pending on the same epoch");
     wait_connected_receive(&mut runtime, &handle)
         .await
         .map_err(|e| format!("Push refetch: {e}"))?;

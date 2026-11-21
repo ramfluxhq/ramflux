@@ -22,7 +22,7 @@ async fn case() -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { mut actor, connection, mut io, root, reader, router } =
+    let Fixture { mut actor, connection, mut io, temp, reader, router } =
         fixture(Duration::from_secs(600)).await?;
     let retained = Arc::new(crate::bus::command_admission::ExpiredReplies::default());
     actor.expired_replies = Some(Arc::clone(&retained));
@@ -95,7 +95,7 @@ async fn case() -> Case {
     router.await?;
     clock.abort();
     let _ = clock.await;
-    std::fs::remove_dir_all(root)?;
+    temp.close()?;
     Ok(())
 }
 

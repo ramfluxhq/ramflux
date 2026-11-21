@@ -111,10 +111,10 @@ impl CreationCeremony {
         {
             return Err(invalid());
         }
-        if ramflux_protocol::normalize_profile_display_name(&input.display_name)?
-            != input.display_name
-        {
-            return Err(invalid());
+        let normalized = ramflux_protocol::normalize_profile_display_name(&input.display_name)
+            .map_err(|_| rejected(crate::CustodyConfirmReason::DisplayName))?;
+        if normalized != input.display_name {
+            return Err(rejected(crate::CustodyConfirmReason::DisplayName));
         }
         if account_exists(root, &input.local_account_id)? {
             return Err(invalid());
@@ -244,13 +244,37 @@ impl CreationCeremony {
     pub(crate) fn guard_commit(&mut self, gate: std::sync::Arc<super::CommitGate>) {
         self.commit_gate = Some(gate);
     }
-    pub(crate) fn confirm_with_passphrase(
+    /// Complete attended creation and seal this device's data with its own local password.
+    /// The password is borrowed only for this call and never enters a pairing DTO or native publication.
+    /// # Errors
+    /// Rejects empty, non-UTF-8, overlong, too-short and blocklisted passwords,
+    /// plus bad confirmation, expiry or vault/storage failure.
+    pub fn confirm_with_passphrase(
         self,
         words: &[Zeroizing<String>; 3],
         vault: &dyn PrimaryVault,
         now: u64,
         passphrase: &[u8],
     ) -> Result<BornAccount, SdkError> {
+        if passphrase.is_empty() {
+            return Err(rejected(crate::CustodyConfirmReason::PassphraseEmpty));
+        }
+        if passphrase.len() > 1024 {
+            return Err(rejected(crate::CustodyConfirmReason::PassphraseTooLong));
+        }
+        let text = std::str::from_utf8(passphrase)
+            .map_err(|_| rejected(crate::CustodyConfirmReason::PassphraseNotUtf8))?;
+        if let Err(error) = crate::check_new_passphrase(text) {
+            let reason = match error {
+                crate::PassphrasePolicyError::TooShort { .. } => {
+                    crate::CustodyConfirmReason::PassphraseTooShort
+                }
+                crate::PassphrasePolicyError::TooCommon => {
+                    crate::CustodyConfirmReason::PassphraseTooCommon
+                }
+            };
+            return Err(rejected(reason));
+        }
         self.complete(words, vault, now, Some(passphrase))
     }
     fn complete(
@@ -265,12 +289,10 @@ impl CreationCeremony {
         let phrase = self.phrase.take().ok_or_else(invalid)?;
         let positions =
             self.positions.filter(|_| self.phase == Phase::Hidden).ok_or_else(invalid)?;
-        let mut matches = true;
         for (position, word) in positions.into_iter().zip(words) {
-            matches &= phrase.matches_word(usize::from(position), word).unwrap_or(false);
-        }
-        if !matches {
-            return Err(SdkError::CustodyConfirmationFailed);
+            if !phrase.matches_word(usize::from(position), word).unwrap_or(false) {
+                return Err(rejected(crate::CustodyConfirmReason::WordMismatch { position }));
+            }
         }
         let master = MasterKey::from_phrase(&phrase)?;
         drop(phrase);
@@ -326,6 +348,9 @@ impl CreationCeremony {
         )
     }
 }
+fn rejected(reason: crate::CustodyConfirmReason) -> SdkError {
+    SdkError::CustodyConfirmRejected(reason)
+}
 fn positions() -> Result<[u8; 3], SdkError> {
     let mut positions = [0; 3];
     for i in 0..3 {
@@ -348,13 +373,87 @@ fn positions() -> Result<[u8; 3], SdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn reject_passphrase(
+        password: &[u8],
+        reason: crate::CustodyConfirmReason,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let vault = crate::custody::tests::TestVault::default();
+        let mut ceremony = CreationCeremony::begin(
+            root.path(),
+            crate::custody::tests::input("invalid-data-password"),
+            100,
+        )?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        let answers = crate::custody::tests::words(&phrase, positions)?;
+        let reference = super::super::custody_vault_reference(
+            root.path(),
+            "invalid-data-password",
+            &ceremony.anchor,
+        )?;
+        let error = ceremony
+            .confirm_with_passphrase(&answers, &vault, 100, password)
+            .expect_err("test: invalid data password was accepted");
+        assert!(matches!(error, SdkError::CustodyConfirmRejected(got) if got == reason), "{error}");
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(
+            body.code, "CustodySetupInvalid",
+            "test: passphrase refusal changed the custody error family"
+        );
+        assert_eq!(
+            body.reason_code.as_deref(),
+            Some(reason.token()),
+            "test: passphrase refusal dropped its reason token"
+        );
+        assert!(!body.message.contains(reason.token()), "bus message echoes the check token");
+        assert!(
+            super::super::load_account(root.path(), "invalid-data-password", 100).is_err(),
+            "test: invalid data password left durable native authority"
+        );
+        assert!(
+            vault.load_primary(&reference).is_err(),
+            "test: invalid data password created a management vault item"
+        );
+        Ok(())
+    }
+    #[test]
+    fn empty_passphrase_names_its_rule_and_writes_nothing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        reject_passphrase(&[], crate::CustodyConfirmReason::PassphraseEmpty)
+    }
+    #[test]
+    fn overlong_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(&[b'x'; 1025], crate::CustodyConfirmReason::PassphraseTooLong)
+    }
+    #[test]
+    fn non_utf8_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(&[255], crate::CustodyConfirmReason::PassphraseNotUtf8)
+    }
+    #[test]
+    fn fourteen_scalar_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(&[b'a'; 14], crate::CustodyConfirmReason::PassphraseTooShort)
+    }
+    #[test]
+    fn blocklisted_passphrase_names_its_rule_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        reject_passphrase(b"films+pic+galeries", crate::CustodyConfirmReason::PassphraseTooCommon)
+    }
+
     #[test]
     fn custody_expiration_destroys_pending_phrase() -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::custody::tests::Root::new()?;
         let mut ceremony =
             CreationCeremony::begin(&root.0, crate::custody::tests::input("expired"), 100)?;
         ceremony.deadline = Instant::now();
-        assert!(matches!(ceremony.show_once(), Err(SdkError::CustodyExpired)));
+        let error = ceremony.show_once().expect_err("expired ceremony");
+        assert!(matches!(error, SdkError::CustodyExpired), "{error}");
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, "CustodyExpired");
+        assert_eq!(body.reason_code.as_deref(), Some("deadline"));
         assert!(ceremony.phrase.is_none());
         assert!(!format!("{ceremony:?}").contains("abandon"));
         Ok(())
@@ -414,13 +513,32 @@ mod tests {
             100,
         )?;
         let id = pending.input.local_account_id.clone();
-        drop(pending.show_once()?);
-        pending.hidden_challenge()?;
-        let wrong = std::array::from_fn(|_| Zeroizing::new("wrong".to_owned()));
-        assert!(matches!(
-            pending.confirm_with_passphrase(&wrong, &vault, 100, b"discarded secret"),
-            Err(SdkError::CustodyConfirmationFailed)
-        ));
+        let phrase = pending.show_once()?;
+        let positions = pending.hidden_challenge()?;
+        let mut answers = crate::custody::tests::words(&phrase, positions)?;
+        let expected = answers[1].clone();
+        answers[1] = Zeroizing::new("quartz".to_owned());
+        let error = pending
+            .confirm_with_passphrase(&answers, &vault, 100, b"discarded secret")
+            .expect_err("second challenge word");
+        assert!(
+            matches!(
+                error,
+                SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::WordMismatch {
+                    position,
+                }) if position == positions[1]
+            ),
+            "{error}"
+        );
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, "CustodyConfirmationFailed");
+        assert_eq!(
+            body.reason_code.as_deref(),
+            Some(crate::CustodyConfirmReason::WordMismatch { position: positions[1] }.token())
+        );
+        assert!(!body.message.contains(expected.as_str()), "reason reveals the expected word");
+        assert!(!body.message.contains("quartz"), "reason reveals the submitted word");
+        assert!(!error.to_string().contains(expected.as_str()));
         assert!(!root.0.join(ramflux_storage::ACCOUNT_INDEX_FILE).exists());
         assert!(!root.0.join("custody_accounts").join(id).exists());
         assert!(matches!(
@@ -435,5 +553,47 @@ mod tests {
             Err(SdkError::CustodySetupInvalid)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn padded_display_name_names_the_check_and_writes_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::custody::tests::Root::new()?;
+        let mut input = crate::custody::tests::input("named");
+        input.display_name = "  Ada".into();
+        let error = CreationCeremony::begin(&root.0, input, 100).expect_err("padded display name");
+        assert!(
+            matches!(
+                error,
+                SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::DisplayName)
+            ),
+            "{error}"
+        );
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.reason_code.as_deref(), Some("display_name"));
+        assert!(!body.message.contains("Ada"), "reason reveals the display name");
+        assert!(!root.0.join("custody_accounts").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn word_position_tokens_roundtrip_without_a_word() {
+        for position in 1..=24 {
+            let reason = crate::CustodyConfirmReason::WordMismatch { position };
+            assert_eq!(reason.token(), format!("word_{position}"));
+            assert_eq!(crate::CustodyConfirmReason::from_token(reason.token()), Some(reason));
+            assert_eq!(reason.family(), "CustodyConfirmationFailed");
+        }
+        assert_eq!(
+            crate::CustodyConfirmReason::WordMismatch { position: 0 }.token(),
+            "word_rejected"
+        );
+        assert_eq!(
+            crate::CustodyConfirmReason::WordMismatch { position: 25 }.token(),
+            "word_rejected"
+        );
+        assert!(crate::CustodyConfirmReason::from_token("word_rejected").is_none());
+        assert!(crate::CustodyConfirmReason::from_token("word_01").is_none());
+        assert!(crate::CustodyConfirmReason::from_token("harbor").is_none());
     }
 }

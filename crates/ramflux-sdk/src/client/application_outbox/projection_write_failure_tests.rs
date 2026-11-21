@@ -81,8 +81,8 @@ fn staged(entry: &[u8], sequence: u64) -> ReceiveStage<'_> {
 
 pub(crate) fn envelope(id: &str) -> Envelope {
     serde_json::from_value(json!({
-        "schema": "ramflux.envelope.v1",
-        "version": 1,
+        "schema": "ramflux.envelope.v2",
+        "version": 2,
         "domain": "test",
         "signing_key_id": "key",
         "signature_alg": "ed25519",
@@ -364,7 +364,7 @@ fn drain_without_outbox(client: &mut RamfluxClient) -> Result<(), SdkError> {
     stage(client, DRAIN_SEQ)?;
     let key = persist_receipt(client, &entry, MESSAGE)?;
     let db = client.account_db()?;
-    client.write_inbox_projection_claim_at(db, &key, &entry)?;
+    RamfluxClient::write_inbox_projection_claim_at(db, &key)?;
     assert!(client.account_db()?.load_actor_state::<Committed>(&key)?.is_some_and(|r| r.projected));
     assert!(!client.account_db()?.actor_state_exists(&format!("{OUTBOX}{key}"))?);
     assert_eq!(

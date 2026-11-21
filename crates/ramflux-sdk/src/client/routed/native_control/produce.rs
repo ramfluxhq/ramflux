@@ -3,7 +3,7 @@
 
 //! Sender side of peer controls 5/9/11/12: build the typed Control Inner once per logical
 //! operation and capture its exact bytes durably, so a retry resends the same event identity.
-//! Dormant until the schema gate selects message schema v1; nothing here sends.
+//! The active transport callers send these retained bytes through the shared pair sealer.
 use super::{a2i, content, group_key, guardian};
 use crate::client::recovery::{SdkGuardianAcceptMessage, SdkGuardianInviteMessage};
 use crate::{RamfluxClient, SdkError, SdkGroupSenderKeyDistribution};
@@ -29,9 +29,11 @@ impl RamfluxClient {
         payload: g::control::Payload,
         operation_key: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let control = crate::client::generated_control::control_from_payload(payload)?;
         crate::client::generated_control::validate_control_native(&control)?;
+        let content = g::Content { value: Some(g::content::Value::Control(control.clone())) };
+        let layer = Self::required_content_layer(&content)?;
+        let epoch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch;
         let body = Zeroizing::new(control.encode_to_vec());
         let key = capture_key(operation_key);
         let own = self.owned_device_identity()?;
@@ -42,10 +44,17 @@ impl RamfluxClient {
                     ramflux_protocol::decode_base64url(&cached)
                         .map_err(|_| SdkError::ReplayMismatch)?,
                 );
+                if g::validation::scan_inner(&bytes).map_err(|_| SdkError::ReplayMismatch)?.outcome
+                    != g::validation::ScanOutcome::Supported
+                {
+                    return Err(SdkError::ReplayMismatch);
+                }
                 let inner =
                     g::Inner::decode(bytes.as_slice()).map_err(|_| SdkError::ReplayMismatch)?;
                 let identity = inner.identity.as_ref().ok_or(SdkError::ReplayMismatch)?;
                 if inner.kind != 8
+                    || inner.layer != layer
+                    || identity.group_epoch != group.map(|(_, epoch)| epoch)
                     || inner.body != *body
                     || identity.conversation_id != conversation
                     || identity.group_id.as_deref() != group.map(|(id, _)| id)
@@ -53,6 +62,7 @@ impl RamfluxClient {
                     || identity.author.as_ref().is_none_or(|author| {
                         author.account_anchor != own.root_commitment()
                             || author.device_id != own.device_id()
+                            || author.device_epoch != epoch
                     })
                 {
                     return Err(SdkError::ReplayMismatch);
@@ -83,7 +93,6 @@ impl RamfluxClient {
     /// # Errors
     /// Returns a storage error when the capture row cannot be removed.
     pub fn retire_generated_peer_control(&self, operation_key: &str) -> Result<(), SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         Ok(self.account_db()?.remove_actor_state(&capture_key(operation_key))?)
     }
 
@@ -104,7 +113,6 @@ impl RamfluxClient {
         distribution: &SdkGroupSenderKeyDistribution,
         recipient_device: &ramflux_crypto::RootQualifiedDeviceRef,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         if distribution.sender_id != self.owned_device_identity()?.device_id() {
             return Err(content("group key producer must be its sender"));
         }
@@ -115,15 +123,48 @@ impl RamfluxClient {
             actor_manifest_url: None,
             distribution: Some(group_key::generated_distribution(distribution)),
         });
+        let g::control::Payload::GroupKeyControl(key) = &payload else {
+            return Err(content("group key payload missing"));
+        };
+        group_key::distribution(key)?;
+        let own = self.owned_device_identity()?;
+        if distribution.group_key_epoch != group_epoch
+            || self.current_group_key_head(&distribution.group_id, group_epoch)?
+                != distribution.group_state_hash
+        {
+            return Err(content("group key producer requires the verified current head"));
+        }
+        let state = self
+            .account_db()?
+            .shared_group_state(&distribution.group_id)?
+            .ok_or_else(|| content("verified group state missing"))?;
+        if state.view().conversation_id != conversation {
+            return Err(content(
+                "group key producer conversation differs from verified group state",
+            ));
+        }
+        self.require_generated_group_epoch(&distribution.group_id, &own, group_epoch, false)?;
+        self.require_generated_group_epoch(
+            &distribution.group_id,
+            recipient_device,
+            group_epoch,
+            false,
+        )?;
+        Self::verify_group_distribution_auth(distribution, &own)?;
+        // A restored sender may rotate its chain without changing the signed group head.
+        let terms = Zeroizing::new(ramflux_protocol::canonical_json_bytes(distribution)?);
+        let revision =
+            ramflux_crypto::blake3_256_base64url("ramflux.group-key.local-operation.v1", &terms);
         self.produce_generated_peer_control(
             conversation,
             Some((&distribution.group_id, group_epoch)),
             payload,
             &format!(
-                "group-key/{}/{}/{}",
+                "group-key/{}/{}/{}/{}",
                 distribution.group_id,
                 distribution.group_key_epoch,
-                recipient_device.storage_key()
+                recipient_device.storage_key(),
+                revision
             ),
         )
     }
@@ -137,7 +178,6 @@ impl RamfluxClient {
         invite: &SdkGuardianInviteMessage,
         guardian_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if invite.inviter_principal_id != branch.principal_id
             || invite.inviter_device_id != branch.device_id
@@ -180,7 +220,6 @@ impl RamfluxClient {
         accept: &SdkGuardianAcceptMessage,
         owner_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if accept.guardian_principal_id != branch.principal_id
             || accept.guardian_device_id != branch.device_id
@@ -229,7 +268,6 @@ impl RamfluxClient {
         revoke: g::ObjectRevokeAccess,
         recipient_root: &str,
     ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        crate::client::target_selection::require_schema_v1()?;
         let operation_key = format!(
             "object-revoke/{}/{}/{}",
             revoke.object_id, revoke.recipient_principal_id, revoke.link_id

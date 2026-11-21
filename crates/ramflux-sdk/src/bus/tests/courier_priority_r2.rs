@@ -48,18 +48,42 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
             ack(&f.source, "task/ack/priority-r2", &packet)?;
             let source = f.source.client.owned_device_identity()?;
             let peer = f.peer.client.owned_device_identity()?;
+            let conversation = fixture::direct_conversation(&f.source.client)?;
+            // A receipt is owed only for a stored peer message with an authenticated identity.
+            let author = ramflux_protocol::message::QualifiedDevice {
+                account_anchor: peer.root_commitment().into(),
+                device_id: peer.device_id().into(),
+                device_epoch: 1,
+            };
+            let identity = ramflux_protocol::message::EventIdentity {
+                id: ramflux_protocol::message::identity::derive(&author, &conversation, 1)?
+                    .to_vec(),
+                conversation_id: conversation.clone(),
+                author: Some(author),
+                device_sequence: 1,
+                hlc: 1000,
+                ..Default::default()
+            };
+            let received = ramflux_protocol::encode_base64url(&identity.id);
+            f.source.client.account_db()?.persist_message_actor_state(
+                &received,
+                &format!("routed/generated-identity/{received}"),
+                &identity,
+            )?;
             let receipt_key = format!("{}priority-r2", crate::client::delivery_receipts::PREFIX);
             f.source.client.account_db()?.persist_actor_state(
                 &receipt_key,
                 &crate::client::delivery_receipts::Work {
                     status_id: "priority-r2".into(),
-                    conversation: "healthy".into(),
-                    message: "received-priority-r2".into(),
+                    conversation,
+                    message: received,
                     wire_message: None,
                     receiver: source.storage_key().into(),
                     sender: peer.storage_key().into(),
                     root: Some(peer.root_commitment().into()),
                     at: now_unix_timestamp(),
+                    sealed_at: now_unix_timestamp(),
+                    retry_from: now_unix_timestamp(),
                     attempts: 0,
                     next_at: 0,
                     packet: None,
@@ -115,10 +139,11 @@ async fn due_receipt_is_sent_by_actor_priority_before_stalled_task_submit() -> C
 }
 
 fn outgoing_call(account: &mut LocalBusAccountState, peer: &RamfluxClient) -> Case<String> {
+    let conversation = fixture::direct_conversation(&account.client)?;
     let id = ramflux_protocol::encode_base64url([28; 16]);
     let call = crate::client::call::state::LiveCall::outgoing(
         id.clone(),
-        "healthy".into(),
+        conversation,
         account.client.call_local_endpoint()?,
         vec![peer.call_local_endpoint()?],
         now_unix_timestamp(),
@@ -136,6 +161,7 @@ async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_secon
             let mut f = Box::pin(Fixture::new("courier-receive-receipt-r3")).await?;
             f.inbound().await?;
             let reader = f.source.client.account_db()?.open_reader()?;
+            let conversation = fixture::direct_conversation(&f.source.client)?;
             let gateway = Arc::clone(&f.gateway);
             let (gate, mut observed) = hold();
             let released = Arc::clone(&gate.release);
@@ -160,7 +186,7 @@ async fn newly_received_messages_send_receipts_in_the_same_pass_with_eight_secon
                     == 1)
             })
             .await?;
-            assert_eq!(reader.direct_messages("healthy")?.len(), 1);
+            assert_eq!(reader.direct_messages(&conversation)?.len(), 1);
             wait_until(|| {
                 Ok(reader.actor_state_usage(crate::client::delivery_receipts::PREFIX)?.0 == 0)
             })

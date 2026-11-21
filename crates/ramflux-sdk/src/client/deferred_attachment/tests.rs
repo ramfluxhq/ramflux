@@ -2,16 +2,19 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
+use crate::client::identity_authority::HeadUse;
 
 struct Fixture {
     client: RamfluxClient,
     reference: SdkDmAttachmentRef,
     package: SdkObjectSharePackage,
     root: ramflux_test_support::TestPath,
+    authority: crate::client::native_test_support::Fixture,
+    source: crate::client::native_test_support::Fixture,
 }
 impl Fixture {
-    fn new() -> Result<Self, SdkError> {
-        let fixture = Self::without_owner()?;
+    async fn new() -> Result<Self, SdkError> {
+        let fixture = Self::without_owner().await?;
         fixture.client.persist_received_attachment_reference(
             &fixture.reference,
             "owner",
@@ -20,40 +23,24 @@ impl Fixture {
         )?;
         Ok(fixture)
     }
-    fn without_owner() -> Result<Self, SdkError> {
-        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos());
-        let sequence = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = ramflux_test_support::TestPath::new()
-            .expect("test: allocate fixture directory")
-            .child(format!("rf-deferred-{}-{unique}-{sequence}", std::process::id()));
-        let client = open(&root, true)?;
-        // Construct a real encrypted key slot using the donor's object key.
+    async fn without_owner() -> Result<Self, SdkError> {
+        Self::native_reference()
+            .await
+            .map_err(|error| SdkError::LocalBus(format!("native attachment fixture: {error}")))
+    }
+    async fn native_reference() -> crate::client::native_test_support::TestResult<Self> {
+        use crate::client::native_test_support::Fixture as Native;
+        let mut authority =
+            Native::with_principal("account", "recipient-device", "recipient").await?;
+        let source = Native::with_principal("owner-account", "owner-device", "owner").await?;
+        source.accept_peer(&authority)?;
+        authority.accept_peer(&source)?;
         let mut donor = RamfluxClient::new();
         let object = donor.put_encrypted_object("remote-object", b"received attachment")?;
         let key = donor.object_store.object_key(&object.object_id)?;
-        let mut sender = ramflux_crypto::DmSession::initiator([7; 32], [1; 32], [2; 32], [3; 32])?;
-        let receiver = ramflux_crypto::DmSession::recipient([7; 32], [2; 32], [1; 32], [3; 32])?;
-        client.persist_dm_session("attachment-slot", "bootstrap", "recv", &receiver)?;
-        let slot = SdkObjectKeySlot {
-            schema: "ramflux.sdk.object_key_slot.dm.v1".to_owned(),
-            version: 1,
-            object_id: object.object_id.clone(),
-            conversation_id: "attachment-slot".to_owned(),
-            recipient_device_id: "recipient-device".to_owned(),
-            source_principal_commitment: None,
-            x3dh: None,
-            ciphertext: sender.encrypt(
-                &key,
-                &object_key_slot_associated_data(
-                    &object.object_id,
-                    "attachment-slot",
-                    "recipient-device",
-                ),
-            )?,
-        };
+        let slot = source.object_key_slot_for(&authority, &object.object_id, &key)?;
+        let root = authority.root.0.clone();
+        let client = std::mem::take(&mut authority.client);
         let reference = SdkDmAttachmentRef {
             schema: "ramflux.sdk.dm_attachment_ref.v1".to_owned(),
             version: 1,
@@ -78,28 +65,49 @@ impl Fixture {
             object,
             key_slot: slot,
         };
-        Ok(Self { client, reference, package, root })
+        Ok(Self { client, reference, package, root, authority, source })
     }
 }
-fn open(root: &Path, create: bool) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.create_identity_root("recipient", [0x21; 32]);
-    client.create_device_branch("recipient", "recipient-device", 1, [0x22; 32]);
-    client.open_account_index(root)?;
-    if create {
-        client.create_account("account", "commitment")?;
+impl Fixture {
+    async fn reopen(&self) -> Result<RamfluxClient, SdkError> {
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&self.root)?;
+        client.unlock_account("account", b"native fixture data passphrase")?;
+        client.initialize_born_v3_branch("recipient-device", self.authority.vault.clone()).await?;
+        let remote = self.source.client.owned_device_identity()?;
+        assert!(
+            matches!(
+                client.require_cached_root_authority(HeadUse::NewAuthorization, &remote),
+                Err(SdkError::FreshHeadRequired { .. })
+            ),
+            "reopen must not restore a process-local freshness stamp"
+        );
+        let directory =
+            Box::pin(crate::client::native_test_support::directory::Directory::new(vec![
+                self.source.manifest.clone(),
+            ]))
+            .await
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        let mut config = self.authority.config.clone();
+        directory.configure_session(&mut config);
+        let manifest = Box::pin(crate::client::contact::fetch_verified_device_manifest(
+            &config,
+            remote.root_commitment(),
+        ))
+        .await?;
+        client.persist_observed_identity_directory_now(&manifest)?;
+        client.require_cached_root_authority(HeadUse::NewAuthorization, &remote)?;
+        Ok(client)
     }
-    client.unlock_account("account", b"test-secret")?;
-    Ok(client)
 }
 
-#[test]
-fn reference_and_key_slot_survive_encrypted_account_reopen() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn reference_and_key_slot_survive_encrypted_account_reopen() -> Result<(), SdkError> {
+    let mut f = Fixture::new().await?;
     let db_path = f.client.account_db()?.path.clone();
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     let stored: ReceivedAttachment = f
         .client
         .account_db()?
@@ -130,7 +138,7 @@ fn reference_and_key_slot_survive_encrypted_account_reopen() -> Result<(), SdkEr
 #[tokio::test]
 async fn failed_fetch_preserves_message_then_same_operation_retries_and_replays()
 -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     f.client.account_db()?.import_direct_message_projection(DirectMessageWrite {
         conversation_id: "conversation",
         message_id: "message",
@@ -159,7 +167,7 @@ async fn failed_fetch_preserves_message_then_same_operation_retries_and_replays(
     assert!(!failed.to_string().contains("secret grant"));
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     let package = f.package.clone();
     let success = f
         .client
@@ -212,9 +220,9 @@ async fn failed_fetch_preserves_message_then_same_operation_retries_and_replays(
     Ok(())
 }
 
-#[test]
-fn receive_replay_preserves_reference_and_chunk_checkpoint() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn receive_replay_preserves_reference_and_chunk_checkpoint() -> Result<(), SdkError> {
+    let mut f = Fixture::new().await?;
     let payload = ChunkPayload {
         chunk_index: 0,
         nonce: "nonce".to_owned(),
@@ -230,7 +238,7 @@ fn receive_replay_preserves_reference_and_chunk_checkpoint() -> Result<(), SdkEr
     )?;
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     assert_eq!(f.client.received_attachment_chunk(&f.reference, 0)?, Some(payload));
     let saved = f
         .client
@@ -245,7 +253,7 @@ fn receive_replay_preserves_reference_and_chunk_checkpoint() -> Result<(), SdkEr
 #[tokio::test]
 async fn deadline_and_invalid_reference_are_recorded_without_touching_messages()
 -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     let result = f
         .client
         .fetch_received_with(
@@ -285,7 +293,7 @@ async fn deadline_and_invalid_reference_are_recorded_without_touching_messages()
 
 #[tokio::test]
 async fn committed_slot_checkpoint_recovers_a_lost_success_receipt() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     f.client.import_shared_object(&f.package)?;
     let result = f
         .client
@@ -303,9 +311,9 @@ async fn committed_slot_checkpoint_recovers_a_lost_success_receipt() -> Result<(
     Ok(())
 }
 
-#[test]
-fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
+    let mut f = Fixture::new().await?;
     f.client.persist_attachment_fetch_state(&FetchState {
         wire_object_id: Some(f.reference.object_id.clone()),
         manifest_hash: Some(f.reference.manifest_hash.clone()),
@@ -318,7 +326,7 @@ fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
     })?;
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     f.client.recover_received_attachment_fetches()?;
     let status = f
         .client
@@ -331,9 +339,9 @@ fn interrupted_fetch_becomes_retryable_after_restart() -> Result<(), SdkError> {
     Ok(())
 }
 
-#[test]
-fn received_attachment_reference_contains_no_live_ratchet_snapshot() -> Result<(), SdkError> {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn received_attachment_reference_contains_no_live_ratchet_snapshot() -> Result<(), SdkError> {
+    let f = Fixture::new().await?;
     let value: serde_json::Value = f
         .client
         .account_db()?
@@ -344,9 +352,9 @@ fn received_attachment_reference_contains_no_live_ratchet_snapshot() -> Result<(
     Ok(())
 }
 
-#[test]
-fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+#[tokio::test]
+async fn a_received_object_selector_resolves_only_its_expected_manifest() -> Result<(), SdkError> {
+    let mut f = Fixture::new().await?;
     f.client.persist_received_reference_prepared_at(
         &f.reference,
         "received:collision",
@@ -377,7 +385,7 @@ mod revocation_refusal;
 #[tokio::test]
 async fn attachment_ack_completion_after_deletion_returns_object_erased_without_new_progress()
 -> Result<(), SdkError> {
-    let fixture = Fixture::new()?;
+    let fixture = Fixture::new().await?;
     let client = &fixture.client;
     client.send_direct_message("conversation", "message", "owner", b"body")?;
     let outcome = client
@@ -416,7 +424,7 @@ async fn attachment_ack_completion_after_deletion_returns_object_erased_without_
 // Mutation: skip the owner registration in prepare_legacy_attachment_imports before import.
 #[tokio::test]
 async fn legacy_attachment_half_import_survives_reopen_and_receive_retry() -> Result<(), SdkError> {
-    let mut f = Fixture::without_owner()?;
+    let mut f = Fixture::without_owner().await?;
     f.client.prepare_legacy_attachment_imports(
         std::slice::from_ref(&f.reference),
         "owner",
@@ -446,7 +454,7 @@ async fn legacy_attachment_half_import_survives_reopen_and_receive_retry() -> Re
     // Simulate death after payload commit, before message projection, receive ratchet or cursor.
     assert!(f.client.direct_message_by_id("message")?.is_none());
     drop(std::mem::replace(&mut f.client, RamfluxClient::new()));
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     assert_eq!(
         f.client.decrypt_object("remote-object").ok().as_deref(),
         Some(b"received attachment".as_slice()),
@@ -470,10 +478,10 @@ async fn legacy_attachment_half_import_survives_reopen_and_receive_retry() -> Re
     Ok(())
 }
 
-#[test]
-fn surface_image_authority_uses_registered_conversation_and_exact_manifest() -> Result<(), SdkError>
-{
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn surface_image_authority_uses_registered_conversation_and_exact_manifest()
+-> Result<(), SdkError> {
+    let f = Fixture::new().await?;
     assert!(
         f.client.surface_attachment_in_conversation(
             &f.reference.object_id,

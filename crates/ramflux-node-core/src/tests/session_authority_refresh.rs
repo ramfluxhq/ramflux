@@ -10,7 +10,7 @@ fn old_session_refreshes_set_before_cross_node_delivery_and_revocation_refuses_i
     let first = registration_request(&router, "alice", "first", 1, None, "192.0.2.1")?;
     router.mvp1_register_identity(&first)?;
     let mut message = signed_registered_envelope(
-        envelope("long-lived-session", "peer", DeliveryClass::OpaqueEvent),
+        envelope("long-lived-session", "peer", DeliveryClass::Message),
         "alice",
         "first",
         1,

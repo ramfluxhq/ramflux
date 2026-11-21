@@ -48,10 +48,13 @@ async fn case() -> Case {
     .await??;
     let response = started
         .actor
-        .request(command("message.read", json!({"conversation_id":"healthy"})))
+        .request(command(
+            "message.read",
+            json!({"conversation_id":started.conversation,"read_model":true}),
+        ))
         .await?;
     assert!(response.body["messages"].as_array().is_some_and(|messages| {
-        messages.iter().any(|message| message["body_utf8"] == "courier stays responsive")
+        messages.iter().any(|message| message["text"] == "courier stays responsive")
     }));
     let wall = std::time::Instant::now();
     started.actor.stop().await?;
@@ -76,7 +79,7 @@ async fn redrive_case() -> Case {
     fixture.inbound().await?;
     let now = now_unix_timestamp();
     let client = &fixture.source.client;
-    client.persist_gateway_receive_cursor("sender", 100)?;
+    client.persist_gateway_receive_cursor(&fixture.source.target_delivery_id, 100)?;
     // A durable contact floor is a mailbox range, not an in-memory availability hint.
     // Even entries now behind the monotonic live cursor must be looked up again.
     client.account_db()?.persist_actor_state(
@@ -106,10 +109,13 @@ async fn redrive_case() -> Case {
     }
     let response = started
         .actor
-        .request(command("message.read", json!({"conversation_id":"healthy"})))
+        .request(command(
+            "message.read",
+            json!({"conversation_id":started.conversation,"read_model":true}),
+        ))
         .await?;
     assert!(response.body["messages"].as_array().is_some_and(|messages| {
-        messages.iter().any(|message| message["body_utf8"] == "courier stays responsive")
+        messages.iter().any(|message| message["text"] == "courier stays responsive")
     }));
     started.actor.stop().await?;
     let root = started.root.clone();

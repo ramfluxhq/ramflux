@@ -46,7 +46,6 @@ fn sealed_250kb() -> Result<GatewayInboxEntry, SdkError> {
 
 #[test]
 fn sdk_decode_refuses_ciphertext_pad_on_real_250kb_envelope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let entry = sealed_250kb()?;
     let padded = inject_compact_object_pad(
         &entry.envelope,
@@ -58,7 +57,6 @@ fn sdk_decode_refuses_ciphertext_pad_on_real_250kb_envelope() -> Result<(), SdkE
 
 #[test]
 fn sdk_decode_refuses_x3dh_pad_on_real_250kb_envelope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let entry = sealed_250kb()?;
     let padded = inject_compact_object_pad(&entry.envelope, "x3dh", serde_json::json!("x"))?;
     unknown_field(decode(&padded))
@@ -66,7 +64,6 @@ fn sdk_decode_refuses_x3dh_pad_on_real_250kb_envelope() -> Result<(), SdkError> 
 
 #[test]
 fn sdk_decode_refuses_source_principal_commitment_over_identifier_cap() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let entry = sealed_250kb()?;
     let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|_| invalid("payload"))?;
@@ -126,7 +123,6 @@ fn rewrite_sidecar(
 
 #[test]
 fn sdk_decode_refuses_non_empty_legacy_ciphertext_on_real_250kb_envelope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let entry = sealed_250kb()?;
     decode(&entry.envelope)?;
     let padded = rewrite_sidecar(&entry.envelope, |sidecar| {
@@ -144,7 +140,6 @@ fn sdk_decode_refuses_non_empty_legacy_ciphertext_on_real_250kb_envelope() -> Re
 
 #[test]
 fn sdk_decode_refuses_top_level_pad_on_real_250kb_envelope() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let entry = sealed_250kb()?;
     let padded = rewrite_sidecar(&entry.envelope, |sidecar| {
         sidecar["pad"] = serde_json::json!("p".repeat(100 * 1024));

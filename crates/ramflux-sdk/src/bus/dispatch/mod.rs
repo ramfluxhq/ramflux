@@ -3,6 +3,7 @@
 
 pub mod a2i;
 pub mod account;
+pub(in crate::bus) mod attachment_prepare;
 pub(crate) mod call;
 pub mod call_bot;
 pub mod contact;
@@ -16,8 +17,6 @@ pub(crate) mod deferred_attachment;
 pub mod device;
 pub mod grant_mcp;
 pub mod group;
-#[cfg(feature = "itest-legacy-accounts")]
-mod itest_legacy;
 #[cfg(all(
     feature = "itest-memory-vault",
     ramflux_itest,
@@ -26,9 +25,13 @@ mod itest_legacy;
 ))]
 pub(crate) mod itest_migration;
 pub mod message;
+mod message_delete;
 pub mod node;
 pub mod object;
+mod object_erasure;
+mod object_revoke;
 pub(in crate::bus) mod object_status;
+pub(crate) mod residue;
 pub(crate) mod surface;
 
 pub(crate) use a2i::*;

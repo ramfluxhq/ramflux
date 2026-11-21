@@ -81,7 +81,6 @@ fn locator_tables(db: &Connection) -> rusqlite::Result<Vec<LocatorTable>> {
             | "group_message_tombstone_projection"
             | "message_projection"
             | "receipt_projection"
-            | "group_pending_undecrypted"
             | "root_group_sender_key_counter_seen"
             | "group_sender_key_counter_seen"
             | "contact_message_request"

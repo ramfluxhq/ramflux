@@ -19,7 +19,7 @@ struct Fixture {
     io: SessionIo,
     reader: AccountDb,
     router: tokio::task::JoinHandle<()>,
-    root: ramflux_test_support::TestPath,
+    temp: tempfile::TempDir,
 }
 fn command(method: &str, body: serde_json::Value) -> AccountCommand {
     let (outbound, _) = mpsc::channel(1);
@@ -36,7 +36,8 @@ fn command(method: &str, body: serde_json::Value) -> AccountCommand {
     }
 }
 async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Error>> {
-    let root = crate::bus::runtime_tests::root("queue-origin");
+    let temp = tempfile::Builder::new().prefix("ramflux-queue-origin-").tempdir()?;
+    let root = temp.path().to_path_buf();
     let index = AccountIndex::open(&root)?;
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
     let router = tokio::task::spawn_local(async move {
@@ -83,6 +84,18 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
                     None,
                     Arc::new(AtomicBool::new(false)),
                 )?;
+                crate::bus::runtime_tests::graft_explicit_native_root(
+                    &mut account.client,
+                    "alice",
+                )?;
+                crate::bus::runtime_tests::publish_grafted_authority_for_status(
+                    &mut account.client,
+                    "alice",
+                )?;
+                // The seeded engine keeps the identity captured before the native root.
+                // ACK checks both, so the session must present the grafted device.
+                account.gateway_config.source_identity =
+                    Some(account.client.owned_device_identity()?);
                 let (connection, io) = crate::bus::connection_manager::tests::seeded(
                     account.gateway_config.clone(),
                     initial_limits,
@@ -98,21 +111,27 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
     .await?;
     let (connection, io, reader) = installed.await?;
     connection.require_live(held).await?;
-    Ok(Fixture { actor, connection, io, reader, router, root })
+    Ok(Fixture { actor, connection, io, reader, router, temp })
 }
 
 #[tokio::test(start_paused = true)]
 async fn command_call_deadline_counts_from_admission_after_three_seconds_in_the_mailbox() -> Case {
-    tokio::task::LocalSet::new()
-        .run_until(crate::bus::connection_manager::tests::watchdog(case(Duration::from_secs(600))))
-        .await
+    Box::pin(
+        tokio::task::LocalSet::new().run_until(crate::bus::connection_manager::tests::watchdog(
+            case(Duration::from_secs(600)),
+        )),
+    )
+    .await
 }
 #[tokio::test(start_paused = true)]
 async fn command_fails_within_twenty_five_seconds_of_admission_with_production_caller_wait() -> Case
 {
-    tokio::task::LocalSet::new()
-        .run_until(crate::bus::connection_manager::tests::watchdog(case(Duration::from_secs(25))))
-        .await
+    Box::pin(
+        tokio::task::LocalSet::new().run_until(crate::bus::connection_manager::tests::watchdog(
+            case(Duration::from_secs(25)),
+        )),
+    )
+    .await
 }
 async fn case(post_claim: Duration) -> Case {
     // Keep the paused runtime runnable while its independent reader threads answer startup work.
@@ -121,8 +140,7 @@ async fn case(post_claim: Duration) -> Case {
             tokio::task::yield_now().await;
         }
     });
-    let Fixture { root: _root, actor, connection, mut io, router, reader } =
-        fixture(post_claim).await?;
+    let Fixture { temp, actor, connection, mut io, router, reader } = fixture(post_claim).await?;
     let owner = connection.clone();
     let courier = tokio::spawn(async move {
         owner
@@ -185,6 +203,7 @@ async fn case(post_claim: Duration) -> Case {
     clock.abort();
     let _ = clock.await;
     drop(reader);
+    temp.close()?;
     Ok(())
 }
 

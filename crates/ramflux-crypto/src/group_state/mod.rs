@@ -13,18 +13,18 @@ use ramflux_protocol::{
     group_state::{
         GROUP_CHANGE_REQUEST_DOMAIN, GROUP_CHANGE_RESULT_DOMAIN, GROUP_REQUEST_TTL_SECONDS,
         GROUP_STATE_ACTOR_DOMAIN, GROUP_STATE_SNAPSHOT_DOMAIN, GroupCreatorTransfer,
-        GroupDeviceExclusion, GroupMemberIdentity, GroupStateActor, GroupStateChange,
-        GroupStateGenesis, GroupStateLimit, GroupStateSnapshot, MAX_GROUP_CREATOR_TRANSFERS,
-        MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT, MAX_GROUP_NAME_BYTES, MAX_GROUP_STATE_BYTES,
-        MAX_GROUP_STATE_EXCLUSIONS, MAX_GROUP_STATE_MEMBERS, SharedGroupMember, SharedGroupRole,
-        SharedGroupState,
+        GroupDeviceExclusion, GroupMemberIdentity, GroupServiceOrder, GroupStateActor,
+        GroupStateChange, GroupStateGenesis, GroupStateLimit, GroupStateSnapshot,
+        MAX_GROUP_CREATOR_TRANSFERS, MAX_GROUP_DEVICES, MAX_GROUP_DEVICES_PER_ROOT,
+        MAX_GROUP_NAME_BYTES, MAX_GROUP_STATE_BYTES, MAX_GROUP_STATE_EXCLUSIONS,
+        MAX_GROUP_STATE_MEMBERS, SharedGroupMember, SharedGroupRole, SharedGroupState,
     },
 };
 pub use requests::*;
 use serde_json::{Value, json};
 pub use snapshot::{
-    GroupStateCreateInput, advance_group_state, advance_native_group_state, create_group_state,
-    create_native_group_state,
+    GroupStateCreateInput, advance_group_state, advance_native_group_state,
+    advance_native_group_state_with_order, create_group_state, create_native_group_state,
 };
 pub use transfer::{accept_group_transfer, verify_group_transfer_acceptance};
 #[derive(Clone)]

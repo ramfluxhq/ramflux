@@ -31,7 +31,7 @@ async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_devi
             Some("sender".into()),
             "conversation",
             "conversation.send",
-            json!({"conversation_id":"thread","text":"Native text"}),
+            json!({"conversation_id":conversation(&source.client)?,"text":"Native text"}),
         );
         request.operation_id = Some("host-send-1".into());
         // Admission number 1,025 must recycle terminal metadata and reach the real send path.
@@ -69,7 +69,7 @@ async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_devi
             "SDK must seal native plaintext"
         );
         assert_eq!(
-            source.client.direct_messages("thread")?.len(),
+            source.client.direct_messages(&conversation(&source.client)?)?.len(),
             1,
             "fan-out must retain one logical local message"
         );
@@ -80,13 +80,17 @@ async fn conversation_send_derives_routes_and_seals_for_every_verified_peer_devi
         let original = request.body.clone();
         source.client.account_db()?.persist_client_record("conversation", "other-thread", &json!({"kind":"direct","participants":["sender","peer"]}))?;
         for changed in [
-            json!({"conversation_id":"thread","text":"Changed text"}),
+            json!({"conversation_id":conversation(&source.client)?,"text":"Changed text"}),
             json!({"conversation_id":"other-thread","text":"Native text"}),
-            json!({"conversation_id":"thread","text":"Native text","attachments":[{"object_id":"changed","plaintext_base64":"eA","chunk_size":1024,"relay_endpoint":"https://relay.example.invalid"}]}),
+            json!({"conversation_id":conversation(&source.client)?,"text":"Native text","attachments":[{"object_id":"changed","plaintext_base64":"eA","chunk_size":1024,"relay_endpoint":"https://relay.example.invalid"}]}),
         ] {
             request.body = changed;
             let error = crate::bus::dispatch::conversation_send::send_account(&request,&mut source).await.err().ok_or("changed intent was accepted")?;
-            assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code,crate::bindings::GeneratedErrorCode::InvalidArgument as i32,"different intent has a typed refusal");
+            if request.body.get("attachments").is_some() {
+                assert!(matches!(error, SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Content, .. }), "retired attachment metadata requires a typed Content refusal");
+            } else {
+                assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code,crate::bindings::GeneratedErrorCode::InvalidArgument as i32,"different intent has a typed refusal");
+            }
             assert_eq!(captured.lock().map_err(|_| "capture poisoned")?.len(),baseline,"rejected retry must never reach transport");
         }
         request.body = original;
@@ -128,25 +132,40 @@ async fn two_device_peer_retries_keep_one_logical_timeline_and_safe_failed_fallb
     eprintln!("injected failure result: {failed:?}");
     assert!(failed.is_err());
     assert_eq!(captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 1);
-    let timeline = RamfluxClient::surface_timeline_id(&carrier)?;
+    let timeline = source.client.surface_generated_message_id(&carrier)?;
     let first_cipher =
-        source.client.direct_message_by_id(&timeline)?.ok_or("logical message")?.encrypted_body;
+        source.client.account_db()?.message_content(&timeline)?.ok_or("logical message")?;
     assert_ne!(first_cipher, [] as [u8; 0]);
     assert_eq!(source.client.surface_get("surface", 0, None)?["delivery_state"], "failed");
     let fallback = source.client.account_db()?.message_content(&timeline)?.ok_or("fallback")?;
-    assert!(String::from_utf8(fallback)?.contains("Safe fallback"));
+    let (_, content) = RamfluxClient::decode_generated_inner(&fallback)?;
+    assert!(
+        matches!(content.value, Some(ramflux_protocol::message::content::Value::Surface(_))),
+        "retained projection must be a typed Surface"
+    );
+    assert!(
+        source.client.surface_get("surface", 0, None)?["fallback_text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Safe fallback")),
+        "failed transport preserves the public safe fallback"
+    );
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
         Box::new(super::fixture::RecordingGateway::new(captured.clone())),
     ));
     assert_eq!(send(&mut source, &carrier).await?["delivery_state"], "submitted");
     assert_eq!(
-        source.client.direct_message_by_id(&timeline)?.ok_or("logical message")?.encrypted_body,
+        source.client.account_db()?.message_content(&timeline)?.ok_or("logical message")?,
         first_cipher
     );
-    assert_eq!(source.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(source.client.direct_messages(&conversation(&source.client)?)?.len(), 1);
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    assert_eq!(envelopes.len(), 3);
+    assert_eq!(envelopes.len(), 3, "one failed fanout plus two successful targets");
+    assert_eq!(
+        envelopes.first(),
+        envelopes.get(1),
+        "retry must reuse the exact already sealed target envelope"
+    );
     Box::pin(assert_deliveries(&root, address, &source.client, &mut peers, envelopes, &timeline))
         .await?;
     directory.abort();
@@ -172,126 +191,97 @@ pub(super) async fn peer_fixture_devices(
     source: &mut LocalBusAccountState,
     devices: &[&str],
 ) -> Result<PeerFixture, Box<dyn std::error::Error>> {
+    use crate::client::native_test_support::{
+        Fixture as Native, activation_send::tests::publish_layer_four, bus,
+    };
+    assert!(!devices.is_empty() && devices.len() <= 8, "bounded peer fixture device inventory");
+    let mut native = Box::pin(Native::with_principal("sender", "device-sender", "sender")).await?;
+    Box::pin(publish_layer_four(&mut native)).await?;
+    let mut peer =
+        Box::pin(Native::with_principal("peer", devices.first().ok_or("peer device")?, "peer"))
+            .await?;
+    Box::pin(publish_layer_four(&mut peer)).await?;
+    let mut first = peer.into_bus();
     let mut peers = Vec::new();
-    let mut peer_manifest = None;
-    for (index, device) in devices.iter().enumerate() {
-        let mut peer = runtime_tests::account(
-            &root.join(device),
+    for device in devices.iter().skip(1) {
+        peers.push(Box::pin(bus::sibling(&mut first, device, device)).await?);
+    }
+    peers.insert(0, first);
+    let peer_manifest = super::fixture::manifest(&peers.first().ok_or("peer")?.client)?;
+    let own = native.manifest.clone();
+    *source = native.into_bus();
+    source.client.persist_observed_identity_directory_now(&peer_manifest)?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &own.principal_commitment,
+        &peer_manifest.principal_commitment,
+    )?;
+    for account in std::iter::once(&*source).chain(peers.iter()) {
+        account.client.persist_observed_identity_directory_now(&own)?;
+        account.client.persist_observed_identity_directory_now(&peer_manifest)?;
+        account.client.establish_friend_link(
+            "surface-peer",
+            &own.principal_commitment,
+            &peer_manifest.principal_commitment,
+        )?;
+        account.client.account_db()?.persist_client_record("conversation", &conversation, &json!({"kind":"direct","group_id":null,"participants":["sender","peer"],"participant_roots":[own.principal_commitment,peer_manifest.principal_commitment]}))?;
+        account
+            .client
+            .account_db()?
+            .persist_actor_state("fixture/direct-conversation", &conversation)?;
+        account.client.account_db()?.persist_client_record(
+            "identity",
             "peer",
-            None,
-            Arc::new(AtomicBool::new(false)),
+            &json!({"contact_identity_commitment":peer_manifest.principal_commitment}),
         )?;
-        peer.client.create_identity_root("peer", [91; 32]);
-        peer.client.create_device_branch("peer", device, 1, [92 + u8::try_from(index)?; 32]);
-        let mut manifest = super::fixture::manifest(&peer.client)?;
-        manifest.devices[0].target_delivery_id = device.to_string();
-        if let Some(existing) = peer_manifest.as_mut() {
-            let existing: &mut crate::prekey::SdkDeviceManifestResponse = existing;
-            existing.devices.extend(manifest.devices);
-        } else {
-            peer_manifest = Some(manifest);
-        }
-        let send = ramflux_crypto::DmSession::initiator(
-            [50 + u8::try_from(index)?; 32],
-            dm_device_id_hash("device-sender"),
-            dm_device_id_hash(device),
-            [3; 32],
+        account.client.account_db()?.persist_client_record(
+            "identity",
+            "sender",
+            &json!({"contact_identity_commitment":own.principal_commitment}),
         )?;
-        let recv = ramflux_crypto::DmSession::recipient(
-            [50 + u8::try_from(index)?; 32],
-            dm_device_id_hash(device),
-            dm_device_id_hash("device-sender"),
-            [3; 32],
-        )?;
-        source.client.persist_pair(
-            &source.client.owned_device_identity()?,
-            &peer.client.owned_device_identity()?,
-            &[4; 32],
-            &send,
-        )?;
-        peer.client.persist_pair(
-            &peer.client.owned_device_identity()?,
-            &source.client.owned_device_identity()?,
-            &[4; 32],
-            &recv,
-        )?;
-        peer.client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"direct","participants":["sender","peer"]}),
-        )?;
-        peer.client.account_db()?.persist_client_record("device","device-sender",&json!({"principal_id":"sender","signing_public_key":ramflux_protocol::encode_base64url(source.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.signing_key.verifying_key().to_bytes())}))?;
-        peers.push(peer);
     }
-    if let Some(manifest) = peer_manifest.as_mut() {
-        crate::client::identity_authority::test_support::sign_manifest(
-            peers[0].client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            manifest,
-            2,
-        )?;
-        source.client.persist_root_verified_directory(manifest)?;
-        for peer in &peers {
-            configure_receiver(&peer.client, &source.client, manifest)?;
-        }
+    for peer in &peers {
+        bus::seed_pair(&source.client, &peer.client)?;
     }
-    let peer_manifest = peer_manifest.ok_or("peer manifest")?;
-    source.client.account_db()?.establish_friend_link("surface-peer", "sender", "peer")?;
-    let own = super::fixture::manifest(&source.client)?;
-    source.principal_commitment = own.principal_commitment.clone();
-    source.client.account_db()?.persist_client_record(
-        "conversation",
-        "thread",
-        &json!({"kind":"direct","participants":["sender","peer"]}),
-    )?;
-    source.client.account_db()?.persist_client_record(
-        "identity",
-        "peer",
-        &json!({"contact_identity_commitment":peer_manifest.principal_commitment}),
-    )?;
     let manifests = BTreeMap::from([
         (own.principal_commitment.clone(), serde_json::to_value(own)?),
         (peer_manifest.principal_commitment.clone(), serde_json::to_value(peer_manifest)?),
     ]);
     let (address, directory) = super::fixture::directory(root, manifests).await?;
-    let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
-        bind_addr: "127.0.0.1:0".parse()?,
-        gateway_addr: address,
-        server_name: "test-gateway".into(),
-        ca_cert: root.join("ca.pem"),
-        principal_id: "sender".into(),
-        device_id: "device-sender".into(),
-        target_delivery_id: "sender".into(),
-        prekey_http_url: None,
-    })
-    .with_account_identity(&source.client)?;
+    let mut config = source.gateway_config.clone();
+    config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+    config.gateway_addr = address;
+    config.tcp_gateway_addr = Some(address);
+    config.server_name = "test-gateway".into();
+    config.ca_cert = root.join("ca.pem");
+    source.gateway_config = config.clone();
     Ok(PeerFixture { peers, config, address, directory })
 }
-fn configure_receiver(
-    peer: &RamfluxClient,
-    source: &RamfluxClient,
-    manifest: &crate::prekey::SdkDeviceManifestResponse,
-) -> Result<(), SdkError> {
-    peer.persist_root_verified_directory(manifest)?;
-    peer.persist_root_verified_directory(&super::fixture::manifest(source)?)?;
-    peer.establish_friend_link(
-        "surface-receiver-consent",
-        source.owned_device_identity()?.root_commitment(),
-        peer.owned_device_identity()?.root_commitment(),
-    )?;
-    Ok(())
+
+pub(super) fn conversation(client: &RamfluxClient) -> Result<String, SdkError> {
+    client
+        .account_db()?
+        .load_actor_state("fixture/direct-conversation")?
+        .ok_or_else(|| invalid("test: canonical conversation missing"))
 }
 pub(super) fn create_carrier(source: &RamfluxClient) -> Result<Carrier, SdkError> {
+    create_carrier_in(source, &conversation(source)?)
+}
+pub(super) fn create_carrier_in(
+    source: &RamfluxClient,
+    conversation: &str,
+) -> Result<Carrier, SdkError> {
     let request = crate::SurfaceSendRequest::event(&create_frame(
-        "thread",
+        conversation,
         &text_snapshot("surface", "Safe fallback", ""),
     )?)?;
     let carrier = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
         updated_at: None,
         payload_kind: PayloadKind::Event,
-        conversation_id: "thread".into(),
+        conversation_id: conversation.to_owned(),
         surface_id: "surface".into(),
         message_id: request.message_id,
         sender_principal_id: "sender".into(),
@@ -325,44 +315,31 @@ async fn assert_deliveries(
             envelope,
         };
         for (index, peer) in peers.iter_mut().enumerate() {
-            let device = peer
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .device_id
-                .clone();
-            if peer.client.open_routed(&entry, &device).is_ok() {
-                let config = GatewaySessionConfig::tcp_tls(crate::GatewayTcpTlsEndpointConfig {
-                    bind_addr: "127.0.0.1:0".parse()?,
-                    gateway_addr: address,
-                    server_name: "test-gateway".into(),
-                    ca_cert: root.join("ca.pem"),
-                    principal_id: "peer".into(),
-                    device_id: device,
-                    target_delivery_id: "peer".into(),
-                    prekey_http_url: None,
-                })
-                .with_account_identity(&peer.client)?;
+            if entry.target_delivery_id == peer.target_delivery_id {
+                let mut config = peer.gateway_config.clone();
+                config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+                config.gateway_addr = address;
+                config.tcp_gateway_addr = Some(address);
+                config.server_name = "test-gateway".into();
+                config.ca_cert = root.join("ca.pem");
                 // Already authenticated directory records isolate this receive from prekey discovery.
                 let own_manifest = super::fixture::manifest(source)?;
-                peer.client.persist_identity_directory(&own_manifest)?;
+                peer.client.persist_observed_identity_directory_now(&own_manifest)?;
                 let mut engine = GatewaySessionEngine::with_test_transport(
                     config,
                     Box::new(super::fixture::RecordingGateway::new(Arc::default())),
                 );
-                let result =
-                    peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+                let result = peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
                 assert_eq!(result.routing.map(|route| route.message_id), Some(timeline.to_owned()));
                 assert!(
                     peer.client.surface_get("surface", 0, None)?.is_null(),
                     "human-authored peer cards remain fallback-only"
                 );
-                assert_eq!(peer.client.direct_messages("thread")?.len(), 1);
+                assert_eq!(peer.client.direct_messages(&conversation(source)?)?.len(), 1);
                 // Exact-envelope retry also retains the committed logical projection.
                 assert_eq!(
                     peer.client
-                        .apply_routed_entry(&mut engine, &pool, &entry, false)
+                        .apply_routed_entry(&mut engine, &pool, &entry)
                         .await?
                         .routing
                         .map(|route| route.message_id),

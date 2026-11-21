@@ -68,7 +68,13 @@ async fn durable_sender_assignment_writers_survive_settlement_and_restart() -> R
             }
             let changed = {
                 let mut e = row.envelope.clone();
-                e.encrypted_payload.push('x');
+                e.encrypted_payload = ramflux_protocol::encode_base64url(
+                    ramflux_protocol::message::outer::encode_compact_cryptobox(&[8; 16], &[])?,
+                );
+                e.payload_hash = ramflux_protocol::hash_base64url(
+                    ramflux_protocol::domain::ENVELOPE,
+                    e.encrypted_payload.as_bytes(),
+                );
                 e
             };
             assert!(

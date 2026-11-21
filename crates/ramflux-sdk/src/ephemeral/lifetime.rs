@@ -284,11 +284,10 @@ mod tests {
     use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use serde_json::Value;
-    use std::collections::BTreeMap;
 
     const NOW_MS: u64 = 1_000_000;
     const MONOTONIC_MS: u64 = 50_000;
-    const CIPHERTEXT: &str = "still-encrypted-ciphertext";
+    const CIPHERTEXT: &str = "c3RpbGwtZW5jcnlwdGVkLWNpcGhlcnRleHQ";
     const PRINCIPAL: &str = "principal";
     const SEED: [u8; 32] = [7; 32];
 
@@ -297,7 +296,7 @@ mod tests {
     }
 
     fn signing_public_key() -> String {
-        ramflux_crypto::public_key_base64url_from_seed(SEED)
+        ramflux_crypto::public_key_base64url_from_seed(&SEED)
     }
 
     fn sign_envelope(envelope: &mut Envelope) {
@@ -310,14 +309,11 @@ mod tests {
     }
 
     fn unsigned_envelope() -> Envelope {
-        let mut extensions = BTreeMap::new();
-        extensions
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
         Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.message".to_owned(),
-            ext: Ext { ext: extensions },
+            schema: "ramflux.envelope.v2".to_owned(),
+            version: 2,
+            domain: "ramflux.envelope.v2".to_owned(),
+            ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "key".to_owned(),
                 signature_alg: SignatureAlg::Ed25519,
@@ -333,10 +329,22 @@ mod tests {
             ttl: 5,
             created_at: 1_000,
             encrypted_payload: CIPHERTEXT.to_owned(),
-            payload_hash: "hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            payload_hash: ramflux_protocol::hash_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                CIPHERTEXT.as_bytes(),
+            ),
+            delivery_mode: Some("ephemeral".to_owned()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
+        }
+    }
+
+    /// Named modes are strings; any other JSON shape can only arrive through the retired bridge.
+    fn with_mode(envelope: &mut Envelope, mode: Value) {
+        if let Value::String(name) = mode {
+            envelope.delivery_mode = Some(name);
+        } else {
+            envelope.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
         }
     }
 
@@ -557,7 +565,7 @@ mod tests {
         assert_eq!(display_expires(&late), Some(1_005_000));
 
         let mut durable = valid_envelope();
-        durable.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+        durable.delivery_mode = Some("durable".to_owned());
         sign_envelope(&mut durable);
         assert_eq!(
             drop_reason(&admit(&durable, NOW_MS, MONOTONIC_MS, None)),
@@ -575,7 +583,7 @@ mod tests {
             Value::Object(serde_json::Map::new()),
         ] {
             let unknown = mutated(|e| {
-                e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
+                with_mode(e, mode);
             });
             assert_eq!(
                 drop_reason(&admit(&unknown, NOW_MS, MONOTONIC_MS, None)),
@@ -638,7 +646,7 @@ mod tests {
         );
         assert!(admit(&unsigned, NOW_MS, MONOTONIC_MS, None).ciphertext.is_none());
 
-        let wrong_key = ramflux_crypto::public_key_base64url_from_seed([8; 32]);
+        let wrong_key = ramflux_crypto::public_key_base64url_from_seed(&[8; 32]);
         assert_eq!(
             authenticate(&envelope, PRINCIPAL, &wrong_key),
             Err(ReceiverDropReason::BadSignature)
@@ -732,7 +740,7 @@ mod tests {
 
     fn received_byte_round_trip_mode_and_auth() {
         let mut durable = valid_envelope();
-        durable.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+        durable.delivery_mode = Some("durable".to_owned());
         sign_envelope(&mut durable);
         assert_drop_round_trip(&durable, NOW_MS, MONOTONIC_MS, ReceiverDropReason::NotEphemeral);
         for mode in [
@@ -745,7 +753,7 @@ mod tests {
         ] {
             assert_drop_round_trip(
                 &mutated(|e| {
-                    e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
+                    with_mode(e, mode);
                 }),
                 NOW_MS,
                 MONOTONIC_MS,

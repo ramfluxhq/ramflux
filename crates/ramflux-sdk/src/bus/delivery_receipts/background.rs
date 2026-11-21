@@ -6,7 +6,7 @@
 use super::{
     ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, GatewaySessionConfig, LIFETIME,
     LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with,
-    gateway_direct_message_envelope, mpsc, now_unix_timestamp, postpone, receipt_message,
+    mpsc, now_unix_timestamp, postpone, receipt_message,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
@@ -200,7 +200,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     for key in keys {
         if let Some(work) = db.load_actor_state::<Work>(&key)?
             && (work.next_at <= now
-                || work.at.saturating_add(LIFETIME) <= now
+                || work.retry_from.saturating_add(LIFETIME) <= now
                 || work.attempts >= ATTEMPTS)
         {
             rows.push((key, work));
@@ -208,12 +208,15 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     }
     rows.sort_by_key(|(_, work)| work.at);
     let mut selected = None;
-    for (key, work) in rows {
+    for (key, mut work) in rows {
         if db.message_is_deleted(&work.message)? {
             discard(&account.client, &key, &work)?;
-        } else if work.at.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
+        } else if work.retry_from.saturating_add(LIFETIME) <= now || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
         } else {
+            if work.refresh_expired_transport(now) {
+                db.persist_actor_state(&key, &work)?;
+            }
             match receipt_message(account, &account.gateway_config, &work) {
                 Ok(message) => {
                     selected = Some((key, work, message));
@@ -269,7 +272,7 @@ fn seal(
         return Ok(None);
     }
     let now = now_unix_timestamp();
-    if plan.work.at.saturating_add(LIFETIME) <= now || plan.work.attempts >= ATTEMPTS {
+    if plan.work.retry_from.saturating_add(LIFETIME) <= now || plan.work.attempts >= ATTEMPTS {
         finish(&account.client, &plan.key, &plan.work, "failed")?;
         return Ok(None);
     }
@@ -288,8 +291,11 @@ fn seal(
             crate::client::routed::Route::receipt(),
             material,
         )?;
-        plan.message.encrypted_body = serde_json::to_vec(&sealed)?;
-        gateway_direct_message_envelope(&account.gateway_config, &plan.message, None)
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &account.gateway_config,
+            &mut plan.message,
+            sealed,
+        )
     });
     let packet = match prepared {
         Ok(packet) => packet,
@@ -363,49 +369,52 @@ fn stopped() -> SdkError {
 }
 
 #[cfg(test)]
+pub(crate) fn retained_receipt_fixture(
+    account: &LocalBusAccountState,
+    message: &GatewayDirectMessage,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    // This courier classification fixture never decrypts or admits application content.
+    // It retains a current, signed compact outer packet across an uncertain submit.
+    let root = account.client.owned_device_identity()?;
+    let payload = "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA";
+    let mut envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
+        "schema":"ramflux.envelope.v2", "version":2, "domain":"ramflux.envelope.v2",
+        "signing_key_id":message.sender_id, "signature_alg":"ed25519", "signature":"",
+        "envelope_id":message.envelope_id, "source_principal_id":message.source_principal_id,
+        "source_device_id":message.sender_id, "target_delivery_id":message.target_delivery_id,
+        "delivery_class":"message", "priority":"normal", "ttl":message.ttl,
+        "created_at":message.created_at, "encrypted_payload":payload,
+        "payload_hash":ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, payload.as_bytes()),
+        "delivery_mode":"durable", "collapse_tag":ramflux_protocol::encode_base64url([34;32]),
+        "report_commitment":ramflux_protocol::encode_base64url([51;32]),
+        "ext":{"source_root_commitment":root.root_commitment()}
+    }))?;
+    envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+        account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+    );
+    ramflux_protocol::message::outer::decode_candidate_outer_ijson(
+        &ramflux_protocol::canonical_json_bytes(&envelope)?,
+    )
+    .map_err(|_| SdkError::LocalBus("test: retained receipt outer invalid".into()))?;
+    Ok(envelope)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::AtomicBool};
-    #[test]
-    fn legacy_receipt_defaults_do_not_change_the_stored_row_fence() -> Result<(), SdkError> {
-        let root = crate::bus::runtime_tests::root("receipt-legacy-row-fence");
-        let account = crate::bus::runtime_tests::account(
-            &root,
-            "alice",
-            None,
-            Arc::new(AtomicBool::new(false)),
-        )?;
-        let manifest =
-            crate::client::identity_authority::test_support::public_manifest(&account.client)?;
-        account.client.persist_identity_directory(&manifest)?;
-        let identity = account.client.owned_device_identity()?;
-        let message = GatewayDirectMessage {
-            conversation_id: "thread".into(),
-            message_id: "receipt".into(),
-            envelope_id: "retained-receipt".into(),
-            source_principal_id: account.gateway_config.principal_id.clone(),
-            sender_id: identity.device_id().into(),
-            recipient_device_id: Some(identity.device_id().into()),
-            recipient_principal_commitment: Some(identity.root_commitment().into()),
-            target_delivery_id: account.gateway_config.target_delivery_id.clone(),
-            encrypted_body: Vec::new(),
-            created_at: now_unix_timestamp(),
-            ttl: crate::offline_retention::RECEIPT_TTL_SECS,
-        };
-        let packet = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
-        let work = Work {
-            status_id: String::new(),
-            conversation: "thread".into(),
-            message: "stored-message".into(),
-            wire_message: None,
-            receiver: identity.storage_key().into(),
-            sender: identity.storage_key().into(),
-            root: Some(identity.root_commitment().into()),
-            at: now_unix_timestamp(),
-            attempts: 0,
-            next_at: 0,
-            packet: Some(packet),
-        };
+    #[tokio::test]
+    async fn omitted_receipt_defaults_do_not_change_the_stored_row_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::bus::runtime_tests::root("receipt-optional-row-fence");
+        let (account, _) = Box::pin(super::refusal_tests::seeded(&root)).await?;
+        let cell = format!("{PREFIX}cell");
+        let work = account
+            .client
+            .account_db()?
+            .load_actor_state::<Work>(&cell)?
+            .ok_or("seeded receipt")?;
+        account.client.account_db()?.remove_actor_state(&cell)?;
         let mut legacy = serde_json::to_value(&work)?;
         let object = legacy
             .as_object_mut()
@@ -474,6 +483,8 @@ pub(crate) async fn test_fetch_material(
         sender: "receipt-peer".into(),
         root: None,
         at: 0,
+        sealed_at: 0,
+        retry_from: 0,
         attempts: 0,
         next_at: 0,
         packet: None,

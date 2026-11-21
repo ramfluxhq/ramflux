@@ -8,7 +8,7 @@ use ramflux_protocol::message as g;
 
 fn page_inner(identity: g::EventIdentity, page: g::HistoryPage) -> Vec<u8> {
     g::Inner {
-        layer: g::registry::COMPILED_LAYER,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 8,
         identity: Some(identity),
         body: g::Control { operation: 7, payload: Some(g::control::Payload::OwnHistory(page)) }
@@ -40,7 +40,6 @@ async fn history_page_item_refusal_preserves_unrelated_import_and_chain_body() -
     let mut source = Fixture::new("history-item-source").await?;
     let mut sibling = source.enroll_sibling("history-item-sibling", "sibling").await?;
     let peer = Fixture::new("history-item-peer").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (first_id, first, conversation) =
         Box::pin(history::receive_first_hand(&mut source, &peer)).await?;
     let (second_id, second, _) = Box::pin(history::receive_first_hand(&mut source, &peer)).await?;

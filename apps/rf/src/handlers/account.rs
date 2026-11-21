@@ -28,10 +28,6 @@ pub(crate) async fn handle_account(
     }
     let mut bus = LocalBusClient::connect(&socket).await?;
     match command.action {
-        #[cfg(feature = "itest-legacy-accounts")]
-        AccountAction::ItestLegacyCreate(create) => {
-            super::itest_legacy_account::create(&mut bus, create).await
-        }
         AccountAction::Backup(backup) => {
             super::account_backup::handle(&mut bus, backup, &socket).await
         }

@@ -58,7 +58,7 @@ impl GatewaySessionEngine {
     fn incarnation_of(&self, what: &str) -> Result<String, SdkError> {
         match &self.mode {
             SessionMode::Push { incarnation } => Ok(incarnation.as_str().to_owned()),
-            _ => Err(local_refusal(what, "the session is not negotiated")),
+            SessionMode::Direct => Err(local_refusal(what, "the session is not negotiated")),
         }
     }
 

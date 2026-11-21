@@ -11,7 +11,7 @@ use crate::bus::{
 };
 use crate::prelude::*;
 use serde_json::json;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 
 pub(super) struct Started {
@@ -19,6 +19,7 @@ pub(super) struct Started {
     pub router: tokio::task::JoinHandle<()>,
     peer: LocalBusAccountState,
     pub root: ramflux_test_support::TestPath,
+    pub conversation: String,
 }
 impl Started {
     pub(super) fn peer(&mut self) -> &mut LocalBusAccountState {
@@ -37,18 +38,29 @@ async fn case() -> Case {
     let hold = Arc::new(AckHold::default());
     fixture.gateway.lock().map_err(|_| "gateway")?.ack_hold = Some(Arc::clone(&hold));
     let gateway = Arc::clone(&fixture.gateway);
+    let diagnostic = fixture.source.client.account_db()?.open_reader()?;
     let started = Box::pin(start(fixture)).await?;
     tokio::time::timeout(Duration::from_secs(10), hold.entered.notified()).await?;
     // The only active receive trigger is Connected; all competing budgets are 600 seconds.
     controls(&started.actor).await?;
     let received = started
         .actor
-        .request(command("message.read", json!({"conversation_id":"healthy"})))
+        .request(command(
+            "message.read",
+            json!({"conversation_id":started.conversation,"read_model":true}),
+        ))
         .await?;
     assert!(
-        received.body["messages"].as_array().is_some_and(|rows| rows
+        received.body["messages"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["text"] == "courier stays responsive")),
+        "generated receive did not project: response={} journal={:?}",
+        received.body,
+        diagnostic
+            .journal_after(diagnostic.journal_bounds()?.head_seq.saturating_sub(16), 16)?
             .iter()
-            .any(|row| row["body_utf8"] == "courier stays responsive"))
+            .map(|event| (&event.topic, event.body.get("error_code")))
+            .collect::<Vec<_>>()
     );
     assert!(
         gateway.lock().map_err(|_| "gateway")?.acked.is_empty(),
@@ -93,6 +105,7 @@ pub(super) async fn controls(actor: &AccountActor) -> Case {
 
 pub(super) async fn start(fixture: Fixture) -> Case<Started> {
     let Fixture { root, mut source, peer, .. } = fixture;
+    let conversation = super::fixture::direct_conversation(&source.client)?;
     let mut engine = source.engine.take().ok_or("fixture engine")?;
     engine.frame_timeout = Duration::from_secs(600);
     let config = source.gateway_config.clone();
@@ -101,7 +114,7 @@ pub(super) async fn start(fixture: Fixture) -> Case<Started> {
     drop(source);
     let resume = ResumeConfig { config, commitment, relay_options };
     let (actor, router) = launch(&root, &resume, Some(engine)).await?;
-    Ok(Started { actor, router, peer, root })
+    Ok(Started { actor, router, peer, root, conversation })
 }
 #[derive(Clone)]
 struct ResumeConfig {
@@ -126,22 +139,14 @@ async fn launch(
     });
     let actor = AccountActor::start_local(
         "sender".into(),
-        LocalBusConfig {
-            itest_legacy_accounts: true,
-            ..LocalBusConfig::new(root.join("bus.sock"), data_root)
-        },
+        LocalBusConfig::new(root.join("bus.sock"), data_root),
         crate::node::NodeStore::default(),
         index,
         events,
         ActorOptions {
             timeouts: limits(),
             initial: Some(Box::new(move |_| {
-                let mut account = crate::bus::runtime_tests::account(
-                    &loaded_root,
-                    "sender",
-                    None,
-                    Arc::new(AtomicBool::new(false)),
-                )?;
+                let mut account = super::fixture::open_source(&loaded_root, &config)?;
                 account.principal_commitment = commitment;
                 account.gateway_config = config;
                 account.client.node_relay_options = relay_options;
@@ -274,6 +279,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         connection_work,
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
+        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         transfers: super::super::uploads::Transfers::start(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {

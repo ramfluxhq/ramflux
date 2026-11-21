@@ -136,6 +136,40 @@ impl AccountDb {
             })
             .collect()
     }
+    /// Reference ids bound to one message, in id order. Bounded by the per-message grant caps.
+    /// # Errors
+    /// Refuses unavailable storage and an oversized fanout.
+    pub fn native_message_references(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<[u8; 32]>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT reference_id FROM runtime_attachment_reference WHERE message_id=?1 ORDER BY reference_id LIMIT 4097",
+        )?;
+        let rows = query
+            .query_map(params![message_id], |r| r.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if u64::try_from(rows.len()).unwrap_or(u64::MAX) > MAX_GRANTS {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        rows.into_iter().map(|bytes| bytes.try_into().map_err(invalid)).collect()
+    }
+    /// The message a reference was bound to, if it is still held.
+    /// # Errors
+    /// Refuses unavailable storage.
+    pub fn native_reference_message(
+        &self,
+        reference: &[u8; 32],
+    ) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT message_id FROM runtime_attachment_reference WHERE reference_id=?1",
+                params![reference.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
     /// Persist every per-grant operation and seal against concurrent registration in one FULL transaction.
     /// # Errors
     /// Refuses missing/extra/substituted fanout entries or changed immutable operations.

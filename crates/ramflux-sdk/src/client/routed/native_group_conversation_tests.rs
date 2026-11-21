@@ -5,6 +5,7 @@
 use super::*;
 use crate::client::identity_authority::HeadUse;
 use crate::client::native_test_support::{Fixture, TestResult};
+use ramflux_protocol::message as g;
 
 fn carrier(
     owner: &Fixture,
@@ -12,11 +13,29 @@ fn carrier(
     conversation: &str,
     id: &str,
 ) -> TestResult<GatewayInboxEntry> {
-    let logical = owner.client.qualify_outgoing_group_message("group", id)?.0;
-    let bytes = owner.client.encrypt_group_message(
-        "group",
-        &owner.config.device_id,
-        b"native group reply",
+    let mut identity = owner.client.allocate_generated_identity(
+        conversation,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    identity.group_id = Some("group".into());
+    identity.group_epoch = Some(owner.client.group_state("group")?.group_epoch);
+    let logical = ramflux_protocol::encode_base64url(&identity.id);
+    let mut content = g::Content {
+        value: Some(g::content::Value::Message(g::Message {
+            text: "native group reply".into(),
+            ..Default::default()
+        })),
+    };
+    RamfluxClient::prepare_generated_revision(&mut content)?;
+    let Some(g::content::Value::Message(content)) = content.value else {
+        return Err("test: prepared Message missing".into());
+    };
+    let sealed =
+        owner.client.encrypt_generated_group_message("group", &owner.config.device_id, &content)?;
+    let bytes = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content { value: Some(g::content::Value::Message(sealed)) },
     )?;
     let mut message = GatewayDirectMessage {
         conversation_id: conversation.into(),
@@ -50,12 +69,13 @@ fn carrier(
             bundle,
         },
     )?;
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&owner.config, &mut message, packet, None)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 42,
         target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&owner.config, &message, None)?,
+        envelope,
     })
 }
 
@@ -64,8 +84,8 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
 -> TestResult {
     let owner = Fixture::with_device("route-owner", "owner-device").await?;
     let mut peer = Fixture::with_device("route-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
     peer.client.establish_friend_link(
         "consent",
         &owner.manifest.principal_commitment,
@@ -103,7 +123,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     let wrong = carrier(&owner, &peer, "operator-thread", "wrong-thread")?;
     let error = peer
         .client
-        .apply_routed_entry(&mut engine, &pool, &wrong, false)
+        .apply_routed_entry(&mut engine, &pool, &wrong)
         .await
         .err()
         .ok_or("wrong thread accepted")?;
@@ -116,7 +136,7 @@ async fn native_group_envelope_rejects_divergent_conversation_and_accepts_resolv
     let resolved =
         crate::bus::group_conversation::resolve(&owner.client, "group", "operator-thread")?;
     let correct = carrier(&owner, &peer, &resolved, "resolved-thread")?;
-    let delivered = peer.client.apply_routed_entry(&mut engine, &pool, &correct, false).await?;
+    let delivered = peer.client.apply_routed_entry(&mut engine, &pool, &correct).await?;
     assert_eq!(delivered.routing.ok_or("routing")?.conversation_id, "signed-thread");
     assert!(delivered.plaintext.is_some());
     assert!(peer.client.committed_routing(HeadUse::NewAuthorization, &correct)?.is_some());

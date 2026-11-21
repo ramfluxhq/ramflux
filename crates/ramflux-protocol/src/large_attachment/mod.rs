@@ -3,6 +3,7 @@
 
 //! Dormant large-attachment wire formats. These codecs confer no authority.
 mod grant;
+mod owner_operation;
 mod renewal;
 pub use renewal::{
     AttachmentOperation, ForwardAttestation, RenewalRequest, RequesterPop, body_digest,
@@ -12,6 +13,7 @@ mod receipt;
 mod retirement;
 mod token;
 pub use grant::{ScopedAttachmentGrant, VerifiedScopedGrant};
+pub use owner_operation::{OwnerAttachmentOperation, OwnerBind, OwnerPut, OwnerReserve};
 pub use receipt::AttachmentRegistrationReceipt;
 pub use retirement::{AttachmentRetirement, VerifiedAttachmentRetirement};
 pub use token::{AttachmentToken, VerifiedAttachmentToken};

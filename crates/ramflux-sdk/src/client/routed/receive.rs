@@ -5,10 +5,9 @@
 use super::committed::Committed;
 use super::{
     GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionAccess, Kind, MessageMetadata,
-    Opened, RamfluxClient, Routing, SdkError, SdkGroupSenderKeyDistribution,
-    SdkGroupSenderKeyDistributionEnvelope, associated_data_from_outer, decode, invalid,
+    Opened, RamfluxClient, Routing, SdkError, associated_data_from_outer, decode, invalid,
 };
-use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_delivery};
+use crate::client::dm::franking_report_metadata_for_delivery;
 use crate::client::identity_authority::HeadUse;
 
 pub(crate) struct Delivery {
@@ -35,19 +34,14 @@ struct Finish {
     opened: Opened,
     body: zeroize::Zeroizing<Vec<u8>>,
     plaintext: Option<Vec<u8>>,
-    refs: Vec<crate::dm::SdkDmAttachmentRef>,
-    import: bool,
     background: bool,
-    consume_erased: bool,
 }
 
 struct PreparedGroupControls {
-    legacy: Option<(ramflux_protocol::GroupEvent, String)>,
     shared: Option<crate::client::shared_group::PreparedSharedGroup>,
 }
 
 struct ApplyOpts {
-    attachments: bool,
     prepared: Option<Result<super::PreparedInbound, SdkError>>,
 }
 
@@ -87,53 +81,6 @@ pub(crate) enum JoinedW1<'a> {
 }
 
 impl RamfluxClient {
-    fn prepare_routed_surface_projection(
-        &self,
-        opened: &mut Opened,
-        entry: &GatewayInboxEntry,
-        body: &[u8],
-    ) -> Result<(), SdkError> {
-        // Only an authenticated carrier may select the reserved logical surface projection.
-        // The pair packet and transport receipt retain their per-envelope identities.
-        if opened.routing.kind == Kind::Direct
-            && let Ok(Some(carrier)) = crate::client::surface::Carrier::decode(body)
-            && carrier.conversation_id == opened.routing.conversation_id
-            && self
-                .verify_surface_carrier(
-                    &carrier,
-                    &entry.envelope.source_principal_id,
-                    &entry.envelope.source_device_id,
-                )
-                .is_ok()
-        {
-            opened.routing.message_id = Self::surface_timeline_id(&carrier)?;
-        }
-        Ok(())
-    }
-    async fn import_routed_own_history(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        entry: &GatewayInboxEntry,
-        opened: &Opened,
-        body: &[u8],
-    ) -> Result<(), SdkError> {
-        if opened.routing.kind == Kind::Control
-            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(body)
-            && value["schema"] == "ramflux.sdk.own_device_sync.v1"
-        {
-            let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
-                ramflux_protocol::parse_i_json(body)?;
-            if sync.source_device_id != entry.envelope.source_device_id
-                || sync.target_device_id != opened.local_device.device_id()
-            {
-                return Err(invalid("own-device history transport scope mismatch"));
-            }
-            let expected = self.own_account_anchor()?;
-            self.import_own_device_sync(engine, pool, &expected, &sync, None).await?;
-        }
-        Ok(())
-    }
     async fn prepare_contact_request_manifest(
         &self,
         config: &crate::GatewaySessionConfig,
@@ -192,14 +139,12 @@ impl RamfluxClient {
             .await?;
         }
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
-        let generated_id = if crate::client::target_selection::schema_v1_selected() {
+        let generated_id = {
             use prost::Message as _;
             ramflux_protocol::message::Inner::decode(opened.body.as_slice())
                 .ok()
                 .and_then(|inner| inner.identity)
                 .map(|identity| ramflux_protocol::encode_base64url(identity.id))
-        } else {
-            None
         };
         if let Some(id) = generated_id {
             if opened.routing.message_id != id {
@@ -219,7 +164,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Delivery>, SdkError> {
-        super::validate_routed_ciphertext(entry)?;
+        self.validate_routed_receipt_or_ciphertext(entry)?;
         let Some((_, payload_hash)) = self.routed_seen_marker(entry)? else { return Ok(None) };
         if payload_hash != entry.envelope.payload_hash {
             return Err(SdkError::ReplayMismatch);
@@ -261,16 +206,15 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
-        attachments: bool,
     ) -> Result<Delivery, SdkError> {
         let apply = self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
-            ApplyOpts { attachments, prepared: None },
-            Self::legacy_persist,
+            ApplyOpts { prepared: None },
+            Self::standalone_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
+        // The receive state machine must stay off caller stacks in every feature set.
         let apply = Box::pin(apply);
         apply.await
     }
@@ -286,10 +230,9 @@ impl RamfluxClient {
             engine,
             pool,
             entry,
-            ApplyOpts { attachments: false, prepared: Some(prepared) },
-            Self::legacy_persist,
+            ApplyOpts { prepared: Some(prepared) },
+            Self::standalone_persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
         apply.await
     }
@@ -307,22 +250,29 @@ impl RamfluxClient {
             engine,
             pool,
             entry,
-            ApplyOpts { attachments: false, prepared },
+            ApplyOpts { prepared },
             persist,
         );
-        #[cfg(feature = "itest-rfd-fault")]
         let apply = Box::pin(apply);
         apply.await
     }
 
-    fn legacy_persist(
+    #[cfg(test)]
+    pub(crate) fn persist_routed_projection_for_fixture(
+        &self,
+        write: JoinedW1<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+        self.standalone_persist(write)
+    }
+
+    fn standalone_persist(
         &self,
         write: JoinedW1<'_>,
     ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
         match write {
             JoinedW1::Project(ctx) => self.commit_routed_projection(ctx),
             JoinedW1::Cover | JoinedW1::ContactBootstrap { .. } => {
-                Err(invalid("legacy persist requires a projection commit"))
+                Err(invalid("standalone receive requires a projection commit"))
             }
         }
     }
@@ -365,73 +315,40 @@ impl RamfluxClient {
         }))
     }
 
-    #[allow(clippy::too_many_arguments, reason = "mirrors the live own-history confirm path")]
-    async fn confirm_or_refuse_own_history<const JOINING: bool>(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        entry: &GatewayInboxEntry,
-        opened: &Opened,
-        body: &[u8],
-        native_prepared: bool,
-        history: Option<crate::client::own_device_sync::receive_job::HistoryCompletion>,
-    ) -> Result<(), SdkError> {
-        let local = opened.local_device.device_id();
-        if native_prepared {
-            if let Some(sync) =
-                Self::routed_own_history_envelope(entry, &opened.routing, body, local)?
-            {
-                self.confirm_prepared_own_history(&sync, history.as_ref())?;
-            }
-            return Ok(());
-        }
-        if JOINING {
-            if Self::routed_own_history_envelope(entry, &opened.routing, body, local)?.is_some() {
-                return Err(invalid("own-device history import refused on an activated ledger"));
-            }
-            return Ok(());
-        }
-        self.import_routed_own_history(engine, pool, entry, opened, body).await
-    }
-
     async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool, const JOINING: bool>(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
+        _pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         opts: ApplyOpts,
         persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
+        self.require_native_pair_device_not_revoked()?;
         #[cfg(feature = "itest-rfd-fault")]
         let fault_entry = crate::itest_rfd_fault::tamper_received_binding(entry)?;
         #[cfg(feature = "itest-rfd-fault")]
         let entry = fault_entry.as_deref().unwrap_or(entry);
         let consume_erased = CONSUME_ERASED;
-        let ApplyOpts { attachments, prepared } = opts;
+        let ApplyOpts { prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
         }
-        let mut prepared = prepared.transpose()?;
-        if decode(&entry.envelope)?.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
+        let prepared = prepared.transpose()?;
+        if prepared.as_ref().is_some_and(|value| value.candidate.is_some())
+            || self.contact_bootstrap_required(entry)?
+        {
             return self
                 .apply_contact_request_for::<JOINING>(engine, entry, prepared, persist)
                 .await;
         }
-        let history = prepared.as_mut().and_then(|prepared| prepared.history.take());
         let (native_prepared, directory) =
             self.prepare_routed_authority(engine, entry, prepared).await?;
         let commit = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
             return self.joined_cover::<JOINING>(persist, delivery);
         }
-        let mut opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
-        let (body, refs) = if opened.routing.attachments {
-            let (body, refs) = decode_dm_attachment_body(&opened.body)?;
-            (zeroize::Zeroizing::new(body), refs)
-        } else {
-            (opened.body.clone(), Vec::new())
-        };
-        self.prepare_routed_surface_projection(&mut opened, entry, &body)?;
+        let opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
+        let body = opened.body.clone();
         let envelope = decode(&entry.envelope)?;
         let aad = associated_data_from_outer(
             &entry.envelope,
@@ -439,18 +356,7 @@ impl RamfluxClient {
             opened.local_device.device_id(),
             &opened.bundle_hash,
         )?;
-        self.confirm_or_refuse_own_history::<JOINING>(
-            engine,
-            pool,
-            entry,
-            &opened,
-            &body,
-            native_prepared,
-            history,
-        )
-        .await?;
         let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
-        let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let held = opened.routing.kind == Kind::Direct
             && self.pending_contact_root(source.root_commitment())?
@@ -458,23 +364,22 @@ impl RamfluxClient {
                 source.root_commitment(),
                 &entry.envelope.source_principal_id,
             )?;
-        let (consumed_slots, references) =
-            self.routed_attachment_refs(&mut opened, &refs, accepted);
+        let consumed_slots = Vec::<crate::SdkObjectKeySlot>::new();
         let groups = self
             .prepare_routed_group_controls(engine, &opened, entry, &body, directory.as_ref())
             .await?;
-        let (plaintext, admitted) = persist(
+        let (plaintext, _) = persist(
             self,
             JoinedW1::Project(Commit {
                 opened: &opened,
                 entry,
                 body: &body,
                 metadata: metadata.as_ref(),
-                membership: groups.legacy.as_ref(),
+                membership: None,
                 shared_group: groups.shared.as_ref(),
                 local_target: Some(&engine.config().target_delivery_id),
                 slots: &consumed_slots,
-                references,
+                references: Vec::new(),
                 receipt: &commit,
                 consume_erased,
                 contact_held: held,
@@ -484,24 +389,14 @@ impl RamfluxClient {
         if JOINING {
             self.finish_pair_retirement()?;
         }
-        let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
-        let import = attachments && opened.routing.kind == Kind::Direct && accepted && !held;
         let background = native_prepared;
-        self.finish_routed_receive(
-            engine,
-            pool,
-            entry,
-            Finish { opened, body, plaintext, refs, import, background, consume_erased },
-        )
-        .await
+        self.finish_routed_receive(engine, entry, Finish { opened, body, plaintext, background })
+            .await
     }
 
     // Both persist callbacks complete their outer writer before this hook. Volatile
     // changes must not survive a failed SQLite commit.
     fn finish_routed_volatile(&self, opened: &Opened, body: &[u8], projected: bool) {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return;
-        }
         self.typing_sender.borrow_mut().received(opened.remote_device.storage_key());
         if projected
             && Self::decode_generated_inner(body).is_ok_and(|(_, content)| {
@@ -515,48 +410,19 @@ impl RamfluxClient {
         }
     }
 
-    fn routed_attachment_refs<'a>(
-        &self,
-        opened: &mut Opened,
-        refs: &'a [crate::dm::SdkDmAttachmentRef],
-        accepted: bool,
-    ) -> (
-        Vec<crate::SdkObjectKeySlot>,
-        Vec<(
-            &'a crate::dm::SdkDmAttachmentRef,
-            Option<crate::client::object::DeferredObjectKeySlot>,
-        )>,
-    ) {
-        let mut consumed_slots = Vec::new();
-        let mut references = Vec::new();
-        for attachment in refs.iter().filter(|_| accepted) {
-            let prepared = if attachment.key_slot.version == 2 {
-                self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
-            } else {
-                self.decrypt_object_key_slot(&attachment.key_slot).ok()
-            };
-            if prepared.is_some() && attachment.key_slot.version == 2 {
-                consumed_slots.push(attachment.key_slot.clone());
-            }
-            references.push((attachment, prepared));
-        }
-        (consumed_slots, references)
-    }
-
     async fn finish_routed_receive(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         finish: Finish,
     ) -> Result<Delivery, SdkError> {
-        let Finish { opened, body, plaintext, refs, import, background, consume_erased } = finish;
+        let Finish { opened, body, plaintext, background } = finish;
         // Durable pair-secret retirement runs at the end of `commit_routed_projection` /
         // `commit_contact_request_bootstrap` after that writer transaction commits (a WAL
         // checkpoint cannot run while the transaction is open). After commit, `voice_calls`,
         // `voice_transition`, and `object_store.tombstone` are RAM-only (rebuilt on load /
         // session). The call refresh (`refresh_call_control` -> `retire_call_without_keys`)
-        // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply, attachment import) is P17 / P16;
+        // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply) is P17;
         // the seen early-return stays for those.
         let pair_reply = if background {
             match self.prepare_received_pair_reply(engine.config(), &opened, &body) {
@@ -570,11 +436,6 @@ impl RamfluxClient {
             self.reply_pair_reset(engine, &opened, &body).await;
             None
         };
-        let imported = if import {
-            self.import_accepted_attachments(engine, pool, &refs, consume_erased).await?
-        } else {
-            Vec::new()
-        };
         self.refresh_routed_control_cache(&opened, &body)?;
         let plaintext = plaintext.map(|plaintext| {
             let plaintext = zeroize::Zeroizing::new(plaintext);
@@ -584,7 +445,7 @@ impl RamfluxClient {
                 message_id: opened.routing.message_id.clone(),
                 sender_id: entry.envelope.source_principal_id.clone(),
                 plaintext_body_base64: ramflux_protocol::encode_base64url(&plaintext),
-                attachments: imported,
+                attachments: Vec::new(),
             }
         });
         #[cfg(feature = "itest-rfd-fault")]
@@ -608,33 +469,7 @@ impl RamfluxClient {
             prepared.map(|value| Ok(value.manifest)),
         )
         .await?;
-        self.upgrade_replay_identity(
-            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
-        )?;
         Ok((native_prepared, directory))
-    }
-
-    async fn import_accepted_attachments(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        refs: &[crate::dm::SdkDmAttachmentRef],
-        consume_erased: bool,
-    ) -> Result<Vec<crate::dm::SdkDmAttachmentImportResult>, SdkError> {
-        let mut imported = Vec::new();
-        for attachment in refs {
-            #[cfg(test)]
-            super::tests::selector_reopen::import_entry(self, attachment)?;
-            match self
-                .import_dm_attachment_from_relay_via_gateway(engine, pool, attachment, None)
-                .await
-            {
-                Ok(result) => imported.push(result),
-                Err(SdkError::ObjectErased) if consume_erased => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(imported)
     }
 
     fn routed_committed_content(
@@ -751,69 +586,10 @@ impl RamfluxClient {
             }
             _ => self.prepare_shared_group_receive(engine, opened, entry, body).await?,
         };
-        let generated_control = shared.is_none()
-            && (super::generated_receive::is_group_key_control(body)
-                || self.authorize_generated_group_control_body(entry, &opened.routing, body)?);
-        let legacy = if opened.routing.kind == Kind::GroupControl
-            && shared.is_none()
-            && !generated_control
-        {
-            if let Some(super::ReceiveGroupDirectory::Legacy(evidence)) = directory {
-                self.prepare_legacy_group_with_directory(engine.config(), opened, entry, evidence)?
-            } else {
-                self.prepare_routed_group_control(engine, opened, entry).await?
-            }
-        } else {
-            None
-        };
-        Ok(PreparedGroupControls { legacy, shared })
-    }
-    async fn prepare_routed_group_control(
-        &self,
-        engine: &impl GatewaySessionAccess,
-        opened: &Opened,
-        entry: &GatewayInboxEntry,
-    ) -> Result<Option<(ramflux_protocol::GroupEvent, String)>, SdkError> {
-        if let Some(group) = opened.routing.group_id.as_deref()
-            && self.group_state(group).is_ok()
-        {
-            self.require_routed_group_member(group, entry)?;
+        if shared.is_none() && opened.routing.kind == Kind::GroupControl {
+            self.authorize_generated_group_control_body(entry, &opened.routing, body)?;
         }
-        if let Ok(control) =
-            serde_json::from_slice::<crate::group::SdkGroupControlEnvelope>(&opened.body)
-        {
-            let value = serde_json::to_value(&control.event.body)?;
-            if value.get("group_id").and_then(serde_json::Value::as_str)
-                != opened.routing.group_id.as_deref()
-            {
-                return Err(invalid("group control routing mismatch"));
-            }
-            self.prepare_group_join_identity(engine.config(), &control.event).await?;
-            return Ok(None);
-        }
-        let wrapper: SdkGroupSenderKeyDistributionEnvelope = serde_json::from_slice(&opened.body)?;
-        let bytes = ramflux_protocol::decode_base64url(&wrapper.distribution_base64)
-            .map_err(|_| invalid("invalid group distribution"))?;
-        let distribution: SdkGroupSenderKeyDistribution = serde_json::from_slice(&bytes)?;
-        if Some(distribution.group_id.as_str()) != opened.routing.group_id.as_deref() {
-            return Err(invalid("group distribution routing mismatch"));
-        }
-        let membership = self
-            .verify_sender_key_membership_bootstrap(
-                engine.config(),
-                &engine.config().device_id,
-                &wrapper,
-            )
-            .await?;
-        if let Some((event, _)) = &membership {
-            let body = serde_json::to_value(&event.body)?;
-            if body.get("group_id").and_then(serde_json::Value::as_str)
-                != opened.routing.group_id.as_deref()
-            {
-                return Err(invalid("group membership routing mismatch"));
-            }
-        }
-        Ok(membership)
+        Ok(PreparedGroupControls { shared })
     }
 
     pub(super) fn commit_contact_request_bootstrap(
@@ -916,9 +692,6 @@ impl RamfluxClient {
         local: &str,
         code: &str,
     ) -> Result<(), SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(());
-        }
         if matches!(code, "authentication_failed" | "schema_invalid" | "routing_rejected") {
             return match self.commit_authenticated_refused_transport(entry, local) {
                 Err(error @ SdkError::Storage(_)) => Err(error),
@@ -942,7 +715,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
+        if self.friend_rejection_reason(opened.remote_device.root_commitment())?.is_none()
             || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
         {
             self.commit_bootstrap_sequence(
@@ -958,11 +731,10 @@ impl RamfluxClient {
                 &opened.session,
             )?;
             let reset = opened.routing.kind == Kind::Control
-                && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
-                    matches!(
-                        value["type"].as_str(),
-                        Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-                    )
+                && Self::decode_generated_inner(body).is_ok_and(|(_, content)| {
+                    matches!(content.value,
+                        Some(ramflux_protocol::message::content::Value::Control(control))
+                            if matches!(control.operation, 1 | 2))
                 });
             self.confirm_pair(
                 &opened.local_device,
@@ -1078,8 +850,6 @@ impl RamfluxClient {
                     },
                     prepared,
                 );
-                #[cfg(test)]
-                super::tests::selector_reopen::registered(&registration);
                 match registration {
                     Ok(()) => admitted.push(index),
                     Err(SdkError::ObjectErased) if consume_erased => {}
@@ -1166,9 +936,8 @@ impl RamfluxClient {
                 opened.routing.message_id
             ))?
             .unwrap_or(false);
-        let self_sync = crate::client::target_selection::schema_v1_selected()
-            && ramflux_protocol::message::validation::scan_inner(body)
-                .is_ok_and(|scanned| scanned.kind == 12);
+        let self_sync = ramflux_protocol::message::validation::scan_inner(body)
+            .is_ok_and(|scanned| scanned.kind == 12);
         if call
             || delete_control
             || erased_reference
@@ -1210,9 +979,8 @@ fn deferred_generated_group<'a>(
     body: &[u8],
 ) -> Option<&'a crate::client::shared_group::PreparedSharedGroup> {
     shared.filter(|_| {
-        crate::client::target_selection::schema_v1_selected()
-            && ramflux_protocol::message::validation::scan_inner(body)
-                .is_ok_and(|scanned| scanned.kind == 8)
+        ramflux_protocol::message::validation::scan_inner(body)
+            .is_ok_and(|scanned| scanned.kind == 8)
     })
 }
 
@@ -1233,13 +1001,6 @@ fn routed_message_metadata(
     } else {
         Ok(None)
     }
-}
-
-fn admitted_refs(
-    refs: &[crate::dm::SdkDmAttachmentRef],
-    admitted: Vec<usize>,
-) -> Vec<crate::dm::SdkDmAttachmentRef> {
-    admitted.into_iter().map(|index| refs[index].clone()).collect()
 }
 
 #[cfg(test)]

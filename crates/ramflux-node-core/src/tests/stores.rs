@@ -22,11 +22,11 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
     router.upsert_session(session("target_live", SessionLifecycle::Live, 1, 1))?;
     router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_pending", "target_offline", DeliveryClass::OpaqueEvent),
+        envelope("env_pending", "target_offline", DeliveryClass::Message),
     );
     router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_acked", "target_ack", DeliveryClass::OpaqueEvent),
+        envelope("env_acked", "target_ack", DeliveryClass::Message),
     );
     router.apply_ack(&sequence_ack("env_acked", 1))?;
     store.bootstrap_router(&router)?;
@@ -39,7 +39,7 @@ fn router_redb_store_restores_router_snapshot() -> Result<(), Box<dyn std::error
     assert!(matches!(
         restored.submit_envelope_at_created(
             &source_identity,
-            envelope("env_online", "target_live", DeliveryClass::OpaqueEvent)
+            envelope("env_online", "target_live", DeliveryClass::Message)
         ),
         RouterSubmitOutcome::Online(_)
     ));
@@ -59,7 +59,7 @@ fn router_redb_incremental_replay_survives_restart() -> Result<(), Box<dyn std::
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
     let submitted =
-        current_envelope("env_replay_incremental", "target_replay", DeliveryClass::OpaqueEvent);
+        current_envelope("env_replay_incremental", "target_replay", DeliveryClass::Message);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
     let accepted =
@@ -92,11 +92,8 @@ fn router_wal_submission_restores_replay_and_inbox_atomically()
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
-    let submitted = current_envelope(
-        "env_router_wal_submission",
-        "target_router_wal",
-        DeliveryClass::OpaqueEvent,
-    );
+    let submitted =
+        current_envelope("env_router_wal_submission", "target_router_wal", DeliveryClass::Message);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
     let accepted =
@@ -159,7 +156,7 @@ fn router_wal_async_submission_restores_replay_and_inbox_atomically()
     let submitted = current_envelope(
         "env_router_wal_async_submission",
         "target_router_wal_async",
-        DeliveryClass::OpaqueEvent,
+        DeliveryClass::Message,
     );
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
@@ -202,11 +199,8 @@ fn router_wal_submission_respects_redb_ack_cursor_on_restore()
     let store = RouterRedbStore::open_with_wal(&path, &wal_root)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
-    let submitted = current_envelope(
-        "env_router_wal_acked",
-        "target_router_wal_ack",
-        DeliveryClass::OpaqueEvent,
-    );
+    let submitted =
+        current_envelope("env_router_wal_acked", "target_router_wal_ack", DeliveryClass::Message);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
     let accepted =
@@ -240,7 +234,7 @@ fn router_redb_expired_replay_tuple_is_purged_on_load() -> Result<(), Box<dyn st
     let path = temp_store_path("router_redb_expired_replay_tuple_is_purged_on_load")?;
     let store = RouterRedbStore::open(&path)?;
     let mut expired =
-        current_envelope("env_replay_expired_on_disk", "target_replay", DeliveryClass::OpaqueEvent);
+        current_envelope("env_replay_expired_on_disk", "target_replay", DeliveryClass::Message);
     let now = i64::try_from(now_unix_seconds())?;
     expired.ttl = 60;
     expired.created_at = now - 120;
@@ -282,7 +276,7 @@ fn router_redb_fanout_replay_survives_restart() -> Result<(), Box<dyn std::error
     )?)?;
     store.record_identity_registry(&router.mvp1_identities_snapshot())?;
     let fanout_envelope = signed_registered_envelope(
-        current_envelope("env_fanout_replay", "target_unused", DeliveryClass::SelfDeviceControl),
+        current_envelope("env_fanout_replay", "target_unused", DeliveryClass::Message),
         "principal_fanout",
         "device_source",
         601,
@@ -358,11 +352,8 @@ fn router_redb_incremental_ack_survives_restart_without_duplicate_delivery()
     let store = RouterRedbStore::open(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
-    let submitted = current_envelope(
-        "env_ack_incremental",
-        "target_ack_incremental",
-        DeliveryClass::OpaqueEvent,
-    );
+    let submitted =
+        current_envelope("env_ack_incremental", "target_ack_incremental", DeliveryClass::Message);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
     let accepted =
@@ -410,7 +401,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
     )?;
 
     let submitted =
-        current_envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::OpaqueEvent);
+        current_envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::Message);
     let replay_key = envelope_replay_tuple_key(&source_identity, &submitted);
     let replay_expires_at = submitted.created_at + i64::from(submitted.ttl);
     let queued = match router.submit_envelope_at(
@@ -423,7 +414,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
     };
     store.record_submission_increment(&replay_key, replay_expires_at, Some(&queued.entry))?;
 
-    let acked = current_envelope("env_keyed_ack", "target_ack_keyed", DeliveryClass::OpaqueEvent);
+    let acked = current_envelope("env_keyed_ack", "target_ack_keyed", DeliveryClass::Message);
     let acked_key = envelope_replay_tuple_key(&source_identity, &acked);
     let acked_expires_at = acked.created_at + i64::from(acked.ttl);
     let acked_entry =
@@ -466,7 +457,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
             envelope(
                 "env_online_keyed_after_restart",
                 "target_online_keyed",
-                DeliveryClass::OpaqueEvent,
+                DeliveryClass::Message,
             )
         ),
         RouterSubmitOutcome::Online(_)
@@ -479,7 +470,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
     assert!(matches!(
         restored.submit_envelope_at_created(
             &source_identity,
-            envelope("env_after_fed_deactivate", "target_fed_keyed", DeliveryClass::OpaqueEvent,)
+            envelope("env_after_fed_deactivate", "target_fed_keyed", DeliveryClass::Message,)
         ),
         RouterSubmitOutcome::RejectedDeactivated { .. }
     ));
@@ -492,7 +483,7 @@ fn router_redb_per_key_state_round_trip_restores_router() -> Result<(), Box<dyn 
     assert!(matches!(
         restored.submit_envelope_at(
             &source_identity,
-            envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::OpaqueEvent),
+            envelope("env_keyed_pending", "target_pending_keyed", DeliveryClass::Message),
             1_760_000_003,
         ),
         RouterSubmitOutcome::RejectedSecurity { .. }
@@ -1280,7 +1271,7 @@ fn object_relay_tombstone_rejects_cross_owner() -> Result<(), Box<dyn std::error
         signed_at: now + 1,
         expires_at: now + OBJECT_RELAY_TOMBSTONE_DEFAULT_TTL_SECONDS,
         owner_signing_key_id: DEVICE_B_OWNER_KEY_ID.into(),
-        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(DEVICE_B_OWNER_SEED),
+        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(&DEVICE_B_OWNER_SEED),
     };
     let result = state.apply_owner_session_tombstone(tombstone, now + 1);
     assert!(
@@ -2370,7 +2361,7 @@ fn relay_candidate_for_owner(
         chunk_cipher_hash: object_relay_chunk_cipher_hash("manifest_relay_1", 0, &encrypted_chunk),
         encrypted_chunk,
         owner_signing_key_id: owner_signing_key_id.into(),
-        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(owner_seed),
+        owner_public_key: ramflux_crypto::public_key_base64url_from_seed(&owner_seed),
         stored_at: now,
         expires_at: now
             .checked_add(OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS)

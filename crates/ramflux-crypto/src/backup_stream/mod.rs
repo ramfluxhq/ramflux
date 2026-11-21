@@ -116,7 +116,7 @@ pub fn encrypt_backup_stream(
 ) -> Result<BackupStreamSummary, BackupStreamError> {
     let header = Header::fresh(context)?;
     header.validate()?;
-    let wrapping_key = crate::derive_recovery_secret(passphrase, &header.salt)?;
+    let wrapping_key = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
     encrypt_with_key(input, output, &header, wrapping_key.expose())
 }
 
@@ -163,7 +163,7 @@ impl BackupStreamDecoder {
     /// Returns framing, key derivation or authentication errors.
     pub fn open(input: &mut impl Read, passphrase: &[u8]) -> Result<Self, BackupStreamError> {
         let (header, mut authenticated, wrapped) = read_header(input)?;
-        let wrapping = crate::derive_recovery_secret(passphrase, &header.salt)?;
+        let wrapping = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
         let cipher = XChaCha20Poly1305::new(wrapping.expose().into());
         let bytes = Zeroizing::new(
             cipher
@@ -215,7 +215,7 @@ pub fn decrypt_backup_stream(
     passphrase: &[u8],
 ) -> Result<BackupStreamSummary, BackupStreamError> {
     let (header, authenticated, wrapped) = read_header(input)?;
-    let wrapping_key = crate::derive_recovery_secret(passphrase, &header.salt)?;
+    let wrapping_key = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
     decrypt_with_key(input, output, header, authenticated, &wrapped, wrapping_key.expose())
 }
 

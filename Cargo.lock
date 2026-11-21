@@ -207,6 +207,9 @@ name = "arrayvec"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "asn1-rs"
@@ -362,15 +365,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "atomic-polyfill"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
-dependencies = [
- "critical-section",
 ]
 
 [[package]]
@@ -546,6 +540,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -1135,12 +1130,6 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
-
-[[package]]
-name = "critical-section"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-channel"
@@ -1927,15 +1916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash32"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1973,20 +1953,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "heapless"
-version = "0.7.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
-dependencies = [
- "atomic-polyfill",
- "hash32",
- "rustc_version",
- "serde",
- "spin",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -3255,7 +3221,6 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
- "heapless",
  "serde",
 ]
 
@@ -3503,7 +3468,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramflux-agent-host"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "clap",
@@ -3531,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-card"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3550,11 +3515,11 @@ dependencies = [
 
 [[package]]
 name = "ramflux-client-model"
-version = "0.1.0"
+version = "0.2.3"
 
 [[package]]
 name = "ramflux-core"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3563,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-crypto"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "aes-gcm 0.11.1",
@@ -3597,16 +3562,20 @@ dependencies = [
 
 [[package]]
 name = "ramflux-federation"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "compio",
+ "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
+ "ramflux-relay",
  "ramflux-sdk",
+ "ramflux-storage",
  "ramflux-test-support",
  "ramflux-transport",
  "redb",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -3623,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-gateway"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "compio",
@@ -3652,7 +3621,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-message-schema"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "pbjson-build",
  "prettyplease",
@@ -3665,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-node-core"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -3701,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-notify"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -3736,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-protocol"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "base64",
  "blake3",
@@ -3767,12 +3736,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ramflux-prx-client"
+version = "0.2.3"
+dependencies = [
+ "ramflux-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "ramflux-relay"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "dhat",
  "ed25519-dalek",
+ "getrandom 0.3.4",
  "libc",
  "quinn",
  "ramflux-crypto",
@@ -3791,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-retention"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "ramflux-node-core",
  "ramflux-test-support",
@@ -3807,16 +3791,19 @@ dependencies = [
 
 [[package]]
 name = "ramflux-rf"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
+ "base64",
  "clap",
  "dbus-secret-service",
  "ed25519-dalek",
  "keyring",
+ "ramflux-core",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",
  "ramflux-sdk",
+ "ramflux-storage",
  "ramflux-sync",
  "ramflux-test-support",
  "rustix",
@@ -3832,7 +3819,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-router"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "compio",
@@ -3853,14 +3840,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "ramflux-sdk"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "aes-gcm 0.10.3",
  "blake3",
+ "bytes",
  "cbindgen",
  "chacha20 0.9.1",
  "chacha20poly1305",
@@ -3873,6 +3862,7 @@ dependencies = [
  "mime",
  "poly1305",
  "prost",
+ "prost-reflect",
  "quinn",
  "ramflux-card",
  "ramflux-client-model",
@@ -3893,19 +3883,22 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-subscriber",
+ "unicode-normalization 0.1.26",
  "windows-sys 0.61.2",
  "zeroize",
 ]
 
 [[package]]
 name = "ramflux-signaling"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "ramflux-node-core",
@@ -3920,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-storage"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "caseless",
@@ -3934,11 +3927,14 @@ dependencies = [
  "ramflux-protocol",
  "ramflux-test-support",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "subtle",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "unicode-normalization 0.1.24",
  "unicode-segmentation 1.12.0",
@@ -3947,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sync"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "chacha20poly1305",
  "ramflux-core",
@@ -3961,14 +3957,14 @@ dependencies = [
 
 [[package]]
 name = "ramflux-test-support"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "ramflux-transport"
-version = "0.1.0"
+version = "0.2.3"
 dependencies = [
  "arc-swap",
  "blake3",
@@ -4000,6 +3996,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x509-parser 0.17.0",
+ "zeroize",
 ]
 
 [[package]]

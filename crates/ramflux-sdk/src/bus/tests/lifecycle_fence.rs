@@ -21,12 +21,10 @@ use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{ReceiveExpectation, ReceiveMigrate, ReceiveStage};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(super) const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
-const CONVERSATION: &str = "healthy";
 /// Inner real-time watchdog budget. QA default-thread whole-module wall time
 /// of `held()`+`ack_fence()` was 20.8-25.0 s over 5 runs (worst 24.976 s);
 /// 45 s is ~1.8x that worst case and stays below the CI nextest kill point
@@ -39,20 +37,29 @@ pub(super) fn limits() -> RuntimeTimeouts {
     RuntimeTimeouts::held_for_test()
 }
 
+/// Installs the scripted gateway config on a reopened account and binds its pairing admission
+/// to that account's current database. The config was cloned from the account that opened the
+/// fixture; its admission reader points at a database that is closed by now, and a closed
+/// reader makes the custody connection refuse with `PublicationPending`.
+pub(super) fn bind_config(
+    account: &mut LocalBusAccountState,
+    config: &GatewaySessionConfig,
+) -> Result<(), SdkError> {
+    account.gateway_config = config.clone();
+    account.gateway_config.pairing_admission =
+        Some(Arc::new(account.client.account_db()?.pairing_admission_reader()));
+    account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
+    Ok(())
+}
+
 pub(super) fn open_account(
     root: &Path,
     config: &GatewaySessionConfig,
     commitment: &str,
 ) -> Result<LocalBusAccountState, SdkError> {
-    let mut account = crate::bus::runtime_tests::account(
-        &root.join("source"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
+    let mut account = super::fixture::open_source(&root.join("source"), config)?;
     account.principal_commitment = commitment.to_owned();
-    account.gateway_config = config.clone();
-    account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
+    bind_config(&mut account, config)?;
     account.engine = None;
     crate::bus::dispatch::object::hydrate_local_object_state(&mut account)?;
     Ok(account)
@@ -79,10 +86,7 @@ pub(super) fn runtime_for(
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {
             account_index: None,
-            config: LocalBusConfig {
-                itest_legacy_accounts: true,
-                ..LocalBusConfig::new(root.join("bus.sock"), root.join("source"))
-            },
+            config: LocalBusConfig::new(root.join("bus.sock"), root.join("source")),
             nodes: crate::node::NodeStore::default(),
             accounts: BTreeMap::from([("sender".into(), account)]),
             active_account_id: None,
@@ -104,6 +108,7 @@ pub(super) fn runtime_for(
         connection_work,
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
+        pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
         receive_gate_hook: None,
         courier_events: None,
     }
@@ -116,7 +121,10 @@ pub(super) fn account_of(
 }
 
 fn messages(runtime: &super::super::AccountRuntime) -> Result<usize, SdkError> {
-    Ok(account_of(runtime)?.client.direct_messages(CONVERSATION)?.len())
+    Ok(account_of(runtime)?
+        .client
+        .direct_messages(&super::fixture::direct_conversation(&account_of(runtime)?.client)?)?
+        .len())
 }
 
 pub(super) fn acked(
@@ -306,8 +314,10 @@ async fn held() -> Case {
 
     // Real `account.unlock` loads the account from disk; rebind the loopback Push engine.
     let (unlock_reply, unlock_response) = oneshot::channel();
-    let mut unlock =
-        command("account.unlock", serde_json::json!({"passphrase":"actor-test-secret"}));
+    let mut unlock = command(
+        "account.unlock",
+        serde_json::json!({"passphrase":"native fixture data passphrase"}),
+    );
     unlock.reply = Some(unlock_reply);
     runtime.apply(unlock).await?;
     unlock_response.await??;
@@ -315,8 +325,7 @@ async fn held() -> Case {
     while runtime.connection_work.try_recv().is_ok() {}
     {
         let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
-        account.gateway_config = config.clone();
-        account.target_delivery_id = config.target_delivery_id.clone();
+        bind_config(account, &config)?;
     }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);

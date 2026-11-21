@@ -121,6 +121,9 @@ impl AttachmentOperation {
             length: c.u64()?,
             body_digest: c.array()?,
         };
+        if !matches!(op.op, 1 | 2 | 3 | 8) {
+            return Err(FormatError("operation kind"));
+        }
         if !c.0.is_empty() || op.canonical_bytes()? != bytes {
             return Err(FormatError("operation framing"));
         }

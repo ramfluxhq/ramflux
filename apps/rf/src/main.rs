@@ -17,6 +17,14 @@ pub(crate) const DEFAULT_DATA_ROOT: &str = "/tmp/ramflux/rfd-data";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RfError {
+    #[cfg(unix)]
+    #[error("Pairing command did not complete.")]
+    PairingExit { code: i32 },
+    #[cfg(not(unix))]
+    #[error("{command} is unsupported on this platform.")]
+    UnsupportedPlatform { command: &'static str },
+    #[error("{code}: {message}")]
+    Refused { code: &'static str, message: String },
     #[error("{0}")]
     Message(String),
     #[error("SDK error: {0}")]
@@ -33,7 +41,13 @@ pub(crate) enum RfError {
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("{error}");
-        std::process::exit(1);
+        std::process::exit(match error {
+            #[cfg(unix)]
+            RfError::PairingExit { code } => code,
+            #[cfg(not(unix))]
+            RfError::UnsupportedPlatform { .. } => 2,
+            _ => 1,
+        });
     }
 }
 
@@ -48,7 +62,12 @@ async fn run() -> Result<(), RfError> {
         Command::Account(command) => handlers::account::handle_account(cli.socket, command).await,
         Command::Contact(command) => handlers::contact::handle_contact(cli.socket, command).await,
         Command::Device(command) => handlers::device::handle_device(cli.socket, command).await,
+        Command::Pairing(command) => handlers::pairing::handle(cli.socket, command).await,
+        Command::Transfer(command) => handlers::pairing::handle_transfer(cli.socket, command).await,
         Command::Dm(command) => handlers::dm::handle_dm(cli.socket, command).await,
+        Command::Conversation(command) => {
+            handlers::conversation_ops::handle(cli.socket, command).await
+        }
         Command::Group(command) => handlers::group::handle_group(cli.socket, command).await,
         Command::Object(command) => handlers::object::handle_object(cli.socket, command).await,
         Command::Call(command) => handlers::call::handle_call(cli.socket, command).await,
@@ -58,6 +77,9 @@ async fn run() -> Result<(), RfError> {
         Command::Keychain(command) => handlers::keychain::handle_keychain(command),
         Command::A2i(command) => handlers::a2i::handle_a2i(cli.socket, command).await,
         Command::Surface(command) => handlers::surface::handle_surface(cli.socket, command).await,
+        Command::Task(command) => handlers::task::handle_task(cli.socket, command).await,
         Command::Admin(command) => handlers::admin::handle_admin(command),
+        Command::Diag(command) => handlers::diag::handle(cli.socket, command).await,
+        Command::Attachment(command) => handlers::attachment::handle(cli.socket, command).await,
     }
 }

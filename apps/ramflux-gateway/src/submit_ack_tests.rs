@@ -299,9 +299,8 @@ async fn serve_connection(
 }
 
 #[test]
-fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committed_sequence()
--> anyhow::Result<()> {
-    let envelope = test_envelope(100)?;
+fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committed_sequence() {
+    let envelope = test_envelope(100);
     let accepted = EnvelopeSubmitResponse {
         migration_refusal: None,
         outcome: "online".into(),
@@ -313,22 +312,33 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
     for outcome in ["online", "offline_queued"] {
         let mut response = accepted.clone();
         response.outcome = outcome.into();
-        assert!(super::committed_submit_entry(&response, envelope.clone()).is_ok());
+        assert!(
+            super::committed_submit_entry(&response, envelope.clone()).is_ok(),
+            "accepted matching submission must confirm"
+        );
     }
     for seq in [None, Some(0)] {
         let mut response = accepted.clone();
         response.inbox_seq = seq;
-        assert!(super::committed_submit_entry(&response, envelope.clone()).is_err());
+        assert!(
+            super::committed_submit_entry(&response, envelope.clone()).is_err(),
+            "invalid submission outcome or sequence must not confirm"
+        );
     }
     let mut wrong_target = accepted.clone();
     wrong_target.target_delivery_id = "other-target".into();
-    assert!(super::committed_submit_entry(&wrong_target, envelope.clone()).is_err());
+    assert!(
+        super::committed_submit_entry(&wrong_target, envelope.clone()).is_err(),
+        "another target cannot confirm this submission"
+    );
     for outcome in ["rejected_security", "forwarded_home_node_migrated", "unknown"] {
         let mut response = accepted.clone();
         response.outcome = outcome.into();
-        assert!(super::committed_submit_entry(&response, envelope.clone()).is_err());
+        assert!(
+            super::committed_submit_entry(&response, envelope.clone()).is_err(),
+            "invalid submission outcome or sequence must not confirm"
+        );
     }
-    Ok(())
 }
 
 #[tokio::test]
@@ -337,7 +347,7 @@ async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox
     for later in [false, true] {
         let (_fixture_directory_1, context) = super::tests::test_gateway_context()?;
         let runtime = test_runtime()?;
-        let submitted = test_envelope(i64::try_from(ramflux_node_core::now_unix_seconds())?)?;
+        let submitted = test_envelope(i64::try_from(ramflux_node_core::now_unix_seconds())?);
         let mut expected = submitted.clone();
         expected.envelope_id =
             ramflux_node_core::mvp10_fanout_envelope_id(&submitted.envelope_id, "alice-device");
@@ -379,9 +389,8 @@ async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox
     Ok(())
 }
 #[test]
-fn fanout_confirmation_requires_a_positive_committed_sequence_for_an_accepted_delivery()
--> anyhow::Result<()> {
-    let envelope = test_envelope(100)?;
+fn fanout_confirmation_requires_a_positive_committed_sequence_for_an_accepted_delivery() {
+    let envelope = test_envelope(100);
     for sequence in [None, Some(0)] {
         let delivery = ramflux_node_core::GatewayOwnDeviceFanoutDelivery {
             device_id: "alice-device".into(),
@@ -389,9 +398,11 @@ fn fanout_confirmation_requires_a_positive_committed_sequence_for_an_accepted_de
             outcome: "online".into(),
             inbox_seq: sequence,
         };
-        assert!(super::committed_fanout_entry(&delivery, &envelope).is_err());
+        assert!(
+            super::committed_fanout_entry(&delivery, &envelope).is_err(),
+            "uncommitted fanout sequence {sequence:?} cannot confirm"
+        );
     }
-    Ok(())
 }
 
 struct OneSubmit(Option<Vec<u8>>);

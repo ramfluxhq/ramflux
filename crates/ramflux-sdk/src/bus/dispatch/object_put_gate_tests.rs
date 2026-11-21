@@ -68,6 +68,14 @@ async fn offline_cases() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or(SdkError::AccountDbNotUnlocked)?
                 .timeouts
                 .network_wait = Duration::ZERO;
+            if relay {
+                let account =
+                    state.accounts.get_mut(ACCOUNT).ok_or(SdkError::AccountDbNotUnlocked)?;
+                crate::bus::runtime_tests::graft_explicit_native_root(
+                    &mut account.client,
+                    ACCOUNT,
+                )?;
+            }
             let command = request(&mut state, streaming, relay).await?;
             let intent = MutationIntent::new(&command.request)?;
             let result =
@@ -133,6 +141,10 @@ async fn conditional_object_delete_keeps_local_tombstones_offline_and_gates_rela
             .network_wait = Duration::ZERO;
         let put = request(&mut state, false, false).await?;
         Box::pin(crate::bus::mutations::execute(&mut state, ACCOUNT, &put)).await?;
+        if relay {
+            let account = state.accounts.get_mut(ACCOUNT).ok_or(SdkError::AccountDbNotUnlocked)?;
+            crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, ACCOUNT)?;
+        }
         let delete = command(
             "object.delete",
             json!({"object_id":OBJECT_ID,

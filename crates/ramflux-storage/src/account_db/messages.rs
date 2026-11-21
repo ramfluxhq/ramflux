@@ -53,6 +53,30 @@ impl AccountDb {
         self.insert_direct_message_projection(message)
     }
 
+    /// Mark a verified generated author from this account as the owner of its projection.
+    /// # Errors
+    /// Refuses a missing/deleted projection, a foreign account or mismatched generated author.
+    pub fn mark_generated_message_owned(
+        &self,
+        message_id: &str,
+        owner: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<(), StorageError> {
+        let changed = self.connection.execute(
+            "UPDATE direct_message_projection SET is_own=1
+             WHERE message_id=?1 AND deleted=0
+               AND EXISTS(SELECT 1 FROM runtime_account_identity WHERE singleton=1 AND principal_commitment=?2)
+               AND EXISTS(SELECT 1 FROM runtime_actor_state
+                          WHERE state_kind='routed/generated-identity/'||?1
+                            AND json_valid(CAST(state_json AS TEXT))
+                            AND json_extract(CAST(state_json AS TEXT),'$.author.accountAnchor')=?2)",
+            params![message_id, owner.root_commitment()],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn import_direct_message_projection(
@@ -452,5 +476,116 @@ impl AccountDb {
                 })
             },
         )?)
+    }
+
+    /// Remove a live service projection the accepted log no longer contains.
+    ///
+    /// No tombstone is written. A user-deleted row is left in place. The call joins the
+    /// current write so a later failure rolls the replacement back with the group commit.
+    ///
+    /// # Errors
+    /// Returns storage errors, including a row that disappears inside the transaction.
+    pub fn drop_replaced_service_projection(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), StorageError> {
+        self.join_write(|| self.remove_replaced_service_row(conversation_id, message_id))
+    }
+
+    fn remove_replaced_service_row(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), StorageError> {
+        let deleted: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT deleted FROM direct_message_projection WHERE conversation_id=?1 AND message_id=?2",
+                params![conversation_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if deleted != Some(0) {
+            return Ok(());
+        }
+        self.delete_replaced_service_copies(message_id)?;
+        let removed = self.connection.execute(
+            "DELETE FROM direct_message_projection WHERE conversation_id=?1 AND message_id=?2 AND deleted=0",
+            params![conversation_id, message_id],
+        )?;
+        if removed != 1 {
+            return Err(StorageError::MessageNotFound(message_id.to_owned()));
+        }
+        // The event-id body fence stays. A later rewrite of this id is still ReplayMismatch.
+        let identity = format!("routed/generated-identity/{message_id}");
+        self.remove_actor_state(&identity)?;
+        self.connection.execute(
+            "DELETE FROM runtime_journal WHERE source_key=?1",
+            params![format!("generated/receive/{message_id}/{message_id}")],
+        )?;
+        self.connection.execute(
+            "DELETE FROM runtime_outbox WHERE table_name='direct_message_projection' AND json_extract(keys_json,'$.message_id')=?1",
+            params![message_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND json_extract(keys_json,'$.state_kind')=?1",
+            params![identity],
+        )?;
+        Ok(())
+    }
+
+    fn delete_replaced_service_copies(&self, message_id: &str) -> Result<(), StorageError> {
+        if self.table_present("message_footprint")? {
+            self.connection.execute(
+                "DELETE FROM message_footprint WHERE message_id=?1",
+                params![message_id],
+            )?;
+        }
+        if self.table_present("local_search_doc")? {
+            self.connection
+                .execute("DELETE FROM local_search_doc WHERE message_id=?1", params![message_id])?;
+        }
+        Ok(())
+    }
+
+    fn table_present(&self, name: &str) -> Result<bool, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            params![name],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Body hash recorded for a service event id, including one whose row was removed.
+    ///
+    /// # Errors
+    /// Returns a storage error when the fence table cannot be read.
+    pub fn service_body_fence(&self, message_id: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT body_hash FROM group_service_body_fence WHERE message_id=?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record the first body hash for a service event id. A stored hash is never replaced.
+    ///
+    /// # Errors
+    /// Returns a storage error when the fence row cannot be inserted.
+    pub fn record_service_body_fence(
+        &self,
+        message_id: &str,
+        body_hash: &[u8],
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO group_service_body_fence(message_id, body_hash) VALUES(?1, ?2)
+             ON CONFLICT(message_id) DO NOTHING",
+            params![message_id, body_hash],
+        )?;
+        Ok(())
     }
 }

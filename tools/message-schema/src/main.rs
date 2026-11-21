@@ -37,6 +37,8 @@ fn category(name: &str) -> &'static str {
     } else if name.starts_with("Control")
         || name.starts_with("PairReset")
         || name.starts_with("ContactControl")
+        || name.starts_with("ContactSafety")
+        || name.starts_with("ExpectedContact")
         || name.starts_with("GroupControl")
         || name.starts_with("GroupStateControl")
         || name.starts_with("GroupKey")

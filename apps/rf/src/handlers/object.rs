@@ -5,6 +5,8 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 mod list;
+#[path = "object_thumbnail.rs"]
+mod thumbnail;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Result<(), RfError> {
@@ -97,6 +99,8 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             }
             print_json(&response)
         }
+        ObjectAction::Thumbnail(thumbnail) => thumbnail::print(&mut bus, thumbnail).await,
+        ObjectAction::Revoke(revoke) => revoke_object(&mut bus, revoke).await,
         ObjectAction::Delete(delete) => {
             let request = LocalBusObjectDeleteRequest {
                 object_id: delete.object,
@@ -115,6 +119,57 @@ pub(crate) async fn handle_object(socket: PathBuf, command: ObjectCommand) -> Re
             )
         }
     }
+}
+
+async fn revoke_object(bus: &mut LocalBusClient, revoke: ObjectRevoke) -> Result<(), RfError> {
+    if let Some(message) = revoke.message {
+        let response = bus
+            .request(
+                Some(revoke.account),
+                "attachment",
+                "attachment.revoke",
+                serde_json::json!({ "message_id": message }),
+            )
+            .await?;
+        let state = response.get("state").and_then(serde_json::Value::as_str).unwrap_or("");
+        if state == "relay_erased" {
+            print_json(&response)
+        } else if state == "retirement_pending" {
+            // A pending retirement is not success: the bytes may still be readable at the source.
+            print_json(&response)?;
+            Err(RfError::Message("retirement_pending".to_owned()))
+        } else {
+            Err(RfError::Message(state.to_owned()))
+        }
+    } else {
+        let request = LocalBusObjectRevokeRequest {
+            object_id: required_flag(revoke.object, "object")?,
+            conversation_id: required_flag(revoke.conversation, "conversation")?,
+            recipient_principal_id: required_flag(revoke.recipient, "recipient")?,
+            link_id: required_flag(revoke.link, "link")?,
+            reason: revoke.reason,
+            effective_at: revoke
+                .effective_at
+                .ok_or_else(|| RfError::Message("missing --effective-at".to_owned()))?,
+            recipient_device_id: required_flag(revoke.recipient_device, "recipient-device")?,
+            recipient_principal_commitment: revoke.recipient_principal_commitment,
+            target_delivery_id: required_flag(revoke.target, "target")?,
+            sender_id: revoke.sender,
+        };
+        print_json(
+            &bus.request(
+                Some(revoke.account),
+                "object",
+                "object.revoke",
+                serde_json::to_value(request)?,
+            )
+            .await?,
+        )
+    }
+}
+
+fn required_flag(value: Option<String>, flag: &str) -> Result<String, RfError> {
+    value.ok_or_else(|| RfError::Message(format!("missing --{flag}")))
 }
 
 fn fetch_result(receipt: &serde_json::Value) -> Result<(), RfError> {

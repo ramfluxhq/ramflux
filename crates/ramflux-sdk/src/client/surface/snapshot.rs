@@ -57,6 +57,7 @@ impl RamfluxClient {
                 .error("only the author may resynchronize a surface"));
         }
         let candidate = Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: record.created_at,

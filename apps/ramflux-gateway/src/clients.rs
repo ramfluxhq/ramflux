@@ -1462,9 +1462,9 @@ pub(crate) mod tests {
 
     fn test_envelope(envelope_id: &str) -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
-            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "test-envelope-key".to_owned(),
@@ -1476,15 +1476,15 @@ pub(crate) mod tests {
             source_device_id: "device_gateway_test".to_owned(),
             target_delivery_id: "target_notify_mesh".to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
             created_at: i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(0),
             encrypted_payload: "encrypted_payload".to_owned(),
             payload_hash: "payload_hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         }
     }
 
@@ -1513,6 +1513,7 @@ pub(crate) mod tests {
             gateway: None,
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         }
     }
 

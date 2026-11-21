@@ -8,7 +8,7 @@ fn session_registry_routes_live_session_to_gateway() -> Result<(), Box<dyn std::
     let mut registry = SessionRegistry::new();
     registry.upsert_session(session("target_a", SessionLifecycle::Authed, 1, 1))?;
     registry.mark_live("target_a")?;
-    let decision = registry.route_target("target_a", DeliveryClass::OpaqueEvent);
+    let decision = registry.route_target("target_a", DeliveryClass::Message);
     assert_eq!(
         decision,
         DeliveryDecision::Online {
@@ -35,13 +35,13 @@ fn draining_or_missing_session_uses_offline_wake() -> Result<(), Box<dyn std::er
         })
     );
 
-    let missing = registry.route_target("target_missing", DeliveryClass::SelfDeviceControl);
+    let missing = registry.route_target("target_missing", DeliveryClass::Message);
     assert_eq!(
         missing,
         DeliveryDecision::OfflineWake(WakeHint {
             target_delivery_id: "target_missing".to_owned(),
             push_alias_hash: None,
-            delivery_class: DeliveryClass::SelfDeviceControl,
+            delivery_class: DeliveryClass::Message,
         })
     );
     Ok(())
@@ -62,7 +62,7 @@ fn stale_session_update_is_rejected() -> Result<(), Box<dyn std::error::Error>> 
 fn envelope_routing_uses_target_delivery_id() -> Result<(), Box<dyn std::error::Error>> {
     let mut registry = SessionRegistry::new();
     registry.upsert_session(session("target_env", SessionLifecycle::Live, 1, 1))?;
-    let envelope = envelope("env_1", "target_env", DeliveryClass::OpaqueEvent);
+    let envelope = envelope("env_1", "target_env", DeliveryClass::Message);
     assert!(matches!(registry.route_envelope(&envelope), DeliveryDecision::Online { .. }));
     Ok(())
 }
@@ -92,7 +92,7 @@ fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::er
 
     let submit_outcome = router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_gateway_west", "target_gateway_west", DeliveryClass::OpaqueEvent),
+        envelope("env_gateway_west", "target_gateway_west", DeliveryClass::Message),
     );
     let RouterSubmitOutcome::Online(delivery) = submit_outcome else {
         return Err("expected online delivery".into());
@@ -105,8 +105,8 @@ fn router_sessions_preserve_gateway_instance_ids() -> Result<(), Box<dyn std::er
 #[test]
 fn offline_inbox_pull_after_cursor_returns_pending_entries() {
     let mut inbox = OpaqueDeviceInbox::new();
-    let first = inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));
-    let second = inbox.append(envelope("env_2", "target_a", DeliveryClass::OpaqueEvent));
+    let first = inbox.append(envelope("env_1", "target_a", DeliveryClass::Message));
+    let second = inbox.append(envelope("env_2", "target_a", DeliveryClass::Message));
     assert_eq!(first.inbox_seq, 1);
     assert_eq!(second.inbox_seq, 2);
 
@@ -118,8 +118,8 @@ fn offline_inbox_pull_after_cursor_returns_pending_entries() {
 #[test]
 fn ack_advances_cursor_and_removes_pending_entry() -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));
-    inbox.append(envelope("env_2", "target_a", DeliveryClass::OpaqueEvent));
+    inbox.append(envelope("env_1", "target_a", DeliveryClass::Message));
+    inbox.append(envelope("env_2", "target_a", DeliveryClass::Message));
 
     let state = inbox.apply_ack(&sequence_ack("env_1", 1))?;
     assert_eq!(state.inbox_seq, 1);
@@ -134,7 +134,7 @@ fn ack_advances_cursor_and_removes_pending_entry() -> Result<(), Box<dyn std::er
 #[test]
 fn nack_records_reason_without_advancing_cursor() -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    inbox.append(envelope("env_1", "target_a", DeliveryClass::OpaqueEvent));
+    inbox.append(envelope("env_1", "target_a", DeliveryClass::Message));
     let state = inbox.apply_nack(&sequence_nack("env_1", NackReason::RateLimited, 1))?;
     assert_eq!(state.inbox_seq, 0);
     assert_eq!(state.last_envelope_id, None);
@@ -146,7 +146,7 @@ fn nack_records_reason_without_advancing_cursor() -> Result<(), Box<dyn std::err
 #[test]
 fn nack_after_ack_returns_existing_cursor_idempotently() -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    inbox.append(envelope("env_ack_then_nack", "target_a", DeliveryClass::OpaqueEvent));
+    inbox.append(envelope("env_ack_then_nack", "target_a", DeliveryClass::Message));
 
     let acked = inbox.apply_ack(&sequence_ack("env_ack_then_nack", 1))?;
     assert!(acked.acked_envelope_ids.contains("env_ack_then_nack"));
@@ -165,11 +165,11 @@ fn bound_ack_and_nack_reject_other_target_envelope() -> Result<(), Box<dyn std::
     let router = RouterCore::new();
     let _accepted_a = router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_bound_target_a", "target_a", DeliveryClass::OpaqueEvent),
+        envelope("env_bound_target_a", "target_a", DeliveryClass::Message),
     );
     let _accepted_b = router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_bound_target_b", "target_b", DeliveryClass::OpaqueEvent),
+        envelope("env_bound_target_b", "target_b", DeliveryClass::Message),
     );
 
     let ack_rejected =
@@ -205,7 +205,7 @@ fn router_target_index_supports_concurrent_submit_and_ack() -> Result<(), Box<dy
                 let target_delivery_id = format!("target_index_{worker_index}_{envelope_index}");
                 let outcome = router.submit_envelope_at_created(
                     &source_identity,
-                    envelope(&envelope_id, &target_delivery_id, DeliveryClass::OpaqueEvent),
+                    envelope(&envelope_id, &target_delivery_id, DeliveryClass::Message),
                 );
                 if !matches!(outcome, RouterSubmitOutcome::OfflineQueued(_)) {
                     return Err(format!("unexpected submit outcome: {outcome:?}"));
@@ -274,7 +274,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         principal_id: "principal_fanout_collision_a".to_owned(),
         source_device_id: "source_a".to_owned(),
         envelope: signed_registered_envelope(
-            envelope("a:b", "unused_fanout_target_a", DeliveryClass::SelfDeviceControl),
+            envelope("a:b", "unused_fanout_target_a", DeliveryClass::Message),
             "principal_fanout_collision_a",
             "source_a",
             701,
@@ -284,7 +284,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         principal_id: "principal_fanout_collision_b".to_owned(),
         source_device_id: "source_b".to_owned(),
         envelope: signed_registered_envelope(
-            envelope("a", "unused_fanout_target_b", DeliveryClass::SelfDeviceControl),
+            envelope("a", "unused_fanout_target_b", DeliveryClass::Message),
             "principal_fanout_collision_b",
             "source_b",
             703,
@@ -305,11 +305,7 @@ fn mvp10_own_device_fanout_uses_collision_safe_envelope_ids()
         router.mvp10_own_device_fanout_at_created(ItestMvp10OwnDeviceFanoutRequest {
             principal_id: "principal_fanout_collision_b".to_owned(),
             source_device_id: "source_a".to_owned(),
-            envelope: envelope(
-                "cross_principal",
-                "unused_fanout_target",
-                DeliveryClass::SelfDeviceControl,
-            ),
+            envelope: envelope("cross_principal", "unused_fanout_target", DeliveryClass::Message),
         });
     assert!(
         matches!(cross_principal, Err(NodeCoreError::ItestHttp(message)) if message.contains("source device is not registered for principal"))
@@ -324,11 +320,7 @@ fn gateway_own_device_fanout_frame_round_trips_json() -> Result<(), Box<dyn std:
             signed_request: gateway_fanout_signed_request("device_frame_fanout"),
             principal_id: "principal_frame_fanout".to_owned(),
             source_device_id: "device_frame_fanout".to_owned(),
-            envelope: envelope(
-                "env_frame_fanout",
-                "fanout-placeholder",
-                DeliveryClass::SelfDeviceControl,
-            ),
+            envelope: envelope("env_frame_fanout", "fanout-placeholder", DeliveryClass::Message),
         },
     };
     let value = serde_json::to_value(&frame)?;
@@ -363,7 +355,7 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
 
     let online = router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_online", "target_live", DeliveryClass::OpaqueEvent),
+        envelope("env_online", "target_live", DeliveryClass::Message),
     );
     assert!(matches!(online, RouterSubmitOutcome::Online(_)));
     if let RouterSubmitOutcome::Online(delivery) = online {
@@ -376,13 +368,13 @@ fn router_core_routes_online_and_queues_offline() -> Result<(), Box<dyn std::err
 
     let offline = router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_offline", "target_offline", DeliveryClass::SelfDeviceControl),
+        envelope("env_offline", "target_offline", DeliveryClass::Message),
     );
     assert!(matches!(offline, RouterSubmitOutcome::OfflineQueued(_)));
     if let RouterSubmitOutcome::OfflineQueued(queued) = offline {
         assert_eq!(queued.entry.inbox_seq, 1);
         assert_eq!(queued.wake_hint.target_delivery_id, "target_offline");
-        assert_eq!(queued.wake_hint.delivery_class, DeliveryClass::SelfDeviceControl);
+        assert_eq!(queued.wake_hint.delivery_class, DeliveryClass::Message);
     }
     assert_eq!(router.resume("target_offline", 0, 10).len(), 1);
 
@@ -399,19 +391,19 @@ fn router_replay_guard_rejects_duplicate_envelope_and_expired_ttl()
     let router = RouterCore::new();
     let accepted = router.submit_envelope_at(
         &source_identity,
-        envelope("env_replay", "target_replay", DeliveryClass::OpaqueEvent),
+        envelope("env_replay", "target_replay", DeliveryClass::Message),
         1_760_000_001,
     );
     assert!(matches!(accepted, RouterSubmitOutcome::OfflineQueued(_)));
 
     let replay = router.submit_envelope_at(
         &source_identity,
-        envelope("env_replay", "target_replay", DeliveryClass::OpaqueEvent),
+        envelope("env_replay", "target_replay", DeliveryClass::Message),
         1_760_000_002,
     );
     assert!(matches!(replay, RouterSubmitOutcome::RejectedSecurity { .. }));
 
-    let mut expired = envelope("env_expired", "target_replay", DeliveryClass::OpaqueEvent);
+    let mut expired = envelope("env_expired", "target_replay", DeliveryClass::Message);
     expired.ttl = 1;
     let rejected = router.submit_envelope_at(&source_identity, expired, 1_760_000_010);
     assert!(matches!(rejected, RouterSubmitOutcome::RejectedSecurity { .. }));
@@ -423,7 +415,7 @@ fn replay_guard_rejects_long_ttl_envelope_replay_until_expiry_then_prunes()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
     let mut replay_guard = NodeReplayGuardState::new();
-    let mut first = envelope("env_ttl_window", "target_replay", DeliveryClass::OpaqueEvent);
+    let mut first = envelope("env_ttl_window", "target_replay", DeliveryClass::Message);
     first.ttl = 3_600;
 
     replay_guard.check_envelope(&source_identity, &first, first.created_at + 1)?;
@@ -431,7 +423,7 @@ fn replay_guard_rejects_long_ttl_envelope_replay_until_expiry_then_prunes()
     assert!(matches!(replay, Err(NodeCoreError::ReplayGuard(_))));
     assert_eq!(replay_guard.len(), 1);
 
-    let mut later = envelope("env_after_prune", "target_replay", DeliveryClass::OpaqueEvent);
+    let mut later = envelope("env_after_prune", "target_replay", DeliveryClass::Message);
     later.created_at = first.created_at + 3_601;
     later.ttl = 3_600;
     replay_guard.check_envelope(&source_identity, &later, later.created_at)?;
@@ -443,7 +435,7 @@ fn replay_guard_rejects_long_ttl_envelope_replay_until_expiry_then_prunes()
 fn replay_guard_rejects_envelope_ttl_above_maximum() -> Result<(), Box<dyn std::error::Error>> {
     let source_identity = replay_source("alice_device")?;
     let mut replay_guard = NodeReplayGuardState::new();
-    let mut envelope = envelope("env_ttl_max", "target_replay", DeliveryClass::OpaqueEvent);
+    let mut envelope = envelope("env_ttl_max", "target_replay", DeliveryClass::Message);
     envelope.ttl = ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS_U32 + 1;
 
     let rejected = replay_guard.check_envelope(&source_identity, &envelope, envelope.created_at);

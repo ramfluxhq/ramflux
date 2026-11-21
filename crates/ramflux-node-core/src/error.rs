@@ -144,6 +144,8 @@ pub enum NodeCoreError {
     ItestJson(String),
     #[error("service shutdown failed: {0}")]
     ServiceShutdown(String),
+    #[error("discovery record is missing the node version")]
+    MissingNodeVersion,
     #[error("unauthorized: {0}")]
     Unauthorized(String),
     /// The caller is verifiably not the device bound as the push routes' owner.
@@ -151,6 +153,9 @@ pub enum NodeCoreError {
     PushRouteOwnerMismatch,
     #[error("delivery_mode_refused")]
     DeliveryModeRefused,
+    /// Generation 1 admits only `message` and `call_wake` as envelope delivery classes.
+    #[error("delivery_class_refused")]
+    DeliveryClassRefused,
 }
 
 impl From<ramflux_protocol::ephemeral::EphemeralModeError> for NodeCoreError {

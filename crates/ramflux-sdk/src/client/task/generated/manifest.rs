@@ -24,58 +24,7 @@ impl RamfluxClient {
         {
             return Err(invalid("message-layer declaration requires native custody evidence"));
         }
-        let generated = g::NativeDeviceManifest {
-            custody: native
-                .custody
-                .as_ref()
-                .map(|value| {
-                    Ok::<_, SdkError>(g::NativeCustodyManifest {
-                        canonical: ramflux_protocol::canonical_json_bytes(value)?,
-                    })
-                })
-                .transpose()?,
-            signed_device_set: native
-                .signed_device_set
-                .as_ref()
-                .map(|value| {
-                    Ok::<_, SdkError>(g::NativeSignedDeviceSet {
-                        canonical: ramflux_protocol::canonical_json_bytes(value)?,
-                    })
-                })
-                .transpose()?,
-            principal_id: native.principal_id.clone(),
-            principal_commitment: native.principal_commitment.clone(),
-            root_public_key: native.root_public_key.clone(),
-            devices: native
-                .devices
-                .iter()
-                .map(|device| {
-                    Ok(g::ManifestDevice {
-                        principal_id: device.principal_id.clone(),
-                        principal_commitment: device.principal_commitment.clone(),
-                        device_id: device.device_id.clone(),
-                        device_epoch: device.device_epoch,
-                        branch_public_key: device.branch_public_key.clone(),
-                        target_delivery_id: device.target_delivery_id.clone(),
-                        branch_proof: device
-                            .branch_proof
-                            .as_ref()
-                            .map(|value| {
-                                Ok::<_, SdkError>(g::NativeBranchProof {
-                                    canonical: ramflux_protocol::canonical_json_bytes(value)?,
-                                })
-                            })
-                            .transpose()?,
-                        prekey_bundle: Some(g::NativePrekeyBundle {
-                            canonical: ramflux_protocol::canonical_json_bytes(
-                                &device.prekey_bundle,
-                            )?,
-                        }),
-                        branch_authorized_event_id: device.branch_authorized_event_id.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, SdkError>>()?,
-        };
+        let generated = g::NativeDeviceManifest::try_from(native)?;
         let bytes = generated.encode_to_vec();
         self.decode_generated_task_manifest(&bytes, &native.principal_id)?;
         Ok(bytes)
@@ -112,8 +61,12 @@ impl RamfluxClient {
             return Err(invalid("task manifest principal mismatch"));
         }
         let native = generated_manifest_fields(manifest)?;
-        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let commitment = if native.principal_id == local.principal_id {
+        let local_principal = if let Some(account) = &self.born_v3_account {
+            account.record().body.principal_id.clone()
+        } else {
+            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id.clone()
+        };
+        let commitment = if native.principal_id == local_principal {
             self.surface_local_root_commitment()?
         } else {
             self.account_db()?
@@ -126,7 +79,7 @@ impl RamfluxClient {
     }
 }
 
-fn generated_manifest_fields(
+pub(crate) fn generated_manifest_fields(
     manifest: &g::NativeDeviceManifest,
 ) -> Result<SdkDeviceManifestResponse, SdkError> {
     let native_custody = manifest
@@ -135,6 +88,7 @@ fn generated_manifest_fields(
         .map(|value| canonical::<ramflux_protocol::custody::CustodyManifest>(&value.canonical))
         .transpose()?;
     let native = SdkDeviceManifestResponse {
+        fetched_after: crate::prekey::FetchStamp::default(),
         custody: manifest
             .custody
             .as_ref()
@@ -225,4 +179,62 @@ fn canonical<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, SdkErro
         return Err(invalid("noncanonical native task manifest document"));
     }
     Ok(value)
+}
+
+impl TryFrom<&SdkDeviceManifestResponse> for g::NativeDeviceManifest {
+    type Error = SdkError;
+    fn try_from(native: &SdkDeviceManifestResponse) -> Result<Self, Self::Error> {
+        Ok(g::NativeDeviceManifest {
+            custody: native
+                .custody
+                .as_ref()
+                .map(|value| {
+                    Ok::<_, SdkError>(g::NativeCustodyManifest {
+                        canonical: ramflux_protocol::canonical_json_bytes(value)?,
+                    })
+                })
+                .transpose()?,
+            signed_device_set: native
+                .signed_device_set
+                .as_ref()
+                .map(|value| {
+                    Ok::<_, SdkError>(g::NativeSignedDeviceSet {
+                        canonical: ramflux_protocol::canonical_json_bytes(value)?,
+                    })
+                })
+                .transpose()?,
+            principal_id: native.principal_id.clone(),
+            principal_commitment: native.principal_commitment.clone(),
+            root_public_key: native.root_public_key.clone(),
+            devices: native
+                .devices
+                .iter()
+                .map(|device| {
+                    Ok(g::ManifestDevice {
+                        principal_id: device.principal_id.clone(),
+                        principal_commitment: device.principal_commitment.clone(),
+                        device_id: device.device_id.clone(),
+                        device_epoch: device.device_epoch,
+                        branch_public_key: device.branch_public_key.clone(),
+                        target_delivery_id: device.target_delivery_id.clone(),
+                        branch_proof: device
+                            .branch_proof
+                            .as_ref()
+                            .map(|value| {
+                                Ok::<_, SdkError>(g::NativeBranchProof {
+                                    canonical: ramflux_protocol::canonical_json_bytes(value)?,
+                                })
+                            })
+                            .transpose()?,
+                        prekey_bundle: Some(g::NativePrekeyBundle {
+                            canonical: ramflux_protocol::canonical_json_bytes(
+                                &device.prekey_bundle,
+                            )?,
+                        }),
+                        branch_authorized_event_id: device.branch_authorized_event_id.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, SdkError>>()?,
+        })
+    }
 }

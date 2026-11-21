@@ -360,7 +360,7 @@ fn subscription_cancel_is_dispatched_and_allows_replacement() {
 
 fn seed_node(root: &std::path::Path) {
     let profile: crate::NodeProfile = serde_json::from_value(json!({
-        "node_id":"test","node_public_key":ramflux_crypto::public_key_base64url_from_seed([7;32]),
+        "node_id":"test","node_public_key":ramflux_crypto::public_key_base64url_from_seed(&[7;32]),
         "pin_source":"tofu","ca_cert_pem":"test-only CA",
         "gateway":{"quic_addr":"node.example.invalid:443","tcp_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
         "relay":{"quic_addr":"node.example.invalid:443","server_name":"node.example.invalid"},
@@ -387,11 +387,83 @@ fn compatibility_custody_envelopes_do_not_disconnect_the_bridge() {
 }
 
 #[test]
+fn confirm_reasons_survive_native_error_projection() {
+    use crate::{CustodyConfirmReason, SdkError};
+    let rows = [
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseEmpty),
+            "CustodySetupInvalid",
+            "passphrase_empty",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooLong),
+            "CustodySetupInvalid",
+            "passphrase_too_long",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseNotUtf8),
+            "CustodySetupInvalid",
+            "passphrase_not_utf8",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooShort),
+            "CustodySetupInvalid",
+            "too_short",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooCommon),
+            "CustodySetupInvalid",
+            "too_common",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::DisplayName),
+            "CustodySetupInvalid",
+            "display_name",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::OperationId),
+            "CustodySetupInvalid",
+            "operation_id",
+            1,
+        ),
+        (
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::WordMismatch { position: 8 }),
+            "CustodyConfirmationFailed",
+            "word_8",
+            5,
+        ),
+        (SdkError::CustodyExpired, "CustodyExpired", "deadline", 16),
+    ];
+    for (error, code, reason, number) in rows {
+        let body = crate::bus::io::local_bus_error_body(&error);
+        assert_eq!(body.code, code, "{reason}");
+        assert_eq!(body.reason_code.as_deref(), Some(reason), "{reason}");
+        assert!(!body.message.contains(reason), "{reason} message echoes the token");
+        let mut value = json!({
+            "code": error_code(&body.code),
+            "response": {"kind":"error","error": body},
+        });
+        super::native_error::completion(&mut value);
+        assert_eq!(value["code"], number, "{reason}");
+        assert_eq!(value["response"]["error"]["code"], code, "{reason}");
+        assert_eq!(value["response"]["error"]["reason_code"], reason, "{reason}");
+        assert!(value["response"]["error"].get("message").is_none(), "{reason}");
+    }
+}
+
+#[test]
 fn shared_error_classes_keep_the_binding_numeric_contract() {
     for (error, expected) in [
         (crate::SdkError::DataRootInUse, 18),
         (crate::SdkError::NoNodeSelected, 9),
         (crate::SdkError::Transport(ramflux_transport::TransportError::NotAuthenticated), 5),
+        (crate::SdkError::CustodyPublicationFailed, 1),
     ] {
         let name = crate::bus::io::local_bus_error_code(&error);
         assert_eq!(
@@ -400,6 +472,39 @@ fn shared_error_classes_keep_the_binding_numeric_contract() {
             "shared SDK classification {name} lost its binding code"
         );
     }
+}
+
+#[test]
+fn edit_conflict_crosses_the_c_abi_with_generated_code_and_revisions() {
+    let wrapped = crate::SdkError::from(crate::bindings::AdapterError::from_sdk(
+        &crate::SdkError::EditConflict { target: "m".into(), expected: 2, received: 1 },
+    ));
+    let request = LocalBusFrame::request(
+        "7",
+        Some("alice".into()),
+        "conversation",
+        "conversation.edit",
+        json!({}),
+    );
+    let frame = crate::bus::io::local_bus_error(&request, &wrapped);
+    let name = frame.error.as_ref().expect("test: bus error").code.clone();
+    let mut completion = json!({
+        "code": error_code(&name),
+        "response": serde_json::to_value(&frame).expect("test: frame"),
+    });
+    super::native_error::completion(&mut completion);
+    assert_eq!(
+        completion["response"]["body"]["code"], 7,
+        "the C completion keeps generated code 7"
+    );
+    assert_eq!(completion["response"]["body"]["name"], "edit_conflict");
+    assert_eq!(completion["response"]["error"]["details"]["target"], "m");
+    assert_eq!(completion["response"]["error"]["details"]["expected"], 2);
+    assert_eq!(completion["response"]["error"]["details"]["received"], 1);
+    assert!(
+        completion["response"]["error"].get("message").is_none(),
+        "conflict diagnostics stay inside the daemon"
+    );
 }
 
 #[test]
@@ -704,6 +809,74 @@ fn native_clients_cannot_submit_raw_routing_without_explicit_capability() {
         "raw message routing must be refused before carrier admission"
     );
     assert_eq!(operation, 0, "refused raw routing cannot allocate an operation");
+}
+
+#[test]
+fn typing_submit_is_admitted_without_the_raw_message_capability() {
+    let fixture = Fixture::open();
+    let admit = |body: Value| {
+        let request = serde_json::to_vec(&json!({
+            "sdk_api": "message",
+            "method": "message.submit",
+            "body": body,
+            "deadline_ms": deadline(),
+        }))
+        .expect("test: request");
+        let mut operation = 99;
+        let code =
+            ramflux_v2_execute(fixture.handle, request.as_ptr(), request.len(), &raw mut operation);
+        (code, operation)
+    };
+    let typing = json!({
+        "requestId": "op",
+        "accountId": "acct",
+        "send": {
+            "conversationId": "dm",
+            "operationId": "op",
+            "content": {"typing": {"active": true}}
+        }
+    });
+    let (code, operation) = admit(typing);
+    assert_eq!(code, 0, "typing is not a raw plaintext submit");
+    assert_ne!(operation, 0, "an admitted typing submit owns an operation");
+    assert_eq!(ramflux_v2_operation_cancel(fixture.handle, operation), 0, "cancel the waiter");
+    let mixed = json!({
+        "send": {"content": {"typing": {"active": true}, "message": {"text": "hidden"}}}
+    });
+    let (code, operation) = admit(mixed);
+    assert_eq!(code, 12, "a message beside typing stays a raw submit");
+    assert_eq!(operation, 0, "a mixed submit cannot allocate an operation");
+    let disguised = json!({
+        "typing": true,
+        "send": {"content": {"message": {"text": "hidden"}}}
+    });
+    let (code, operation) = admit(disguised);
+    assert_eq!(code, 12, "a top-level typing flag cannot carry plaintext");
+    assert_eq!(operation, 0);
+    let rooted = tempfile::tempdir().expect("test: isolated data root");
+    let config = serde_json::to_vec(&json!({
+        "data_root": rooted.path(),
+        "allow_raw_messages": true,
+    }))
+    .expect("test: config");
+    let mut handle = 0;
+    assert_eq!(ramflux_v2_client_open(config.as_ptr(), config.len(), &raw mut handle), 0);
+    let raw = serde_json::to_vec(&json!({
+        "sdk_api": "message",
+        "method": "message.submit",
+        "body": {},
+        "deadline_ms": deadline(),
+    }))
+    .expect("test: raw request");
+    let mut operation = 0;
+    assert_eq!(
+        ramflux_v2_execute(handle, raw.as_ptr(), raw.len(), &raw mut operation),
+        0,
+        "the explicit capability still admits a raw submit"
+    );
+    assert_ne!(operation, 0);
+    assert_eq!(ramflux_v2_operation_cancel(handle, operation), 0);
+    assert_eq!(ramflux_v2_client_close(handle), 0);
 }
 
 #[cfg(feature = "card-runtime")]

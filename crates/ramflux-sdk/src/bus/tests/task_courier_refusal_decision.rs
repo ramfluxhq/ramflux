@@ -36,8 +36,10 @@ impl Life {
         json!({"approval_id": self.scoped})
     }
 
+    /// Envelopes the task courier submitted, without the own-device copies the same account's
+    /// copy courier sends through the same gateway.
     fn wire(&self) -> usize {
-        self.gateway.lock().unwrap().attempts.len()
+        self.gateway.lock().unwrap().task_attempts()
     }
 
     fn arm(&self, nack: Option<&str>) {
@@ -73,6 +75,7 @@ async fn start(approved: bool) -> Case<Life> {
     let packet = fixture.peer.client.sign_task_approval(approval::Payload::Request { request })?;
     let id = packet.id()?;
     fixture.source.client.accept_task_approval(&packet)?;
+    separate_own_copies(&fixture.gateway, &fixture.source)?;
     let Fixture { root, source, peer, sibling, gateway, .. } = fixture;
     Ok(Life {
         account: source,
@@ -89,6 +92,13 @@ async fn start(approved: bool) -> Case<Life> {
 
 fn job_of(db: &AccountDb, key: &str) -> Case<Job> {
     Ok(db.load_actor_state(key)?.ok_or("the decision job is gone")?)
+}
+
+/// The canonical direct conversation every approval of this fixture is bound to.
+fn approval_conversation(db: &AccountDb) -> Case<String> {
+    Ok(db
+        .load_actor_state("fixture/direct-conversation")?
+        .ok_or("the fixture canonical conversation is missing")?)
 }
 
 fn receipt_of(db: &AccountDb) -> Case<Value> {
@@ -157,18 +167,21 @@ async fn to_conflict(life: &mut Life) -> Case<Vec<u8>> {
         assert_eq!(journal[0].body["delivery_state"], "failed");
         assert_eq!(journal[0].body["approval_id"], me.scoped);
         assert_eq!(journal[0].body["task_id"], "healthy-task");
-        assert_eq!(journal[0].body["conversation_id"], "healthy");
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 1);
+        // The approval is bound to the fixture's canonical direct conversation, not to the
+        // label of the unrelated seeded task carrier.
+        let conversation = approval_conversation(&run.reader)?;
+        assert_eq!(journal[0].body["conversation_id"], conversation);
+        assert_eq!(me.wire(), 1);
         // Visible to readers and never selected again.
         let view = run
-            .call("task.get", json!({"conversation_id":"healthy","task_id":"healthy-task"}))
+            .call("task.get", json!({"conversation_id":conversation,"task_id":"healthy-task"}))
             .await?;
         let shown = view_rows(&view);
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0]["delivery_state"], "failed");
         assert_eq!(shown[0]["reason_code"], "submit_conflict");
         run.idle(2).await?;
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 1, "no automatic resend");
+        assert_eq!(me.wire(), 1, "no automatic resend");
         Ok(())
     })
     .await?;
@@ -183,7 +196,7 @@ async fn to_conflict(life: &mut Life) -> Case<Vec<u8>> {
     assert_eq!(rows[0]["delivery_state"], "failed");
     assert_eq!(rows[0]["reason_code"], "submit_conflict");
     assert_eq!(queue::manifest_requests(&mut life.account)?.len(), 0);
-    assert_eq!(life.wire(), 1);
+    assert_eq!(life.wire(), 1, "the decision is never resent");
     Ok(original)
 }
 
@@ -195,8 +208,9 @@ async fn retry_success(approved: bool) -> Case {
         receipt_of(life.account.client.account_db()?)?["revision"].as_u64().unwrap();
     let start = life.start;
     life.run(async |run, me| {
+        let conversation = approval_conversation(&run.reader)?;
         let view = run
-            .call("task.get", json!({"conversation_id":"healthy","task_id":"healthy-task"}))
+            .call("task.get", json!({"conversation_id":conversation,"task_id":"healthy-task"}))
             .await?;
         assert_eq!(view_rows(&view).len(), 1);
         run.idle(1).await?;
@@ -220,7 +234,7 @@ async fn retry_success(approved: bool) -> Case {
             job_of(&run.reader, &me.key)?.packet.bytes()?,
         );
         assert_eq!(before, after);
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 1);
+        assert_eq!(me.wire(), 1);
         // (a3c) the same choice re-enqueues once: one revision bump, `attempts = 0` written once
         // (a rewrite after the clock moved would carry the later `next_at`), no wire send.
         let first = run.call(me.method(), me.body()).await?;
@@ -237,7 +251,7 @@ async fn retry_success(approved: bool) -> Case {
         assert_eq!(receipt_of(&run.reader)?, queued, "the duplicate wrote no receipt");
         let job = job_of(&run.reader, &me.key)?;
         assert_eq!((job.attempts, job.next_at), (0, start), "the duplicate wrote no job");
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 1);
+        assert_eq!(me.wire(), 1);
         Ok(())
     })
     .await?;
@@ -270,9 +284,9 @@ async fn retry_success(approved: bool) -> Case {
             assert!(!run.reader.actor_state_exists(&stored)?, "{namespace} row remains");
         }
         // The conflicted send stopped after envelope 1; the retry sends the whole two-envelope plan.
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 3);
+        assert_eq!(me.wire(), 3);
         run.idle(2).await?;
-        assert_eq!(me.gateway.lock().unwrap().attempts.len(), 3, "delivered exactly once more");
+        assert_eq!(me.wire(), 3, "delivered exactly once more");
         Ok(())
     })
     .await?;
@@ -291,20 +305,16 @@ async fn repeat_conflict() -> Case {
             let decided = run.call(me.method(), me.body()).await?;
             assert_eq!(decided["delivery_state"], "pending");
             assert_eq!(job_of(&run.reader, &me.key)?.attempts, 0);
-            assert_eq!(me.gateway.lock().unwrap().attempts.len(), retries);
+            assert_eq!(me.wire(), retries);
             let items = run.step().await?;
             assert_eq!(items, vec![(me.key.clone(), 0, false)]);
             run.until("the repeated conflict", |db| Ok(attempts_of(db, &me.key)? == Some(8)))
                 .await?;
             assert_eq!(Shape::of(&run.reader, &me.key)?, conflicted(retries + 1));
             assert_eq!(job_of(&run.reader, &me.key)?.packet.bytes()?, original);
-            assert_eq!(me.gateway.lock().unwrap().attempts.len(), retries + 1);
+            assert_eq!(me.wire(), retries + 1);
             run.idle(2).await?;
-            assert_eq!(
-                me.gateway.lock().unwrap().attempts.len(),
-                retries + 1,
-                "no automatic attempt between explicit retries"
-            );
+            assert_eq!(me.wire(), retries + 1, "no automatic attempt between explicit retries");
             Ok(())
         })
         .await?;

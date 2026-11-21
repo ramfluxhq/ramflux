@@ -450,14 +450,11 @@ async fn failed_verification_and_cancellation_leave_existing_accounts_and_output
                 supervisor.index.account("alice")?.db_relative_path,
                 original_record.db_relative_path
             );
-            let read = call(
-                &supervisor,
-                "message.read",
-                Some("alice"),
-                json!({"conversation_id":"thread"}),
-            )
-            .await?;
-            assert!(read.to_string().contains("m5"));
+            let read = call(&supervisor, "contact.list", Some("alice"), json!({})).await?;
+            assert!(
+                read.to_string().contains("friend-0"),
+                "failed restore changed existing contacts"
+            );
         }
         rejects_identity_replacement_and_rollback(&supervisor, &root, &archive, secret).await?;
         let verify = call(
@@ -575,11 +572,11 @@ async fn archive_while_reading(
     .await?;
     let concurrent = tokio::time::timeout(
         Duration::from_secs(2),
-        call(supervisor, "message.read", Some("alice"), json!({"conversation_id":"thread"})),
+        call(supervisor, "contact.list", Some("alice"), json!({})),
     )
     .await??;
     assert!(
-        concurrent.to_string().contains("m5"),
+        concurrent.to_string().contains("friend-0"),
         "archive workers must not hold the account actor"
     );
     finished(supervisor, create["job"]["job_id"].as_str().ok_or("id")?, BackupJobState::Done)
@@ -878,6 +875,50 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
         std::fs::remove_dir_all(root)?;
         Ok(())
     })).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult {
+    LocalSet::new()
+        .run_until(async {
+            let root = crate::bus::runtime_tests::root("backup-create-refused");
+            let supervisor = source_supervisor(
+                &root,
+                Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
+            )?;
+            let archive = root.join("refused.rfb");
+            for (passphrase, code) in
+                [("aaaaaaaaaaaaaa", "too_short"), ("films+pic+galeries", "too_common")]
+            {
+                let Err(error) = call(
+                    &supervisor,
+                    "account.backup.create",
+                    Some("alice"),
+                    json!({"output_path": &archive, "passphrase": passphrase}),
+                )
+                .await
+                else {
+                    return Err("test: refused backup passphrase was accepted".into());
+                };
+                let body = crate::bus::io::local_bus_error_body(&error);
+                assert_eq!(body.code, code, "test: backup create refusal code was {}", body.code);
+                assert!(
+                    body.reason_code.is_none(),
+                    "test: backup create refusal carried a reason code"
+                );
+                assert!(!archive.exists(), "test: a refused backup created an archive");
+            }
+            assert_eq!(
+                supervisor.backup_jobs.jobs()?["jobs"],
+                json!([]),
+                "test: a refused backup wrote a job row"
+            );
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        })
+        .await
 }
 
 #[path = "tests/selector_normalization.rs"]

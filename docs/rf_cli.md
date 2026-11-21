@@ -36,8 +36,8 @@ identity and certificate pin; the relay address can be an IP address and need
 not equal the node id. Do not substitute the discovery HTTP or gateway address.
 
 The receiver runs `rf dm read --account=ACCOUNT --conversation=CONVERSATION`.
-It automatically fetches, verifies and decrypts received attachments, returning
-their bytes in `decrypted_messages[].attachments[].plaintext_base64` (base64url).
+It synchronizes and reads the durable typed message model. Media references appear
+in the message content; use `rf object fetch` for attachment transfer state.
 Pass `--wait 240` to poll deferred fetches within a caller-owned budget in seconds.
 The default, `--wait 0`, makes one read. While waiting, a generic failure exits
 immediately; `attachment fetch deferred; retry object.fetch` exits with status 1
@@ -168,3 +168,29 @@ the agent and directs the operator to pass `--custodian <owner id>`.
 The daemon retains its custody and attended-access checks. Export creates a
 private file, refuses to overwrite it, and consumes the credential once.
 Account backup export keeps its existing explicit `--account` selection.
+
+## Prepared attachment references
+
+Generation 1 sends attachments in `Message.media`. Both `rf dm send` and
+`rf group send` accept repeated `--media-ref PATH` arguments. Each file contains
+one prepared r4 MediaRef JSON value including `largeManifest`; paths are bounded
+to sixteen references and 2 MiB per JSON file. The SDK checks the inner manifest
+hash, lengths and key slots before allocating an outgoing identity or sealing.
+Prepare/upload the segmented attachment and its authorized capability before
+sending its reference. This command does not upload bulk attachment bytes.
+The r4 manifest requires verified layer-4 support from the recipient or group
+cohort. Missing or insufficient declarations return `PeerUpgradeRequired`; the
+sender does not replace media with its caption. Plain messages retain layer 3.
+
+`dm send --attach` and its `--relay-url` metadata are retired and return a typed
+Content refusal. Use prepared references; legacy relay/grant fields are never
+translated into the generated message.
+
+
+Message deletion uses the authenticated account as the author or current group moderator.
+Use `rf dm delete --scope everyone` or `rf group message delete` to submit a
+generated Delete to the verified recipient cohort. `--operation-id` retains one
+event across retries. The SDK derives the tombstone from that event.
+DM deletion defaults to offline `local` erasure; `--scope local` selects the same
+behavior for a group message. Caller-selected tombstones and the old group
+actor/reason inputs receive a typed Content refusal.

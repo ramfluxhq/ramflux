@@ -74,10 +74,9 @@ fn route() -> Routing {
 #[tokio::test]
 async fn generated_group_state_uses_native_current_role_and_exact_actor_before_retention()
 -> TestResult {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let own = Box::pin(Fixture::new("generated-group-state-owner")).await?;
     let outsider = Box::pin(Fixture::new("generated-group-state-outsider")).await?;
-    own.client.persist_fetched_identity_directory(&outsider.manifest)?;
+    own.client.persist_observed_identity_directory_now(&outsider.manifest)?;
     let primary =
         own.client.born_v3_account.as_ref().ok_or("account")?.group_primary(own.vault.as_ref())?;
     own.client.shared_group_create_with_primary(
@@ -137,5 +136,69 @@ async fn generated_group_state_uses_native_current_role_and_exact_actor_before_r
             .is_err(),
         "a different verified pair source cannot assert the owner's actor"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn transfer_control_signs_typed_bytes_and_refuses_old_json_signature() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let own = Box::pin(Fixture::new("typed-transfer-signature")).await?;
+        let primary = own
+            .client
+            .born_v3_account
+            .as_ref()
+            .ok_or("account")?
+            .group_primary(own.vault.as_ref())?;
+        let state = own.client.shared_group_create_with_primary(
+            "typed-transfer",
+            "typed-transfer-thread",
+            None,
+            &own.config.target_delivery_id,
+            Some(&primary),
+        )?;
+        let actor = own.client.owned_group_actor(&own.config.target_delivery_id)?;
+        let now = crate::time::now_unix_timestamp();
+        let body = TransferBody::Probe {
+            probe: Box::new(super::super::transfer_wire::TransferProbe {
+                id: ramflux_protocol::encode_base64url([29; 32]),
+                actor: actor.clone(),
+                creator: actor.clone(),
+                base: state.snapshot().clone(),
+                required: vec![super::super::transfer_wire::TransferDevice {
+                    root: actor.identity.root_commitment.clone(),
+                    device: actor.identity.device_id.clone(),
+                }],
+                issued_at: now,
+                expires_at: now + 60,
+            }),
+        };
+        let signed = TransferControl::sign(&own.client, body.clone())?;
+        let generated = super::super::generated_send::transfer(&signed)?;
+        let restored = transfer(&generated)?;
+        restored.verify(now)?;
+        let mut unsigned = generated.clone();
+        unsigned.signature.clear();
+        let mut transcript = Vec::new();
+        for field in [
+            b"ramflux.message.typed.TransferControl.v1".as_slice(),
+            unsigned.encode_to_vec().as_slice(),
+        ] {
+            transcript.extend(u32::try_from(field.len())?.to_be_bytes());
+            transcript.extend(field);
+        }
+        ramflux_crypto::verify_canonical_signature(
+            &transcript,
+            &signed.signature,
+            &actor.identity.signing_public_key,
+        )?;
+        let mut old = restored;
+        old.signature = ramflux_crypto::sign_with_device_branch(
+            own.client.device_branch.as_ref().ok_or("branch")?,
+            &json!({"domain":"ramflux.group.transfer_sync.v1","body":body}),
+        )?;
+        assert!(old.verify(now).is_err(), "legacy JSON signatures must refuse");
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+    .await??;
     Ok(())
 }

@@ -22,28 +22,8 @@ impl RamfluxClient {
     ) -> Result<String, SdkError> {
         Ok(format!("dm-pair/reset-work/{}", RamfluxClient::pair_key(local, remote)?))
     }
-    pub(super) fn normalize_reset_work(&self, work: &mut ResetWork) -> Result<i64, SdkError> {
-        if let Some(first) = work.first_at {
-            return Ok(first);
-        }
-        // Legacy work predates first_at. Never mistake a recent retry for its creation time.
-        // If retention removed the original attempt, fail closed to manual recovery.
-        let first = self
-            .account_db()?
-            .legacy_pair_reset_first_at(&RamfluxClient::pair_key(
-                &self.device_identity(&work.local)?,
-                &self.device_identity(&work.remote)?,
-            )?)?
-            .unwrap_or(0);
-        work.first_at = Some(first);
-        self.account_db()?.persist_actor_state(
-            &Self::reset_work_key(
-                &self.device_identity(&work.local)?,
-                &self.device_identity(&work.remote)?,
-            )?,
-            work,
-        )?;
-        Ok(first)
+    pub(super) fn reset_first_at(work: &ResetWork) -> Result<i64, SdkError> {
+        work.first_at.ok_or_else(|| super::invalid("reset work creation time missing"))
     }
 
     pub(crate) fn begin_pair_recovery(
@@ -58,9 +38,9 @@ impl RamfluxClient {
             return Ok(false);
         }
         let key = Self::reset_work_key(local, remote)?;
-        let mut existing = db.load_actor_state::<ResetWork>(&key)?;
-        if let Some(work) = &mut existing
-            && at >= self.normalize_reset_work(work)?.saturating_add(MAX_RESET_LIFETIME)
+        let existing = db.load_actor_state::<ResetWork>(&key)?;
+        if let Some(work) = &existing
+            && at >= Self::reset_first_at(work)?.saturating_add(MAX_RESET_LIFETIME)
         {
             self.mark_pair_manual(local, remote, at)?;
             return Ok(false);

@@ -26,12 +26,6 @@ pub(crate) async fn dispatch_account_bus_request(
     state: &mut LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
-        #[cfg(feature = "itest-legacy-accounts")]
-        "account.itest_legacy.create" if state.config.itest_legacy_accounts => {
-            let body = account_request(&request.body)?;
-            let response = super::itest_legacy::local_bus_account_create(state, body).await?;
-            Ok(local_bus_ok(serde_json::to_value(response)?))
-        }
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
         "account.list" => Ok(local_bus_ok(serde_json::json!({
@@ -58,7 +52,7 @@ pub(crate) async fn dispatch_account_bus_request(
         }
         "account.lock" => {
             let account_id = request_account_id(request)?.to_owned();
-            local_bus_account_lock(state, &account_id)?;
+            local_bus_account_lock(state, &account_id).await?;
             Ok(local_bus_ok(serde_json::json!({
                 "local_account_id": account_id,
                 "locked": true,
@@ -172,7 +166,7 @@ pub(crate) fn local_bus_account_response(
     }
 }
 
-fn local_bus_account_lock(
+async fn local_bus_account_lock(
     state: &mut LocalBusDaemonState,
     account_id: &str,
 ) -> Result<(), SdkError> {
@@ -187,8 +181,11 @@ fn local_bus_account_lock(
             None,
         )?;
     }
+    let pairing_pending =
+        crate::custody::pairing::work_signal(&state.config.data_root, account_id).is_some();
+    crate::custody::pairing::remove_actor_and_drain(&state.config.data_root, account_id).await?;
     let removed = state.accounts.remove(account_id);
-    if removed.is_none() {
+    if removed.is_none() && !pairing_pending {
         return Err(SdkError::AccountNotOpen(account_id.to_owned()));
     }
     if state.active_account_id.as_deref() == Some(account_id) {
@@ -273,6 +270,11 @@ async fn local_bus_account_backup_import(
         &manifest,
         state.account_index.clone(),
     )?;
+    crate::custody::pairing::remove_actor_and_drain(
+        &state.config.data_root,
+        &manifest.local_account_id,
+    )
+    .await?;
     state.accounts.remove(&manifest.local_account_id);
     // Backup import is an offline root/account restore. Rejoining gateway and publishing a fresh
     // device prekey is a separate device-activation flow, so do not touch the network here.
@@ -382,10 +384,11 @@ fn encrypt_account_backup(
     contacts: Vec<String>,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupFile, SdkError> {
+    crate::passphrase::admit_new_passphrase(passphrase.as_bytes())?;
     let salt = ramflux_crypto::random_32()?;
     let nonce_seed = ramflux_crypto::random_32()?;
     let nonce = &nonce_seed[..12];
-    let key = ramflux_crypto::derive_recovery_secret(passphrase.as_bytes(), &salt)?;
+    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
     passphrase.zeroize();
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
@@ -443,7 +446,7 @@ fn decrypt_account_backup_state(
         ramflux_protocol::decode_base64url(&backup.ciphertext_base64url).map_err(|error| {
             SdkError::LocalBus(format!("invalid account backup ciphertext: {error}"))
         })?;
-    let key = ramflux_crypto::derive_recovery_secret(passphrase.as_bytes(), &salt)?;
+    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
     passphrase.zeroize();
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
@@ -647,7 +650,3 @@ mod tests {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "tests/key_backup_restore.rs"]
-pub(crate) mod key_backup_restore;

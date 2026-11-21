@@ -138,9 +138,13 @@ async fn bad_carriers_never_change_an_authors_view_or_create_stub_surfaces() -> 
     assert!(!project(&f.human, &bad, "bad")?.accepted);
     assert_eq!(f.human.surface_get("s", 0, None)?, before);
     let other = signed_in(&f.human, "human", "thread", "unknown", "Nothing")?;
-    let mut unknown = other;
+    let mut unknown = other.to_generated()?;
     unknown.surface_id = "absent".into();
-    assert!(!project(&f.human, &unknown, "unknown")?.accepted);
+    let bytes = prost::Message::encode_to_vec(&unknown);
+    assert!(
+        project_bytes(&f.human, &other, "unknown", &bytes).is_err(),
+        "mismatched typed surface identity must be refused"
+    );
     assert_eq!(
         f.human.surface_list("thread", "", 100)?["surfaces"].as_array().map(Vec::len),
         Some(1)

@@ -1,6 +1,6 @@
 [package]
 name = "ramflux-storage"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.99.0"
 license.workspace = true
@@ -23,12 +23,16 @@ blake3 = "1.8.5"
 hkdf = { workspace = true }
 hmac = { workspace = true, features = ["zeroize"] }
 sha2 = { workspace = true, features = ["zeroize"] }
+subtle = { workspace = true }
 chacha20poly1305 = "0.10.1"
 rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint", "hooks"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
 
 [features]
 # Opt-in counters for integration-test complexity proofs; disabled in production.
@@ -43,6 +47,7 @@ insecure-test-sqlite = ["rusqlite/bundled"]
 workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "process", "io-util", "time"] }
 ramflux-test-support.workspace = true
 tempfile.workspace = true
 ed25519-dalek.workspace = true

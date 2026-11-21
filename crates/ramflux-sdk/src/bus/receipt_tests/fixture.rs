@@ -17,57 +17,117 @@ pub(super) struct Mailbox {
     pub lose_ack: bool,
     pub stall_receipts: bool,
     pub reject_id: Option<String>,
+    /// The real gateway replay guard (TTL, future-skew and replay checks) when installed.
+    pub guard: Option<ramflux_node_core::NodeReplayGuardState>,
+    /// Known senders the guard binds an envelope to.
+    pub guard_sources: Vec<ramflux_crypto::RootQualifiedDeviceRef>,
+    prekeys: BTreeMap<String, crate::prekey::SdkPrekeyResponse>,
 }
 #[derive(Clone)]
 pub(super) struct Spec {
     pub root: PathBuf,
     pub principal: String,
     pub device: String,
-    pub seed: u8,
+    vault: Arc<crate::custody::tests::TestVault>,
+    events: Arc<Mutex<BTreeMap<String, String>>>,
+    directory: Arc<Mutex<BTreeMap<String, crate::SdkDeviceManifestResponse>>>,
 }
 impl Spec {
-    pub fn new(root: &Path, principal: &str, seed: u8) -> Self {
+    pub fn new(root: &Path, principal: &str, _seed: u8) -> Self {
         Self {
             root: root.join(principal),
             principal: principal.into(),
             device: format!("device-{principal}"),
-            seed,
+            vault: Arc::new(crate::custody::tests::TestVault::default()),
+            events: Arc::new(Mutex::new(BTreeMap::new())),
+            directory: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
     pub fn client(&self, index: Option<AccountIndex>) -> Result<RamfluxClient, SdkError> {
         let mut client = RamfluxClient::new();
         client.account_index = index;
-        client.create_identity_root(&self.principal, [self.seed; 32]);
-        client.create_device_branch(&self.principal, &self.device, 1, [self.seed + 1; 32]);
         client.open_account_index(&self.root)?;
-        if client.account_index()?.account(&self.principal).is_err() {
-            client.create_account(&self.principal, &client.surface_local_root_commitment()?)?;
+        if !crate::custody::account_exists(&self.root, &self.principal)? {
+            let now = crate::custody::network_now()?;
+            let mut input = crate::custody::tests::input(&self.principal);
+            input.principal_id.clone_from(&self.principal);
+            input.device_id.clone_from(&self.device);
+            let mut ceremony = crate::custody::CreationCeremony::begin(&self.root, input, now)?;
+            let phrase = ceremony.show_once()?;
+            let positions = ceremony.hidden_challenge()?;
+            let answers = crate::custody::tests::words(&phrase, positions)
+                .map_err(|_| SdkError::CustodySetupInvalid)?;
+            let account = ceremony.confirm(&answers, self.vault.as_ref(), now)?;
+            client.seal_new_account_data(
+                &self.principal,
+                &account.record().body.account_anchor,
+                b"receipt-test",
+            )?;
+            crate::custody::tests::mark_live(&self.root, &self.principal, now)
+                .map_err(|_| SdkError::CustodySetupInvalid)?;
         }
         client.unlock_account(&self.principal, b"receipt-test")?;
-        client.initialize_and_publish_prekey_bundle(
-            &client.surface_local_root_commitment()?,
-            &self.device,
-            &self.device,
-            [self.seed + 1; 32],
-            None,
-        )?;
-        client.persist_identity_directory(
-            &crate::client::identity_authority::test_support::manifest(&client)?,
-        )?;
+        client.initialize_born_v3_branch_for_fixture(&self.device, self.vault.as_ref())?;
+        client.persist_observed_identity_directory_now(&self.manifest(&client)?)?;
+        let directory = self
+            .directory
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?;
+        assert!(directory.len() <= 8, "bounded receipt live directory");
+        for manifest in directory.values() {
+            client.persist_observed_identity_directory_now(manifest)?;
+        }
         Ok(client)
     }
+
+    pub fn manifest(
+        &self,
+        client: &RamfluxClient,
+    ) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
+        let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+        let identity = client.owned_device_identity()?;
+        crate::SdkDeviceManifestResponse::from_native(ramflux_protocol::custody::CustodyManifest {
+            publication: account.publication(),
+            custodian_publication: None,
+            devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
+                device_ref: ramflux_protocol::custody::DeviceRef {
+                    account_anchor: identity.root_commitment().into(),
+                    device_id: self.device.clone(),
+                    device_epoch: 1,
+                },
+                target_delivery_id: identity.storage_key().into(),
+                prekey_bundle: serde_json::to_value(
+                    client.load_x3dh_private_state(&identity)?.bundle,
+                )?,
+                message_layer: None,
+            }],
+        })
+    }
+
     pub fn config(&self, client: &RamfluxClient) -> Result<GatewaySessionConfig, SdkError> {
-        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::IdentityRootMissing)?,
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| SdkError::IdentityRootMissing)?,
             server_name: "receipt-test".into(),
             ca_cert: self.root.join("ca.pem"),
             principal_id: self.principal.clone(),
             device_id: self.device.clone(),
-            target_delivery_id: self.device.clone(),
+            target_delivery_id: client.owned_device_identity()?.storage_key().into(),
             prekey_http_url: None,
         })
-        .with_account_identity(client)
+        .with_native_custody(crate::GatewayCustodyConfig {
+            account_root: self.root.clone(),
+            account_id: self.principal.clone(),
+            node_id: "receipt-node".into(),
+            node_public_key: ramflux_protocol::encode_base64url([7; 32]),
+            vault: self.vault.clone(),
+        });
+        let mut config = config.with_account_identity(client)?;
+        config.device_branch = Some(Arc::new(
+            client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+        ));
+        config.source_identity = Some(client.owned_device_identity()?);
+        Ok(config)
     }
     pub fn account(
         &self,
@@ -76,18 +136,50 @@ impl Spec {
     ) -> Result<LocalBusAccountState, SdkError> {
         let client = self.client(index)?;
         let config = self.config(&client)?;
+        let mut manifests = self
+            .directory
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        manifests.push(self.manifest(&client)?);
+        {
+            let mut mailbox =
+                mail.lock().map_err(|_| SdkError::LocalBus("test: mailbox poisoned".into()))?;
+            for manifest in manifests {
+                for device in manifest.devices {
+                    mailbox.prekeys.insert(
+                        device.target_delivery_id.clone(),
+                        crate::prekey::SdkPrekeyResponse {
+                            device_id: device.device_id,
+                            target_delivery_id: Some(device.target_delivery_id),
+                            principal_commitment: manifest.principal_commitment.clone(),
+                            bundle: Some(device.prekey_bundle),
+                        },
+                    );
+                }
+            }
+        }
         let root = client.surface_local_root_commitment()?;
         let reconnect = mail.clone();
         let mut account = LocalBusAccountState::new(
             client,
             GatewaySessionEngine::with_test_transport(
-                config,
-                Box::new(Gateway { target: self.device.clone(), mail, last: None, cursor: None }),
+                config.clone(),
+                Box::new(Gateway {
+                    target: config.target_delivery_id.clone(),
+                    mail,
+                    last: None,
+                    cursor: None,
+                }),
             ),
             root,
         );
-        account.test_connector =
-            Some(Arc::new(ReceiptConnector { mail: reconnect, target: self.device.clone() }));
+        account.test_connector = Some(Arc::new(ReceiptConnector {
+            mail: reconnect,
+            target: account.target_delivery_id.clone(),
+        }));
         Ok(account)
     }
     pub fn daemon(&self, mail: Shared) -> Result<Rc<Supervisor>, SdkError> {
@@ -103,8 +195,12 @@ impl Spec {
     }
     pub fn trust(&self, client: &RamfluxClient, other: &Spec) -> Result<(), SdkError> {
         let peer = other.client(None)?;
-        let manifest = crate::client::identity_authority::test_support::manifest(&peer)?;
-        client.persist_identity_directory(&manifest)?;
+        let manifest = other.manifest(&peer)?;
+        self.directory
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
+            .insert(manifest.principal_commitment.clone(), manifest.clone());
+        client.persist_observed_identity_directory_now(&manifest)?;
         let identity = other.identity()?;
         let db = client.account_db()?;
         let mut row = db.client_device_record(&identity)?.ok_or(SdkError::IdentityRootMissing)?;
@@ -119,31 +215,237 @@ impl Spec {
         }
         Ok(())
     }
+    /// Enrols `self` as a second native device of `primary`'s account and returns the merged
+    /// two-device manifest. The sibling lives under `self.root` with the receipt passphrase and
+    /// its own vault, so `erasure_audit::open` reads it exactly like any other receipt account.
+    pub fn enroll_sibling_of(
+        &self,
+        primary: &Spec,
+        source: &RamfluxClient,
+    ) -> Result<crate::SdkDeviceManifestResponse, Box<dyn std::error::Error>> {
+        let mut native =
+            *primary.manifest(source)?.custody.ok_or("test: native primary manifest")?;
+        let record = native.publication.record.clone();
+        let key = primary
+            .vault
+            .primary_for_public_key(&record.body.master_certificate.body.self_signing_public_key)?;
+        let now = crate::custody::network_now()?.max(record.body.issued_at);
+        let current = ramflux_crypto::custody::verify_record(&record, now, None, None)?;
+        let mut seeds = zeroize::Zeroizing::new([0_u8; 64]);
+        getrandom::fill(&mut *seeds).map_err(|_| SdkError::CustodyRandomUnavailable)?;
+        let signing: [u8; 32] = seeds[..32].try_into()?;
+        let agreement: [u8; 32] = seeds[32..].try_into()?;
+        let branch =
+            ramflux_crypto::create_device_branch(&primary.principal, &self.device, 1, signing);
+        let agreement = ramflux_crypto::X25519KeyPair::from_seed(agreement);
+        let mut certificate = record.body.devices[0]
+            .branch_certificate
+            .as_ref()
+            .ok_or("test: primary branch certificate")?
+            .body
+            .clone();
+        certificate.device_id.clone_from(&self.device);
+        certificate.branch_signing_public_key =
+            ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().as_bytes());
+        certificate.agreement_identity_public_key =
+            ramflux_protocol::encode_base64url(&agreement.public);
+        certificate.cert_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
+        native.publication.record =
+            key.enroll_device(&current, key.certify_branch(certificate)?, now)?;
+        crate::custody::accept_publication(
+            &primary.root,
+            &primary.principal,
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: native.publication.clone(),
+                custodian_publication: None,
+            },
+            now,
+        )?;
+        std::fs::create_dir_all(&self.root)?;
+        crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
+            root: &self.root,
+            id: &self.principal,
+            device: &self.device,
+            record: native.publication.record.clone(),
+            branch: &seeds,
+            vault: self.vault.as_ref(),
+            passphrase: b"receipt-test",
+            now,
+        })?;
+        let sibling = self.client(None)?;
+        native.devices.extend(
+            self.manifest(&sibling)?.custody.ok_or("test: native sibling manifest")?.devices,
+        );
+        let full = crate::SdkDeviceManifestResponse::from_native(native)?;
+        source.persist_observed_identity_directory_now(&full)?;
+        sibling.persist_observed_identity_directory_now(&full)?;
+        for spec in [primary, self] {
+            spec.directory
+                .lock()
+                .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
+                .insert(full.principal_commitment.clone(), full.clone());
+        }
+        Ok(full)
+    }
     pub fn identity(&self) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {
-        Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
-            &ramflux_crypto::create_identity_root(&self.principal, [self.seed; 32]),
-            &ramflux_crypto::create_device_branch(
-                &self.principal,
-                &self.device,
-                1,
-                [self.seed + 1; 32],
-            ),
+        let account = crate::custody::load_account(
+            &self.root,
+            &self.principal,
+            crate::custody::network_now()?,
+        )?;
+        Ok(ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
+            account.verified(),
+            &self.device,
         )?)
     }
+    pub fn conversation(&self, to: &Spec) -> Result<String, SdkError> {
+        ramflux_protocol::message::dm_scope::derive(
+            self.identity()?.root_commitment(),
+            to.identity()?.root_commitment(),
+        )
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))
+    }
+    pub fn prepare_group(
+        &self,
+        client: &RamfluxClient,
+        group: &str,
+        conversation: &str,
+        peers: &[(&Spec, &RamfluxClient)],
+    ) -> Result<(), SdkError> {
+        assert!(peers.len() <= 8, "bounded native receipt group");
+        let own = self.identity()?;
+        let primary = client
+            .born_v3_account
+            .as_ref()
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .group_primary(self.vault.as_ref())?;
+        let mut state = client.shared_group_create_with_primary(
+            group,
+            conversation,
+            None,
+            own.storage_key(),
+            Some(&primary),
+        )?;
+        for (peer, receiver) in peers {
+            self.trust(client, peer)?;
+            peer.trust(receiver, self)?;
+            state = client.shared_group_change_with_primary(
+                group,
+                own.storage_key(),
+                ramflux_protocol::group_state::GroupStateChange::Add {
+                    member: receiver.owned_group_actor(peer.identity()?.storage_key())?.identity,
+                    role: ramflux_protocol::SharedGroupRole::Member,
+                },
+                Some(&primary),
+            )?;
+        }
+        for (peer, receiver) in peers {
+            receiver.accept_shared_group_state(&state, peer.identity()?.storage_key())?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_group_text(
+        &self,
+        account: &mut LocalBusAccountState,
+        group: &str,
+        operation: &str,
+        text: &str,
+    ) -> Result<String, SdkError> {
+        let conversation = account
+            .client
+            .account_db()?
+            .shared_group_state(group)?
+            .ok_or(SdkError::CustodySetupInvalid)?
+            .view()
+            .conversation_id
+            .clone();
+        let content = ramflux_protocol::message::Content {
+            value: Some(ramflux_protocol::message::content::Value::Message(
+                ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
+            )),
+        };
+        let mut manifests = self
+            .directory
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: directory poisoned".into()))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        manifests.push(self.manifest(&account.client)?);
+        let directory = crate::client::native_test_support::directory::Directory::new(manifests)
+            .await
+            .map_err(|error| SdkError::LocalBus(format!("test: group directory: {error}")))?;
+        directory.configure_session(&mut account.gateway_config);
+        if let Some(engine) = account.engine.as_mut() {
+            directory.configure_session(&mut engine.config);
+        }
+        let request = LocalBusFrame::request(
+            "group-receipt-fixture",
+            Some(self.principal.clone()),
+            "group",
+            "group.send",
+            json!({"group_id":group,"conversation_id":conversation,"message_id":operation,"sender_id":self.device,"content":content,"encrypted_body_base64":""}),
+        );
+        let sent =
+            Box::pin(crate::bus::dispatch::group::dispatch_group_send_request(&request, account))
+                .await?;
+        let id = sent.response_body["message_id"]
+            .as_str()
+            .ok_or_else(|| SdkError::LocalBus("test: group event id missing".into()))?
+            .to_owned();
+        self.events
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: event map poisoned".into()))?
+            .insert(operation.into(), id.clone());
+        Ok(id)
+    }
+
+    pub async fn send_text(
+        &self,
+        client: &RamfluxClient,
+        engine: &mut impl GatewaySessionAccess,
+        message: GatewayDirectMessage,
+        text: &[u8],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        let operation = message.message_id.clone();
+        let text = std::str::from_utf8(text)
+            .map_err(|_| SdkError::InboundRejected("test: UTF-8 text".into()))?;
+        let (id, entry) = Box::pin(client.send_generated_content_via_gateway(
+            engine,
+            message,
+            &ramflux_protocol::message::Content {
+                value: Some(ramflux_protocol::message::content::Value::Message(
+                    ramflux_protocol::message::Message { text: text.into(), ..Default::default() },
+                )),
+            },
+        ))
+        .await?;
+        self.events
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: event map poisoned".into()))?
+            .insert(operation, id);
+        Ok(entry)
+    }
+    pub fn event(&self, operation: &str) -> Result<String, SdkError> {
+        self.events
+            .lock()
+            .map_err(|_| SdkError::LocalBus("test: event map poisoned".into()))?
+            .get(operation)
+            .cloned()
+            .ok_or_else(|| SdkError::LocalBus("test: authored event missing".into()))
+    }
     pub fn message(&self, to: &Spec, id: &str) -> GatewayDirectMessage {
+        let peer = to.identity().expect("test: receipt peer custody authority");
         GatewayDirectMessage {
-            conversation_id: "thread".into(),
+            conversation_id: self.conversation(to).expect("test: canonical receipt conversation"),
             message_id: id.into(),
             envelope_id: id.into(),
             source_principal_id: self.principal.clone(),
             sender_id: self.device.clone(),
             recipient_device_id: Some(to.device.clone()),
-            recipient_principal_commitment: Some(ramflux_crypto::identity_root_commitment(
-                &ramflux_crypto::create_identity_root(&to.principal, [to.seed; 32])
-                    .signing_key
-                    .verifying_key(),
-            )),
-            target_delivery_id: to.device.clone(),
+            recipient_principal_commitment: Some(peer.root_commitment().into()),
+            target_delivery_id: peer.storage_key().into(),
             encrypted_body: vec![],
             created_at: now_unix_timestamp(),
             ttl: 600,
@@ -162,20 +464,22 @@ pub(super) fn seed_pair(a: &Spec, b: &Spec) -> TestResult {
         dm_device_id_hash(&a.device),
         dm_device_id_hash(&b.device),
         [3; 32],
-    )?;
+    )?
+    .with_collapse_key_from_x3dh_sk(&[17; 32], &[4; 32])?;
     let receiver = ramflux_crypto::DmSession::recipient(
         [17; 32],
         dm_device_id_hash(&b.device),
         dm_device_id_hash(&a.device),
         [3; 32],
-    )?;
+    )?
+    .with_collapse_key_from_x3dh_sk(&[17; 32], &[4; 32])?;
     one.persist_pair(&a.identity()?, &b.identity()?, &[4; 32], &sender)?;
     two.persist_pair(&b.identity()?, &a.identity()?, &[4; 32], &receiver)?;
     for client in [&one, &two] {
         client.account_db()?.persist_client_record(
             "conversation",
-            "thread",
-            &json!({"kind":"direct","participants":[a.principal,b.principal]}),
+            &a.conversation(b)?,
+            &json!({"kind":"direct","group_id":null,"participants":[a.principal,b.principal],"participant_roots":[a.identity()?.root_commitment(),b.identity()?.root_commitment()]}),
         )?;
     }
     Ok(())
@@ -205,6 +509,7 @@ pub(super) async fn delivered(
     client: &LocalBusClient,
     principal: &str,
     id: &str,
+    conversation: &str,
     count: usize,
 ) -> Result<serde_json::Value, SdkError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -215,12 +520,12 @@ pub(super) async fn delivered(
                 Some(principal.into()),
                 "test",
                 "message.read",
-                json!({"conversation_id":"thread"}),
+                json!({"conversation_id":conversation,"read_model":true}),
             ))
             .await?;
         if body["messages"].as_array().is_some_and(|rows| {
             rows.iter().any(|row| {
-                row["message_id"] == id
+                row["id"] == id
                     && row["receipts"].as_array().is_some_and(|receipts| {
                         receipts.iter().filter(|r| r["state"] == "delivered").count() == count
                     })
@@ -303,42 +608,23 @@ impl GatewaySessionFrameSource for Gateway {
                     .map_err(|e| TransportError::Quic(e.to_string()));
             }
             let frame = match self.last.take() {
+                Some(GatewayClientFrame::PrekeyFetch { device_id }) => {
+                    let response = self
+                        .mail
+                        .lock()
+                        .map_err(|_| TransportError::Quic("mailbox poisoned".into()))?
+                        .prekeys
+                        .get(&device_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            TransportError::Quic("test: native prekey missing".into())
+                        })?;
+                    GatewayServerFrame::Prekey { response }
+                }
                 Some(GatewayClientFrame::Heartbeat { now }) => {
                     GatewayServerFrame::Heartbeat { now }
                 }
-                Some(GatewayClientFrame::Submit { submit }) => {
-                    let mut mail = self
-                        .mail
-                        .lock()
-                        .map_err(|_| TransportError::Quic("mailbox poisoned".into()))?;
-                    let envelope = submit.envelope;
-                    mail.submissions.push(envelope.clone());
-                    if mail.reject_id.as_deref() == Some(envelope.envelope_id.as_str()) {
-                        return Err(TransportError::Quic("injected receipt refusal".into()));
-                    }
-                    let entry = if let Some(existing) = mail.messages.iter().find(|e| {
-                        e.envelope.source_device_id == envelope.source_device_id
-                            && e.envelope.envelope_id == envelope.envelope_id
-                            && e.target_delivery_id == envelope.target_delivery_id
-                    }) {
-                        existing.clone()
-                    } else {
-                        let entry = GatewayInboxEntry {
-                            forwarded: false,
-                            inbox_seq: u64::try_from(mail.messages.len() + 1)
-                                .map_err(|e| TransportError::Quic(e.to_string()))?,
-                            target_delivery_id: envelope.target_delivery_id.clone(),
-                            envelope,
-                        };
-                        mail.messages.push(entry.clone());
-                        entry
-                    };
-                    if mail.lose_ack {
-                        mail.lose_ack = false;
-                        return Err(TransportError::Quic("injected lost submit response".into()));
-                    }
-                    GatewayServerFrame::Deliver { entry }
-                }
+                Some(GatewayClientFrame::Submit { submit }) => self.submit(submit)?,
                 Some(GatewayClientFrame::Resume { resume }) => {
                     let mail = self
                         .mail
@@ -411,7 +697,7 @@ pub(super) async fn explicit_noop(
             "test",
             "message.receipt.delivered",
             json!({
-                "conversation_id": "thread", "message_id": "dm-one",
+                "conversation_id": peer.conversation(receiver)?, "message_id": peer.event("dm-one")?,
                 "receiver_device_id": receiver.device, "recipient_device_id": peer.device,
                 "target_delivery_id": peer.device,
             }),
@@ -426,15 +712,11 @@ pub(super) async fn explicit_noop(
             Some(receiver.principal.clone()),
             "test",
             "message.read",
-            json!({"conversation_id": "thread"}),
+            json!({"conversation_id": peer.conversation(receiver)?, "read_model":true}),
         ))
         .await?;
-    assert_eq!(read["messages"][0]["sender_device_id"], peer.device);
-    assert!(
-        read["messages"][0]["sender_device_display"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("Laptop@"))
-    );
+    assert_eq!(read["messages"][0]["author"]["device_id"], peer.device);
+    assert_eq!(read["messages"][0]["author"]["account_anchor"], peer.identity()?.root_commitment());
     assert_eq!(
         mail.lock()
             .map_err(|_| "mailbox")?
@@ -450,4 +732,57 @@ pub(super) async fn explicit_noop(
     let _ = server.await;
     drop(daemon);
     Ok(())
+}
+
+impl Gateway {
+    fn submit(
+        &mut self,
+        submit: crate::GatewaySubmitFrame,
+    ) -> Result<GatewayServerFrame, TransportError> {
+        let mut mail =
+            self.mail.lock().map_err(|_| TransportError::Quic("mailbox poisoned".into()))?;
+        let envelope = submit.envelope;
+        mail.submissions.push(envelope.clone());
+        if mail.reject_id.as_deref() == Some(envelope.envelope_id.as_str()) {
+            return Err(TransportError::Quic("injected receipt refusal".into()));
+        }
+        if mail.guard.is_some() {
+            let source = mail
+                .guard_sources
+                .iter()
+                .find(|s| {
+                    s.device_id() == envelope.source_device_id
+                        || s.storage_key() == envelope.source_device_id
+                })
+                .cloned()
+                .ok_or_else(|| TransportError::Quic("test: unknown guard source".into()))?;
+            if let Some(guard) = mail.guard.as_mut() {
+                guard
+                    .accept_envelope_once(&source, &envelope, now_unix_timestamp())
+                    .map_err(|error| TransportError::Quic(format!("gateway guard: {error}")))?;
+            }
+        }
+        let entry = if let Some(existing) = mail.messages.iter().find(|e| {
+            e.envelope.source_device_id == envelope.source_device_id
+                && e.envelope.envelope_id == envelope.envelope_id
+                && e.target_delivery_id == envelope.target_delivery_id
+        }) {
+            existing.clone()
+        } else {
+            let entry = GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: u64::try_from(mail.messages.len() + 1)
+                    .map_err(|e| TransportError::Quic(e.to_string()))?,
+                target_delivery_id: envelope.target_delivery_id.clone(),
+                envelope,
+            };
+            mail.messages.push(entry.clone());
+            entry
+        };
+        if mail.lose_ack {
+            mail.lose_ack = false;
+            return Err(TransportError::Quic("injected lost submit response".into()));
+        }
+        Ok(GatewayServerFrame::Deliver { entry })
+    }
 }

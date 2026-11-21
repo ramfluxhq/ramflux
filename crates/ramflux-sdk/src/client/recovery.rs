@@ -667,8 +667,10 @@ pub fn invite_guardian(
         expires_at,
         signed: sdk_device_signed_fields(&branch.device_id, ""),
     };
-    invite.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &invite)?;
+    invite.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &super::routed::native_control::guardian::invite_transcript(&invite)?,
+        branch,
+    );
     Ok(invite)
 }
 
@@ -710,8 +712,10 @@ pub fn accept_guardian_invite(
         accepted_at: now,
         signed: sdk_device_signed_fields(&branch.device_id, ""),
     };
-    accept.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &accept)?;
+    accept.signed.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &super::routed::native_control::guardian::accept_transcript(&accept)?,
+        branch,
+    );
     client.account_db()?.record_guardian_recovery_share(&GuardianRecoveryShareWrite {
         owner_principal_id: &invite.inviter_principal_id,
         guardian_principal_id: &branch.principal_id,
@@ -737,9 +741,9 @@ pub fn accept_guardian_invite(
 /// # Errors
 /// Returns an error when canonical verification fails.
 pub fn verify_guardian_accept(accept: &SdkGuardianAcceptMessage) -> Result<(), SdkError> {
-    Ok(ramflux_protocol::verify_signed_fields(
-        accept,
-        &accept.signed,
+    Ok(ramflux_crypto::verify_canonical_signature(
+        &super::routed::native_control::guardian::accept_transcript(accept)?,
+        &accept.signed.signature,
         &accept.guardian_device_public_key_base64url,
     )?)
 }
@@ -753,9 +757,9 @@ fn verify_guardian_invite(invite: &SdkGuardianInviteMessage) -> Result<(), SdkEr
             "guardian invite member kind is not guardian_share".to_owned(),
         ));
     }
-    Ok(ramflux_protocol::verify_signed_fields(
-        invite,
-        &invite.signed,
+    Ok(ramflux_crypto::verify_canonical_signature(
+        &super::routed::native_control::guardian::invite_transcript(invite)?,
+        &invite.signed.signature,
         &invite.inviter_device_public_key_base64url,
     )?)
 }
@@ -904,7 +908,7 @@ fn now_unix_u64() -> Result<u64, SdkError> {
 
 #[must_use]
 pub fn recovery_member_public_key_base64url(member_signing_seed: [u8; 32]) -> String {
-    ramflux_crypto::public_key_base64url_from_seed(member_signing_seed)
+    ramflux_crypto::public_key_base64url_from_seed(&member_signing_seed)
 }
 
 fn to_crypto_member_kind(

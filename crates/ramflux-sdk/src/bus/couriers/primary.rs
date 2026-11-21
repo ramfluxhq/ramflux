@@ -22,7 +22,7 @@ impl PrimarySnapshot {
         let setup = account.native_setup.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
         Ok(Some(Self { native, vault: crate::bus::custody_setup::primary_provider(setup) }))
     }
-    pub(crate) async fn load(self) -> Result<ramflux_crypto::custody::SelfSigningKey, SdkError> {
+    pub(crate) async fn load(self) -> Result<crate::custody::PrimarySigningLease, SdkError> {
         tokio::task::spawn_blocking(move || self.native.group_primary(self.vault.as_ref()))
             .await
             .map_err(|_| SdkError::CustodyVaultUnavailable)?

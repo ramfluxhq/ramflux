@@ -161,6 +161,7 @@ pub(crate) const OBJECT_OPERATION_FAILED: &str = "failed";
 pub(crate) const OBJECT_OPERATION_UNKNOWN: &str = "unknown";
 pub(crate) const OBJECT_PUT_REQUEST_HASH_DOMAIN: &str = "ramflux.object_put.request.v1";
 pub const OBJECT_PUT_PROTOCOL_VERSION: u32 = 1;
+#[cfg(test)]
 pub(crate) fn object_key_slot_associated_data(
     object_id: &str,
     conversation_id: &str,
@@ -520,6 +521,7 @@ pub(crate) fn verify_recipient_object_access_grant(
 /// a caller that intentionally clears the field still fails closed in the v3 grantee token builder
 /// instead of silently inheriting the environment default. Lineage is never derived from other
 /// fields such as the gateway host or recipient node.
+#[cfg(test)]
 pub(crate) fn effective_attachment_lineage(
     explicit: Option<String>,
     effective: Option<String>,
@@ -852,6 +854,18 @@ pub(crate) async fn relay_quic_health_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn object_key_slot_aad_binds_object_slot_and_recipient() {
+        let object_id = "object_sync_test";
+        let ad_a = object_key_slot_associated_data(object_id, "slot_a", "device_b");
+        let ad_b = object_key_slot_associated_data(object_id, "slot_b", "device_b");
+        let ad_c = object_key_slot_associated_data(object_id, "slot_a", "device_c");
+        let ad_d = object_key_slot_associated_data("object_other", "slot_a", "device_b");
+        assert_ne!(ad_a, ad_b, "the slot id must be bound into the associated data");
+        assert_ne!(ad_a, ad_c, "the recipient device must be bound into the associated data");
+        assert_ne!(ad_a, ad_d, "the object id must be bound into the associated data");
+        assert!(String::from_utf8(ad_a).unwrap_or_default().contains("device_b"));
+    }
     fn test_recipient_identity(
         branch: &DeviceBranch,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, SdkError> {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant generated Call Inner conversion (S10a P16).
+//! Generated Call Inner conversion and native authority validation.
 //! This module neither sends a carrier nor admits a stored event.
 use super::generated_content::GeneratedEventStream;
 use crate::{RamfluxClient, SdkError};

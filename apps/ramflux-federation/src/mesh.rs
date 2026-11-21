@@ -1049,7 +1049,7 @@ pub(crate) mod tests {
         use ramflux_node_core::test_support::federation_fixtures::{
             federation_route_with_key, signed_federation_handshake, test_federation_ca_pem,
         };
-        let source_public_key = ramflux_crypto::public_key_base64url_from_seed(source_seed);
+        let source_public_key = ramflux_crypto::public_key_base64url_from_seed(&source_seed);
         let mut route = federation_route_with_key(
             "node-b",
             &source_public_key,
@@ -1660,10 +1660,10 @@ pub(crate) mod tests {
             S: serde::Serializer,
         {
             use serde::ser::SerializeMap;
-            let mut map = serializer.serialize_map(Some(19))?;
-            map.serialize_entry("schema", "ramflux.envelope.v1")?;
-            map.serialize_entry("version", &1)?;
-            map.serialize_entry("domain", "ramflux.envelope.v1")?;
+            let mut map = serializer.serialize_map(Some(22))?;
+            map.serialize_entry("schema", "ramflux.envelope.v2")?;
+            map.serialize_entry("version", &2)?;
+            map.serialize_entry("domain", "ramflux.envelope.v2")?;
             map.serialize_entry("ext", &RawExt { duplicate: self.duplicate_ext })?;
             map.serialize_entry("signing_key_id", "device")?;
             map.serialize_entry("signature_alg", "ed25519")?;
@@ -1673,12 +1673,18 @@ pub(crate) mod tests {
             map.serialize_entry("source_device_id", "phone")?;
             map.serialize_entry("target_delivery_id", "peer")?;
             map.serialize_entry("routing_set_id", &Option::<String>::None)?;
-            map.serialize_entry("delivery_class", "opaque_event")?;
+            map.serialize_entry("delivery_class", "message")?;
             map.serialize_entry("priority", "normal")?;
             map.serialize_entry("ttl", &3600)?;
             map.serialize_entry("created_at", &self.created_at)?;
             map.serialize_entry("encrypted_payload", "opaque")?;
             map.serialize_entry("payload_hash", "hash")?;
+            map.serialize_entry("delivery_mode", "durable")?;
+            map.serialize_entry("collapse_tag", "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI")?;
+            map.serialize_entry(
+                "report_commitment",
+                "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+            )?;
             map.end()
         }
     }
@@ -1742,6 +1748,7 @@ pub(crate) mod tests {
                     protocol_versions: vec!["s8".to_owned()],
                     transport_backends: vec!["quic".to_owned()],
                     node_capabilities: vec!["mesh".to_owned()],
+                    served_gateway_capabilities: Vec::new(),
                     attachment_authority: None,
                 },
                 observability: Arc::new(crate::FederationMeshObservability::default()),
@@ -1842,6 +1849,7 @@ pub(crate) mod tests {
                 protocol_versions: vec!["s8".to_owned()],
                 transport_backends: vec!["quic".to_owned()],
                 node_capabilities: vec!["mesh".to_owned()],
+                served_gateway_capabilities: Vec::new(),
                 attachment_authority: None,
             },
         };

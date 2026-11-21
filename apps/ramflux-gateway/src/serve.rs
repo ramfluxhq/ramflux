@@ -660,11 +660,10 @@ mod tests {
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
 
     #[test]
-    fn candidate_profile_token_is_not_advertised_while_gate_off() {
-        assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    fn active_profile_token_is_advertised() {
         let versions = super::advertised_client_protocol_versions(&["v1".to_owned()]);
-        assert_eq!(versions, vec!["v1".to_owned()]);
-        assert!(!versions.iter().any(|version| {
+        assert!(versions.iter().any(|version| version == "v1"));
+        assert!(versions.iter().any(|version| {
             version == ramflux_protocol::message::outer::MESSAGE_SCHEMA_V1_PROFILE
         }));
     }
@@ -775,9 +774,9 @@ mod tests {
 
     fn test_envelope(envelope_id: &str, target_delivery_id: &str) -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
-            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "test-envelope-key".to_owned(),
@@ -789,15 +788,15 @@ mod tests {
             source_device_id: "device_gateway_forward".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 86_400,
             created_at: 1_760_000_000,
             encrypted_payload: "encrypted_payload".to_owned(),
             payload_hash: "payload_hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         }
     }
 }

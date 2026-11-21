@@ -1,6 +1,6 @@
 [package]
 name = "ramflux-rf"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.99.0"
 license.workspace = true
@@ -14,8 +14,6 @@ path = "src/main.rs"
 default = []
 # Process-local credential vault for native integration fixtures only.
 itest-memory-vault = ["ramflux-sdk/itest-memory-vault"]
-# Explicit legacy fixture creation; never enabled by production builds.
-itest-legacy-accounts = ["ramflux-sdk/itest-legacy-accounts"]
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = ["ramflux-sdk/itest-identity-proof"]
 # T24-B2: propagate the SDK rfd mid-flight crash-resume barrier gate. Never enabled by production rf.
@@ -28,6 +26,7 @@ itest-bus-fault = ["ramflux-sdk/itest-bus-fault"]
 object-ipc-crash-seam = ["ramflux-sdk/object-ipc-crash-seam"]
 
 [dependencies]
+ramflux-core.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -36,6 +35,7 @@ ramflux-crypto = { workspace = true }
 ramflux-sdk = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-sync = { workspace = true }
+base64 = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { workspace = true }
 keyring = "3"
@@ -56,6 +56,7 @@ tempfile.workspace = true
 tokio = { version = "1.42", features = ["test-util"] }
 tracing = { workspace = true }
 ramflux-node-core = { workspace = true }
+ramflux-storage = { workspace = true }
 
 [lints]
 workspace = true

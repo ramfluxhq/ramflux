@@ -239,92 +239,99 @@ impl RamfluxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::shared_group::tests::{person, temp_root};
+    use crate::client::shared_group::tests::{
+        install_native_directories, native_person, native_target,
+    };
     #[test]
     fn stranger_group_is_held_declined_and_blocked_without_joined_projection()
     -> Result<(), SdkError> {
-        let root = temp_root("invitations")?;
-        let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-        let peer = person(&root.join("peer"), "peer", "phone", 21, 22)?;
-        owner.shared_group_create("group", "thread", None, "target-phone")?;
-        let state = owner.shared_group_change(
+        let owner = native_person("owner", "phone")?;
+        let peer = native_person("peer", "phone")?;
+        install_native_directories(&[&owner, &peer])?;
+        owner.client.fixture_group_create("group", "thread", None, "phone")?;
+        let state = owner.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             ramflux_protocol::GroupStateChange::Add {
-                member: peer.owned_group_actor("target-phone")?.identity,
+                member: peer.client.fixture_group_actor("phone")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        assert!(peer.group_snapshot_requires_consent(&state)?);
-        let body = super::super::bootstrap::packet_bytes(&state)?;
-        peer.hold_group_invitation(&state, &body)?;
-        assert!(peer.account_db()?.shared_group_state("group")?.is_none());
-        assert!(peer.account_db()?.client_record("conversation", "thread")?.is_none());
-        assert_eq!(peer.group_invitations()?["invitations"].as_array().map(Vec::len), Some(1));
+        assert!(peer.client.group_snapshot_requires_consent(&state)?);
+        let body = owner.client.shared_group_packet(&state, false)?;
+        peer.client.hold_group_invitation(&state, &body)?;
+        assert!(peer.client.account_db()?.shared_group_state("group")?.is_none());
+        assert!(peer.client.account_db()?.client_record("conversation", "thread")?.is_none());
+        assert_eq!(
+            peer.client.group_invitations()?["invitations"].as_array().map(Vec::len),
+            Some(1)
+        );
         let before = peer
+            .client
             .account_db()?
             .load_actor_state::<Invitation>(&key("group"))?
             .ok_or(StorageError::GroupPermissionDenied)?
             .expires_at;
-        peer.hold_group_invitation(&state, &body)?;
+        peer.client.hold_group_invitation(&state, &body)?;
         assert_eq!(
-            peer.account_db()?
+            peer.client
+                .account_db()?
                 .load_actor_state::<Invitation>(&key("group"))?
                 .ok_or(StorageError::GroupPermissionDenied)?
                 .expires_at,
             before
         );
-        peer.decide_group_invitation("group", false, "target-phone")?;
-        peer.hold_group_invitation(&state, &body)?;
-        assert_eq!(peer.group_invitations()?["invitations"], serde_json::json!([]));
-        let root_id = owner.owned_device_identity()?.root_commitment().to_owned();
-        peer.establish_friend_link("blocked-inviter", "peer", &root_id)?;
-        peer.block_friend_link("blocked-inviter")?;
-        assert!(peer.group_snapshot_requires_consent(&state).is_err());
+        peer.client.decide_group_invitation("group", false, &native_target(&peer.client)?)?;
+        peer.client.hold_group_invitation(&state, &body)?;
+        assert_eq!(peer.client.group_invitations()?["invitations"], serde_json::json!([]));
+        let root_id = owner.client.owned_device_identity()?.root_commitment().to_owned();
+        peer.client.establish_friend_link("blocked-inviter", "peer", &root_id)?;
+        peer.client.block_friend_link("blocked-inviter")?;
+        assert!(peer.client.group_snapshot_requires_consent(&state).is_err());
         drop((owner, peer));
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
     #[test]
     fn explicit_invitation_acceptance_and_contact_consent_adopt_only_signed_state()
     -> Result<(), SdkError> {
-        let root = temp_root("invitation-accept")?;
-        let owner = person(&root.join("owner"), "owner", "phone", 11, 12)?;
-        let peer = person(&root.join("peer"), "peer", "phone", 21, 22)?;
-        owner.shared_group_create("group", "thread", None, "target-phone")?;
-        let state = owner.shared_group_change(
+        let owner = native_person("owner", "phone")?;
+        let peer = native_person("peer", "phone")?;
+        install_native_directories(&[&owner, &peer])?;
+        owner.client.fixture_group_create("group", "thread", None, "phone")?;
+        let state = owner.client.fixture_group_change(
             "group",
-            "target-phone",
+            "phone",
             ramflux_protocol::GroupStateChange::Add {
-                member: peer.owned_group_actor("target-phone")?.identity,
+                member: peer.client.fixture_group_actor("phone")?.identity,
                 role: ramflux_protocol::SharedGroupRole::Member,
             },
         )?;
-        peer.hold_group_invitation(&state, &super::super::bootstrap::packet_bytes(&state)?)?;
-        peer.decide_group_invitation("group", true, "target-phone")?;
+        peer.client
+            .hold_group_invitation(&state, &owner.client.shared_group_packet(&state, false)?)?;
+        peer.client.decide_group_invitation("group", true, &native_target(&peer.client)?)?;
         assert_eq!(
-            peer.account_db()?
+            peer.client
+                .account_db()?
                 .shared_group_state("group")?
                 .ok_or(StorageError::GroupPermissionDenied)?
                 .view(),
             state.view()
         );
-        assert!(!peer.group_snapshot_requires_consent(&state)?);
-        let remote = owner.owned_device_identity()?.root_commitment().to_owned();
-        peer.establish_friend_link("formerly-contact", "peer", &remote)?;
-        peer.remove_friend_link("formerly-contact", "me")?;
-        assert!(!peer.friend_link_peer_is_accepted(&remote)?);
+        assert!(!peer.client.group_snapshot_requires_consent(&state)?);
+        let remote = owner.client.owned_device_identity()?.root_commitment().to_owned();
+        peer.client.establish_friend_link("formerly-contact", "peer", &remote)?;
+        peer.client.remove_friend_link("formerly-contact", "me")?;
+        assert!(!peer.client.friend_link_peer_is_accepted(&remote)?);
         assert!(
-            !peer.group_snapshot_requires_consent(&state)?,
+            !peer.client.group_snapshot_requires_consent(&state)?,
             "contact removal does not revoke joined group membership"
         );
-        peer.block_friend_link("formerly-contact")?;
+        peer.client.block_friend_link("formerly-contact")?;
         assert!(
-            peer.group_snapshot_requires_consent(&state).is_err(),
+            peer.client.group_snapshot_requires_consent(&state).is_err(),
             "explicit blocks apply even after joining"
         );
         drop((owner, peer));
-        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

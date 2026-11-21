@@ -1,0 +1,306 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! J7 ordered installation. Every partial owner commit leaves a durable admission fence.
+
+use super::install_store::{self, Install};
+use crate::{SdkError, custody};
+use ramflux_protocol::custody::{CustodyAuthority, object_hash};
+use ramflux_storage::{AccountDb, AdoptionRow};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
+
+/// Target-local storage owners for an installation attempt. No network capability.
+pub struct Installation<'a> {
+    pub root: &'a Path,
+    pub db: &'a AccountDb,
+    pub vault: &'a dyn custody::PrimaryVault,
+    pub now: u64,
+}
+
+/// Independently query the native head and activate exactly the acknowledged publication.
+/// The provider is the native query path; relay acknowledgements never implement this contract.
+pub trait PairingAuthorityQuery: Send + Sync {
+    /// # Errors
+    /// Returns native query errors without granting ordinary account admission.
+    fn current_authority(&self, anchor: &str) -> Result<CustodyAuthority, SdkError>;
+}
+
+/// Install an exact independently verified native publication using target-local vault refs.
+///
+/// # Errors
+/// Wrong ACK/head, absent local keys, owner disagreement, or any durable write failure keeps
+/// networking closed. Retrying the same operation completes the ordered owner sequence.
+pub fn activate_recipient(
+    local: &Installation<'_>,
+    install: &Install,
+    acknowledged_hash: &str,
+    query: &dyn PairingAuthorityQuery,
+) -> Result<(), SdkError> {
+    let authority = query.current_authority(&install.account_anchor)?;
+    if object_hash(&authority.publication.record)? != acknowledged_hash {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    install_exact(local, install, acknowledged_hash, &authority)
+}
+
+/// Signalled whenever a local head installation ends (success or failure), so readers that met
+/// the in-flight marker can wait for completion instead of polling.
+pub(crate) static INSTALL_SETTLED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub(crate) fn install_exact(
+    local: &Installation<'_>,
+    install: &Install,
+    acknowledged_hash: &str,
+    authority: &CustodyAuthority,
+) -> Result<(), SdkError> {
+    let outcome = install_exact_inner(local, install, acknowledged_hash, authority);
+    INSTALL_SETTLED.notify_waiters();
+    outcome
+}
+
+fn install_exact_inner(
+    local: &Installation<'_>,
+    install: &Install,
+    acknowledged_hash: &str,
+    authority: &CustodyAuthority,
+) -> Result<(), SdkError> {
+    let Installation { root, db, vault, now } = *local;
+    let _lock = authority_lock(root, &install.account_id)?;
+    let saved = install_store::read_pending(root, &install.account_id, &install.operation_id)?;
+    let installed = install_store::read_installed(root, &install.account_id)?;
+    let mut row = saved
+        .or(installed.filter(|row| row.operation_id == install.operation_id))
+        .ok_or(SdkError::PairingField("operation_id"))?;
+    if row.schema != install.schema
+        || row.version != install.version
+        || row.install_purpose != install.install_purpose
+        || row.full_transfer != install.full_transfer
+        || row.account_anchor != install.account_anchor
+        || row.recipient_ref != install.recipient_ref
+        || row.branch_vault_ref != install.branch_vault_ref
+        || row.data_vault_ref != install.data_vault_ref
+        || row.primary_vault_ref != install.primary_vault_ref
+        || row.record_hash.as_deref().is_some_and(|hash| hash != acknowledged_hash)
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    if let Some(head) = db.pairing_head()? {
+        if head.operation_id != row.operation_id
+            || head.candidate_hash != acknowledged_hash
+            || head.state != "acknowledged"
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+    } else if row.install_purpose != "authority_refresh" {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
+    row.record_hash = Some(acknowledged_hash.into());
+    let adoption = super::full_generation::preserved_refresh_adoption(root, db, &row)?;
+    custody::verify_pairing_local(&row, authority, vault, now)?;
+    row.state = "adopt_prepared".into();
+    install_store::write_pending(root, &row)?;
+    cut(1)?;
+    custody::write_pairing_authority(root, &row, authority, vault, now)?;
+    cut(2)?;
+    let account = custody::load_data_account(root, &row.account_id, now)?;
+    if !custody::matches_install(&account, &row)? {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
+    custody::verify_pairing_local(&row, authority, vault, now)?;
+    row.state = "authority_durable".into();
+    install_store::write_pending(root, &row)?;
+    cut(3)?;
+    db.commit_pairing_install(&adoption)?;
+    cut(4)?;
+    row.state = "installed".into();
+    install_store::write_installed(root, &row)?;
+    install_store::remove_pending(root, &row.account_id, &row.operation_id)?;
+    Ok(())
+}
+
+// Test seam: stop the installation after a numbered durable step, as a process death would.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CUT: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn cut(step: u8) -> Result<(), SdkError> {
+    if CUT.with(|cell| cell.get() == step) {
+        CUT.with(|cell| cell.set(0));
+        return Err(SdkError::PairingCode("InjectedCut"));
+    }
+    Ok(())
+}
+#[cfg(not(test))]
+#[inline]
+#[allow(clippy::unnecessary_wraps)]
+fn cut(_step: u8) -> Result<(), SdkError> {
+    Ok(())
+}
+
+pub(crate) fn adoption(row: &Install) -> Result<AdoptionRow, SdkError> {
+    Ok(AdoptionRow {
+        account_id: row.account_id.clone(),
+        operation_id: row.operation_id.clone(),
+        record_hash: row.record_hash.clone().ok_or(SdkError::PairingField("record_hash"))?,
+        local_ref: ramflux_protocol::canonical_json_bytes(&row.recipient_ref)?,
+        local_role: if row.primary_vault_ref.is_some() { "primary" } else { "secondary" }.into(),
+        branch_vault_ref: row.branch_vault_ref.clone(),
+        data_vault_ref: row.data_vault_ref.clone(),
+        primary_vault_ref: row.primary_vault_ref.clone(),
+        full_generation_nonce: row.full_transfer.as_ref().map(|full| full.generation_nonce.clone()),
+        full_initial_union_root: row
+            .full_transfer
+            .as_ref()
+            .map(|full| full.initial_union_root.clone()),
+    })
+}
+
+/// Adopt later verified heads through the same retained marker, preserving local key owners.
+///
+/// # Errors
+/// Refuses missing/mismatched keys and leaves an incomplete refresh fenced for retry.
+pub fn refresh_authority(
+    root: &Path,
+    db: &AccountDb,
+    vault: &dyn custody::PrimaryVault,
+    account_id: &str,
+    authority: &CustodyAuthority,
+    now: u64,
+) -> Result<(), SdkError> {
+    let account = custody::load_data_account(root, account_id, now)?;
+    // A provably older native observation must not allocate an installation fence.
+    // Otherwise a rejected stale-node response can block an already installed device
+    // on its next ordinary unlock. Final installation still rechecks durable pins.
+    if authority.publication.record.body.account_anchor != account.record().body.account_anchor
+        || authority.publication.record.body.device_set_epoch
+            < account.record().body.device_set_epoch
+    {
+        return Err(SdkError::PairingCode("HeadChanged"));
+    }
+    let hash = object_hash(&authority.publication.record)?;
+    let reference = ramflux_protocol::custody::DeviceRef {
+        account_anchor: account.record().body.account_anchor.clone(),
+        device_id: account.local_device_id()?.into(),
+        device_epoch: account
+            .record()
+            .body
+            .devices
+            .iter()
+            .find(|device| device.device_id == account.local_device_id().unwrap_or(""))
+            .ok_or(SdkError::PairingCode("HeadChanged"))?
+            .device_epoch,
+    };
+    let is_primary =
+        authority.publication.record.body.master_certificate.body.primary_device_ref == reference;
+    let pending = install_store::list_pending(root, account_id)?;
+    let row = if let Some(row) = pending.iter().find(|row| {
+        row.install_purpose == "authority_refresh"
+            && row.record_hash.as_deref() == Some(hash.as_str())
+    }) {
+        row.clone()
+    } else {
+        let installed = install_store::read_installed(root, account_id)?;
+        if install_store::pending_blocks_network(&pending, installed.as_ref()) {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        let row = Install {
+            schema: "ramflux.pairing.Install.v2".into(),
+            version: 2,
+            account_id: account_id.into(),
+            account_anchor: reference.account_anchor.clone(),
+            operation_id: match db.pairing_head()? {
+                Some(head) if head.state == "acknowledged" && head.candidate_hash == hash => {
+                    head.operation_id
+                }
+                Some(_) => return Err(SdkError::PairingCode("PublicationPending")),
+                None => ramflux_protocol::encode_base64url(*super::super::random()?),
+            },
+            recipient_ref: reference,
+            recipient_mode: "existing".into(),
+            install_purpose: "authority_refresh".into(),
+            record_hash: Some(hash.clone()),
+            prior_record_hash: Some(object_hash(account.record())?),
+            branch_vault_ref: account.branch_vault_ref().into(),
+            data_vault_ref: ramflux_storage::FileVaultSecretSource::owner_ref(account_id),
+            primary_vault_ref: is_primary.then(|| account.primary_vault_ref().to_owned()),
+            state: "adopt_prepared".into(),
+            cleanup_ref: None,
+            cleanup_owner_ref: None,
+            full_transfer: None,
+        };
+        custody::verify_pairing_local(&row, authority, vault, now)?;
+        install_store::write_pending(root, &row)?;
+        row
+    };
+    install_exact(&Installation { root, db, vault, now }, &row, &hash, authority)
+}
+
+/// Unlock-time recovery of ordinary authority refreshes a process death interrupted. A refresh
+/// that is not owned by a head journal row (an observation of the own native head) leaves only
+/// its pending marker; the marker fences admission, so it must be settled before the session is
+/// admitted. Two outcomes, decided by what is already durable:
+/// - the new authority file is durable (its hash is the marker's): the exact installation is
+///   completed from that file, through the same ordered steps;
+/// - it is not: no owner has changed, the marker only fenced an attempt that never took effect,
+///   so it is removed and the next observation repeats the refresh.
+///
+/// Markers owned by a head journal row are left to that head's recovery.
+///
+/// Returns whether any marker was settled.
+///
+/// # Errors
+/// Storage, verification or installation errors leave the marker in place for a retry.
+pub(crate) fn settle_interrupted_refresh(
+    root: &Path,
+    db: &AccountDb,
+    vault: &dyn custody::PrimaryVault,
+    account_id: &str,
+    now: u64,
+) -> Result<bool, SdkError> {
+    let head = db.pairing_head()?;
+    let mut settled = false;
+    for row in install_store::list_pending(root, account_id)? {
+        if row.install_purpose != "authority_refresh"
+            || head.as_ref().is_some_and(|head| head.operation_id == row.operation_id)
+        {
+            continue;
+        }
+        let account = custody::load_data_account(root, account_id, now)?;
+        if row.record_hash.as_deref() == Some(object_hash(account.record())?.as_str()) {
+            let authority = CustodyAuthority {
+                publication: account.publication(),
+                custodian_publication: account.custodian_publication(root, now)?,
+            };
+            refresh_authority(root, db, vault, account_id, &authority, now)?;
+        } else {
+            install_store::remove_pending(root, account_id, &row.operation_id)?;
+        }
+        settled = true;
+    }
+    Ok(settled)
+}
+
+/// Account-scoped process fence. Never held over a network request.
+pub(crate) fn authority_lock(root: &Path, id: &str) -> Result<fs::File, SdkError> {
+    super::super::valid_id(id)?;
+    let path = root.join("custody_accounts").join(id).join(".authority.lock");
+    let file = crate::platform::fs::open_owner_only_no_follow(&path)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match crate::platform::fs::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(SdkError::PairingCode("Busy"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}

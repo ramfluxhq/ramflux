@@ -13,6 +13,10 @@ pub enum ProtocolError {
     TransportProtocol(String),
     #[error("invalid identity record: {0}")]
     InvalidIdentityRecord(&'static str),
+    #[error("device name contains a control or format character")]
+    DeviceNameControlCharacter,
+    #[error("device name yields a delivery id of {actual} bytes; the limit is {limit}")]
+    DeviceDeliveryIdTooLong { actual: usize, limit: usize },
     #[error("group state capacity: {0}")]
     GroupStateLimit(#[from] crate::group_state::GroupStateLimit),
     #[error("group ownership transfer requires synchronization")]
@@ -53,6 +57,8 @@ pub enum ProtocolError {
     SignatureVerificationFailed,
     #[error("unsupported signature algorithm")]
     UnsupportedSignatureAlgorithm,
+    #[error("discovery record is missing the node version")]
+    MissingNodeVersion,
     #[error("signed request expired")]
     SignedRequestExpired,
     #[error("signed request created too far in the future")]

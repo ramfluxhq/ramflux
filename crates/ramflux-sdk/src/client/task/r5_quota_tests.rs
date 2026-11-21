@@ -4,19 +4,11 @@
 //! No-role group traffic and aggregate capacity preserve unrelated and locally active tasks.
 use super::*;
 
-#[test]
-fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback() -> TestResult {
-    let f = Fixture::new()?;
-    let other = register(&f, "other", 81)?;
-    f.human.create_group("group", "human-device")?;
-    for id in ["agent-device", "other-device"] {
-        f.human.add_group_member("group", &member(&f.human, id)?, "member")?;
-    }
-    f.human.account_db()?.persist_client_record(
-        "conversation",
-        "group-thread",
-        &json!({"kind":"group","group_id":"group"}),
-    )?;
+#[tokio::test]
+async fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback()
+-> TestResult {
+    let f = Box::pin(native_group::fixture(true, "other")).await?;
+    let other = &f.other;
     let c = sign(
         &f.agent,
         "group-thread",
@@ -26,7 +18,7 @@ fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback
     assert!(!project(&f.human, &c)?.accepted);
     for n in 0..12 {
         let update = sign(
-            &other,
+            other,
             "group-thread",
             &format!("update-{n}"),
             TaskEventBody::Update(TaskUpdate {
@@ -43,7 +35,7 @@ fn r5_no_role_group_updates_from_the_named_assignee_are_dropped_without_holdback
     }
     assert_eq!(f.human.account_db()?.task_state_usage("task/pending/")?.0, 0);
     let legitimate = sign(
-        &other,
+        other,
         "group-thread",
         "legitimate",
         peer_start("unrelated", "group-thread", "other", "human"),

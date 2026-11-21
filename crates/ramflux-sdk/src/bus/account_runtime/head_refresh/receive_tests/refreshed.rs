@@ -63,7 +63,7 @@ async fn setup_refreshed() -> TestResult<Case> {
     .await?;
     *alice.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
     let mut config = alice.config;
     config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
     config.gateway_addr = address;
@@ -100,12 +100,44 @@ async fn receive(runtime: &mut AccountRuntime) -> TestResult<crate::bus::actor::
     runtime.apply(command).await?;
     Ok(result.await??)
 }
-fn assert_message(response: &crate::bus::actor::ActorResponse) {
+async fn assert_message(
+    runtime: &AccountRuntime,
+    response: &crate::bus::actor::ActorResponse,
+) -> TestResult {
     assert_eq!(
-        response.body["decrypted_messages"][0]["body_utf8"], "after rename",
-        "receive must return the message whose refresh it waited for"
+        response.body["durable_reader"], "message.read",
+        "receive must hand clients to the durable read model"
     );
-    assert_eq!(response.body["messages"].as_array().map(Vec::len), Some(1));
+    assert!(
+        response.body.get("decrypted_messages").is_none(),
+        "receive must not expose a parallel plaintext page"
+    );
+    let account = runtime.state.accounts.get("sender").ok_or("test: receiving account")?;
+    let readers = crate::bus::readers::AccountReaders::start(
+        account.client.account_db()?,
+        Some(account.client.owned_device_identity()?),
+    )?;
+    let result = readers
+        .request(crate::LocalBusFrame::request(
+            "refreshed-read",
+            Some("sender".into()),
+            "message",
+            "message.list",
+            json!({"conversation_id":"thread", "read_model":true}),
+        ))
+        .await;
+    readers.stop().await;
+    let page = result?;
+    assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+    let rows = page["messages"].as_array().ok_or("test: durable message page")?;
+    let chats: Vec<_> = rows.iter().filter(|row| row["kind"] != "service").collect();
+    assert_eq!(chats.len(), 1, "the receive must commit exactly one refreshed message");
+    assert_eq!(
+        chats.first().ok_or("test: refreshed row")?["text"],
+        "after rename",
+        "the durable reader must serve the message whose refresh the command waited for"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -114,7 +146,7 @@ async fn receive_applies_message_refreshed_inside_its_command() -> TestResult {
         .run_until(Box::pin(async {
             let mut case = Box::pin(setup_refreshed()).await?;
             let response = receive(&mut case.runtime).await?;
-            assert_message(&response);
+            assert_message(&case.runtime, &response).await?;
             assert_eq!(
                 case.resumes.load(Ordering::SeqCst),
                 2,
@@ -132,6 +164,12 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
     tokio::task::LocalSet::new()
         .run_until(Box::pin(async {
             let mut case = Box::pin(setup_refreshed()).await?;
+            let service_pin = {
+                let account = case.runtime.state.accounts.get("sender").ok_or("account")?;
+                let pin = account.client.service_projection_pin("thread")?;
+                assert!(pin.len() >= 2, "the fixture's accepted add and rename are the baseline");
+                pin
+            };
             let (entered, ready) = oneshot::channel();
             let (_release, held) = oneshot::channel();
             case.runtime.receive_gate_hook = Some((entered, held));
@@ -157,15 +195,20 @@ async fn cancelled_apply_cannot_prepare_retry_that_waits_for_refresh() -> TestRe
             assert_eq!(case.resumes.load(Ordering::SeqCst), 1);
             let account = case.runtime.state.accounts.get_mut("sender").ok_or("account")?;
             assert!(
-                account.client.direct_messages("thread")?.is_empty(),
+                account.client.direct_chat_messages("thread")?.is_empty(),
                 "cancelled dispatch must not apply the ready message"
+            );
+            assert_eq!(
+                account.client.service_projection_pin("thread")?,
+                service_pin,
+                "cancellation must not write a service row"
             );
             *account.client.native_head_freshness.borrow_mut() =
                 crate::client::identity_authority::NativeHeadFreshness::default();
-            account.client.persist_fetched_identity_directory(&case.bob.manifest)?;
+            account.client.persist_observed_identity_directory_now(&case.bob.manifest)?;
             let before = case.resumes.load(Ordering::SeqCst);
             let response = receive(&mut case.runtime).await?;
-            assert_message(&response);
+            assert_message(&case.runtime, &response).await?;
             assert_eq!(
                 case.resumes.load(Ordering::SeqCst) - before,
                 2,

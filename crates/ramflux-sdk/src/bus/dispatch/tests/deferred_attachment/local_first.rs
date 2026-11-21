@@ -105,6 +105,7 @@ async fn case() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "account")?;
     account.start_connection()?;
     let connection = account.connection.clone().ok_or("manager not started")?;
     connection.require_live(Duration::from_secs(600)).await?;
@@ -236,6 +237,7 @@ async fn keyed_case() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let account = state.accounts.get_mut("account").ok_or(SdkError::AccountDbNotUnlocked)?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, "account")?;
     account.start_connection()?;
     let connection = account.connection.clone().ok_or("manager not started")?;
     connection.require_live(Duration::from_secs(600)).await?;

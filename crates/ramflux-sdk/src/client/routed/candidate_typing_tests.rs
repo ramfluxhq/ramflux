@@ -6,7 +6,7 @@ use crate::typing::{TypingOutcome, TypingReceiver};
 use std::time::Instant;
 
 async fn prepared_pair() -> Result<(Fixture, Fixture), SdkError> {
-    let (mut a, mut b) = pair(227, 229)?;
+    let (mut a, mut b) = pair(227, 229).await?;
     friend(&mut a, &b)?;
     let bootstrap = seal(&a, &b, message("bootstrap", "c"), b"bootstrap")?;
     apply(&mut b, &bootstrap).await?;
@@ -67,13 +67,13 @@ fn typing_envelope_at(
     draft.ttl = ttl;
     draft.recipient_device_id = Some(b.id.clone());
     draft.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
-    draft.target_delivery_id.clone_from(&b.id);
+    draft.source_principal_id = a.config()?.principal_id;
+    draft.target_delivery_id = b.config()?.target_delivery_id;
     a.client.prepare_typing_delivery(&mut engine, &draft, active)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     for ttl in [0, 1, 2, 3, 4, 6] {
         let error = typing_envelope(&a, &b, "refused", ttl)
@@ -108,7 +108,6 @@ async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(),
 
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_ephemeral_future_tolerance_uses_local_clock() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let envelope = typing_envelope(&a, &b, "future-event", 5)?;
     let mut receiver = TypingReceiver::default();
@@ -130,7 +129,6 @@ async fn receiver_ephemeral_future_tolerance_uses_local_clock() -> Result<(), Sd
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let envelope = typing_envelope(&a, &b, "transient-event", 5)?;
     let db = b.client.account_db()?;
@@ -159,8 +157,7 @@ async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (mut a, mut b) = pair(181, 183)?;
+    let (mut a, mut b) = pair(181, 183).await?;
     friend(&mut a, &b)?;
     let error = typing_envelope(&a, &b, "no-session", 5)
         .err()
@@ -207,7 +204,10 @@ async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Resul
         let reply = seal(&b, &a, reply_message, b"peer reply")?;
         apply(&mut a, &reply).await?;
         a.client.active_account_db = None;
-        a.client.unlock_account("alice", b"routed-test")?;
+        a.client.unlock_account("alice", b"native fixture data passphrase")?;
+        let vault =
+            a.native.as_ref().ok_or_else(|| invalid("native typing fixture"))?.vault.clone();
+        a.client.initialize_born_v3_branch(&a.id, vault).await?;
         assert_eq!(
             a.client.account_db()?.load_actor_state::<u16>(&budget_key)?,
             Some((batch + 1) * 64)
@@ -226,7 +226,6 @@ async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Resul
 #[tokio::test(flavor = "current_thread")]
 async fn future_typing_clear_cannot_remove_visible_indicator_before_signed_start()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let active = typing_envelope_at(&a, &b, "visible", 5, true, 100)?;
     let clear = typing_envelope_at(&a, &b, "future-clear", 1, false, 101)?;
@@ -253,7 +252,6 @@ async fn future_typing_clear_cannot_remove_visible_indicator_before_signed_start
 #[tokio::test(flavor = "current_thread")]
 async fn typing_failed_commit_exposes_no_ciphertext_and_rolls_back_ratchet_and_allowance()
 -> Result<(), SdkError> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     let source = a.client.owned_device_identity()?;
     let remote = b.client.owned_device_identity()?;
@@ -273,5 +271,45 @@ async fn typing_failed_commit_exposes_no_ciphertext_and_rolls_back_ratchet_and_a
     let (_, typing) = b.client.open_typing_delivery(&envelope, &b.id)?;
     assert!(typing.active);
     assert_eq!(db.load_actor_state::<u16>(&key)?, Some(count.unwrap_or(0) + 1));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn clear_without_live_indicator_is_idle() -> Result<(), SdkError> {
+    let (a, _b) = Box::pin(prepared_pair()).await?;
+    a.client.set_typing_focus(Some("c"))?;
+    let mut config = a.config()?;
+    config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
+    let request = ramflux_protocol::message::MessageRequest {
+        request_id: "clear".into(),
+        account_id: a.client.account_db()?.local_account_id.clone(),
+        action: Some(ramflux_protocol::message::message_request::Action::Send(
+            ramflux_protocol::message::SendMessage {
+                conversation_id: "c".into(),
+                operation_id: vec![7; 16],
+                reply_to: None,
+                content: Some(ramflux_protocol::message::Content {
+                    value: Some(ramflux_protocol::message::content::Value::Typing(
+                        ramflux_protocol::message::Typing { active: false, expires_at: 0 },
+                    )),
+                }),
+            },
+        )),
+    };
+    let update = Box::pin(a.client.send_generated_typing_request(&mut engine, &request)).await?;
+    assert!(
+        matches!(
+            update.state,
+            Some(ramflux_protocol::message::message_update::State::Content(ref content))
+                if matches!(
+                    content.value,
+                    Some(ramflux_protocol::message::content::Value::Typing(ref typing))
+                        if !typing.active
+                )
+        ),
+        "test: a clear with no live indicator returns an idle typing update"
+    );
     Ok(())
 }

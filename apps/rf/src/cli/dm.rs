@@ -33,16 +33,16 @@ pub(crate) struct ConversationSelector {
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) conversation: String,
     /// Unified read model (message schema v1 only): page size, 1..=100.
-    #[arg(long, hide = true)]
+    #[arg(long)]
     pub(crate) limit: Option<u32>,
     /// Unified read model: `next_before` cursor JSON of the previous page.
-    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "JSON")]
+    #[arg(long, allow_hyphen_values = true, value_name = "JSON")]
     pub(crate) before: Option<String>,
     /// Unified read model: durable change cursor (`next_after` of the previous batch).
-    #[arg(long, hide = true, value_name = "SEQ")]
+    #[arg(long, value_name = "SEQ")]
     pub(crate) after_seq: Option<u64>,
     /// Unified read model: one message with revision, reactions, receipts and erasure state.
-    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "ID")]
+    #[arg(long, allow_hyphen_values = true, value_name = "ID")]
     pub(crate) message: Option<String>,
 }
 
@@ -56,21 +56,33 @@ pub(crate) struct DmRead {
     #[arg(long, value_name = "SECS", default_value_t = 0)]
     pub(crate) wait: u64,
     /// Unified read model (message schema v1 only): page size, 1..=100.
-    #[arg(long, hide = true)]
+    #[arg(long)]
     pub(crate) limit: Option<u32>,
     /// Unified read model: `next_before` cursor JSON of the previous page.
-    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "JSON")]
+    #[arg(long, allow_hyphen_values = true, value_name = "JSON")]
     pub(crate) before: Option<String>,
     /// Unified read model: durable change cursor (`next_after` of the previous batch).
-    #[arg(long, hide = true, value_name = "SEQ")]
+    #[arg(long, value_name = "SEQ")]
     pub(crate) after_seq: Option<u64>,
     /// Unified read model: one message with revision, reactions, receipts and erasure state.
-    #[arg(long, hide = true, allow_hyphen_values = true, value_name = "ID")]
+    #[arg(long, allow_hyphen_values = true, value_name = "ID")]
     pub(crate) message: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct DmSend {
+    /// Prepared r4 `MediaRef` JSON, including `large_manifest`. Repeat for multiple attachments.
+    #[arg(long)]
+    pub(crate) media_ref: Vec<PathBuf>,
+    /// File to send. Repeat at most 16 times. Each file is its own prepare.
+    #[arg(long)]
+    pub(crate) attach: Vec<PathBuf>,
+    /// Retired. Present means a content refusal. The value is not read.
+    #[arg(long)]
+    pub(crate) relay_url: Option<String>,
+    /// Retired. Present means a content refusal. The value is not read.
+    #[arg(long)]
+    pub(crate) attachment_chunk_size: Option<u64>,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) account: String,
     #[arg(long, allow_hyphen_values = true)]
@@ -91,12 +103,6 @@ pub(crate) struct DmSend {
     pub(crate) target: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) body: String,
-    #[arg(long)]
-    pub(crate) attach: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) relay_url: Option<String>,
-    #[arg(long, default_value_t = 1024)]
-    pub(crate) attachment_chunk_size: usize,
     #[arg(long)]
     pub(crate) federation_url: Option<String>,
     #[arg(allow_hyphen_values = true, long)]
@@ -140,10 +146,11 @@ pub(crate) struct DmDelete {
     pub(crate) conversation: String,
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) message: String,
-    #[arg(long, default_value = "own_devices")]
+    #[arg(long, default_value = "local", value_parser = ["local", "everyone"])]
     pub(crate) scope: String,
+    /// Reuse this token to retry the same logical deletion.
     #[arg(long, allow_hyphen_values = true)]
-    pub(crate) tombstone: Option<String>,
+    pub(crate) operation_id: Option<String>,
 }
 
 #[derive(Args)]

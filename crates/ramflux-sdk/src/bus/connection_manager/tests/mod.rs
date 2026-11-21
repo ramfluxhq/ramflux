@@ -198,7 +198,7 @@ pub(crate) fn send(
 }
 pub(crate) fn entry(id: &str, sequence: u64) -> Result<crate::GatewayInboxEntry, SdkError> {
     Ok(serde_json::from_value(
-        serde_json::json!({"inbox_seq":sequence,"target_delivery_id":"host-target","envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"source-device","signature_alg":"ed25519","signature":"fixture","envelope_id":id,"source_principal_id":"source","source_device_id":"source-device","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"opaque"}}),
+        serde_json::json!({"inbox_seq":sequence,"target_delivery_id":"host-target","envelope":{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","signing_key_id":"source-device","signature_alg":"ed25519","signature":"fixture","envelope_id":id,"source_principal_id":"source","source_device_id":"source-device","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"opaque"}}),
     )?)
 }
 

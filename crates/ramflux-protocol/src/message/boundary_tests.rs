@@ -32,10 +32,10 @@ fn every_interleaved_oneof_has_a_field_order_encoder() -> TestResult {
     let pool = descriptors()?;
     assert_eq!(
         pool.all_messages().filter(|message| !message.is_map_entry()).count(),
-        223,
+        227,
         "v3 descriptor message inventory"
     );
-    assert_eq!(pool.all_messages().count(), 224, "v3 descriptor inventory includes the map entry");
+    assert_eq!(pool.all_messages().count(), 228, "v3 descriptor inventory includes the map entry");
     let mut interleaved = Vec::new();
     for message in pool.all_messages() {
         for choice in message.oneofs().filter(|choice| !choice.is_synthetic()) {
@@ -64,23 +64,28 @@ fn byte_limits_accept_the_cap_and_reject_one_more() -> TestResult {
     let pool = descriptors()?;
     for message in pool.all_messages().filter(|m| m.name().starts_with("Native")) {
         if message.get_field_by_name("canonical").is_some() {
-            let cap = if message.name() == "NativeGroupSnapshot" {
-                crate::group_state::MAX_GROUP_STATE_BYTES
-            } else {
-                8 * 1024
+            let cap = match message.name() {
+                "NativeGroupSnapshot" => crate::group_state::MAX_GROUP_STATE_BYTES,
+                "NativeCustodyManifest" => MAX_INNER_BYTES,
+                _ => 8 * 1024,
             };
             caps.push((message.name().to_owned(), "canonical", cap));
         }
     }
     for (name, field, cap) in caps {
         let tag = descriptor(&name)?.get_field_by_name(field).ok_or("field missing")?.number();
+        // The custody manifest leaf cap equals the whole-message cap, so a leaf at the cap
+        // plus its framing is refused by the message cap; the leaf is scanned directly.
+        let scan = |bytes: &[u8]| {
+            if name == "NativeCustodyManifest" {
+                scanner::scan(&descriptor(&name)?, bytes, 2, 0)
+            } else {
+                scan_message(&name, bytes, 2)
+            }
+        };
+        assert_eq!(scan(&blob(tag, &vec![1; cap])), Ok(ScanOutcome::Supported), "{name}.{field}");
         assert_eq!(
-            scan_message(&name, &blob(tag, &vec![1; cap]), 2),
-            Ok(ScanOutcome::Supported),
-            "{name}.{field}"
-        );
-        assert_eq!(
-            scan_message(&name, &blob(tag, &vec![1; cap + 1]), 2),
+            scan(&blob(tag, &vec![1; cap + 1])),
             Err(ValidationError::Limit),
             "{name}.{field}"
         );

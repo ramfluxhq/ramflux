@@ -50,8 +50,42 @@ struct Incoming {
     target: String,
 }
 
+/// Sign held creator-fork repairs once the account primary can be loaded. A locked or missing
+/// vault leaves the markers pending for the next pass.
+async fn redrive_creator_repairs(writer: &Writer) -> Result<bool, SdkError> {
+    let snapshot = writer
+        .apply(|account| {
+            if account.client.has_pending_creator_repairs()? {
+                PrimarySnapshot::prepare(account)
+            } else {
+                Ok(None)
+            }
+        })
+        .await?;
+    let Some(snapshot) = snapshot else { return Ok(false) };
+    let primary = match snapshot.load().await {
+        Ok(primary) => primary,
+        Err(error) => {
+            tracing::debug!(%error, "creator repair redrive deferred");
+            return Ok(false);
+        }
+    };
+    writer
+        .apply(move |account| {
+            Ok(match account.client.redrive_creator_repairs(Some(&primary)) {
+                Ok(repaired) => repaired > 0,
+                Err(error) => {
+                    tracing::debug!(%error, "creator repair redrive deferred");
+                    false
+                }
+            })
+        })
+        .await
+}
+
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
-    let mut active = process_incoming(&context, &writer).await?;
+    let repaired = redrive_creator_repairs(&writer).await?;
+    let mut active = process_incoming(&context, &writer).await? || repaired;
     let Some(plan) = writer.apply(prepare).await? else { return Ok(active) };
     active = true;
     let captured = plan.clone();
@@ -422,20 +456,23 @@ fn seal(
     {
         return Ok(None);
     }
+    let bytes = account.client.generated_group_control_inner(&plan.packet)?;
+    message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
     let sealed = account.client.seal_routed_prepared(
         &plan.config,
         &message,
-        &serde_json::to_vec(&plan.packet)?,
+        &bytes,
         crate::client::routed::Route::group_control(plan.packet.group()),
         material?,
     )?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&plan.config, &mut message, sealed)?;
     let attempt = Attempt {
         id: plan.id.clone(),
         packet: plan.packet.clone(),
         root,
         device: device.device_id,
-        envelope: crate::dm::gateway_direct_message_envelope(&plan.config, &message, None)?,
+        envelope,
         federation: route,
         expires_at,
     };
@@ -478,7 +515,7 @@ async fn process_incoming(context: &SessionContext, writer: &Writer) -> Result<b
                 if let Err(error) = client.process_group_request_with_primary(
                     &item.record.request,
                     &item.target,
-                    primary.as_ref(),
+                    primary.as_deref(),
                 ) {
                     tracing::debug!(%error,"group request processing deferred");
                 }
@@ -497,12 +534,9 @@ fn incoming(account: &mut LocalBusAccountState) -> Result<Vec<Incoming>, SdkErro
         .load_actor_state::<String>("group-courier/process-cursor")?
         .unwrap_or_default();
     let mut waiting = Vec::new();
-    for record in client.group_change_records()?.into_iter().filter(|record| {
-        record.incoming
-            && record.result.is_none()
-            && record.local_status == "waiting_for_owner"
-            && record.request.expires_at > now
-    }) {
+    for record in
+        client.group_change_records()?.into_iter().filter(|record| record.awaits_creator(now))
+    {
         waiting.push((
             crate::client::shared_group::request_record_key(&record.request, true)?,
             record,

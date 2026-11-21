@@ -184,6 +184,7 @@ fn carrier(
 ) -> Result<Carrier, SdkError> {
     let device = sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let signed = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -206,6 +207,14 @@ fn project(
     carrier: &Carrier,
     projection: &str,
 ) -> Result<Outcome, SdkError> {
+    project_bytes(client, carrier, projection, &carrier.bytes()?)
+}
+fn project_bytes(
+    client: &RamfluxClient,
+    carrier: &Carrier,
+    projection: &str,
+    bytes: &[u8],
+) -> Result<Outcome, SdkError> {
     client
         .project_surface_message(
             "thread",
@@ -217,11 +226,12 @@ fn project(
                 expires_at: None,
                 group_epoch: None,
             },
-            &carrier.bytes()?,
+            bytes,
             false,
         )?
         .ok_or_else(|| super::invalid("not a surface"))
 }
+
 fn create(f: &Fixture) -> Result<(), SdkError> {
     create_for(&f.author, &f.human)
 }
@@ -405,12 +415,9 @@ async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() ->
         "",
         100,
     )?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(
-            history[0]["carrier"]["wire_base64"].as_str().ok_or("wire")?
-        )?,
-        wire
-    );
+    let retained: Carrier = serde_json::from_value(history[0]["carrier"].clone())?;
+    assert_eq!(retained.bytes()?, signed.bytes()?, "history retains exact typed carrier");
+    assert_eq!(retained.to_generated()?, signed.to_generated()?, "history retains typed fields");
     f.human = RamfluxClient::new();
     f.human.open_account_index(&f.root)?;
     f.human.unlock_account("human", b"surface-test-secret")?;
@@ -510,9 +517,11 @@ async fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> Te
         "control: duplicate injection must change exactly the v3 sequence member"
     );
     signed.wire_base64 = ramflux_protocol::encode_base64url(duplicated.as_bytes());
-    let signed = raw_signature(&f.author, signed)?;
     assert!(signed.payload().is_err(), "original duplicate-key evidence must reach the v3 codec");
-    assert!(!project(&f.human, &signed, "invalid")?.accepted);
+    assert!(
+        signed.bytes().is_err(),
+        "the typed carrier builder must refuse duplicate-key wire bytes"
+    );
     assert!(f.human.surface_get("s", 0, None)?.is_null());
     assert!(f.human.surface_state("s")?.is_none());
     Ok(())
@@ -521,11 +530,19 @@ async fn malformed_original_wire_cannot_be_normalized_by_carrier_ingress() -> Te
 #[tokio::test]
 async fn carrier_metadata_has_a_budget_before_renderer_error_projection() -> TestResult {
     let f = Fixture::new().await?;
-    let mut signed =
+    let signed =
         carrier(&f.author, PayloadKind::Event, "create", &event(1, C::CreateSurface(snapshot()))?)?;
-    signed.surface_id = "x".repeat(257);
-    assert!(Carrier::decode(&signed.bytes()?).is_err());
-    assert!(!project(&f.human, &signed, "oversized")?.accepted);
+    let mut typed = signed.to_generated()?;
+    typed.surface_id = "x".repeat(257);
+    let bytes = prost::Message::encode_to_vec(&typed);
+    assert!(
+        !Carrier::decode(&bytes).is_ok_and(|value| value.is_some()),
+        "typed metadata bound must precede renderer projection"
+    );
+    assert!(
+        project_bytes(&f.human, &signed, "oversized", &bytes).is_err(),
+        "oversized typed metadata must not create a surface"
+    );
     assert_eq!(f.human.surface_list("thread", "", 100)?["surfaces"], json!([]));
     Ok(())
 }
@@ -718,15 +735,6 @@ async fn surface_refusals_have_stable_codes_for_policy_versions_hashes_and_size(
     Ok(())
 }
 
-fn raw_signature(sender: &RamfluxClient, mut carrier: Carrier) -> Result<Carrier, SdkError> {
-    let mut body = serde_json::to_value(&carrier)?;
-    body.as_object_mut().ok_or_else(|| super::invalid("carrier body"))?.remove("signature");
-    carrier.signature = ramflux_crypto::sign_with_device_branch(
-        sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-        &json!({"domain":ramflux_protocol::domain::SURFACE_CARRIER,"body":body}),
-    )?;
-    Ok(carrier)
-}
 #[tokio::test]
 async fn signed_resync_bootstraps_missed_create_and_only_then_admits_n_plus_one() -> TestResult {
     let f = Fixture::new().await?;
@@ -766,18 +774,26 @@ async fn signed_resync_bootstraps_missed_create_and_only_then_admits_n_plus_one(
         project(&f.author, &resync, "author-resync")?.accepted,
         "author replacement must bind the same complete state"
     );
-    for (label, mut wrong) in
-        [("conversation", resync.clone()), ("author", resync.clone()), ("device", resync.clone())]
-    {
+    for label in ["conversation", "author", "device"] {
+        use prost::Message as _;
+        let mut wrong = resync.to_generated()?;
         match label {
             "conversation" => wrong.conversation_id = "another-thread".into(),
             "author" => wrong.author_principal_id = "human".into(),
             _ => wrong.sender_device_id = "human-device".into(),
         }
         wrong.message_id = format!("wrong-{label}");
-        let wrong = raw_signature(&f.author, wrong)?;
+        wrong.signature.clear();
+        wrong.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &crate::client::task::generated::typed_transcript(
+                "SurfaceCarrier",
+                &wrong.encode_to_vec(),
+            )?,
+            f.author.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        );
         assert!(
-            !project(&f.human, &wrong, label)?.accepted,
+            !project_bytes(&f.human, &resync, label, &wrong.encode_to_vec())
+                .is_ok_and(|result| result.accepted),
             "authenticated bootstrap must refuse a wrong {label} binding"
         );
         assert!(

@@ -52,7 +52,7 @@ pub(crate) struct SourceKind {
 
 /// Every footprint kind classified Source. A kind that appears in neither this list nor
 /// `NON_SOURCE_KINDS` is unclassified, which the inventory guard rejects.
-pub(crate) const SOURCE_KINDS: [SourceKind; 11] = [
+pub(crate) const SOURCE_KINDS: [SourceKind; 10] = [
     SourceKind {
         kind: "actor",
         table: "runtime_actor_state",
@@ -100,12 +100,6 @@ pub(crate) const SOURCE_KINDS: [SourceKind; 11] = [
         table: "runtime_journal",
         locator: "CAST(t.seq AS TEXT)",
         column: "body_json",
-    },
-    SourceKind {
-        kind: "group_pending_undecrypted",
-        table: "group_pending_undecrypted",
-        locator: "CAST(t.rowid AS TEXT)",
-        column: "envelope_json",
     },
     SourceKind {
         kind: "contact_message_request",
@@ -188,6 +182,9 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     // Replay counters keyed by group, epoch, sender and counter (`group_pending.rs:171`):
     // no payload hash, device or signing key.
     "group_sender_key_counter_seen",
+    // Service-event body digest (`messages.rs` `record_service_body_fence`). The row is the
+    // replay fence, not an inbound envelope, and message erasure must not delete it.
+    "group_service_body_fence",
     "root_group_sender_key_counter_seen",
     // The projection itself: writers `messages.rs:77,107` and `deleted_messages.rs:297,456` store
     // the sender principal, `encrypted_body` and typed `MessageMetadata`, whose optional

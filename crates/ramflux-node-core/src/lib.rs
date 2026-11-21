@@ -9,6 +9,7 @@ compile_error!("durability-test-hooks must not be enabled in a production build"
 #[cfg(all(feature = "itest-http", any(ramflux_production, ramflux_release_profile)))]
 compile_error!("itest-http must not be enabled in release or production builds");
 
+mod attachment_wire;
 mod authority_refusal;
 mod config;
 mod durability_io;
@@ -16,8 +17,10 @@ mod durability_io;
 pub mod durability_test_hooks;
 mod fatal_durability;
 pub mod username_directory;
+pub use attachment_wire::*;
 pub use authority_refusal::*;
 pub use ramflux_core::environment;
+pub use ramflux_core::version;
 mod error;
 mod federation_attachment;
 mod federation_crypto;
@@ -243,7 +246,12 @@ mod home_migration_release;
 pub use home_migration_release::{HOME_MIGRATION_RELEASE_GATE, home_migration_enabled};
 mod device_pairing_release;
 pub use device_pairing_release::{
-    DEVICE_PAIRING_CAPABILITY, DEVICE_PAIRING_RELEASE_GATE, device_pairing_enabled,
+    DEVICE_PAIRING_CAPABILITY, PRIMARY_TRANSFER_FULL_CAPABILITY, device_pairing_enabled,
+};
+mod gateway_client_capabilities;
+pub use gateway_client_capabilities::{
+    published_gateway_client_capabilities, router_echo_gateway_client_capabilities,
+    select_gateway_client_capabilities,
 };
 
 pub use router_store::sender_retry;
@@ -265,3 +273,6 @@ pub use ephemeral::{
 
 mod session_push_frames;
 pub use session_push_frames::*;
+
+mod logical_snapshot;
+pub use logical_snapshot::{LogicalWal, logical_redb_rows, logical_wal_records};

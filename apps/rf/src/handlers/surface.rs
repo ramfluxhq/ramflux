@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::{LocalBusClient, PathBuf, RfError, SurfaceAction, SurfaceCommand, print_json};
+use ramflux_sdk::LocalBusFrame;
 use serde_json::json;
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) async fn handle_surface(
     socket: PathBuf,
     command: SurfaceCommand,
@@ -69,6 +71,18 @@ pub(crate) async fn handle_surface(
             )
         }
     };
+    if matches!(method, "surface.send" | "surface.action") {
+        // Writes keep the daemon refusal on stdout and fail the process. A surface
+        // action the bus accepts as a frame but marks `accepted: false` is the same refusal.
+        let frame = LocalBusFrame::request(request_id(), Some(account), "surface", method, body);
+        let response = bus.request_frame_response(frame).await?;
+        return crate::handlers::conversation_ops::commit_write(method, &response);
+    }
     let response = bus.request(Some(account), "surface", method, body).await?;
     print_json(&response)
+}
+
+fn request_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("rf-surface-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }

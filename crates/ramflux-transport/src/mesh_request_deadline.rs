@@ -42,6 +42,15 @@ pub fn mesh_request_deadline(
 ) -> Result<MeshRequestDeadline, TransportError> {
     register(&stream.sock, deadline)
 }
+/// Register the same request watchdog from a TLS socket clone held by its admission owner.
+/// # Errors
+/// Refuses elapsed deadlines, saturation, clone failure or unavailable watchdog state.
+pub fn mesh_socket_request_deadline(
+    socket: &TcpStream,
+    deadline: Instant,
+) -> Result<MeshRequestDeadline, TransportError> {
+    register(socket, deadline)
+}
 fn register(socket: &TcpStream, deadline: Instant) -> Result<MeshRequestDeadline, TransportError> {
     if Instant::now() >= deadline {
         return Err(error("mesh request deadline exceeded"));

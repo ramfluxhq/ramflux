@@ -47,7 +47,7 @@ impl Gateway {
         let node = verify_node_identity_record(
             &record,
             "test-node",
-            &ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             now,
         )?;
         let service = Arc::new(CustodyService::new(node, false, &store, now)?);
@@ -89,6 +89,7 @@ impl Gateway {
     }
     fn config(&self, id: &str) -> CustodyNetworkConfig {
         CustodyNetworkConfig {
+            pairing_admission: None,
             account_root: self.accounts.clone(),
             account_id: id.into(),
             device_id: "primary".into(),
@@ -96,7 +97,7 @@ impl Gateway {
             server_name: "localhost".into(),
             ca_certificate: self.public.tls.ca_cert.clone(),
             node_id: "test-node".into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             audience: "test-node".into(),
             binding_mode: BindingMode::HomeRelayReceipt,
             allow_no_channel_binding: false,
@@ -235,7 +236,7 @@ async fn in_child(name: &'static str) -> Result<bool> {
                 .env(CHILD, "1")
                 .env(
                     "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY",
-                    ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+                    ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
                 )
                 .env(
                     "RAMFLUX_CUSTODY_PROXY_SIGNING_SEED",

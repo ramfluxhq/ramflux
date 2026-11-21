@@ -76,11 +76,12 @@ fn add_native_member(
         &owner.branch,
         &owner.actor,
         state,
-        snapshot::Apply {
-            requester: &owner.actor,
-            change: GroupStateChange::Add { member, role },
+        snapshot::Apply::clock(
+            &owner.actor,
+            GroupStateChange::Add { member, role },
             now,
-        },
+            state.snapshot().epoch,
+        )?,
     )
 }
 fn person(
@@ -177,7 +178,20 @@ fn more_than_sixty_four_epochs_fast_forward_in_one_snapshot() -> Result<(), Cryp
     }
     assert_eq!(state.relation_to(&first)?, GroupStateRelation::Extension);
     assert_eq!(state.view().epoch, 132);
-    assert!(canonical_json_bytes(state.snapshot())?.len() < 5000, "no operation history growth");
+    assert_eq!(
+        state.snapshot().service_events.len(),
+        131,
+        "each rename is one signed service event"
+    );
+    assert_eq!(
+        state.view().name.as_deref(),
+        Some("Name 132"),
+        "the roster keeps only the current name"
+    );
+    assert!(
+        canonical_json_bytes(state.snapshot())?.len() < MAX_GROUP_STATE_BYTES,
+        "the signed service log stays inside the snapshot budget"
+    );
     Ok(())
 }
 #[test]
@@ -425,11 +439,12 @@ fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), Cry
         &owner.branch,
         &current,
         &state,
-        snapshot::Apply {
-            requester: &current,
-            change: GroupStateChange::SetName { name: "Later".into() },
-            now: i64::try_from(now).map_err(|_| invalid("clock"))?,
-        },
+        snapshot::Apply::clock(
+            &current,
+            GroupStateChange::SetName { name: "Later".into() },
+            i64::try_from(now).map_err(|_| invalid("clock"))?,
+            state.snapshot().epoch,
+        )?,
     )?;
     verify_group_state_snapshot(later.snapshot().clone())?;
     let mut expired_genesis = later.snapshot().clone();
@@ -443,11 +458,12 @@ fn native_genesis_actor_is_bound_to_its_signed_creation_time() -> Result<(), Cry
         &owner.branch,
         &owner.actor,
         &state,
-        snapshot::Apply {
-            requester: &owner.actor,
-            change: GroupStateChange::SetName { name: "Skewed sibling".into() },
-            now: 700,
-        },
+        snapshot::Apply::clock(
+            &owner.actor,
+            GroupStateChange::SetName { name: "Skewed sibling".into() },
+            700,
+            state.snapshot().epoch,
+        )?,
     )?;
     verify_group_state_snapshot(skewed.snapshot().clone())?;
     Ok(())
@@ -562,14 +578,15 @@ fn r5_group_only_exclusions_survive_while_the_root_remains_a_member() -> Result<
         &owner.branch,
         &owner.actor,
         &base,
-        snapshot::Apply {
-            requester: &owner.actor,
-            change: GroupStateChange::Remove {
+        snapshot::Apply::clock(
+            &owner.actor,
+            GroupStateChange::Remove {
                 root_commitment: owner.actor.identity.root_commitment.clone(),
                 device_id: "laptop".into(),
             },
-            now: 1000,
-        },
+            1000,
+            base.snapshot().epoch,
+        )?,
     )?;
     assert!(
         removed.view().effective_role(&owner.actor.identity.root_commitment, "laptop").is_none()
@@ -579,11 +596,12 @@ fn r5_group_only_exclusions_survive_while_the_root_remains_a_member() -> Result<
         &owner.branch,
         &owner.actor,
         &removed,
-        snapshot::Apply {
-            requester: &owner.actor,
-            change: GroupStateChange::SetName { name: "After boundary".into() },
-            now: 1000 + GROUP_REQUEST_TTL_SECONDS,
-        },
+        snapshot::Apply::clock(
+            &owner.actor,
+            GroupStateChange::SetName { name: "After boundary".into() },
+            1000 + GROUP_REQUEST_TTL_SECONDS,
+            removed.snapshot().epoch,
+        )?,
     )?;
     assert_eq!(pruned.view().excluded.len(), 1);
     assert!(
@@ -734,7 +752,12 @@ fn r6_transfer_acceptance_binds_base_target_and_sixty_second_lease() -> Result<(
         &alice.branch,
         &alice.actor,
         &base,
-        snapshot::Apply { requester: &alice.actor, change: change(acceptance.clone()), now: 1061 },
+        snapshot::Apply::clock(
+            &alice.actor,
+            change(acceptance.clone()),
+            1061,
+            base.snapshot().epoch,
+        )?,
     );
     assert!(matches!(
         expired,
@@ -747,11 +770,12 @@ fn r6_transfer_acceptance_binds_base_target_and_sixty_second_lease() -> Result<(
             &alice.branch,
             &alice.actor,
             &changed,
-            snapshot::Apply {
-                requester: &alice.actor,
-                change: change(acceptance.clone()),
-                now: 1001
-            }
+            snapshot::Apply::clock(
+                &alice.actor,
+                change(acceptance.clone()),
+                1001,
+                changed.snapshot().epoch,
+            )?
         )
         .is_err()
     );

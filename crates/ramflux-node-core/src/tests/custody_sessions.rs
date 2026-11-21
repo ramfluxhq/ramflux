@@ -379,8 +379,15 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
             retry: None,
         }
     ));
-    let verified = verify_record(&driver.publication.record, NOW, None, None)?;
     let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([11; 32]));
+    let renewed = publish_session_profile_update(&driver, &router, &store, &primary)?;
+    let after_update =
+        signed_request(&driver, &session, &action, &ramflux_protocol::encode_base64url([8; 32]))?;
+    assert!(
+        matches!(send(&driver.connection, after_update, NOW + 1), CustodyServerFrame::Inbox { .. }),
+        "unrelated head changes preserve a live authorized branch session"
+    );
+    let verified = verify_record(&renewed, NOW + 1, None, None)?;
     let revoked = primary.revoke_device(&verified, "primary", NOW + 1)?;
     router.publish_custody_record(
         &crate::CustodyPublication { record: revoked, compacted_ids: None },
@@ -433,7 +440,7 @@ fn custody_node_history_retains_keys_and_rejects_rollback_or_rebinding_after_res
         body.previous_record_hash = Some(retired.hash().into());
         body.issued_at = NOW + 2;
         let mut key = first.envelope().body.proxy_keys[0].clone();
-        key.public_key = ramflux_crypto::public_key_base64url_from_seed([21; 32]);
+        key.public_key = ramflux_crypto::public_key_base64url_from_seed(&[21; 32]);
         body.proxy_keys = vec![key];
         let rebound = sign_node_identity_record(&root, body)?;
         let rebound = verify_node_identity_record(
@@ -741,7 +748,7 @@ fn durable_view_publication() -> Result {
         let core = store.publication_core()?;
         let id = store.inbox_status(&target)?.0.ok_or("identity")?;
         let first = core.reserve(&target, &id, &[])?;
-        let mut envelope = envelope("native-held-publication", &target, DeliveryClass::OpaqueEvent);
+        let mut envelope = envelope("native-held-publication", &target, DeliveryClass::Message);
         envelope.source_principal_id = "alice".into();
         envelope.source_device_id = "primary".into();
         envelope.created_at = i64::try_from(NOW)?;
@@ -830,3 +837,23 @@ mod sender_retry;
 
 #[path = "custody_entry_bound.rs"]
 mod entry_bound;
+
+fn publish_session_profile_update(
+    driver: &Driver,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    primary: &SelfSigningKey,
+) -> Result<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>> {
+    let mut body = driver.publication.record.body.clone();
+    body.device_set_epoch += 1;
+    body.previous_record_hash = Some(object_hash(&driver.publication.record)?);
+    body.issued_at = NOW + 1;
+    body.profile.display_name = "Current profile".into();
+    let record = primary.sign_record(body)?;
+    router.publish_custody_record(
+        &crate::CustodyPublication { record: record.clone(), compacted_ids: None },
+        NOW + 1,
+        store,
+    )?;
+    Ok(record)
+}

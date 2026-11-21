@@ -35,7 +35,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
     for key in keys {
         if let Some(work) = db.load_actor_state::<Work>(&key)?
             && (work.next_at <= now
-                || work.at.saturating_add(LIFETIME) <= now
+                || work.retry_from.saturating_add(LIFETIME) <= now
                 || work.attempts >= ATTEMPTS)
         {
             due.push((key, work));
@@ -53,7 +53,7 @@ pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, S
             continue;
         }
         let attempt_at = now_unix_timestamp();
-        if work.at.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
+        if work.retry_from.saturating_add(LIFETIME) <= attempt_at || work.attempts >= ATTEMPTS {
             finish(&account.client, &key, &work, "failed")?;
             continue;
         }
@@ -136,14 +136,20 @@ async fn send(
     key: &str,
     work: &mut Work,
 ) -> Result<(), SdkError> {
+    if work.refresh_expired_transport(now_unix_timestamp()) {
+        account.client.account_db()?.persist_actor_state(key, work)?;
+    }
     let (mut message, body) = receipt_message(account, engine.config(), work)?;
     if work.packet.is_none() {
         let sealed = account
             .client
             .seal_routed_as(engine, &message, &body, crate::client::routed::Route::receipt())
             .await?;
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
-        work.packet = Some(gateway_direct_message_envelope(engine.config(), &message, None)?);
+        work.packet = Some(crate::dm::gateway_generated_envelope_from_sealed(
+            engine.config(),
+            &mut message,
+            sealed,
+        )?);
         account.client.account_db()?.persist_actor_state(key, work)?;
     }
     let packet =
@@ -232,14 +238,14 @@ fn receipt_message(
         reader_device_id: receiver.device_id().into(),
         event: SdkReceiptEventBody::Delivered {
             conversation_id: work.conversation.clone(),
-            message_id: work.wire_message.as_ref().unwrap_or(&work.message).clone(),
+            message_id: work.message.clone(),
             delivered_at: work.at,
             receiver_device_id: receiver.device_id().into(),
             scope: "e2ee_private".into(),
             ttl_seconds: 300,
         },
     };
-    let message = GatewayDirectMessage {
+    let mut message = GatewayDirectMessage {
         conversation_id: work.conversation.clone(),
         message_id: receipt.clone(),
         envelope_id: format!("receipt_evt_{receipt}"),
@@ -249,10 +255,11 @@ fn receipt_message(
         recipient_principal_commitment: Some(source.root_commitment().into()),
         target_delivery_id: target.into(),
         encrypted_body: Vec::new(),
-        created_at: work.at,
+        created_at: work.sealed_at,
         ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
-    Ok((message, serde_json::to_vec(&event)?))
+    let prepared = account.client.prepare_generated_receipt(&mut message, &event)?;
+    Ok((message, prepared.wire.clone()))
 }
 
 pub(crate) mod background;

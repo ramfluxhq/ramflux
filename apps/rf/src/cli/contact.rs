@@ -61,11 +61,23 @@ pub(crate) struct ContactLink {
 }
 
 #[derive(Args)]
+#[command(group(
+    clap::ArgGroup::new("accept_selector")
+        .args(["principal", "request", "link", "root"])
+        .required(true)
+        .multiple(false)
+))]
 pub(crate) struct ContactAccept {
-    #[command(flatten)]
-    pub(crate) link: ContactLink,
-    #[command(flatten)]
-    pub(crate) federated: Option<ContactFederatedArgs>,
+    #[arg(allow_hyphen_values = true, long)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) principal: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) request: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) link: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) root: Option<String>,
 }
 
 #[derive(Args)]
@@ -136,8 +148,18 @@ pub(crate) struct ContactSafetySelector {
 pub(crate) struct ContactVerify {
     #[command(flatten)]
     pub(crate) selector: ContactSafetySelector,
-    #[arg(long)]
+    #[arg(long, requires = "expected_safety")]
     pub(crate) mark_verified: bool,
+    /// Compare-and-set stamp: the `expected` JSON object shown by `rf contact verify`
+    /// (without `--mark-verified`) or `rf contact safety-number`.
+    #[arg(long, requires = "mark_verified", value_parser = parse_expected_safety)]
+    pub(crate) expected_safety: Option<ramflux_protocol::message::ExpectedContactSafety>,
+}
+
+fn parse_expected_safety(
+    text: &str,
+) -> Result<ramflux_protocol::message::ExpectedContactSafety, String> {
+    serde_json::from_str(text).map_err(|error| format!("invalid expected-safety stamp: {error}"))
 }
 
 #[derive(Args)]

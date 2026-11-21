@@ -6,9 +6,10 @@ use super::state::{LiveCall, invalid};
 use crate::client::identity_authority::HeadUse;
 use crate::client::identity_authority::NativeOperation;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use ramflux_protocol::{CallControl, CallEndpoint, CallRow};
 use serde_json::json;
-pub(crate) const PREFIX: &[u8] = b"ramflux.call.control.v1\n";
 const MAX_CONTROL_RECEIPTS_PER_CALL: u64 = 128;
 
 pub(crate) fn signing_bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
@@ -46,40 +47,28 @@ pub(crate) fn resolution_terminal(control: &CallControl) -> Option<String> {
 }
 
 pub(crate) fn bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
-    let mut bytes = zeroize::Zeroizing::new(PREFIX.to_vec());
-    bytes.extend(serde_json::to_vec(c)?);
+    let bytes = zeroize::Zeroizing::new(
+        crate::client::generated_call::native::from_native(c)?.encode_to_vec(),
+    );
     if bytes.len() > 16384 {
         return Err(invalid("control byte budget"));
     }
     Ok(bytes)
 }
+#[cfg(test)]
 fn decode(body: &[u8]) -> Result<Option<CallControl>, SdkError> {
-    if crate::client::target_selection::schema_v1_selected()
-        && let Ok((_, content)) = RamfluxClient::decode_generated_inner(body)
-        && let Some(ramflux_protocol::message::content::Value::Call(call)) = content.value
-    {
-        return crate::client::generated_call::native::to_native(call).map(Some);
-    }
-    let Some(body) = body.strip_prefix(PREFIX) else {
-        return Ok(None);
-    };
     if body.len() > 16384 {
         return Err(invalid("control byte budget"));
     }
-    let control: CallControl = ramflux_protocol::parse_i_json(body)?;
-    let id =
-        ramflux_protocol::decode_base64url(&control.call_id).map_err(|_| invalid("call id"))?;
-    if control.schema != "ramflux.call.control.v1" || id.len() != 16 {
-        return Err(invalid("control schema or id"));
+    if g::validation::scan_message("Call", body, g::registry::COMPILED_LAYER).is_err() {
+        return Ok(None);
     }
-    Ok(Some(control))
+    let call = g::Call::decode(body).map_err(|_| invalid("invalid typed Call"))?;
+    crate::client::generated_call::native::to_native(call).map(Some)
 }
 pub(crate) fn is_call_body(body: &[u8]) -> bool {
-    body.starts_with(PREFIX)
-        || (crate::client::target_selection::schema_v1_selected()
-            && RamfluxClient::decode_generated_inner(body).is_ok_and(|(_, content)| {
-                matches!(content.value, Some(ramflux_protocol::message::content::Value::Call(_)))
-            }))
+    RamfluxClient::decode_generated_inner(body)
+        .is_ok_and(|(_, content)| matches!(content.value, Some(g::content::Value::Call(_))))
 }
 impl RamfluxClient {
     pub(crate) fn call_device_identity(
@@ -314,6 +303,7 @@ impl RamfluxClient {
             Ok(incoming)
         }
     }
+    #[cfg(test)]
     pub(crate) fn project_call_control(
         &self,
         entry: &GatewayInboxEntry,
@@ -377,7 +367,7 @@ impl RamfluxClient {
         let next = self.plan_call(c, crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;
         if db.client_record("conversation", conversation)?.is_none() {
-            db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id]}))?;
+            db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id],"participant_roots":[crate::identity_root_public_key_commitment(&c.caller.root_public_key)?,crate::identity_root_public_key_commitment(&c.callee.root_public_key)?]}))?;
         }
         self.persist_call_row(&next.row)?;
         if next.row.state != "ended" {
@@ -400,6 +390,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn refresh_call_control(&mut self, body: &[u8]) -> Result<bool, SdkError> {
         let Some(c) = decode(body)? else {
             return Ok(false);

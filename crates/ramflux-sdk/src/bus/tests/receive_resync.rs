@@ -46,26 +46,36 @@ struct Recovery {
     started: super::receive_ack::Started,
     reader: ramflux_storage::AccountDb,
     handle: ConnectionHandle,
+    gateway: std::sync::Arc<std::sync::Mutex<super::fixture::Gateway>>,
     io: crate::bus::connection_manager::tests::SessionIo,
     entries: Vec<GatewayInboxEntry>,
     receipts: Vec<String>,
+    expected_messages: usize,
     slow: Option<crate::bus::connection_manager::SessionSubscription>,
     draining: Option<tokio::task::JoinHandle<()>>,
     released: WallClock,
     probe: Option<ramflux_storage::SqlWorkProbe>,
 }
 
+/// Wall-clock deadline for a whole resync scenario, fixtures included: the scenario future is
+/// dropped on expiry, so its temporary directories go before the runner's kill window.
+async fn bounded(scenario: impl std::future::Future<Output = Case>) -> Case {
+    tokio::time::timeout(Duration::from_secs(240), scenario)
+        .await
+        .map_err(|_| "resync scenario exceeded its 240 s deadline")?
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_entry_overflow_with_two_subscribers() -> Case {
-    run(266, None, true).await
+    bounded(Box::pin(run(266, None, true))).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_entry_overflow_without_subscribers() -> Case {
-    run(266, None, false).await
+    bounded(Box::pin(run(266, None, false))).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn receive_resync_recovers_byte_overflow_below_the_entry_cap() -> Case {
-    run(9, Some(960 * 1024), true).await
+    bounded(Box::pin(run(26, Some(384 * 1024), true))).await
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Completion {
@@ -82,7 +92,7 @@ async fn resync_trigger_requests_entry_overflow_without_subscribers() -> Case {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn resync_trigger_requests_byte_overflow_below_the_entry_cap() -> Case {
-    run_mode(9, Some(960 * 1024), true, Completion::Trigger).await
+    run_mode(26, Some(384 * 1024), true, Completion::Trigger).await
 }
 async fn run(count: usize, frame_bytes: Option<usize>, subscribers: bool) -> Case {
     let _turn = wait_durable_turn().await;
@@ -98,21 +108,8 @@ async fn run_mode(
         .run_until(Box::pin(async move {
             let mut fixture = Box::pin(Fixture::new("receive-resync-overflow")).await?;
             let prepared = WallClock::now();
-            let entries = Box::pin(entries(&mut fixture, count, frame_bytes)).await?;
+            let (entries, receipts) = Box::pin(entries(&mut fixture, count, frame_bytes)).await?;
             eprintln!("prepared {count} authenticated inbox entries in {:?}", prepared.elapsed());
-            let receipts = if completion == Completion::Durable {
-                entries
-                    .iter()
-                    .map(|entry| {
-                        fixture
-                            .source
-                            .client
-                            .authenticated_committed_key(HeadUse::NewAuthorization, entry)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                Vec::new()
-            };
             if completion == Completion::Trigger {
                 return crate::bus::connection_manager::tests::watchdog(Box::pin(async {
                     let state = Box::pin(prepare_case(
@@ -142,14 +139,7 @@ async fn run_mode(
                     .await?;
                     let acked = tokio::time::timeout(
                         DURABLE_RECOVERY_COMPLETION_LIMIT,
-                        recover(
-                            &state.handle,
-                            &mut state.io,
-                            &state.entries,
-                            &state.reader,
-                            &state.receipts,
-                            state.probe.as_ref(),
-                        ),
+                        recover(&mut state),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -188,6 +178,7 @@ async fn prepare_case(
         &limits(),
     );
     fixture.source.install_test_session(engine);
+    let gateway = std::sync::Arc::clone(&fixture.gateway);
     let started = Box::pin(start(fixture)).await?;
     let handle = started.actor.connection_for_test().ok_or("connection handle")?;
     let initial = wait_for(io.output.recv(), "initial Connected Resume frame")
@@ -203,12 +194,12 @@ async fn prepare_case(
     )
     .await?;
     let mut slow = subscribers.then(|| handle.subscribe([FrameKind::Deliver]));
-    let (drained_tx, mut drained_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (drained_tx, mut drained_rx) = tokio::sync::mpsc::channel(512);
     let draining = subscribers.then(|| {
         let mut subscription = handle.subscribe([FrameKind::Deliver]);
         tokio::spawn(async move {
             while let Some(event) = subscription.recv().await {
-                if drained_tx.send(event).is_err() {
+                if drained_tx.send(event).await.is_err() {
                     break;
                 }
             }
@@ -229,27 +220,13 @@ async fn prepare_case(
         .await?
         .ok_or("session output closed before held Cursor RPC request")?;
     assert!(matches!(cursor_request, GatewayClientFrame::Cursor { .. }));
-    let mut second_subscriber_lagged = false;
-    for entry in &entries {
-        send(&io, &GatewayServerFrame::Deliver { entry: entry.clone() })?;
-        if subscribers && !second_subscriber_lagged {
-            match wait_for(drained_rx.recv(), "second subscriber delivery or overflow event")
-                .await?
-                .ok_or("second subscriber closed before its delivery or overflow event")?
-            {
-                SessionEvent::Frame { frame, .. }
-                    if matches!(frame.as_ref(), GatewayServerFrame::Deliver { .. }) => {}
-                SessionEvent::Lagged { .. } => second_subscriber_lagged = true,
-                _ => return Err("second subscriber received an unexpected event".into()),
-            }
-        }
-    }
+    feed_overflow(&io, &entries, subscribers.then_some(&mut drained_rx)).await?;
     wait_until(|| {
         let stats = handle.test_buffer_stats();
         stats.entries + stats.dropped == count
     })
     .await?;
-    assert_buffer_limits(&handle, frame_bytes.is_some());
+    assert_buffer_limits(&handle, &entries, frame_bytes.is_some())?;
     eprintln!("overflow barrier reached: {count} frames");
     if let Some(slow) = &mut slow {
         let event = wait_for(slow.recv(), "slow subscriber Lagged event")
@@ -265,7 +242,7 @@ async fn prepare_case(
     let released = WallClock::now();
     send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
     wait_for(held, "held Cursor RPC completion").await???;
-    let first = wait_for(io.output.recv(), "Resync Resume").await?.ok_or("Resync Resume")?;
+    let first = next_recovery_resume(&mut io, &gateway).await?;
     assert!(released.elapsed() < Duration::from_secs(15));
     assert!(matches!(first, GatewayClientFrame::Resume { resume } if resume.after_inbox_seq == 0));
     assert!(handle.test_receive_trace().contains(&(ReceiveTrigger::Resync, false)));
@@ -275,28 +252,120 @@ async fn prepare_case(
     } else {
         None
     };
-    Ok(Recovery { started, reader, handle, io, entries, receipts, slow, draining, released, probe })
+    let expected_messages = if frame_bytes.is_some() { count } else { 1 };
+    Ok(Recovery {
+        started,
+        reader,
+        handle,
+        gateway,
+        io,
+        entries,
+        receipts,
+        expected_messages,
+        slow,
+        draining,
+        released,
+        probe,
+    })
 }
+async fn feed_overflow(
+    io: &crate::bus::connection_manager::tests::SessionIo,
+    entries: &[GatewayInboxEntry],
+    mut drain: Option<&mut tokio::sync::mpsc::Receiver<SessionEvent>>,
+) -> Case {
+    for entry in entries {
+        send(io, &GatewayServerFrame::Deliver { entry: entry.clone() })?;
+        if let Some(receiver) = drain.as_mut() {
+            match wait_for(receiver.recv(), "second subscriber delivery or overflow event")
+                .await?
+                .ok_or("second subscriber closed before delivery or overflow")?
+            {
+                SessionEvent::Frame { frame, .. }
+                    if matches!(frame.as_ref(), GatewayServerFrame::Deliver { .. }) => {}
+                SessionEvent::Lagged { .. } => drain = None,
+                _ => return Err("second subscriber received an unexpected event".into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn finish_case(state: Recovery, acked: BTreeSet<String>) -> Case {
-    let Recovery { started, reader, handle, entries, receipts, slow, draining, probe, .. } = state;
+    let Recovery {
+        started,
+        reader,
+        handle,
+        entries,
+        receipts,
+        expected_messages,
+        slow,
+        draining,
+        probe,
+        ..
+    } = state;
     let count = entries.len();
     work::assert_complete(&handle, probe.as_ref().ok_or("missing SQL observer")?, count);
     assert_eq!(acked.len(), count);
     assert!(!handle.resync_needed(), "clear only after the complete durable handoff");
     assert_completed_trace(&handle);
-    let response = started
-        .actor
-        .request(command("message.read", json!({"conversation_id":"healthy","limit":1000})))
-        .await?;
-    let messages = response.body["messages"].as_array().ok_or("messages")?;
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["body_utf8"], "resync recovery");
-    assert_eq!(reader.actor_state_keys("routed/committed/")?.len(), count);
+    assert_message_pages(&started, expected_messages).await?;
+    assert_eq!(
+        reader.actor_state_keys("routed/committed/")?.len(),
+        count,
+        "each authenticated entry retains its durable receive receipt"
+    );
+    assert_eq!(
+        reader.actor_state_keys("routed/pair-control-applied/")?.len(),
+        count - expected_messages,
+        "every generated Control has its durable effect fence"
+    );
     for key in &receipts {
         assert!(reader.actor_state_exists(key)?);
     }
-    assert_control_effects(&reader, count - 1)?;
+    assert_control_effects(&reader, count - expected_messages)?;
     Box::pin(cleanup(started, reader, slow, draining)).await
+}
+
+async fn assert_message_pages(started: &super::receive_ack::Started, expected: usize) -> Case {
+    let mut before = serde_json::Value::Null;
+    let mut ids = BTreeSet::new();
+    for _ in 0..expected {
+        let response = started
+            .actor
+            .request(command(
+                "message.read",
+                json!({
+                    "conversation_id":started.conversation,"limit":100,"read_model":true,
+                    "before_order_key":before,
+                }),
+            ))
+            .await?;
+        let messages = response.body["messages"].as_array().ok_or("messages")?;
+        if messages.is_empty() {
+            return Err("a recovery page must make progress".into());
+        }
+        for message in messages {
+            assert!(
+                message["text"].as_str().is_some_and(|text| text.starts_with("resync recovery"))
+            );
+            assert!(
+                ids.insert(message["id"].as_str().ok_or("canonical id")?.to_owned()),
+                "a recovery page cannot repeat an already rendered message"
+            );
+        }
+        let next = response.body["next_before"].clone();
+        if next.is_null() {
+            break;
+        }
+        assert_ne!(next, before, "the durable reader cursor must advance");
+        before = next;
+    }
+    assert_eq!(
+        ids.len(),
+        expected,
+        "all recovered messages remain readable across response budgets"
+    );
+    Ok(())
 }
 
 async fn cleanup(
@@ -343,21 +412,82 @@ fn assert_completed_trace(handle: &ConnectionHandle) {
         ]
     );
 }
-fn assert_buffer_limits(handle: &ConnectionHandle, byte_bound: bool) {
-    let stats = handle.test_buffer_stats();
-    assert_eq!(stats.entries, if byte_bound { 8 } else { 256 });
-    assert_eq!(stats.dropped, if byte_bound { 1 } else { 10 });
-    assert!(stats.bytes <= crate::bus::runtime_limits::SESSION_BUFFER_BYTES);
-    assert!(handle.resync_needed(), "overflow must set the explicit recovery flag");
-}
-async fn recover(
+fn assert_buffer_limits(
     handle: &ConnectionHandle,
-    io: &mut crate::bus::connection_manager::tests::SessionIo,
     entries: &[GatewayInboxEntry],
-    reader: &ramflux_storage::AccountDb,
-    receipts: &[String],
-    probe: Option<&ramflux_storage::SqlWorkProbe>,
-) -> Case<BTreeSet<String>> {
+    byte_bound: bool,
+) -> Case {
+    let mut expected = 0;
+    let mut bytes = 0;
+    for entry in entries {
+        let size = serde_json::to_vec(&GatewayServerFrame::Deliver { entry: entry.clone() })?.len();
+        if expected < crate::bus::runtime_limits::SESSION_BUFFER
+            && bytes + size <= crate::bus::runtime_limits::SESSION_BUFFER_BYTES
+        {
+            expected += 1;
+            bytes += size;
+        }
+    }
+    let stats = handle.test_buffer_stats();
+    assert_eq!(stats.entries, expected, "buffered entries match the actual signed wire sizes");
+    assert_eq!(stats.dropped, entries.len() - expected);
+    assert_eq!(stats.bytes, bytes);
+    if byte_bound {
+        assert!(expected < crate::bus::runtime_limits::SESSION_BUFFER);
+    } else {
+        assert_eq!(expected, crate::bus::runtime_limits::SESSION_BUFFER);
+    }
+    assert!(stats.dropped > 0);
+    assert!(handle.resync_needed(), "overflow must set the explicit recovery flag");
+    Ok(())
+}
+async fn next_recovery_resume(
+    io: &mut crate::bus::connection_manager::tests::SessionIo,
+    gateway: &std::sync::Arc<std::sync::Mutex<super::fixture::Gateway>>,
+) -> Case<GatewayClientFrame> {
+    loop {
+        let frame = wait_for(io.output.recv(), "Resync Resume").await?.ok_or("Resync Resume")?;
+        if matches!(frame, GatewayClientFrame::Resume { .. }) {
+            return Ok(frame);
+        }
+        reply_to_courier(io, gateway, frame)?;
+    }
+}
+
+fn reply_to_courier(
+    io: &crate::bus::connection_manager::tests::SessionIo,
+    gateway: &std::sync::Arc<std::sync::Mutex<super::fixture::Gateway>>,
+    frame: GatewayClientFrame,
+) -> Case {
+    let response = match frame {
+        GatewayClientFrame::Submit { submit } => GatewayServerFrame::Deliver {
+            entry: GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: 1,
+                target_delivery_id: submit.envelope.target_delivery_id.clone(),
+                envelope: submit.envelope,
+            },
+        },
+        GatewayClientFrame::OwnDeviceFanout { fanout } => {
+            super::fixture::own_copy_response(fanout)?
+        }
+        GatewayClientFrame::PrekeyFetch { device_id } => {
+            GatewayServerFrame::Prekey { response: super::fixture::prekey(gateway, &device_id)? }
+        }
+        other => {
+            return Err(format!(
+                "unexpected courier frame: {}",
+                serde_json::to_value(other)?["frame_type"]
+            )
+            .into());
+        }
+    };
+    send(io, &response)
+}
+
+async fn recover(state: &mut Recovery) -> Case<BTreeSet<String>> {
+    let Recovery { handle, io, gateway, entries, reader, receipts, probe, .. } = state;
+    let probe = probe.as_ref();
     let mut acked = BTreeSet::new();
     respond_page(io, entries, 0, 64)?;
     // Subscriber and no-subscriber overflow both run receive::run's Resync pass.
@@ -372,28 +502,25 @@ async fn recover(
                     GatewayClientFrame::Resume { resume } => respond_page(io, entries, resume.after_inbox_seq, resume.limit)?,
                     GatewayClientFrame::Ack { ack } => {
                         let index = entries.iter().position(|entry| entry.envelope.envelope_id == ack.envelope_id).ok_or("unexpected ACK")?;
-                        assert!(reader.actor_state_exists(&receipts[index])?, "ACK preceded the durable receive commit");
+                        assert!(reader.actor_state_exists(&receipts[index])?,
+                            "ACK preceded the durable receive commit: seq={}, ledger={:?}, journal={:?}",
+                            entries[index].inbox_seq,
+                            reader.receive_state_for_test(entries[index].inbox_seq),
+                            reader.latest_journal_event("message.undeliverable"));
                         assert!(acked.insert(ack.envelope_id.clone()), "a recovered entry was acknowledged twice");
                         if let Some(probe) = probe { work::assert_prefix_not_rescanned(probe); }
                         if acked.len().is_multiple_of(32) { eprintln!("durable recovery ACK {}: {:?}", acked.len(), handle.test_receive_profile()); }
                         let cursor = GatewayCursor {
-                            target_delivery_id: "sender".into(), inbox_seq: entries[index].inbox_seq,
+                            target_delivery_id: entries[index].target_delivery_id.clone(), inbox_seq: entries[index].inbox_seq,
                             last_envelope_id: Some(ack.envelope_id.clone()), acked_envelope_ids: vec![ack.envelope_id],
                             nacked_envelope_ids: BTreeMap::new(),
                         };
                         send(io, &GatewayServerFrame::Ack { cursor: cursor.clone() })?;
                         send(io, &GatewayServerFrame::Cursor { cursor: Some(cursor) })?;
                     }
-                    GatewayClientFrame::Submit { submit } => {
-                        send(io, &GatewayServerFrame::Deliver { entry: GatewayInboxEntry {
-                            forwarded: false, inbox_seq: 1,
-                            target_delivery_id: submit.envelope.target_delivery_id.clone(),
-                            envelope: submit.envelope,
-                        } })?;
-                    }
-                    GatewayClientFrame::OwnDeviceFanout { fanout } => {
-                        send(io, &super::fixture::own_copy_response(fanout)?)?;
-                    }
+                    frame @ (GatewayClientFrame::Submit { .. }
+                        | GatewayClientFrame::OwnDeviceFanout { .. }
+                        | GatewayClientFrame::PrekeyFetch { .. }) => reply_to_courier(io, gateway, frame)?,
                     other => return Err(format!("unexpected recovery frame {}", serde_json::to_value(other)?["frame_type"]).into()),
                 }
             }
@@ -465,56 +592,72 @@ async fn entries(
     fixture: &mut Fixture,
     count: usize,
     frame_bytes: Option<usize>,
-) -> Case<Vec<GatewayInboxEntry>> {
-    use crate::bus::dispatch::task_transport::{Target, seal};
+) -> Case<(Vec<GatewayInboxEntry>, Vec<String>)> {
+    use super::fixture::seal_content_with_identity as seal;
+    use crate::bus::dispatch::task_transport::Target;
+    use ramflux_protocol::message as g;
     let target = Target {
         device: "device-sender".into(),
         identity: fixture.source.client.owned_device_identity()?,
-        delivery: "sender".into(),
+        delivery: fixture.source.target_delivery_id.clone(),
         federation: None,
         own: false,
     };
     let mut engine = fixture.peer.session_client().await?;
     let mut entries = Vec::with_capacity(count);
+    let mut receipts = Vec::with_capacity(count);
     for index in 0..count {
         // A direct message and authenticated controls exercise durable application
         // and exactly-once control projection through the same overflow recovery.
-        let (body, route) = if index == 0 {
-            (b"resync recovery".as_slice(), crate::client::routed::Route::direct())
+        let content = if index == 0 || frame_bytes.is_some() {
+            g::Content {
+                value: Some(g::content::Value::Message(g::Message {
+                    text: if frame_bytes.is_some() {
+                        let mut text = String::from("resync recovery");
+                        text.extend(std::iter::repeat_n(
+                            'x',
+                            ramflux_protocol::message::validation::MAX_TEXT_BYTES - text.len(),
+                        ));
+                        text
+                    } else {
+                        "resync recovery".into()
+                    },
+                    ..Default::default()
+                })),
+            }
         } else {
-            (
-                br#"{"type":"pair.session.reset.ack.v1"}"#.as_slice(),
-                crate::client::routed::Route::control(),
-            )
+            g::Content {
+                value: Some(g::content::Value::Control(
+                    crate::client::generated_control::control_from_payload(
+                        g::control::Payload::ResetAck(g::PairResetAck {
+                            rejected_bootstrap_floor: 0,
+                        }),
+                    )?,
+                )),
+            }
         };
-        let packet = seal(&fixture.peer, &mut engine, &target, "healthy", body, route).await?;
-        let mut entry = GatewayInboxEntry {
+        let (packet, _) = seal(&fixture.peer, &mut engine, &target, content, None, None).await?;
+        let entry = GatewayInboxEntry {
             forwarded: false,
             inbox_seq: u64::try_from(index + 1)?,
-            target_delivery_id: "sender".into(),
+            target_delivery_id: packet.envelope.target_delivery_id.clone(),
             envelope: packet.envelope,
         };
-        if let Some(frame_bytes) = frame_bytes {
-            entry.envelope.ext.ext.insert("padding".into(), json!(""));
-            let length =
-                serde_json::to_vec(&GatewayServerFrame::Deliver { entry: entry.clone() })?.len();
-            entry.envelope.ext.ext.insert(
-                "padding".into(),
-                json!("x".repeat(frame_bytes.checked_sub(length).ok_or("frame size")?)),
-            );
-            entry.envelope.signed.signature =
-                ramflux_crypto::sign_protocol_object_with_device_branch(
-                    fixture.peer.client.device_branch.as_ref().ok_or("device branch")?,
-                    &entry.envelope,
-                )?;
-        }
+        ramflux_protocol::message::outer::check_ingress_caps(
+            ramflux_protocol::message::outer::IngressSizes::measure_wire(
+                &entry.envelope,
+                0,
+                &[],
+                &[],
+            )?,
+        )?;
         let size = serde_json::to_vec(&GatewayServerFrame::Deliver { entry: entry.clone() })?.len();
         assert!(size <= frame_bytes.unwrap_or(16 * 1024));
-        if let Some(expected) = frame_bytes {
-            assert_eq!(size, expected);
-        }
+        let key =
+            fixture.source.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
+        receipts.push(key);
         entries.push(entry);
     }
     fixture.peer.install_test_session(engine);
-    Ok(entries)
+    Ok((entries, receipts))
 }

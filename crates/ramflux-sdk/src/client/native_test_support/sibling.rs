@@ -16,7 +16,7 @@ impl Fixture {
         let primary = self.vault.primary_for_public_key(
             &native.publication.record.body.master_certificate.body.self_signing_public_key,
         )?;
-        let now = crate::custody::network_now()?;
+        let now = crate::custody::network_now()?.max(native.publication.record.body.issued_at);
         let current =
             ramflux_crypto::custody::verify_record(&native.publication.record, now, None, None)?;
         let mut seeds = Zeroizing::new([0; 64]);
@@ -50,6 +50,10 @@ impl Fixture {
             },
             now,
         )?;
+        // The accepted publication moved the on-disk head; reload this device's native account so
+        // later primary-signing steps (group changes) see the same head instead of HeadChanged.
+        let local_device = self.client.owned_device_identity()?.device_id().to_owned();
+        self.client.initialize_born_v3_branch(&local_device, self.vault.clone()).await?;
         let root = Root::new()?;
         let vault = Arc::new(TestVault::default());
         crate::custody::install_sibling_fixture(crate::custody::SiblingSetup {
@@ -72,15 +76,15 @@ impl Fixture {
             .devices
             .extend(sibling.manifest.custody.as_ref().ok_or("sibling manifest")?.devices.clone());
         let full = SdkDeviceManifestResponse::from_native((*native).clone())?;
-        self.client.persist_fetched_identity_directory(&full)?;
-        sibling.client.persist_fetched_identity_directory(&full)?;
+        self.client.persist_observed_identity_directory_now(&full)?;
+        sibling.client.persist_observed_identity_directory_now(&full)?;
         self.manifest = full.clone();
         sibling.manifest = full;
         Ok(sibling)
     }
 
     pub(crate) fn material_for(&self, target: &Self) -> Result<SendMaterial, SdkError> {
-        self.client.persist_fetched_identity_directory(&target.manifest)?;
+        self.client.persist_observed_identity_directory_now(&target.manifest)?;
         let reference = target.client.owned_device_identity()?;
         Ok(SendMaterial {
             manifest: Some((reference.root_commitment().into(), target.manifest.clone())),
@@ -105,12 +109,12 @@ impl Fixture {
         let pool = ramflux_transport::RelayQuicPool::new(
             ramflux_transport::RelayQuicPoolConfig::functional_default()?,
         );
-        self.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        self.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         Ok(())
     }
 }
 
-struct NoNetwork;
+pub(super) struct NoNetwork;
 impl ramflux_transport::GatewaySessionFrameSink for NoNetwork {
     fn send_frame<'a>(
         &'a mut self,
@@ -150,7 +154,6 @@ async fn native_sibling_self_sync_defers_without_authenticated_floor_bootstrap()
         sibling.client.born_v3_account.as_ref().ok_or("native sibling")?.primary_vault_ref(),
         ""
     );
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let value = source.client.change_self_sync(
         "native-thread",
         g::SelfSync { operation: 6, mute: true, ..Default::default() },
@@ -169,7 +172,6 @@ async fn self_sync_all_erased_source_never_bootstraps_a_floorless_third_sibling(
     let mut source = Fixture::new("floor-erased-source").await?;
     let _second = source.enroll_sibling("floor-second", "second").await?;
     let third = source.enroll_sibling("floor-third", "third").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let draft = g::SelfSync {
         operation: 2,
         revision: 1,

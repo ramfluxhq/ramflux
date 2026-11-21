@@ -18,7 +18,7 @@ def check(metadata):
     if not nodes:
         raise ValueError("production graph has no resolved SDK node")
     for node in nodes:
-        for feature in ("itest-memory-vault", "itest-legacy-accounts", "test-support"):
+        for feature in ("itest-memory-vault", "test-support"):
             if feature in node["features"]:
                 raise ValueError(f"production graph enables forbidden SDK {feature}")
 
@@ -32,7 +32,7 @@ def check_tree(graph):
         # cargo tree puts optional source paths before the feature list.
         features = set(fields[-1].split(","))
         forbidden = {
-            "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts", "test-support"),
+            "ramflux-sdk": ("itest-memory-vault", "test-support"),
             "ramflux-node-core": ("durability-test-hooks", "itest-http"),
             "ramflux-gateway": ("itest-http",),
             "ramflux-storage": ("durability-test-hooks",),
@@ -50,6 +50,42 @@ def check_release_commands(text, file):
                 raise ValueError(f"SDK native C ABI release requires --profile ffi-release or CARGO_PROFILE_RELEASE_PANIC=unwind: {file}")
             if "itest-http" in command or "--all-features" in command:
                 raise ValueError(f"test HTTP feature in release/deploy build command: {file}")
+
+
+RETIRED_LEGACY_ACCOUNT_NEEDLES = (
+    "itest-legacy-accounts",
+    "itest_legacy_accounts",
+    "account.itest_legacy.create",
+    "with_itest_legacy_accounts",
+    "from_create_request",
+    "ItestLegacyAccountCreate",
+)
+
+
+def refuse_retired_legacy_account_surface(text, label):
+    for needle in RETIRED_LEGACY_ACCOUNT_NEEDLES:
+        if needle in text:
+            raise ValueError(f"retired legacy account surface remains in {label}: {needle}")
+
+
+def check_legacy_accounts_absent(root):
+    # An unknown cargo feature is not a production guard. The creator, flag, and
+    # feature name must be absent from the sources that used to compile them.
+    # The CLI parse test may still name the deleted command as rejected input.
+    paths = [
+        root / "crates/ramflux-sdk/Cargo.toml",
+        root / "apps/rf/Cargo.toml",
+        root / ".github/workflows/ci.yml",
+        root / "docs/custody_networking.md",
+    ]
+    paths.extend((root / "crates/ramflux-sdk/src").rglob("*.rs"))
+    paths.extend(
+        path
+        for path in (root / "apps/rf/src").rglob("*.rs")
+        if path.name != "opaque_id_tests.rs"
+    )
+    for path in paths:
+        refuse_retired_legacy_account_surface(path.read_text(), path)
 
 
 def self_test_release_commands():
@@ -71,6 +107,13 @@ def self_test_release_commands():
     check_release_commands("cargo build --locked --release --workspace", "fixture")
     check_release_commands("cargo build --profile ffi-release -p ramflux-sdk --features c-abi", "fixture")
     check_release_commands("CARGO_PROFILE_RELEASE_PANIC=unwind cargo build --release -p ramflux-sdk --features card-runtime", "fixture")
+    try:
+        refuse_retired_legacy_account_surface("itest-legacy-accounts = []", "fixture")
+    except ValueError:
+        pass
+    else:
+        raise ValueError("source-absence control accepted a retired legacy account feature")
+    refuse_retired_legacy_account_surface("itest-memory-vault = []", "fixture")
 
 
 def main():
@@ -118,6 +161,7 @@ def main():
         ):
             if guard not in dispatch:
                 raise ValueError(f"migration approval dispatch guard absent in {file}: {guard}")
+    check_legacy_accounts_absent(root)
     print("production feature provenance: OK")
 
 

@@ -10,7 +10,6 @@ use ramflux_protocol::message as g;
 async fn own_authored_group_history_preserves_plaintext_nonce_for_a_later_third_sibling()
 -> TestResult {
     let mut source = Fixture::new("authored-group-source").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let primary = source
         .client
         .born_v3_account
@@ -53,7 +52,7 @@ async fn own_authored_group_history_preserves_plaintext_nonce_for_a_later_third_
     let mut second = source.enroll_sibling("authored-group-second", "second").await?;
     let mut third = source.enroll_sibling("authored-group-third", "third").await?;
     second.manifest = source.manifest.clone();
-    second.client.persist_fetched_identity_directory(&source.manifest)?;
+    second.client.persist_observed_identity_directory_now(&source.manifest)?;
     // A copied context cannot grant membership: both siblings explicitly verify/install
     // the independently signed native group snapshot through the native consent API.
     for target in [&second, &third] {

@@ -92,7 +92,7 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    b.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+    b.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     Ok(())
 }
 pub(crate) async fn native_pair() -> TestResult<(Native, Native)> {
@@ -100,8 +100,8 @@ pub(crate) async fn native_pair() -> TestResult<(Native, Native)> {
     let mut b = Native::new("ephemeral-receiver").await?;
     // Install the fixture's completed current-directory results. These endpoint tests
     // make no claim about the network lookup or freshness transport itself.
-    a.client.persist_fetched_identity_directory(&b.manifest)?;
-    b.client.persist_fetched_identity_directory(&a.manifest)?;
+    a.client.persist_observed_identity_directory_now(&b.manifest)?;
+    b.client.persist_observed_identity_directory_now(&a.manifest)?;
     for (receiver, sender) in [(&a, &b), (&b, &a)] {
         receiver.client.establish_friend_link(
             "native-ephemeral-link",
@@ -122,8 +122,13 @@ fn seal_content(
     let message = draft(a, b, id, 5)?;
     let identity = next_identity(a, &message.conversation_id)?;
     let raw = if unknown {
-        g::Inner { layer: 2, kind: 900, identity: Some(identity), body: vec![0xff, 0, 0x80] }
-            .encode_to_vec()
+        g::Inner {
+            layer: g::registry::PROFILE_FLOOR,
+            kind: 900,
+            identity: Some(identity),
+            body: vec![0xff, 0, 0x80],
+        }
+        .encode_to_vec()
     } else {
         RamfluxClient::encode_generated_inner(
             identity,
@@ -160,7 +165,6 @@ fn allowed_receiver_state(b: &Native, a: &Native) -> TestResult<Vec<String>> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_unknown_is_retained_and_known_non_typing_is_dropped() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let allowed = allowed_receiver_state(&b, &a)?;
     let before = b.client.account_db()?.test_table_fingerprints(&allowed)?;
@@ -201,7 +205,7 @@ async fn ephemeral_unknown_is_retained_and_known_non_typing_is_dropped() -> Test
     b.client.active_account_db = None;
     b.client.unlock_account("ephemeral-receiver", b"native fixture data passphrase")?;
     b.client.initialize_born_v3_branch("primary", b.vault.clone()).await?;
-    b.client.persist_fetched_identity_directory(&a.manifest)?;
+    b.client.persist_observed_identity_directory_now(&a.manifest)?;
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 16);
     assert_fault_rollback_and_retry(&b.client, &mut receiver, &blocked, now)?;
     Ok(())
@@ -249,7 +253,6 @@ fn fill_source_quota(client: &RamfluxClient, source: &str) -> TestResult {
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
@@ -332,7 +335,6 @@ async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> Tes
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let message = draft(&a, &b, "future-edit", 5)?;
     let target = b
@@ -375,7 +377,7 @@ async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() ->
         &message.conversation_id,
         &target.message_id,
         "local",
-        "erase-future-edit",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase-future-edit"),
     )?;
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
     assert!(
@@ -391,7 +393,6 @@ async fn ephemeral_unknown_edit_target_erase_retires_raw_and_native_opening() ->
 
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_inner_author_epoch_must_match_verified_peer() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(native_pair()).await?;
     let message = draft(&a, &b, "wrong-inner-epoch", 5)?;
     let source = a.client.owned_device_identity()?;
@@ -468,7 +469,6 @@ fn assert_tables_unchanged(
 
 #[tokio::test(flavor = "current_thread")]
 async fn account_transient_generation_reset_and_durable_message_clear() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
@@ -525,7 +525,6 @@ async fn account_transient_generation_reset_and_durable_message_clear() -> TestR
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_missing_negotiated_echo_refuses_before_ratchet_or_allowance_write() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(native_pair()).await?;
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());

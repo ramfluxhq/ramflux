@@ -346,9 +346,15 @@ pub(crate) fn handle_mesh_request(
     } else {
         None
     };
-    let Some(request) = ramflux_transport::read_bounded_mesh_http_request(
+    let accepted = std::time::Instant::now();
+    let Some(admitted) = ramflux_transport::read_bounded_mesh_http_request_with_admission(
         stream,
-        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
+        &crate::pairing_full::cap,
+        |reader, method, path, raw, bytes| {
+            let context =
+                crate::pairing_full::ReadContext { router, peer, socket: &reader.sock, accepted };
+            crate::pairing_full::admit(&context, method, path, raw, bytes)
+        },
     )?
     else {
         return Ok(false);
@@ -361,6 +367,14 @@ pub(crate) fn handle_mesh_request(
         );
         return Ok(false);
     };
+    let (mut request, full) = admitted.into_parts();
+    if let Some(mut full) = full {
+        let context =
+            crate::pairing_full::ReadContext { router, peer, socket: &stream.sock, accepted };
+        let reply = crate::pairing_full::handle(&context, &mut full, &mut request);
+        crate::pairing_full::write(stream, &reply)?;
+        return Ok(false);
+    }
     #[cfg(feature = "itest-http")]
     if matches!(
         request.path.as_str(),
@@ -1643,116 +1657,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-
-    #[cfg(feature = "itest-http")]
-    fn legacy_release_subprocesses() -> anyhow::Result<bool> {
-        const CHILD: &str = "RAMFLUX_LEGACY_RELEASE_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            for flag in [None, Some("0")] {
-                let mut command = std::process::Command::new(std::env::current_exe()?);
-                command.args(["--exact", "handlers::tests::legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin"])
-                    .env(CHILD, "1").env("RAMFLUX_ROUTER_ADMIN_TOKEN", "release-token").env_remove("RAMFLUX_HOME_MIGRATION_ENABLED");
-                if let Some(flag) = flag {
-                    command.env("RAMFLUX_HOME_MIGRATION_ENABLED", flag);
-                }
-                let output = command.output()?;
-                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-                assert!(
-                    String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-                    "child must run exactly one test: {}",
-                    String::from_utf8_lossy(&output.stdout)
-                );
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    #[test]
-    #[cfg(feature = "itest-http")]
-    fn legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin() -> anyhow::Result<()> {
-        if legacy_release_subprocesses()? {
-            return Ok(());
-        }
-        let (path, state, store) = crate::router_runtime::tests::test_router("legacy-release")?;
-        let now = 1_760_000_020;
-        let request = crate::router_runtime::tests::register_test_device_at(
-            &state,
-            "alice",
-            "alice_phone",
-            "target_alice",
-            1,
-            now,
-        )?;
-        store.bootstrap_router(&state)?;
-        let before = serde_json::to_value(state.mvp1_identities_snapshot())?;
-        let handle = crate::router_runtime::RouterHandle::tokio(state, store, None);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let _client = std::net::TcpStream::connect(listener.local_addr()?)?;
-        let (mut stream, _) = listener.accept()?;
-        for (path, body) in [
-            (concat!("/admin/home-node-", "migration/apply"), b"{}".to_vec()),
-            (concat!("/admin/home-node-", "route/update/apply"), b"{}".to_vec()),
-        ] {
-            let request = ramflux_transport::MeshHttpRequest {
-                method: "POST".into(),
-                path: path.into(),
-                body: body.clone(),
-            };
-            let response = handle_mesh_request_value(request, &handle, "ramflux-gateway")?;
-            assert_eq!(response.status, "404 Not Found");
-            let request = ramflux_node_core::NodeHttpRequest {
-                method: "POST".into(),
-                path: path.into(),
-                body,
-                keep_alive: false,
-                source_ip_hash: None,
-                pre_auth_cookie: None,
-                pre_auth_now: None,
-                forwarded_proto: None,
-                forwarded_for: None,
-            };
-            assert!(!handle_itest_admin_request(&mut stream, &request, &handle)?);
-        }
-        let sibling = handle_mesh_request_value(
-            ramflux_transport::MeshHttpRequest {
-                method: "POST".into(),
-                path: "/admin/custody/budgets".into(),
-                body: br#"{"admin_token":"release-token"}"#.to_vec(),
-            },
-            &handle,
-            "ramflux-gateway",
-        )?;
-        assert_eq!(sibling.status, "200 OK");
-        assert!(handle_itest_admin_request(
-            &mut stream,
-            &ramflux_node_core::NodeHttpRequest {
-                method: "POST".into(),
-                path: "/admin/custody/budgets".into(),
-                body: br#"{"admin_token":"release-token"}"#.to_vec(),
-                keep_alive: false,
-                source_ip_hash: None,
-                pre_auth_cookie: None,
-                pre_auth_now: None,
-                forwarded_proto: None,
-                forwarded_for: None,
-            },
-            &handle,
-        )?);
-
-        assert_eq!(before, serde_json::to_value(handle.state().mvp1_identities_snapshot())?);
-        assert!(handle.state().home_node_migration(&request.proof.principal_id).is_none());
-        assert!(handle.state().resolve_home_node_route(&request.proof.principal_id).is_none());
-        drop(handle);
-        let store = ramflux_node_core::RouterRedbStore::open(&path)?;
-        let restored =
-            store.load_router()?.ok_or_else(|| anyhow::anyhow!("missing restored router"))?;
-        assert_eq!(before, serde_json::to_value(restored.mvp1_identities_snapshot())?);
-        assert!(restored.home_node_migration(&request.proof.principal_id).is_none());
-        assert!(restored.resolve_home_node_route(&request.proof.principal_id).is_none());
-        drop(store);
-        Ok(())
-    }
 
     #[test]
     fn custody_budget_inspection_requires_admin_token_and_mesh_peer() -> anyhow::Result<()> {

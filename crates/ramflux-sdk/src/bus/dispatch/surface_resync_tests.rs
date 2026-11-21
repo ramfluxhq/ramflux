@@ -14,6 +14,7 @@ struct Group {
     config: GatewaySessionConfig,
     directory: tokio::task::JoinHandle<()>,
     create: Carrier,
+    baseline: usize,
     _root: ramflux_test_support::TestPath,
 }
 impl Group {
@@ -62,6 +63,7 @@ impl Group {
         let snapshot = text_snapshot("surface", "中文 é 🦀", "");
         let request = crate::SurfaceSendRequest::event(&create_frame("thread", &snapshot)?)?;
         let create = source_client.sign_surface_carrier(Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: None,
@@ -112,7 +114,9 @@ impl Group {
             "the initial create and delta must finish their own-device submission"
         );
         let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
-        Ok(Self { source, peers, config, directory, create, _root: root })
+        let baseline =
+            peers.get(2).ok_or("unrelated peer missing")?.client.direct_messages("thread")?.len();
+        Ok(Self { source, peers, config, directory, create, baseline, _root: root })
     }
     fn prepare_peer(
         source_client: &RamfluxClient,
@@ -292,11 +296,15 @@ async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_au
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
         };
-        peer.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
+        peer.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
         assert_eq!(peer.client.surface_get("surface", 0, None)?["version"], 2);
     }
     assert_eq!(group.source.client.direct_messages("thread")?.len(), before);
-    assert_eq!(group.peers[2].client.direct_messages("thread")?.len(), 1);
+    assert_eq!(
+        group.peers[2].client.direct_messages("thread")?.len(),
+        group.baseline,
+        "a reply addressed to two requesters must not write rows for other members"
+    );
     assert_eq!(group.peers[2].client.surface_get("surface", 0, None)?["version"], 1);
     assert_eq!(
         group.source.client.account_db()?.actor_state_usage("surface/resync_answered/")?.0,
@@ -394,7 +402,7 @@ pub(super) async fn native_pair_resync() -> TestResult {
         target_delivery_id: reply.target_delivery_id.clone(),
         envelope: reply,
     };
-    pair.peers[0].client.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    pair.peers[0].client.apply_routed_entry(&mut receiver, &pool, &incoming).await?;
     let view = pair.peers[0].client.surface_get("surface", 0, None)?;
     assert_eq!(view["version"], 2, "resync must recover the missed version");
     assert_eq!(view["out_of_sync"], false, "valid resync clears the recovery fence");

@@ -24,7 +24,14 @@ fn downstream_entry_bound_matches_actual_wire_shapes() -> Result<(), Box<dyn std
         let actual = independent_size(&envelope);
         assert_eq!(single_entry_frame_size(&envelope)?, actual);
         assert_eq!(actual, ENTRY_FRAME_BYTE_CAP + usize::from(over));
-        assert_eq!(check_entry_bound(&envelope).is_err(), over);
+        if over {
+            payload_too_large(check_entry_bound(&envelope))?;
+        } else {
+            assert!(
+                check_entry_bound(&envelope).is_err(),
+                "a frame below the size cap still requires the active cryptobox/profile"
+            );
+        }
     }
     Ok(())
 }
@@ -63,7 +70,7 @@ fn nested_sdk_json(cryptobox: &[u8], pad: Option<String>) -> serde_json::Value {
 }
 
 fn bind_candidate_named_fields(envelope: &mut ramflux_protocol::Envelope) {
-    if ramflux_protocol::schema_profile::schema_v1_live() {
+    {
         envelope.delivery_mode = Some("durable".into());
         envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x22_u8; 32]));
         envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x23_u8; 32]));
@@ -112,7 +119,6 @@ fn payload_too_large(result: Result<(), NodeCoreError>) -> Result<(), Box<dyn st
 #[test]
 fn candidate_entry_bound_measures_nested_cryptobox_when_gate_on()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let envelope = compact_sdk_envelope(&[7_u8; 32])?;
     check_entry_bound(&envelope)?;
     let sizes =
@@ -129,7 +135,6 @@ fn candidate_entry_bound_measures_nested_cryptobox_when_gate_on()
 #[test]
 fn candidate_entry_bound_accepts_392kb_nested_cryptobox() -> Result<(), Box<dyn std::error::Error>>
 {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let cryptobox = vec![7_u8; 522_808];
     let envelope = compact_sdk_envelope(&cryptobox)?;
     let wrapper = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
@@ -151,7 +156,6 @@ fn candidate_entry_bound_accepts_392kb_nested_cryptobox() -> Result<(), Box<dyn 
 
 #[test]
 fn candidate_entry_bound_refuses_one_over_cryptobox() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let over = vec![7_u8; ramflux_protocol::message::outer::MAX_CIPHERTEXT_BYTES + 1];
     payload_too_large(check_entry_bound(&compact_sdk_envelope(&over)?))
 }
@@ -168,20 +172,19 @@ fn padded_nested_field_is_payload_too_large_with_gate_on_and_off()
 -> Result<(), Box<dyn std::error::Error>> {
     let envelope = padded_nested_envelope()?;
     payload_too_large(check_entry_bound(&envelope))?;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     payload_too_large(check_entry_bound(&envelope))
 }
 
 #[test]
-fn candidate_decode_refuses_unknown_nested_field() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+fn active_decode_refuses_retired_json_wrapper_with_unknown_field()
+-> Result<(), Box<dyn std::error::Error>> {
     let nested = nested_sdk_json(&[7_u8; 32], Some("x".into()));
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.encrypted_payload = ramflux_protocol::encode_base64url(serde_json::to_vec(&nested)?);
     bind_payload_hash(&mut envelope);
     match check_entry_bound(&envelope) {
         Err(NodeCoreError::InvalidConfiguration(message))
-            if message == "candidate outer envelope has unknown fields" =>
+            if message == "candidate outer envelope is malformed" =>
         {
             Ok(())
         }
@@ -190,8 +193,33 @@ fn candidate_decode_refuses_unknown_nested_field() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn generation_one_admits_only_message_and_call_wake_delivery_classes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_protocol::DeliveryClass;
+    for class in [DeliveryClass::Message, DeliveryClass::CallWake] {
+        let mut envelope = compact_sdk_envelope(&[7_u8; 32])?;
+        envelope.delivery_class = class.clone();
+        check_entry_bound(&envelope).map_err(|error| format!("{class:?} is admitted: {error}"))?;
+    }
+    for class in [
+        DeliveryClass::OpaqueEvent,
+        DeliveryClass::NotificationWake,
+        DeliveryClass::ObjectManifest,
+        DeliveryClass::ObjectChunk,
+        DeliveryClass::FederationControl,
+    ] {
+        let mut envelope = compact_sdk_envelope(&[7_u8; 32])?;
+        envelope.delivery_class = class.clone();
+        match check_entry_bound(&envelope) {
+            Err(NodeCoreError::DeliveryClassRefused) => {}
+            other => return Err(format!("{class:?} must be refused, got {other:?}").into()),
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn admitted_candidate_envelope_is_fetchable() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let envelope = compact_sdk_envelope(&vec![7_u8; 522_808])?;
     check_entry_bound(&envelope)?;
     let root = fixture("p06-r4-fetch");
@@ -260,7 +288,6 @@ fn unknown_nested_field(
 
 #[test]
 fn candidate_250kb_ciphertext_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let envelope = inject_compact_pad(
         &compact_250kb_envelope()?,
         "ciphertext",
@@ -272,14 +299,12 @@ fn candidate_250kb_ciphertext_pad_is_unknown_field() -> Result<(), Box<dyn std::
 
 #[test]
 fn candidate_250kb_x3dh_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let envelope = inject_compact_pad(&compact_250kb_envelope()?, "x3dh", serde_json::json!("x"))?;
     unknown_nested_field(check_entry_bound(&envelope))
 }
 
 #[test]
 fn candidate_source_principal_commitment_cap() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let cap = ramflux_protocol::message::outer::MAX_IDENTIFIER_BYTES;
     let mut allowed = compact_250kb_envelope()?;
     let bytes = ramflux_protocol::decode_base64url(&allowed.encrypted_payload)?;
@@ -334,7 +359,6 @@ fn set_sidecar_field(
 #[test]
 fn candidate_250kb_legacy_ciphertext_field_is_refused_when_non_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let base = compact_250kb_envelope()?;
     check_entry_bound(&base)?;
     let zeros = vec![0_u8; 200 * 1024];
@@ -354,7 +378,6 @@ fn candidate_250kb_legacy_ciphertext_field_is_refused_when_non_empty()
 
 #[test]
 fn candidate_250kb_top_level_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let padded = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {
         sidecar["pad"] = serde_json::json!("p".repeat(100 * 1024));
     })?;
@@ -366,7 +389,6 @@ const PAYLOAD_HASH_MISMATCH: &str = "envelope payload hash mismatch";
 
 #[test]
 fn candidate_compact_ciphertext_field_is_required() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let missing = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {
         let object = sidecar["ciphertext"].as_object_mut().expect("ciphertext object");
         object.remove("ciphertext");
@@ -383,7 +405,6 @@ fn candidate_compact_ciphertext_field_is_required() -> Result<(), Box<dyn std::e
 
 #[test]
 fn candidate_entry_refuses_payload_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     check_entry_bound(&envelope)?;
     envelope.payload_hash = "tampered-payload-hash".into();
@@ -396,11 +417,11 @@ fn candidate_entry_refuses_payload_hash_mismatch() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn legacy_entry_accepts_payload_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn active_entry_refuses_payload_hash_mismatch_in_legacy_wrapper()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.payload_hash = "legacy-mismatch".into();
-    check_entry_bound(&envelope)?;
+    exact_config(check_entry_bound(&envelope), "envelope payload hash mismatch")?;
     Ok(())
 }
 
@@ -422,25 +443,24 @@ fn exact_mode_refused(result: Result<(), NodeCoreError>) -> Result<(), Box<dyn s
 }
 
 #[test]
-fn gate_off_named_delivery_mode_is_refused_at_entry() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn active_entry_refuses_unframed_named_delivery_mode() -> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.delivery_mode = Some("ephemeral".into());
-    exact_mode_refused(check_entry_bound(&envelope))
+    assert!(check_entry_bound(&envelope).is_err());
+    Ok(())
 }
 
 #[test]
-fn gate_off_named_collapse_tag_is_refused_at_entry() -> Result<(), Box<dyn std::error::Error>> {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn active_entry_refuses_legacy_wrapper_with_named_collapse_tag()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
-    exact_mode_refused(check_entry_bound(&envelope))
+    assert!(check_entry_bound(&envelope).is_err());
+    Ok(())
 }
 
 #[test]
-fn gate_off_named_field_conflicting_with_ext_bridge_is_refused()
--> Result<(), Box<dyn std::error::Error>> {
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn active_entry_refuses_retired_ext_bridge() -> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.delivery_mode = Some("durable".into());
     envelope.ext.ext.insert(
@@ -452,7 +472,6 @@ fn gate_off_named_field_conflicting_with_ext_bridge_is_refused()
 
 #[test]
 fn candidate_entry_refuses_missing_delivery_mode() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.delivery_mode = None;
     exact_mode_refused(check_entry_bound(&envelope))
@@ -460,7 +479,6 @@ fn candidate_entry_refuses_missing_delivery_mode() -> Result<(), Box<dyn std::er
 
 #[test]
 fn candidate_entry_refuses_unknown_delivery_mode() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.delivery_mode = Some("bogus".into());
     exact_mode_refused(check_entry_bound(&envelope))
@@ -468,7 +486,6 @@ fn candidate_entry_refuses_unknown_delivery_mode() -> Result<(), Box<dyn std::er
 
 #[test]
 fn candidate_entry_refuses_31_byte_collapse_tag() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 31]));
     exact_mode_refused(check_entry_bound(&envelope))
@@ -476,24 +493,22 @@ fn candidate_entry_refuses_31_byte_collapse_tag() -> Result<(), Box<dyn std::err
 
 #[test]
 fn candidate_entry_refuses_31_byte_report_commitment() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 31]));
     exact_config(check_entry_bound(&envelope), "report_commitment must be 32 bytes")
 }
 
 #[test]
-fn gate_off_named_report_commitment_is_refused_at_entry() -> Result<(), Box<dyn std::error::Error>>
-{
-    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+fn active_entry_refuses_legacy_wrapper_with_report_commitment()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
-    exact_mode_refused(check_entry_bound(&envelope))
+    assert!(check_entry_bound(&envelope).is_err());
+    Ok(())
 }
 
 #[test]
 fn candidate_compact_ciphertext_object_is_required() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let missing = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {
         sidecar.as_object_mut().expect("sidecar object").remove("ciphertext");
     })?;

@@ -70,10 +70,7 @@ pub(super) fn route(
         }
         ("GET", "/mvp1/session-push-capabilities") => {
             reply(&ramflux_node_core::SessionPushCapabilities {
-                capabilities: vec![
-                    ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
-                    ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into(),
-                ],
+                capabilities: router.echoed_gateway_client_capabilities(),
                 router_boot_id: router.state().router_boot_id().to_owned(),
             })
         }

@@ -10,7 +10,7 @@ fn legacy_wal_record_without_acceptance_time_is_refused() -> Result<(), Box<dyn 
     let path = temp_store_path("r4_legacy_wal")?;
     let wal = path.with_extension("wal");
     let now = i64::try_from(now_unix_seconds())?;
-    let mut envelope = envelope("legacy-wal", "legacy-wal-mailbox", DeliveryClass::OpaqueEvent);
+    let mut envelope = envelope("legacy-wal", "legacy-wal-mailbox", DeliveryClass::Message);
     envelope.created_at = now + 10 * 365 * 86_400;
     envelope.ttl = 604_800;
     let entry =

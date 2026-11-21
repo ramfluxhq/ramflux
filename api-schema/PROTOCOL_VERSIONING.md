@@ -162,7 +162,7 @@ Current request methods include:
   `account.lock`, `account.unlock`,
   `account.backup.export`, `account.backup.import`,
   `account.passphrase.rotate`
-- device: `device.list`, `device.activate`
+- device: `device.list`
 - message and conversation: `message.submit`, `message.receive`,
   `message.ack`, `message.delete`, `message.receipt.delivered`,
   `message.receipt.read`, `message.list`, `message.read`,

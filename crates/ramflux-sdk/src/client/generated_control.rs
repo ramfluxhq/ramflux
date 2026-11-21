@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant generated Control Inner conversion and native payload checks (S10a P15).
+//! Generated Control Inner conversion and native payload checks.
 //! Native adapters retain their authority checks; all receive effects join W1.
 mod receive;
 use super::generated_content::GeneratedEventStream;
@@ -234,6 +234,35 @@ fn validate_own_contact_sync(body: &g::OwnContactSync) -> Result<(), SdkError> {
     };
     if manifest.principal_id.is_empty() || body.link.is_none() {
         return Err(refused("own contact sync requires principal and friend link"));
+    }
+    if let Some(confirmation) = body.safety_confirmation.as_ref() {
+        validate_safety_confirmation(confirmation)?;
+    }
+    Ok(())
+}
+
+fn validate_safety_confirmation(body: &g::ContactSafetyConfirmation) -> Result<(), SdkError> {
+    let Some(expected) = body.expected.as_ref() else {
+        return Err(refused("safety confirmation requires expected material"));
+    };
+    let required = [
+        expected.self_identity_commitment.as_str(),
+        expected.contact_identity_commitment.as_str(),
+        expected.safety_number_hash.as_str(),
+        expected.contact_device_set_hash.as_str(),
+        expected.contact_lineage_head.as_str(),
+        expected.self_authority_head.as_str(),
+        expected.contact_authority_head.as_str(),
+        expected.principal_id.as_str(),
+        expected.link_id.as_str(),
+    ];
+    if body.origin.is_none()
+        || body.verified_at.is_none_or(|at| at < 0)
+        || expected.algorithm_version.is_none()
+        || required.iter().any(|value| value.is_empty())
+        || expected.replace_provisional_root.as_ref().is_some_and(String::is_empty)
+    {
+        return Err(refused("safety confirmation is incomplete"));
     }
     Ok(())
 }

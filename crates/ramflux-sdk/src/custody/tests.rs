@@ -26,7 +26,7 @@ impl Root {
 pub(crate) struct TestVault {
     secrets: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     pub(crate) fail: AtomicBool,
-    fail_branch: AtomicBool,
+    pub(crate) fail_branch: AtomicBool,
     cancel_commit: Mutex<Option<std::sync::Arc<CommitGate>>>,
     commit_obstacle: Mutex<Option<PathBuf>>,
 }
@@ -204,12 +204,21 @@ pub(crate) fn create_with_device(
     vault: &dyn PrimaryVault,
     now: u64,
 ) -> Result<BornAccount> {
+    Ok(create_with_device_and_phrase(root, id, device, vault, now)?.0)
+}
+pub(crate) fn create_with_device_and_phrase(
+    root: &Path,
+    id: &str,
+    device: &str,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(BornAccount, Zeroizing<String>)> {
     let mut input = input(id);
     input.device_id = device.into();
     let mut ceremony = CreationCeremony::begin(root, input, now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
-    Ok(ceremony.confirm(&words(&phrase, positions)?, vault, now)?)
+    Ok((ceremony.confirm(&words(&phrase, positions)?, vault, now)?, phrase))
 }
 pub(crate) fn mark_live(root: &Path, id: &str, now: u64) -> Result {
     let mut account = load_account(root, id, now)?;
@@ -249,10 +258,18 @@ fn custody_show_once_ordering_and_single_confirmation_attempt_are_enforced() -> 
     assert_ne!(positions[1], positions[2]);
     let mut answers = words(&phrase, positions)?;
     answers[1] = Zeroizing::new("not-a-word".into());
-    assert!(matches!(
-        ceremony.confirm(&answers, &vault, 100),
-        Err(SdkError::CustodyConfirmationFailed)
-    ));
+    let error =
+        ceremony.confirm(&answers, &vault, 100).expect_err("a mismatched word must be rejected");
+    assert!(
+        matches!(
+            error,
+            SdkError::CustodyConfirmRejected(crate::CustodyConfirmReason::WordMismatch {
+                position
+            }) if position == positions[1]
+        ),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("not-a-word"), "{error}");
     assert!(!root.0.join("custody_accounts").exists());
     Ok(())
 }
@@ -306,15 +323,19 @@ fn custody_confirmed_authority_reloads_with_latch_and_without_phrase_or_master_o
     Ok(())
 }
 #[test]
-fn custody_vault_failure_reserves_mode_and_never_creates_a_legacy_manifest() -> Result {
+fn custody_vault_failure_removes_the_reservation_and_creates_no_legacy_manifest() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
     vault.fail.store(true, Ordering::SeqCst);
     assert!(create(&root.0, "failed", &vault, 100).is_err());
-    assert!(account_exists(&root.0, "failed")?);
+    assert!(!account_exists(&root.0, "failed")?, "vault failure left a locked account");
+    assert!(matches!(
+        ramflux_storage::AccountIndex::open(&root.0)?.account("failed"),
+        Err(ramflux_storage::StorageError::AccountNotFound(_))
+    ));
     assert!(load_account(&root.0, "failed", 100).is_err());
     assert!(!root.0.join("local_bus_accounts").exists());
-    assert!(CreationCeremony::begin(&root.0, input("failed"), 100).is_err());
+    let _again = CreationCeremony::begin(&root.0, input("failed"), 100)?;
     Ok(())
 }
 #[test]
@@ -470,7 +491,17 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
         let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
         let phrase = ceremony.show_once()?;
         let positions = ceremony.hidden_challenge()?;
-        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
+        // Create through the validated public path, then model corrupted vault bytes
+        // to reach the export UTF-8 cleanup branch independently of creation validation.
+        let born = ceremony.confirm_with_passphrase(
+            &words(&phrase, positions)?,
+            &vault,
+            now,
+            b"valid-agent-data-passphrase",
+        )?;
+        let reference = format!("agent-provisioning:{}", born.primary_vault_ref());
+        vault.delete(&reference)?;
+        vault.store_provisioning_secret(&reference, secret)?;
         mark_live(&root.0, account, now)?;
         if occupied {
             // Destination failure after the passphrase String was built.
@@ -590,13 +621,17 @@ fn custody_partial_vault_import_cannot_be_retried_as_a_legacy_account() -> Resul
     let vault = TestVault::default();
     vault.fail_branch.store(true, Ordering::SeqCst);
     assert!(create(&root.0, "partial", &vault, 100).is_err());
-    assert!(account_exists(&root.0, "partial")?);
+    assert!(!account_exists(&root.0, "partial")?, "partial vault import left a locked account");
     assert!(!root.0.join("custody_accounts/partial/authority.json").exists());
     let mut legacy = crate::RamfluxClient::new();
     legacy.open_account_index(&root.0)?;
     assert!(matches!(
         legacy.unlock_account("partial", b"data-secret"),
-        Err(SdkError::NetworkingPending)
+        Err(SdkError::Storage(ramflux_storage::StorageError::AccountNotFound(_)))
+    ));
+    assert!(matches!(
+        ramflux_storage::AccountIndex::open(&root.0)?.account("partial"),
+        Err(ramflux_storage::StorageError::AccountNotFound(_))
     ));
     assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
     Ok(())
@@ -643,20 +678,6 @@ fn custody_loading_requires_a_separate_client_from_an_existing_legacy_identity()
 }
 
 #[test]
-fn custody_final_publication_failure_deletes_both_new_vault_entries() -> Result {
-    let root = Root::new()?;
-    let vault = TestVault::default();
-    *vault.commit_obstacle.lock().map_err(|_| "vault lock")? =
-        Some(root.0.join("custody_accounts/final-failure/authority.json"));
-    assert!(create(&root.0, "final-failure", &vault, 100).is_err());
-    assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
-    assert!(account_exists(&root.0, "final-failure")?);
-    assert!(load_account(&root.0, "final-failure", 100).is_err());
-    assert!(!root.0.join("local_bus_accounts/final-failure.json").exists());
-    Ok(())
-}
-
-#[test]
 fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
@@ -677,18 +698,14 @@ fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials(
             .is_err()
     );
     assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);
-    assert!(!root.0.join("custody_accounts/cancelled-commit/authority.json").exists());
-    // The failed reservation retains its mode denial, but publishes no account authority.
-    assert!(account_exists(&root.0, "cancelled-commit")?);
-    let accounts = list_accounts(&root.0, 100)?;
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0]["setup_incomplete"], true);
-    assert_eq!(accounts[0]["setup_failed"], true);
-    assert_eq!(accounts[0]["reason"], "setup_failed_before_authority");
-    let reason = crate::custody::failed_setup(&root.0, "cancelled-commit")?.ok_or("not failed")?;
-    assert!(matches!(
-        crate::custody::failed_setup_error("cancelled-commit", reason),
-        SdkError::LocalBusRefused { code, .. } if code == "CustodySetupFailed"
-    ));
+    assert!(
+        !account_exists(&root.0, "cancelled-commit")?,
+        "cancelled confirm left a locked account"
+    );
+    assert!(
+        list_accounts(&root.0, 100)?.is_empty(),
+        "cancelled confirm stayed in the account list"
+    );
+    assert_eq!(crate::custody::failed_setup(&root.0, "cancelled-commit")?, None);
     Ok(())
 }

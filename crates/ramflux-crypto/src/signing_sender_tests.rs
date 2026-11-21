@@ -19,7 +19,7 @@ fn generic_v2_senders_use_checked_transcript() -> Result<(), Box<dyn std::error:
     ramflux_protocol::verify_sender_signature(
         &evidence,
         ramflux_protocol::SenderTranscriptMode::Evidence,
-        &public_key_base64url_from_seed([17; 32]),
+        &public_key_base64url_from_seed(&[17; 32]),
     )?;
     envelope["encrypted_payload"] = serde_json::json!("b3RoZXI");
     assert!(matches!(

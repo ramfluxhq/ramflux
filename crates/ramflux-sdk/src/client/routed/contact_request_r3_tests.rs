@@ -29,8 +29,14 @@ async fn sync(state: &mut LocalBusDaemonState) -> Result<(), SdkError> {
 #[tokio::test]
 async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next_root_is_admitted()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
+    crate::client::native_test_support::watchdog::within(contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next_root_is_admitted_body())
+        .await.map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next_root_is_admitted_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 31)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 41)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let valid = r2::outbound(&mut state, &directory).await?;
@@ -58,8 +64,8 @@ async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next
         before,
         "known exhausted sender must not fetch authority"
     );
-    let mut c = Fixture::new("carol", 51)?;
-    let mut d = Fixture::new("bob", 41)?;
+    let mut c = Box::pin(Fixture::native_named("carol", 51)).await?;
+    let mut d = Box::pin(Fixture::native_named("bob", 41)).await?;
     directory
         .records
         .lock()
@@ -80,8 +86,17 @@ async fn contact02_r3_sender_exhaustion_is_acked_without_manifest_fetch_and_next
 #[tokio::test]
 async fn contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_retry()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 71)?;
-    let mut b = Fixture::new("bob", 81)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_retry_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_retry_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 71)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 81)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
@@ -144,8 +159,17 @@ async fn contact02_r3_global_pressure_keeps_one_root_envelope_and_removes_due_re
 #[tokio::test]
 async fn contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 91)?;
-    let mut b = Fixture::new("bob", 101)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 91)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 101)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
@@ -171,17 +195,33 @@ async fn contact02_r3_non_replay_deferral_inside_active_scan_keeps_its_floor()
 #[tokio::test]
 async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r3_pruned_decline_fences_session_control_and_outbound_retries_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 111)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 121)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = r2::outbound(&mut state, &directory).await?;
     let source = r2::root(&state, "alice")?;
     let target = r2::root(&state, "bob")?;
-    let manifest = directory.records.lock().map_err(|_| invalid("records"))?[0].clone();
-    account(&state, "bob")?.persist_identity_directory(&manifest)?;
+    let manifest = directory
+        .records
+        .lock()
+        .map_err(|_| invalid("records"))?
+        .first()
+        .cloned()
+        .ok_or_else(|| invalid("source manifest"))?;
+    account(&state, "bob")?.persist_observed_identity_directory_now(&manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
-    let control: contact_requests::Control = serde_json::from_slice(&opened.body)?;
+    let control =
+        account(&state, "bob")?.verify_contact_control(&entry, &opened.routing, &opened.body)?;
     deliver(&mut state, "bob", &entry).await?;
     let receiver = account(&state, "bob")?;
     receiver.account_db()?.fence_contact_request(
@@ -199,18 +239,9 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
     let mut old = control.clone();
     old.body.issued_at -= 172_800;
     old.body.expires_at -= 172_800;
-    old.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-        &ramflux_protocol::canonical_json_bytes(
-            &json!({"domain":"ramflux.contact_request.v1","body":old.body}),
-        )?,
-        account(&state, "alice")?
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .to_bytes(),
-    );
-    receiver.verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&old)?)?;
+    // This is the already admitted native request's local view. Time changes
+    // cannot bypass the retained fence; native proof/lifetime checks are tested
+    // independently by the signed-consent adversaries.
     assert!(
         receiver.apply_contact_control(&old).is_err(),
         "old signed request replayed after cooldown"
@@ -226,7 +257,13 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
         &json!({"state":"declined","updated_at":now_unix_timestamp()-7200}),
     )?;
     assert!(!sender.contact_request_retryable(&target)?);
-    let peer = directory.records.lock().map_err(|_| invalid("records"))?[1].clone();
+    let peer = directory
+        .records
+        .lock()
+        .map_err(|_| invalid("records"))?
+        .get(1)
+        .cloned()
+        .ok_or_else(|| invalid("peer manifest"))?;
     assert!(
         sender.stage_contact_request(&peer, "re-add", None).is_err(),
         "pruned declined status must prevent re-add before cooldown"
@@ -236,8 +273,17 @@ async fn contact02_r3_pruned_decline_fences_session_control_and_outbound_retries
 #[tokio::test]
 async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_rows()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_rows_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_rows_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 131)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 141)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
@@ -249,7 +295,18 @@ async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_r
     bad.updated_at = now_unix_timestamp() - 7200;
     db.remove_contact_request(&source, "inbound", &bad.request_id)?;
     db.persist_contact_request(&bad)?;
-    // Missing current manifest causes retirement's qualified device lookup to fail.
+    // A retained newer native head makes this cached request unretirable.
+    // Maintenance must preserve it and continue to the independent healthy row.
+    let native = client
+        .current_custody_authority(&source, crate::custody::network_now()?)?
+        .ok_or_else(|| invalid("native current authority"))?;
+    assert!(db.retain_contact_request_authority_floor(
+        &source,
+        native.envelope().body.device_set_epoch + 1,
+        "future-native-head",
+        now_unix_timestamp() + 3600,
+        now_unix_timestamp(),
+    )?);
     db.remove_actor_state(&format!("identity/manifest-root/{source}"))?;
     db.remove_actor_state("identity/manifest/alice")?;
     let mut healthy = bad.clone();
@@ -284,8 +341,16 @@ async fn contact02_r3_cleanup_is_paced_and_bad_retirement_does_not_block_later_r
 
 #[tokio::test]
 async fn contact02_r3_expiry_is_enforced_between_janitor_intervals() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r3_expiry_is_enforced_between_janitor_intervals_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r3_expiry_is_enforced_between_janitor_intervals_body() -> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 151)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 161)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;

@@ -15,7 +15,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-struct Terminal {
+pub(super) struct Terminal {
     input: File,
     output: File,
     echo_disabled: bool,
@@ -34,7 +34,7 @@ struct Terminal {
     modes_restored: bool,
 }
 impl Terminal {
-    fn open() -> Result<Self, RfError> {
+    pub(super) fn open() -> Result<Self, RfError> {
         #[cfg(windows)]
         {
             let input = super::windows_console::open_input().map_err(|error| {
@@ -126,7 +126,11 @@ impl Terminal {
             Ok(())
         }
     }
-    fn line(&mut self, prompt: &str, hidden: bool) -> Result<Zeroizing<String>, RfError> {
+    pub(super) fn line(
+        &mut self,
+        prompt: &str,
+        hidden: bool,
+    ) -> Result<Zeroizing<String>, RfError> {
         if hidden {
             self.echo(false)?;
         }
@@ -308,6 +312,8 @@ async fn create_human_confirm(
         return Err(RfError::Message("Local data passphrases did not match.".into()));
     }
     drop(repeated);
+    ramflux_sdk::check_new_passphrase(&passphrase)
+        .map_err(|error| RfError::Message(error.user_message()))?;
     Ok(client.confirm(&words, &passphrase).await?)
 }
 

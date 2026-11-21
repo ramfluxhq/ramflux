@@ -19,6 +19,8 @@ mod migration_courier;
 mod migration_drain;
 mod migration_forward_limits;
 mod operator;
+mod pairing_full;
+mod pairing_key;
 mod pairing_mesh;
 mod retention;
 mod router_engine;
@@ -69,7 +71,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         );
     }
     if let Some(config) =
-        ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
+        ramflux_node_core::load_config_from_args_reporting(std::env::args().skip(1), service)?
     {
         validate_migration_config(&config)?;
         let pools = ramflux_node_core::CustodyPoolSettings::from_env()?;
@@ -103,6 +105,9 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             home_node_forward,
             config.node_id.clone(),
         ));
+        if let Some(configured) = config.gateway_client_capabilities.as_deref() {
+            router.install_gateway_client_capabilities(configured);
+        }
         router.enable_custody(&config)?;
         custody_listener::start(&config, Arc::clone(&router))?;
         retention::start(Arc::clone(&router));
@@ -143,7 +148,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
     if checkpoint_only || discard_stale {
         anyhow::bail!("identity registry maintenance commands require --config");
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(
+        service,
+        version = ramflux_node_core::version::VERSION_SHA,
+        "service initialized"
+    );
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }

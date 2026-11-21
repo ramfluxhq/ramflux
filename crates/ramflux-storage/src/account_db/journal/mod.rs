@@ -85,7 +85,7 @@ impl AccountDb {
         at: i64,
         subject: Option<&str>,
     ) -> Result<JournalEvent, StorageError> {
-        self.write_transaction(|| self.insert_journal(source, topic, body, at, subject))
+        self.join_write(|| self.insert_journal(source, topic, body, at, subject))
     }
 
     pub(crate) fn insert_journal(

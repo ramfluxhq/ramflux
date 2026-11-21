@@ -164,18 +164,16 @@ impl CustodyService {
     /// Rejects an invalid pairing opt-in or a store that cannot open.
     pub fn with_pairing_relay_if_enabled(
         self,
-        node_seed: [u8; 32],
+        node_seed: zeroize::Zeroizing<[u8; 32]>,
         public_origin: String,
     ) -> Result<Self, crate::NodeCoreError> {
         if !crate::device_pairing_enabled()? {
             return Ok(self);
         }
-        let store = crate::pairing_relay::PairingRelayStore::new(
-            crate::pairing_relay::PairingRelayConfig {
-                clock: Arc::new(crate::pairing_relay::NodePairingClock::system()),
-                node_seed,
-                public_origin,
-            },
+        let store = crate::pairing_relay::PairingRelayStore::with_seed(
+            Arc::new(crate::pairing_relay::NodePairingClock::system()),
+            public_origin,
+            node_seed,
         )
         .map_err(|error| crate::NodeCoreError::ItestHttp(error.to_string()))?;
         Ok(self.with_pairing_relay(Arc::new(Mutex::new(store))))
@@ -184,6 +182,12 @@ impl CustodyService {
     pub fn pairing_relay(&self) -> Option<&Arc<Mutex<crate::pairing_relay::PairingRelayStore>>> {
         self.pairing.as_ref()
     }
+    /// Independently verified local node identity for data-only pairing relay admission.
+    #[must_use]
+    pub fn pairing_node(&self) -> &VerifiedNodeRecord {
+        &self.node
+    }
+
     /// Attach migration only with the custody listener's independently verified node signer.
     /// # Errors
     /// Rejects a signer for a different node or key.

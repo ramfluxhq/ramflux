@@ -35,6 +35,23 @@ pub(super) fn authored_key(carrier: &Carrier) -> Result<(String, String), SdkErr
     Ok((format!("{prefix}{suffix}"), prefix))
 }
 impl RamfluxClient {
+    pub(crate) fn surface_generated_message_id(
+        &self,
+        carrier: &Carrier,
+    ) -> Result<String, SdkError> {
+        let timeline = Self::surface_timeline_id(carrier)?;
+        if let Some(id) = self
+            .account_db()?
+            .load_actor_state::<String>(&format!("surface/generated-alias/{timeline}"))?
+        {
+            return Ok(id);
+        }
+        #[cfg(test)]
+        return Ok(timeline);
+        #[cfg(not(test))]
+        Err(invalid("Surface has no retained generated identity"))
+    }
+
     pub(crate) fn retain_authored_surface(&self, carrier: &Carrier) -> Result<(), SdkError> {
         let (key, prefix) = authored_key(carrier)?;
         let previous = self.account_db()?.load_actor_state::<serde_json::Value>(&key)?;
@@ -151,8 +168,7 @@ impl RamfluxClient {
             self.account_db()?.write_transaction(|| {
                 let control = self.live_surface_control_packet(carrier, epoch)?;
                 let bytes = zeroize::Zeroizing::new(control.bytes()?);
-                let message = Self::surface_timeline_id(carrier)?;
-                let reference = carrier.surface_reference()?;
+                let message = self.surface_generated_message_id(carrier)?;
                 let thread = self
                     .account_db()?
                     .client_record("conversation", &carrier.conversation_id)?
@@ -160,13 +176,14 @@ impl RamfluxClient {
                 crate::bus::own_device_copy::stage(
                     self,
                     crate::client::own_device_copy::OwnMessageInput {
+                        payload_kind: crate::client::own_device_copy::OwnPayloadKind::Surface,
                         id: &message,
                         created_at: crate::prelude::now_unix_timestamp(),
                         conversation: &carrier.conversation_id,
                         group: thread["group_id"].as_str(),
                         body: &bytes,
                     },
-                    Some(("surface", &reference)),
+                    Some(("message", &message)),
                 )?;
                 Ok::<_, SdkError>(())
             })

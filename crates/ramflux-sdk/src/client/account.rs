@@ -44,8 +44,10 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let account_index = self.account_index()?;
         let _writer = account_index.acquire_account_writer(account_id)?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(account_id)?;
-        let wrapping_key = account_db_key_encryption_key(&vault_secret, secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(account_id)?);
+        let wrapping_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
         let wrapped =
             account_index.load_wrapped_db_key(account_id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let key = unwrap_with_vault_secret(&wrapping_key, &wrapped)?;
@@ -149,8 +151,10 @@ impl RamfluxClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         let account_index = self.account_index()?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
-        let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let key_encryption_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
         let key = if let Some(wrapped) = wrapped {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
@@ -180,8 +184,8 @@ impl RamfluxClient {
         if let Some(device_branch) = self.device_branch.clone() {
             db.set_device_signer(device_branch);
         }
-        super::contact_verification::migrate_legacy_contact_verifications(&db)?;
         self.born_v3_account = born;
+        self.release_held_manifests();
         self.object_store.replace_persisted(Vec::new(), BTreeMap::new());
         self.active_account_db = Some(db);
         *self.self_sync_restore_clock.borrow_mut() = None;
@@ -189,6 +193,9 @@ impl RamfluxClient {
         *self.typing_receiver.borrow_mut() = super::typing::TypingReceiver::default();
         *self.typing_sender.borrow_mut() = super::typing::sender::TypingSender::default();
         self.bind_object_retirement()?;
+        if self.born_v3_account.is_some() {
+            self.backfill_direct_conversations()?;
+        }
         Ok(())
     }
 
@@ -199,9 +206,12 @@ impl RamfluxClient {
         local_account_id: &str,
         new_secret: &[u8],
     ) -> Result<(), SdkError> {
+        crate::passphrase::admit_new_passphrase(new_secret)?;
         let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
-        let key_encryption_key = account_db_key_encryption_key(&vault_secret, new_secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let key_encryption_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, new_secret));
         let wrapped = self.account_db()?.wrap_current_db_key(&key_encryption_key)?;
         self.account_index()?.store_wrapped_db_key(local_account_id, &wrapped)?;
         Ok(())
@@ -422,7 +432,7 @@ impl RamfluxClient {
     }
 
     /// Bind schema, import and the discriminator to the first verified node incarnation
-    /// (Push handshake) or a retained local epoch (Compat/Legacy) before ledger phases.
+    /// (Push handshake) or a retained local epoch (Direct) before ledger phases.
     /// Already-activated accounts are left unchanged. No-op while first-activation is off.
     ///
     /// # Errors
@@ -481,8 +491,12 @@ fn fresh_receive_incarnation() -> Result<String, SdkError> {
     Ok(super::contact::bytes_to_hex(&bytes))
 }
 
-pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+/// Derives the key-encryption key that unwraps an account database key.
+///
+/// The input is `ramflux.account_db_kek.v2`, the file-vault secret, then the passphrase.
+#[must_use]
+pub fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
+    let mut hasher = zeroize::Zeroizing::new(blake3::Hasher::new());
     hasher.update(b"ramflux.account_db_kek.v2");
     hasher.update(vault_secret);
     hasher.update(secret);

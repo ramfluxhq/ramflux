@@ -28,7 +28,7 @@ impl Drop for HangGuard {
 
 /// Kill before/after each reply W1, redrive, one envelope, W0 staged.
 /// Folded into `receive_stage_redrive` (P13 is on main).
-pub(crate) fn reply_stage_redrive() -> Result<(), SdkError> {
+pub(crate) async fn reply_stage_redrive() -> Result<(), SdkError> {
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if matches!(
@@ -39,7 +39,7 @@ pub(crate) fn reply_stage_redrive() -> Result<(), SdkError> {
         }
     });
     let _hang = HangGuard(Some(cancel));
-    let mut fixture = Fixture::new()?;
+    let mut fixture = Box::pin(Fixture::new()).await?;
     redrive(&mut fixture, 1, "surface-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
     redrive(&mut fixture, 2, "second-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
     Ok(())
@@ -54,7 +54,7 @@ fn redrive(
 ) -> Result<(), SdkError> {
     let envelope =
         reply_outbox_crash_tests::bound_envelope(&fixture.client, &format!("{auth_key}-env"))?;
-    let config = reply_outbox_crash_tests::session_config(&fixture.client)?;
+    let config = fixture.config()?;
     let target =
         fixture.peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
     reply_outbox_crash_tests::stage(&fixture.client, sequence)?;

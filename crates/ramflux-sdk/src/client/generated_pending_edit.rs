@@ -123,6 +123,7 @@ impl RamfluxClient {
                         source: &source,
                         imported: None,
                         own_sent: true,
+                        author_submit: false,
                     },
                     conversation,
                     &raw.bytes,

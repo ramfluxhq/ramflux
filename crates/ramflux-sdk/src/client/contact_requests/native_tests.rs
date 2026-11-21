@@ -42,7 +42,7 @@ pub(crate) async fn request_entry(
     sender: &Fixture,
     target: &crate::prekey::SdkDeviceManifestResponse,
 ) -> TestResult<GatewayInboxEntry> {
-    sender.client.persist_fetched_identity_directory(target)?;
+    sender.client.persist_observed_identity_directory_now(target)?;
     let mut intent = intent_for(sender, &target.principal_commitment)?;
     let body = super::native_delivery::approve(
         &sender.client,
@@ -58,7 +58,7 @@ pub(crate) async fn request_entry(
             &target.principal_commitment,
         )?,
         message_id: super::generated::message_id(&body, "autonomous-contact")?,
-        envelope_id: "autonomous-contact".into(),
+        envelope_id: format!("native-contact-{}", intent.request_id),
         source_principal_id: sender.config.principal_id.clone(),
         sender_id: sender.config.device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
@@ -68,7 +68,7 @@ pub(crate) async fn request_entry(
         created_at: crate::time::now_unix_timestamp(),
         ttl: 3600,
     };
-    let mut packet = sender.client.seal_routed_prepared(
+    let packet = sender.client.seal_generated_routed_prepared(
         &sender.config,
         &message,
         &body,
@@ -78,15 +78,27 @@ pub(crate) async fn request_entry(
             bundle: Some(device.prekey_bundle.clone()),
         },
     )?;
-    packet.packet.schema = super::ENVELOPE_SCHEMA.into();
     let envelope =
-        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, packet, None)?;
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config, &mut message, packet)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
         target_delivery_id: message.target_delivery_id.clone(),
         envelope,
     })
+}
+
+pub(crate) fn decoded_consent(
+    bytes: &[u8],
+) -> TestResult<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2>> {
+    Ok(super::generated::decode(bytes)?.ok_or("native contact consent")?)
+}
+
+pub(crate) fn encoded_consent(
+    sender: &Fixture,
+    consent: &ramflux_protocol::custody::Envelope<ramflux_protocol::custody::ContactConsentV2>,
+) -> TestResult<Vec<u8>> {
+    Ok(sender.client.generated_contact_inner(consent, None)?.to_vec())
 }
 
 pub(crate) async fn approve_request(sender: &Fixture, target: &Fixture) -> TestResult<Vec<u8>> {
@@ -100,37 +112,29 @@ pub(crate) async fn approve_request(sender: &Fixture, target: &Fixture) -> TestR
     .to_vec())
 }
 
-fn transport(sender: &Fixture, target: &Fixture) -> TestResult<(GatewayInboxEntry, Routing)> {
+fn transport(
+    sender: &Fixture,
+    target: &Fixture,
+    exact: &[u8],
+) -> TestResult<(GatewayInboxEntry, Routing)> {
     let conversation = super::conversation(
         &sender.manifest.principal_commitment,
         &target.manifest.principal_commitment,
     )?;
-    let message = GatewayDirectMessage {
-        conversation_id: conversation.clone(),
-        message_id: "native-consent".into(),
-        envelope_id: "native-consent".into(),
-        source_principal_id: sender.manifest.principal_id.clone(),
-        sender_id: "primary".into(),
-        recipient_device_id: Some("primary".into()),
-        recipient_principal_commitment: Some(target.manifest.principal_commitment.clone()),
-        target_delivery_id: target.client.owned_device_identity()?.storage_key().into(),
-        encrypted_body: b"authenticated carrier validation fixture".to_vec(),
-        created_at: crate::time::now_unix_timestamp(),
-        ttl: 3600,
-    };
+    let message_id = super::generated::message_id(exact, "native-consent")?;
     Ok((
         GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: message.target_delivery_id.clone(),
-            envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+            target_delivery_id: target.config.target_delivery_id.clone(),
+            envelope: sender.seal_inner_to(target, exact)?,
         },
         Routing {
             group_message_id: None,
             kind: Kind::Control,
             conversation_id: conversation,
             group_id: None,
-            message_id: message.message_id,
+            message_id,
             attachments: false,
         },
     ))
@@ -141,9 +145,9 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
 {
     let sender = Fixture::new("native-consent-sender").await?;
     let target = Fixture::new("native-consent-target").await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let original = sender.manifest.custody.as_ref().ok_or("native")?.publication.clone();
     target.client.verify_contact_control(&entry, &route, &bytes)?;
     let primary = sender.vault.primary_for_public_key(
@@ -156,7 +160,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let renamed = primary.sign_record(body)?;
     let mut manifest = sender.manifest.clone();
     manifest.custody.as_mut().ok_or("native")?.publication.record = renamed;
-    target.client.persist_fetched_identity_directory(&manifest)?;
+    target.client.persist_observed_identity_directory_now(&manifest)?;
     assert!(matches!(
         target.client.verify_contact_control(&entry, &route, &bytes),
         Err(SdkError::ContactUnavailable(_))
@@ -188,7 +192,7 @@ async fn native_contact_delayed_consent_requires_exact_old_record_and_current_br
     let mut native = manifest.custody.ok_or("native")?;
     native.publication.record = revoked;
     native.devices.clear();
-    target.client.persist_fetched_identity_directory(
+    target.client.persist_observed_identity_directory_now(
         &crate::prekey::SdkDeviceManifestResponse::from_native(*native)?,
     )?;
     assert!(target.client.verify_contact_control(&entry, &route, &bytes).is_err());
@@ -237,7 +241,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
     let bytes = approve_request(&sender, &target).await?;
     let mut expired: ramflux_protocol::custody::Envelope<
         ramflux_protocol::custody::ContactConsentV2,
-    > = serde_json::from_slice(&bytes)?;
+    > = super::generated::decode(&bytes)?.ok_or("native contact consent")?;
     let now = crate::custody::network_now()?;
     expired.body.issued_at = now - 604_801;
     expired.body.expires_at = now - 1;
@@ -264,7 +268,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
         )?,
         *primary.vault_seed(),
     );
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     assert!(matches!(
         target
             .client
@@ -272,7 +276,7 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
                 &target.config,
                 &entry,
                 &route,
-                &serde_json::to_vec(&expired)?,
+                &sender.client.generated_contact_inner(&expired, None)?,
                 Some(&sender.manifest)
             )
             .await,
@@ -290,9 +294,9 @@ async fn native_expired_primary_signature_cannot_trigger_a_history_lookup() -> T
 async fn native_inbound_accept_persists_safety_before_the_first_directory_read() -> TestResult {
     let sender = Fixture::new("native-safety-sender").await?;
     let target = Fixture::new("native-safety-target").await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
     target.client.apply_contact_control(&control)?;
     let db = target.client.account_db()?;
@@ -335,7 +339,7 @@ async fn native_received_request_keeps_lookup_provenance_and_preserves_card_pins
     let sender = Fixture::new("native-provenance-sender").await?;
     let target = Fixture::new("native-provenance-target").await?;
     let bytes = approve_request(&sender, &target).await?;
-    let (entry, route) = transport(&sender, &target)?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
     let db = target.client.account_db()?;
     let principal = &sender.manifest.principal_id;
     assert!(db.client_record("identity", principal)?.is_none());
@@ -382,9 +386,9 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let sender = Fixture::new("native-preview-sender").await?;
         let target = Fixture::new("native-preview-target").await?;
-        target.client.persist_fetched_identity_directory(&sender.manifest)?;
+        target.client.persist_observed_identity_directory_now(&sender.manifest)?;
         let bytes = approve_request(&sender, &target).await?;
-        let (entry, route) = transport(&sender, &target)?;
+        let (entry, route) = transport(&sender, &target, &bytes)?;
         let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
         target.client.apply_contact_control(&control)?;
         let root = &sender.manifest.principal_commitment;
@@ -405,10 +409,9 @@ async fn native_contact_request_preview_uses_anchor_safety_number() -> TestResul
 async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity() -> TestResult {
     use prost::Message as _;
     use ramflux_protocol::message as g;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let sender = Box::pin(Fixture::new("generated-native-contact-sender")).await?;
     let target = Box::pin(Fixture::new("generated-native-contact-target")).await?;
-    target.client.persist_fetched_identity_directory(&sender.manifest)?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
     let mut pending = intent(&sender, &target)?;
     let bytes = super::native_delivery::approve(
         &sender.client,
@@ -494,4 +497,269 @@ async fn generated_native_contact_keeps_primary_consent_and_one_retry_identity()
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].state, "pending", "receiving a request never accepts it");
     Ok(())
+}
+
+async fn pending_pair(
+    label: &str,
+) -> TestResult<(Fixture, Fixture, ramflux_storage::ContactRequestRecord)> {
+    let sender = Box::pin(Fixture::new(&format!("{label}-sender"))).await?;
+    let target = Box::pin(Fixture::new(&format!("{label}-target"))).await?;
+    target.client.persist_observed_identity_directory_now(&sender.manifest)?;
+    let bytes = approve_request(&sender, &target).await?;
+    let (entry, route) = transport(&sender, &target, &bytes)?;
+    let control = target.client.verify_contact_control(&entry, &route, &bytes)?;
+    target.client.apply_contact_control(&control)?;
+    let request = target
+        .client
+        .account_db()?
+        .contact_request(&sender.manifest.principal_commitment, "inbound")?
+        .ok_or("test: pending request")?;
+    assert_eq!(request.state, "pending", "test: receiving a request never accepts it");
+    Ok((sender, target, request))
+}
+
+fn direct_id(a: &Fixture, b: &Fixture) -> TestResult<String> {
+    Ok(ramflux_protocol::message::dm_scope::derive(
+        &a.manifest.principal_commitment,
+        &b.manifest.principal_commitment,
+    )?)
+}
+
+fn directory_ids(fixture: &Fixture) -> TestResult<Vec<String>> {
+    let account = fixture.client.account_db()?.local_account_id.clone();
+    let listed = crate::bus::read_model::read(
+        &fixture.client,
+        &crate::LocalBusFrame::request(
+            "default-conversation-directory",
+            Some(account),
+            "conversation",
+            "conversation.directory",
+            serde_json::json!({}),
+        ),
+    )?;
+    Ok(listed["conversations"]
+        .as_array()
+        .ok_or("test: conversations array")?
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+        .collect())
+}
+
+#[tokio::test]
+async fn accepting_a_request_lists_an_empty_direct_conversation_with_bound_roots() -> TestResult {
+    let (sender, target, request) = pending_pair("default-accept").await?;
+    let id = direct_id(&sender, &target)?;
+    assert!(directory_ids(&target)?.is_empty(), "a pending request must create no row");
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?, vec![id.clone()], "accept lists exactly the direct row");
+    let row = target.client.account_db()?.client_record("conversation", &id)?.ok_or("row")?;
+    assert_eq!(row["kind"], "direct");
+    assert!(row["group_id"].is_null(), "direct rows carry no group");
+    assert_eq!(
+        row["participants"],
+        serde_json::json!([target.config.principal_id, sender.config.principal_id])
+    );
+    let roots = row["participant_roots"].as_array().ok_or("roots")?.len();
+    assert_eq!(roots, 2, "both roots are bound");
+    let messages = target.client.account_db()?.conversation_summaries()?;
+    assert!(
+        messages.iter().all(|summary| summary.message_count == 0),
+        "the default thread is empty presentation"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accept_and_first_send_keep_one_direct_and_typing_uses_that_binding() -> TestResult {
+    let (sender, target, request) = pending_pair("direct-one-pair").await?;
+    let id = direct_id(&sender, &target)?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?, vec![id.clone()]);
+    let own = target.client.owned_device_identity()?;
+    let message = GatewayDirectMessage {
+        conversation_id: id.clone(),
+        message_id: "op".into(),
+        envelope_id: "env".into(),
+        source_principal_id: target.config.principal_id.clone(),
+        sender_id: own.device_id().into(),
+        recipient_device_id: None,
+        recipient_principal_commitment: Some(sender.manifest.principal_commitment.clone()),
+        target_delivery_id: String::new(),
+        encrypted_body: Vec::new(),
+        created_at: 0,
+        ttl: 0,
+    };
+    drop_direct_roots(&target, &id)?;
+    target.client.ensure_authored_direct_context(&message, &own)?;
+    assert_eq!(root_count(&target, &id)?, 2, "the first send binds the accept conversation");
+    assert_eq!(directory_ids(&target)?, vec![id.clone()]);
+    drop_direct_roots(&target, &id)?;
+    let again = target.client.ensure_direct_conversation(
+        &sender.manifest.principal_commitment,
+        &sender.manifest.principal_id,
+    )?;
+    assert_eq!(again.as_deref(), Some(id.as_str()));
+    assert_eq!(root_count(&target, &id)?, 2, "accept again fills the same row");
+    drop_direct_roots(&target, &id)?;
+    target.client.set_typing_focus(Some(&id))?;
+    assert_eq!(root_count(&target, &id)?, 2, "typing uses the same root pair as the direct send");
+    assert_eq!(directory_ids(&target)?, vec![id]);
+    target.client.set_typing_focus(None)?;
+    Ok(())
+}
+
+fn drop_direct_roots(fixture: &Fixture, id: &str) -> TestResult<()> {
+    let db = fixture.client.account_db()?;
+    let mut row = db.client_record("conversation", id)?.ok_or("row")?;
+    row.as_object_mut().ok_or("conversation object")?.remove("participant_roots");
+    db.persist_client_record("conversation", id, &row)?;
+    Ok(())
+}
+
+fn root_count(fixture: &Fixture, id: &str) -> TestResult<usize> {
+    let row = fixture.client.account_db()?.client_record("conversation", id)?.ok_or("row")?;
+    Ok(row["participant_roots"].as_array().ok_or("roots")?.len())
+}
+
+#[tokio::test]
+async fn accepted_retry_keeps_the_existing_row_history_and_title() -> TestResult {
+    let (sender, target, request) = pending_pair("default-retry").await?;
+    let id = direct_id(&sender, &target)?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    let db = target.client.account_db()?;
+    let mut row = db.client_record("conversation", &id)?.ok_or("row")?;
+    row["title"] = serde_json::json!("kept title");
+    db.persist_client_record("conversation", &id, &row)?;
+    let accepted = db
+        .contact_request(&sender.manifest.principal_commitment, "inbound")?
+        .ok_or("accepted request")?;
+    assert_eq!(accepted.state, "accepted");
+    target.client.decide_inbound_contact(&accepted, "accepted")?;
+    let after = db.client_record("conversation", &id)?.ok_or("row after retry")?;
+    assert_eq!(after, row, "an accepted retry must not rewrite an existing row");
+    Ok(())
+}
+
+#[tokio::test]
+async fn backfill_on_open_projects_contacts_accepted_before_the_row_existed() -> TestResult {
+    let mut one = Box::pin(Fixture::new("default-backfill-one")).await?;
+    let two = Box::pin(Fixture::new("default-backfill-two")).await?;
+    one.client.persist_observed_identity_directory_now(&two.manifest)?;
+    one.client.establish_friend_link(
+        "default-backfill-link",
+        &one.manifest.principal_commitment,
+        &two.manifest.principal_commitment,
+    )?;
+    let id = direct_id(&one, &two)?;
+    assert!(
+        one.client.account_db()?.client_record("conversation", &id)?.is_none(),
+        "test: an accepted contact without a row"
+    );
+    one.client.active_account_db = None;
+    one.client.unlock_account("default-backfill-one", b"native fixture data passphrase")?;
+    assert_eq!(directory_ids(&one)?, vec![id.clone()], "open backfills the accepted contact");
+    one.client.active_account_db = None;
+    one.client.unlock_account("default-backfill-one", b"native fixture data passphrase")?;
+    assert_eq!(directory_ids(&one)?, vec![id], "a restart keeps exactly one row");
+    Ok(())
+}
+
+#[tokio::test]
+async fn sibling_own_contact_sync_projects_the_same_row() -> TestResult {
+    let one = Box::pin(Fixture::new("default-sibling-one")).await?;
+    let two = Box::pin(Fixture::new("default-sibling-two")).await?;
+    one.accept_peer(&two)?;
+    assert_eq!(directory_ids(&one)?, vec![direct_id(&one, &two)?]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn conflicting_existing_row_is_refused_and_rolls_back_the_accept() -> TestResult {
+    let (sender, target, request) = pending_pair("default-conflict").await?;
+    let id = direct_id(&sender, &target)?;
+    let db = target.client.account_db()?;
+    db.persist_client_record(
+        "conversation",
+        &id,
+        &serde_json::json!({
+            "kind":"direct","group_id":null,"title":null,"direct_route":null,
+            "participants":["x","y"],"participant_roots":["root-x","root-y"],
+        }),
+    )?;
+    assert!(
+        target.client.decide_inbound_contact(&request, "accepted").is_err(),
+        "a row bound to other roots must refuse the accept"
+    );
+    assert_eq!(
+        db.contact_request(&sender.manifest.principal_commitment, "inbound")?
+            .ok_or("request")?
+            .state,
+        "pending",
+        "the refused accept rolls the whole decision back"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn principal_not_bound_to_the_contact_root_is_refused() -> TestResult {
+    let (sender, target, request) = pending_pair("default-unbound").await?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    let other = Box::pin(Fixture::new("default-conflict-other")).await?;
+    assert!(
+        target
+            .client
+            .ensure_direct_conversation(
+                &sender.manifest.principal_commitment,
+                &other.manifest.principal_id,
+            )
+            .is_err(),
+        "a principal not bound to the root must be refused"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_declined_and_blocked_contacts_get_no_row_and_no_grant() -> TestResult {
+    let (sender, target, request) = pending_pair("default-declined").await?;
+    let root = sender.manifest.principal_commitment.clone();
+    let principal = sender.manifest.principal_id.clone();
+    assert_eq!(target.client.ensure_direct_conversation(&root, &principal)?, None);
+    target.client.decide_inbound_contact(&request, "declined")?;
+    assert_eq!(target.client.ensure_direct_conversation(&root, &principal)?, None);
+    assert!(directory_ids(&target)?.is_empty(), "declined creates no row");
+
+    let (sender, target, request) = pending_pair("default-blocked").await?;
+    target.client.decide_inbound_contact(&request, "accepted")?;
+    assert_eq!(directory_ids(&target)?.len(), 1);
+    let link = target
+        .client
+        .account_db()?
+        .friend_link_for_peer(&sender.manifest.principal_commitment)?
+        .ok_or("link")?;
+    target.client.block_friend_link(&link.link_id)?;
+    assert_eq!(
+        target.client.ensure_direct_conversation(
+            &sender.manifest.principal_commitment,
+            &sender.manifest.principal_id
+        )?,
+        None,
+        "a blocked contact is never projected or revived"
+    );
+    Ok(())
+}
+
+/// Exercise the actual native producer while surfacing a deferred fixture error to its caller.
+pub(crate) async fn deliver_pending(
+    account: &mut crate::bus::state::LocalBusAccountState,
+) -> TestResult<usize> {
+    let pending =
+        account.client.account_db()?.list_actor_states::<Intent>("contact-request/send/")?;
+    let mut sent = 0;
+    for mut intent in pending {
+        let mut engine = account.session_client().await?;
+        let result = super::delivery::deliver(&account.client, &mut engine, &mut intent).await;
+        account.apply_session_metadata(engine);
+        sent += result?.0;
+    }
+    Ok(sent)
 }

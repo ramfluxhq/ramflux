@@ -20,6 +20,7 @@ fn native_card(sender: &NativeFixture) -> TestResult<String> {
             master_public_key: record.body.master_certificate.body.master_public_key.clone(),
             master_certificate: record.body.master_certificate.clone(),
             authority_head_hash: ramflux_protocol::custody::object_hash(record)?,
+            authority_epoch: record.body.device_set_epoch,
             devices: record.body.devices.clone(),
             node_url: "https://node.example".into(),
             node_key_fingerprint: crate::contact_node_fingerprint(
@@ -114,7 +115,7 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     let mut engine = receiver.session_client().await?;
     let result = receiver
         .client
-        .apply_routed_entry(&mut engine, &super::super::review::pool()?, &entry, false)
+        .apply_routed_entry(&mut engine, &super::super::review::pool()?, &entry)
         .await;
     receiver.install_test_session(engine);
     result?;
@@ -133,8 +134,9 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     let before = directory.manifest_fetches.load(Ordering::SeqCst);
     for (index, (source, selector)) in [
         ("lookup", json!({"principal_id":principal})),
-        ("card", json!({"card":card})),
-        ("card", json!({"principal_id":principal})),
+        // A card retry returns the existing state: no provenance change without the full checks.
+        ("lookup", json!({"card":card})),
+        ("lookup", json!({"principal_id":principal})),
         ("verified", json!({"card":card})),
     ]
     .into_iter()
@@ -142,13 +144,16 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     {
         let receiver = requests::account(&state, "bob")?;
         if source == "verified" {
-            receiver.mark_contact_safety_verified(&root, "bob")?;
+            crate::client::contact_verification_cas::verify_linked_contact(receiver, &root)?;
         }
         clear_safety_cache(receiver, &principal)?;
         let verification = receiver.account_db()?.contact_verification(&root)?;
         let started = std::time::Instant::now();
         let accepted = call(&mut state, "bob", "contact.accept", selector).await?;
-        assert_eq!(accepted["contact"]["root_source"], source);
+        assert_eq!(
+            accepted["contact"]["root_source"], source,
+            "retry {index}: provenance must stay what the earlier checks established"
+        );
         let receiver = requests::account(&state, "bob")?;
         let row = crate::bus::read_model::row(receiver, "identity", &principal)?;
         assert_eq!(row["safety_number_available"], true);
@@ -171,9 +176,13 @@ async fn native_auto_accepted_card_retry_repairs_an_uncached_identity_without_a_
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn native_contact_request_crosses_the_ordinary_transport_before_first_direct_message()
 -> TestResult {
+    crate::client::native_test_support::watchdog::within(native_contact_request_crosses_body())
+        .await?
+}
+async fn native_contact_request_crosses_body() -> TestResult {
     let sender = NativeFixture::with_device("native-transport-alice", "alice-device").await?;
     let target = NativeFixture::with_device("native-transport-bob", "bob-device").await?;
     let directory = Directory::from_records(
@@ -198,7 +207,7 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
             responses: VecDeque::new(),
         }),
     );
-    sender.client.persist_fetched_identity_directory(&target.manifest)?;
+    sender.client.persist_observed_identity_directory_now(&target.manifest)?;
     sender.client.stage_contact_request(&target.manifest, "native-transport-contact", None)?;
     let mut intent = sender
         .client
@@ -237,8 +246,19 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
         )
         .await?;
     target.client.commit_contact_request_bootstrap(&entry, &sender.manifest, "bob-device")?;
-    let message = GatewayDirectMessage {
-        conversation_id: "native-transport-thread".into(),
+    first_direct_after_native_contact(&sender, &target, &mut engine).await
+}
+
+async fn first_direct_after_native_contact(
+    sender: &NativeFixture,
+    target: &NativeFixture,
+    engine: &mut GatewaySessionEngine,
+) -> TestResult {
+    let mut message = GatewayDirectMessage {
+        conversation_id: ramflux_protocol::message::dm_scope::derive(
+            &sender.client.own_account_anchor()?,
+            &target.client.own_account_anchor()?,
+        )?,
         message_id: "first-direct".into(),
         envelope_id: "first-direct".into(),
         source_principal_id: sender.manifest.principal_id.clone(),
@@ -250,9 +270,55 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    let _sealed = sender
+    assert!(
+        sender
+            .client
+            .account_db()?
+            .client_record("conversation", &message.conversation_id)?
+            .is_none(),
+        "first-contact calibration must have no preexisting root-pair conversation"
+    );
+    assert!(
+        !sender.client.friend_link_peer_is_accepted(&target.manifest.principal_commitment)?,
+        "outbound consent must still be pending before the first DM"
+    );
+    let prepared = sender.client.prepare_authored_message(
+        &mut message,
+        None,
+        &ramflux_protocol::message::Message { text: "first message".into(), ..Default::default() },
+    )?;
+    let context = sender
         .client
-        .seal_routed_as(&mut engine, &message, b"first message", Route::direct())
-        .await?;
+        .account_db()?
+        .client_record("conversation", &message.conversation_id)?
+        .ok_or("first DM context")?;
+    assert_eq!(
+        context["participant_roots"],
+        serde_json::json!([
+            sender.manifest.principal_commitment,
+            target.manifest.principal_commitment
+        ]),
+        "authored capture must bind the verified immutable root pair"
+    );
+    assert!(
+        !sender.client.friend_link_peer_is_accepted(&target.manifest.principal_commitment)?,
+        "creating local root context must not grant contact consent"
+    );
+    let sealed =
+        sender.client.seal_routed_as(engine, &message, &prepared.wire, Route::direct()).await?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, sealed, None)?;
+    let entry = GatewayInboxEntry {
+        envelope,
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: target.config.target_delivery_id.clone(),
+    };
+    let opened = target.client.open_routed(&entry, &target.config.device_id)?;
+    assert_eq!(
+        opened.body.as_slice(),
+        prepared.exact,
+        "request bootstrap must preserve the first ordinary generated DM"
+    );
     Ok(())
 }

@@ -29,7 +29,6 @@ async fn history_chain_restart_reexports_prefix_and_starts_at_page_zero() -> Tes
 
 #[tokio::test]
 async fn history_staging_refuses_the_local_device_and_a_foreign_root() -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let own = Fixture::new("history-producer-own").await?;
     let peer = Fixture::new("history-producer-peer").await?;
     assert_eq!(
@@ -80,11 +79,9 @@ async fn history_producer_skips_rows_without_first_hand_evidence() -> TestResult
 }
 
 #[tokio::test]
-async fn history_courier_stays_dormant_before_schema_activation() -> TestResult {
+async fn history_courier_has_no_work_without_retained_history() -> TestResult {
     let own = Fixture::new("history-producer-dormant").await?;
-    if !crate::client::target_selection::schema_v1_selected() {
-        assert!(own.client.prepare_generated_history_delivery(&own.config)?.is_none());
-    }
+    assert!(own.client.prepare_generated_history_delivery(&own.config)?.is_none());
     Ok(())
 }
 
@@ -121,5 +118,77 @@ async fn history_cached_page_is_erased_with_any_carried_owner() -> TestResult {
         !db.actor_state_exists(&key)?,
         "erasing any carried owner invalidates the whole cached page"
     );
+    Ok(())
+}
+
+/// The 32-byte secrets a stored pair snapshot holds: root key, both chain keys and the
+/// private ratchet key. Zero or absent entries are not secrets.
+fn live_pair_secrets(db: &ramflux_storage::AccountDb) -> TestResult<Vec<[u8; 32]>> {
+    const MAX_SESSIONS: usize = 16;
+    const FIELDS: [&str; 4] =
+        ["root_key", "sending_chain_key", "receiving_chain_key", "dhs_private"];
+    let mut secrets = Vec::new();
+    for key in db.actor_state_keys("dm-pair/session/")?.into_iter().take(MAX_SESSIONS) {
+        let record: serde_json::Value =
+            db.load_actor_state(&key)?.ok_or("stored pair session record")?;
+        for field in FIELDS {
+            let Some(values) = record["snapshot"][field].as_array() else { continue };
+            let bytes = values
+                .iter()
+                .map(|value| value.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+                .collect::<Option<Vec<u8>>>()
+                .ok_or("pair secret is a byte array")?;
+            let secret = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "pair secret width")?;
+            if secret != [0; 32] {
+                secrets.push(secret);
+            }
+        }
+    }
+    Ok(secrets)
+}
+
+fn holds_bytes(haystack: &[u8], needle: &[u8; 32]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Rule 14: live pair secrets are never part of an own-device history export. The page is
+/// built from a real first-hand receive, so the store holds the live pair for that peer.
+#[tokio::test]
+async fn history_export_never_contains_live_pair_secrets() -> TestResult {
+    use prost::Message as _;
+    let mut source = Fixture::new("history-secret-source").await?;
+    let peer = Fixture::new("history-secret-peer").await?;
+    let (original, retained, _) = Box::pin(
+        crate::client::native_test_support::history::receive_first_hand(&mut source, &peer),
+    )
+    .await?;
+    let secrets = live_pair_secrets(source.client.account_db()?)?;
+    assert!(
+        secrets.len() >= 3,
+        "the receive must leave a live pair with root, chain and ratchet secrets: {}",
+        secrets.len()
+    );
+    let control = [vec![0xa5; 7], secrets[0].to_vec(), vec![0x5a; 7]].concat();
+    assert!(holds_bytes(&control, &secrets[0]), "the byte scan must find a planted secret");
+
+    let built = source
+        .client
+        .build_generated_history_page(&[1; 32], 0, &[0; 32], None)?
+        .ok_or("the first-hand row must produce a history page")?;
+    assert_eq!(built.page.items.len(), 1, "the export must carry the first-hand message");
+    assert_eq!(built.page.items[0], retained, "the item is the exact retained evidence");
+    assert_eq!(built.owners, vec![ramflux_protocol::encode_base64url(&original.id)]);
+    let (_, inner) = source.client.encode_generated_history_page(&built)?;
+    let mut produced = vec![built.page.encode_to_vec(), inner];
+    produced.extend(built.page.items.iter().map(prost::Message::encode_to_vec));
+    for (index, bytes) in produced.iter().enumerate() {
+        assert!(!bytes.is_empty(), "produced history bytes {index} must not be empty");
+        for secret in &secrets {
+            assert!(
+                !holds_bytes(bytes, secret),
+                "a live pair secret appears in produced history bytes {index}"
+            );
+        }
+    }
     Ok(())
 }

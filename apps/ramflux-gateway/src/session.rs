@@ -99,7 +99,7 @@ pub(crate) async fn handle_gateway_quic_connection(
     }
 }
 
-async fn handle_gateway_quic_stream_with_connection(
+pub(crate) async fn handle_gateway_quic_stream_with_connection(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     context: GatewayQuicContext,
@@ -114,9 +114,12 @@ async fn handle_gateway_quic_stream_with_connection(
     .await??;
     if crate::custody::is_open(&bytes) {
         let Some(pools) = context.custody.as_ref() else {
-            ramflux_transport::write_quic_json_frame(&mut send, &crate::custody::unavailable())
-                .await?;
-            send.finish()?;
+            crate::custody::refuse_quic(
+                &mut send,
+                &mut recv,
+                &ramflux_protocol::custody::CustodyRefusal::Unsupported,
+            )
+            .await;
             return Ok(());
         };
         let Some(permit) = crate::custody::admit_quic(
@@ -128,6 +131,7 @@ async fn handle_gateway_quic_stream_with_connection(
         )
         .await?
         else {
+            crate::custody::drain_unread(&mut recv).await;
             return Ok(());
         };
         return Box::pin(crate::custody::quic(send, recv, connection, context, &bytes, permit))
@@ -391,6 +395,25 @@ pub(crate) fn native_handoff_matches(
     }
 }
 
+/// Live sessions recheck current branch ownership; unrelated roster/profile changes do not
+/// replace the connection-bound grant. Initial handoff still requires the exact head.
+pub(crate) fn native_live_authority_matches(
+    registered: &ramflux_node_core::DeviceAuthKeyResponse,
+    grant: &super::custody::GatewayGrant,
+    established_branch_key: &str,
+    now: u64,
+) -> bool {
+    let session = grant.session();
+    registered.custody_authority.as_ref().is_some_and(|authority| {
+        grant.live(now)
+            && !registered.revoked
+            && registered.branch_public_key == established_branch_key
+            && session.device_ref.account_anchor == authority.publication.record.body.account_anchor
+            && session.device_ref.device_id == registered.device_id
+            && session.device_ref.device_epoch == registered.device_epoch
+    })
+}
+
 pub(crate) async fn validate_native_frame(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
@@ -406,7 +429,10 @@ pub(crate) async fn validate_native_frame(
     )
     .await?;
     let key = key.ok_or_else(|| anyhow::anyhow!("native branch unavailable"))?;
-    anyhow::ensure!(native_handoff_matches(&key, Some(grant), now)?, "native authority changed");
+    anyhow::ensure!(
+        native_live_authority_matches(&key, grant, &runtime.branch_public_key, now),
+        "native authority changed"
+    );
     let capability = match frame {
         Frame::OwnDeviceFanout { .. } => "sync",
         Frame::VoiceLease { .. } => "call",
@@ -1030,6 +1056,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 ramflux_node_core::GatewayClientFrame::VoiceLease { request } => {
                     crate::voice::handle(&send, &context, &runtime, &request).await?;
                 }
+                ramflux_node_core::GatewayClientFrame::Attachment { request } => {
+                    crate::attachment::handle(&send, &context, &runtime, &request).await?;
+                }
                 ramflux_node_core::GatewayClientFrame::RelayTokenV3Issue { request } => {
                     handle_gateway_relay_token_v3_issue(&send, &context, &runtime, &request)
                         .await?;
@@ -1252,7 +1281,7 @@ fn load_gateway_v3_issuer_material()
         .map_err(|_| anyhow::anyhow!("{GATEWAY_V3_ISSUER_CERT_FILE_ENV} is required"))?;
     let cert: ramflux_node_core::GatewayIssuerCertificate =
         serde_json::from_slice(&std::fs::read(cert_file)?)?;
-    let expected_attestation_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let expected_attestation_key = ramflux_crypto::public_key_base64url_from_seed(&seed);
     if cert.attestation_public_key != expected_attestation_key {
         anyhow::bail!("v3 issuer seed does not match configured certificate");
     }
@@ -2932,9 +2961,9 @@ pub(crate) mod tests {
 
     pub(crate) fn test_envelope() -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.envelope.v1".to_owned(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "test".to_owned(),
@@ -2946,15 +2975,18 @@ pub(crate) mod tests {
             source_device_id: "alice-device".to_owned(),
             target_delivery_id: "target-bob".to_owned(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 3_600,
             created_at: 1_760_000_000,
-            encrypted_payload: "payload".to_owned(),
-            payload_hash: "payload-hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+            payload_hash: ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+            ),
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         }
     }
 
@@ -3129,6 +3161,7 @@ pub(crate) mod tests {
             }),
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         };
         Ok(crate::GatewayQuicContext {
             custody: None,

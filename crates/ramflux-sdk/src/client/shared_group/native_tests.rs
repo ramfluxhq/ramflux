@@ -5,12 +5,16 @@
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> TestResult {
+    crate::client::native_test_support::watchdog::within(peer_accepts_native_owner_snapshot_body())
+        .await?
+}
+async fn peer_accepts_native_owner_snapshot_body() -> TestResult {
     let owner = Fixture::with_device("native-group-owner", "owner-device").await?;
-    let peer = Fixture::with_device("native-group-peer", "peer-device").await?;
-    owner.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&owner.manifest)?;
+    let mut peer = Fixture::with_device("native-group-peer", "peer-device").await?;
+    owner.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&owner.manifest)?;
 
     let owner_primary = owner
         .client
@@ -49,54 +53,83 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
     assert!(peer_route.target_delivery_id.is_some());
     assert!(peer.client.accept_shared_group_state(&state, &peer.config.target_delivery_id)?);
 
-    let distribution =
-        owner.client.export_group_sender_key_distribution("native-group", "owner-device")?;
-    peer.client.import_group_sender_key_distribution(&distribution)?;
-    let encrypted = owner.client.encrypt_group_message(
-        "native-group",
-        "owner-device",
-        b"native group key works",
-    )?;
-    let message = GatewayDirectMessage {
-        conversation_id: "native-thread".into(),
-        message_id: "native-message".into(),
-        envelope_id: "native-message".into(),
-        source_principal_id: owner.manifest.principal_id.clone(),
-        sender_id: owner.config.device_id.clone(),
-        recipient_device_id: Some(peer.config.device_id.clone()),
-        recipient_principal_commitment: Some(peer.manifest.principal_commitment.clone()),
-        target_delivery_id: peer.config.target_delivery_id.clone(),
-        encrypted_body: encrypted,
-        created_at: crate::time::now_unix_timestamp(),
-        ttl: 3600,
-    };
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: message.target_delivery_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(&owner.config, &message, None)?,
-    };
-    assert_incomplete_authority_refuses(&peer, &owner.manifest.principal_commitment, &entry)?;
-    assert!(matches!(
-        peer.client.append_group_gateway_delivery_for_recipient(
-            "native-thread",
-            "native-group",
-            "native-message",
-            &entry,
-            &peer.config.device_id,
-        )?,
-        GroupGatewayDeliveryResult::Message(ref plaintext) if plaintext == b"native group key works"
-    ));
-    let projected = peer
+    let snapshot = owner
         .client
-        .direct_messages("native-thread")?
-        .into_iter()
-        .find(|message| message.message_id == "native-message")
-        .ok_or("projected native group message")?;
-    assert_eq!(projected.sender_id, owner.manifest.principal_id);
+        .shared_group_packet_for_recipient(&state, &peer.client.owned_device_identity()?)?;
+    let directory = crate::client::native_test_support::directory::Directory::new(vec![
+        owner.manifest.clone(),
+        peer.manifest.clone(),
+    ])
+    .await?;
+    directory.configure(&mut peer);
+    peer.receive(owner.seal_inner_to(&peer, &snapshot)?, 1).await?;
+    assert!(directory.requests() > 0, "native snapshot must refresh genuine issuer authority");
+    let identity = owner.client.allocate_generated_identity(
+        "native-thread",
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let logical = ramflux_protocol::encode_base64url(&identity.id);
+    let exact = owner.client.encrypt_generated_group_inner(
+        "native-group",
+        &owner.config.device_id,
+        identity,
+        &ramflux_protocol::message::Message {
+            text: "native group key works".into(),
+            ..Default::default()
+        },
+    )?;
+    let envelope = owner.seal_inner_to(&peer, &exact)?;
+    let entry = GatewayInboxEntry {
+        envelope,
+        forwarded: false,
+        inbox_seq: 2,
+        target_delivery_id: peer.config.target_delivery_id.clone(),
+    };
+    assert_incomplete_authority_refuses(
+        &peer,
+        &owner.manifest.principal_commitment,
+        &logical,
+        &entry,
+    )?;
+    peer.receive(entry.envelope, 2).await?;
+    assert_native_projection(&peer, &owner, &logical, &exact)
+}
+
+fn assert_native_projection(
+    peer: &Fixture,
+    owner: &Fixture,
+    logical: &str,
+    exact: &[u8],
+) -> TestResult {
     assert_eq!(
-        peer.client.account_db()?.message_content("native-message")?.as_deref(),
-        Some(b"native group key works".as_slice())
+        peer.client.account_db()?.message_content(logical)?,
+        Some(exact.to_vec()),
+        "group receive must retain exact authenticated wire bytes"
+    );
+    let page = peer.client.generated_message_page("native-thread", None, 10)?;
+    let row = page.messages.first().ok_or("native group projection")?;
+    let author = row
+        .identity
+        .as_ref()
+        .and_then(|identity| identity.author.as_ref())
+        .ok_or("native group author")?;
+    assert_eq!(
+        author.account_anchor, owner.manifest.principal_commitment,
+        "reader must retain the qualified native author"
+    );
+    assert_eq!(
+        author.device_id, owner.config.device_id,
+        "reader must retain the actual author device"
+    );
+    let Some(ramflux_protocol::message::message_update::State::Content(content)) =
+        row.state.as_ref()
+    else {
+        return Err("native group content missing".into());
+    };
+    assert!(
+        matches!(content.value.as_ref(), Some(ramflux_protocol::message::content::Value::Message(value)) if value.text == "native group key works"),
+        "reader must project actual group decryption"
     );
     Ok(())
 }
@@ -104,6 +137,7 @@ async fn peer_accepts_native_owner_snapshot_and_decrypts_its_group_key() -> Test
 fn assert_incomplete_authority_refuses(
     peer: &Fixture,
     anchor: &str,
+    logical: &str,
     entry: &GatewayInboxEntry,
 ) -> TestResult {
     let db = peer.client.account_db()?;
@@ -112,22 +146,12 @@ fn assert_incomplete_authority_refuses(
         db.load_actor_state::<serde_json::Value>(&cache_key)?.ok_or("retained sender authority")?;
     db.remove_actor_state(&cache_key)?;
     assert!(
-        peer.client
-            .append_group_gateway_delivery_for_recipient(
-                "native-thread",
-                "native-group",
-                "native-message",
-                entry,
-                &peer.config.device_id,
-            )
-            .is_err()
+        peer.client.open_routed(entry, &peer.config.device_id).is_err(),
+        "a roster and sender key must not replace current native sender authority"
     );
     assert!(
-        !peer
-            .client
-            .direct_messages("native-thread")?
-            .iter()
-            .any(|message| message.message_id == "native-message")
+        peer.client.account_db()?.message_content(logical)?.is_none(),
+        "authority refusal must not project the group message"
     );
     db.persist_actor_state(&cache_key, &retained)?;
     Ok(())

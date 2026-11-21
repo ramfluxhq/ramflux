@@ -11,6 +11,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-gateway
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/gateway.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -55,6 +57,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-router
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/router.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -91,6 +95,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-notify
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/notify.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -121,6 +127,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-federation
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/federation.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -191,6 +199,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-relay
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/relay.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -243,6 +253,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-signaling
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/signaling.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
@@ -272,6 +284,8 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         BIN: ramflux-retention
+        RAMFLUX_PRODUCT_VERSION: ${RAMFLUX_BUILD_PRODUCT_VERSION:-}
+        RAMFLUX_PRODUCT_REVISION: ${RAMFLUX_BUILD_PRODUCT_REVISION:-}
     command: ["--config", "/etc/ramflux/config/retention.toml"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]

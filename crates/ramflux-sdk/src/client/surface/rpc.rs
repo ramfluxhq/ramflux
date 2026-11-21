@@ -272,6 +272,7 @@ impl RamfluxClient {
             .map_err(|_| invalid("stored RPC response encoding"))?;
         let frame = SurfaceRpc::from_wire_bytes(&bytes, entry.response_kind)?;
         let response = self.sign_surface_carrier(Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: None,

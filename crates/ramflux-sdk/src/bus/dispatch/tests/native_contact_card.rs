@@ -33,7 +33,7 @@ async fn native_ordinary_card_export_and_import_selector_keep_the_master_anchor(
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    let response = export(&state, "native-card")?.response_body;
+    let response = export(&state, "native-card").await?.response_body;
     let text = response["card"].as_str().ok_or("card")?;
     let parsed = crate::parse_contact_card(text, i64::try_from(now)?)?;
     assert_eq!(parsed.root_commitment, anchor);
@@ -49,19 +49,26 @@ async fn native_ordinary_card_export_and_import_selector_keep_the_master_anchor(
     );
     let selector = parse_selector(&request, account)?;
     assert_eq!(selector.card.ok_or("parsed card")?.version, 3);
-    account.client.account_db()?.persist_client_record("identity", &parsed.principal_id,
-        &json!({"contact_identity_commitment":ramflux_protocol::encode_base64url([99;32]),"root_source":"card"}))?;
-    assert!(matches!(
-        parse_selector(&request, account),
-        Err(SdkError::ContactInput(ContactReason::AnchorMismatch))
-    ));
+    account.client.account_db()?.persist_client_record(
+        "identity",
+        &parsed.principal_id,
+        &json!({
+            "contact_identity_commitment": ramflux_protocol::encode_base64url([99; 32]),
+            "root_source": "card"
+        }),
+    )?;
+    let stored = parse_selector(&request, account)?;
+    let stored_card = stored.card.ok_or("parsed card")?;
+    assert_eq!(stored_card.version, 3);
+    assert_eq!(stored_card.root_commitment, anchor);
+    assert_eq!(stored.selector, parsed.principal_id);
     request.body = json!({"card":legacy_card(i64::try_from(now)?)?});
     assert!(matches!(parse_selector(&request, account), Err(SdkError::CustodyModeDowngrade)));
     Ok(())
 }
 
 fn legacy_card(now: i64) -> TestResult<String> {
-    let public = ramflux_crypto::public_key_base64url_from_seed([7; 32]);
+    let public = ramflux_crypto::public_key_base64url_from_seed(&[7; 32]);
     let body = ContactCardBody {
         version: 1,
         principal_id: "legacy-peer".into(),

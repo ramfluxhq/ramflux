@@ -169,6 +169,9 @@ pub fn verify_federation_server_record(
     if record.node_ca_cert_pem.trim().is_empty() {
         return Err(NodeCoreError::ItestHttp("federation discovery record missing CA".to_owned()));
     }
+    if record.version.trim().is_empty() {
+        return Err(NodeCoreError::MissingNodeVersion);
+    }
     ramflux_protocol::verify_discovery_freshness(record.updated_at, record.expires_at, now)
         .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?;
     let signed_bytes = ramflux_protocol::signed_bytes(record)

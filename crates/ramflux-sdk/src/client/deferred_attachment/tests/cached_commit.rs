@@ -10,40 +10,49 @@ use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, Tran
 use tracing::instrument::WithSubscriber;
 
 pub(super) fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
-    let seed = [41; 32];
-    let manifest = crate::client::identity_authority::test_support::remote_manifest(
-        "owner",
-        "owner-device",
-        seed,
+    use crate::client::routed::{Route, SendMaterial};
+    use ramflux_protocol::message as g;
+    let target_root = f.client.own_account_anchor()?;
+    let exact = f.source.client.generated_object_revoke_inner(
+        g::ObjectRevokeAccess {
+            object_id: "remote-object".into(),
+            recipient_principal_id: target_root.clone(),
+            link_id: "attachment-test-link".into(),
+            reason: "withdraw access".into(),
+            effective_at: now_unix_timestamp(),
+        },
+        &target_root,
     )?;
-    f.client.persist_identity_directory(&manifest)?;
-    let root = ramflux_crypto::create_identity_root(
-        "owner",
-        ramflux_crypto::blake3_256("ramflux.test.remote.root.v1", &seed),
-    );
-    let branch = ramflux_crypto::create_device_branch("owner", "owner-device", 1, seed);
-    let config = unused_engine()
-        .map_err(|error| SdkError::LocalBus(error.to_string()))?
-        .config
-        .with_owned_device(&root, branch)?;
-    let message = GatewayDirectMessage {
-        conversation_id: "conversation".into(),
-        message_id: "revoke-message".into(),
+    let (identity, _) = RamfluxClient::decode_generated_inner(&exact)?;
+    let local = f.client.owned_device_identity()?;
+    let mut message = GatewayDirectMessage {
+        conversation_id: identity.conversation_id,
+        message_id: ramflux_protocol::encode_base64url(&identity.id),
         envelope_id: "revoke-wire".into(),
-        source_principal_id: "owner".into(),
-        sender_id: "owner-device".into(),
-        recipient_device_id: Some("recipient-device".into()),
-        recipient_principal_commitment: None,
-        target_delivery_id: "recipient-device".into(),
+        source_principal_id: f.source.config.principal_id.clone(),
+        sender_id: f.source.config.device_id.clone(),
+        recipient_device_id: Some(local.device_id().into()),
+        recipient_principal_commitment: Some(target_root),
+        target_delivery_id: local.storage_key().into(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: 3600,
+        ttl: 300,
     };
+    let bundle = f.client.load_x3dh_private_state(&local)?.bundle;
+    let sealed = f.source.client.seal_generated_routed_prepared(
+        &f.source.config,
+        &message,
+        &exact,
+        Route::control(),
+        SendMaterial { manifest: None, bundle: Some(bundle) },
+    )?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&f.source.config, &mut message, sealed)?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
-        target_delivery_id: "recipient-device".into(),
-        envelope: crate::dm::gateway_direct_message_envelope(&config, &message, None)?,
+        target_delivery_id: local.storage_key().into(),
+        envelope,
     })
 }
 
@@ -57,7 +66,7 @@ fn revoke_before_import(f: &Fixture) -> Result<(), SdkError> {
 
 #[tokio::test]
 async fn attachment_fetch_maps_mid_fetch_object_tombstone_to_deleted() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     let mut fetches = 0;
     let receipt = f
         .client
@@ -88,7 +97,7 @@ async fn attachment_fetch_maps_mid_fetch_object_tombstone_to_deleted() -> Result
 #[tokio::test]
 async fn revocation_before_first_import_blocks_cached_completion()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     stage_chunks(&f)?;
     f.client.acknowledge_received_attachment_with(&f.reference, 1, async |_| Ok(())).await?;
     let ack = ack_progress_prefix(&f.reference)?;
@@ -136,23 +145,19 @@ async fn revocation_before_first_import_blocks_cached_completion()
     )
     .await?;
     assert_eq!(directory["objects"], json!([]));
-    let read = crate::bus::test_account_reader_request(
-        f.client.account_db()?,
-        LocalBusFrame::request(
-            "read",
-            None,
-            "message",
-            "message.read",
-            json!({"conversation_id":"conversation"}),
-        ),
-    )
-    .await?;
-    assert_eq!(read["messages"][0]["body_utf8"], "visible message");
-    assert_eq!(read["messages"][0]["attachments"], json!([]));
+    assert_eq!(
+        f.client.account_db()?.message_content("message")?,
+        Some(b"visible message".to_vec()),
+        "attachment revocation must preserve the independent message content"
+    );
+    assert_eq!(
+        f.client.direct_message_by_id("message")?.ok_or("message")?.encrypted_body,
+        b"visible message"
+    );
     // The fence must also hydrate safely when no full object descriptor was ever stored.
     let previous = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(previous);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     assert!(f.client.account_db()?.object_is_tombstoned("remote-object")?);
     assert!(f.client.try_import_cached_attachment(&f.reference).is_err());
     Ok(())
@@ -161,7 +166,7 @@ async fn revocation_before_first_import_blocks_cached_completion()
 #[tokio::test]
 async fn revocation_before_first_import_blocks_relay_import()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     revoke_before_import(&f)?;
     assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
     let mut engine = unused_engine()?;
@@ -180,13 +185,15 @@ async fn revocation_before_first_import_blocks_relay_import()
     Ok(())
 }
 
-#[test]
-fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::error::Error>> {
-    let f = Fixture::new()?;
+#[tokio::test]
+async fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let f = Fixture::new().await?;
+    // One capture: a second revoke in a later unix second is a different payload.
+    let entry = revocation_entry(&f)?;
     let error = f
         .client
         .project_contact_control(
-            &revocation_entry(&f)?,
+            &entry,
             &json!({"type":"object.revoke_access","object_id":"unknown-object"}),
         )
         .err()
@@ -202,8 +209,8 @@ fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::erro
     assert!(
         f.client
             .project_contact_control(
-                &revocation_entry(&f)?,
-                &json!({"type":"object.revoke_access","object_id":"remote-object"})
+                &entry,
+                &json!({"type":"object.revoke_access","object_id":"remote-object"}),
             )
             .is_err()
     );
@@ -213,10 +220,7 @@ fn revocation_for_unknown_reference_is_refused() -> Result<(), Box<dyn std::erro
 
 fn expired_reference(f: &mut Fixture) -> Result<(), SdkError> {
     let branch = f.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-    let identity = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
-        &ramflux_crypto::create_identity_root("recipient", [0x21; 32]),
-        branch,
-    )?;
+    let identity = f.client.owned_device_identity()?;
     let now = u64::try_from(now_unix_timestamp()).unwrap_or(0);
     let grant = build_signed_object_access_grant(
         branch,
@@ -278,7 +282,7 @@ fn stage_chunks(f: &Fixture) -> Result<(), SdkError> {
 #[tokio::test]
 async fn expired_attachment_grant_completes_cached_bytes_but_not_missing_bytes()
 -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     expired_reference(&mut f)?;
     let mut calls = 0;
     let missing = f
@@ -290,10 +294,7 @@ async fn expired_attachment_grant_completes_cached_bytes_but_not_missing_bytes()
             async |client, reference| {
                 calls += 1;
                 let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-                let identity = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
-                    &ramflux_crypto::create_identity_root("recipient", [0x21; 32]),
-                    branch,
-                )?;
+                let identity = client.owned_device_identity()?;
                 verify_recipient_object_access_grant(
                     reference.access_grant.as_ref(),
                     branch,
@@ -330,7 +331,7 @@ async fn expired_attachment_grant_completes_cached_bytes_but_not_missing_bytes()
 
 #[tokio::test]
 async fn attachment_import_sweeps_acks_and_skips_committed_ack_replays() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     f.client.account_db()?.import_direct_message_projection(DirectMessageWrite {
         conversation_id: "conversation",
         message_id: "message",
@@ -357,7 +358,7 @@ async fn attachment_import_sweeps_acks_and_skips_committed_ack_replays() -> Resu
 }
 
 async fn erase_imported_attachment() -> Result<Fixture, SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     f.client.account_db()?.import_direct_message_projection(DirectMessageWrite {
         conversation_id: "conversation",
         message_id: "message",
@@ -372,7 +373,12 @@ async fn erase_imported_attachment() -> Result<Fixture, SdkError> {
     assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?.len(), 1);
     assert!(f.client.try_import_cached_attachment(&f.reference)?.is_some());
     assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?, Vec::<String>::new());
-    f.client.delete_direct_message("conversation", "message", "local", "erase")?;
+    f.client.delete_direct_message(
+        "conversation",
+        "message",
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"erase"),
+    )?;
     assert_eq!(
         f.client.account_db()?.actor_state_keys(&reference_key("remote-object"))?,
         Vec::<String>::new()
@@ -380,7 +386,7 @@ async fn erase_imported_attachment() -> Result<Fixture, SdkError> {
     assert!(f.client.received_attachment_chunk(&f.reference, 0)?.is_none());
     let old = std::mem::replace(&mut f.client, RamfluxClient::new());
     drop(old);
-    f.client = open(&f.root, false)?;
+    f.client = f.reopen().await?;
     assert_eq!(f.client.account_db()?.actor_state_keys(&prefix)?, Vec::<String>::new());
     assert_eq!(
         f.client.account_db()?.actor_state_keys(&reference_key("remote-object"))?,
@@ -392,14 +398,14 @@ async fn erase_imported_attachment() -> Result<Fixture, SdkError> {
 
 #[tokio::test]
 async fn attachment_owned_state_erasure_survives_account_reopen() -> Result<(), SdkError> {
-    let _fixture = erase_imported_attachment().await?;
+    let _fixture = Box::pin(erase_imported_attachment()).await?;
     Ok(())
 }
 
 // Mutation: skip last-owner object_index payload/key erasure.
 #[tokio::test]
 async fn attachment_object_payload_erasure_survives_account_reopen() -> Result<(), SdkError> {
-    let fixture = erase_imported_attachment().await?;
+    let fixture = Box::pin(erase_imported_attachment()).await?;
     assert!(
         fixture.client.decrypt_object("remote-object").is_err(),
         "durable object erasure survives reopen"
@@ -409,7 +415,7 @@ async fn attachment_object_payload_erasure_survives_account_reopen() -> Result<(
 
 #[tokio::test]
 async fn attachment_cached_completion_rejects_corrupt_encrypted_chunks() -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     expired_reference(&mut f)?;
     stage_chunks(&f)?;
     let mut chunk = f
@@ -467,7 +473,7 @@ enum Deletion {
 }
 async fn assert_cached_deletion_is_final(mode: Deletion) -> Result<(), Box<dyn std::error::Error>> {
     for gateway_path in [false, true] {
-        let mut f = Fixture::new()?;
+        let mut f = Fixture::new().await?;
         stage_chunks(&f)?;
         let available = f
             .client
@@ -551,19 +557,19 @@ async fn assert_cached_deletion_is_final(mode: Deletion) -> Result<(), Box<dyn s
 #[tokio::test]
 async fn attachment_cached_completion_preserves_local_delete()
 -> Result<(), Box<dyn std::error::Error>> {
-    assert_cached_deletion_is_final(Deletion::Local).await
+    Box::pin(assert_cached_deletion_is_final(Deletion::Local)).await
 }
 
 #[tokio::test]
 async fn attachment_cached_completion_obeys_durable_sender_revocation()
 -> Result<(), Box<dyn std::error::Error>> {
-    assert_cached_deletion_is_final(Deletion::SenderRevocation).await
+    Box::pin(assert_cached_deletion_is_final(Deletion::SenderRevocation)).await
 }
 
 #[tokio::test]
 async fn attachment_valid_grant_completes_remaining_cached_acks()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     expired_reference(&mut f)?;
     let expired = f.reference.access_grant.as_ref().ok_or("grant missing")?;
     let branch = f.client.device_branch.as_ref().ok_or("branch missing")?;
@@ -648,7 +654,7 @@ async fn attachment_valid_grant_completes_remaining_cached_acks()
 async fn attachment_deleted_and_unverified_causes_keep_one_warning_each()
 -> Result<(), Box<dyn std::error::Error>> {
     for deleted in [true, false] {
-        let mut f = Fixture::new()?;
+        let mut f = Fixture::new().await?;
         if deleted {
             stage_chunks(&f)?;
             assert!(f.client.try_import_cached_attachment(&f.reference)?.is_some());
@@ -679,7 +685,7 @@ async fn attachment_deleted_and_unverified_causes_keep_one_warning_each()
 #[tokio::test]
 async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     let sql = super::revocation_refusal::connection(&f)?;
     let object = f.package.object.clone();
     let receipt = f
@@ -726,7 +732,7 @@ async fn attachment_fetch_maps_zero_manifest_placeholder_conflict_to_deleted()
 #[tokio::test]
 async fn attachment_error_preserves_live_identity_conflict_and_object_erased()
 -> Result<(), SdkError> {
-    let mut f = Fixture::new()?;
+    let mut f = Fixture::new().await?;
     assert!(matches!(
         f.client.attachment_error(
             &f.reference,

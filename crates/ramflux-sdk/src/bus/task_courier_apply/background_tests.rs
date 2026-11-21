@@ -5,8 +5,7 @@
 
 use super::*;
 use crate::bus::dispatch::task_transport::Target;
-use crate::client::identity_authority::test_support::public_manifest;
-use std::{future::Future as _, sync::atomic::AtomicBool, task::Poll};
+use std::{future::Future as _, task::Poll};
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cached_material_writer_wait_does_not_spend_the_network_deadline()
@@ -14,22 +13,23 @@ async fn cached_material_writer_wait_does_not_spend_the_network_deadline()
     tokio::time::timeout(
         Duration::from_secs(20),
         Box::pin(async {
-            let root = tempfile::tempdir()?;
-            let mut account = crate::bus::runtime_tests::account(
-                &root.path().join("source"),
-                "sender",
-                None,
-                Arc::new(AtomicBool::new(false)),
-            )?;
-            let peer = crate::bus::runtime_tests::account(
-                &root.path().join("peer"),
-                "peer",
-                None,
-                Arc::new(AtomicBool::new(false)),
-            )?;
-            let local = account.client.owned_device_identity()?;
+            use crate::client::native_test_support::{
+                Fixture, activation_send::tests::task_content,
+            };
+            use prost::Message as _;
+            let source = Fixture::new("task-courier-sender").await?;
+            let peer = Fixture::new("task-courier-peer").await?;
+            source.accept_peer(&peer)?;
+            peer.accept_peer(&source)?;
             let remote = peer.client.owned_device_identity()?;
-            account.client.persist_identity_directory(&public_manifest(&peer.client)?)?;
+            let conversation = source.client.generated_direct_conversation_id(&remote)?;
+            let typed = task_content(&source, &peer, &conversation)?;
+            let Some(ramflux_protocol::message::content::Value::Task(task)) = typed.value else {
+                return Err("test: typed Task content missing".into());
+            };
+            let task_bytes = task.encode_to_vec();
+            let mut account = source.into_bus();
+            let local = account.client.owned_device_identity()?;
             let pair = ramflux_crypto::DmSession::initiator(
                 [17; 32],
                 dm_device_id_hash(local.device_id()),
@@ -46,8 +46,8 @@ async fn cached_material_writer_wait_does_not_spend_the_network_deadline()
                     federation: None,
                     own: false,
                 },
-                "healthy",
-                b"control",
+                &conversation,
+                &task_bytes,
                 crate::client::routed::Route::control(),
             )?;
             assert!(draft.request.root.is_none(), "verified authority is cached");
@@ -74,8 +74,8 @@ async fn cached_material_writer_wait_does_not_spend_the_network_deadline()
                     requests: Vec::new(),
                     failure: None,
                 },
-                routing: routing_fingerprint(&account, "healthy")?,
-                conversation: "healthy".into(),
+                routing: routing_fingerprint(&account, &conversation)?,
+                conversation: conversation.clone(),
                 drafts: vec![draft],
                 config: account.gateway_config.clone(),
                 approval: false,

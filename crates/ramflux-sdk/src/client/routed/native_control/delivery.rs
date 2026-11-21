@@ -17,9 +17,6 @@ impl RamfluxClient {
         principal: &str,
         require_contact: bool,
     ) -> Result<String, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Err(content("generated durable profile is not selected"));
-        }
         let root = message
             .recipient_principal_commitment
             .as_deref()
@@ -58,7 +55,8 @@ impl RamfluxClient {
         self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
         message.message_id = ramflux_protocol::encode_base64url(&identity.id);
-        let (mut session, header, bundle) = self.send_pair_session(engine, &message).await?;
+        let (mut session, header, bundle) =
+            self.send_pair_session_for(engine, &message, false).await?;
         let recipient = Self::qualified_recipient(&message)?;
         let envelope = self.account_db()?.write_transaction(|| {
             self.bind_outgoing_delivery(&local, &message, &crate::client::routed::Kind::Control)?;

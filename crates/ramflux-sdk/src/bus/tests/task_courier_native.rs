@@ -20,7 +20,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 &words(&phrase, positions)?,
                 vault.as_ref(),
                 now,
-                b"passphrase",
+                b"courier data passphrase",
             )?;
             let (_commands, receiver) = mpsc::channel(1);
             let (_stop, shutdown) = watch::channel(false);
@@ -54,6 +54,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 connection_work,
                 ledger: None,
                 transient: crate::bus::account_runtime::TransientHost::default(),
+                pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
                 transfers: crate::bus::account_runtime::uploads::Transfers::start(),
                 readers: Arc::new(Mutex::new(None)),
                 events,
@@ -111,7 +112,7 @@ async fn private_unlock(runtime: &mut AccountRuntime) -> Case {
     let command = AccountCommand {
         admission: None,
         private: Some(crate::bus::actor::PrivateCommand::NativeUnlock {
-            passphrase: zeroize::Zeroizing::new("passphrase".into()),
+            passphrase: zeroize::Zeroizing::new("courier data passphrase".into()),
             home_node_id: None,
             reply,
         }),

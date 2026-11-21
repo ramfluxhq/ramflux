@@ -10,10 +10,13 @@ pub(crate) use crate::{DEFAULT_DATA_ROOT, DEFAULT_SOCKET};
 mod a2i;
 mod account;
 mod admin;
+mod attachment;
 mod call_bot;
 mod contact;
+mod conversation_ops;
 mod daemon;
 mod device;
+mod diag;
 mod dm;
 mod grant;
 mod group;
@@ -24,25 +27,39 @@ mod mcp;
 mod node;
 mod object;
 mod surface;
+mod task;
 pub(crate) use node::*;
 pub(crate) use surface::*;
+pub(crate) use task::*;
 
 pub(crate) use a2i::*;
 pub(crate) use account::*;
 pub(crate) use admin::*;
+pub(crate) use attachment::*;
 pub(crate) use call_bot::*;
 pub(crate) use contact::*;
+pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
+pub(crate) use diag::*;
+mod pairing;
+mod transfer;
 pub(crate) use dm::*;
 pub(crate) use grant::*;
 pub(crate) use group::*;
 pub(crate) use keychain::*;
 pub(crate) use mcp::*;
 pub(crate) use object::*;
+pub(crate) use pairing::*;
+pub(crate) use transfer::*;
 
 #[derive(Parser)]
-#[command(name = "rf", about = "Ramflux reference CLI over the local SDK bus")]
+#[command(
+    name = "rf",
+    display_name = "ramflux",
+    version = ramflux_core::version::VERSION_SHA,
+    about = "Ramflux reference CLI over the local SDK bus"
+)]
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_SOCKET)]
     pub(crate) socket: PathBuf,
@@ -57,7 +74,12 @@ pub(crate) enum Command {
     Account(AccountCommand),
     Contact(ContactCommand),
     Device(DeviceCommand),
+    /// Native SAS pairing preview (default-off).
+    Pairing(PairingCommand),
+    /// Full-account primary transfer preview (default-off).
+    Transfer(TransferCommand),
     Dm(DmCommand),
+    Conversation(ConversationCommand),
     Group(GroupCommand),
     Object(ObjectCommand),
     Call(CallCommand),
@@ -68,7 +90,12 @@ pub(crate) enum Command {
     Vault(VaultCommand),
     A2i(A2iCommand),
     Surface(SurfaceCommand),
+    /// Task drivers over the existing task.* bus methods.
+    Task(TaskCommand),
     Admin(AdminCommand),
+    /// Plaintext residue diagnostics.
+    Diag(DiagCommand),
+    Attachment(AttachmentCommand),
 }
 
 #[cfg(test)]
@@ -80,17 +107,32 @@ mod tests {
     #[test]
     fn retired_relay_service_key_flags_are_typed_parse_refusals()
     -> Result<(), Box<dyn std::error::Error>> {
-        for arguments in [
-            vec!["rf", "dm", "send", "--relay-service-key", "retired"],
-            vec!["rf", "dm", "read", "--relay-service-key", "retired"],
-            vec!["rf", "device", "sync", "export", "--relay-service-key-base64", "retired"],
-            vec!["rf", "device", "sync", "import", "--relay-service-key-base64", "retired"],
-        ] {
+        // `device sync import` was removed with the relay subcommand. The other
+        // commands remain, and their retired flags are unknown arguments.
+        let cases: &[(&[&str], clap::error::ErrorKind)] = &[
+            (
+                &["rf", "dm", "send", "--relay-service-key", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "dm", "read", "--relay-service-key", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "device", "sync", "export", "--relay-service-key-base64", "retired"],
+                clap::error::ErrorKind::UnknownArgument,
+            ),
+            (
+                &["rf", "device", "sync", "import", "--relay-service-key-base64", "retired"],
+                clap::error::ErrorKind::InvalidSubcommand,
+            ),
+        ];
+        for (arguments, kind) in cases {
             let error =
-                Cli::try_parse_from(arguments).err().ok_or("test: retired relay flag accepted")?;
+                Cli::try_parse_from(*arguments).err().ok_or("test: retired relay flag accepted")?;
             assert_eq!(
                 error.kind(),
-                clap::error::ErrorKind::UnknownArgument,
+                *kind,
                 "retired flag must fail during parsing rather than be silently ignored"
             );
         }

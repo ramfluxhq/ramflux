@@ -41,7 +41,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             .transpose()?;
         let state = Arc::new(Mutex::new(state));
         serve_itest_turn_udp(config.signaling.as_ref(), Arc::clone(&state), service_key)?;
-        tracing::info!(service, "service initialized");
+        tracing::info!(
+            service,
+            version = ramflux_node_core::version::VERSION_SHA,
+            "service initialized"
+        );
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
@@ -52,7 +56,11 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             })
             .map_err(Into::into);
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(
+        service,
+        version = ramflux_node_core::version::VERSION_SHA,
+        "service initialized"
+    );
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }

@@ -14,7 +14,6 @@ fn commitment(principal: &str) -> String {
 }
 
 struct Fixture {
-    root: PathBuf,
     client: RamfluxClient,
     _directory: tempfile::TempDir,
 }
@@ -22,19 +21,33 @@ impl Fixture {
     fn new() -> Result<Self, SdkError> {
         let directory = tempfile::Builder::new().prefix("ramflux-read-model-").tempdir()?;
         let root = directory.path().to_path_buf();
-        let mut client = RamfluxClient::new();
-        client.create_identity_root("alice", [0x31; 32]);
-        client.create_device_branch("alice", "alice-phone", 1, [0x32; 32]);
-        client.open_account_index(&root)?;
-        client.create_account("local-alice", &commitment("alice"))?;
-        client.unlock_account("local-alice", b"test-secret")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        let born = runtime.block_on(crate::bus::runtime_tests::born_account(
+            &root,
+            "local-alice",
+            "alice",
+            "alice-phone",
+            b"native fixture data passphrase",
+            "alice-phone",
+        ))?;
+        let anchor = born.manifest.principal_commitment.clone();
+        let mut state = born.state;
+        let client = std::mem::replace(&mut state.client, RamfluxClient::new());
+        drop(state);
         client.account_db()?.persist_client_record(
             "self",
             "account",
             &json!({"principal_id":"alice","device_id":"alice-phone"}),
         )?;
-        client.account_db()?.persist_client_record("identity","alice",&json!({"id":"alice","principal_id":"alice","contact_identity_commitment":commitment("alice"),"devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}))?;
-        Ok(Self { root, client, _directory: directory })
+        client.account_db()?.persist_client_record(
+            "identity",
+            "alice",
+            &json!({"id":"alice","principal_id":"alice","contact_identity_commitment":anchor,"devices":[{"id":"alice-phone"}],"kind":"human","is_self":true}),
+        )?;
+        Ok(Self { client, _directory: directory })
     }
     fn read(&self, method: &str, body: Value) -> Result<Value, SdkError> {
         read(
@@ -305,40 +318,50 @@ fn historical_sender_with_only_a_foreign_live_name_stays_unattributed() -> Resul
     Ok(())
 }
 
-#[test]
-fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Result<(), SdkError> {
-    let fixture = Fixture::new()?;
-    let owner = signed_group_reader(&fixture.root.join("owner"), "owner", "owner-phone", 51)?;
-    let peer = signed_group_reader(&fixture.root.join("peer"), "peer", "peer-phone", 61)?;
-    for receiver in [&owner, &peer] {
-        for sender in [&owner, &peer] {
-            receiver.persist_identity_directory(
-                &crate::client::identity_authority::test_support::public_manifest(sender)?,
-            )?;
+#[tokio::test(flavor = "current_thread")]
+async fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Result<(), SdkError>
+{
+    use crate::client::native_test_support::Fixture as Native;
+    let owner = Box::pin(Native::with_device("owner", "owner-phone"))
+        .await
+        .map_err(|error| invalid(&error.to_string()))?
+        .into_bus();
+    let peer = Box::pin(Native::with_device("peer", "peer-phone"))
+        .await
+        .map_err(|error| invalid(&error.to_string()))?
+        .into_bus();
+    for holder in [&owner, &peer] {
+        for source in [&owner, &peer] {
+            holder.client.persist_observed_identity_directory_now(&native_manifest(source)?)?;
         }
     }
-    peer.establish_friend_link(
+    peer.client.establish_friend_link(
         "owner-contact",
-        "peer",
-        owner.owned_device_identity()?.root_commitment(),
+        &peer.client.own_account_anchor()?,
+        &owner.client.own_account_anchor()?,
     )?;
-    owner.shared_group_create("g", "group-thread", Some("Initial".into()), "owner-phone")?;
-    let initial = owner.shared_group_change(
+    owner.client.fixture_group_create(
+        "g",
+        "group-thread",
+        Some("Initial".into()),
+        "owner-phone",
+    )?;
+    let initial = owner.client.fixture_group_change(
         "g",
         "owner-phone",
         ramflux_protocol::GroupStateChange::Add {
-            member: peer.owned_group_actor("peer-phone")?.identity,
+            member: peer.client.fixture_group_actor("peer-phone")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
     )?;
-    peer.accept_shared_group_state(&initial, "peer-phone")?;
-    let state = owner.shared_group_change(
+    peer.client.fixture_accept_group_state(&initial, "peer-phone")?;
+    let state = owner.client.fixture_group_change(
         "g",
         "owner-phone",
         ramflux_protocol::GroupStateChange::SetName { name: "Reviewed checklist".into() },
     )?;
-    peer.accept_shared_group_state(&state, "peer-phone")?;
-    for client in [&owner, &peer] {
+    peer.client.fixture_accept_group_state(&state, "peer-phone")?;
+    for client in [&owner.client, &peer.client] {
         for body in [json!({}), json!({"limit":1})] {
             let listed = read(
                 client,
@@ -365,18 +388,14 @@ fn r5_paginated_and_legacy_group_lists_expose_the_current_signed_name() -> Resul
     }
     Ok(())
 }
-fn signed_group_reader(
-    root: &Path,
-    principal: &str,
-    device: &str,
-    seed: u8,
-) -> Result<RamfluxClient, SdkError> {
-    let mut client = RamfluxClient::new();
-    client.create_identity_root(principal, [seed; 32]);
-    client.create_device_branch(principal, device, 1, [seed.saturating_add(1); 32]);
-    client.open_account_index(root)?;
-    let actor = client.owned_group_actor(device)?;
-    client.create_account("acct", &actor.identity.root_commitment)?;
-    client.unlock_account("acct", b"test-secret")?;
-    Ok(client)
+/// Manifest that a native fixture account published for itself.
+fn native_manifest(
+    account: &crate::bus::state::LocalBusAccountState,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    account
+        .client
+        .native_bus_fixture
+        .as_ref()
+        .map(|material| material.manifest.clone())
+        .ok_or(SdkError::CustodySetupInvalid)
 }

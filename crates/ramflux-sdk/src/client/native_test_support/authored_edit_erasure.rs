@@ -71,7 +71,7 @@ fn assert_retired(target: &Fixture, owner: &str) -> TestResult {
     Ok(())
 }
 
-async fn deliver_sent(
+pub(super) async fn deliver_sent(
     source: &Fixture,
     target: &mut Fixture,
     sent: g::OwnSentMessage,

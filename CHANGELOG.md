@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.2.3] - 2026-11-21
+
+- Device pairing is released: nodes with pairing enabled advertise it and clients pair by default; typing: an expired typing clear is idle and typing submit works without the raw-message capability; typed client for the PRX management API.
+
+## [0.2.2] - 2026-11-21
+
+- Node tooling gives the gateway its attachment authority endpoint, so attachments can be imported, revoked and erased on deployed nodes; `rf pairing` prints the code of an unlisted refusal; a failed layer declaration publish logs its cause; dependency update that removes heapless 0.7.
+
+## [0.2.1] - 2026-11-17
+
+- Send a file in a direct message or a group.
+- Local search.
+- 15-character passphrase policy.
+- Residue scan: `rf diag residue`.
+- Layer-4 declaration.
+
+## [0.2.0] - 2026-11-16
+
+First version under the shared product version line (all Ramflux repos move together).
+Changes since 0.1.0, at a high level:
+
+- Generation-1 messaging is active: one message format, one delivery path, and a read model the CLI and apps share.
+- Contact safety numbers can be verified and the result is recorded safely, so two devices cannot silently overwrite each other.
+- Editing a message now detects conflicting edits instead of losing one of them.
+- Groundwork for pairing a new device and moving the primary device.
+- A terminal client (TUI) and the tooling used to run Demo B end to end.
+- A pre-v1 sweep removed old account, storage and wire formats; development stores must be reset.
+- `rf --version`, the daemon and every node service now report `ramflux <version> (<commit>)`; node discovery and `rf node probe` include the node version.
+
+## Message schema v1 activation
+
+- Activate storage generation 1 and the compact envelope profile with exact protobuf Inner bytes.
+- Ordinary DM/group sends allocate one retained event identity and private revision before fan-out.
+- The durable message read model is the CLI reader; receive responses identify its snapshot cursor.
+- Existing development stores require reset; generation-0 wire/application codecs are retired.
+- Retire opaque group JSON encryption; generated group sends use the typed native primitive.
+- Group history uses the generated public read model and never returns private revision bytes.
+
 - Activate negotiated ephemeral delivery with volatile same-node routing, bounded queues,
   exclusive signed deadlines and no durable fallback, client journal writes or offline wakes.
   Add real-process CLI push/restart coverage and retry partially applied capability reassertions.
@@ -25,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Device pairing is released: nodes with pairing enabled advertise it; clients pair by default.
+
 - Add dormant account-local encrypted search to the Rust SDK and local bus, with
   exact-word/CJK matching, bounded paging, cancellation and synchronous privacy
   purges. Capability and engine qualification remain disabled; activation and
@@ -38,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unmarked gateway stores and plaintext account/keychain state in retired formats
   now fail closed at load/startup (`UnsupportedPersistedFormat` where applicable).
   Current authority and acknowledged history must be preserved during operator repair.
+
+### Device pairing preview
+
+- Added journaled native head updates and exact-head recipient installation foundations.
+  Device pairing remains default-off and preview / CLI only; desktop and mobile
+  pairing companions are unavailable. See [device pairing](docs/device_pairing.md).
 
 ### Session push
 

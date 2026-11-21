@@ -164,7 +164,7 @@ fn prepare_controls(
     peer: &Native,
     receipts: Vec<(LocalBusFrame, Option<Value>)>,
 ) -> Case {
-    native.client.persist_fetched_identity_directory(&peer.manifest)?;
+    native.client.persist_observed_identity_directory_now(&peer.manifest)?;
     native.client.account_db()?.establish_friend_link(
         "busy-link",
         &native.manifest.principal_commitment,

@@ -64,6 +64,16 @@ pub enum ContactReason {
     /// An accepted contact already exists.
     #[error("already_contact")]
     AlreadyContact,
+    /// Verification was requested without a complete expected-safety object.
+    #[error("expected_safety_required")]
+    ExpectedSafetyRequired,
+    /// A presented safety field does not equal the authenticated material at commit.
+    #[error("safety_material_mismatch")]
+    SafetyMaterialMismatch,
+    /// The current authority is older than the card's signed issuance epoch, or forks it at the
+    /// same epoch. The directory may be replaying a superseded head.
+    #[error("authority_stale")]
+    AuthorityStale,
 }
 
 /// A home-node locator authenticated by the card's root signature.
@@ -96,6 +106,7 @@ pub struct ContactCardBody {
 #[serde(deny_unknown_fields)]
 pub struct ContactCardAuthority {
     pub head_hash: String,
+    pub epoch: u64,
     pub master_certificate_hash: String,
 }
 
@@ -247,7 +258,7 @@ pub(crate) fn encode_contact_card(
 mod tests {
     use super::*;
     fn body() -> Result<ContactCardBody, SdkError> {
-        let public = ramflux_crypto::public_key_base64url_from_seed([7; 32]);
+        let public = ramflux_crypto::public_key_base64url_from_seed(&[7; 32]);
         Ok(ContactCardBody {
             version: 1,
             principal_id: "alice".into(),
@@ -256,7 +267,7 @@ mod tests {
             node: ContactNode {
                 url: "https://node.example".into(),
                 key_fingerprint: contact_node_fingerprint(
-                    &ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+                    &ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
                 )?,
             },
             display_name: Some("Alice".into()),

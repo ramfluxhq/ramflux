@@ -5,6 +5,24 @@
 use super::{RamfluxClient, SdkError, now_unix_timestamp};
 use serde_json::{Value, json};
 impl RamfluxClient {
+    // Persisted local denial is decisive before any peer-directory network work.
+    // Ordinary freshness checks still run at their existing authorization boundary.
+    pub(crate) fn require_native_pair_device_not_revoked(&self) -> Result<(), SdkError> {
+        if self.born_v3_account.is_some()
+            && self
+                .account_db()?
+                .load_actor_state::<bool>(&Self::device_revocation_key(
+                    &self.owned_device_identity()?,
+                ))?
+                .unwrap_or(false)
+        {
+            return Err(crate::client::identity_authority::invalid(
+                "device is locally fenced by a pending root revocation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn require_pair_device_active(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -39,23 +57,29 @@ impl RamfluxClient {
         if self
             .current_custody_authority(remote.root_commitment(), crate::custody::network_now()?)?
             .is_some()
-            && self.require_current_device_authorization(remote).is_err()
         {
-            return Ok(false);
+            // A missing process-local head clock is not a relationship end.
+            // The directory fetch restores it; deleting the due reset would not.
+            match self.require_current_device_authorization(remote) {
+                Ok(()) | Err(SdkError::FreshHeadRequired { .. }) => {}
+                Err(_) => return Ok(false),
+            }
         }
         let Some(record) = db.client_record("device", remote.storage_key())? else {
             return Ok(false);
         };
-        let Some(principal) = record["principal_id"].as_str() else { return Ok(false) };
+        let Some(principal) = record["principal_id"].as_str() else {
+            return Ok(false);
+        };
         if record["revoked"] == true || self.friend_rejection_reason(principal)?.is_some() {
             return Ok(false);
         }
         let own =
             self.device_branch.as_ref().is_some_and(|device| device.principal_id == principal);
-        Ok(own
-            || self.friend_link_peer_is_accepted(principal)?
-            || db.actor_state_exists(&RamfluxClient::pair_key(local, remote)?)?
-            || self.pair_recovery_pending(local, remote)?)
+        let friend = self.friend_link_peer_is_accepted(principal)?;
+        let paired = db.actor_state_exists(&RamfluxClient::pair_key(local, remote)?)?;
+        let pending = self.pair_recovery_pending(local, remote)?;
+        Ok(own || friend || paired || pending)
     }
     pub(crate) fn apply_verified_device_revocation(
         &self,
@@ -126,7 +150,7 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let local = self.owned_device_identity()?;
         let db = self.account_db()?;
-        db.write_transaction(|| -> Result<(), SdkError> {
+        db.join_write(|| -> Result<(), SdkError> {
             for id in db.pair_session_ids(&local, remote)? {
                 self.retire_pair(&local, remote, &id)?;
             }

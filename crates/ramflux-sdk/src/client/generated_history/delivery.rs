@@ -48,9 +48,6 @@ impl RamfluxClient {
         &self,
         config: &GatewaySessionConfig,
     ) -> Result<Option<Plan>, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(None);
-        }
         let db = self.account_db()?;
         let now = crate::time::now_unix_timestamp();
         for key in db.actor_state_keys(TRANSFER)? {
@@ -303,9 +300,9 @@ mod tests {
         own.client.send_direct_message("c", "owner", "sender", b"body")?;
         let mut row = Outgoing::new(&own.client.owned_device_identity()?, 1)?;
         let envelope = Envelope {
-            schema: "test".into(),
-            version: 1,
-            domain: "test".into(),
+            schema: "ramflux.envelope.v2".into(),
+            version: 2,
+            domain: "ramflux.envelope.v2".into(),
             ext: ramflux_protocol::Ext::default(),
             signed: ramflux_protocol::SignedFields {
                 signing_key_id: "key".into(),
@@ -317,15 +314,15 @@ mod tests {
             source_device_id: "source-device".into(),
             target_delivery_id: row.target.clone(),
             routing_set_id: None,
-            delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
+            delivery_class: ramflux_protocol::DeliveryClass::Message,
             priority: ramflux_protocol::Priority::Normal,
             ttl: 300,
             created_at: crate::time::now_unix_timestamp(),
             encrypted_payload: "ciphertext".into(),
             payload_hash: "payload-hash".into(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".into()),
+            report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".into()),
         };
         row.in_flight = Some(InFlight {
             page: 0,

@@ -14,16 +14,15 @@ pub(crate) use ramflux_storage::{
     DeliveryReceiptRecord, DeviceDirectoryRecord, DirectMessageRecord, DirectMessageWrite,
     DisappearingPolicyRecord, EventStore, FileVaultSecretSource, FrankingReportMetadata,
     FriendLinkRecord, GroupInviteAcceptWrite, GroupInviteWrite, GroupMemberBanWrite,
-    GroupMemberJoinWrite, GroupMemberKickWrite, GroupMessageDeleteWrite,
-    GroupPendingUndecryptedRecord, GroupRoleChangeWrite, GroupSenderKeyCounterRecord, GroupState,
-    GuardianRecoveryShareRecord, GuardianRecoveryShareWrite, HistoryBundle,
-    IdentityLifecycleRecord, IdentityLifecycleTiming, McpAuditWrite, McpGrantWrite,
-    McpStandingApprovalWrite, McpToolWrite, MessageMetadata, MessageReceiptState,
-    MessageTombstoneRecord, ObjectOperationRecord, ObjectOperationWrite, ObjectShareGrantRecord,
-    ObjectShareGrantWrite, ObjectTransferRecord, ObjectTransferWrite, ObjectWrite,
-    PendingRecoveryApprovalWrite, PendingRecoveryRecord, PendingRecoveryWrite, ProjectionStore,
-    ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord, VaultSecretSource,
-    WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
+    GroupMemberJoinWrite, GroupMemberKickWrite, GroupMessageDeleteWrite, GroupRoleChangeWrite,
+    GroupSenderKeyCounterRecord, GroupState, GuardianRecoveryShareRecord,
+    GuardianRecoveryShareWrite, HistoryBundle, IdentityLifecycleRecord, IdentityLifecycleTiming,
+    McpAuditWrite, McpGrantWrite, McpStandingApprovalWrite, McpToolWrite, MessageMetadata,
+    MessageReceiptState, MessageTombstoneRecord, ObjectOperationRecord, ObjectOperationWrite,
+    ObjectShareGrantRecord, ObjectShareGrantWrite, ObjectTransferRecord, ObjectTransferWrite,
+    ObjectWrite, PendingRecoveryApprovalWrite, PendingRecoveryRecord, PendingRecoveryWrite,
+    ProjectionStore, ReceiptEventWrite, StorageError, StoredBotInstallRecord, TypingStateRecord,
+    VaultSecretSource, WrappedAccountDbKey, unwrap_with_vault_secret, wrap_with_vault_secret,
 };
 pub(crate) use ramflux_sync::{
     A2iControlEvent, ChunkManifest, ChunkPayload, EncryptedObject, FederationMesh,
@@ -58,13 +57,16 @@ pub(crate) use crate::bus::io::{
     local_bus_error, local_bus_error_code, local_bus_event, local_bus_response, local_bus_trace,
     read_local_bus_frame, request_account_id, write_local_bus_frame,
 };
-pub(crate) use crate::bus::protocol::{LocalBusPersistedAccount, default_device_capability_scope};
+pub(crate) use crate::bus::protocol::LocalBusPersistedAccount;
+#[cfg(test)]
+pub(crate) use crate::bus::protocol::default_device_capability_scope;
 pub(crate) use crate::bus::state::{
     LocalBusAccountState, LocalBusConnectionState, LocalBusDaemonState, LocalBusSubscriber,
 };
-pub(crate) use crate::client::contact::assert_manifest_active_device;
 #[cfg(test)]
-pub(crate) use crate::client::contact::assert_target_manifest_active_device;
+pub(crate) use crate::client::contact::{
+    assert_manifest_active_device, assert_target_manifest_active_device,
+};
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
     GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,
@@ -82,17 +84,13 @@ pub(crate) use crate::object::{
     SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
     build_signed_owner_authorization_proof, build_signed_requester_pop,
     build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
-    build_v3_owner_session_token_issue_body, effective_attachment_lineage,
-    object_key_slot_associated_data, object_relay_chunk_cipher_hash, object_relay_chunk_id,
+    build_v3_owner_session_token_issue_body, object_relay_chunk_cipher_hash, object_relay_chunk_id,
     object_transfer_id, object_transfer_status, parse_relay_transfer_options,
     recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
 };
 
 pub(crate) use crate::own_device_sync::{
-    SdkOwnDeviceDmSessionSnapshot, SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
-    SdkOwnDeviceHistoryBundle, SdkOwnDeviceSyncEnvelope, SdkOwnDeviceSyncExportResponse,
-    SdkOwnDeviceSyncImportResponse, group_message_epoch, own_device_sync_signing_body,
-    own_device_sync_slot_conversation_id,
+    SdkOwnDeviceGroupMemberSnapshot, SdkOwnDeviceGroupSnapshot,
 };
 pub(crate) use crate::prekey::{
     SdkDeviceManifestResponse, identity_root_public_key_commitment, sdk_fetch_prekey_bundle,
@@ -100,3 +98,9 @@ pub(crate) use crate::prekey::{
     sdk_http_json_request, sdk_http_post_json, sdk_publish_prekey_bundle,
 };
 pub(crate) use crate::time::now_unix_timestamp;
+
+#[cfg(test)]
+pub(crate) use crate::object::effective_attachment_lineage;
+
+#[cfg(test)]
+pub(crate) use crate::object::object_key_slot_associated_data;

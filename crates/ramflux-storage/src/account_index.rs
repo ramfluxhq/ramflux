@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod backup;
-pub use backup::BackupIndexInstall;
+pub use backup::{AccountGenerationSelection, BackupIndexInstall};
 mod operations;
 mod search;
 
@@ -46,6 +46,7 @@ impl AccountIndex {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StorageError> {
         fs::create_dir_all(root.as_ref())?;
         let path = root.as_ref().join(ACCOUNT_INDEX_FILE);
+        crate::schema_generation::creation::initialize_if_absent(&path, None)?;
         let connection = Connection::open(path)?;
         crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch(
@@ -143,6 +144,24 @@ impl AccountIndex {
             "DELETE FROM local_account
               WHERE local_account_id=?1 AND principal_commitment=?2
                 AND wrapped_key IS NULL AND wrapped_key_nonce IS NULL",
+            params![local_account_id, principal_commitment],
+        )? == 1)
+    }
+
+    /// Deletes an unpublished reservation, including one that already stored a wrapped data key.
+    ///
+    /// The caller must already have proven that this account has no `authority.json`. A matching
+    /// anchor is required so a replaced row is left untouched.
+    /// # Errors
+    /// Returns storage errors without deleting a row whose anchor does not match.
+    pub fn release_unpublished_reservation(
+        &self,
+        local_account_id: &str,
+        principal_commitment: &str,
+    ) -> Result<bool, StorageError> {
+        Ok(self.connection.execute(
+            "DELETE FROM local_account
+              WHERE local_account_id=?1 AND principal_commitment=?2",
             params![local_account_id, principal_commitment],
         )? == 1)
     }

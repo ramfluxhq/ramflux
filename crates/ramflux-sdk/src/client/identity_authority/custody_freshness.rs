@@ -18,6 +18,12 @@ impl NativeHeadFreshness {
     pub(crate) fn observation(&self, root: &str) -> Option<Instant> {
         self.heads.get(root).map(|(_, at)| *at)
     }
+    /// True when a completed network fetch of this root began at or after `since`. A new send
+    /// authorization asks for this, so an observation made before the command was admitted
+    /// (even seconds earlier) can never authorize it.
+    pub(crate) fn observed_since(&self, root: &str, since: Instant) -> bool {
+        self.heads.get(root).is_some_and(|(_, at)| *at >= since)
+    }
     fn remember(&mut self, root: &str, hash: String, at: Instant) {
         if self.heads.get(root).is_some_and(|(seen, observed)| seen == &hash && *observed > at) {
             return;
@@ -38,10 +44,24 @@ impl NativeHeadFreshness {
     }
 }
 impl RamfluxClient {
-    /// Only a completed current-directory network fetch may call this helper. Own-device
-    /// history, archive import, cached manifests and caller-supplied JSON use the evidence-only
-    /// persistence helper; none can refresh this process-local authorization clock.
+    /// Applies a directory manifest. Only a manifest stamped with the instant its network fetch
+    /// began renews the process-local send-authorization clock, and only from that instant, so
+    /// a queued result never looks newer than the authorization it is applied to. A manifest
+    /// without a stamp (inbound, cached, archived or caller-supplied) is evidence only; there
+    /// is no fallback to the time of application.
     pub(crate) fn persist_fetched_identity_directory(
+        &self,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<(), SdkError> {
+        match manifest.fetched_after.0 {
+            Some(began) => self.persist_fetched_identity_directory_at(manifest, began),
+            None => self.persist_identity_directory(manifest),
+        }
+    }
+
+    /// Test and fixture seam: treats a locally built manifest as fetched just now.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn persist_observed_identity_directory_now(
         &self,
         manifest: &SdkDeviceManifestResponse,
     ) -> Result<(), SdkError> {
@@ -66,6 +86,7 @@ impl RamfluxClient {
         }
         Ok(())
     }
+
     pub(crate) fn invalidate_changed_custody_head(&self, root: &str, hash: &str) {
         let mut cache = self.native_head_freshness.borrow_mut();
         if cache.heads.get(root).is_some_and(|(old, _)| old != hash) {
@@ -113,7 +134,7 @@ mod tests {
                 .is_err(),
             "queued public evidence cannot renew the directory permission clock"
         );
-        local.client.persist_fetched_identity_directory(&remote.manifest)?;
+        local.client.persist_observed_identity_directory_now(&remote.manifest)?;
         local.client.persist_fetched_identity_directory_at(&remote.manifest, old)?;
         assert!(
             local

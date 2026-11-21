@@ -19,6 +19,7 @@ pub struct RecvCommitFingerprint {
 }
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn load_dm_session(
         &self,
         conversation_id: &str,
@@ -36,31 +37,7 @@ impl RamfluxClient {
         )))
     }
 
-    pub(crate) async fn load_or_create_send_dm_session(
-        &self,
-        engine: &mut impl GatewaySessionAccess,
-        message: &GatewayDirectMessage,
-    ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
-        let recipient_device_id = message.recipient_device_id.as_deref().ok_or_else(|| {
-            SdkError::LocalBus(
-                "recipient_device_id is required to bootstrap a new X3DH DM session".to_owned(),
-            )
-        })?;
-        let reference = Self::qualified_recipient(message)?;
-        let lookup = self.root_qualified_device_lookup(&reference)?;
-        let recipient_bundle =
-            engine.fetch_prekey_bundle(&lookup).await?.bundle.ok_or_else(|| {
-                SdkError::LocalBus(format!("missing prekey bundle for {recipient_device_id}"))
-            })?;
-        self.verify_root_bound_prekey(&self.device_identity(&reference)?, &recipient_bundle)?;
-        self.create_send_dm_session_from_bundle(
-            message,
-            recipient_device_id,
-            recipient_bundle,
-            &engine.config().device_id,
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn create_send_dm_session_from_bundle(
         &self,
         message: &GatewayDirectMessage,
@@ -95,15 +72,12 @@ impl RamfluxClient {
         let bundle_hash = prekey_bundle_hash(&recipient_bundle)?;
         let initiator_device_id_hash = dm_device_id_hash(own_device_id);
         let recipient_device_id_hash = dm_device_id_hash(recipient_device_id);
-        let bootstrap_sequence = if aad.is_some() {
-            Some(self.allocate_bootstrap_sequence(&self.local_device_identity(own_device_id)?)?)
-        } else {
-            None
-        };
+        let bootstrap_sequence =
+            Some(self.allocate_bootstrap_sequence(&self.local_device_identity(own_device_id)?)?);
         let bootstrap_aad = super::routed::bootstrap_sequence::bootstrap_aad(
             aad.unwrap_or_else(|| dm_associated_data(&message.conversation_id)),
             bootstrap_sequence,
-            aad.map(|_| 2),
+            Some(2),
         )?;
         let output = ramflux_crypto::x3dh_initiator(&X3dhInitiatorInput {
             initiator_identity: &own_identity,
@@ -129,7 +103,7 @@ impl RamfluxClient {
         )?;
         let header = SdkDmX3dhHeader {
             bootstrap_sequence,
-            bootstrap_ordering_version: aad.map(|_| 2),
+            bootstrap_ordering_version: Some(2),
             bootstrap_envelope_id: None,
             initiator_identity_public: own_identity.public,
             initiator_ephemeral_public: ephemeral.public,
@@ -145,6 +119,7 @@ impl RamfluxClient {
         Ok((session, Some(header)))
     }
 
+    #[cfg(test)]
     pub(crate) fn load_or_create_recv_dm_session(
         &self,
         conversation_id: &str,
@@ -212,6 +187,7 @@ impl RamfluxClient {
         .map_err(SdkError::from)
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_dm_session(
         &self,
         conversation_id: &str,
@@ -227,6 +203,7 @@ impl RamfluxClient {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_dm_session_snapshot(
         &self,
         conversation_id: &str,
@@ -242,12 +219,9 @@ impl RamfluxClient {
         )
     }
 
-    /// Read-only introspection for realnet integration tests (T21-A2a / CTRL-028), gated behind the
-    /// `itest-fingerprint` feature so it is never compiled into production binaries. Returns the
-    /// receive commit watermark (or legacy session checkpoint), the attachment key-slot watermark,
-    /// and the gateway receive cursor, so a test can assert that a failed attachment import advances
-    /// none of them and a successful retry advances all of them. It exposes no control or mutation
-    /// surface — every field is derived from existing read-only projection/cursor lookups.
+    /// Retired inspection of the generation-zero conversation/session checkpoints.
+    /// # Errors
+    /// Returns typed Content refusal; generation one uses qualified native pair receipts.
     #[cfg(feature = "itest-fingerprint")]
     pub fn recv_commit_fingerprint(
         &self,
@@ -256,23 +230,10 @@ impl RamfluxClient {
         recipient_device_id: &str,
         target_delivery_id: &str,
     ) -> Result<RecvCommitFingerprint, SdkError> {
-        let slot_conversation_id =
-            dm_attachment_slot_conversation_id(conversation_id, object_id, recipient_device_id);
-        Ok(RecvCommitFingerprint {
-            main_recv_checkpoint: self
-                .projection_checkpoint(&dm_session_checkpoint_name(conversation_id, "recv"))?
-                .or(self.account_db()?.load_actor_state::<String>(
-                    &crate::client::routed::conversation_watermark(conversation_id),
-                )?),
-            slot_recv_checkpoint: self
-                .projection_checkpoint(&dm_session_checkpoint_name(&slot_conversation_id, "recv"))?
-                .or(self.account_db()?.load_actor_state::<String>(
-                    &crate::client::routed::object_watermark(
-                        object_id,
-                        &self.local_device_identity(recipient_device_id)?,
-                    )?,
-                )?),
-            receive_cursor: self.gateway_receive_cursor(target_delivery_id)?,
+        let _ = (conversation_id, object_id, recipient_device_id, target_delivery_id);
+        Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired conversation-session fingerprint requires native pair receipts".into(),
         })
     }
 
@@ -394,5 +355,22 @@ mod t24b1_client_db_reopen_tests {
             "the reopened sender reuses the pre-send ratchet state"
         );
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "itest-fingerprint"))]
+mod retired_fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn retired_fingerprint_refuses_content_before_account_access() {
+        let client = RamfluxClient::new();
+        assert!(
+            matches!(
+                client.recv_commit_fingerprint("conversation", "object", "device", "target"),
+                Err(SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Content, .. })
+            ),
+            "an old checkpoint inspection must not report generation-one acceptance"
+        );
     }
 }

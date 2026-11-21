@@ -234,22 +234,23 @@ authority. Business models and policy stay in the shared crate.
 ## Conversation send
 
 Use `conversation.send` through `ramflux_v2_execute`, with an account id, a durable
-`operation_id`, and body `{conversation_id,text,attachments?}`. Text is UTF-8, at
-most 65536 bytes; an empty text requires an attachment. Routing fields are refused.
+`operation_id`, and body `{conversation_id,text,media?}`. Text is UTF-8 and uses the
+generated Message byte limit; an empty text requires media. Each media reference
+contains the ATTACH-LARGE-01 r4 `large_manifest`. Retired attachment inputs return
+typed Content refusal before route or network work. Routing fields are refused.
 The SDK derives the sender from its authenticated device, the peer commitment from
 the existing conversation, and recipient devices from the verified manifest. Group
 conversations use the ordinary group sender. Sealing, friend-link checks, TTL,
 own-device copies and gateway submission use the existing SDK delivery paths.
-Group attachments retain the existing SDK limitation and are refused.
+DM and group media use the same generated Message contract.
 
 The call returns the usual asynchronous operation handle. Its completion body has
 `message_id`, `conversation_id`, `delivery_state` (`submitted` or `failed`), and
 per-target `deliveries` with stable error codes on failure. Submitted means gateway
 submission, never delivery or read. Use existing receipt/event projections for later
 progress. Fan-out preserves the first local ciphertext and refuses a changed sender,
-conversation or plaintext under that logical id. Raw SDK sends retain their existing
-ciphertext collision fence. The logical message id is derived from account and operation id, so retries
-retain identity. Existing operation reconciliation governs interrupted mutations;
+conversation or plaintext under that logical id. The response message id is the allocated qualified event identity; the account and
+operation id select its durable retry record, so retries retain that identity. Existing operation reconciliation governs interrupted mutations;
 a failed fan-out can have partial effects and is not a no-effects cancellation.
 Before a verified route is available the operation can return the usual SDK error.
 
@@ -317,7 +318,7 @@ with `conversation_id` and the existing `message_id`:
 
 | Operation | Additional body fields |
 | --- | --- |
-| `conversation.edit` | `text` (1..65536 UTF-8 bytes), a complete text replacement |
+| `conversation.edit` | `text` (1..65536 UTF-8 bytes), a complete text replacement; `expected_revision` (u64), the base revision the caller observed. Required. A missing field is `invalid_argument`. A mismatch, or a base another local edit has already reserved, is `edit_conflict` (body code 7, details `{target, expected, received}`) and is not sent. |
 | `conversation.react` | `token` (SDK-validated reaction), optional `remove` boolean |
 | `conversation.reply` | `text` (1..65536 UTF-8 bytes) |
 | `conversation.delete` | `scope`: `local` or `everyone` |
@@ -327,8 +328,9 @@ reference, edit revision and exact previous-content digest. It applies the share
 author/moderator rules, allocates one durable source-qualified event identity and
 private revision entropy, and uses SDK routing/sealing and ordinary group or
 verified peer-device fanout. Hosts cannot supply a sender, device, envelope,
-revision, digest or tombstone. Unknown fields are refused. An edit replaces the
-whole Message content; old reply, media and forward fields are omitted.
+written revision, digest or tombstone. `expected_revision` is the observed base,
+not the revision the edit will write. Unknown fields are refused. An edit replaces
+the whole Message content; old reply, media and forward fields are omitted.
 
 Retries with the same operation id retain the exact prepared Inner and identity;
 changing the intent under that id is refused. Private prepared content is owned
@@ -411,7 +413,7 @@ require the explicit trusted-host config capability `allow_secret_exports:true`;
 SDK authorization and custody checks apply independently. An operation key is
 nonempty and at most 256 UTF-8 bytes. Conversation send persists an intent
 fingerprint in account operation metadata before routing; changed conversation,
-text or attachments cannot reuse a key, including across restart or message erasure.
+text or media cannot reuse a key, including across restart or message erasure.
 No plaintext send content is retained in that fingerprint record.
 
 Subscription close acknowledgement releases the bridge slot. Failed opens release

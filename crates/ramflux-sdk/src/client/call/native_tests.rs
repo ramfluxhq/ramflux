@@ -4,15 +4,19 @@
 //! Native master provenance through the ordinary signed call-control state machine.
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
+use ramflux_protocol::message as g;
 fn signed_control(
     sender: &Fixture,
+    target: &Fixture,
     control: &CallControl,
 ) -> TestResult<(GatewayInboxEntry, zeroize::Zeroizing<Vec<u8>>)> {
     let mut control = control.clone();
+    let event_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
     let target_endpoint =
         if control.sender == control.caller { &control.callee } else { &control.caller };
     let target_root = crate::identity_root_public_key_commitment(&target_endpoint.root_public_key)?;
-    let target = ramflux_protocol::qualified_device_id(&target_root, &target_endpoint.device_id)?;
+    let target_delivery =
+        ramflux_protocol::qualified_device_id(&target_root, &target_endpoint.device_id)?;
     if matches!(control.body, ramflux_protocol::CallAction::Invite { .. }) {
         let branch = sender.client.device_branch.as_ref().ok_or("test: sender branch missing")?;
         let created_at = u64::try_from(control.created_at)?;
@@ -28,14 +32,14 @@ fn signed_control(
                 &control.caller.device_id,
             )?,
             sender_epoch: 1,
-            target_device: target.clone(),
+            target_device: target_delivery.clone(),
             target_epoch: 1,
-            target_delivery_id: target.clone(),
+            target_delivery_id: target_delivery.clone(),
             call_ref: control
                 .call_ref
                 .clone()
                 .unwrap_or_else(|| ramflux_protocol::encode_base64url([43; 16])),
-            source_event_id: "native-call-control".into(),
+            source_event_id: event_id.clone(),
             kind: ramflux_protocol::CallIntentKind::OneToOne,
             action: ramflux_protocol::CallIntentAction::Start,
             seq: 0,
@@ -56,25 +60,34 @@ fn signed_control(
         sender.client.device_branch.as_ref().ok_or("branch")?,
     );
     let body = bytes(&control)?;
-    let message = crate::GatewayDirectMessage {
-        conversation_id: control.conversation_id,
-        message_id: "native-call-control".into(),
-        envelope_id: "native-call-control".into(),
-        source_principal_id: control.sender.principal_id,
-        sender_id: control.sender.device_id,
-        recipient_device_id: Some("primary".into()),
-        recipient_principal_commitment: Some(target_root),
-        target_delivery_id: target,
-        encrypted_body: body.to_vec(),
-        created_at: crate::time::now_unix_timestamp(),
-        ttl: 600,
-    };
+    let identity = sender.client.account_db()?.write_transaction(|| {
+        sender.client.allocate_generated_identity(
+            &control.conversation_id,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )
+    })?;
+    let exact = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Call(
+                crate::client::generated_call::native::from_native(&control)?,
+            )),
+        },
+    )?;
     Ok((
         GatewayInboxEntry {
             forwarded: false,
             inbox_seq: 1,
-            target_delivery_id: message.target_delivery_id.clone(),
-            envelope: crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+            target_delivery_id: target.config.target_delivery_id.clone(),
+            envelope: sender.seal_inner_to_with_id(
+                target,
+                &exact,
+                control
+                    .call_start
+                    .as_ref()
+                    .map_or(event_id.as_str(), |start| start.body.source_event_id.as_str()),
+            )?,
         },
         body,
     ))
@@ -83,8 +96,8 @@ fn signed_control(
 async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() -> TestResult {
     let mut alice = Fixture::new("native-call-alice").await?;
     let mut bob = Fixture::new("native-call-bob").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     for fixture in [&alice, &bob] {
         fixture.client.establish_friend_link(
             "native-call-friend",
@@ -122,7 +135,7 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
     outgoing.pin_peer(peer.clone(), bob.manifest.devices[0].branch_public_key.clone())?;
     let invite = outgoing.pending[0].clone();
     alice.client.voice_calls.insert(id.clone(), outgoing);
-    let (entry, body) = signed_control(&alice, &invite)?;
+    let (entry, body) = signed_control(&alice, &bob, &invite)?;
     assert!(bob.client.project_call_control(&entry, "native-call-thread", None, &body)?);
     assert!(bob.client.refresh_call_control(&body)?);
     let before = bob.client.voice_calls[&id].row.clone();
@@ -139,7 +152,7 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
     assert_eq!(alice.client.voice_calls[&id].callee, peer);
     let mut forged = invite;
     forged.sender.root_public_key = peer.root_public_key;
-    let (entry, body) = signed_control(&alice, &forged)?;
+    let (entry, body) = signed_control(&alice, &bob, &forged)?;
     assert!(bob.client.project_call_control(&entry, "native-call-thread", None, &body).is_err());
     assert!(alice.client.identity_root.is_none());
     assert!(bob.client.identity_root.is_none());
@@ -150,8 +163,8 @@ async fn native_call_invite_and_replay_hold_media_with_real_master_and_anchor() 
 async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() -> TestResult {
     let alice = Fixture::new("generated-cache-alice").await?;
     let mut bob = Fixture::new("generated-cache-bob").await?;
-    alice.client.persist_fetched_identity_directory(&bob.manifest)?;
-    bob.client.persist_fetched_identity_directory(&alice.manifest)?;
+    alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
+    bob.client.persist_observed_identity_directory_now(&alice.manifest)?;
     let conversation = ramflux_protocol::message::dm_scope::derive(
         &alice.client.own_account_anchor()?,
         &bob.client.own_account_anchor()?,
@@ -182,8 +195,8 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
         crate::time::now_unix_timestamp(),
     )?;
     outgoing.pin_peer(peer, bob.manifest.devices[0].branch_public_key.clone())?;
-    let (entry, native_body) = signed_control(&alice, &outgoing.pending[0])?;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (entry, native_body) =
+        signed_control(&alice, &bob, outgoing.pending.first().ok_or("test: invite")?)?;
     let signed = decode(&native_body)?.ok_or("signed call")?;
     let identity = alice.client.account_db()?.write_transaction(|| {
         alice.client.allocate_generated_identity(
@@ -200,7 +213,11 @@ async fn generated_call_cache_uses_exact_inner_transition_after_native_commit() 
             )),
         },
     )?;
-    let converted = decode(&raw)?.ok_or("test: generated call missing")?;
+    let (_, content) = RamfluxClient::decode_generated_inner(&raw)?;
+    let Some(g::content::Value::Call(call)) = content.value else {
+        return Err("test: generated call missing".into());
+    };
+    let converted = crate::client::generated_call::native::to_native(call)?;
     assert!(converted == signed, "generated carrier must retain signed Start authority");
     bob.client.account_db()?.write_transaction(|| {
         bob.client.project_native_call_control(&entry, &conversation, None, &converted, &raw)
@@ -219,9 +236,9 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         let mut alice = Fixture::new("call-sibling-alice").await?;
         let mut bob = Fixture::new("call-sibling-bob").await?;
         let mut secondary = bob.enroll_sibling("call-sibling-secondary", "secondary").await?;
-        alice.client.persist_fetched_identity_directory(&bob.manifest)?;
+        alice.client.persist_observed_identity_directory_now(&bob.manifest)?;
         for receiver in [&mut bob, &mut secondary] {
-            receiver.client.persist_fetched_identity_directory(&alice.manifest)?;
+            receiver.client.persist_observed_identity_directory_now(&alice.manifest)?;
         }
         let conversation = ramflux_protocol::message::dm_scope::derive(&alice.client.own_account_anchor()?, &bob.client.own_account_anchor()?)?;
         for fixture in [&alice, &bob, &secondary] {
@@ -243,7 +260,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
             let mut control = caller.pending.get(index).ok_or("test: invite")?.clone();
             let reference = if index == 0 { [62;16] } else { [63;16] };
             control.call_ref = Some(ramflux_protocol::encode_base64url(reference));
-            let (entry, body) = signed_control(&alice,&control)?;
+            let (entry, body) = signed_control(&alice,receiver,&control)?;
             receiver.client.project_call_control(&entry,&conversation,None,&body)?;
             receiver.client.refresh_call_control(&body)?;
             starts.push(decode(&body)?.and_then(|c|c.call_start).ok_or("test: Start")?);
@@ -264,7 +281,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         recipient.apply_media_for(local,second_start,true,false)?;
         recipient.answer(now)?;
         let answer = recipient.pending.last().ok_or("test: answer")?.clone();
-        let (answer_entry, answer_body) = signed_control(&secondary,&answer)?;
+        let (answer_entry, answer_body) = signed_control(&secondary,&alice,&answer)?;
         let answer = decode(&answer_body)?.ok_or("test: signed answer")?;
         let id = caller.row.call_id.clone();
         alice.client.persist_call_row(&caller.row)?;
@@ -279,7 +296,7 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         assert!(both_confirmed.call_ref.as_deref() == Some(second_start.body.call_ref.as_str()), "winner reused its sibling's reference");
         let mut cross = answer;
         cross.call_ref = Some(first_start.body.call_ref.clone());
-        let (cross_entry,cross_body) = signed_control(&secondary,&cross)?;
+        let (cross_entry,cross_body) = signed_control(&secondary,&alice,&cross)?;
         let refusal = alice.client.project_call_control(&cross_entry,&conversation,None,&cross_body).err().ok_or("test: cross-sibling reference admitted")?;
         assert!(refusal.to_string().contains("control Start reference differs"), "cross-sibling control failed at the wrong boundary: {refusal}");
         both_confirmed.apply_media_for(second.clone(),second_start,true,true)?;
@@ -293,4 +310,64 @@ async fn native_sibling_answers_require_their_own_start_permission() -> TestResu
         assert!(!both_confirmed.expire(now+31)?, "reconnect reset the answered lifecycle to the ring deadline");
         Ok(())
     })).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_call_invite_crosses_sealed_receive_and_replays_without_reringing() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let alice = Fixture::new("native-wire-call-alice").await?;
+        let mut bob = Fixture::new("native-wire-call-bob").await?;
+        alice.accept_peer(&bob)?;
+        bob.accept_peer(&alice)?;
+        let conversation = g::dm_scope::derive(
+            &alice.client.own_account_anchor()?,
+            &bob.client.own_account_anchor()?,
+        )?;
+        let local = alice.client.call_local_endpoint()?;
+        let peer = bob.client.call_local_endpoint()?;
+        let id = ramflux_protocol::encode_base64url([40; 16]);
+        let mut outgoing = LiveCall::outgoing(
+            id.clone(),
+            conversation.clone(),
+            local,
+            vec![peer.clone()],
+            crate::time::now_unix_timestamp(),
+        )?;
+        outgoing.pin_peer(
+            peer,
+            bob.manifest
+                .devices
+                .first()
+                .ok_or("test: peer device missing")?
+                .branch_public_key
+                .clone(),
+        )?;
+        let invite = outgoing.pending.first().ok_or("test: invite missing")?;
+        let (entry, _) = signed_control(&alice, &bob, invite)?;
+        let opened = bob.client.open_routed(&entry, &bob.config.device_id)?;
+        assert_eq!(
+            opened.routing.kind,
+            crate::client::routed::Kind::Control,
+            "the generated Call must retain the producer's control route",
+        );
+        assert!(is_call_body(&opened.body), "the decrypted Inner must carry the typed Call");
+        bob.receive(entry.envelope.clone(), 1).await?;
+        let received = bob.client.voice_calls.get(&id).ok_or("test: received call missing")?;
+        assert_eq!(received.row.state, "incoming_ringing");
+        assert_eq!(received.pending.len(), 1, "one invite produces one ringing response");
+        let before = bob.client.account_db()?.journal_bounds()?.head_seq;
+        bob.receive(entry.envelope, 1).await?;
+        assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, before);
+        assert_eq!(
+            bob.client.voice_calls.get(&id).ok_or("test: replay lost call")?.pending.len(),
+            1,
+            "a committed delivery cannot ring twice",
+        );
+        assert!(
+            bob.client.generated_message_view_page(&conversation, None, 10)?.messages.is_empty(),
+            "Call control must not become an ordinary Message row",
+        );
+        Ok(())
+    })
+    .await?
 }

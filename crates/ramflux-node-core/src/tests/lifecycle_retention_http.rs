@@ -13,7 +13,7 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     router.mvp1_register_identity(&register)?;
     router.submit_envelope_at_created(
         &source_identity,
-        envelope("env_before_delete", "target_principal_delete", DeliveryClass::OpaqueEvent),
+        envelope("env_before_delete", "target_principal_delete", DeliveryClass::Message),
     );
     assert!(router.mvp7_metadata_summary("principal_delete").metadata_present);
 
@@ -54,7 +54,7 @@ fn account_lifecycle_finalization_removes_metadata_and_rejects_delivery()
     assert!(matches!(
         router.submit_envelope_at_created(
             &source_identity,
-            envelope("env_after_delete", "target_principal_delete", DeliveryClass::OpaqueEvent,)
+            envelope("env_after_delete", "target_principal_delete", DeliveryClass::Message,)
         ),
         RouterSubmitOutcome::RejectedDeleted { .. }
     ));
@@ -348,7 +348,7 @@ fn recovery_quorum_config(
                 ramflux_protocol::RecoveryQuorumMemberCommitment {
                     member_kind: member_kind.clone(),
                     signing_key_id: (*signing_key_id).to_owned(),
-                    public_key_base64url: ramflux_crypto::public_key_base64url_from_seed(*seed),
+                    public_key_base64url: ramflux_crypto::public_key_base64url_from_seed(seed),
                 }
             })
             .collect(),

@@ -86,10 +86,7 @@ fn snap(
 ) -> Result<Snap, SdkError> {
     let db = client.account_db()?;
     let (disposition, work) = db.receive_state_for_test(entry.inbox_seq)?;
-    // The v3 replay migration marker commits in its own transaction before the receive ledger
-    // (replay_migration.rs), is idempotent, and is not a receive effect, so it is excluded.
-    let mut rows = db.durable_rows_for_test()?;
-    rows.retain(|row| !row.contains("identity/replay-upgrade/"));
+    let rows = db.durable_rows_for_test()?;
     Ok(Snap {
         seen: client.routed_seen_marker(entry)?.is_some(),
         rows,
@@ -150,61 +147,63 @@ fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
 async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<Delivery, SdkError> {
     let mut session = engine(receiver)?;
     let pool = pool()?;
-    receiver.client.apply_routed_entry(&mut session, &pool, entry, false).await
+    receiver.client.apply_routed_entry(&mut session, &pool, entry).await
 }
 
 fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
+    review::trust(receiver, sender)?;
+    review::trust(sender, receiver)?;
     receiver.client.establish_friend_link(
         "link",
-        sender.client.owned_device_identity()?.root_commitment(),
-        receiver.client.owned_device_identity()?.root_commitment(),
+        sender.client.own_account_anchor()?.as_str(),
+        receiver.client.own_account_anchor()?.as_str(),
     )?;
     Ok(())
 }
 
-fn group_ready(sender: &Fixture, receiver: &mut Fixture, group: &str) -> Result<(), SdkError> {
-    for client in [&sender.client, &receiver.client] {
-        fixture_group(client, group, sender)?;
-        fixture_member(client, group, receiver)?;
-        let key = ramflux_protocol::encode_base64url(
-            sender
-                .client
-                .device_branch
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .verifying_key()
-                .to_bytes(),
-        );
-        client.account_db()?.persist_group_member_device_key(
-            group,
-            &crate::client::identity_authority::test_support::group_device(client, group, "alice")?,
-            &key,
-        )?;
-    }
+pub(super) fn group_ready(
+    sender: &Fixture,
+    receiver: &mut Fixture,
+    group: &str,
+) -> Result<(), SdkError> {
+    friend(receiver, sender)?;
+    sender.create_shared_group(group, &format!("{group}-conversation"))?;
+    let member =
+        receiver.client.owned_group_actor(&receiver.config()?.target_delivery_id)?.identity;
+    let state = sender.change_shared_group(
+        group,
+        ramflux_protocol::GroupStateChange::Add {
+            member,
+            role: ramflux_protocol::SharedGroupRole::Member,
+        },
+    )?;
+    receiver.client.accept_shared_group_state(&state, &receiver.config()?.target_delivery_id)?;
     Ok(())
 }
 
-fn group_control_entry(
+pub(super) fn group_control_entry(
     sender: &Fixture,
     receiver: &Fixture,
     group: &str,
     conversation: &str,
 ) -> Result<GatewayInboxEntry, SdkError> {
-    let distribution = sender.client.export_group_sender_key_distribution(group, "alice")?;
-    let wrapper = SdkGroupSenderKeyDistributionEnvelope {
-        schema: "ramflux.sdk.group_sender_key.distribution_envelope.v1".to_owned(),
-        version: 1,
-        membership_event_base64: None,
-        actor_manifest_url: None,
-        distribution_base64: ramflux_protocol::encode_base64url(distribution),
-    };
-    seal_group(
-        sender,
-        receiver,
-        message("group-control", conversation),
-        &serde_json::to_vec(&wrapper)?,
-    )
+    let distribution = ramflux_protocol::parse_i_json(
+        &sender.client.export_group_sender_key_distribution(group, &sender.id)?,
+    )?;
+    let epoch = sender
+        .client
+        .account_db()?
+        .shared_group_state(group)?
+        .ok_or_else(|| invalid("group state"))?
+        .view()
+        .epoch;
+    let exact = sender.client.generated_group_key_inner(
+        conversation,
+        epoch,
+        &distribution,
+        &receiver.client.owned_device_identity()?,
+    )?;
+    generated_control_entry(sender, receiver, &exact, Route::group_control(group))
 }
 
 /// Kill before the named W1 commit, reopen equals pre-state; success then reopen equals post-state.
@@ -214,13 +213,16 @@ async fn cut(
     conversation: &str,
     kind: commit_fault::Kind,
 ) -> Result<(), SdkError> {
-    stage_w0(&receiver.client, &receiver.id, entry)?;
+    // Account open backfills the canonical direct-conversation row for accepted friends.
+    // Materialize it before the pre-state so every comparison isolates the receive effects.
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
+    stage_w0(&receiver.client, &entry.target_delivery_id, entry)?;
     let pre = snap(&receiver.client, entry, conversation)?;
     assert!(!pre.seen);
     assert_eq!(pre.work, 1);
     commit_fault::fail_before(kind);
     assert_fault(apply(receiver, entry).await);
-    reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, pre);
     apply(receiver, entry).await?;
     let post = snap(&receiver.client, entry, conversation)?;
@@ -228,7 +230,7 @@ async fn cut(
     assert_eq!(post.work, 1);
     assert_eq!(post.disposition.as_deref(), Some("staged"));
     assert_ne!(post.rows, pre.rows, "{kind:?} wrote no durable effect");
-    reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, post);
     Ok(())
 }
@@ -239,38 +241,29 @@ async fn routed_effect_marker_atomic() -> Result<(), SdkError> {
 }
 
 async fn atomic() -> Result<(), SdkError> {
-    let sender = Fixture::new("alice", 201)?;
-    let mut receiver = Fixture::new("bob", 211)?;
+    let sender = Fixture::native_named("alice", 201).await?;
+    let mut receiver = Fixture::native_named("bob", 211).await?;
     friend(&mut receiver, &sender)?;
-    let entry = seal(
-        &sender,
-        &receiver,
-        message("first-committed", "unseen-conversation"),
-        b"private message body",
-    )?;
-    cut(&mut receiver, &entry, "unseen-conversation", commit_fault::Kind::Content).await?;
+    let sent = generated_delivery(&sender, &receiver, "first-committed", "private message body")?;
+    cut(&mut receiver, &sent.entry, &sent.conversation, commit_fault::Kind::Content).await?;
 
-    let sender = Fixture::new("alice", 221)?;
-    let mut receiver = Fixture::new("bob", 231)?;
+    let sender = Fixture::native_named("alice", 221).await?;
+    let mut receiver = Fixture::native_named("bob", 231).await?;
     friend(&mut receiver, &sender)?;
-    let entry =
-        seal(&sender, &receiver, message("pair-committed", "pair-conversation"), b"pair body")?;
-    cut(&mut receiver, &entry, "pair-conversation", commit_fault::Kind::Pair).await?;
+    let sent = generated_delivery(&sender, &receiver, "pair-committed", "pair body")?;
+    cut(&mut receiver, &sent.entry, &sent.conversation, commit_fault::Kind::Pair).await?;
 
-    let sender = Fixture::new("alice", 161)?;
-    let mut receiver = Fixture::new("bob", 171)?;
+    let sender = Fixture::native_named("alice", 161).await?;
+    let mut receiver = Fixture::native_named("bob", 171).await?;
     friend(&mut receiver, &sender)?;
-    let entry = seal_as(
-        &sender,
-        &receiver,
-        message("control-reset", "control-conversation"),
-        br#"{"type":"pair.session.reset.v1"}"#,
-        Route::control(),
-    )?;
-    cut(&mut receiver, &entry, "control-conversation", commit_fault::Kind::Control).await?;
+    let entry = reset_entry(&sender, &receiver)?;
+    let scope = sender
+        .client
+        .generated_direct_conversation_id(&receiver.client.owned_device_identity()?)?;
+    cut(&mut receiver, &entry, &scope, commit_fault::Kind::Control).await?;
 
-    let sender = Fixture::new("alice", 241)?;
-    let mut receiver = Fixture::new("bob", 251)?;
+    let sender = Fixture::native_named("alice", 241).await?;
+    let mut receiver = Fixture::native_named("bob", 251).await?;
     group_ready(&sender, &mut receiver, "private-group")?;
     let entry =
         group_control_entry(&sender, &receiver, "private-group", "private-group-conversation")?;
@@ -343,22 +336,21 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
 }
 
 async fn redrive() -> Result<(), SdkError> {
-    let sender = Fixture::new("alice", 71)?;
-    let mut receiver = Fixture::new("bob", 81)?;
+    let sender = Fixture::native_named("alice", 71).await?;
+    let mut receiver = Fixture::native_named("bob", 81).await?;
     friend(&mut receiver, &sender)?;
-    let entry =
-        seal(&sender, &receiver, message("redrive-content", "redrive-conversation"), b"once")?;
-    redrive_kind(&mut receiver, &entry, "redrive-conversation", commit_fault::Kind::Content)
+    let sent = generated_delivery(&sender, &receiver, "redrive-content", "once")?;
+    redrive_kind(&mut receiver, &sent.entry, &sent.conversation, commit_fault::Kind::Content)
         .await?;
 
-    let sender = Fixture::new("alice", 91)?;
-    let mut receiver = Fixture::new("bob", 101)?;
+    let sender = Fixture::native_named("alice", 91).await?;
+    let mut receiver = Fixture::native_named("bob", 101).await?;
     friend(&mut receiver, &sender)?;
-    let entry = seal(&sender, &receiver, message("redrive-pair", "redrive-pair"), b"once")?;
-    redrive_kind(&mut receiver, &entry, "redrive-pair", commit_fault::Kind::Pair).await?;
+    let sent = generated_delivery(&sender, &receiver, "redrive-pair", "once")?;
+    redrive_kind(&mut receiver, &sent.entry, &sent.conversation, commit_fault::Kind::Pair).await?;
 
-    let sender = Fixture::new("alice", 111)?;
-    let mut receiver = Fixture::new("bob", 121)?;
+    let sender = Fixture::native_named("alice", 111).await?;
+    let mut receiver = Fixture::native_named("bob", 121).await?;
     group_ready(&sender, &mut receiver, "redrive-group")?;
     let entry =
         group_control_entry(&sender, &receiver, "redrive-group", "redrive-group-conversation")?;
@@ -372,9 +364,9 @@ async fn redrive() -> Result<(), SdkError> {
 
     bootstrap_redrive().await?;
     crate::client::application_outbox::projection_stage_redrive::projection_stage_redrive()?;
-    crate::client::reply_outbox::reply_stage_redrive_tests::reply_stage_redrive()?;
-    let sender = Fixture::new("alice", 131)?;
-    let mut receiver = Fixture::new("bob", 141)?;
+    crate::client::reply_outbox::reply_stage_redrive_tests::reply_stage_redrive().await?;
+    let sender = Fixture::native_named("alice", 131).await?;
+    let mut receiver = Fixture::native_named("bob", 141).await?;
     friend(&mut receiver, &sender)?;
     reply_pair_admit(&sender, &mut receiver)?;
     Ok(())
@@ -401,14 +393,8 @@ fn pair_admit_request<'a>(
 }
 
 fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkError> {
-    let entry = seal_as(
-        sender,
-        receiver,
-        message("reply-reset", "reply-pair"),
-        br#"{"type":"pair.session.reset.v1"}"#,
-        Route::control(),
-    )?;
-    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let entry = reset_entry(sender, receiver)?;
+    stage_w0(&receiver.client, &entry.target_delivery_id, &entry)?;
     let opened = receiver.client.open_routed(&entry, "bob")?;
     receiver.client.persist_pair(
         &opened.local_device,
@@ -431,7 +417,7 @@ fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkE
         let db = receiver.client.account_db()?;
         let gate = crate::client::reply_outbox::ReplyOutbox {
             expected: ReceiveExpectation {
-                target: &receiver.id,
+                target: &entry.target_delivery_id,
                 incarnation: "e",
                 cursor: 0,
                 generation: 1,
@@ -492,12 +478,12 @@ fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkE
         assert_eq!(stored.envelope, expected);
         assert_eq!(stored.kind, crate::client::reply_outbox::ReplyKind::Pair);
     }
-    reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     {
         let db = receiver.client.account_db()?;
         let gate = crate::client::reply_outbox::ReplyOutbox {
             expected: ReceiveExpectation {
-                target: &receiver.id,
+                target: &entry.target_delivery_id,
                 incarnation: "e",
                 cursor: 0,
                 generation: 1,
@@ -548,7 +534,10 @@ async fn redrive_kind(
     conversation: &str,
     kind: commit_fault::Kind,
 ) -> Result<(), SdkError> {
-    stage_w0(&receiver.client, &receiver.id, entry)?;
+    // Account open backfills the canonical direct-conversation row for accepted friends.
+    // Materialize it before the pre-state so every comparison isolates the receive effects.
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
+    stage_w0(&receiver.client, &entry.target_delivery_id, entry)?;
     commit_fault::fail_before(kind);
     assert_fault(apply(receiver, entry).await);
     apply(receiver, entry).await?;
@@ -556,7 +545,7 @@ async fn redrive_kind(
     assert!(once.seen);
     assert_eq!(once.work, 1);
     assert_eq!(once.disposition.as_deref(), Some("staged"));
-    reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
+    reopen(&mut receiver.client, &receiver.id, b"native fixture data passphrase")?;
     apply(receiver, entry).await?;
     let again = snap(&receiver.client, entry, conversation)?;
     assert_eq!(again, once);
@@ -606,4 +595,50 @@ async fn bootstrap_redrive() -> Result<(), SdkError> {
     target.client.commit_contact_request_bootstrap(&entry, &sender.manifest, "primary")?;
     assert_eq!(snap(&target.client, &entry, "")?, once);
     Ok(())
+}
+
+pub(super) fn generated_control_entry(
+    sender: &Fixture,
+    receiver: &Fixture,
+    exact: &[u8],
+    route: Route,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let (identity, _) = RamfluxClient::decode_generated_inner(exact)?;
+    let mut request = message("effect-control-wire", &identity.conversation_id);
+    request.message_id = ramflux_protocol::encode_base64url(identity.id);
+    request.envelope_id = format!("effect-control-{}", request.message_id);
+    request.recipient_principal_commitment = Some(receiver.client.own_account_anchor()?);
+    request.target_delivery_id = receiver.config()?.target_delivery_id;
+    let (mut request, sealed) = seal_native_fixture(sender, receiver, request, exact, route)?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut request, sealed)?;
+    Ok(GatewayInboxEntry {
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        envelope,
+        forwarded: false,
+        inbox_seq: 1,
+    })
+}
+fn reset_entry(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInboxEntry, SdkError> {
+    use ramflux_protocol::message as g;
+    let scope = sender
+        .client
+        .generated_direct_conversation_id(&receiver.client.owned_device_identity()?)?;
+    let identity = sender.client.allocate_generated_identity(
+        &scope,
+        crate::client::generated_identity::now_ms(),
+        false,
+    )?;
+    let exact = RamfluxClient::encode_generated_inner(
+        identity,
+        &g::Content {
+            value: Some(g::content::Value::Control(g::Control {
+                operation: 1,
+                payload: Some(g::control::Payload::Reset(g::PairReset {
+                    rejected_bootstrap_floor: 0,
+                })),
+            })),
+        },
+    )?;
+    generated_control_entry(sender, receiver, &exact, Route::control())
 }

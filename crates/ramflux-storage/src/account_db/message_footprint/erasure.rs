@@ -94,7 +94,6 @@ const BODY: &str = r"
  DELETE FROM runtime_message_content WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='runtime_message_content');
  DELETE FROM message_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='message_projection');
  DELETE FROM receipt_projection WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='receipt_projection');
- DELETE FROM group_pending_undecrypted WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_pending_undecrypted');
  DELETE FROM root_group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='root_group_sender_key_counter_seen');
  DELETE FROM group_sender_key_counter_seen WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='group_sender_key_counter_seen');
  DELETE FROM contact_message_request WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='contact_message_request');

@@ -326,8 +326,8 @@ fn seal(
         crate::client::routed::Route::group_control(&plan.intent.snapshot.group_id),
         material?,
     )?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let envelope = crate::dm::gateway_direct_message_envelope(&plan.config, &message, None)?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&plan.config, &mut message, sealed)?;
     plan.intent.active = Some(StagedEnvelope {
         federation: route.clone(),
         root: root.clone(),

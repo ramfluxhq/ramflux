@@ -810,12 +810,12 @@ mod tests {
                 "delivery_class":"opaque_event", "required_capability":"opaque_delivery",
                 "signing_key_id":"node-a.example","signature_alg":"ed25519","signature":"",
                 "envelope": {
-                    "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+                    "schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2",
                     "ext":{"source_device_authority":{"epoch":1}},
                     "signing_key_id":"device","signature_alg":"ed25519","signature":"retained-device-signature",
                     "envelope_id":"retained","source_principal_id":"alice","source_device_id":"first",
-                    "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
-                    "priority":"normal","ttl":600,"created_at":1_760_000_000,"encrypted_payload":"opaque","payload_hash":"hash"
+                    "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"message",
+                    "priority":"normal","ttl":600,"created_at":1_760_000_000,"encrypted_payload":"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA","payload_hash": ramflux_crypto::blake3_256_base64url(ramflux_protocol::domain::ENVELOPE, b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA"),"delivery_mode":"durable","collapse_tag": ramflux_protocol::encode_base64url([0x22_u8; 32]),"report_commitment": ramflux_protocol::encode_base64url([0x33_u8; 32])
                 }
             }),
         )?;
@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(refreshed.envelope.signed, request.envelope.signed);
         ramflux_node_core::verify_federated_envelope_forward(
             &refreshed,
-            &ramflux_crypto::public_key_base64url_from_seed([9; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
         )?;
         assert!(
             refresh_spooled_forward(&request, &state, |_| Err(
@@ -971,9 +971,9 @@ mod tests {
             delivery_class: "opaque_event".to_owned(),
             required_capability: "opaque_delivery".to_owned(),
             envelope: ramflux_protocol::Envelope {
-                schema: "ramflux.envelope.v1".to_owned(),
-                version: 1,
-                domain: "ramflux.envelope.v1".to_owned(),
+                schema: "ramflux.envelope.v2".to_owned(),
+                version: 2,
+                domain: "ramflux.envelope.v2".to_owned(),
                 ext: ramflux_protocol::Ext::default(),
                 signed: ramflux_protocol::SignedFields {
                     signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -985,15 +985,15 @@ mod tests {
                 source_device_id: "alice_device".to_owned(),
                 target_delivery_id: "target_b".to_owned(),
                 routing_set_id: None,
-                delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+                delivery_class: ramflux_protocol::DeliveryClass::Message,
                 priority: ramflux_protocol::Priority::Normal,
                 ttl: 3_600,
                 created_at: 1_760_000_000,
                 encrypted_payload: "ciphertext".to_owned(),
                 payload_hash: "payload_hash".to_owned(),
-                delivery_mode: None,
-                collapse_tag: None,
-                report_commitment: None,
+                delivery_mode: Some("durable".to_owned()),
+                collapse_tag: Some("IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI".to_owned()),
+                report_commitment: Some("MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM".to_owned()),
             },
         };
 
@@ -1125,7 +1125,7 @@ mod tests {
         ramflux_node_core::sign_federated_envelope_forward(&mut request, [81; 32])?;
         ramflux_node_core::verify_federated_envelope_forward(
             &request,
-            &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[81; 32]),
         )?;
         let expected = serde_json::to_value(&request.migration_evidence)?;
         for (wire, accepted, outcome) in [

@@ -21,11 +21,11 @@ fn wire_size(envelope: &ramflux_protocol::Envelope) -> anyhow::Result<usize> {
 }
 fn run(origin: &str) -> anyhow::Result<()> {
     for mode in 0..=1 {
-        for over in [false, true] {
+        for size_case in 0..3 {
             let root = ramflux_test_support::TestPath::new()
                 .expect("test: allocate fixture directory")
                 .child(format!(
-                    "entry-bound-{origin}-{mode}-{over}-{}-{}",
+                    "entry-bound-{origin}-{mode}-{size_case}-{}-{}",
                     std::process::id(),
                     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
                 ));
@@ -47,15 +47,28 @@ fn run(origin: &str) -> anyhow::Result<()> {
                 .ext
                 .ext
                 .insert("escaped_metadata".into(), serde_json::json!("\"\\\n".repeat(30)));
-            envelope.encrypted_payload.clear();
-            let base = wire_size(&envelope)?;
-            envelope.encrypted_payload =
-                "x".repeat(ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
+            if size_case > 0 {
+                // The generation-one metadata cap is stricter than the complete-frame cap.
+                // Keep valid ciphertext and authenticate the exact downstream frame boundary.
+                envelope.ext.ext.insert("frame_padding".into(), serde_json::json!(""));
+                let base = wire_size(&envelope)?;
+                let padding = ENTRY_FRAME_BYTE_CAP - base + usize::from(size_case == 2);
+                envelope
+                    .ext
+                    .ext
+                    .insert("frame_padding".into(), serde_json::json!("x".repeat(padding)));
+            }
             envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
                 &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
                 ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
             );
-            assert_eq!(wire_size(&envelope)?, ENTRY_FRAME_BYTE_CAP + usize::from(over));
+            if size_case > 0 {
+                assert_eq!(
+                    wire_size(&envelope)?,
+                    ENTRY_FRAME_BYTE_CAP + usize::from(size_case == 2),
+                    "independent downstream frame boundary must be exact"
+                );
+            }
             if origin == "gateway" {
                 envelope.ext.ext.remove("source_device_authority");
             }
@@ -79,7 +92,7 @@ fn run(origin: &str) -> anyhow::Result<()> {
             )?;
             let value: serde_json::Value = serde_json::from_slice(&response.body)?;
             let delivery = if migration { &value["delivery"] } else { &value };
-            if over {
+            if size_case > 0 {
                 assert_eq!(delivery["outcome"], "payload_too_large", "{value}");
                 assert_eq!(
                     state.resume("point-target", 0, 10),

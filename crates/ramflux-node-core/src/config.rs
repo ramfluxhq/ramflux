@@ -29,6 +29,12 @@ pub struct NodeServiceConfig {
     pub signaling: Option<SignalingConfig>,
     #[serde(default)]
     pub relay: Option<RelayConfig>,
+    /// Gateway client capabilities this node serves.
+    /// Federation publishes this list. The router echoes it on
+    /// `GET /mvp1/session-push-capabilities`. Absent: federation publishes nothing,
+    /// and the router keeps its historical echo of both features.
+    #[serde(default)]
+    pub gateway_client_capabilities: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -105,6 +111,26 @@ pub fn load_config_from_args(
     expected_service_id: &str,
 ) -> Result<Option<NodeServiceConfig>, NodeCoreError> {
     config_from_args(args, expected_service_id, true)
+}
+
+/// Like [`load_config_from_args`], and logs the build version once a configured service starts.
+/// Call it after the tracing subscriber is installed so the line reaches the service log.
+/// # Errors
+/// Returns the same errors as [`load_config_from_args`].
+pub fn load_config_from_args_reporting(
+    args: impl IntoIterator<Item = String>,
+    expected_service_id: &str,
+) -> Result<Option<NodeServiceConfig>, NodeCoreError> {
+    let config = load_config_from_args(args, expected_service_id)?;
+    if let Some(config) = &config {
+        tracing::info!(
+            service = expected_service_id,
+            version = crate::version::VERSION_SHA,
+            node_id = config.node_id,
+            "service starting"
+        );
+    }
+    Ok(config)
 }
 
 /// Reads client configuration without initializing service secrets or creating files.

@@ -21,17 +21,17 @@ impl NativeOperation {
     }
 }
 impl RamfluxClient {
-    pub(crate) fn require_native_sync(
-        &self,
-        root: &str,
-        sender: &str,
-        receiver: &str,
-    ) -> Result<(), SdkError> {
-        for device in [sender, receiver] {
-            self.require_native_operation(
-                &self.device_identity_for_root(root, device)?,
-                NativeOperation::Sync,
-            )?;
+    /// A pairing or own-device sync step must not run while this account's head publication is
+    /// still pending: the installed authority and the adopted head have not yet agreed.
+    pub(crate) fn require_native_publication_settled(&self, root: &str) -> Result<(), SdkError> {
+        if let Some(account) = &self.born_v3_account
+            && account.record().body.account_anchor == root
+            && !crate::custody::pairing::ordinary_session_admitted(
+                self,
+                account.local_account_id(),
+            )?
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
         }
         Ok(())
     }
@@ -105,7 +105,7 @@ mod tests {
             body.devices[0].branch_certificate = Some(primary.certify_branch(certificate)?);
             native.publication.record = primary.sign_record(body)?;
             manifest = crate::prekey::SdkDeviceManifestResponse::from_native((**native).clone())?;
-            fixture.client.persist_fetched_identity_directory(&manifest)?;
+            fixture.client.persist_observed_identity_directory_now(&manifest)?;
             fixture.client.require_current_device_authorization(&identity)?;
             assert!(fixture.client.require_native_operation(&identity, operation).is_err());
             match operation {

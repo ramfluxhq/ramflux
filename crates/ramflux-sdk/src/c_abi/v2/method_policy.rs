@@ -63,6 +63,19 @@ policies! {
     "account.status" => ("account", false, true, false, false),
     "account.switch" => ("account", true, true, false, false),
     "account.unlock" => ("account", true, true, false, false),
+    "attachment.enable" => ("account", true, true, false, false),
+    "attachment.import.begin" => ("account", true, true, false, false),
+    "attachment.import.cancel" => ("account", true, true, false, false),
+    "attachment.import.finish" => ("account", true, true, false, false),
+    "attachment.import.read" => ("account", true, true, false, false),
+    "attachment.import.status" => ("account", false, true, false, false),
+    "attachment.prepare.begin" => ("account", true, true, false, false),
+    "attachment.prepare.cancel" => ("account", true, true, false, false),
+    "attachment.prepare.chunk" => ("account", true, true, false, false),
+    "attachment.prepare.finish" => ("account", true, true, false, false),
+    "attachment.prepare.renew" => ("account", true, true, false, false),
+    "attachment.prepare.status" => ("account", false, true, false, false),
+    "attachment.revoke" => ("account", true, true, false, false),
     "bot.install" => ("bot", true, true, false, false),
     "bot.list" => ("bot", false, true, false, false),
     "bot.revoke" => ("bot", true, true, false, false),
@@ -94,7 +107,7 @@ policies! {
     "contact.safety_number" => ("contact", true, true, false, false),
     "contact.unblock" => ("contact", true, true, false, false),
     "contact.verification.status" => ("contact", false, true, false, false),
-    "contact.verify" => ("contact", true, true, false, false),
+    "contact.verify" => ("contact.verify.cas", true, true, false, false),
     "conversation.directory" => ("conversation", false, true, false, false),
     "conversation.disappearing.expire" => ("conversation", true, true, false, false),
     "conversation.disappearing.set" => ("conversation", true, true, false, false),
@@ -102,7 +115,7 @@ policies! {
     "conversation.mute" => ("conversation", true, true, false, false),
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
-    "device.activate" => ("device", true, true, false, false),
+    "diag.residue" => ("diag", true, false, false, false),
     "device.authorize" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
     "device.migrate" => ("device", true, true, false, false),
@@ -116,7 +129,14 @@ policies! {
     "device.refresh" => ("device", true, true, false, false),
     "device.revoke" => ("device", true, true, false, false),
     "device.sync.export" => ("device", true, true, false, true),
-    "device.sync.import" => ("device", true, true, false, false),
+    "device.transfer.affirm" => ("device", true, true, false, false),
+    "device.transfer.begin" => ("device", true, true, false, false),
+    "device.transfer.cancel" => ("device", true, true, false, false),
+    "device.transfer.confirm" => ("device", true, true, false, false),
+    "device.transfer.join" => ("device", true, true, false, false),
+    "device.transfer.prepare" => ("device", true, true, false, false),
+    "device.transfer.status" => ("device", false, true, false, false),
+    "device.transfer.tail_abandon" => ("device", true, true, false, false),
     "grant.approve" => ("grant", true, true, false, false),
     "grant.create_standing_approval" => ("grant", true, true, false, false),
     "grant.deny" => ("grant", true, true, false, false),
@@ -169,6 +189,7 @@ policies! {
     "message.receive" => ("message", true, true, false, false),
     "message.submit" => ("raw_message", true, true, false, false),
     "conversation.send" => ("conversation", true, true, false, false),
+    // Body requires `expected_revision` (the observed base). The bus refuses a missing base.
     "conversation.edit" => ("conversation", true, true, false, false),
     "conversation.react" => ("conversation", true, true, false, false),
     "conversation.reply" => ("conversation", true, true, false, false),
@@ -195,6 +216,7 @@ policies! {
     "object.put.chunk" => ("object", true, true, false, false),
     "object.put.finish" => ("object", true, true, false, false),
     "object.put.status" => ("object", false, true, false, false),
+    "object.revoke" => ("object", true, true, false, false),
     "object.share" => ("object", true, true, false, false),
     "object.transfer.resume" => ("object", true, true, false, false),
     "object.transfer.status" => ("object", false, true, false, false),
@@ -250,16 +272,96 @@ pub(super) fn allowed(name: &str) -> bool {
         && METHOD_POLICIES.iter().any(|row| row.name == name)
 }
 
-pub(super) fn manifest() -> serde_json::Value {
-    let methods = METHOD_POLICIES
+pub(super) const CONTACT_VERIFY_CAS_CONTRACT: &str = "CONTACT-VERIFY-CAS-01";
+pub(super) const CONTACT_VERIFY_CAS_CAPABILITY: &str = "contact.verify.cas";
+pub(super) const CONTACT_VERIFY_CAS_REQUEST_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyRequest";
+pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
+    "ramflux.message.v1.ContactSafetyVerifyResult";
+/// blake3 of the generated message descriptor set.
+pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
+    "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc";
+/// Immutable product commit whose tree contains this CAS policy and descriptor.
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08";
+
+pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
+    let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
+    let Some(row) = rows.next() else {
+        return false;
+    };
+    if rows.next().is_some() {
+        return false;
+    }
+    allowed("contact.verify")
+        && row.capability == CONTACT_VERIFY_CAS_CAPABILITY
+        && descriptor_hex == CONTACT_VERIFY_CAS_DESCRIPTOR
+        && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
+        && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
+        && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08"
+}
+
+#[cfg(test)]
+pub(super) fn contact_verify_cas_inventory_admits(inventory: &serde_json::Value) -> bool {
+    let Some(methods) = inventory
+        .get("method_policy")
+        .and_then(|policy| policy.get("methods"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let rows = methods
         .iter()
-        .map(|policy| {
-            serde_json::json!({
-                "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
-                "secret_input":policy.secret_input,"secret_output":policy.secret_output,
-                "show_once":policy.show_once,"key_export":requires_key_export(policy.name),
-            })
-        })
+        .filter(|row| row.get("name").and_then(serde_json::Value::as_str) == Some("contact.verify"))
         .collect::<Vec<_>>();
+    let Some(row) = rows.first().filter(|_| rows.len() == 1) else {
+        return false;
+    };
+    row.get("bridge_allowed").and_then(serde_json::Value::as_bool) == Some(true)
+        && row.get("capability").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_CAPABILITY)
+        && row.get("cas_capability").is_none()
+        && row.get("contract").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_CONTRACT)
+        && row.get("request_type").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_REQUEST_TYPE)
+        && row.get("response_type").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_RESPONSE_TYPE)
+        && row.get("message_descriptor_blake3").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_DESCRIPTOR)
+        && row.get("product_pin").and_then(serde_json::Value::as_str)
+            == Some(CONTACT_VERIFY_CAS_PRODUCT_PIN)
+}
+
+fn method_value(policy: &MethodPolicy) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name":policy.name,"capability":policy.capability,"bridge_allowed":allowed(policy.name),
+        "secret_input":policy.secret_input,"secret_output":policy.secret_output,
+        "show_once":policy.show_once,"key_export":requires_key_export(policy.name),
+    });
+    if policy.name == "contact.verify"
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("contract".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_CONTRACT));
+        object
+            .insert("request_type".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_REQUEST_TYPE));
+        object.insert(
+            "response_type".to_owned(),
+            serde_json::json!(CONTACT_VERIFY_CAS_RESPONSE_TYPE),
+        );
+        object.insert(
+            "message_descriptor_blake3".to_owned(),
+            serde_json::json!(CONTACT_VERIFY_CAS_DESCRIPTOR),
+        );
+        object.insert("product_pin".to_owned(), serde_json::json!(CONTACT_VERIFY_CAS_PRODUCT_PIN));
+    }
+    value
+}
+
+pub(super) fn manifest() -> serde_json::Value {
+    // The build script compiles this file alone. Keep the execute predicate
+    // referenced here so that isolated compile still type-checks it.
+    let _ = loaded_cas_descriptor_matches(CONTACT_VERIFY_CAS_DESCRIPTOR);
+    let methods = METHOD_POLICIES.iter().map(method_value).collect::<Vec<_>>();
     serde_json::json!({"abi_major":2,"policy_version":2,"methods":methods})
 }

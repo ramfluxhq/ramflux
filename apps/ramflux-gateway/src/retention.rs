@@ -160,7 +160,7 @@ mod tests {
             device_id: "device".into(),
             target_delivery_id: "target".into(),
             device_epoch: 1,
-            branch_public_key: ramflux_crypto::public_key_base64url_from_seed([52; 32]),
+            branch_public_key: ramflux_crypto::public_key_base64url_from_seed(&[52; 32]),
             supports_forward_ack: false,
             ephemeral_rate: std::sync::Arc::default(),
         };

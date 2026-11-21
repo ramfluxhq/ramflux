@@ -56,7 +56,7 @@ impl Fixture {
             output: root.join("custody output's"),
             root,
             seed,
-            public: ramflux_crypto::public_key_base64url_from_seed([7; 32]),
+            public: ramflux_crypto::public_key_base64url_from_seed(&[7; 32]),
         })
     }
 
@@ -139,7 +139,7 @@ fn init_uses_the_discovery_pin_and_authorizes_the_gateway_signer() -> Result {
     let seed_file = ramflux_node_core::NodeSecret::from_file(&fixture.seed)?;
     assert_eq!(
         values["RAMFLUX_CUSTODY_NODE_PUBLIC_KEY"],
-        seed_file.with_bytes(|seed| ramflux_crypto::public_key_base64url_from_seed(*seed))
+        seed_file.with_bytes(ramflux_crypto::public_key_base64url_from_seed)
     );
     let record = fixture.record()?;
     let now = ramflux_node_core::now_unix_seconds();
@@ -195,7 +195,7 @@ fn init_uses_the_discovery_pin_and_authorizes_the_gateway_signer() -> Result {
         verify_node_identity_record(
             &record,
             "demo.example",
-            &ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            &ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             now
         )
         .is_err()
@@ -350,7 +350,7 @@ fn renew_twice_uses_only_the_deployed_head_and_retains_both_epoch_two_seeds() ->
 fn deployed_record_requires_the_pinned_signature_before_any_preparation() -> Result {
     let mut donor = Fixture::new()?;
     fs::write(&donor.seed, encode_base64url([8; 32]))?;
-    donor.public = ramflux_crypto::public_key_base64url_from_seed([8; 32]);
+    donor.public = ramflux_crypto::public_key_base64url_from_seed(&[8; 32]);
     assert!(donor.run("custody-init", &[])?.status.success());
     let path = donor.values()?["RAMFLUX_CUSTODY_NODE_RECORD_FILE"].clone();
     let fixture = Fixture::new()?;

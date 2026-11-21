@@ -3,9 +3,7 @@
 
 //! Contact-control network steps with conditional actor-owned consent and pair commits.
 
-use super::{
-    Decision, ENVELOPE_SCHEMA, Intent, TTL, conversation, invalid, key, material_hash, queue,
-};
+use super::{Decision, Intent, TTL, conversation, invalid, key, material_hash, queue};
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::contact_requests::{
     Metadata,
@@ -419,36 +417,15 @@ fn body(
     if peer.devices.len() > 64 {
         return Err(invalid("contact request device fanout exceeds budget"));
     }
-    let (approval, body) = if own.custody.is_some() {
-        (
-            Some(native_delivery::prepare_approval(
-                &account.client,
-                &plan.config,
-                &plan.intent,
-                &own,
-            )?),
-            Zeroizing::new(Vec::new()),
-        )
-    } else {
-        let intent = &plan.intent;
-        let control = super::super::wire::sign(
-            account.client.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            super::super::wire::Body {
-                schema: super::super::wire::DOMAIN.into(),
-                kind: intent.kind,
-                request_id: intent.request_id.clone(),
-                requester_root: intent.requester_root.clone(),
-                target_root: intent.target_root.clone(),
-                actor_root: plan.own_root.clone(),
-                issued_at: intent.issued_at,
-                expires_at: intent.expires_at,
-                nonce: intent.nonce.clone(),
-                note: intent.note.clone(),
-                manifest: own.clone(),
-            },
-        )?;
-        (None, Zeroizing::new(serde_json::to_vec(&control)?))
-    };
+    if own.custody.is_none() {
+        return Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Authority,
+            reason: "native custody consent authority required".into(),
+        });
+    }
+    let approval =
+        Some(native_delivery::prepare_approval(&account.client, &plan.config, &plan.intent, &own)?);
+    let body = Zeroizing::new(Vec::new());
     Ok(Some(BodyPlan { plan, own, devices: peer.devices, approval, body }))
 }
 fn approved_body(
@@ -531,18 +508,16 @@ fn seal(
         return Ok(None);
     }
     let mut message = plan.message.clone();
-    let mut sealed = account.client.seal_routed_prepared(
+    let sealed = account.client.seal_generated_routed_prepared(
         &plan.plan.config,
         &message,
         &plan.body,
         crate::client::routed::Route::control(),
         material,
     )?;
-    if plan.plan.intent.kind == Decision::Request {
-        sealed.packet.schema = ENVELOPE_SCHEMA.into();
-    }
     // Control carrier; no Direct report payload.
-    crate::dm::gateway_envelope_from_sealed(&plan.plan.config, &mut message, sealed, None).map(Some)
+    crate::dm::gateway_generated_envelope_from_sealed(&plan.plan.config, &mut message, sealed)
+        .map(Some)
 }
 fn complete(
     account: &LocalBusAccountState,

@@ -3,10 +3,11 @@
 
 //! Signed content discriminator and untouched protocol payload bytes inside ordinary E2EE.
 use crate::{RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use ramflux_protocol::{RpcKind, SurfaceAction, SurfaceEvent, SurfaceRpc};
 use serde::{Deserialize, Serialize};
 pub(crate) const MAX_CARRIER_BYTES: usize = 1024 * 1024;
-pub(crate) const PREFIX: &[u8] = b"ramflux.surface.v2\n";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PayloadKind {
@@ -17,9 +18,19 @@ pub(crate) enum PayloadKind {
     FunctionResponse,
     Error,
 }
+// Some native DTOs erase protobuf field presence. Retain the signed typed view only
+// when rebuilding would change it; this private storage record never selects a wire codec.
+#[derive(Clone, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TypedEncoding {
+    pub(super) fingerprint: String,
+    pub(super) encoded: String,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Carrier {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) typed: Option<TypedEncoding>,
     pub schema: String,
     pub content_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,11 +49,6 @@ pub(crate) struct Carrier {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<super::SnapshotProof>,
 }
-#[derive(Serialize)]
-struct Signing {
-    domain: &'static str,
-    body: serde_json::Value,
-}
 impl PayloadKind {
     pub(crate) const fn rpc_kind(&self) -> Option<RpcKind> {
         match self {
@@ -60,13 +66,6 @@ pub(crate) enum Payload {
     ActionReceipt { original: Box<Carrier>, action: SurfaceAction },
 }
 impl Carrier {
-    fn signing(&self) -> Result<Signing, SdkError> {
-        let mut value = serde_json::to_value(self)?;
-        if let Some(object) = value.as_object_mut() {
-            object.remove("signature");
-        }
-        Ok(Signing { domain: ramflux_protocol::domain::SURFACE_CARRIER, body: value })
-    }
     pub fn payload(&self) -> Result<Payload, SdkError> {
         let bytes = ramflux_protocol::decode_base64url(&self.wire_base64)
             .map_err(|_| invalid("invalid surface wire encoding"))?;
@@ -129,9 +128,7 @@ impl Carrier {
         Ok(payload)
     }
     pub fn bytes(&self) -> Result<Vec<u8>, SdkError> {
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(self)?);
-        Ok(bytes)
+        Ok(self.to_generated()?.encode_to_vec())
     }
     fn validate_identifiers(&self) -> Result<(), SdkError> {
         if [self.posted_at, self.updated_at]
@@ -158,18 +155,18 @@ impl Carrier {
         Ok(())
     }
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
-        let Some(json) = bytes.strip_prefix(PREFIX) else {
-            return Ok(None);
-        };
         if bytes.len() > MAX_CARRIER_BYTES {
             return Err(invalid("surface carrier exceeds byte budget"));
         }
-        let carrier: Self = ramflux_protocol::parse_i_json(json)?;
-        if (carrier.payload_kind == PayloadKind::Action && bytes.len() > 256 * 1024)
-            || (carrier.payload_kind == PayloadKind::Event && bytes.len() > 512 * 1024)
-        {
-            return Err(invalid("surface action carrier exceeds byte budget"));
+        if !matches!(
+            g::validation::scan_message("SurfaceCarrier", bytes, g::registry::COMPILED_LAYER),
+            Ok(g::validation::ScanOutcome::Supported)
+        ) {
+            return Ok(None);
         }
+        let value = g::SurfaceCarrier::decode(bytes)
+            .map_err(|_| invalid("invalid typed Surface carrier"))?;
+        let carrier = Self::from_generated(&value)?;
         carrier.validate_identifiers()?;
         Ok(Some(carrier))
     }
@@ -202,7 +199,17 @@ impl RamfluxClient {
                 .max(carrier.posted_at.unwrap_or(0))
                 .max(prior.as_ref().and_then(|v| v["updated_at"].as_i64()).unwrap_or(0)),
         );
-        carrier.signature = ramflux_crypto::sign_with_device_branch(device, &carrier.signing()?)?;
+        let mut generated = carrier.to_generated()?;
+        generated.signature.clear();
+        carrier.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &crate::client::task::generated::typed_transcript(
+                "SurfaceCarrier",
+                &generated.encode_to_vec(),
+            )?,
+            device,
+        );
+        generated.signature = carrier.signature.clone();
+        carrier.retain_generated_encoding(&generated)?;
         // Apply the same transport budget before sending as on receive.
         if carrier.bytes()?.len()
             > match carrier.payload_kind {
@@ -241,10 +248,10 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("surface signer key missing"))?
                 .to_owned()
         };
-        ramflux_crypto::verify_device_branch_signature(
-            &public,
-            &carrier.signing()?,
+        ramflux_crypto::verify_canonical_signature(
+            &carrier.typed_signing()?,
             &carrier.signature,
+            &public,
         )?;
         let payload = carrier.payload()?;
         Ok(payload)

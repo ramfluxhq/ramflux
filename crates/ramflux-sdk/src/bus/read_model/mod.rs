@@ -131,7 +131,7 @@ pub(super) fn validate(request: &LocalBusFrame) -> Result<(), SdkError> {
         }
     }
     match request.method.as_str() {
-        "account.create" | "account.itest_legacy.create" => {
+        "account.create" => {
             let _: LocalBusAccountCreateRequest = serde_json::from_value(request.body.clone())
                 .map_err(|_| invalid("invalid account request"))?;
         }
@@ -189,3 +189,6 @@ fn legacy_list(
     super::io::encode_local_bus_frame(&local_bus_response(request, response.clone()))?;
     Ok(response)
 }
+
+#[cfg(test)]
+mod native_capture_tests;

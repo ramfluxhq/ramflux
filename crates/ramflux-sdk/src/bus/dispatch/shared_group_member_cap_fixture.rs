@@ -45,7 +45,8 @@ pub(super) fn populate(
     let content = json!({"domain":ramflux_protocol::group_state::GROUP_STATE_SNAPSHOT_DOMAIN,
         "genesis":snapshot.genesis, "creator":snapshot.creator, "transfers":snapshot.transfers,
         "group_id":snapshot.group_id, "epoch":snapshot.epoch, "previous_hash":snapshot.previous_hash,
-        "state":core, "issued_at":snapshot.issued_at});
+        "state":core, "issued_at":snapshot.issued_at, "service_order":snapshot.service_order,
+        "service_events":snapshot.service_events});
     snapshot.state_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::group_state::GROUP_STATE_CONTENT_HASH_DOMAIN,
         &ramflux_protocol::canonical_json_bytes(&content)?,

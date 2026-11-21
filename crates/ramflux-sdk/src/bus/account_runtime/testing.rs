@@ -18,6 +18,8 @@ use crate::{
 pub struct AccountSessionHarness {
     runtime: AccountRuntime,
     event_router: tokio::task::JoinHandle<()>,
+    _preempt: watch::Sender<u64>,
+    _shutdown: watch::Sender<bool>,
 }
 
 /// Explicit authenticated coordinates supplied by a real-component fixture.
@@ -112,8 +114,6 @@ impl AccountSessionHarness {
         capabilities: FixtureCapabilities,
     ) -> Result<Self, SdkError> {
         let FixtureCapabilities { incarnation, ephemeral } = capabilities;
-        let id = client.account_db()?.local_account_id.clone();
-        let root = index.root().to_path_buf();
         let principal = client.surface_local_root_commitment()?;
         let mut engine = GatewaySessionEngine::with_test_transport(config.clone(), stream);
         engine.session = session;
@@ -125,7 +125,7 @@ impl AccountSessionHarness {
                 )
                 .map_err(|_| SdkError::GatewaySessionNotEstablished)?,
             },
-            None => crate::gateway::session_push::SessionMode::Compat,
+            None => crate::gateway::session_push::SessionMode::Direct,
         };
         let mut account =
             super::super::state::LocalBusAccountState::disconnected(client, config, principal);
@@ -133,6 +133,15 @@ impl AccountSessionHarness {
         account.timeouts.receive_min = Duration::from_secs(600);
         account.timeouts.receive_max = Duration::from_secs(600);
         account.timeouts.keepalive_idle = Duration::from_secs(600);
+        Box::pin(Self::start_account(index, account)).await
+    }
+
+    pub(super) async fn start_account(
+        index: AccountIndex,
+        account: super::super::state::LocalBusAccountState,
+    ) -> Result<Self, SdkError> {
+        let id = account.client.account_db()?.local_account_id.clone();
+        let root = index.root().to_path_buf();
         let timeouts = account.timeouts.clone();
         let state = LocalBusDaemonState {
             account_index: Some(index),
@@ -145,8 +154,8 @@ impl AccountSessionHarness {
         };
         let (_, receiver) = mpsc::channel(2);
         let (_, lifecycle) = mpsc::channel(2);
-        let (_, preempt) = watch::channel(0);
-        let (_, shutdown) = watch::channel(false);
+        let (preempt_owner, preempt) = watch::channel(0);
+        let (shutdown_owner, shutdown) = watch::channel(false);
         let (events, mut batches) = mpsc::channel::<super::super::events::EventBatch>(2);
         let event_router = tokio::spawn(async move {
             let mut subscribers = BTreeMap::new();
@@ -175,13 +184,15 @@ impl AccountSessionHarness {
             connection_work,
             ledger: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
+            pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
             #[cfg(test)]
             receive_gate_hook: None,
             #[cfg(test)]
             courier_events: None,
         };
         runtime.start_connection()?;
-        let mut harness = Self { runtime, event_router };
+        let mut harness =
+            Self { runtime, event_router, _preempt: preempt_owner, _shutdown: shutdown_owner };
         let handle = harness.handle()?;
         harness.drive(handle.require_live(Duration::from_secs(10))).await.map_err(|error| {
             SdkError::GatewaySessionRejected(format!("fixture live admission: {error:?}"))
@@ -256,7 +267,7 @@ impl AccountSessionHarness {
             .accounts
             .get_mut(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
-        account.client.persist_fetched_identity_directory(&manifest)?;
+        account.client.persist_observed_identity_directory_now(&manifest)?;
         account.client.establish_friend_link(
             "calls-fixture",
             &account.principal_commitment,
@@ -271,8 +282,12 @@ impl AccountSessionHarness {
         let mut ids = Vec::new();
         for seed in [91u8, 92] {
             let id = ramflux_protocol::encode_base64url([seed; 16]);
-            let thread = format!("call-thread-{seed}");
-            account.client.account_db()?.persist_client_record("conversation",&thread,&serde_json::json!({"kind":"direct","group_id":null,"participants":[account.gateway_config.principal_id,manifest.principal_id]}))?;
+            let thread = ramflux_protocol::message::dm_scope::derive(
+                &account.principal_commitment,
+                &manifest.principal_commitment,
+            )
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+            account.client.account_db()?.persist_client_record("conversation",&thread,&serde_json::json!({"kind":"direct","group_id":null,"participants":[account.gateway_config.principal_id,manifest.principal_id],"participant_roots":[account.principal_commitment,manifest.principal_commitment]}))?;
             let mut call = crate::client::call::state::LiveCall::outgoing(
                 id.clone(),
                 thread,
@@ -332,10 +347,18 @@ impl AccountSessionHarness {
             {
                 return Ok(());
             }
-            let work = tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
+            let work = match tokio::time::timeout_at(deadline, self.runtime.connection_work.recv())
                 .await
-                .map_err(|_| SdkError::NetworkingPending)?
-                .ok_or(SdkError::GatewaySessionNotEstablished)?;
+            {
+                Ok(Some(work)) => work,
+                Ok(None) => return Err(SdkError::GatewaySessionNotEstablished),
+                Err(_) => {
+                    return Err(SdkError::InboundPending(format!(
+                        "native call receive deadline: {}",
+                        self.diagnostics()?
+                    )));
+                }
+            };
             Box::pin(self.runtime.apply_connection_work(work)).await?;
         }
     }
@@ -483,7 +506,11 @@ impl AccountSessionHarness {
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
         let message = crate::GatewayDirectMessage {
-            conversation_id: "transport-control".into(),
+            conversation_id: ramflux_protocol::message::dm_scope::derive(
+                &account.client.surface_local_root_commitment()?,
+                peer_root,
+            )
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?,
             message_id: "durable-control".into(),
             envelope_id: "account-durable-control".into(),
             source_principal_id: account.gateway_config.principal_id.clone(),
@@ -600,9 +627,15 @@ impl AccountSessionHarness {
             .accounts
             .get(&self.runtime.id)
             .ok_or(SdkError::AccountDbNotUnlocked)?;
-        Ok(
-            serde_json::json!({"connection":self.handle()?.snapshot(), "ledger":format!("{:?}", account.client.account_db()?.receive_status_counters(&account.target_delivery_id)?), "journal":format!("{:?}",account.client.account_db()?.journal_bounds()?), "startup":account.client.account_db()?.receive_startup(&account.target_delivery_id)?}),
-        )
+        let db = account.client.account_db()?;
+        let journal = db.journal_after(0, 16)?.into_iter().map(|event| serde_json::json!({
+            "seq":event.seq, "topic":event.topic,
+            "reason":event.body.get("reason"), "reason_code":event.body.get("reason_code"),
+            "code":event.body.get("code"), "error_code":event.body.get("error_code"), "keys":event.body.as_object().map(|body| body.keys().take(16).cloned().collect::<Vec<_>>()),
+        })).collect::<Vec<_>>();
+        Ok(serde_json::json!({"voice_persisted":db.actor_state_usage("voice/public/")?.0,
+                "voice_resident":account.client.voice_calls.len(), "journal_events":journal,
+                "connection":self.handle()?.snapshot(), "ledger":format!("{:?}", account.client.account_db()?.receive_status_counters(&account.target_delivery_id)?), "journal":format!("{:?}",account.client.account_db()?.journal_bounds()?), "startup":account.client.account_db()?.receive_startup(&account.target_delivery_id)?}))
     }
 
     /// Stop all account-owned session work before ordinary database reopen.
@@ -623,3 +656,7 @@ impl Drop for AccountSessionHarness {
         self.event_router.abort();
     }
 }
+
+#[path = "testing_pairing.rs"]
+mod pairing;
+pub use pairing::{NativePairingNetworkFixture, NativePairingSessionFixture};

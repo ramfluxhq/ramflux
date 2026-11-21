@@ -44,15 +44,7 @@ async fn held_inbound_pending_logs_one_info_line_with_sequence_kind_and_reason()
     let mail: Shared = Arc::default();
     let mut source = a.account(None, mail.clone())?;
     let mut engine = source.session_client().await?;
-    source
-        .client
-        .send_plaintext_direct_message_without_franking(
-            &mut engine,
-            a.message(&b, "held-message"),
-            b"held body",
-            crate::client::routed::Route::direct(),
-        )
-        .await?;
+    a.send_text(&source.client, &mut engine, a.message(&b, "held-message"), b"held body").await?;
     source.install_test_session(engine);
     let mut entry =
         mail.lock().map_err(|_| "mail lock")?.messages.first().cloned().ok_or("entry")?;

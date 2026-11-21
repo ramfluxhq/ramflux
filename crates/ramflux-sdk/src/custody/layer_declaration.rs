@@ -41,8 +41,7 @@ pub(crate) fn candidate(
         || expires_at == 0
         || validity == 0
         || validity > MAX_LAYER_DECLARATION_VALIDITY_SECONDS
-        || max_layer < MESSAGE_LAYER_FLOOR
-        || max_layer > MAX_MESSAGE_LAYER
+        || !(MESSAGE_LAYER_FLOOR..=MAX_MESSAGE_LAYER).contains(&max_layer)
         || expires_at > ramflux_protocol::MAX_SAFE_JSON_INTEGER
     {
         return Err(invalid());
@@ -149,8 +148,7 @@ impl DeclarationPins {
             || declaration.device.device_id != device.device_id
             || declaration.device.device_epoch != device.device_epoch
             || declaration.declaration_sequence == 0
-            || declaration.max_layer < MESSAGE_LAYER_FLOOR
-            || declaration.max_layer > MAX_MESSAGE_LAYER
+            || !(MESSAGE_LAYER_FLOOR..=MAX_MESSAGE_LAYER).contains(&declaration.max_layer)
         {
             return Err(invalid());
         }
@@ -261,38 +259,38 @@ mod tests {
     #[test]
     fn declaration_pin_rejects_rollback() -> Result<(), Box<dyn std::error::Error>> {
         let mut pins = DeclarationPins::default();
-        pins.observe("anchor", &device(4, 2, 86_500), 11, "head-11")?;
+        pins.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_500), 11, "head-11")?;
         let saved = serde_json::to_vec(&pins)?;
         let mut restored: DeclarationPins = serde_json::from_slice(&saved)?;
 
         // A newer native head can preserve the exact declaration, including after expiry.
-        restored.observe("anchor", &device(4, 2, 86_500), 12, "head-12")?;
+        restored.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_500), 12, "head-12")?;
         assert_eq!(restored.devices.first().map(|pin| pin.native_epoch), Some(12));
 
         // Lower declaration sequence, stale native head, foreign device epoch, and equal-sequence
         // conflict each fail independently and leave the pin unchanged.
         let before = restored.clone();
         assert!(matches!(
-            restored.observe("anchor", &device(3, 2, 200), 13, "head-13"),
+            restored.observe("anchor", &device(3, MAX_MESSAGE_LAYER, 200), 13, "head-13"),
             Err(SdkError::CustodyForkFenced)
         ));
         assert_eq!(restored, before);
         assert!(matches!(
-            restored.observe("anchor", &device(4, 2, 86_500), 11, "head-11"),
+            restored.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_500), 11, "head-11"),
             Err(SdkError::CustodyForkFenced)
         ));
         assert_eq!(restored, before);
         assert!(matches!(
-            restored.observe("anchor", &device(4, 2, 86_500), 12, "fork-head-12"),
+            restored.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_500), 12, "fork-head-12"),
             Err(SdkError::CustodyForkFenced)
         ));
         assert_eq!(restored, before);
         assert!(matches!(
-            restored.observe("anchor", &device(4, 2, 86_499), 13, "head-13"),
+            restored.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_499), 13, "head-13"),
             Err(SdkError::CustodyForkFenced)
         ));
         assert_eq!(restored, before);
-        let mut foreign = device(5, 2, 200);
+        let mut foreign = device(5, MAX_MESSAGE_LAYER, 200);
         foreign
             .message_layer
             .as_mut()
@@ -305,7 +303,7 @@ mod tests {
             Err(SdkError::CustodySetupInvalid)
         ));
         assert_eq!(restored, before);
-        let mut wrong_account = device(5, 2, 200);
+        let mut wrong_account = device(5, MAX_MESSAGE_LAYER, 200);
         wrong_account
             .message_layer
             .as_mut()
@@ -319,22 +317,21 @@ mod tests {
         ));
         assert_eq!(restored, before);
         assert!(matches!(
-            restored.observe("anchor", &device(5, 1, 200), 13, "head-13"),
+            restored.observe("anchor", &device(5, MESSAGE_LAYER_FLOOR - 1, 200), 13, "head-13"),
             Err(SdkError::CustodySetupInvalid)
         ));
         assert_eq!(restored, before);
 
         let mut withdrawn = before.clone();
-        let mut absent = device(4, 2, 86_500);
+        let mut absent = device(4, MAX_MESSAGE_LAYER, 86_500);
         absent.message_layer = None;
         withdrawn.observe("anchor", &absent, 12, "head-12")?;
         assert!(matches!(
-            withdrawn.observe("anchor", &device(4, 2, 86_500), 13, "head-13"),
+            withdrawn.observe("anchor", &device(4, MAX_MESSAGE_LAYER, 86_500), 13, "head-13"),
             Err(SdkError::CustodyForkFenced)
         ));
 
-        // A genuinely higher sequence may lower only within the declared supported range;
-        // S10a's floor equals its maximum, so the floor is the sole admissible value here.
+        // A higher sequence may lower the declaration only within the supported range.
         restored.observe("anchor", &device(5, MESSAGE_LAYER_FLOOR, 200), 13, "head-13")?;
         assert_eq!(restored.devices.first().map(|pin| pin.declaration_sequence), Some(5));
         Ok(())

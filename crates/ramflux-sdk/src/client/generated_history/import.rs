@@ -12,6 +12,11 @@ impl RamfluxClient {
         sibling: &ramflux_crypto::RootQualifiedDeviceRef,
         item: &g::HistoryItem,
     ) -> Result<bool, SdkError> {
+        if crate::client::contact_verification_cas::history_item_carries_safety_grant(
+            &item.exact_inner,
+        ) {
+            return Ok(false);
+        }
         if sibling.root_commitment() != self.own_account_anchor()? {
             return Err(EvidenceError::EditAuthorMismatch.into());
         }

@@ -118,31 +118,15 @@ fn sender_with_seed(target: &str, seed: u8) -> TestResult<crate::ForwardedEnvelo
             external_human_primary: None,
         },
     )?;
-    let mut envelope = ramflux_protocol::Envelope {
-        schema: "ramflux.envelope.v1".into(),
-        version: 1,
-        domain: "ramflux.envelope.v1".into(),
-        ext: ramflux_protocol::Ext::default(),
-        signed: ramflux_protocol::SignedFields {
-            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
-            signature: String::new(),
-            signing_key_id: "sender".into(),
-        },
-        envelope_id: "forward-test".into(),
-        source_principal_id: branch.principal_id.clone(),
-        source_device_id: branch.device_id.clone(),
-        target_delivery_id: target.into(),
-        routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority: ramflux_protocol::Priority::Normal,
-        ttl: 3600,
-        created_at: i64::try_from(now)?,
-        encrypted_payload: "ciphertext".into(),
-        payload_hash: hash(76),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
-    };
+    let mut envelope = crate::test_support::federation_fixtures::envelope(
+        "forward-test",
+        target,
+        ramflux_protocol::DeliveryClass::Message,
+    );
+    envelope.source_principal_id = branch.principal_id.clone();
+    envelope.source_device_id = branch.device_id.clone();
+    envelope.created_at = i64::try_from(now)?;
+    envelope.signed.signing_key_id = "sender".into();
     envelope.ext.ext.insert("source_root_commitment".into(), json!(record.body.account_anchor));
     envelope.signed.signature =
         ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &envelope)?;
@@ -386,7 +370,7 @@ fn verified_forward(
 ) -> TestResult<crate::ForwardedEnvelopeRequest> {
     crate::verify_federated_envelope_forward(
         request,
-        &ramflux_crypto::public_key_base64url_from_seed([81; 32]),
+        &ramflux_crypto::public_key_base64url_from_seed(&[81; 32]),
     )?;
     Ok(crate::ForwardedEnvelopeRequest {
         peer_node_id: "test-peer".into(),

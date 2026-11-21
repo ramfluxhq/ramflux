@@ -39,12 +39,9 @@ impl NodeServiceSigningKey {
 
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        let public_key_bytes = ramflux_crypto::public_key_bytes_from_seed(seed);
-        Self {
-            seed,
-            public_key_bytes,
-            public_key_base64url: ramflux_crypto::public_key_base64url_from_seed(seed),
-        }
+        let public_key_bytes = ramflux_crypto::public_key_bytes_from_seed(&seed);
+        let public_key_base64url = ramflux_crypto::public_key_base64url_from_seed(&seed);
+        Self { seed, public_key_bytes, public_key_base64url }
     }
 
     #[must_use]

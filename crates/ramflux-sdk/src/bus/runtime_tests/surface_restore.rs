@@ -18,6 +18,7 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
         &text_snapshot("surface", "Persisted", "saved"),
     )?)?;
     let carrier = Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
@@ -37,6 +38,44 @@ fn persisted_surface(root: &Path) -> Result<Value, SdkError> {
     let carrier = account.client.sign_surface_carrier(carrier)?;
     assert!(account.client.stage_surface_outgoing(&carrier, None)?.accepted);
     account.client.surface_get("surface", 0, None)
+}
+
+async fn persisted_born_surface(root: &Path) -> Result<Value, SdkError> {
+    let born = runtime_tests::born_account(
+        root,
+        "alice",
+        "alice",
+        "device-alice",
+        b"actor-test-secret",
+        "target",
+    )
+    .await?;
+    let create = crate::SurfaceSendRequest::event(&create_frame(
+        "thread",
+        &text_snapshot("surface", "Persisted", "saved"),
+    )?)?;
+    let carrier = Carrier {
+        typed: None,
+        schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
+        content_type: "surface".into(),
+        posted_at: None,
+        updated_at: None,
+        payload_kind: PayloadKind::Event,
+        conversation_id: "thread".into(),
+        surface_id: "surface".into(),
+        message_id: create.message_id,
+        sender_principal_id: "alice".into(),
+        sender_device_id: "device-alice".into(),
+        author_principal_id: "alice".into(),
+        wire_base64: create.wire_base64,
+        signature: String::new(),
+        snapshot: None,
+    };
+    let carrier = born.state.client.sign_surface_carrier(carrier)?;
+    assert!(born.state.client.stage_surface_outgoing(&carrier, None)?.accepted);
+    let expected = born.state.client.surface_get("surface", 0, None)?;
+    drop(born);
+    Ok(expected)
 }
 fn command(method: &str, body: Value, outbound: mpsc::Sender<LocalBusFrame>) -> AccountCommand {
     AccountCommand {
@@ -64,7 +103,7 @@ fn enqueue(
 async fn surface_reads_queued_during_restart_restore_match_warm_reader_results()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = runtime_tests::root("surface-restore");
-    let expected = persisted_surface(&root)?;
+    let expected = persisted_born_surface(&root).await?;
     assert_eq!(expected["version"], 1);
     let index = AccountIndex::open(&root)?;
     let (events, mut batches) = mpsc::channel::<crate::bus::events::EventBatch>(64);

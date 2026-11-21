@@ -6,8 +6,9 @@ pub(crate) mod account_runtime;
 pub(crate) use account_runtime::apply_ack_flush;
 mod ack_cache;
 mod actor;
+pub(crate) mod attachment_plane;
 mod attachment_scheduler;
-mod backup_jobs;
+pub(crate) mod backup_jobs;
 pub mod client;
 mod command_admission;
 mod connection;
@@ -16,6 +17,7 @@ mod control_state;
 pub(crate) mod couriers;
 mod creation_client;
 mod creation_confirm;
+pub(crate) mod credentials;
 #[cfg(test)]
 #[path = "tests/native_actor.rs"]
 pub(crate) mod native_actor;
@@ -42,10 +44,9 @@ pub mod io;
 mod journal;
 mod lifecycle;
 mod lifecycle_registry;
-mod message_projection;
 mod metadata;
 mod method_table;
-mod mutation_intent;
+pub(crate) mod mutation_intent;
 mod mutations;
 pub(crate) mod native_account;
 mod networking_events;
@@ -71,6 +72,8 @@ pub use protocol::*;
 
 #[cfg(test)]
 pub(crate) mod runtime_tests;
+#[cfg(test)]
+pub(crate) mod test_gateway;
 
 mod task_courier;
 mod task_courier_apply;
@@ -83,6 +86,9 @@ mod transport_security_tests;
 pub(crate) mod outbound;
 
 mod own_contact_backfill;
+mod pairing;
+#[cfg(test)]
+pub(crate) use pairing::unlock_for_test;
 
 pub(crate) mod contact_backpressure;
 

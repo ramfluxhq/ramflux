@@ -53,7 +53,7 @@ fn details(value: &Value, code: &Code) -> Details {
                 return Details::Generated(ErrorDetails::ResyncRequired { cursor, floor, head });
             }
         }
-        "edit_conflict" | "EditConflict" => {
+        "edit_conflict" => {
             if let (Some(target), Some(expected), Some(received)) = (
                 value.get("target").and_then(Value::as_str),
                 number("expected"),

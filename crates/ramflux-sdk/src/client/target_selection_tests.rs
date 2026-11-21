@@ -61,7 +61,7 @@ fn native_of(manifest: &SdkDeviceManifestResponse) -> TestResult<CustodyManifest
 }
 
 fn persist_declared(fixture: &Fixture, manifest: &SdkDeviceManifestResponse) -> TestResult {
-    fixture.client.persist_fetched_identity_directory(manifest)?;
+    fixture.client.persist_observed_identity_directory_now(manifest)?;
     Ok(())
 }
 
@@ -153,6 +153,16 @@ fn sign_layers(
     layers: &[(&str, &ramflux_crypto::DeviceBranch, u64, u64)],
     issued: u64,
 ) -> TestResult {
+    sign_layers_at(fixture, native, layers, issued, MESSAGE_LAYER_FLOOR)
+}
+
+fn sign_layers_at(
+    fixture: &Fixture,
+    native: &mut CustodyManifest,
+    layers: &[(&str, &ramflux_crypto::DeviceBranch, u64, u64)],
+    issued: u64,
+    max_layer: u32,
+) -> TestResult {
     let primary = primary_key(fixture)?;
     let mut body = native.publication.record.body.clone();
     body.previous_record_hash =
@@ -171,7 +181,7 @@ fn sign_layers(
                 device_id: (*device_id).into(),
                 device_epoch: device.device_epoch,
             },
-            MESSAGE_LAYER_FLOOR,
+            max_layer,
             1,
             *layer_issued,
             *layer_expires,
@@ -289,12 +299,9 @@ fn shared_group(
     group_id: &str,
 ) -> TestResult {
     persist_declared(owner, owner_manifest)?;
-    let primary = owner
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native")?
-        .group_primary(owner.vault.as_ref())?;
+    let current =
+        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
+    let primary = current.group_primary(owner.vault.as_ref())?;
     owner.client.shared_group_create_with_primary(
         group_id,
         "thread",
@@ -436,12 +443,9 @@ async fn membership_change_rebuilds_unsubmitted_representation() -> TestResult {
     assert_eq!(unchanged.variant_counter_high_water, 1);
     assert_eq!(plan.representations[0].variant_counter, 1);
     assert_eq!(unchanged.representations[0].variant_counter, 1);
-    let primary = owner
-        .client
-        .born_v3_account
-        .as_ref()
-        .ok_or("native")?
-        .group_primary(owner.vault.as_ref())?;
+    let current =
+        load_account(&owner.root.0, &owner.client.account_db()?.local_account_id, wall_now()?)?;
+    let primary = current.group_primary(owner.vault.as_ref())?;
     let bob_id = bob.client.owned_device_identity()?;
     let reads = Cell::new(0);
     let rebuilt = select_with_current_membership(|| {
@@ -568,18 +572,18 @@ async fn offline_over_24h_still_receives_floor_in_dm_group_and_own_copy() -> Tes
 }
 
 #[test]
-fn schema_gate_off_skips_candidate_plan() -> TestResult {
-    assert!(!schema_v1_selected());
-    assert_eq!(ACTIVE_STORAGE_GENERATION, 0);
-    assert_eq!(MESSAGE_SCHEMA_V1_GENERATION, 1);
+fn active_schema_builds_candidate_plan() {
+    assert_eq!(ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, "schema v1 must be active");
     let built = Cell::new(false);
     let plan = RamfluxClient::candidate_target_plan(|| {
         built.set(true);
         Err(SdkError::CustodySetupInvalid)
-    })?;
-    assert!(plan.is_none());
-    assert!(!built.get(), "gate-off adapters must not construct a selection request");
-    Ok(())
+    });
+    assert!(
+        matches!(plan, Err(SdkError::CustodySetupInvalid)),
+        "selection must propagate authority refusal"
+    );
+    assert!(built.get(), "active adapters must construct the real selection request");
 }
 
 #[test]
@@ -933,4 +937,189 @@ fn group_logical_event_id_is_message_id_not_group_id() -> TestResult {
     assert_ne!(generated, "g1");
     assert_ne!(generated, "");
     Ok(())
+}
+
+/// Primary declares layer 4; the enrolled secondary has never published a declaration.
+fn layer4_roster(
+    fixture: &Fixture,
+    secondary: Option<&str>,
+    issued: u64,
+) -> TestResult<SdkDeviceManifestResponse> {
+    let mut native = native_of(&fixture.manifest)?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let account = load_account(&fixture.root.0, &id, issued)?;
+    let (_, primary_branch) =
+        account.credentials(fixture.vault.as_ref(), &fixture.config.device_id, issued)?;
+    if let Some(secondary) = secondary {
+        enroll_sibling(fixture, &mut native, secondary, issued)?;
+    }
+    let primary_id = fixture.config.device_id.clone();
+    sign_layers_at(
+        fixture,
+        &mut native,
+        &[(primary_id.as_str(), &primary_branch.signing, issued, issued + 3_600)],
+        issued,
+        COMPILED_LAYER,
+    )?;
+    Ok(SdkDeviceManifestResponse::from_native(native)?)
+}
+
+fn assert_layer_refusal(result: Result<(), SdkError>, required: u32) -> TestResult {
+    match result {
+        Err(SdkError::LocalBusRefused { code, body, .. }) if code == "PeerUpgradeRequired" => {
+            assert_eq!(body["required_layer"], required, "refusal must name the required layer");
+            assert_eq!(body["retry_after_ms"], RETRY_AFTER_MS, "refusal carries the fixed hint");
+            Ok(())
+        }
+        other => Err(format!("expected a layer refusal, got {other:?}").into()),
+    }
+}
+
+/// MEDIA-LAYER-DECL-01 section 1: the sender's own declaration is not a send gate, and a
+/// device without a layer-4 declaration (a secondary until LAYER-SECONDARY-01) is not a layer-4
+/// receive target in any scope.
+#[tokio::test]
+async fn undeclared_device_is_not_a_layer_four_target_in_any_scope() -> TestResult {
+    crate::client::native_test_support::watchdog::within(undeclared_device_scopes())
+        .await
+        .map_err(|_| "test: deadline exceeded")?
+}
+
+async fn undeclared_device_scopes() -> TestResult {
+    let owner = Fixture::with_device("m4-owner", "owner").await?;
+    let sender = Fixture::with_device("m4-sender", "sender").await?;
+    let member = Fixture::with_device("m4-member", "member").await?;
+    let undeclared = Fixture::with_device("m4-undeclared", "undeclared").await?;
+    let issued = wall_now()? + 1;
+    let owner_m = layer4_roster(&owner, Some("phone"), issued)?;
+    let owner_primary_only = layer4_roster(&owner, None, issued)?;
+    let member_m = layer4_roster(&member, None, issued)?;
+    persist_declared(&sender, &owner_primary_only)?;
+    persist_declared(&sender, &member_m)?;
+    persist_declared(&sender, &undeclared.manifest)?;
+    let _clock = FixedClock::set(i64::try_from(issued + 20)?);
+
+    // Own-copy fan-out: the secondary is isolated at the floor, so layer-4 content is refused.
+    let own_plan = plan_of(&RamfluxClient::own_copy_selection_request(
+        "own-media",
+        &owner.config.device_id,
+        &owner_m,
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(
+        representation(&own_plan, "phone")?.selected_layer,
+        PROFILE_FLOOR,
+        "own-copy: an undeclared secondary must be isolated at the floor"
+    );
+    assert_layer_refusal(require_layer(Some(own_plan), COMPILED_LAYER), COMPILED_LAYER)?;
+
+    // DM scope toward the undeclared secondary device: floor only, refused.
+    let mut to_phone = RamfluxClient::own_copy_selection_request(
+        "dm-phone",
+        "sender",
+        &owner_m,
+        KindId::KindMessage,
+    )?;
+    to_phone.scope = FanoutScope::Dm;
+    to_phone.targets.retain(|target| target.device_id() == "phone");
+    let phone_plan = plan_of(&to_phone)?;
+    assert_eq!(
+        representation(&phone_plan, "phone")?.selected_layer,
+        PROFILE_FLOOR,
+        "dm: an undeclared secondary must be floor only"
+    );
+    assert_layer_refusal(require_layer(Some(phone_plan), COMPILED_LAYER), COMPILED_LAYER)?;
+
+    // DM to the declared primary: allowed although the SENDER has no declaration at all
+    // (source cap is the compiled layer when its own declaration is absent).
+    let to_primary = dm_message(&sender, &owner, "dm-primary");
+    let primary_plan =
+        plan_of(&sender.client.dm_selection_request(&to_primary, KindId::KindMessage)?)?;
+    assert_eq!(
+        primary_plan.fresh_cohort_layer,
+        Some(COMPILED_LAYER),
+        "dm: a declared primary is a layer-4 target even when the sender is undeclared"
+    );
+    sender.client.require_dm_layer(&to_primary, Some(primary_plan), COMPILED_LAYER)?;
+
+    // The undeclared secondary may itself send layer 4 to a fresh target.
+    let from_phone = plan_of(&RamfluxClient::own_copy_selection_request(
+        "own-from-phone",
+        "phone",
+        &owner_m,
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(
+        representation(&from_phone, &owner.config.device_id)?.selected_layer,
+        COMPILED_LAYER,
+        "an undeclared secondary may send layer 4 to a declared target"
+    );
+    require_layer(Some(from_phone), COMPILED_LAYER)?;
+
+    // Group scope: one undeclared member device refuses layer-4 content for the whole send.
+    let sender_m = sender.manifest.clone();
+    shared_group(
+        &sender,
+        &sender_m,
+        &[(&member, &member_m), (&undeclared, &undeclared.manifest)],
+        "g-media",
+    )?;
+    let group = plan_of(&sender.client.group_selection_request(
+        "g-media",
+        "sender",
+        "group-media",
+        KindId::KindMessage,
+    )?)?;
+    assert_eq!(
+        representation(&group, "member")?.selected_layer,
+        COMPILED_LAYER,
+        "group: the declared member keeps layer 4"
+    );
+    assert_eq!(
+        representation(&group, "undeclared")?.selected_layer,
+        PROFILE_FLOOR,
+        "group: the undeclared member is isolated at the floor"
+    );
+    assert_layer_refusal(require_layer(Some(group), COMPILED_LAYER), COMPILED_LAYER)?;
+    Ok(())
+}
+
+/// ATTACH-SEND-01 r1 M2: a media target's layer counts only inside its own signed window, and
+/// its keys are the ones the verified branch certificate names.
+#[tokio::test]
+async fn media_devices_count_a_declaration_only_inside_its_window() -> TestResult {
+    crate::client::native_test_support::watchdog::within(async {
+        let own = Fixture::with_device("r2-window", "owner").await?;
+        let issued = wall_now()? + 1;
+        let manifest = layer4_roster(&own, None, issued)?;
+        let roster = VerifiedLayerRoster::verify(&manifest, issued + 1)?;
+        let layer_of = |now: u64| -> TestResult<u32> {
+            roster
+                .media_devices(now)
+                .into_iter()
+                .find(|device| device.device_id == own.config.device_id)
+                .map(|device| device.layer)
+                .ok_or_else(|| "the device is not a message device".into())
+        };
+        assert_eq!(layer_of(issued + 1)?, COMPILED_LAYER, "inside the window the layer counts");
+        assert_eq!(layer_of(issued + 3_700)?, 0, "an expired declaration is not layer 4");
+        let device = roster
+            .media_devices(issued + 1)
+            .into_iter()
+            .find(|device| device.device_id == own.config.device_id)
+            .ok_or("device")?;
+        let entry = manifest
+            .devices
+            .iter()
+            .find(|entry| entry.device_id == own.config.device_id)
+            .ok_or("manifest entry")?;
+        assert_eq!(
+            ramflux_protocol::encode_base64url(device.signing_public),
+            entry.branch_public_key,
+            "the signing key comes from the verified branch certificate"
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|_| "test: deadline exceeded")?
 }

@@ -84,12 +84,6 @@ fn seed_local(db: &crate::AccountDb, f: &Family, n: i64, now: i64) -> Result<(),
                 None,
             )?;
         }
-        "group_pending_undecrypted" => {
-            db.connection.execute(
-                "INSERT INTO group_pending_undecrypted VALUES(?1,'g','thread',1,'s',1,?2,1)",
-                params![f.message, b],
-            )?;
-        }
         "contact_message_request" => {}
         "receive_work" => {
             stage_work(db, &f.payload, now)?;
@@ -207,7 +201,6 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         "retry",
         "dead_letter",
         "journal",
-        "group_pending_undecrypted",
         "contact_message_request",
         "receive_work",
     ];
@@ -391,7 +384,6 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         "retry",
         "dead_letter",
         "journal",
-        "group_pending_undecrypted",
         "contact_message_request",
         "receive_work",
     ];

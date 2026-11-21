@@ -3,6 +3,7 @@
 
 //! Ramflux C1 protocol types, canonical JSON, and fixture helpers.
 pub mod agent_profile;
+pub mod attachment_wire;
 
 mod canonical_json;
 pub mod client_discovery;
@@ -14,8 +15,8 @@ pub mod a2ui;
 mod core_types;
 mod device_address;
 pub use device_address::{
-    RootQualifiedDeviceIdentity, parse_qualified_device_id, qualified_device_id,
-    validate_device_name,
+    MAX_DEVICE_NAME_BYTES, RootQualifiedDeviceIdentity, parse_qualified_device_id,
+    qualified_device_id, validate_device_name,
 };
 pub mod dm_fs_v3;
 pub mod domain;
@@ -50,7 +51,7 @@ pub use a2ui::*;
 pub use i_json::{
     I_JSON_REJECTED, MAX_SAFE_JSON_INTEGER, decode_signed_ack_ijson, decode_signed_envelope_ijson,
     decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection, parse_i_json,
-    validate_i_json_bytes, validate_i_json_value,
+    parse_i_json_secret, validate_i_json_bytes, validate_i_json_value,
 };
 pub use tasks::*;
 

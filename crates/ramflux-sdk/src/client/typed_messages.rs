@@ -316,11 +316,9 @@ mod tests {
     #[test]
     fn typed_updates_invalidate_deleted_cache_and_resync_stale_cursor()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_root, client) = crate::client::own_device_sync::tests::client_with_account(
-            "typed-cache",
-            "principal_sync",
-            "local",
-        )?;
+        let fixture =
+            crate::client::native_test_support::account::blocking("typed-cache", "local")?;
+        let client = &fixture.client;
         let refusal =
             client.generated_cursor_status(1)?.err().ok_or("future cursor needs resync")?;
         let identity = g::EventIdentity {
@@ -377,7 +375,7 @@ mod tests {
         assert!(!serde_json::to_string(tombstone)?.contains("private preview"));
         cache.resync(refusal);
         assert!(cache.get("c", b"message").is_none());
-        drop(client);
+        drop(fixture);
         Ok(())
     }
 }

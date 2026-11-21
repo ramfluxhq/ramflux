@@ -64,6 +64,7 @@ pub(crate) fn parse(input: &str, now: i64) -> Result<ContactCardBody, SdkError> 
     body.version = 3;
     body.native_authority = Some(crate::contact_card::ContactCardAuthority {
         head_hash: card.body.authority_head_hash,
+        epoch: card.body.authority_epoch,
         master_certificate_hash: ramflux_protocol::custody::object_hash(
             &card.body.master_certificate,
         )?,
@@ -100,6 +101,7 @@ mod tests {
                     .clone(),
                 master_certificate: account.record().body.master_certificate.clone(),
                 authority_head_hash: ramflux_protocol::custody::object_hash(account.record())?,
+                authority_epoch: account.record().body.device_set_epoch,
                 devices: account.record().body.devices.clone(),
                 node_url: "https://node.example".into(),
                 node_key_fingerprint: crate::contact_node_fingerprint(

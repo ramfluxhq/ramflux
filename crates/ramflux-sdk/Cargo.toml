@@ -1,6 +1,6 @@
 [package]
 name = "ramflux-sdk"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.99.0"
 license.workspace = true
@@ -15,8 +15,6 @@ default = []
 # Integration fixture only; production provenance forbids this feature.
 itest-memory-vault = []
 test-support = []
-# Seed-taking account creation for unmigrated integration fixtures only.
-itest-legacy-accounts = []
 # Default-off short registration-proof lifetime for integration tests only.
 itest-identity-proof = []
 c-abi = ["dep:ramflux-client-model"]
@@ -48,10 +46,12 @@ object-ipc-crash-seam = []
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
-ramflux-client-model = { version = "0.1.0", path = "../ramflux-client-model", optional = true }
-ramflux-card = { version = "0.1.0", path = "../ramflux-card", optional = true }
+bytes.workspace = true
+ramflux-client-model = { workspace = true, optional = true }
+ramflux-card = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 prost.workspace = true
+prost-reflect = "=0.16.5"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
@@ -70,10 +70,11 @@ aes-gcm = "0.10"
 fs2 = "0.4"
 getrandom = { workspace = true }
 mime = "0.3"
-blake3 = "1.5"
+blake3 = { version = "1.5", features = ["zeroize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+unicode-normalization = "0.1.26"
 time = { version = "0.3.51", features = ["formatting"] }
 tokio = { version = "1.42", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing = "0.1"
@@ -109,7 +110,9 @@ windows-sys = { version = "0.61", features = [
 rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 ramflux-test-support.workspace = true
+syn = { version = "2.0", features = ["full", "visit"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }

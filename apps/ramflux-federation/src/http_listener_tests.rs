@@ -50,7 +50,7 @@ fn request(
 
 fn federation_forward_body(created_at: &str, ext_members: &str, admin_token: &str) -> String {
     format!(
-        r#"{{"admin_token":"{admin_token}","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash"}}}}"#
+        r#"{{"admin_token":"{admin_token}","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{{"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"message","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash","delivery_mode":"durable","collapse_tag":"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI","report_commitment":"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM"}}}}"#
     )
 }
 
@@ -86,12 +86,13 @@ pub(super) fn context(
         discovery: crate::FederationDiscoverySurface {
             node_id: "node-a".into(),
             public_endpoint: "localhost:7443".into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
             node_ca_cert_pem: "test-ca".into(),
             node_signing_seed: seed,
             protocol_versions: vec!["v1".into()],
             transport_backends: vec!["https_json".into()],
             node_capabilities: vec!["opaque_delivery".into()],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: None,
         },
         mesh_observability: Arc::new(crate::FederationMeshObservability::default()),
@@ -452,10 +453,10 @@ fn forward_envelope() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     >(serde_json::json!({
         "signing_key_id":"node-a","signature_alg":"ed25519","signature":"",
         "source_node_id":"node-a", "target_node_id":"node-b", "delivery_class":"opaque_event", "required_capability":"opaque_delivery",
-        "envelope": {"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{},
+        "envelope": {"schema":"ramflux.envelope.v2","version":2,"domain":"ramflux.envelope.v2","ext":{},
         "signing_key_id":"device","signature_alg":"ed25519","signature":"device-signature",
         "envelope_id":"forward-test","source_principal_id":"alice","source_device_id":"first","target_delivery_id":"peer",
-        "routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":crate::now_unix_seconds()?,"encrypted_payload":"opaque","payload_hash":"hash"}
+        "routing_set_id":null,"delivery_class":"message","priority":"normal","ttl":600,"created_at":crate::now_unix_seconds()?,"encrypted_payload":"opaque","payload_hash":"hash","delivery_mode":"durable","collapse_tag":"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI","report_commitment":"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM"}
     }))?)?)
 }
 

@@ -118,6 +118,8 @@ message MediaKeySlot {
   QualifiedDevice recipient = 1;
   bytes encrypted_key = 2;
   uint32 format = 3;
+  bytes grant_id = 4;
+  bytes read_capability = 5;
 }
 message MediaManifest {
   bytes manifest_id = 1;
@@ -999,6 +1001,7 @@ message TransferControl {
 message OwnContactSync {
   NativeDeviceManifest manifest = 1;
   FriendLinkRecord link = 2;
+  optional ContactSafetyConfirmation safety_confirmation = 3;
 }
 message OwnContactTombstone {
   FriendLinkRecord link = 1;
@@ -1398,4 +1401,30 @@ message SurfaceRpcFrame {
   optional string function_call_id = 6;
   optional uint64 rejected_version = 7;
   JsonObject a2ui = 8;
+}
+message ExpectedContactSafety {
+  optional uint32 algorithm_version = 1;
+  string self_identity_commitment = 2;
+  string contact_identity_commitment = 3;
+  string safety_number_hash = 4;
+  string contact_device_set_hash = 5;
+  string contact_lineage_head = 6;
+  string self_authority_head = 7;
+  string contact_authority_head = 8;
+  string principal_id = 9;
+  string link_id = 10;
+  optional string replace_provisional_root = 11;
+}
+message ContactSafetyConfirmation {
+  ExpectedContactSafety expected = 1;
+  EventIdentity origin = 2;
+  optional int64 verified_at = 3;
+}
+message ContactSafetyVerifyRequest {
+  ExpectedContactSafety expected = 1;
+}
+message ContactSafetyVerifyResult {
+  ContactSafetyConfirmation safety_confirmation = 1;
+  string verification_state = 2;
+  optional bool sibling_delivery_pending = 3;
 }

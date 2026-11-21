@@ -26,21 +26,24 @@ pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     })
 }
 
-pub(crate) fn test_envelope(now: i64) -> anyhow::Result<ramflux_protocol::Envelope> {
-    let envelope = serde_json::from_value(serde_json::json!({
-        "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
-        "signing_key_id":"test","signature_alg":"ed25519","signature":"fixture",
-        "envelope_id":"group-distribution","source_principal_id":"agent","source_device_id":"agent-device","target_delivery_id":"alice-target",
-        "delivery_class":"opaque_event","priority":"normal","ttl":300,"created_at":now,"encrypted_payload":"opaque","payload_hash":"opaque-hash"
-    }))?;
-    Ok(envelope)
+pub(crate) fn test_envelope(now: i64) -> ramflux_protocol::Envelope {
+    let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+        "group-distribution",
+        "alice-target",
+        ramflux_protocol::DeliveryClass::Message,
+    );
+    envelope.created_at = now;
+    envelope.source_principal_id = "agent".into();
+    envelope.source_device_id = "agent-device".into();
+
+    envelope
 }
 
 pub(crate) fn signed_submit(
     runtime: &super::GatewaySessionRuntime,
     now: i64,
 ) -> anyhow::Result<ramflux_node_core::GatewaySubmitFrame> {
-    let mut envelope = test_envelope(now)?;
+    let mut envelope = test_envelope(now);
     envelope.ext.ext.insert(
         "source_root_commitment".into(),
         serde_json::json!(runtime.source_identity.root_commitment()),

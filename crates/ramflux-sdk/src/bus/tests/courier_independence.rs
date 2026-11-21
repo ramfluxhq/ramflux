@@ -22,7 +22,7 @@ struct Rig {
     peer_root: String,
     message: String,
     wire: String,
-    copy: String,
+    sibling: String,
 }
 async fn rig() -> Case<Rig> {
     let mut fixture = Box::pin(Fixture::new("courier-receipt-independence")).await?;
@@ -53,8 +53,7 @@ async fn rig() -> Case<Rig> {
         .ok_or("later direct route")?
         .0
         .message_id;
-    let copy =
-        crate::bus::own_device_copy::copy_id(&fixture.source.client, &format!("{wire}-outgoing"))?;
+    let sibling = fixture.sibling.client.owned_device_identity()?.device_id().to_owned();
     let peer_root = fixture.peer.client.owned_device_identity()?.root_commitment().to_owned();
     let reader = fixture.source.client.account_db()?.open_reader()?;
     let gateway = Arc::clone(&fixture.gateway);
@@ -71,19 +70,19 @@ async fn rig() -> Case<Rig> {
         peer_root,
         message: route.message_id,
         wire,
-        copy,
+        sibling,
     })
 }
-async fn send(started: &Started, peer: &str, id: &str) -> Case {
-    started.actor.request(command("message.submit",json!({
-        "conversation_id":"healthy","message_id":id,"envelope_id":id,
+async fn send(started: &Started, peer: &str, id: &str) -> Case<String> {
+    let response = started.actor.request(command("message.submit",json!({
+        "conversation_id":started.conversation,"message_id":id,"envelope_id":id,
         "source_principal_id":"sender","sender_id":"device-sender",
         "recipient_device_id":"device-peer","recipient_principal_commitment":peer,
-        "target_delivery_id":"peer","encrypted_body_base64":"",
+        "target_delivery_id":ramflux_protocol::qualified_device_id(peer, "device-peer")?,"encrypted_body_base64":"",
         "plaintext_body_base64":ramflux_protocol::encode_base64url(b"other couriers keep progressing"),
         "created_at":now_unix_timestamp(),"ttl":600,
     }))).await?;
-    Ok(())
+    Ok(response.body["message_id"].as_str().ok_or("allocated message identity")?.into())
 }
 fn receipt(reader: &AccountDb, wire: &str) -> Case<Option<(String, Value)>> {
     for key in reader.actor_state_keys(crate::client::delivery_receipts::PREFIX)? {
@@ -95,13 +94,33 @@ fn receipt(reader: &AccountDb, wire: &str) -> Case<Option<(String, Value)>> {
     }
     Ok(None)
 }
-async fn progress(rig: &Rig) -> Case {
+fn pending_summary(reader: &AccountDb) -> Case<Vec<Value>> {
+    reader.actor_state_keys("own-history/pending/")?.into_iter().take(8).map(|key| {
+        let row = reader.load_actor_state::<Value>(&key)?.ok_or("pending work")?;
+        Ok(json!({"owner":row["owner"],"target":row["target"],"sealed":!row["envelope"].is_null(),"attempts":row["attempts"]}))
+    }).collect()
+}
+async fn progress(rig: &Rig, outgoing: &str) -> Case {
     let snapshot = || -> Case<(usize, bool, bool)> {
         let acked = rig.gateway.lock().map_err(|_| "gateway")?.acked.len();
-        let copied = rig
-            .reader
-            .load_actor_state::<Value>(&format!("own-device/status/{}", rig.copy))?
-            .is_some_and(|row| row["state"] == "submitted");
+        let mut copied = false;
+        for key in rig.reader.actor_state_keys("own-history/staged/")? {
+            let encoded = key.strip_prefix("own-history/staged/").ok_or("staged prefix")?;
+            let (_, target, _, owner, _): (
+                ramflux_protocol::message::QualifiedDevice,
+                ramflux_protocol::message::QualifiedDevice,
+                String,
+                Vec<u8>,
+                Vec<u8>,
+            ) = serde_json::from_slice(&ramflux_protocol::decode_base64url(encoded)?)?;
+            if target.device_id == rig.sibling
+                && ramflux_protocol::encode_base64url(owner) == outgoing
+            {
+                let staging: String = rig.reader.load_actor_state(&key)?.ok_or("staged binding")?;
+                copied =
+                    !rig.reader.actor_state_exists(&format!("own-history/pending/{staging}"))?;
+            }
+        }
         let stored = rig
             .reader
             .direct_message_by_id(&rig.later_message)?
@@ -122,7 +141,10 @@ async fn progress(rig: &Rig) -> Case {
         snapshot().map_or_else(
             |error| format!("progress: {error}"),
             |(acked, copied, stored)| {
-                format!("progress: acked={acked} copied={copied} stored={stored}")
+                format!("progress: acked={acked} copied={copied} stored={stored}; outgoing={outgoing}; staged={:?}; pending={:?}; captures={:?}",
+                    rig.reader.actor_state_keys("own-history/staged/"),
+                    pending_summary(&rig.reader),
+                    rig.reader.actor_state_keys("own-history/capture/"))
             },
         )
     })?
@@ -182,13 +204,13 @@ async fn case(erase: bool) -> Case {
     }
     initial_control.release.notify_one();
     controls(&rig.started.actor).await?;
-    send(&rig.started, &rig.peer_root, &format!("{}-outgoing", rig.wire)).await?;
-    progress(&rig).await?;
+    let outgoing = send(&rig.started, &rig.peer_root, &format!("{}-outgoing", rig.wire)).await?;
+    progress(&rig, &outgoing).await?;
     assert!(!rig.hook.has_applied(), "receipt must remain held while other work completes");
     if erase {
         rig.started.actor.request(command("message.delete",json!({
-            "conversation_id":"healthy","message_id":rig.message,"delete_scope":"own_devices",
-            "tombstone_id":format!("{}-delete",rig.wire),
+            "conversation_id":rig.started.conversation,"message_id":rig.message,"delete_scope":"local",
+            "operation_id":format!("{}-delete",rig.wire),
         }))).await?;
         assert!(receipt(&rig.reader, &rig.wire)?.is_none());
     }

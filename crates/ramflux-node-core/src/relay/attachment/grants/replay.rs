@@ -3,12 +3,14 @@
 //! Source-authoritative replay restrictions. SDK backups never import this server state.
 #[cfg(test)]
 mod capacity_tests;
+mod owner;
 #[cfg(test)]
 mod rebuild_tests;
 mod storage;
 #[cfg(test)]
 mod tests;
 use super::{AttachmentLedgerError, ScopedGrantRegistry, VerifiedScopedGrant, store};
+pub use owner::{OwnerAdmission, OwnerAdmissionError};
 pub(super) use storage::install;
 use storage::{consume, gc};
 /// Metadata of a `PoP` already verified against the exact native operation by P9.
@@ -51,6 +53,25 @@ impl ScopedGrantRegistry {
         self.lease_with_admission(grant, right, now, Into::into, |tx| {
             self.admit_in(tx, grant, proof, now)
         })
+    }
+
+    /// Admits a reader only when `caller` is the grant grantee. A copied capability
+    /// never consumes a nonce and never reaches publication.
+    /// # Errors
+    /// Returns a ledger conflict when `caller` is not the grantee, and the same
+    /// errors as [`Self::admit_operation_after_authentication`] otherwise.
+    pub fn admit_reader_after_authentication(
+        &self,
+        caller: &ramflux_protocol::large_attachment::QualifiedOwner,
+        grant: &VerifiedScopedGrant,
+        right: u32,
+        proof: &AttachmentReplayProof,
+        now: u64,
+    ) -> Result<super::GrantPublicationLease, AttachmentReplayError> {
+        if caller != &grant.grant().grantee {
+            return Err(AttachmentLedgerError::Conflict.into());
+        }
+        self.admit_operation_after_authentication(grant, right, proof, now)
     }
     /// Re-reads authority and consumes the nonce in the caller's write transaction.
     pub(super) fn admit_in(

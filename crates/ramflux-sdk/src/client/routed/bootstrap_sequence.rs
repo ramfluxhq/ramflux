@@ -13,24 +13,13 @@ pub(crate) fn bootstrap_aad(
     sequence: Option<u64>,
     version: Option<u32>,
 ) -> Result<Vec<u8>, SdkError> {
-    if !matches!(version, None | Some(2)) {
-        return Err(invalid("unsupported bootstrap ordering version"));
+    if version != Some(2) {
+        return Err(SdkError::PairRecoveryRequired);
     }
-    match sequence {
-        Some(sequence) if (1..=MAX_SEQUENCE).contains(&sequence) => {
-            Ok(ramflux_protocol::canonical_json_bytes(&(
-                if version == Some(2) {
-                    "ramflux.sdk.bootstrap.hlc.v2"
-                } else {
-                    "ramflux.sdk.bootstrap.sequence.v1"
-                },
-                aad,
-                sequence,
-            ))?)
-        }
-        Some(_) => Err(invalid("invalid bootstrap sequence")),
-        None => Ok(aad.to_vec()),
-    }
+    let sequence = sequence
+        .filter(|value| (1..=MAX_SEQUENCE).contains(value))
+        .ok_or(SdkError::PairRecoveryRequired)?;
+    Ok(ramflux_protocol::canonical_json_bytes(&("ramflux.sdk.bootstrap.hlc.v2", aad, sequence))?)
 }
 impl RamfluxClient {
     pub(crate) fn allocate_bootstrap_sequence(

@@ -8,14 +8,14 @@ use super::*;
 fn mailbox_deadline_is_capped_seven_days_after_server_acceptance() {
     let mut inbox = OpaqueDeviceInbox::new();
     let accepted_at = 2_000_000_000;
-    let mut future = envelope("future", "target", DeliveryClass::OpaqueEvent);
+    let mut future = envelope("future", "target", DeliveryClass::Message);
     future.created_at = accepted_at + 10 * 365 * 86_400;
     future.ttl = 604_800;
     let entry = inbox.append_at(future, accepted_at);
     assert_eq!(inbox.retain_until(&entry), accepted_at + 604_800);
     assert_eq!(inbox.expire(accepted_at + 604_799), 0);
     assert_eq!(inbox.expire(accepted_at + 604_800), 1);
-    let mut short = envelope("short", "target", DeliveryClass::OpaqueEvent);
+    let mut short = envelope("short", "target", DeliveryClass::Message);
     short.created_at = accepted_at;
     short.ttl = 60;
     let short = inbox.append_at(short, accepted_at);
@@ -26,7 +26,7 @@ fn mailbox_deadline_is_capped_seven_days_after_server_acceptance() {
 fn expiry_visits_due_entries_and_checkpoints_only_touched_mailboxes() {
     let mut inbox = OpaqueDeviceInbox::new();
     for target in ["quiet-a", "quiet-b", "expiring"] {
-        let mut message = envelope(&format!("{target}-1"), target, DeliveryClass::OpaqueEvent);
+        let mut message = envelope(&format!("{target}-1"), target, DeliveryClass::Message);
         message.created_at = 1_000;
         message.ttl = if target == "expiring" { 10 } else { 600 };
         inbox.append_at(message, 1_000);
@@ -45,7 +45,7 @@ fn expiry_visits_due_entries_and_checkpoints_only_touched_mailboxes() {
 #[test]
 fn mailbox_reads_hide_expired_entries_without_mutating_the_shard() {
     let mut inbox = OpaqueDeviceInbox::new();
-    let mut message = envelope("read", "target", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("read", "target", DeliveryClass::Message);
     message.created_at = 1_000;
     message.ttl = 10;
     inbox.append_at(message, 1_000);
@@ -61,7 +61,7 @@ fn repeated_nacks_dead_letter_without_keeping_ciphertext() -> Result<(), Box<dyn
     let store = RouterRedbStore::open_without_wal(&path)?;
     store.bootstrap_router(&RouterCore::new())?;
     let mut inbox = OpaqueDeviceInbox::new();
-    let mut message = envelope("poison", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("poison", "mailbox", DeliveryClass::Message);
     message.created_at = i64::try_from(now_unix_seconds())?;
     let entry = inbox.append(message);
     store.record_submission_increment(
@@ -99,7 +99,7 @@ fn durable_sweep_removes_only_rows_whose_index_deadline_is_due()
     let now = i64::try_from(now_unix_seconds())?;
     let mut inbox = OpaqueDeviceInbox::new();
     for (id, ttl) in [("soon", 10_u32), ("later", 3_600)] {
-        let mut message = envelope(id, id, DeliveryClass::OpaqueEvent);
+        let mut message = envelope(id, id, DeliveryClass::Message);
         message.created_at = now;
         message.ttl = ttl;
         let entry = inbox.append(message);
@@ -138,7 +138,7 @@ fn router_wal_keeps_issued_watermarks_after_expiry() -> Result<(), Box<dyn std::
     let store_directory_2 = temp_store_path("server_retention_wal_watermark")?;
     let root = store_directory_2.to_path_buf().with_extension("wal");
     let store = RouterWalStore::open(&root)?;
-    let mut message = envelope("old", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("old", "mailbox", DeliveryClass::Message);
     message.created_at = 1_000;
     message.ttl = 10;
     let entry =

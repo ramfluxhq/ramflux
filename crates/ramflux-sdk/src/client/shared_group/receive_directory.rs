@@ -28,13 +28,15 @@ impl GroupDirectoryRequest {
         gateway: &GatewaySessionConfig,
     ) -> Result<(Self, SdkDeviceManifestResponse), SdkError> {
         let manifest = if let Some(url) = &self.url {
+            let started = std::time::Instant::now();
             let manifest = crate::prekey::http_async::get::<Option<SdkDeviceManifestResponse>>(
                 url,
                 &format!("/mvp1/device-manifest/{}", self.root),
                 gateway.timeout,
             )
             .await?
-            .ok_or_else(|| SdkError::InboundPending("group manifest unavailable".into()))?;
+            .ok_or_else(|| SdkError::InboundPending("group manifest unavailable".into()))?
+            .fetched_from(started);
             crate::client::contact::verify_device_manifest(&manifest, &self.root)?;
             crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp())
         } else {

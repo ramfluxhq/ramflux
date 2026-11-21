@@ -186,7 +186,7 @@ impl RamfluxClient {
         delivery: &Delivery<'_>,
         body: &[u8],
     ) -> Result<Option<Outcome>, SdkError> {
-        if !body.starts_with(super::carrier::PREFIX) {
+        if Carrier::decode(body)?.is_none() {
             return Ok(None);
         }
         self.with_profile_read_scope(|| {

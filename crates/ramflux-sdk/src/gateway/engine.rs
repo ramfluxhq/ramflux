@@ -393,7 +393,7 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             push_route_expiries: BTreeMap::new(),
             pending_push_routes: Vec::new(),
-            mode: super::session_push::SessionMode::Legacy,
+            mode: super::session_push::SessionMode::Direct,
             pending_calls: super::call_resolution::PendingCalls::default(),
         }
     }
@@ -897,6 +897,7 @@ impl GatewaySessionEngine {
         &mut self,
         principal: &str,
     ) -> Result<Option<SdkDeviceManifestResponse>, SdkError> {
+        let started = std::time::Instant::now();
         self.write_frame(&GatewayClientFrame::PrincipalManifestFetch {
             principal_id: principal.to_owned(),
         })
@@ -916,7 +917,12 @@ impl GatewaySessionEngine {
                         ),
                     });
                 }
-                response.manifest.map(serde_json::from_value).transpose().map_err(SdkError::from)
+                response
+                    .manifest
+                    .map(serde_json::from_value::<SdkDeviceManifestResponse>)
+                    .transpose()
+                    .map(|manifest| manifest.map(|manifest| manifest.fetched_from(started)))
+                    .map_err(SdkError::from)
             }
             GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             other => Err(SdkError::GatewaySessionRejected(format!(
@@ -988,6 +994,25 @@ impl GatewaySessionEngine {
         };
         self.write_frame(&GatewayClientFrame::VoiceLease { request: Box::new(request) }).await?;
         decode_voice_reply(self.read_reply(super::frame_dispatch::ExpectedReply::VoiceLease).await?)
+    }
+
+    /// One call to the home relay's attachment plane over the authenticated live session. The
+    /// gateway names the requester from this session; the frame carries no identity.
+    /// # Errors
+    /// Rejects transport failures, a mismatched reply, or a gateway refusal.
+    pub async fn attachment_call(
+        &mut self,
+        request: ramflux_protocol::attachment_wire::AttachmentFrame,
+    ) -> Result<ramflux_protocol::attachment_wire::AttachmentReplyFrame, SdkError> {
+        let id = request.request_id.clone();
+        self.write_frame(&GatewayClientFrame::Attachment { request: Box::new(request) }).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::Attachment).await? {
+            GatewayServerFrame::Attachment { response } if response.request_id == id => {
+                Ok(*response)
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
+            _ => Err(SdkError::GatewaySessionRejected("expected attachment reply".into())),
+        }
     }
 
     /// # Errors

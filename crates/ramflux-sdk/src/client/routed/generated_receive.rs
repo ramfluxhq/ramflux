@@ -13,19 +13,7 @@ use ramflux_protocol::message::{
 use ramflux_storage::{MessageMetadata, RawInnerCopyKind, RawInnerCopyWrite};
 use serde::{Deserialize, Serialize};
 
-/// Fixed typed recognition only; source/group/key authority still runs inside W1.
-pub(super) fn is_group_key_control(bytes: &[u8]) -> bool {
-    validation::scan_inner(bytes).is_ok_and(|scanned| {
-        scanned.kind == 8
-            && g::Control::decode(scanned.body).is_ok_and(|control| {
-                control.operation == 5
-                    && matches!(control.payload, Some(g::control::Payload::GroupKeyControl(_)))
-            })
-    })
-}
-
 pub(super) enum GeneratedProjection {
-    Native,
     Handled(Option<Vec<u8>>),
 }
 
@@ -40,9 +28,6 @@ struct GeneratedCommit<'a> {
 pub(super) fn mutation_erasure_targets(
     bytes: &[u8],
 ) -> (bool, Vec<super::committed::ErasureTarget>) {
-    if !crate::client::target_selection::schema_v1_selected() {
-        return (false, Vec::new());
-    }
     let Ok(inner) = g::Inner::decode(bytes) else {
         return (false, Vec::new());
     };
@@ -173,22 +158,16 @@ impl RamfluxClient {
         bytes: &[u8],
         metadata: Option<&MessageMetadata>,
     ) -> Result<GeneratedProjection, SdkError> {
-        // Dormant integration retains the native callers until the final codec-removal commit.
-        let scanned = match validation::scan_inner(bytes) {
-            Ok(scanned) => scanned,
-            Err(error) if g::Inner::decode(bytes).is_ok_and(|inner| inner.identity.is_some()) => {
-                return Err(SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Content,
-                    reason: error.to_string(),
-                });
-            }
-            Err(_) => return Ok(GeneratedProjection::Native),
-        };
+        let scanned =
+            validation::scan_inner(bytes).map_err(|error| SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Content,
+                reason: error.to_string(),
+            })?;
         let inner = g::Inner::decode(bytes).ok();
         self.authorize_generated_origin(opened, entry, &scanned)?;
         Self::verify_generated_message_header(entry, bytes)?;
         if self.prepare_generated_identity(
-            opened,
+            &opened.routing,
             entry,
             bytes,
             scanned.kind,
@@ -221,7 +200,7 @@ impl RamfluxClient {
             }
         };
         self.project_known_generated(
-            GeneratedCommit {
+            &GeneratedCommit {
                 opened,
                 entry,
                 bytes,
@@ -233,9 +212,9 @@ impl RamfluxClient {
     }
 
     // True means the authenticated identity is already retired, deleted or projected.
-    fn prepare_generated_identity(
+    pub(super) fn prepare_generated_identity(
         &self,
-        opened: &Opened,
+        routing: &super::Routing,
         entry: &GatewayInboxEntry,
         bytes: &[u8],
         kind: u32,
@@ -250,7 +229,7 @@ impl RamfluxClient {
             .client_device_record(&source)?
             .and_then(|record| record["device_epoch"].as_u64())
             .ok_or_else(|| invalid("source epoch missing"))?;
-        if identity.conversation_id != opened.routing.conversation_id
+        if identity.conversation_id != routing.conversation_id
             || identity.author.as_ref().is_none_or(|author| {
                 author.account_anchor != source.root_commitment()
                     || author.device_id != source.device_id()
@@ -277,36 +256,40 @@ impl RamfluxClient {
                 .account_db()?
                 .load_actor_state::<bool>(&format!(
                     "routed/report-opening-retired/{}",
-                    opened.routing.message_id
+                    routing.message_id
                 ))?
                 .unwrap_or(false)
         {
             return Ok(true);
         }
         if kind == 1
-            && let Some(stored) = self.account_db()?.message_content(&opened.routing.message_id)?
+            && let Some(stored) = self.account_db()?.message_content(&routing.message_id)?
         {
-            if stored != bytes {
+            if stored == bytes {
+                return Ok(true);
+            }
+            if routing.kind != Kind::GroupMessage {
                 return Err(SdkError::ReplayMismatch);
             }
-            return Ok(true);
+            // An authenticated authored copy may have arrived first. Decrypt and
+            // compare the entire plaintext Inner before accepting its sealed form.
         }
         let now_ms = crate::client::generated_identity::now_ms();
         self.merge_generated_clock(identity.hlc, now_ms)?;
         self.account_db()?.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/generated-identity/{}", opened.routing.message_id),
+            &routing.message_id,
+            &format!("routed/generated-identity/{}", routing.message_id),
             identity,
         )?;
         let order = crate::client::generated_identity::order_hlc(identity.hlc, now_ms);
         self.account_db()?.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/generated-order/{}", opened.routing.message_id),
+            &routing.message_id,
+            &format!("routed/generated-order/{}", routing.message_id),
             &identity.hlc,
         )?;
         self.account_db()?.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/generated-display-hlc/{}", opened.routing.message_id),
+            &routing.message_id,
+            &format!("routed/generated-display-hlc/{}", routing.message_id),
             &order,
         )?;
         Ok(false)
@@ -379,14 +362,27 @@ impl RamfluxClient {
             return Ok(GeneratedProjection::Handled(None));
         }
         validation::validate_message(&message).map_err(|_| invalid("invalid group content"))?;
+        Self::attachment_message_content(&message.text, &message.media)?;
         self.merge_routed_group_link(&sealed.group_id, &opened.routing.conversation_id)?;
-        self.append_plaintext_projection_once(
-            &opened.routing.conversation_id,
-            &opened.routing.message_id,
-            entry,
-            scanned.exact_inner,
-            metadata,
-        )?;
+        let db = self.account_db()?;
+        if let Some(stored) = db.message_content(&opened.routing.message_id)? {
+            let mut normalized = g::Inner::decode(scanned.exact_inner)
+                .map_err(|_| invalid("group Inner malformed"))?;
+            normalized.body.clone_from(plaintext);
+            let exact = zeroize::Zeroizing::new(normalized.encode_to_vec());
+            zeroize::Zeroize::zeroize(&mut normalized.body);
+            if stored != scanned.exact_inner && stored != exact.as_slice() {
+                return Err(SdkError::ReplayMismatch);
+            }
+        } else {
+            self.append_plaintext_projection_once(
+                &opened.routing.conversation_id,
+                &opened.routing.message_id,
+                entry,
+                scanned.exact_inner,
+                metadata,
+            )?;
+        }
         let db = self.account_db()?;
         if let Some(origin) = origin.as_ref() {
             self.persist_known_origin(&opened.routing.message_id, origin)?;
@@ -444,8 +440,9 @@ impl RamfluxClient {
             self.receive_generated_own_message_copy(opened, entry, copy)?;
         } else if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref()
         {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
             self.apply_generated_metadata_control_once(entry, identity, bytes, || {
-                self.receive_generated_own_contact(contact)
+                self.receive_generated_own_contact_with_origin(contact, &source, identity, bytes)
             })?;
         } else if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
             control.payload.as_ref()
@@ -487,22 +484,27 @@ impl RamfluxClient {
 
     fn project_known_generated(
         &self,
-        frame: GeneratedCommit<'_>,
+        frame: &GeneratedCommit<'_>,
         content: g::Content,
     ) -> Result<GeneratedProjection, SdkError> {
-        let GeneratedCommit { opened, entry, bytes, metadata, identity } = frame;
+        let GeneratedCommit { opened, entry, bytes, metadata, ref identity } = *frame;
         let projected = match content.value.ok_or_else(|| invalid("generated content missing"))? {
             g::content::Value::Message(message) if message.sealed_group.is_none() => {
-                self.ensure_generated_direct_conversation(opened, entry)?;
-                self.append_plaintext_projection_once(
-                    &opened.routing.conversation_id,
-                    &opened.routing.message_id,
-                    entry,
-                    bytes,
-                    metadata,
-                )?;
-                self.retain_direct_message_origin(opened, entry, bytes, identity.as_ref())?;
-                Some(message.text.into_bytes())
+                let source =
+                    self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+                if let Some(reason) = self.friend_rejection_reason(source.root_commitment())? {
+                    self.account_db()?.reject_inbox_message(
+                        &opened.routing.conversation_id,
+                        &opened.routing.message_id,
+                        &entry.envelope.source_principal_id,
+                        &reason,
+                        crate::time::now_unix_timestamp(),
+                    )?;
+                    None
+                } else {
+                    self.project_generated_direct_message(frame, &message)?;
+                    Some(message.text.into_bytes())
+                }
             }
             g::content::Value::Edit(_) => {
                 self.apply_generated_edit_with_metadata(
@@ -514,19 +516,7 @@ impl RamfluxClient {
                 None
             }
             g::content::Value::Delete(delete) => {
-                let event = identity.as_ref().ok_or_else(|| invalid("Delete identity missing"))?;
-                if delete.tombstone_id.as_slice()
-                    != g::identity::delete_tombstone(&event.id)
-                        .map_err(|_| invalid("Delete event id invalid"))?
-                {
-                    return Err(invalid("Delete tombstone id mismatch"));
-                }
-                self.apply_generated_delete_entry(
-                    entry,
-                    event,
-                    &opened.routing.conversation_id,
-                    &delete,
-                )?;
+                self.project_generated_delete_content(opened, entry, identity.as_ref(), &delete)?;
                 None
             }
             g::content::Value::Reaction(reaction) => {
@@ -554,17 +544,6 @@ impl RamfluxClient {
                 )?;
                 None
             }
-            g::content::Value::Call(call) => {
-                let native = crate::client::generated_call::native::to_native(call)?;
-                self.project_native_call_control(
-                    entry,
-                    &opened.routing.conversation_id,
-                    opened.routing.group_id.as_deref(),
-                    &native,
-                    bytes,
-                )?;
-                None
-            }
             g::content::Value::Control(control) => {
                 self.project_known_generated_control(
                     opened,
@@ -575,9 +554,173 @@ impl RamfluxClient {
                 )?;
                 None
             }
-            _ => return Ok(GeneratedProjection::Native),
+            value @ (g::content::Value::Call(_)
+            | g::content::Value::Surface(_)
+            | g::content::Value::Task(_)
+            | g::content::Value::Service(_)) => {
+                self.project_generated_application(frame, value)?;
+                None
+            }
+            g::content::Value::Receipt(receipt) => {
+                self.apply_generated_receipt(
+                    entry,
+                    identity.as_ref().ok_or_else(|| invalid("Receipt identity missing"))?,
+                    &receipt,
+                )?;
+                None
+            }
+            g::content::Value::Typing(_) => {
+                return Err(invalid("Typing is forbidden on durable admission"));
+            }
+            g::content::Value::Message(_) => {
+                return Err(invalid("sealed group Message requires group admission"));
+            }
         };
         Ok(GeneratedProjection::Handled(projected))
+    }
+
+    fn project_generated_delete_content(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        identity: Option<&g::EventIdentity>,
+        delete: &g::Delete,
+    ) -> Result<(), SdkError> {
+        let event = identity.ok_or_else(|| invalid("Delete identity missing"))?;
+        if delete.tombstone_id.as_slice()
+            != g::identity::delete_tombstone(&event.id)
+                .map_err(|_| invalid("Delete event id invalid"))?
+        {
+            return Err(invalid("Delete tombstone id mismatch"));
+        }
+        self.apply_generated_delete_entry(entry, event, &opened.routing.conversation_id, delete)?;
+        Ok(())
+    }
+    fn project_generated_direct_message(
+        &self,
+        frame: &GeneratedCommit<'_>,
+        message: &g::Message,
+    ) -> Result<(), SdkError> {
+        Self::attachment_message_content(&message.text, &message.media)?;
+        self.ensure_generated_direct_conversation(frame.opened, frame.entry)?;
+        self.append_plaintext_projection_once(
+            &frame.opened.routing.conversation_id,
+            &frame.opened.routing.message_id,
+            frame.entry,
+            frame.bytes,
+            frame.metadata,
+        )?;
+        self.record_received_media_objects(frame, message)?;
+        self.retain_direct_message_origin(
+            frame.opened,
+            frame.entry,
+            frame.bytes,
+            frame.identity.as_ref(),
+        )?;
+        Ok(())
+    }
+
+    /// The revoke authorizer needs the admitted message, and a never-imported object
+    /// tombstones only when a retention reference supplies its manifest.
+    fn record_received_media_objects(
+        &self,
+        frame: &GeneratedCommit<'_>,
+        message: &g::Message,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        let message_id = &frame.opened.routing.message_id;
+        let conversation_id = &frame.opened.routing.conversation_id;
+        db.write_transaction(|| {
+            for media in &message.media {
+                if media.object_id.is_empty() || media.manifest_digest.is_empty() {
+                    continue;
+                }
+                let existing = db.client_record("object", &media.object_id)?;
+                let bound = existing.as_ref().is_some_and(|record| {
+                    record
+                        .get("message_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                });
+                if !bound {
+                    db.persist_client_record(
+                        "object",
+                        &media.object_id,
+                        &serde_json::json!({
+                            "object_id": media.object_id,
+                            "message_id": message_id,
+                            "conversation_id": conversation_id,
+                        }),
+                    )?;
+                }
+                let manifest_hash = ramflux_protocol::encode_base64url(&media.manifest_digest);
+                let reference_hash = ramflux_crypto::blake3_256_base64url(
+                    "ramflux.object.received_media.v1",
+                    &ramflux_protocol::canonical_json_bytes(&(message_id, &media.object_id))?,
+                );
+                let reference = serde_json::json!({});
+                let metadata = serde_json::json!({});
+                db.register_object_reference(
+                    ramflux_storage::ObjectReferenceAdmission::FreshMessage,
+                    &ramflux_storage::ObjectReferenceOwner {
+                        reference_hash: &reference_hash,
+                        wire_id: &media.object_id,
+                        manifest_hash: &manifest_hash,
+                        selector: &media.object_id,
+                        message_id,
+                        reference: &reference,
+                        metadata: &metadata,
+                    },
+                )?;
+            }
+            Ok::<(), SdkError>(())
+        })
+    }
+
+    fn project_generated_application(
+        &self,
+        frame: &GeneratedCommit<'_>,
+        value: g::content::Value,
+    ) -> Result<(), SdkError> {
+        let opened = frame.opened;
+        let entry = frame.entry;
+        let bytes = frame.bytes;
+        let metadata = frame.metadata;
+        match value {
+            g::content::Value::Call(call) => {
+                let native = crate::client::generated_call::native::to_native(call)?;
+                self.project_native_call_control(
+                    entry,
+                    &opened.routing.conversation_id,
+                    opened.routing.group_id.as_deref(),
+                    &native,
+                    bytes,
+                )?;
+            }
+            g::content::Value::Surface(surface) => {
+                if opened.routing.kind == Kind::Direct {
+                    self.ensure_generated_direct_conversation(opened, entry)?;
+                }
+                self.project_generated_surface(&opened.routing, entry, &surface, bytes, metadata)?;
+            }
+            g::content::Value::Task(task) => {
+                if opened.routing.kind == Kind::Direct {
+                    self.ensure_generated_direct_conversation(opened, entry)?;
+                }
+                self.project_generated_task(&opened.routing, entry, &task, bytes, metadata)?;
+            }
+            g::content::Value::Service(_) => {
+                self.append_plaintext_projection_once(
+                    &opened.routing.conversation_id,
+                    &opened.routing.message_id,
+                    entry,
+                    bytes,
+                    metadata,
+                )?;
+            }
+            _ => return Err(invalid("structured application kind mismatch")),
+        }
+        Ok(())
     }
 
     fn authorize_generated_origin(
@@ -684,7 +827,7 @@ impl RamfluxClient {
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-        if !matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+        if opened.routing.group_id.is_none()
             && source.root_commitment() != self.own_account_anchor()?
             && opened.routing.conversation_id.starts_with(g::dm_scope::PREFIX)
         {
@@ -695,7 +838,7 @@ impl RamfluxClient {
             )
             .map_err(|_| invalid("reserved DM root pair mismatch"))?;
         }
-        if matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl) {
+        if opened.routing.group_id.is_some() {
             g::dm_scope::validate_group(&opened.routing.conversation_id)
                 .map_err(|_| invalid("group uses reserved DM namespace"))?;
         } else if source.root_commitment() != self.own_account_anchor()?
@@ -828,9 +971,6 @@ impl RamfluxClient {
         opened: &Opened,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(());
-        }
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             self.resolve_generated_pending_edit(
                 &opened.routing.conversation_id,

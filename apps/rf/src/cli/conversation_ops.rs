@@ -1,0 +1,395 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! `rf conversation` commands for send, reply, edit, react, delete and typing.
+
+use clap::{Args, Subcommand, ValueEnum};
+
+#[derive(Args)]
+pub(crate) struct ConversationCommand {
+    #[command(subcommand)]
+    pub(crate) action: ConversationAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ConversationAction {
+    Send(ConversationSend),
+    Reply(ConversationText),
+    Edit(ConversationEdit),
+    React(ConversationReact),
+    Delete(ConversationDelete),
+    Typing(TypingCommand),
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationSend {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) text: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationText {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) text: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationEdit {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) text: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+    /// Base revision the caller observed. Required. A mismatch returns `edit_conflict`.
+    #[arg(long)]
+    pub(crate) expected_revision: u64,
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationReact {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) token: String,
+    #[arg(long)]
+    pub(crate) remove: bool,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum ConversationDeleteScope {
+    Local,
+    Everyone,
+}
+
+impl ConversationDeleteScope {
+    #[must_use]
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Everyone => "everyone",
+        }
+    }
+}
+
+#[derive(Args)]
+pub(crate) struct ConversationDelete {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long, value_enum)]
+    pub(crate) scope: ConversationDeleteScope,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct TypingCommand {
+    #[command(subcommand)]
+    pub(crate) action: TypingAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum TypingAction {
+    Start(TypingEmit),
+    Stop(TypingEmit),
+    Watch(TypingWatch),
+}
+
+#[derive(Args)]
+pub(crate) struct TypingEmit {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) operation_id: String,
+}
+
+#[derive(Args)]
+pub(crate) struct TypingWatch {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    /// How long to collect `message.transient` typing rows, from 1 to 30 seconds.
+    #[arg(long, default_value_t = 6, value_parser = for_secs_in_range)]
+    pub(crate) for_secs: u64,
+    /// Created after `bus.subscribe` succeeds, before the observation window.
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) ready_file: Option<String>,
+    /// Return when the first active indicator arrives. `for_secs` stays the deadline.
+    #[arg(long)]
+    pub(crate) until_active: bool,
+}
+
+fn for_secs_in_range(raw: &str) -> Result<u64, String> {
+    let value = raw.parse::<u64>().map_err(|_| "for-secs must be an integer".to_owned())?;
+    if (1..=30).contains(&value) {
+        Ok(value)
+    } else {
+        Err("for-secs must be from 1 to 30".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConversationAction, ConversationDeleteScope, TypingAction, for_secs_in_range};
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> ConversationAction {
+        let cli = Cli::try_parse_from(args).expect("conversation command");
+        let Command::Conversation(command) = cli.command else {
+            panic!("expected conversation command");
+        };
+        command.action
+    }
+
+    #[test]
+    fn conversation_commands_parse_send_reply_edit_react_and_delete() {
+        let ConversationAction::Send(send) = parse(&[
+            "rf",
+            "conversation",
+            "send",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--text",
+            "hello",
+            "--operation-id",
+            "op-send",
+        ]) else {
+            panic!("expected send");
+        };
+        assert_eq!(send.operation_id, "op-send", "test: send keeps its operation id");
+
+        let ConversationAction::Edit(edit) = parse(&[
+            "rf",
+            "conversation",
+            "edit",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--text",
+            "revised",
+            "--operation-id",
+            "op-edit",
+            "--expected-revision",
+            "0",
+        ]) else {
+            panic!("expected edit");
+        };
+        assert_eq!(edit.message, "m1", "test: edit keeps the target message");
+        assert_eq!(edit.expected_revision, 0, "test: edit keeps the observed base revision");
+
+        let ConversationAction::React(react) = parse(&[
+            "rf",
+            "conversation",
+            "react",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--token",
+            "thumb",
+            "--remove",
+            "--operation-id",
+            "op-react",
+        ]) else {
+            panic!("expected react");
+        };
+        assert!(react.remove, "test: react --remove sets the remove flag");
+
+        let ConversationAction::Delete(delete) = parse(&[
+            "rf",
+            "conversation",
+            "delete",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--scope",
+            "everyone",
+            "--operation-id",
+            "op-delete",
+        ]) else {
+            panic!("expected delete");
+        };
+        assert_eq!(
+            delete.scope,
+            ConversationDeleteScope::Everyone,
+            "test: delete --scope everyone parses"
+        );
+        assert_eq!(delete.scope.as_wire(), "everyone", "test: everyone scope uses the wire name");
+    }
+
+    #[test]
+    fn edit_expected_revision_parses_only_on_edit() {
+        let ConversationAction::Edit(stale) = parse(&[
+            "rf",
+            "conversation",
+            "edit",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--text",
+            "revised",
+            "--operation-id",
+            "op-edit",
+            "--expected-revision",
+            "0",
+        ]) else {
+            panic!("expected edit");
+        };
+        assert_eq!(stale.expected_revision, 0, "test: expected-revision 0 is the observed base");
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "conversation",
+                "edit",
+                "--account",
+                "alice",
+                "--conversation",
+                "thread",
+                "--message",
+                "m1",
+                "--text",
+                "revised",
+                "--operation-id",
+                "op-edit",
+            ])
+            .is_err(),
+            "test: conversation edit requires --expected-revision"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rf",
+                "conversation",
+                "reply",
+                "--account",
+                "alice",
+                "--conversation",
+                "thread",
+                "--message",
+                "m1",
+                "--text",
+                "hello",
+                "--operation-id",
+                "op-reply",
+                "--expected-revision",
+                "0",
+            ])
+            .is_err(),
+            "test: expected-revision belongs only to conversation edit"
+        );
+    }
+
+    #[test]
+    fn typing_watch_defaults_for_secs_and_rejects_out_of_range() {
+        let ConversationAction::Typing(typing) = parse(&[
+            "rf",
+            "conversation",
+            "typing",
+            "watch",
+            "--account",
+            "bob",
+            "--conversation",
+            "thread",
+        ]) else {
+            panic!("expected typing watch");
+        };
+        let TypingAction::Watch(watch) = typing.action else {
+            panic!("expected watch");
+        };
+        assert_eq!(watch.for_secs, 6, "test: typing watch defaults to 6 seconds");
+        assert!(watch.ready_file.is_none(), "test: typing watch has no ready file by default");
+        assert!(!watch.until_active, "test: typing watch collects until the deadline by default");
+        let ConversationAction::Typing(early) = parse(&[
+            "rf",
+            "conversation",
+            "typing",
+            "watch",
+            "--account",
+            "bob",
+            "--conversation",
+            "thread",
+            "--until-active",
+        ]) else {
+            panic!("expected typing watch");
+        };
+        let TypingAction::Watch(early) = early.action else {
+            panic!("expected watch");
+        };
+        assert!(early.until_active, "test: --until-active returns on the first active frame");
+        assert!(for_secs_in_range("0").is_err(), "test: typing watch rejects 0 seconds");
+        assert!(for_secs_in_range("31").is_err(), "test: typing watch rejects 31 seconds");
+        assert_eq!(
+            for_secs_in_range("30").expect("upper bound"),
+            30,
+            "test: 30 seconds is in range"
+        );
+    }
+
+    #[test]
+    fn reply_requires_operation_id() {
+        let Err(error) = Cli::try_parse_from([
+            "rf",
+            "conversation",
+            "reply",
+            "--account",
+            "alice",
+            "--conversation",
+            "thread",
+            "--message",
+            "m1",
+            "--text",
+            "hi",
+        ]) else {
+            panic!("missing operation id was accepted");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "test: reply requires an operation id"
+        );
+    }
+}

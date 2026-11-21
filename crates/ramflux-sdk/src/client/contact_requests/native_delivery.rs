@@ -66,22 +66,18 @@ impl ApprovalPlan {
         }
     }
 }
-pub(super) fn approval_bytes(approved: &Approved) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-    Ok(Zeroizing::new(serde_json::to_vec(&approved.consent)?))
-}
+
 pub(super) fn save_approval(
     client: &RamfluxClient,
     intent: &mut Intent,
     mut approved: Approved,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     let (bytes, updated) = client.account_db()?.write_transaction(|| -> Result<_, SdkError> {
-        let bytes = if crate::client::target_selection::schema_v1_selected() {
+        let bytes = {
             let bytes = client
                 .generated_contact_inner(&approved.consent, approved.generated_inner.as_deref())?;
             approved.generated_inner = Some(bytes.to_vec());
             bytes
-        } else {
-            approval_bytes(&approved)?
         };
         let mut updated = intent.clone();
         updated.native_approval = Some(approved);
@@ -100,6 +96,23 @@ pub(super) async fn approve(
     let approved = prepare_approval(client, config, intent, manifest)?.execute().await?;
     save_approval(client, intent, approved)
 }
+fn approval_vault(
+    #[cfg(test)] client: &RamfluxClient,
+    #[cfg(not(test))] _client: &RamfluxClient,
+    config: &GatewaySessionConfig,
+) -> Result<std::sync::Arc<dyn crate::custody::PrimaryVault>, SdkError> {
+    // The ordinary scripted session has no custody block. The account still holds
+    // the primary that created the branch; production sessions carry that same vault
+    // on the custody config and never reach this arm.
+    match config.custody.as_ref() {
+        Some(custody) => Ok(custody.vault.clone()),
+        #[cfg(test)]
+        None => client.born_v3_vault.clone().ok_or(SdkError::NetworkingPending),
+        #[cfg(not(test))]
+        None => Err(SdkError::NetworkingPending),
+    }
+}
+
 pub(super) fn prepare_approval(
     client: &RamfluxClient,
     config: &GatewaySessionConfig,
@@ -188,7 +201,7 @@ pub(super) fn prepare_approval(
     };
     let root = client.account_index()?.root().to_path_buf();
     let id = client.account_db()?.local_account_id.clone();
-    let vault = config.custody.as_ref().ok_or(SdkError::NetworkingPending)?.vault.clone();
+    let vault = approval_vault(client, config)?;
     let signing_key = cert.branch_signing_public_key.clone();
     let agreement_key = cert.agreement_identity_public_key.clone();
     let epoch = current.envelope().body.device_set_epoch;

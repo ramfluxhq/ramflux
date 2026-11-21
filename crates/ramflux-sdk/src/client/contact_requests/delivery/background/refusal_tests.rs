@@ -69,11 +69,11 @@ async fn deliver_once(
     account: &mut LocalBusAccountState,
     recipient: &RecipientPlan,
 ) -> Result<Option<Plan>, SdkError> {
-    let envelope = crate::dm::gateway_direct_message_envelope(
-        &recipient.plan.config,
+    let envelope = crate::bus::delivery_receipts::background::retained_receipt_fixture(
+        account,
         &recipient.message,
-        None,
     )?;
+    crate::bus::runtime_tests::graft_explicit_native_root(&mut account.client, ACCOUNT)?;
     let session = account.session_client().await?;
     account.apply_session_metadata(session);
     let context =
@@ -155,6 +155,9 @@ async fn contact_row(case: Case) -> TestResult {
     }
 
     // A real reopen: nothing is selected before the deadline, and a Conflict never again.
+    // The live gate used a native root beside this legacy account. Unlock still uses
+    // the fixture passphrase, so drop that root before reopening the same database.
+    account.client.born_v3_account = None;
     reopen(&mut account)?;
     crate::time::FixedClock::advance_to(START + 1);
     assert!(prepare(&account)?.is_none());

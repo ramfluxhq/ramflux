@@ -11,7 +11,7 @@ const NODE: &str = "node-b.realnet";
 const NOW: u64 = 2_000_000_000;
 
 fn pk(seed: [u8; 32]) -> String {
-    ramflux_crypto::public_key_base64url_from_seed(seed)
+    ramflux_crypto::public_key_base64url_from_seed(&seed)
 }
 
 fn sign(bytes: &[u8], seed: [u8; 32]) -> String {

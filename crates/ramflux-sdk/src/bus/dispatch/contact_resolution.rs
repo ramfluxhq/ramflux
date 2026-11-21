@@ -16,6 +16,7 @@ struct Add {
     replace_provisional_root: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn add(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -74,10 +75,15 @@ pub(super) async fn add(
     {
         return Err(ContactReason::AlreadyContact.into());
     }
+    let mut verified_home = None;
     let gateway = match card.as_ref() {
         Some(card) => {
             let home = account_home(state, account_id)?;
-            card_gateway(card, &own, &state.config.data_root, &home).await?
+            let gateway = card_gateway(card, &own, &state.config.data_root, &home).await?;
+            // `card_gateway` proved the card's node is this node: same origin, same key
+            // fingerprint, same node id from its signed client record.
+            verified_home = Some(home.node_id.clone());
+            gateway
         }
         None => own.clone(),
     };
@@ -109,6 +115,9 @@ pub(super) async fn add(
         .await;
     account.apply_session_metadata(engine);
     let contact = result?;
+    if let (Some(home), Some(principal)) = (verified_home, contact["principal_id"].as_str()) {
+        account.client.pin_contact_home(principal, &home)?;
+    }
     #[cfg(test)]
     if let Err(error) = Box::pin(crate::client::contact_requests::flush(account)).await {
         tracing::debug!(%error,"contact request queued for retry");
@@ -200,7 +209,7 @@ async fn card_gateway(
     Ok(gateway)
 }
 
-pub(super) fn export(
+pub(super) async fn export(
     state: &LocalBusDaemonState,
     id: &str,
 ) -> Result<LocalBusDispatchResult, SdkError> {
@@ -208,7 +217,8 @@ pub(super) fn export(
     let profile = account_home(state, id)?;
     if let Some(native) = &account.client.born_v3_account {
         let now = crate::custody::network_now()?;
-        let current = crate::custody::load_account(&state.config.data_root, id, now)?;
+        let current =
+            crate::custody::load_account_after_install(&state.config.data_root, id, now).await?;
         if current.record() != native.record() || current.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }
@@ -225,6 +235,7 @@ pub(super) fn export(
                 .clone(),
             master_certificate: current.record().body.master_certificate.clone(),
             authority_head_hash: ramflux_protocol::custody::object_hash(current.record())?,
+            authority_epoch: current.record().body.device_set_epoch,
             devices: current.record().body.devices.clone(),
             node_url: profile.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?,
             node_key_fingerprint: crate::contact_node_fingerprint(&profile.node_public_key)?,
@@ -321,19 +332,11 @@ fn parse_selector(
         .and_then(|a| a.card.as_deref())
         .map(|c| crate::parse_contact_card(c, now))
         .transpose()?;
-    if let Some(card) = &card {
-        if account.client.born_v3_account.is_some() && card.version != 3 {
-            return Err(SdkError::CustodyModeDowngrade);
-        }
-        if card.version == 3
-            && let Some(pinned) =
-                account.client.account_db()?.client_record("identity", &card.principal_id)?
-            && pinned["contact_identity_commitment"]
-                .as_str()
-                .is_some_and(|anchor| anchor != card.root_commitment)
-        {
-            return Err(ContactReason::AnchorMismatch.into());
-        }
+    if let Some(card) = &card
+        && account.client.born_v3_account.is_some()
+        && card.version != 3
+    {
+        return Err(SdkError::CustodyModeDowngrade);
     }
     let selector = match (&parsed, &legacy, &card) {
         (
@@ -364,15 +367,8 @@ fn parse_selector(
 
 fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProfile, SdkError> {
     let account = local_bus_account(state, id)?;
-    let node = if account.client.born_v3_account.is_some() {
-        account.client.account_db()?.load_actor_state::<String>("account/node-id")?
-    } else {
-        let path = local_bus_account_manifest_path(&state.config.data_root, id);
-        if !path.exists() {
-            return Err(ContactReason::HomeProfileMissing.into());
-        }
-        read_local_bus_account_manifest(&path)?.node_id
-    };
+    let _born = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
+    let node = account.client.account_db()?.load_actor_state::<String>("account/node-id")?;
     let node = node.as_deref().ok_or(ContactReason::HomeProfileMissing)?;
     let profile = state.nodes.profiles.get(node).ok_or(ContactReason::HomeProfileMissing)?;
     if !profile.enabled

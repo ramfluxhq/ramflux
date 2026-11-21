@@ -117,7 +117,7 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
-    /// Exact generated durable carrier, kept behind the inactive profile until module activation.
+    /// Exact generated durable carrier for the active schema profile.
     /// It has one schema, raw I, and native authority; no alternate carrier is selected on failure.
     pub(crate) fn seal_generated_routed_prepared(
         &self,
@@ -129,12 +129,13 @@ impl RamfluxClient {
     ) -> Result<super::SealedRouted, SdkError> {
         use prost::Message as _;
         use ramflux_protocol::message as g;
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Err(invalid("generated durable profile is not selected"));
-        }
+
         let local = self.owned_device_identity()?;
         self.current_custody_authority(local.root_commitment(), crate::custody::network_now()?)?
             .ok_or(SdkError::NetworkingPending)?;
+        if body.len() > g::outer::MAX_INNER_BYTES {
+            return Err(SdkError::PayloadTooLarge);
+        }
         let parsed = super::generated_transport::generated_plaintext(body)?;
         if parsed.routing.kind != route.kind
             || parsed.routing.conversation_id != message.conversation_id

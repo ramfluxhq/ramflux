@@ -5,6 +5,8 @@
 use crate::bus::task_delivery::{Delivery as SealedDelivery, Destination};
 use crate::client::task::{Delivery, carrier::Carrier, invalid};
 use crate::prelude::*;
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde_json::{Value, json};
 #[cfg(test)]
 use std::future::Future;
@@ -101,29 +103,39 @@ pub(crate) async fn send(
         .client_record("conversation", &c.conversation_id)?
         .ok_or_else(|| invalid("task conversation missing"))?;
     let mut engine = account.session_client().await?;
-    let result = prepare(account, &mut engine, c, &thread, Mode::Event).await;
+    let result = Box::pin(prepare(account, &mut engine, c, &thread, Mode::Event)).await;
     account.apply_session_metadata(engine);
     let deliveries = result?;
     let response = account.client.account_db()?.write_transaction(|| {
-        let timeline = crate::client::task::timeline_id(c)?;
+        let local = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let mut authored = GatewayDirectMessage {
+            conversation_id: c.conversation_id.clone(), message_id: c.message_id.clone(),
+            envelope_id: crate::new_surface_message_id()?, source_principal_id: local.principal_id.clone(),
+            sender_id: local.device_id.clone(), recipient_device_id: Some(local.device_id.clone()),
+            recipient_principal_commitment: Some(account.client.own_account_anchor()?),
+            target_delivery_id: account.target_delivery_id.clone(), encrypted_body: Vec::new(),
+            created_at: now_unix_timestamp(), ttl: account.client.content_ttl()?,
+        };
+        let group = thread["group_id"].as_str();
+        let route = group.map_or_else(crate::client::routed::Route::direct, crate::client::routed::Route::group_message);
+        let exact = prepare_task_inner(&account.client, &mut authored, &c.bytes()?, &route)?;
+        let timeline = &authored.message_id;
         let outcome = account.client.project_task_message(&Delivery {
             conversation: &c.conversation_id,
-            message: &timeline,
+            message: timeline,
             principal: &c.principal_id,
             device: &c.device_id,
-            at: now_unix_timestamp(),
+            at: authored.created_at,
         }, &c.bytes()?)?.ok_or_else(|| invalid("task projection absent"))?;
         if !outcome.accepted && !outcome.pending {
             return Err(crate::task_refusal::refused(outcome.reason_code.unwrap_or(crate::TaskRefusalCode::InvalidEvent),outcome.reject.unwrap_or_else(|| "task rejected".into())));
         }
-        if account.client.direct_message_by_id(&timeline)?.is_none() {
-            account.client.send_direct_message(&c.conversation_id,&timeline,&c.device_id,&[])?;
-        }
-        account.client.account_db()?.replace_surface_message_content(&c.conversation_id,&timeline,outcome.fallback_text.as_bytes())?;
+        account.client.project_authored_message(&authored, &exact, &[])?;
         account.client.set_task_delivery_state(&c.conversation_id,c.event()?.event().task_id(),"sending",None)?;
-        Ok(json!({"accepted":outcome.accepted,"pending":outcome.pending,"task_id":c.event()?.event().task_id(),"message_id":c.message_id,"delivery_state":"submitted","actor_kind":crate::client::task::carrier_actor_kind(&account.client, c),"actor_kind_verified":crate::client::task::carrier_kind_verified(&account.client, c)}))
+        Ok(json!({"accepted":outcome.accepted,"pending":outcome.pending,"task_id":c.event()?.event().task_id(),"message_id":authored.message_id,"delivery_state":"submitted","actor_kind":crate::client::task::carrier_actor_kind(&account.client, c),"actor_kind_verified":crate::client::task::carrier_kind_verified(&account.client, c)}))
     })?;
-    if let Err(error) = super::super::task_delivery::submit_all(account, deliveries).await {
+    if let Err(error) = Box::pin(super::super::task_delivery::submit_all(account, deliveries)).await
+    {
         account.client.set_task_delivery_state(
             &c.conversation_id,
             c.event()?.event().task_id(),
@@ -228,7 +240,7 @@ pub(super) async fn prepare(
     )?;
     let mut deliveries = Vec::new();
     if let Some(plan) = group_plan {
-        deliveries.extend(super::task_group::prepare(account, engine, c, plan).await?);
+        peers.extend(plan.targets);
     }
     own_targets.append(&mut peers);
     for target in own_targets {
@@ -272,14 +284,14 @@ fn delivery_route(
     original: bool,
     group: Option<&str>,
 ) -> crate::client::routed::Route {
-    if (target.own && original) || (!target.own && !control) {
-        return crate::client::routed::Route::direct();
+    let _ = (control, original);
+    if target.own {
+        return crate::client::routed::Route::control();
     }
-    crate::client::routed::Route {
-        kind: crate::client::routed::Kind::Control,
-        group_id: group.map(str::to_owned),
-        attachments: false,
-    }
+    group.map_or_else(
+        crate::client::routed::Route::direct,
+        crate::client::routed::Route::group_message,
+    )
 }
 // A compacted local checkpoint is never sent as signed history. An original local
 // event still travels to existing siblings through ordinary authenticated ingress.
@@ -369,6 +381,8 @@ pub(in crate::bus) async fn seal_assigned(
         created_at: assigned.created_at.unwrap_or_else(now_unix_timestamp),
         ttl: account.client.content_ttl()?,
     };
+    let prepared = prepare_task_inner(&account.client, &mut message, body, &kind)?;
+    let body = prepared.as_slice();
     let sealed = if let Some(federation) = &target.federation {
         account.client.seal_routed_federated_as(
             engine,
@@ -387,8 +401,7 @@ pub(in crate::bus) async fn seal_assigned(
         federation: target.federation.clone().map(|route| Destination {
             recipient_root: target.identity.root_commitment().into(),
             route,
-            conversation_id: conversation.into(),
-            message_id: message.message_id,
+
             device_id: target.device.clone(),
         }),
     })
@@ -403,12 +416,12 @@ pub(super) async fn drain_confirmations_at(
     let forward_first = account.task_forward_first;
     account.task_forward_first = !forward_first;
     if forward_first {
-        let forwards = drain_forwards(account, now).await?;
-        let acknowledgements = drain_acknowledgements(account, now).await?;
+        let forwards = Box::pin(drain_forwards(account, now)).await?;
+        let acknowledgements = Box::pin(drain_acknowledgements(account, now)).await?;
         Ok(forwards + acknowledgements)
     } else {
-        let acknowledgements = drain_acknowledgements(account, now).await?;
-        let forwards = drain_forwards(account, now).await?;
+        let acknowledgements = Box::pin(drain_acknowledgements(account, now)).await?;
+        let forwards = Box::pin(drain_forwards(account, now)).await?;
         Ok(acknowledgements + forwards)
     }
 }
@@ -526,7 +539,7 @@ pub(in crate::bus) async fn send_control(
     }
     let mut engine = account.session_client().await?;
     let result = await_preparation(
-        prepare(account, &mut engine, c, &thread, mode),
+        Box::pin(prepare(account, &mut engine, c, &thread, mode)),
         "task confirmation preparation deferred",
     )
     .await;
@@ -839,3 +852,22 @@ pub(in crate::bus) fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 pub(crate) mod prepared;
+
+pub(in crate::bus) fn prepare_task_inner(
+    client: &RamfluxClient,
+    message: &mut GatewayDirectMessage,
+    body: &[u8],
+    route: &crate::client::routed::Route,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
+    g::validation::scan_message("Task", body, g::registry::COMPILED_LAYER)
+        .map_err(|_| invalid("typed Task required"))?;
+    let task = g::Task::decode(body).map_err(|_| invalid("typed Task malformed"))?;
+    message.message_id =
+        format!("task/{}", ramflux_protocol::hash_base64url("ramflux.message.typed.Task.v1", body));
+    let prepared = client.prepare_authored_content(
+        message,
+        route.group_id.as_deref(),
+        &g::Content { value: Some(g::content::Value::Task(task)) },
+    )?;
+    Ok(zeroize::Zeroizing::new(prepared.wire.clone()))
+}

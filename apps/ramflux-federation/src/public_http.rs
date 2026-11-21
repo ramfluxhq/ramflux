@@ -366,29 +366,89 @@ fn public_response(
     admission: &mut RequestAdmission<'_>,
 ) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
     let pairing_on = context.pairing.is_some();
-    let pairing_limits = if pairing_on { crate::pairing_http::pairing_limits() } else { limits };
-    let Some(request) = ramflux_node_core::read_http_request_with_route_limits(
+    let mut pairing_limits =
+        if pairing_on { crate::pairing_http::pairing_limits() } else { limits };
+    if pairing_on {
+        pairing_limits.max_body_bytes =
+            ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES;
+    }
+    let peer = stream
+        .peer_addr()
+        .map_or(std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED), |address| address.ip());
+    let deadline = accepted_at + pairing_limits.request_timeout;
+    let refusal = std::cell::RefCell::new(None);
+    let source_charged = std::cell::Cell::new(false);
+    let read = ramflux_node_core::read_http_request_with_full_admission(
         stream,
         limits,
         pairing_limits,
         |_, path| pairing_on && crate::pairing_http::pairing_route("", path),
         accepted_at,
-    )?
-    else {
-        return Ok(None);
+        |method, path, header, length| match &context.pairing {
+            Some(surface) => crate::pairing_full::admit(
+                &crate::pairing_full::ReadContext {
+                    surface,
+                    peer,
+                    deadline,
+                    refusal: &refusal,
+                    source_permit,
+                    source_charged: &source_charged,
+                },
+                method,
+                path,
+                header,
+                length,
+            ),
+            None => Ok(None),
+        },
+    );
+    let mut admitted = match read {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            return match refusal.into_inner() {
+                Some(reply) => Ok(Some(reply)),
+                None => Err(error),
+            };
+        }
     };
     if !admission.begin() {
+        zeroize::Zeroize::zeroize(&mut admitted.request.body);
         return Ok(Some(HttpResponse::text("503 Service Unavailable", "shutting down")));
     }
     #[cfg(feature = "itest-http")]
     ramflux_node_core::shutdown_request_test_delay();
 
-    if source_permit.is_some_and(|permit| !permit.allow_request(std::time::Instant::now())) {
+    // Ordinary routes do not invoke the pairing admission callback.
+    if !source_charged.get()
+        && source_permit.is_some_and(|permit| !permit.allow_request(std::time::Instant::now()))
+    {
+        zeroize::Zeroize::zeroize(&mut admitted.request.body);
         return Ok(Some(HttpResponse::text("429 Too Many Requests", "too many requests")));
     }
+    if let (Some(surface), Some(permit)) = (&context.pairing, admitted.permit.take()) {
+        return Ok(Some(crate::pairing_full::forward(
+            surface,
+            permit,
+            &mut admitted.request,
+            deadline,
+        )));
+    }
+    let mut request = admitted.request;
+    let response = ordinary_public_response(context, &request, peer, deadline);
+    zeroize::Zeroize::zeroize(&mut request.body);
+    response.map(Some)
+}
+
+fn ordinary_public_response(
+    context: &FederationPublicHttpContext,
+    request: &ramflux_node_core::NodeHttpRequest,
+    source: std::net::IpAddr,
+    deadline: std::time::Instant,
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
     let discovery = &context.discovery;
     let router = context.router.as_ref();
-    let response = match (request.method.as_str(), request.path.as_str()) {
+    Ok(match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => HttpResponse::json(&serde_json::json!({
             "service": "ramflux-federation-public", "status": "ok"
         }))?,
@@ -405,21 +465,14 @@ fn public_response(
         (method, path) if crate::pairing_http::pairing_route(method, path) => {
             match &context.pairing {
                 Some(surface) => {
-                    let source = stream
-                        .peer_addr()
-                        .map_or(std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED), |addr| {
-                            addr.ip()
-                        });
-                    crate::pairing_http::respond(surface, source, &request, false)
+                    crate::pairing_http::respond(surface, source, request, false, deadline)
                 }
                 None => HttpResponse::text("404 Not Found", "not found"),
             }
         }
         _ => HttpResponse::text("404 Not Found", "not found"),
-    };
-    Ok(Some(response))
+    })
 }
-
 #[cfg(test)]
 mod limits_tests {
     #[test]

@@ -38,6 +38,17 @@ fn signed_fixtures_verify_and_invalid_signatures_reject() -> Result<(), Box<dyn 
     for object in FIXTURE_OBJECTS {
         let json_path = root.join(fixture_json_path(object));
         let fixture = read_json(&json_path)?;
+        if object.dir == "envelope" {
+            let refused = ramflux_protocol::sender_signed_transcript(
+                &fixture,
+                ramflux_protocol::SenderTranscriptMode::WithCiphertext,
+            );
+            assert!(
+                matches!(refused, Err(ProtocolError::SenderTranscriptProfile)),
+                "a v1 envelope is refused: {refused:?}"
+            );
+            continue;
+        }
         parse_fixture_value(object, fixture.clone())?;
 
         let canonical = fixture_signed_bytes(object, &fixture)?;

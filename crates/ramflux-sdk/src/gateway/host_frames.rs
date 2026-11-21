@@ -386,7 +386,7 @@ impl GatewaySessionEngine {
     ) -> Result<Option<Step>, SdkError> {
         use super::session_push::{CapableServerFrame, RouteError, Routed, route};
         match route(bytes, &self.mode) {
-            Ok(Routed::Legacy(frame)) => {
+            Ok(Routed::Direct(frame)) => {
                 if let GatewayServerFrame::Ephemeral { expires_at_ms, .. } = &*frame {
                     if !self.ephemeral_negotiated {
                         return Err(self.retire("ephemeral on unsupported session"));
@@ -445,7 +445,7 @@ impl GatewaySessionEngine {
             },
             Err(RouteError::Retire(why)) => Err(self.retire(why)),
             Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
-            Err(RouteError::Legacy(error)) => {
+            Err(RouteError::Direct(error)) => {
                 if transport_on_decode_error {
                     self.terminal_reason = Some(DisconnectReason::Transport);
                 }

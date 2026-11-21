@@ -242,6 +242,7 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install pinned Rust toolchain
         run: |
           toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
@@ -479,10 +480,11 @@ jobs:
 
   # GitHub-hosted CLI jobs. itest-memory-vault is compile-gated and used only for fixtures;
   # production rf default features stay empty. Not a local lane gate.
+  # Serial real-process tests take about 19 minutes of build plus run; 30 leaves room for the cache save.
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -520,8 +522,11 @@ jobs:
         env:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
-          cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
+          cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway -p ramflux-relay
           python3 -B scripts/ci/run-nextest.py --label e2e_harness -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
+          # Pairing remains default-off; this row opts in only in owned child services.
+          cargo build -p ramflux-rf --bin rf
+          RAMFLUX_PAIRING_BIN_DIR="$PWD/target/debug" python3 -B scripts/ci/run-nextest.py --label pairing_history -- cargo nextest run --profile ci --no-tests=fail -p ramflux-federation --bin ramflux-federation --run-ignored ignored-only --test-threads=1 -E 'test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay) | test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_approve_after_custody_deadline_enrolls_and_delivers_to_both_devices)'
           # Includes b1_same_node_bidirectional_dm_uses_deliver_without_resume and
           # two_nodes_have_separate_identities_cas_and_stores (Demo B).
           python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
@@ -529,9 +534,15 @@ jobs:
           python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
           python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
           python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_contact_verify -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_contact_verify --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_group_service -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group_service --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_media_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_media_dm --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_attach -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_attach --run-ignored ignored-only --test-threads=1
           # Unified rows explicitly report dormancy until the separately audited activation.
           cargo build -p ramflux-rf --bin rf --features itest-memory-vault,itest-rfd-fault
           python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
+          # Conversation actions report schema dormancy until activation, same as the unified gate.
+          python3 -B scripts/ci/run-nextest.py --label e2e_conversation_actions -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_conversation_actions --run-ignored ignored-only --test-threads=1
 
       - name: Upload CLI JUnit
         if: always()
@@ -1005,13 +1016,6 @@ jobs:
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
           RAMFLUX_PRODUCTION_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label production-absence -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
-      # Keep the Demo B test-only crash seam out of default shipped artifacts.
-      - name: Guard default receive crash seam absence
-        if: ${{ !cancelled() }}
-        run: |
-          python3 -B scripts/ci/check-receive-crash-absence.py --self-test
-          python3 -B scripts/ci/check-receive-crash-absence.py
-
 
       - name: Upload JUnit
         if: always()
@@ -1020,6 +1024,51 @@ jobs:
           name: junit-v-sdk-a
           path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
+      - name: Reject leaked test temporary files
+        if: always() && env.RF_TEST_TMPDIR != ''
+        run: python3 -B scripts/ci/test-tmp.py check
+
+  # The guard rebuilds rf (debug) and the SDK (release) with RAMFLUX_PRODUCTION_BUILD=1, which
+  # invalidates the whole dependency graph. Run it in its own job so that cold build neither
+  # serializes behind the memory-vault tests nor shares their cache and timeout.
+  v-sdk-crash-guard:
+    name: "SDK variant: receive crash seam absence"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Isolate test temporary files
+        run: python3 -B scripts/ci/test-tmp.py init
+
+      - name: Install pinned Rust toolchain and check build prerequisites
+        run: |
+          missing=0
+          for tool in cc c++ make cmake pkg-config perl python3 git; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing build prerequisite: $tool"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v0-rust-${{ runner.environment }}
+          shared-key: v-sdk-crash-guard
+
+      # Keep the Demo B test-only crash seam out of default shipped artifacts.
+      - name: Guard default receive crash seam absence
+        run: |
+          python3 -B scripts/ci/check-receive-crash-absence.py --self-test
+          python3 -B scripts/ci/check-receive-crash-absence.py
+
       - name: Reject leaked test temporary files
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python3 -B scripts/ci/test-tmp.py check
@@ -1067,11 +1116,6 @@ jobs:
         with:
           tool: nextest@0.9.150
 
-      - name: Test (legacy accounts)
-        run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label legacy-accounts -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
-
       - name: Build same-tree router for the session push real-router gate
         if: ${{ !cancelled() }}
         run: |
@@ -1103,8 +1147,8 @@ jobs:
       - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
         if: ${{ !cancelled() }}
         run: |
-          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
-          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(generation_zero_refuses_new_classes_through_gateway_router)'
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(activation_admits_new_classes_and_refuses_missing_binding)'
+          python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label preauth-transport -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features compio-gateway,itest-local-mint --run-ignored only -E 'test(preauth_claim_rotation_transport_matrix) | test(preauth_signed_open_transport_matrix) | test(gateway_transport_auth_does_not_snapshot_state) | test(competing_signed_writes_preserve_network_progress_and_bounded_pending) | test(saturated_writer_voice_renew_preserves_active_call_and_initial_media) | test(activation_admits_new_classes_and_refuses_missing_binding)'
 
 
       - name: Upload JUnit
@@ -1250,8 +1294,8 @@ jobs:
 
       - name: Migration release gate regressions
         run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
-          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(legacy_home_node_apply_routes_are_absent_on_http_and_mesh_admin) | test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
+          RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
@@ -1307,3 +1351,44 @@ jobs:
       - name: Reject leaked test temporary files
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python3 -B scripts/ci/test-tmp.py check
+
+  prx-contract:
+    name: PRX contract (real prx daemon at the pinned commit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+
+      - name: Checkout PRX at the pinned commit (public repository, no credential)
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          repository: openprx/prx
+          ref: 1d78eb6273eee650de96637fab62d2b6a8e3ee30
+          path: prx
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          rustup toolchain install "$toolchain" --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
+        with:
+          workspaces: |
+            . -> target
+            prx -> target
+
+      - name: Build prx at the pinned commit
+        working-directory: prx
+        env:
+          PRX_BUILD_COMMIT: 1d78eb6273eee650de96637fab62d2b6a8e3ee30
+        run: cargo build --bin prx
+
+      - name: Contract tests against the real daemon
+        env:
+          RAMFLUX_PRX_BIN: ${{ github.workspace }}/prx/target/debug/prx
+        run: cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1

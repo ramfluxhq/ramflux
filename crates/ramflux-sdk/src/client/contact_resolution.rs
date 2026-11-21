@@ -46,6 +46,11 @@ pub(crate) fn manifest_failure(error: SdkError) -> SdkError {
         _ => ContactReason::ManifestInvalid.into(),
     }
 }
+/// A native card is an account introduction, not a snapshot: the fetched, fully verified current
+/// authority must carry the card's account and master certificate, and must be at or above the
+/// card's signed issuance epoch (the exact signed head when the epochs are equal). Later roster
+/// and layer changes therefore keep the card valid, a replayed older head does not, and the card's
+/// own device list is never an input to recipient selection.
 pub(crate) fn verify_native_card_head(
     card: Option<&crate::ContactCardBody>,
     manifest: &SdkDeviceManifestResponse,
@@ -56,12 +61,18 @@ pub(crate) fn verify_native_card_head(
         }
         let authority = manifest.custody.as_ref().ok_or(ContactReason::ManifestInvalid)?;
         let chain = card.native_authority.as_ref().ok_or(ContactReason::ManifestInvalid)?;
-        if ramflux_protocol::custody::object_hash(&authority.publication.record)? != chain.head_hash
-            || ramflux_protocol::custody::object_hash(
-                &authority.publication.record.body.master_certificate,
-            )? != chain.master_certificate_hash
+        let record = &authority.publication.record;
+        if ramflux_protocol::custody::object_hash(&record.body.master_certificate)?
+            != chain.master_certificate_hash
         {
             return Err(ContactReason::ManifestInvalid.into());
+        }
+        let epoch = record.body.device_set_epoch;
+        if epoch < chain.epoch
+            || (epoch == chain.epoch
+                && ramflux_protocol::custody::object_hash(record)? != chain.head_hash)
+        {
+            return Err(ContactReason::AuthorityStale.into());
         }
     }
     Ok(())
@@ -129,9 +140,9 @@ impl RamfluxClient {
                 Err(error) => return Err(error),
             }
         }
-        if let Some(card) = card {
-            self.decorate_contact_identity(&identity, &mut upgraded, Some(card), false)?;
-        }
+        // A retry of an already accepted contact is read-only for provenance: the card's locator
+        // and origin change only through a resolution that fetched and checked current authority
+        // (floor, certificate, pins). Replaying a still-valid old card changes nothing.
         if upgraded != identity {
             db.persist_client_record("identity", &principal, &upgraded)?;
         }
@@ -142,24 +153,7 @@ impl RamfluxClient {
         &self,
         contact_root: &str,
     ) -> Result<Option<SdkContactSafetyNumber>, SdkError> {
-        if self.born_v3_account.is_some() {
-            return self.contact_safety_number(contact_root).map(Some);
-        }
-        let link = self
-            .friend_links()?
-            .into_iter()
-            .find(|link| {
-                link.state == "accepted"
-                    && (link.requester_id == contact_root || link.target_id == contact_root)
-            })
-            .ok_or_else(|| SdkError::LocalBus("accepted contact safety link unavailable".into()))?;
-        let own_root =
-            if link.requester_id == contact_root { link.target_id } else { link.requester_id };
-        if self.observed_device_set(contact_root)?.is_none()
-            || self.observed_device_set(&own_root)?.is_none()
-        {
-            return Ok(None);
-        }
+        let _account = self.born_v3_account.as_ref().ok_or(SdkError::CustodyModeDowngrade)?;
         self.contact_safety_number(contact_root).map(Some)
     }
 
@@ -187,6 +181,7 @@ impl RamfluxClient {
         }
         let cached = self.account_db()?.client_record("identity", selector)?;
         let root_hint = resolution_root(selector, expected_root, cached.as_ref(), allow_commitment);
+        let started = std::time::Instant::now();
         let manifest: Option<SdkDeviceManifestResponse> = if let Some(root) = root_hint {
             sdk_gateway_get_json(gateway, &format!("/mvp1/device-manifest/{root}"))
                 .await
@@ -194,7 +189,7 @@ impl RamfluxClient {
         } else {
             engine.fetch_principal_manifest(selector).await.map_err(lookup_failure)?
         };
-        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?;
+        let manifest = manifest.ok_or(ContactReason::UnknownPrincipal)?.fetched_from(started);
         verify_native_card_head(card, &manifest)?;
         let principal = &manifest.principal_id;
         if principal != selector && !(allow_commitment && manifest.principal_commitment == selector)
@@ -254,6 +249,7 @@ impl RamfluxClient {
 
             db.persist_client_record("identity", principal, &identity)?;
             self.stage_own_contact(&manifest, &link_id)?;
+            self.ensure_direct_conversation(&manifest.principal_commitment, principal)?;
             if send_request {
                 self.resolve_contact_consent(&manifest, &link_id, request_note)?;
             }
@@ -303,6 +299,8 @@ impl RamfluxClient {
         let identity = db.client_record("identity", principal)?.unwrap_or_else(|| json!({}));
         let commitment = identity["contact_identity_commitment"].as_str();
         let verified = if let Some(commitment) = commitment {
+            // A missing born account is CustodyModeDowngrade. Authority that is
+            // still loading is NetworkingPending. Neither is a stored unverified bit.
             self.contact_safety_verification_state(
                 commitment,
                 identity["device_set_hash"].as_str(),
@@ -334,12 +332,14 @@ impl RamfluxClient {
             .or_else(|| retained_status.as_ref().and_then(|row| row["state"].as_str()));
         let request_id = outgoing_request.as_ref().map(|request| &request.request_id);
         let profile = self.read_profile_facts(principal).map(|facts| facts.profile.clone());
-        let display_name = profile
-            .as_ref()
-            .map_or_else(|| identity["display_name"].clone(), |p| json!(p.display_name));
-        let asserted = profile.as_ref().map_or_else(
-            || identity["kind_asserted"].as_str().map_or(Value::Null, |kind| json!(kind)),
-            |p| json!(p.kind),
+        let display_name = if identity["display_name"].is_null() {
+            profile.as_ref().map_or(Value::Null, |p| json!(p.display_name))
+        } else {
+            identity["display_name"].clone()
+        };
+        let asserted = identity["kind_asserted"].as_str().map_or_else(
+            || profile.as_ref().map_or(Value::Null, |p| json!(p.kind)),
+            |kind| json!(kind),
         );
         let warnings = self.identity_name_warnings(principal, display_name.as_str())?;
         Ok(
@@ -360,3 +360,7 @@ pub(crate) struct ContactResolution<'a> {
     pub replace_provisional_root: Option<&'a str>,
     pub verification: Option<&'a SdkContactSafetyNumber>,
 }
+
+#[cfg(test)]
+#[path = "contact_card_authority_tests.rs"]
+mod authority_tests;

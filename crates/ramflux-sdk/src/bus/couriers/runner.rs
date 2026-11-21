@@ -22,7 +22,9 @@ pub(crate) async fn run<F, R>(
     let mut cancel = context.cancel.clone();
     loop {
         let outcome = tokio::select! {biased;_=cancel.changed()=>break,result=pass(context.clone(),writer.clone())=>result};
-        let failed = outcome.is_err();
+        let failed = outcome
+            .as_ref()
+            .is_err_and(|error| !matches!(error, SdkError::FreshHeadRequired { .. }));
         let active = match outcome {
             Ok(active) => active,
             Err(error) => {

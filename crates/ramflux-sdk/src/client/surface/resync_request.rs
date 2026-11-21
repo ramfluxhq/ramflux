@@ -5,6 +5,8 @@
 use super::{Carrier, invalid, key};
 use crate::client::identity_authority::HeadUse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -21,6 +23,36 @@ pub(crate) struct ResyncRequest {
     surface_id: String,
     group: Option<String>,
     epoch: Option<u64>,
+}
+impl ResyncRequest {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        g::Surface {
+            payload: Some(g::surface::Payload::ResyncRequest(g::SurfaceResyncRequest {
+                kind: self.kind.clone(),
+                conversation_id: self.conversation_id.clone(),
+                surface_ref: self.surface_ref.clone(),
+                author: self.author.clone(),
+                surface_id: self.surface_id.clone(),
+                group: self.group.clone(),
+                epoch: self.epoch,
+            })),
+        }
+        .encode_to_vec()
+    }
+    fn from_generated(value: g::SurfaceResyncRequest) -> Result<Self, SdkError> {
+        if value.kind != KIND {
+            return Err(invalid("surface resync kind mismatch"));
+        }
+        Ok(Self {
+            kind: value.kind,
+            conversation_id: value.conversation_id,
+            surface_ref: value.surface_ref,
+            author: value.author,
+            surface_id: value.surface_id,
+            group: value.group,
+            epoch: value.epoch,
+        })
+    }
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ResyncReply {
@@ -133,14 +165,16 @@ impl RamfluxClient {
         conversation: &str,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Ok(value) = serde_json::from_slice::<Value>(body) else { return Ok(false) };
-        if value["type"] != KIND {
-            return Ok(false);
-        }
         if body.len() > 4096 {
             return Err(invalid("surface resync request too large"));
         }
-        let request: ResyncRequest = ramflux_protocol::parse_i_json(body)?;
+        g::validation::scan_message("Surface", body, g::registry::COMPILED_LAYER)
+            .map_err(|_| invalid("invalid Surface"))?;
+        let surface = g::Surface::decode(body).map_err(|_| invalid("invalid Surface"))?;
+        let Some(g::surface::Payload::ResyncRequest(value)) = surface.payload else {
+            return Ok(false);
+        };
+        let request = ResyncRequest::from_generated(value)?;
         if request.conversation_id != conversation
             || request.surface_ref
                 != super::scope::surface_reference(
@@ -360,13 +394,17 @@ impl RamfluxClient {
             super::ControlKind::Peer,
             reply.destination.epoch,
         )?;
-        let body = zeroize::Zeroizing::new(control.bytes()?);
         let mut message = self.surface_resync_direct_message(config, reply)?;
-        let mut route = crate::client::routed::Route::control();
-        route.group_id.clone_from(&reply.destination.group);
-        let packet = self.seal_routed_prepared(config, &message, &body, route, material)?;
-        message.encrypted_body = serde_json::to_vec(&packet)?;
-        crate::dm::gateway_direct_message_envelope(config, &message, None)
+        let surface =
+            g::Surface { payload: Some(g::surface::Payload::Delivery(control.to_generated()?)) };
+        let body = self.prepare_authored_content(
+            &mut message,
+            reply.destination.group.as_deref(),
+            &g::Content { value: Some(g::content::Value::Surface(surface)) },
+        )?;
+        let route = crate::client::routed::Route::from_inner(&body.wire)?;
+        let packet = self.seal_routed_prepared(config, &message, &body.wire, route, material)?;
+        crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, packet)
     }
 
     pub(crate) fn take_surface_resync_answer(

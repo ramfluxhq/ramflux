@@ -23,6 +23,8 @@ pub(crate) enum ObjectAction {
     Import(ObjectImport),
     List(AccountSelector),
     Share(ObjectShare),
+    Thumbnail(ObjectThumbnail),
+    Revoke(ObjectRevoke),
     Delete(ObjectDelete),
 }
 
@@ -111,6 +113,62 @@ pub(crate) struct ObjectShare {
     pub(crate) target: Option<String>,
     #[arg(long)]
     pub(crate) out_package: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct ObjectThumbnail {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) conversation: String,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) message: String,
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct ObjectRevoke {
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) account: String,
+    /// Retire the attachment grants recorded for one sent message.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        conflicts_with_all = [
+            "object",
+            "conversation",
+            "recipient",
+            "link",
+            "effective_at",
+            "reason",
+            "recipient_device",
+            "recipient_principal_commitment",
+            "target",
+            "sender",
+        ]
+    )]
+    pub(crate) message: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) object: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) conversation: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) recipient: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) link: Option<String>,
+    #[arg(long, required_unless_present = "message")]
+    pub(crate) effective_at: Option<i64>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) reason: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) recipient_device: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) recipient_principal_commitment: Option<String>,
+    #[arg(long, allow_hyphen_values = true, required_unless_present = "message")]
+    pub(crate) target: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    pub(crate) sender: Option<String>,
 }
 
 #[derive(Args)]

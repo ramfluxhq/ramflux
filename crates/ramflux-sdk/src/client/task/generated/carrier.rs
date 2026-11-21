@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant typed carrier signing, independent of legacy transport encoders.
+//! Typed carrier signing for generated Task content.
 use super::{g, invalid};
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;

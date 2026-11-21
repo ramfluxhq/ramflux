@@ -4,7 +4,7 @@
 use super::*;
 
 fn signed_candidate(envelope_id: &str, nonce: u64) -> Result<Envelope, Box<dyn std::error::Error>> {
-    let mut envelope = envelope(envelope_id, "target_alice", DeliveryClass::OpaqueEvent);
+    let mut envelope = envelope(envelope_id, "target_alice", DeliveryClass::Message);
     envelope.created_at = i64::try_from(crate::now_unix_seconds())?;
     envelope.delivery_mode = Some("durable".into());
     envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x22_u8; 32]));
@@ -46,7 +46,6 @@ fn authority_mismatch(
 
 #[test]
 fn tampered_delivery_mode_fails_node_entry_signature() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let nonce = 901;
     let router = registered_router(nonce)?;
     let signed = signed_candidate("bind-mode", nonce)?;
@@ -75,7 +74,6 @@ fn tampered_delivery_mode_fails_node_entry_signature() -> Result<(), Box<dyn std
 
 #[test]
 fn tampered_collapse_tag_fails_node_entry_signature() -> Result<(), Box<dyn std::error::Error>> {
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let nonce = 902;
     let router = registered_router(nonce)?;
     let signed = signed_candidate("bind-tag", nonce)?;

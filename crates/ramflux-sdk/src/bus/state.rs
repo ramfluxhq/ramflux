@@ -80,6 +80,7 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) native_setup: Option<LocalBusConfig>,
     pub(crate) activation_pending: bool,
     pub(crate) head_refresh: super::couriers::head_refresh::RefreshState,
+    pub(crate) layer_publish: super::couriers::layer_publish::LayerPublishState,
     pub(crate) client: RamfluxClient,
     pub(crate) engine: Option<GatewaySessionEngine>,
     pub(crate) connection: Option<ConnectionHandle>,
@@ -160,6 +161,7 @@ impl LocalBusAccountState {
             native_setup: None,
             activation_pending: false,
             head_refresh: super::couriers::head_refresh::RefreshState::default(),
+            layer_publish: super::couriers::layer_publish::LayerPublishState::default(),
             client,
             engine: Some(engine),
             connection: None,
@@ -203,15 +205,24 @@ impl LocalBusAccountState {
 
     pub(crate) fn disconnected(
         client: RamfluxClient,
-        gateway_config: GatewaySessionConfig,
+        mut gateway_config: GatewaySessionConfig,
         principal_commitment: String,
     ) -> Self {
+        // Actor handoff may reopen a new writer after the caller's old DB closes.
+        // Bind networking to this actual owner rather than retaining its dead weak reader.
+        if client.born_v3_account.is_some()
+            && let Some(db) = client.active_account_db.as_ref()
+        {
+            gateway_config.pairing_admission =
+                Some(std::sync::Arc::new(db.pairing_admission_reader()));
+        }
         let target_delivery_id = gateway_config.target_delivery_id.clone();
         Self {
             timeouts: super::runtime_limits::RuntimeTimeouts::default(),
             native_setup: None,
             activation_pending: false,
             head_refresh: super::couriers::head_refresh::RefreshState::default(),
+            layer_publish: super::couriers::layer_publish::LayerPublishState::default(),
             client,
             engine: None,
             connection: None,
@@ -253,6 +264,7 @@ impl LocalBusAccountState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn merge_deliveries(
         &mut self,
         entries: Vec<GatewayInboxEntry>,
@@ -280,10 +292,6 @@ impl LocalBusAccountState {
         Ok(fresh)
     }
 
-    pub(crate) fn pending_page(&self, limit: usize) -> Vec<GatewayInboxEntry> {
-        self.pending_deliveries.iter().take(limit).cloned().collect()
-    }
-
     pub(crate) fn mark_acked(&mut self, envelope_id: &str) -> Result<(), SdkError> {
         // The compatibility ACK endpoint accepts an ID only when the node can prove it unique.
         // Cache a position only when the local pending page identifies exactly one delivery too.
@@ -306,51 +314,17 @@ impl LocalBusAccountState {
         Ok(())
     }
 
-    pub(crate) async fn refresh_legacy_authorization(&mut self) -> Result<(), SdkError> {
-        let root = self.client.account_index()?.root().to_path_buf();
-        let id = self.client.account_db()?.local_account_id.clone();
-        let path = local_bus_account_manifest_path(&root, &id);
-        if !super::daemon::account_manifest_available(&path) {
-            return Ok(());
-        }
-        let manifest = read_local_bus_account_manifest(&path)?;
-        let refresh_due = self.client.own_proof_refresh_due(now_unix_timestamp())?;
-        if !manifest.activation_pending && !refresh_due {
-            return Ok(());
-        }
-        let result = tokio::time::timeout(self.timeouts.network_wait, async {
-            self.client
-                .initialize_and_publish_prekey_bundle_via_gateway_request(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    &manifest.device_id,
-                    &manifest.target_delivery_id,
-                    manifest.device_seed,
-                )
-                .await?;
-            self.client
-                .cache_verified_device_manifest(
-                    &self.gateway_config,
-                    &manifest.principal_commitment,
-                    "account.create",
-                )
-                .await?;
-            Ok::<(), SdkError>(())
-        })
-        .await
-        .unwrap_or_else(|_| {
-            Err(SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS })
-        });
-        result.map_err(|error| {
-            if refresh_due && !manifest.activation_pending {
-                SdkError::OwnDeviceAuthorizationRefreshFailed(error.to_string())
-            } else {
-                error
-            }
-        })
-    }
-
     pub(crate) async fn prepare_native_branch(&mut self) -> Result<(), SdkError> {
+        // A scripted gateway speaks ordinary session frames. The branch is already
+        // created, and this config carries no node selection to register.
+        #[cfg(test)]
+        if self.gateway_config.custody.is_none()
+            && !self.gateway_config.custody_networking_pending
+            && self.gateway_config.device_branch.is_some()
+            && self.client.device_branch.is_some()
+        {
+            return Ok(());
+        }
         tokio::time::timeout(
             self.timeouts.network_wait,
             super::native_account::configure_pending(self),
@@ -391,7 +365,7 @@ impl LocalBusAccountState {
     /// Live session mode. `start_connection` moves the engine onto the worker, so the
     /// connection handle is the production source; a test carrier on `engine` still wins.
     pub(crate) fn session_delivery_mode(&self) -> Option<&'static str> {
-        self.bound_session_mode().map(|mode| if mode.is_push() { "push" } else { "compat" })
+        self.bound_session_mode().map(|mode| mode.receive_label())
     }
 
     pub(crate) fn bound_session_mode(&self) -> Option<crate::gateway::session_push::SessionMode> {
@@ -456,8 +430,8 @@ impl LocalBusAccountState {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SdkError>> + '_>> {
         Box::pin(async move {
-            if self.connection_work.is_none() && self.client.born_v3_account.is_none() {
-                self.refresh_legacy_authorization().await?;
+            if self.client.born_v3_account.is_none() {
+                return Err(SdkError::IdentityRootMissing);
             }
             if self.connection.as_ref().is_some_and(ConnectionHandle::retirement_requested)
                 && self.connection_work.is_none()
@@ -645,7 +619,10 @@ impl LocalBusAccountState {
             return;
         }
         let checkpoint = crate::bus::dispatch::device::PUSH_ROUTE_CHECKPOINT;
-        match self.client.set_projection_checkpoint(checkpoint, "") {
+        match self.client.set_projection_checkpoint(
+            checkpoint,
+            crate::bus::dispatch::device::EMPTY_PUSH_ROUTE_BOOK,
+        ) {
             Ok(()) => self.gateway_config.push_route_clear_pending = false,
             Err(error) => tracing::warn!(%error, "push route clear confirmation not persisted"),
         }
@@ -678,6 +655,9 @@ impl LocalBusAccountState {
 }
 #[derive(Clone)]
 pub(crate) struct LocalBusConnectionState {
+    pub(crate) credential_channel: Option<
+        std::sync::Arc<crate::custody::pairing::private_credential::PrivateCredentialChannel>,
+    >,
     pub(crate) connection_id: u64,
     pub(crate) outbound: super::outbound::LocalBusOutbound,
     pub(crate) topics: BTreeSet<String>,
@@ -691,6 +671,7 @@ impl LocalBusConnectionState {
         outbound: impl Into<super::outbound::LocalBusOutbound>,
     ) -> Self {
         Self {
+            credential_channel: None,
             connection_id,
             outbound: outbound.into(),
             topics: BTreeSet::new(),

@@ -34,6 +34,12 @@ impl NodeSecret {
         operation(&self.0)
     }
 
+    /// A zeroize-guarded copy for an owner that must hold its own key (never a plain array).
+    #[must_use]
+    pub fn guarded_seed(&self) -> Zeroizing<[u8; 32]> {
+        self.with_bytes(|bytes| Zeroizing::new(*bytes))
+    }
+
     /// Accepted modes are 0600, 0400, 0640 and 0440.
     /// # Errors
     /// Rejects non-regular files, permissive Unix modes, oversized input and invalid key encoding.

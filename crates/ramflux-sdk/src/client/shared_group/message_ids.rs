@@ -14,6 +14,26 @@ struct Alias {
     expires_at: i64,
 }
 impl RamfluxClient {
+    pub(crate) fn outgoing_group_logical_id(
+        &self,
+        canonical: &str,
+    ) -> Result<Option<String>, SdkError> {
+        let Some(alias) = self
+            .account_db()?
+            .load_actor_state::<Alias>(&format!("group-message/alias/{canonical}"))?
+        else {
+            return Ok(None);
+        };
+        let own = self.owned_device_identity()?;
+        if alias.root != own.root_commitment() || alias.device != own.device_id() {
+            return Err(StorageError::GroupPermissionDenied.into());
+        }
+        Ok(Some(alias.logical))
+    }
+}
+
+#[cfg(test)]
+impl RamfluxClient {
     pub(crate) fn qualify_outgoing_group_message(
         &self,
         group: &str,
@@ -58,21 +78,5 @@ impl RamfluxClient {
             },
         )?;
         Ok((canonical, logical))
-    }
-    pub(crate) fn outgoing_group_logical_id(
-        &self,
-        canonical: &str,
-    ) -> Result<Option<String>, SdkError> {
-        let Some(alias) = self
-            .account_db()?
-            .load_actor_state::<Alias>(&format!("group-message/alias/{canonical}"))?
-        else {
-            return Ok(None);
-        };
-        let own = self.owned_device_identity()?;
-        if alias.root != own.root_commitment() || alias.device != own.device_id() {
-            return Err(StorageError::GroupPermissionDenied.into());
-        }
-        Ok(Some(alias.logical))
     }
 }

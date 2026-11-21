@@ -8,21 +8,27 @@ pub(crate) mod account;
 mod account_backup;
 mod account_ceremony;
 pub(crate) mod admin;
+pub(crate) mod attachment;
 pub(crate) mod bot;
 pub(crate) mod call;
 pub(crate) mod contact;
+pub(crate) mod conversation_ops;
 pub(crate) mod daemon;
 pub(crate) mod device;
+pub(crate) mod diag;
 pub(crate) mod dm;
 pub(crate) mod grant;
 pub(crate) mod group;
-#[cfg(feature = "itest-legacy-accounts")]
-mod itest_legacy_account;
 pub(crate) mod keychain;
 pub(crate) mod mcp;
 pub(crate) mod node;
 #[cfg(unix)]
 mod node_custody;
+#[cfg(unix)]
+pub(crate) mod pairing;
+#[cfg(not(unix))]
+#[path = "pairing_unsupported.rs"]
+pub(crate) mod pairing;
 #[cfg(windows)]
 mod windows_console;
 #[cfg(not(unix))]
@@ -35,6 +41,7 @@ mod node_custody {
 }
 pub(crate) mod object;
 pub(crate) mod surface;
+pub(crate) mod task;
 
 pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;
@@ -53,17 +60,16 @@ pub(crate) use ramflux_sdk::{
     LocalBusGrantRequest, LocalBusGrantRevokeRequest, LocalBusGroupCreateRequest,
     LocalBusGroupInviteAcceptRequest, LocalBusGroupInviteCreateRequest,
     LocalBusGroupMemberAddRequest, LocalBusGroupMemberBanRequest, LocalBusGroupMemberKickRequest,
-    LocalBusGroupMemberRemoveRequest, LocalBusGroupMessageDeleteRequest,
-    LocalBusGroupNameSetRequest, LocalBusGroupReceiveRequest, LocalBusGroupRequest,
-    LocalBusGroupRoleSetRequest, LocalBusGroupSendRequest, LocalBusMcpApprovalDecisionRequest,
-    LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest, LocalBusMessageAckRequest,
-    LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
+    LocalBusGroupMemberRemoveRequest, LocalBusGroupNameSetRequest, LocalBusGroupReceiveRequest,
+    LocalBusGroupRequest, LocalBusGroupRoleSetRequest, LocalBusGroupSendRequest,
+    LocalBusMcpApprovalDecisionRequest, LocalBusMcpServerAddRequest, LocalBusMcpToolCallRequest,
+    LocalBusMessageAckRequest, LocalBusMessageAttachmentInput, LocalBusMessageDeleteRequest,
     LocalBusMessageReceiptDeliveredRequest, LocalBusMessageReceiptReadRequest,
     LocalBusMessageSubmitRequest, LocalBusObjectDeleteRequest, LocalBusObjectGetBeginRequest,
     LocalBusObjectGetFinishRequest, LocalBusObjectGetReadRequest, LocalBusObjectGetRequest,
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES,
     MAX_LOCAL_BUS_OBJECT_BYTES, MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES, OBJECT_PUT_PROTOCOL_VERSION,
     bindings,

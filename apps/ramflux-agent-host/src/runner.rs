@@ -181,10 +181,6 @@ impl<E: EngineProvider> AgentHost<E> {
         self.state.cursor = Some(seq);
         self.save_state()
     }
-    fn is_own_message(&self, message: &serde_json::Value) -> bool {
-        message["sender_id"] == self.state.device_id
-            || message["sender_id"] == self.state.principal_id
-    }
     async fn message(
         &mut self,
         bus: &mut impl AgentBus,
@@ -195,7 +191,7 @@ impl<E: EngineProvider> AgentHost<E> {
         let metadata = &event.body["message"];
         let conversation_id = participant::field(metadata, "conversation_id")?;
         let message_id = participant::field(metadata, "message_id")?;
-        if self.is_own_message(metadata) || metadata["deleted"] == true {
+        if metadata["deleted"] == true {
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
@@ -219,25 +215,14 @@ impl<E: EngineProvider> AgentHost<E> {
         if !self.rate_history_has_capacity(conversation_id) {
             return Err(Error::Limit);
         }
-        let read =
-            bus.request("message.read", json!({"conversation_id":conversation_id}), None).await?;
-        let Some(message) = read["messages"]
-            .as_array()
-            .and_then(|rows| rows.iter().find(|m| m["message_id"] == message_id))
+        let Some(message) = crate::message_input::read(bus, conversation_id, message_id).await?
         else {
             return Ok(());
         };
-        if message["deleted"] == true || self.is_own_message(message) {
-            return Ok(());
-        }
-        let Some(text) =
-            message["body_utf8"].as_str().filter(|t| t.len() <= crate::config::MAX_TEXT_BYTES)
-        else {
-            return Ok(());
-        };
-        let sender_display_name = participant::sender_display_name(bus, message).await?;
+        let text = message["text"].as_str().ok_or(Error::MalformedField("text"))?;
+        let sender_display_name = participant::sender_display_name(bus, &message).await?;
         let chat_kind = if conversation["group_id"].is_string() { "group" } else { "direct" };
-        let mentioned = message["mentioned"].as_bool().unwrap_or(false);
+        let mentioned = participant::mentions_self(bus, &self.state, &message).await?;
         let events = self
             .engine
             .submit(
@@ -427,17 +412,10 @@ impl<E: EngineProvider> AgentHost<E> {
             self.state.approvals.remove(conversation_id);
             return self.save_state();
         };
-        let read =
-            bus.request("message.read", json!({"conversation_id":conversation_id}), None).await?;
-        let Some(message) = read["messages"]
-            .as_array()
-            .and_then(|rows| rows.iter().find(|message| message["message_id"] == message_id))
+        let Some(message) = crate::message_input::read(bus, conversation_id, message_id).await?
         else {
             return Ok(());
         };
-        if message["deleted"] == true || self.is_own_message(message) {
-            return Ok(());
-        }
         let plan = if matches!(intents.first(), Some(Intent::CreateSurface(_))) {
             match crate::surface_plan::SurfacePlan::new(conversation_id, &intents) {
                 Ok(plan) => Some(plan),
@@ -460,7 +438,7 @@ impl<E: EngineProvider> AgentHost<E> {
             if text.is_empty() || text.len() > crate::config::MAX_TEXT_BYTES {
                 return Err(Error::Limit);
             }
-            participant::reply_outputs(bus, &self.state, &conversation, message, text, 0).await?
+            participant::reply_outputs(bus, &self.state, &conversation, &message, text, 0).await?
         } else {
             if !matches!(intents.first(), Some(Intent::CreateSurface(_))) {
                 return Err(Error::State);

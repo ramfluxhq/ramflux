@@ -4,6 +4,7 @@
 //! Repeated consent decisions have distinct journal identities; immutable replays remain no-ops.
 use super::tests::unlocked_client;
 use super::*;
+use prost::Message as _;
 
 fn checkpoint(client: &RamfluxClient, name: &str) -> Result<String, SdkError> {
     client
@@ -88,8 +89,23 @@ fn sibling_reblock_after_local_lift_and_duplicate_tombstone_are_safe() -> Result
     let old = checkpoint(&client, "friend.control")?;
     client.unblock_friend_link_at("link", 1001)?;
     sibling_block.capability_revoked_at = Some(2000);
-    let mut packet = b"ramflux.own_contact_tombstone.v1\n".to_vec();
-    packet.extend(serde_json::to_vec(&serde_json::json!({"link":sibling_block}))?);
+    let packet = crate::client::generated_control::control_from_payload(
+        ramflux_protocol::message::control::Payload::OwnContactTombstone(
+            ramflux_protocol::message::OwnContactTombstone {
+                link: Some(ramflux_protocol::message::FriendLinkRecord {
+                    link_id: sibling_block.link_id,
+                    requester_id: sibling_block.requester_id,
+                    target_id: sibling_block.target_id,
+                    state: sibling_block.state,
+                    remove_scope: sibling_block.remove_scope,
+                    blocked: sibling_block.blocked,
+                    capability_revoked_at: sibling_block.capability_revoked_at,
+                }),
+                decided_at: Some(2_000_000),
+            },
+        ),
+    )?
+    .encode_to_vec();
     assert!(client.receive_own_contact(&packet)?);
     assert!(client.account_db()?.friend_link("link")?.blocked);
     let fresh = checkpoint(&client, "friend.control")?;

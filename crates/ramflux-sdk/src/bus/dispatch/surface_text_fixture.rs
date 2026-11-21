@@ -31,52 +31,12 @@ pub(in crate::bus) struct RecordingGateway {
     pub delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
 }
 impl RecordingGateway {
-    fn own_response(
-        &mut self,
-        fanout: crate::GatewayOwnDeviceFanoutFrame,
-    ) -> Result<GatewayServerFrame, TransportError> {
-        let bytes = ramflux_protocol::decode_base64url(&fanout.envelope.encrypted_payload)
-            .map_err(|e| TransportError::Quic(e.to_string()))?;
-        let raw = bytes
-            .strip_prefix(crate::client::own_device_copy::PREFIX)
-            .ok_or_else(|| TransportError::Quic("expected per-message own copy".into()))?;
-        let packet: crate::client::own_device_copy::OwnDeviceMessage =
-            serde_json::from_slice(raw).map_err(|e| TransportError::Quic(e.to_string()))?;
-        self.own.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(fanout.envelope);
-        if self.fail_own_ack {
-            return Err(TransportError::Quic("injected lost own-copy ACK".into()));
-        }
-        Ok(GatewayServerFrame::OwnDeviceFanout {
-            response: crate::GatewayOwnDeviceFanoutResponse {
-                principal_id: fanout.principal_id,
-                source_device_id: fanout.source_device_id,
-                delivered: packet
-                    .slots
-                    .into_iter()
-                    .map(|slot| {
-                        let failed =
-                            self.fail_own_target.as_ref() == Some(&slot.recipient_device_id);
-                        crate::GatewayOwnDeviceFanoutDelivery {
-                            device_id: slot.recipient_device_id,
-                            target_delivery_id: "sibling".into(),
-                            outcome: if failed { "unreachable" } else { "online" }.into(),
-                            inbox_seq: (!failed).then_some(1),
-                        }
-                    })
-                    .collect(),
-            },
-        })
-    }
-    async fn delayed_own_response(
-        &mut self,
-        fanout: crate::GatewayOwnDeviceFanoutFrame,
-    ) -> Result<GatewayServerFrame, TransportError> {
+    async fn delayed_own_response(&self) {
         if !self.own_delay.is_zero() {
             tokio::time::sleep(self.own_delay).await;
         }
         *self.own_completed_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(now_unix_timestamp());
-        self.own_response(fanout)
     }
 
     pub fn new(delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>) -> Self {
@@ -161,6 +121,31 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     .map_err(|e| TransportError::Quic(e.to_string()));
             }
             let response = match self.last.take() {
+                Some(GatewayClientFrame::Submit { submit }) if own_target(&submit.envelope) => {
+                    self.own
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(submit.envelope.clone());
+                    // The gateway answers (or loses its answer) only after the configured delay.
+                    self.delayed_own_response().await;
+                    if self.fail_own_ack {
+                        return Err(TransportError::Quic("injected lost own-copy ACK".into()));
+                    }
+                    if self.fail_own_target.as_deref().is_some_and(|target| {
+                        own_target_device(&submit.envelope).as_deref() == Some(target)
+                    }) {
+                        GatewayServerFrame::Nack { reason: "injected own target failure".into() }
+                    } else {
+                        GatewayServerFrame::Deliver {
+                            entry: GatewayInboxEntry {
+                                forwarded: false,
+                                inbox_seq: 1,
+                                target_delivery_id: submit.envelope.target_delivery_id.clone(),
+                                envelope: submit.envelope,
+                            },
+                        }
+                    }
+                }
                 Some(GatewayClientFrame::Submit { .. }) if self.nack_reason.is_some() => {
                     GatewayServerFrame::Nack {
                         reason: self.nack_reason.clone().unwrap_or_default(),
@@ -187,8 +172,10 @@ impl GatewaySessionFrameSource for RecordingGateway {
                         },
                     }
                 }
-                Some(GatewayClientFrame::OwnDeviceFanout { fanout }) => {
-                    self.delayed_own_response(fanout).await?
+                Some(GatewayClientFrame::OwnDeviceFanout { .. }) => {
+                    return Err(TransportError::Quic(
+                        "test: retired own-device fanout frame".into(),
+                    ));
                 }
                 Some(GatewayClientFrame::PrekeyFetch { device_id }) => GatewayServerFrame::Prekey {
                     response: self.prekeys.get(&device_id).cloned().unwrap_or_else(|| {
@@ -228,12 +215,26 @@ impl GatewaySessionFrameSource for RecordingGateway {
 pub(in crate::bus::dispatch) fn manifest(
     client: &RamfluxClient,
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    if let Some(material) = &client.native_bus_fixture {
+        return Ok(material.manifest.clone());
+    }
     crate::client::identity_authority::test_support::public_manifest(client)
 }
-pub(in crate::bus) async fn directory(
+pub(crate) async fn directory(
     root: &Path,
     manifests: BTreeMap<String, serde_json::Value>,
 ) -> Result<(SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error>> {
+    let (address, task, _) = directory_live(root, manifests).await?;
+    Ok((address, task))
+}
+
+pub(in crate::bus) async fn directory_live(
+    root: &Path,
+    manifests: BTreeMap<String, serde_json::Value>,
+) -> Result<
+    (SocketAddr, tokio::task::JoinHandle<()>, Arc<Mutex<BTreeMap<String, serde_json::Value>>>),
+    Box<dyn std::error::Error>,
+> {
     let certified = rcgen::generate_simple_self_signed(vec!["test-gateway".into()])?;
     std::fs::write(root.join("ca.pem"), certified.cert.pem())?;
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -248,11 +249,12 @@ pub(in crate::bus) async fn directory(
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let manifests = Arc::new(manifests);
+    let manifests = Arc::new(Mutex::new(manifests));
+    let served = Arc::clone(&manifests);
     let task = tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let acceptor = acceptor.clone();
-            let manifests = manifests.clone();
+            let manifests = Arc::clone(&manifests);
             tokio::spawn(async move {
                 let result = async {
                     let mut stream = acceptor.accept(tcp).await?;
@@ -266,8 +268,12 @@ pub(in crate::bus) async fn directory(
                         serde_json::from_slice(&bytes)?;
                     let commitment =
                         request.path.strip_prefix("/mvp1/device-manifest/").unwrap_or("");
-                    let body =
-                        manifests.get(commitment).cloned().unwrap_or(serde_json::Value::Null);
+                    let body = manifests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(commitment)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     let response = serde_json::to_vec(
                         &serde_json::json!({"status":if body.is_null(){404}else{200},"body":body}),
                     )?;
@@ -285,5 +291,22 @@ pub(in crate::bus) async fn directory(
             });
         }
     });
-    Ok((address, task))
+    Ok((address, task, served))
+}
+
+fn own_target(envelope: &ramflux_protocol::Envelope) -> bool {
+    ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)
+        .ok()
+        .flatten()
+        .is_some_and(|(root, _)| {
+            envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+                == Some(root.as_str())
+        })
+}
+
+fn own_target_device(envelope: &ramflux_protocol::Envelope) -> Option<String> {
+    ramflux_protocol::parse_qualified_device_id(&envelope.target_delivery_id)
+        .ok()
+        .flatten()
+        .map(|(_, device)| device)
 }

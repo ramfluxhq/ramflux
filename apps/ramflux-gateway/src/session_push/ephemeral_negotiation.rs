@@ -488,13 +488,11 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
 }
 
 fn restart_envelope(target: &str) -> ramflux_protocol::Envelope {
-    let mut ext = std::collections::BTreeMap::new();
-    ext.insert(ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION.to_owned(), json!("ephemeral"));
     ramflux_protocol::Envelope {
-        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        ext: ramflux_protocol::Ext { ext },
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        version: 2,
+        domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+        ext: ramflux_protocol::Ext::default(),
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "test-p11-key".to_owned(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
@@ -505,15 +503,15 @@ fn restart_envelope(target: &str) -> ramflux_protocol::Envelope {
         source_device_id: "device-p11".to_owned(),
         target_delivery_id: target.to_owned(),
         routing_set_id: None,
-        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        delivery_class: ramflux_protocol::DeliveryClass::Message,
         priority: ramflux_protocol::Priority::Low,
         ttl: 5,
         created_at: 1_760_000_000,
         encrypted_payload: "encrypted_payload".to_owned(),
         payload_hash: "payload_hash".to_owned(),
-        delivery_mode: None,
-        collapse_tag: None,
-        report_commitment: None,
+        delivery_mode: Some("ephemeral".into()),
+        collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+        report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
     }
 }
 

@@ -39,7 +39,7 @@ impl RamfluxClient {
             .ok_or_else(|| invalid("task requires a known conversation"))?;
         if let Some(group) = thread["group_id"].as_str() {
             let state = self.group_state(group)?;
-            for member in &self.task_current_roster(&state) {
+            for member in &self.task_current_roster(&state)? {
                 let reference = self.group_device_reference(group, member)?;
                 let record = db.client_record("device", &reference)?;
                 let owner = record.as_ref().and_then(|v| v["principal_id"].as_str());

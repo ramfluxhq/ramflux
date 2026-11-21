@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Reset budget, relationship lifecycle, manual-recovery and mixed-bootstrap regressions.
-use super::r5::{fresh, outgoing, settle};
+use super::r5::{fresh, native_outgoing as outgoing, seal, settle};
 use super::review::pool;
 use super::session_record::{Wire, active, archive, gap, last};
 use super::*;
@@ -21,20 +21,29 @@ fn has_work(bob: &Fixture) -> Result<bool, SdkError> {
 #[tokio::test]
 async fn confirming_a_reset_does_not_remove_its_persistent_minimum_interval() -> Result<(), SdkError>
 {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        confirming_a_reset_does_not_remove_its_persistent_minimum_interval_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn confirming_a_reset_does_not_remove_its_persistent_minimum_interval_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "stale-gap")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let (mut ae, acks) = Wire::engine(&alice, &bob)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&sent)?, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&sent)?).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &last(&acks)?).await?;
     assert!(!has_work(&bob)?);
     let current = active(&bob, "alice")?;
     let previous = archive(&bob, "alice")?;
     for _ in 0..10 {
-        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     }
     assert_eq!(sent.lock().map_err(|_| invalid("mutex"))?.len(), 1);
     assert_eq!(active(&bob, "alice")?, current);
@@ -44,8 +53,16 @@ async fn confirming_a_reset_does_not_remove_its_persistent_minimum_interval() ->
 }
 #[tokio::test]
 async fn reset_attempts_never_exceed_ten_in_a_rolling_day() -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        reset_attempts_never_exceed_ten_in_a_rolling_day_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn reset_attempts_never_exceed_ten_in_a_rolling_day_body() -> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let at = now_unix_timestamp();
     for n in 0..10 {
@@ -72,12 +89,21 @@ async fn reset_attempts_never_exceed_ten_in_a_rolling_day() -> Result<(), SdkErr
 #[tokio::test]
 async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_without_sending()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        seven_day_reset_expiry_erases_states_and_persists_manual_recovery_without_sending_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_without_sending_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "expiry-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let now = now_unix_timestamp();
     let mut pending = bob
         .client
@@ -125,12 +151,12 @@ async fn seven_day_reset_expiry_erases_states_and_persists_manual_recovery_witho
     Ok(())
 }
 async fn relationship_end(block: bool) -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "relationship-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     let link = bob
         .client
         .account_db()?
@@ -157,107 +183,123 @@ async fn relationship_end(block: bool) -> Result<(), SdkError> {
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
     bob.client.retry_pair_resets(&mut be, now_unix_timestamp() + 3600).await?;
     assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
     assert!(!has_work(&bob)?);
     Ok(())
 }
 #[tokio::test]
 async fn removing_a_contact_ends_reset_work_through_the_production_path() -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(
+        removing_a_contact_ends_reset_work_through_the_production_path_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn removing_a_contact_ends_reset_work_through_the_production_path_body()
+-> Result<(), SdkError> {
     Box::pin(relationship_end(false)).await
 }
 #[tokio::test]
 async fn blocking_a_contact_ends_reset_work_through_the_production_path() -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(
+        blocking_a_contact_ends_reset_work_through_the_production_path_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn blocking_a_contact_ends_reset_work_through_the_production_path_body()
+-> Result<(), SdkError> {
     Box::pin(relationship_end(true)).await
 }
 #[tokio::test]
 async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_work()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_work_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_work_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let stale = gap(&alice, &bob, "manifest-gap")?;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale, false).await.is_err());
-    let root = ramflux_crypto::create_identity_root("alice", [41; 32]);
-    let public = ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
-    let commitment = crate::prekey::identity_root_public_key_commitment(&public)?;
-    let branch = ramflux_crypto::create_device_branch("alice", "alice-new", 1, [43; 32]);
-    let now = now_unix_timestamp();
-    let proof = ramflux_crypto::authorize_device_branch_v2(
-        &root,
-        &branch,
-        ramflux_crypto::BranchAuthorization {
-            audience: "ramflux-node",
-            capability_scope: vec!["device.delivery.bind".to_owned()],
-            issued_at: now,
-            expires_at: now + 3600,
-            principal_kind: ramflux_protocol::PrincipalKind::Human,
-            agreement_identity_public_key: ramflux_crypto::X25519KeyPair::from_seed([44; 32])
-                .public,
-        },
-    )?;
-    let identity = ramflux_crypto::X25519KeyPair::from_seed([44; 32]);
-    let prekey = ramflux_crypto::X25519KeyPair::from_seed([45; 32]);
-    let bundle = ramflux_crypto::create_prekey_bundle(
-        &branch,
-        &identity,
-        "alice-new:prekey",
-        &prekey,
-        None,
-        None,
-    )?;
-    let mut manifest = crate::prekey::SdkDeviceManifestResponse {
-        custody: None,
-        signed_device_set: None,
-        principal_id: "alice".into(),
-        principal_commitment: commitment.clone(),
-        root_public_key: public,
-        devices: vec![crate::prekey::SdkDeviceManifestEntry {
-            principal_id: "alice".into(),
-            principal_commitment: commitment.clone(),
-            device_id: "alice-new".into(),
-            device_epoch: 1,
-            branch_public_key: ramflux_protocol::encode_base64url(
-                branch.signing_key.verifying_key().to_bytes(),
-            ),
-            target_delivery_id: "alice-new-target".into(),
-            branch_proof: Some(proof),
-            message_layer: None,
-            prekey_bundle: bundle,
-            branch_authorized_event_id: "alice-new:authorized".into(),
-        }],
-    };
-    crate::client::identity_authority::test_support::sign_manifest(&root, &mut manifest, 1)?;
-    let mut complete = manifest.clone();
-    complete
-        .devices
-        .extend(crate::client::identity_authority::test_support::manifest(&alice.client)?.devices);
-    crate::client::identity_authority::test_support::sign_manifest(&root, &mut complete, 2)?;
-    manifest.signed_device_set = complete.signed_device_set;
-    RamfluxClient::verify_device_manifest_json(serde_json::to_value(&manifest)?, &commitment)?;
+    assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &stale).await.is_err());
+    let native = alice.native.as_ref().ok_or_else(|| invalid("test: source native vault"))?;
+    let old = alice.manifest()?;
+    let record = old
+        .custody
+        .as_ref()
+        .ok_or_else(|| invalid("test: native publication"))?
+        .publication
+        .record
+        .clone();
+    let primary = native
+        .vault
+        .primary_for_public_key(&record.body.master_certificate.body.self_signing_public_key)?;
+    let mut next = record.body.clone();
+    next.device_set_epoch += 1;
+    next.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&record)?);
+    next.profile.display_name = "current complete authority".into();
+    let mut current = old.clone();
+    current
+        .custody
+        .as_mut()
+        .ok_or_else(|| invalid("test: native publication"))?
+        .publication
+        .record = primary.sign_record(next)?;
+    bob.client.persist_observed_identity_directory_now(&current)?;
+    let mut partial = current;
+    partial.devices.clear();
+    partial.custody.as_mut().ok_or_else(|| invalid("test: native descriptor"))?.devices.clear();
     let before =
         bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?;
     let pending = bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(&bob)?)?;
-    for _ in 0..2 {
-        bob.client.persist_identity_directory(&manifest)?;
+    for (manifest, stale) in [(&partial, false), (&old, true)] {
+        let result = bob.client.persist_observed_identity_directory_now(manifest);
+        if stale {
+            assert!(result.is_err(), "a genuinely older native head must be refused");
+        } else {
+            result?;
+        }
         assert!(has_work(&bob)?);
         assert_eq!(
             bob.client.account_db()?.list_actor_states::<serde_json::Value>("dm-pair/session/")?,
-            before
+            before,
+            "omitted or stale descriptors must preserve the live pair",
         );
         assert_eq!(
             bob.client.account_db()?.load_actor_state::<serde_json::Value>(&work(&bob)?)?,
-            pending
+            pending,
+            "omitted or stale descriptors must preserve reset work",
         );
-        assert!(bob.client.account_db()?.client_record("device", "alice")?.is_some());
+        assert!(
+            bob.client.account_db()?.client_record("device", &alice.reference()?)?.is_some(),
+            "partial descriptors must not invent a device revocation",
+        );
     }
     Ok(())
 }
 #[tokio::test]
 async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends() -> Result<(), SdkError>
 {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     assert!(alice.client.begin_pair_recovery(
         &alice.client.local_device_identity("alice")?,
@@ -268,13 +310,23 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends() ->
         let mut chosen = None;
         for n in 0..64 {
             let _initial = fresh(&alice, &bob, &format!("reset-bootstrap-{n}"))?;
-            let reset = seal_as(
+            let (mut message, sealed) = seal_native_fixture(
                 &alice,
                 &bob,
-                outgoing(&alice, &bob, &format!("reset-control-{n}")),
-                br#"{"type":"pair.session.reset.v1"}"#,
+                outgoing(&alice, &bob, &format!("reset-control-{n}"))?,
+                &candidate_report::reset_inner(&alice, &bob)?,
                 Route::control(),
             )?;
+            let reset = GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: 1,
+                target_delivery_id: bob.config()?.target_delivery_id,
+                envelope: crate::dm::gateway_generated_envelope_from_sealed(
+                    &alice.config()?,
+                    &mut message,
+                    sealed,
+                )?,
+            };
             let plain = fresh(&bob, &alice, &format!("plain-mixed-{n}"))?;
             if decode(&plain.envelope)?.ciphertext.session_id
                 < decode(&reset.envelope)?.ciphertext.session_id
@@ -288,8 +340,8 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends() ->
     let (mut ae, _) = Wire::engine(&alice, &bob)?;
     let plain_id = decode(&plain.envelope)?.ciphertext.session_id;
     let (mut be, _) = Wire::engine(&bob, &alice)?;
-    alice.client.apply_routed_entry(&mut ae, &pool()?, &plain, false).await?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &reset, false).await?;
+    alice.client.apply_routed_entry(&mut ae, &pool()?, &plain).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &reset).await?;
     assert_eq!(active(&alice, "bob")?, plain_id);
     assert_eq!(active(&bob, "alice")?, plain_id);
     Ok(())
@@ -297,13 +349,22 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends() ->
 #[tokio::test]
 async fn session_replacements_prune_nonsecret_flags_and_tombstones_to_the_archive_bound()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        session_replacements_prune_nonsecret_flags_and_tombstones_to_the_archive_bound_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn session_replacements_prune_nonsecret_flags_and_tombstones_to_the_archive_bound_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
     let mut be = GatewaySessionEngine::with_test_transport(bob.config()?, Box::new(NoNetwork));
     for n in 0..40 {
         let next = fresh(&alice, &bob, &format!("bounded-{n}"))?;
-        bob.client.apply_routed_entry(&mut be, &pool()?, &next, false).await?;
+        bob.client.apply_routed_entry(&mut be, &pool()?, &next).await?;
     }
     let db = bob.client.account_db()?;
     assert!(db.list_actor_states::<serde_json::Value>("dm-pair/retired/")?.len() <= 8);
@@ -316,10 +377,19 @@ async fn session_replacements_prune_nonsecret_flags_and_tombstones_to_the_archiv
 #[tokio::test]
 async fn evicted_packets_older_than_a_confirmed_successor_are_dropped_without_resetting()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        evicted_packets_older_than_a_confirmed_successor_are_dropped_without_resetting_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn evicted_packets_older_than_a_confirmed_successor_are_dropped_without_resetting_body()
+-> Result<(), SdkError> {
+    let mut alice = Fixture::native("alice", 41).await?;
+    let mut bob = Fixture::native("bob", 61).await?;
     settle(&mut alice, &mut bob).await?;
-    let late = seal(&alice, &bob, outgoing(&alice, &bob, "old-evicted-packet"), b"old")?;
+    let late = seal(&alice, &bob, outgoing(&alice, &bob, "old-evicted-packet")?, b"old")?;
     let mut replacement = None;
     for n in 0..10 {
         replacement = Some(fresh(&bob, &alice, &format!("successor-{n}"))?);
@@ -327,67 +397,18 @@ async fn evicted_packets_older_than_a_confirmed_successor_are_dropped_without_re
     let (mut ae, _) = Wire::engine(&alice, &bob)?;
     alice
         .client
-        .apply_routed_entry(
-            &mut ae,
-            &pool()?,
-            &replacement.ok_or_else(|| invalid("replacement"))?,
-            false,
-        )
+        .apply_routed_entry(&mut ae, &pool()?, &replacement.ok_or_else(|| invalid("replacement"))?)
         .await?;
-    let confirm = seal(&alice, &bob, outgoing(&alice, &bob, "confirm-successor"), b"confirmed")?;
+    let confirm = seal(&alice, &bob, outgoing(&alice, &bob, "confirm-successor")?, b"confirmed")?;
     let (mut be, sent) = Wire::engine(&bob, &alice)?;
-    bob.client.apply_routed_entry(&mut be, &pool()?, &confirm, false).await?;
+    bob.client.apply_routed_entry(&mut be, &pool()?, &confirm).await?;
     let current = active(&bob, "alice")?;
     let previous = archive(&bob, "alice")?;
     for _ in 0..10 {
-        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late, false).await.is_err());
+        assert!(bob.client.apply_routed_entry(&mut be, &pool()?, &late).await.is_err());
     }
     assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
     assert_eq!(active(&bob, "alice")?, current);
     assert_eq!(archive(&bob, "alice")?, previous);
-    Ok(())
-}
-
-#[tokio::test]
-async fn upgrading_legacy_work_uses_its_original_attempt_instead_of_renewing_from_the_last_retry()
--> Result<(), SdkError> {
-    for retained_start in [true, false] {
-        let mut alice = Fixture::new("alice", 41)?;
-        let mut bob = Fixture::new("bob", 61)?;
-        settle(&mut alice, &mut bob).await?;
-        let now = now_unix_timestamp();
-        assert!(bob.client.begin_pair_recovery(
-            &bob.client.local_device_identity("bob")?,
-            &bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?,
-            now
-        )?);
-        let db = bob.client.account_db()?;
-        let mut legacy = db
-            .load_actor_state::<serde_json::Value>(&work(&bob)?)?
-            .ok_or_else(|| invalid("work"))?;
-        let _ = legacy.as_object_mut().ok_or_else(|| invalid("work object"))?.remove("first_at");
-        legacy["next_at"] = serde_json::json!(now + 300);
-        db.persist_actor_state(&work(&bob)?, &legacy)?;
-        let first = now - 7 * 86400;
-        if retained_start {
-            db.append_journal(
-                &format!("pair-reset-attempt:{}:{first}", work(&bob)?),
-                "session.reset",
-                &serde_json::json!({"device_id":"alice","attempt":1}),
-                first,
-                None,
-            )?;
-        }
-        let (mut be, sent) = Wire::engine(&bob, &alice)?;
-        bob.client.retry_pair_resets(&mut be, now).await?;
-        assert!(!has_work(&bob)?);
-        assert!(
-            bob.client
-                .account_db()?
-                .load_actor_state::<serde_json::Value>(&format!("{}/manual", pair(&bob)?))?
-                .is_some()
-        );
-        assert!(sent.lock().map_err(|_| invalid("mutex"))?.is_empty());
-    }
     Ok(())
 }

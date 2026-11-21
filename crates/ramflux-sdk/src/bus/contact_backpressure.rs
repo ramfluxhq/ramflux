@@ -33,9 +33,7 @@ fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     a.into_iter().chain(b).min()
 }
 pub(super) fn deferred(entry: &GatewayInboxEntry, error: &SdkError) -> bool {
-    matches!(error, SdkError::ContactRequestCapacity(_))
-        && crate::client::routed::decode(&entry.envelope)
-            .is_ok_and(|packet| packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
+    matches!(error, SdkError::ContactRequestCapacity(_)) && requester(entry).is_some()
 }
 impl Backpressure {
     pub fn load(client: &RamfluxClient, now: i64) -> Result<Self, SdkError> {
@@ -255,9 +253,7 @@ fn expiry(entry: &GatewayInboxEntry, now: i64) -> i64 {
 }
 fn requester(entry: &GatewayInboxEntry) -> Option<String> {
     let packet = crate::client::routed::decode(&entry.envelope).ok()?;
-    (packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
-        .then_some(packet.source_principal_commitment)
-        .flatten()
+    packet.source_principal_commitment
 }
 
 #[cfg(test)]

@@ -781,16 +781,6 @@ impl RouterRedbStore {
             )?;
             self.insert_table_value(
                 ROUTER_SNAPSHOT_TABLE,
-                ROUTER_HOME_NODE_MIGRATION_KEY,
-                &snapshot.home_node_migrations,
-            )?;
-            self.insert_table_value(
-                ROUTER_SNAPSHOT_TABLE,
-                ROUTER_HOME_NODE_ROUTE_KEY,
-                &snapshot.home_node_routes,
-            )?;
-            self.insert_table_value(
-                ROUTER_SNAPSHOT_TABLE,
                 ROUTER_IDENTITY_LINEAGE_EVENTS_KEY,
                 &snapshot.identity_lineage_events,
             )?;

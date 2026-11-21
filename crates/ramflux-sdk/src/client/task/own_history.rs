@@ -7,9 +7,10 @@ use crate::client::identity_authority::HeadUse;
 use crate::client::surface::OwnContext;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{GatewayInboxEntry, RamfluxClient, SdkError};
+use prost::Message as _;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub(crate) const PREFIX: &[u8] = b"ramflux.task.own.v1\n";
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct TaskExportMetadata {
     pub truncated: bool,
@@ -27,16 +28,134 @@ pub(crate) struct TaskOwnPacket {
     base: usize,
     prefix_hash: String,
 }
+impl TaskOwnPacket {
+    pub(crate) fn to_generated(&self) -> Result<g::TaskOwnPacket, SdkError> {
+        if self.history.checkpoint.is_some() {
+            return Err(invalid("local Task checkpoints cannot be exported"));
+        }
+        Ok(g::TaskOwnPacket {
+            context: Some(g::OwnContext::try_from(&self.context)?),
+            history: Some(g::TaskHistory {
+                events: self
+                    .history
+                    .events
+                    .iter()
+                    .map(|event| {
+                        Ok::<_, SdkError>(g::TaskAcceptedEvent {
+                            carrier: Some(event.carrier.to_generated()?),
+                            public_key: event.public_key.clone(),
+                            actor_kind_verified: event.actor_kind_verified,
+                            received_at: event.received_at,
+                            decision_certificate: event
+                                .decision_certificate
+                                .as_ref()
+                                .map(g::TaskCertificate::try_from)
+                                .transpose()?,
+                            membership: event
+                                .membership
+                                .as_ref()
+                                .map(g::TaskMembership::try_from)
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                created_at: self.history.created_at,
+                updated_at: self.history.updated_at,
+            }),
+            manifests: self
+                .manifests
+                .iter()
+                .map(g::NativeDeviceManifest::try_from)
+                .collect::<Result<_, _>>()?,
+            pins: self.pins.iter().map(g::SdkOwnDeviceGroupMemberPin::from).collect(),
+            base: u64::try_from(self.base).map_err(|_| invalid("task page base overflow"))?,
+            prefix_hash: self.prefix_hash.clone(),
+        })
+    }
+    pub(crate) fn from_generated(value: &g::TaskOwnPacket) -> Result<Self, SdkError> {
+        let history = value.history.as_ref().ok_or_else(|| invalid("Task history missing"))?;
+        Ok(Self {
+            context: OwnContext::try_from(
+                value.context.as_ref().ok_or_else(|| invalid("Task context missing"))?,
+            )?,
+            history: TaskHistory {
+                events: history
+                    .events
+                    .iter()
+                    .map(|event| {
+                        Ok::<_, SdkError>(AcceptedEvent {
+                            carrier: Carrier::from_generated(
+                                event
+                                    .carrier
+                                    .as_ref()
+                                    .ok_or_else(|| invalid("Task event carrier missing"))?,
+                            )?,
+                            public_key: event.public_key.clone(),
+                            actor_kind_verified: event.actor_kind_verified,
+                            received_at: event.received_at,
+                            decision_certificate: event
+                                .decision_certificate
+                                .as_ref()
+                                .map(super::generated::certificate::native_certificate)
+                                .transpose()?,
+                            membership: event
+                                .membership
+                                .as_ref()
+                                .map(super::historical::Membership::try_from)
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                created_at: history.created_at,
+                updated_at: history.updated_at,
+                checkpoint: None,
+            },
+            manifests: value
+                .manifests
+                .iter()
+                .map(super::generated::manifest::generated_manifest_fields)
+                .collect::<Result<_, _>>()?,
+            pins: value
+                .pins
+                .iter()
+                .map(crate::own_device_sync::SdkOwnDeviceGroupMemberPin::from)
+                .collect(),
+            base: usize::try_from(value.base).map_err(|_| invalid("Task page base overflow"))?,
+            prefix_hash: value.prefix_hash.clone(),
+        })
+    }
+    pub(crate) fn bytes(&self) -> Result<Vec<u8>, SdkError> {
+        Ok(g::Task {
+            payload: Some(g::task::Payload::OwnHistory(g::TaskHistoryExport {
+                packets: vec![self.to_generated()?],
+                metadata: Some(g::TaskExportMetadata::default()),
+            })),
+        }
+        .encode_to_vec())
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Option<Self>, SdkError> {
+        if bytes.len() > super::MAX_DELIVERY_BYTES {
+            return Err(invalid("Task history byte budget exceeded"));
+        }
+        if g::validation::scan_message("Task", bytes, g::registry::COMPILED_LAYER).is_err() {
+            return Ok(None);
+        }
+        let task = g::Task::decode(bytes).map_err(|_| invalid("Task history malformed"))?;
+        let Some(g::task::Payload::OwnHistory(history)) = task.payload else {
+            return Ok(None);
+        };
+        let [packet] = history.packets.as_slice() else {
+            return Err(invalid("one Task page per delivery required"));
+        };
+        Ok(Some(Self::from_generated(packet)?))
+    }
+}
 impl RamfluxClient {
     fn check_task_own_group_fence(&self, context: &OwnContext) -> Result<(), SdkError> {
         if let Some(group) = &context.group
             && self.group_state(&group.group_id).is_ok()
         {
-            if self
-                .account_db()?
-                .group_member_role(&group.group_id, &self.owned_device_identity()?)?
-                .is_none()
-            {
+            if !self.local_is_group_member(&group.group_id)? {
                 return Err(invalid("own task snapshot cannot restore removed local membership"));
             }
             if self.group_state(&group.group_id)?.group_epoch < group.group_epoch {
@@ -150,7 +269,7 @@ impl RamfluxClient {
         group: Option<&str>,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Some(raw) = body.strip_prefix(PREFIX) else { return Ok(false) };
+        let Some(packet) = TaskOwnPacket::decode(body)? else { return Ok(false) };
         if body.len() > super::MAX_DELIVERY_BYTES {
             return Err(invalid("own task history budget exceeded"));
         }
@@ -164,7 +283,6 @@ impl RamfluxClient {
             return Err(invalid("own task source owner mismatch"));
         }
         self.authorize_owned_surface_source(&source)?;
-        let packet: TaskOwnPacket = ramflux_protocol::parse_i_json(raw)?;
         if packet.context.conversation_id != conversation
             || packet.context.group.as_ref().map(|g| g.group_id.as_str()) != group
             || packet.history.events.len() > 289
@@ -172,13 +290,9 @@ impl RamfluxClient {
         {
             return Err(invalid("own task history context or count mismatch"));
         }
-        self.import_task_own_packet(&packet, &entry.envelope.source_device_id).map(|()| true)
+        self.import_task_own_packet(&packet).map(|()| true)
     }
-    fn import_task_own_packet(
-        &self,
-        packet: &TaskOwnPacket,
-        source_device: &str,
-    ) -> Result<(), SdkError> {
+    fn import_task_own_packet(&self, packet: &TaskOwnPacket) -> Result<(), SdkError> {
         self.validate_own_context_namespace(&packet.context)?;
         let conversation = &packet.context.conversation_id;
         self.account_db()?.write_transaction(|| {
@@ -204,7 +318,7 @@ impl RamfluxClient {
                 crate::client::contact::verify_device_manifest(manifest, &commitment)?;
                 self.persist_identity_directory(manifest)?;
             }
-            self.import_surface_context(&packet.context, source_device)?;
+            self.import_surface_context(&packet.context)?;
             let mut active_pins = Vec::new();
             for pin in &packet.pins {
                 if let Some(root) = &pin.principal_commitment
@@ -243,16 +357,7 @@ impl RamfluxClient {
                 {
                     return Err(invalid("own task event context mismatch"));
                 }
-                let timeline = super::timeline_id(carrier)?;
-                let fallback = self.project_historical_task_event(accepted, &packet.context)?;
-                if self.direct_message_by_id(&timeline)?.is_none() {
-                    self.send_direct_message(conversation, &timeline, &carrier.device_id, &[])?;
-                }
-                self.account_db()?.replace_surface_message_content(
-                    conversation,
-                    &timeline,
-                    fallback.as_bytes(),
-                )?;
+                self.project_historical_task_event(accepted, &packet.context)?;
             }
             Ok::<_, SdkError>(())
         })
@@ -260,6 +365,21 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
+    pub(crate) fn generated_task_export_metadata(
+        &self,
+        target_device: &str,
+    ) -> Result<g::TaskExportMetadata, SdkError> {
+        let metadata = self
+            .account_db()?
+            .load_actor_state::<TaskExportMetadata>(&super::key("export_metadata", target_device))?
+            .unwrap_or_default();
+        Ok(g::TaskExportMetadata {
+            truncated: metadata.truncated,
+            skipped_items: metadata.skipped_items,
+            next_cursor: metadata.next_cursor,
+        })
+    }
+
     pub(crate) fn own_task_packets(
         &self,
         target_device: &str,
@@ -307,10 +427,10 @@ impl RamfluxClient {
                         return Ok(packets);
                     }
                     for body in bodies {
-                        packets.push(ramflux_protocol::parse_i_json(
-                            body.strip_prefix(PREFIX)
-                                .ok_or_else(|| invalid("task snapshot prefix missing"))?,
-                        )?);
+                        packets.push(
+                            TaskOwnPacket::decode(&body)?
+                                .ok_or_else(|| invalid("typed task snapshot missing"))?,
+                        );
                     }
                     size += bytes;
                 }
@@ -348,20 +468,17 @@ impl RamfluxClient {
         db.prune_task_diagnostics("task/import_skip/", 256)?;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn import_own_task_packets(
         &self,
         packets: &[TaskOwnPacket],
-        source: &str,
     ) -> Result<(), SdkError> {
         if packets.len() > 100 || serde_json::to_vec(packets)?.len() > 4 * 1024 * 1024 {
             self.record_task_history_skip("task_import", "task_snapshot_budget_exceeded")?;
             return Ok(());
         }
         for packet in packets {
-            match self
-                .account_db()?
-                .write_transaction(|| self.import_task_own_packet(packet, source))
-            {
+            match self.account_db()?.write_transaction(|| self.import_task_own_packet(packet)) {
                 Ok(()) => {}
                 Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
                 Err(_) => {
@@ -379,7 +496,10 @@ impl RamfluxClient {
 }
 
 fn task_prefix_hash(events: &[AcceptedEvent]) -> Result<String, SdkError> {
-    let bytes = events.iter().map(|e| e.carrier.bytes()).collect::<Result<Vec<_>, _>>()?;
+    let bytes = events
+        .iter()
+        .map(|e| e.carrier.to_generated().map(|carrier| carrier.encode_to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ramflux_protocol::hash_base64url(
         "ramflux.task.history_prefix.v1",
         &ramflux_protocol::canonical_json_bytes(&bytes)?,
@@ -390,26 +510,22 @@ fn task_packet_pages(mut packet: TaskOwnPacket) -> Result<Vec<Vec<u8>>, SdkError
     let mut pages = Vec::new();
     for event in &events {
         packet.history.events.push(event.clone());
-        if PREFIX.len() + serde_json::to_vec(&packet)?.len() > super::MAX_DELIVERY_BYTES {
+        if packet.bytes()?.len() > super::MAX_DELIVERY_BYTES {
             packet.history.events.pop();
             if packet.history.events.is_empty() {
                 return Err(invalid("task snapshot item exceeds the transport byte budget"));
             }
-            let mut bytes = PREFIX.to_vec();
-            bytes.extend(serde_json::to_vec(&packet)?);
-            pages.push(bytes);
+            pages.push(packet.bytes()?);
             packet.base += packet.history.events.len();
             packet.prefix_hash = task_prefix_hash(&events[..packet.base])?;
             packet.history.events = vec![event.clone()];
-            if PREFIX.len() + serde_json::to_vec(&packet)?.len() > super::MAX_DELIVERY_BYTES {
+            if packet.bytes()?.len() > super::MAX_DELIVERY_BYTES {
                 return Err(invalid("task snapshot item exceeds the transport byte budget"));
             }
         }
     }
     if !packet.history.events.is_empty() {
-        let mut bytes = PREFIX.to_vec();
-        bytes.extend(serde_json::to_vec(&packet)?);
-        pages.push(bytes);
+        pages.push(packet.bytes()?);
     }
     Ok(pages)
 }

@@ -6,7 +6,6 @@ use super::{
     fixture::{self, Shared, Spec, TestResult},
     *,
 };
-use serde_json::json;
 #[tokio::test]
 async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arrives() -> TestResult
 {
@@ -16,59 +15,31 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
     let mail: Shared = Arc::new(Mutex::default());
     fixture::seed_pair(&a, &b)?;
     let source = a.client(None)?;
-    let mut receiver = b.account(None, mail.clone())?;
-    for (spec, client) in [(&a, &source), (&b, &receiver.client)] {
-        spec.trust(client, &a)?;
-        spec.trust(client, &b)?;
-        client.create_group("group", a.identity()?.storage_key())?;
-        client.add_group_member_with_root(
-            "group",
-            &b.device,
-            "member",
-            b.identity()?.root_commitment(),
-        )?;
-        client.account_db()?.persist_client_record(
-            "conversation",
-            "thread",
-            &json!({"kind":"group","group_id":"group"}),
-        )?;
-    }
-    let distribution = source.export_group_sender_key_distribution("group", &a.device)?;
-    let raw = source.encrypt_group_message("group", &a.device, b"held group body")?;
-    let mut account = a.account(None, mail)?;
-    let mut engine = account.session_client().await?;
-    let mut message = a.message(&b, "held");
-    message.envelope_id = "held:device-bob".into();
-    let sealed = source
-        .seal_routed_as(
-            &mut engine,
-            &message,
-            &raw,
-            crate::client::routed::Route::group_message("group"),
-        )
-        .await?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let entry = GatewayInboxEntry {
-        forwarded: false,
-        inbox_seq: 1,
-        target_delivery_id: b.device.clone(),
-        envelope: gateway_direct_message_envelope(&engine.config, &message, None)?,
-    };
-    drop(engine);
-    drop(account);
+    let target = b.client(None)?;
+    a.prepare_group(&source, "group", "thread", &[(&b, &target)])?;
+    let mut account = a.account(None, mail.clone())?;
+    let logical = a.send_group_text(&mut account, "group", "held", "held group body").await?;
+    let distribution = account.client.export_group_sender_key_distribution("group", &a.device)?;
+    let entry = mail
+        .lock()
+        .map_err(|_| "mailbox")?
+        .messages
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.target_delivery_id == b.identity().expect("test: group recipient").storage_key()
+        })
+        .cloned()
+        .ok_or("native group entry")?;
+    let mut receiver = b.account(None, mail)?;
     let pool = receiver.relay_quic_pool()?;
     let mut engine = receiver.session_client().await?;
-    receiver.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-    let sender = a.identity()?;
-    let logical = ramflux_protocol::group_message_id(
-        "group",
-        sender.root_commitment(),
-        sender.device_id(),
-        "held",
-    )?;
+    let pending = receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await;
+    assert!(
+        matches!(pending, Err(SdkError::InboundPending(_)) | Ok(_)),
+        "missing key remains retryable"
+    );
     assert!(receiver.client.direct_message_by_id(&logical)?.is_none());
-    assert!(receiver.client.direct_message_by_id("held")?.is_none());
-    assert!(receiver.client.direct_message_by_id("held:device-bob")?.is_none());
     assert_eq!(
         receiver
             .client
@@ -78,9 +49,10 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
         0
     );
     receiver.client.import_group_sender_key_distribution(&distribution)?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     assert_eq!(
-        receiver.client.account_db()?.message_content(&logical)?,
-        Some(b"held group body".to_vec())
+        receiver.client.generated_message_detail("thread", &logical)?.message.text.as_deref(),
+        Some("held group body")
     );
     let keys = receiver
         .client
@@ -93,8 +65,9 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
         .load_actor_state::<crate::client::delivery_receipts::Work>(&keys[0])?
         .ok_or("receipt")?;
     assert_eq!(work.sender, a.identity()?.storage_key());
-    assert_eq!(work.wire_message.as_deref(), Some("held:device-bob"));
+    assert_eq!(work.wire_message.as_deref(), Some(entry.envelope.envelope_id.as_str()));
     receiver.client.import_group_sender_key_distribution(&distribution)?;
+    receiver.client.apply_routed_entry(&mut engine, &pool, &entry).await?;
     assert_eq!(
         receiver
             .client
@@ -103,11 +76,9 @@ async fn a_group_message_gets_its_receipt_only_after_the_missing_sender_key_arri
             .0,
         1
     );
-    drop(engine);
-    drop(receiver);
-    drop(source);
     Ok(())
 }
+
 #[test]
 fn unknown_or_inbound_targets_cannot_poison_a_later_valid_delivery_receipt() -> TestResult {
     let root = runtime_tests::root("receipt-unknown-target");

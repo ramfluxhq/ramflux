@@ -65,17 +65,49 @@ fn message_service_share_sequence_and_order() -> TestResult {
     Ok(())
 }
 
+fn prepared_media() -> Result<MediaRef, Box<dyn std::error::Error>> {
+    use ramflux_protocol::large_attachment as large;
+    let manifest = large::MediaManifest {
+        manifest_id: [1; 32],
+        plaintext_digest: [2; 32],
+        plaintext_length: 64,
+        ciphertext_length: 80,
+        encrypted_segment_bytes: large::SEGMENT_BYTES,
+        network_chunk_bytes: 524_288,
+        segment_digests: vec![[3; 32]],
+        key_slots: vec![large::MediaKeySlot {
+            recipient: large::QualifiedDevice {
+                account_anchor: "anchor".into(),
+                device_id: "device".into(),
+                device_epoch: 1,
+            },
+            encrypted_key: vec![4; 32],
+            format: 1,
+            grant_id: vec![6; 32],
+            read_capability: b"capability".to_vec(),
+        }],
+        relay_origin: "https://relay.example".into(),
+        read_capability: Vec::new(),
+        expires_at: 4_000_000_000,
+        retention_class: "relay_retained.v1".into(),
+    };
+    let reference = large::MediaRef {
+        object_id: "obj-1".into(),
+        manifest_digest: manifest.hash()?,
+        mime_type: "image/png".into(),
+        size: manifest.plaintext_length,
+        key_slots: manifest.key_slots.clone(),
+        file_name: Some("pic.png".into()),
+        inline_thumbnail: None,
+        large_manifest: manifest,
+    };
+    Ok(MediaRef::decode(reference.canonical_bytes()?.as_slice())?)
+}
+
 #[test]
 fn generated_message_media_group_and_receipt_paths_round_trip() -> TestResult {
     let mut stream = stream();
-    let media = MediaRef {
-        object_id: "obj-1".into(),
-        manifest_digest: vec![9; 32],
-        mime_type: "image/png".into(),
-        size: 64,
-        file_name: Some("pic.png".into()),
-        ..Default::default()
-    };
+    let media = prepared_media()?;
     let with_media = RamfluxClient::encode_generated_message(
         &mut stream,
         b"media-1".to_vec(),

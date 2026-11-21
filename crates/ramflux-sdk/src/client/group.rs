@@ -40,6 +40,7 @@ impl RamfluxClient {
     ) -> Result<GroupState, SdkError> {
         self.add_group_member_address(group_id, member_id, role, None)
     }
+    #[cfg(test)]
     pub(crate) fn add_group_member_with_root(
         &self,
         group: &str,
@@ -288,7 +289,6 @@ impl RamfluxClient {
             ),
             _ => Err(SdkError::LocalBus("unsupported group control event body".to_owned())),
         }?;
-        self.observe_verified_task_roster(event, &state);
         Ok(state)
     }
 
@@ -443,47 +443,6 @@ impl RamfluxClient {
         })
     }
 
-    pub(crate) async fn prepare_group_join_identity(
-        &self,
-        gateway: &GatewaySessionConfig,
-        event: &ramflux_protocol::GroupEvent,
-    ) -> Result<(), SdkError> {
-        if let Some((root, raw)) = self.group_join_identity_request(event)? {
-            self.resolve_target_principal_commitment(gateway, Some(&root), &raw).await?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn group_join_identity_request(
-        &self,
-        event: &ramflux_protocol::GroupEvent,
-    ) -> Result<Option<(String, String)>, SdkError> {
-        if let ramflux_protocol::GroupEventBody::MemberJoined {
-            group_id, joined_identity, ..
-        } = &event.body
-        {
-            self.verify_group_control_event(event)?;
-            if !matches!(
-                self.account_db()?
-                    .group_member_role_metadata(group_id, &event.actor_device_id)?
-                    .as_deref(),
-                Some("owner" | "admin")
-            ) {
-                return Err(StorageError::GroupPermissionDenied.into());
-            }
-            let reference = self.group_event_member_reference(event)?.ok_or_else(|| {
-                SdkError::InboundPending("joined member root context absent".into())
-            })?;
-            let (root, raw) = ramflux_protocol::parse_qualified_device_id(&reference)?
-                .ok_or_else(|| SdkError::InboundPending("joined member root absent".into()))?;
-            if self.account_db()?.client_record("device", &reference)?.is_none()
-                && self.device_branch.as_ref().is_none_or(|own| own.device_id != *joined_identity)
-            {
-                return Ok(Some((root, raw)));
-            }
-        }
-        Ok(None)
-    }
     #[allow(clippy::too_many_arguments)]
     fn apply_verified_group_role_change(
         &self,
@@ -794,33 +753,12 @@ impl RamfluxClient {
         target_member_id: &str,
         reason: &str,
     ) -> Result<(ramflux_protocol::GroupEvent, GroupState), SdkError> {
-        let group = self.group_state(group_id)?;
-        let new_group_epoch = group.group_epoch + 1;
-        let event_id = group_member_banned_event_id(
-            group_id,
-            actor_device_id,
-            target_member_id,
-            new_group_epoch,
-        );
-        let ban_id = format!("group.ban:{group_id}:{target_member_id}:{new_group_epoch}");
-        let event = self.signed_group_control_base(
-            group_id,
-            actor_device_id,
-            event_id,
-            "group.member_banned",
-            new_group_epoch,
-            ramflux_protocol::GroupEventBody::MemberBanned {
-                group_id: group_id.to_owned(),
-                previous_epoch: group.group_epoch,
-                new_group_epoch,
-                banned_identity: target_member_id.to_owned(),
-                reason: reason.to_owned(),
-                ban_id,
-            },
-        )?;
-        let event = self.sign_group_control_event(event)?;
-        let state = self.apply_group_control_event(&event)?;
-        Ok((event, state))
+        let _ = (group_id, actor_device_id, target_member_id, reason);
+        Err(SdkError::GeneratedRefused {
+            code: crate::GeneratedRefusalCode::Content,
+            reason: "retired group ban event carrier; use native signed group membership changes"
+                .into(),
+        })
     }
 
     /// # Errors
@@ -948,6 +886,7 @@ impl RamfluxClient {
     /// # Errors
     /// Returns an error when the local owner/admin cannot sign a direct-add onboard event.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn create_signed_group_member_join_event(
         &self,
         group_id: &str,

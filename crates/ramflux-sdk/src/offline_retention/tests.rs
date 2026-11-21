@@ -40,8 +40,8 @@ fn prepare_retention_group(
     fixture: &Fixture,
     recipient: &Fixture,
 ) -> TestResult<(String, crate::prekey::SdkPrekeyResponse)> {
-    fixture.client.persist_fetched_identity_directory(&recipient.manifest)?;
-    recipient.client.persist_fetched_identity_directory(&fixture.manifest)?;
+    fixture.client.persist_observed_identity_directory_now(&recipient.manifest)?;
+    recipient.client.persist_observed_identity_directory_now(&fixture.manifest)?;
     let primary = fixture
         .client
         .born_v3_account
@@ -100,19 +100,28 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
         }),
     );
     let message = crate::GatewayDirectMessage {
-        conversation_id: "dm".into(),
+        conversation_id: fixture
+            .client
+            .generated_direct_conversation_id(&recipient.client.owned_device_identity()?)?,
         message_id: "dm-message".into(),
         envelope_id: "dm-message".into(),
         source_principal_id: fixture.config.principal_id.clone(),
         sender_id: fixture.config.device_id.clone(),
-        recipient_device_id: None,
-        recipient_principal_commitment: None,
+        recipient_device_id: Some(recipient.config.device_id.clone()),
+        recipient_principal_commitment: Some(recipient.client.own_account_anchor()?),
         target_delivery_id: recipient.config.target_delivery_id.clone(),
-        encrypted_body: b"retained encrypted content".to_vec(),
+        encrypted_body: Vec::new(),
         created_at: now,
         ttl: 3_600, // Legacy caller value must not override the account retention.
     };
-    fixture.client.submit_direct_message_via_gateway(&mut engine, message).await?;
+    fixture
+        .client
+        .send_plaintext_direct_message_via_gateway(
+            &mut engine,
+            message,
+            b"retained encrypted content",
+        )
+        .await?;
     let group_send = crate::LocalBusFrame::request(
         "ttl-group-send",
         Some("ttl-offline".into()),
@@ -121,7 +130,8 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
         serde_json::json!({
             "group_id":"ttl-group", "conversation_id":"group-thread", "message_id":"group-message",
             "sender_id":fixture.config.device_id,
-            "encrypted_body_base64":ramflux_protocol::encode_base64url(b"retained group content"),
+            "encrypted_body_base64":"",
+            "plaintext_body_base64":ramflux_protocol::encode_base64url(b"retained group content"),
             "envelope_id":"group-message", "source_principal_id":fixture.config.principal_id,
             "target_delivery_id":recipient.config.target_delivery_id, "ttl":3600,
         }),
@@ -135,15 +145,6 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
     let submitted =
         crate::bus::dispatch::group::dispatch_group_send_request(&group_send, &mut account).await?;
     assert_eq!(submitted.response_body["submitted"]["envelope"]["envelope_id"], "group-message");
-    let group_id = submitted.response_body["message_id"].as_str().ok_or("group message id")?;
-    let stored = account.client.direct_message_by_id(group_id)?.ok_or("group message missing")?;
-    let group_envelope: crate::group::SdkGroupEncryptedEnvelope =
-        serde_json::from_slice(&stored.encrypted_body)?;
-    assert_eq!(group_envelope.group_id, "ttl-group");
-    assert_eq!(
-        recipient.client.decrypt_group_envelope(&group_envelope, group_id)?,
-        b"retained group content"
-    );
     drop(account);
     // A fresh recipient engine reconnects after the server clock advances two hours.
     let mut reconnected = crate::GatewaySessionEngine::with_test_transport(

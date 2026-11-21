@@ -3,39 +3,62 @@
 
 //! Removal privacy boundaries and retry budgets across coalesced group mutations.
 use super::*;
+use crate::GatewaySessionEngine;
+use crate::bus::dispatch::surface_transport::fixture::RecordingGateway;
+use crate::bus::state::LocalBusAccountState;
+use crate::client::native_test_support::Fixture as Native;
 use ramflux_protocol::group_state::{GroupStateChange, SharedGroupRole};
+use std::sync::{Arc, Mutex};
+
+/// Runs one native fixture future to completion on a fresh current-thread runtime.
+fn block_on<T>(
+    future: impl std::future::Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(future)
+}
+
+/// One native account whose only device is `device`, held as a public-bus fixture.
+async fn native_account(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+    let fixture = Native::with_device(id, device)
+        .await
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    Ok(fixture.into_bus())
+}
+
+/// The same native account with a recording gateway, so `flush` can drive its session.
+async fn native_flush_account(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+    let mut account = native_account(id, device).await?;
+    let gateway = RecordingGateway::new(Arc::new(Mutex::new(Vec::new())));
+    account.install_test_session(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(gateway),
+    ));
+    Ok(account)
+}
+
+fn native_person(id: &str, device: &str) -> Result<LocalBusAccountState, SdkError> {
+    block_on(native_account(id, device))
+}
 
 #[test]
 fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backoff()
 -> Result<(), SdkError> {
-    let root = ramflux_test_support::TestPath::new()
-        .expect("test: allocate fixture directory")
-        .child(format!(
-            "rf-group-queue-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        ));
-    let mut client = RamfluxClient::new();
-    client.create_identity_root("owner", [11; 32]);
-    client.create_device_branch("owner", "owner", 1, [12; 32]);
-    client.open_account_index(&root)?;
-    client.create_account("account", "owner")?;
-    client.unlock_account("account", b"queue-test")?;
-    let peer_root = ramflux_crypto::create_identity_root("peer", [21; 32]);
-    let peer_branch = ramflux_crypto::create_device_branch("peer", "phone", 1, [22; 32]);
-    let peer = ramflux_crypto::certify_group_state_actor(&peer_root, &peer_branch, "target-peer")?;
-    let first = client.shared_group_create(
+    let owner = native_person("owner", "owner")?;
+    let peer_account = native_person("peer", "phone")?;
+    let peer = peer_account.client.fixture_group_actor("phone")?;
+    let first = owner.client.fixture_group_create(
         "group",
         "thread",
         Some("Public title".into()),
-        "target-owner",
+        "owner",
     )?;
-    let second = client.shared_group_change(
+    let second = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
     )?;
-    enqueue(&client, &second, Some(&first))?;
-    let db = client.account_db()?;
+    enqueue(&owner.client, &second, Some(&first))?;
+    let db = owner.client.account_db()?;
     let id = key("group");
     let mut intent: Intent =
         db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
@@ -44,84 +67,89 @@ fn shared_group_queue_freezes_removed_recipients_without_resetting_outage_backof
     let next_at = intent.next_at;
     let expires_at = intent.expires_at;
     db.persist_actor_state(&id, &intent)?;
-    let removed = client.shared_group_change(
+    let removed = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Remove {
             root_commitment: peer.identity.root_commitment.clone(),
             device_id: "phone".into(),
         },
     )?;
-    enqueue(&client, &removed, Some(&second))?;
-    let renamed = client.shared_group_change(
+    enqueue(&owner.client, &removed, Some(&second))?;
+    let renamed = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::SetName { name: "Private subsequent title".into() },
     )?;
-    enqueue(&client, &renamed, Some(&removed))?;
+    enqueue(&owner.client, &renamed, Some(&removed))?;
     let intent: Intent = db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(intent.attempt, 4);
     assert_eq!(intent.next_at, next_at);
     assert_eq!(intent.expires_at, expires_at);
     assert_eq!(db.list_actor_states::<Intent>(PREFIX)?.len(), 1);
     for device in ["phone", "unknown-sibling"] {
-        let snapshot =
-            recipient_snapshot(&client, &intent, &renamed, &peer.identity.root_commitment, device)?
-                .ok_or(StorageError::GroupPermissionDenied)?;
+        let snapshot = recipient_snapshot(
+            &owner.client,
+            &intent,
+            &renamed,
+            &peer.identity.root_commitment,
+            device,
+        )?
+        .ok_or(StorageError::GroupPermissionDenied)?;
         assert_eq!(snapshot.epoch, removed.view().epoch);
         assert_eq!(
             ramflux_crypto::verify_group_state_snapshot(snapshot.clone())?.view().name.as_deref(),
             Some("Public title")
         );
     }
-    let owned = client.owned_device_identity()?;
+    let owner_identity = owner.client.owned_device_identity()?;
     assert_eq!(
-        recipient_snapshot(&client, &intent, &renamed, owned.root_commitment(), "owner")?
-            .ok_or(StorageError::GroupPermissionDenied)?
-            .epoch,
+        recipient_snapshot(
+            &owner.client,
+            &intent,
+            &renamed,
+            owner_identity.root_commitment(),
+            "owner"
+        )?
+        .ok_or(StorageError::GroupPermissionDenied)?
+        .epoch,
         renamed.view().epoch
     );
-    let rejoined = client.shared_group_change(
+    let rejoined = owner.client.fixture_group_change(
         "group",
-        "target-owner",
+        "owner",
         GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
     )?;
-    enqueue(&client, &rejoined, Some(&renamed))?;
+    enqueue(&owner.client, &rejoined, Some(&renamed))?;
     let intent: Intent = db.load_actor_state(&id)?.ok_or(StorageError::GroupPermissionDenied)?;
     assert_eq!(
-        recipient_snapshot(&client, &intent, &rejoined, &peer.identity.root_commitment, "phone")?
-            .ok_or(StorageError::GroupPermissionDenied)?
-            .epoch,
+        recipient_snapshot(
+            &owner.client,
+            &intent,
+            &rejoined,
+            &peer.identity.root_commitment,
+            "phone"
+        )?
+        .ok_or(StorageError::GroupPermissionDenied)?
+        .epoch,
         rejoined.view().epoch
     );
-    drop(client);
+    drop((owner, peer_account));
     Ok(())
 }
 
 #[test]
 fn shared_group_revoked_membership_discards_the_pending_broadcast() -> Result<(), SdkError> {
-    use std::sync::{Arc, atomic::AtomicBool};
-    let root = crate::bus::runtime_tests::root("group-revoked-outbox");
-    let account = crate::bus::runtime_tests::account(
-        &root.join("member"),
-        "member",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let mut owner = RamfluxClient::new();
-    owner.create_identity_root("owner", [21; 32]);
-    owner.create_device_branch("owner", "owner", 1, [22; 32]);
-    owner.open_account_index(root.join("owner"))?;
-    owner.create_account("owner", "owner")?;
-    owner.unlock_account("owner", b"group-owner")?;
-    owner.shared_group_create("group", "thread", None, "owner-target")?;
-    let local = account.client.owned_group_actor("target")?;
-    let joined = owner.shared_group_change(
+    let account = native_person("member", "member")?;
+    let owner = native_person("owner", "owner")?;
+    owner.client.fixture_group_create("group", "thread", None, "owner")?;
+    let local = account.client.fixture_group_actor("member")?;
+    let joined = owner.client.fixture_group_change(
         "group",
-        "owner-target",
+        "owner",
         GroupStateChange::Add { member: local.identity.clone(), role: SharedGroupRole::Member },
     )?;
-    account.client.accept_shared_group_state(&joined, "target")?;
+    account.client.fixture_accept_group_state(&joined, "member")?;
     let outgoing = ramflux_crypto::resign_group_state_snapshot(
         account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
         &local,
@@ -134,16 +162,16 @@ fn shared_group_revoked_membership_discards_the_pending_broadcast() -> Result<()
         .account_db()?
         .load_actor_state::<Intent>(&id)?
         .ok_or(StorageError::GroupPermissionDenied)?;
-    let removed = owner.shared_group_change(
+    let removed = owner.client.fixture_group_change(
         "group",
-        "owner-target",
+        "owner",
         GroupStateChange::Remove {
             root_commitment: local.identity.root_commitment,
             device_id: local.identity.device_id,
         },
     )?;
-    account.client.accept_shared_group_state(&removed, "target")?;
-    assert!(prepare_intent(&account.client, &mut intent, "target")?.is_none());
+    account.client.fixture_accept_group_state(&removed, "member")?;
+    assert!(prepare_intent(&account.client, &mut intent, "member")?.is_none());
     assert!(!account.client.account_db()?.actor_state_exists(&id)?);
     drop((account, owner));
     Ok(())
@@ -152,12 +180,9 @@ fn shared_group_revoked_membership_discards_the_pending_broadcast() -> Result<()
 #[tokio::test]
 async fn shared_group_bad_snapshot_does_not_prevent_another_group_getting_its_turn()
 -> Result<(), SdkError> {
-    use std::sync::{Arc, atomic::AtomicBool};
-    let root = crate::bus::runtime_tests::root("group-isolated-outbox");
-    let mut account =
-        crate::bus::runtime_tests::account(&root, "owner", None, Arc::new(AtomicBool::new(false)))?;
-    account.client.shared_group_create("a-bad", "bad-thread", None, "target")?;
-    account.client.shared_group_create("z-good", "good-thread", None, "target")?;
+    let mut account = native_flush_account("owner", "owner").await?;
+    account.client.fixture_group_create("a-bad", "bad-thread", None, "owner")?;
+    account.client.fixture_group_create("z-good", "good-thread", None, "owner")?;
     let bad = key("a-bad");
     let good = key("z-good");
     let proof_key = format!("group-state/{}", ramflux_protocol::encode_base64url("a-bad"));
@@ -189,41 +214,32 @@ async fn shared_group_bad_snapshot_does_not_prevent_another_group_getting_its_tu
 #[test]
 fn shared_group_device_removal_keeps_its_boundary_when_the_root_is_removed_later()
 -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("group-removal-boundary");
-    let account = crate::bus::runtime_tests::account(
-        &root,
-        "owner",
-        None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
-    let client = &account.client;
-    let peer = ramflux_crypto::certify_group_state_actor(
-        &ramflux_crypto::create_identity_root("peer", [21; 32]),
-        &ramflux_crypto::create_device_branch("peer", "phone", 1, [22; 32]),
-        "phone-target",
-    )?;
-    client.shared_group_create("group", "thread", Some("Original name".into()), "target")?;
-    client.shared_group_change(
+    let owner = native_person("owner", "owner")?;
+    let peer_account = native_person("peer", "phone")?;
+    let peer = peer_account.client.fixture_group_actor("phone")?;
+    let client = &owner.client;
+    client.fixture_group_create("group", "thread", Some("Original name".into()), "owner")?;
+    client.fixture_group_change(
         "group",
-        "target",
+        "owner",
         GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
     )?;
-    let device_removed = client.shared_group_change(
+    let device_removed = client.fixture_group_change(
         "group",
-        "target",
+        "owner",
         GroupStateChange::Remove {
             root_commitment: peer.identity.root_commitment.clone(),
             device_id: "tablet".into(),
         },
     )?;
-    client.shared_group_change(
+    client.fixture_group_change(
         "group",
-        "target",
+        "owner",
         GroupStateChange::SetName { name: "Only remaining devices see this".into() },
     )?;
-    let root_removed = client.shared_group_change(
+    let root_removed = client.fixture_group_change(
         "group",
-        "target",
+        "owner",
         GroupStateChange::Remove {
             root_commitment: peer.identity.root_commitment.clone(),
             device_id: "phone".into(),
@@ -258,21 +274,15 @@ fn shared_group_device_removal_keeps_its_boundary_when_the_root_is_removed_later
         .epoch,
         root_removed.view().epoch
     );
-    drop(account);
+    drop((owner, peer_account));
     Ok(())
 }
 
 #[test]
 fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
 -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("group-final-round");
-    let account = crate::bus::runtime_tests::account(
-        &root,
-        "owner",
-        None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
-    account.client.shared_group_create("group", "thread", Some("Before".into()), "target")?;
+    let account = native_person("owner", "owner")?;
+    account.client.fixture_group_create("group", "thread", Some("Before".into()), "owner")?;
     let id = key("group");
     let db = account.client.account_db()?;
     let mut intent =
@@ -283,9 +293,9 @@ fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
     let deadline = intent.expires_at;
     let next = intent.next_at;
     db.persist_actor_state(&id, &intent)?;
-    account.client.shared_group_change(
+    account.client.fixture_group_change(
         "group",
-        "target",
+        "owner",
         GroupStateChange::SetName { name: "During final round".into() },
     )?;
     let coalesced =
@@ -301,14 +311,8 @@ fn shared_group_coalescing_during_round_eight_keeps_the_existing_retry_window()
 
 #[test]
 fn shared_group_same_head_coalescing_preserves_device_delivery_progress() -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("group-preserve-delivered");
-    let account = crate::bus::runtime_tests::account(
-        &root,
-        "owner",
-        None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
-    let state = account.client.shared_group_create("group", "thread", None, "target")?;
+    let account = native_person("owner", "owner")?;
+    let state = account.client.fixture_group_create("group", "thread", None, "owner")?;
     let db = account.client.account_db()?;
     let id = key("group");
     let mut intent: Intent =
@@ -329,36 +333,27 @@ fn shared_group_same_head_coalescing_preserves_device_delivery_progress() -> Res
 #[tokio::test]
 async fn shared_group_remove_commits_above_recovery_capacity_and_is_selected_first()
 -> Result<(), SdkError> {
-    let root = crate::bus::runtime_tests::root("group-local-priority");
-    let mut account = crate::bus::runtime_tests::account(
-        &root,
-        "owner",
-        None,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )?;
+    let mut account = native_flush_account("owner", "owner").await?;
     for index in 0..40 {
-        account.client.shared_group_create(
+        account.client.fixture_group_create(
             &format!("group-{index:02}"),
             &format!("thread-{index}"),
             None,
-            "target",
+            "owner",
         )?;
     }
-    let peer = ramflux_crypto::certify_group_state_actor(
-        &ramflux_crypto::create_identity_root("peer", [41; 32]),
-        &ramflux_crypto::create_device_branch("peer", "phone", 1, [42; 32]),
-        "phone-target",
-    )?;
-    account.client.shared_group_change(
+    let peer_account = native_account("peer", "phone").await?;
+    let peer = peer_account.client.fixture_group_actor("phone")?;
+    account.client.fixture_group_change(
         "group-39",
-        "target",
+        "owner",
         GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
     )?;
-    let removed = account.client.shared_group_change(
+    let removed = account.client.fixture_group_change(
         "group-39",
-        "target",
+        "owner",
         GroupStateChange::Remove {
-            root_commitment: peer.identity.root_commitment,
+            root_commitment: peer.identity.root_commitment.clone(),
             device_id: "phone".into(),
         },
     )?;
@@ -397,6 +392,6 @@ async fn shared_group_remove_commits_above_recovery_capacity_and_is_selected_fir
     assert_eq!(retained.terminal[0].expires_at, deadline);
     assert!(retained.expires_at > now_unix_timestamp() + 6 * 86400);
     assert!(account.client.account_db()?.actor_state_exists(&boundary_key("group-39"))?);
-    drop(account);
+    drop((account, peer_account));
     Ok(())
 }

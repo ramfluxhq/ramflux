@@ -2,6 +2,12 @@ node_id = "localhost"
 service_id = "ramflux-federation"
 redb_path = "/var/lib/ramflux/federation/federation.redb"
 
+# Shared with the router. Federation publishes this list and does not infer it from mesh addresses.
+gateway_client_capabilities = [
+  "gateway.session_push.v1",
+  "gateway.ephemeral.v1",
+]
+
 [mesh]
 listen_addr = "0.0.0.0:7443"
 ca_cert = "/etc/ramflux/mesh/ca.pem"

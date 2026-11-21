@@ -51,7 +51,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     let shutdown = ramflux_node_core::ServiceShutdown::install(service)?;
     tracing_subscriber::fmt().with_target(false).init();
     if let Some(config) =
-        ramflux_node_core::load_config_from_args(std::env::args().skip(1), service)?
+        ramflux_node_core::load_config_from_args_reporting(std::env::args().skip(1), service)?
     {
         let route_key =
             ramflux_node_core::NodeSecret::required_env("RAMFLUX_NOTIFY_ROUTE_KEY_FILE")?;
@@ -128,7 +128,11 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             Ok(())
         });
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(
+        service,
+        version = ramflux_node_core::version::VERSION_SHA,
+        "service initialized"
+    );
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }

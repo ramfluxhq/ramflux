@@ -164,7 +164,7 @@ fn new_shared(
         timeouts: timeouts.clone(),
         ephemeral_inbox: std::sync::Mutex::new(crate::ephemeral::session::SessionInbox::new()),
         session_push_advertise: config.session_push_advertise,
-        session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Legacy),
+        session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Direct),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
         catch_ups_total: AtomicU64::new(0),
         receive_observations: receive_observations::Counters::default(),
@@ -182,6 +182,7 @@ fn new_shared(
             "own-device-copy",
             "self-sync",
             "own-history",
+            "authored-history",
             "contact-control",
             "surface-resync",
             "pair-reset",
@@ -190,6 +191,7 @@ fn new_shared(
             "group-delivery",
             "call-signaling",
             "own-contact-backfill",
+            "layer-publish",
         ]
         .into_iter()
         .map(|name| (name, Arc::new(Notify::new())))
@@ -518,6 +520,11 @@ impl ConnectionHandle {
     #[cfg(test)]
     pub(crate) fn removals(&self) -> Vec<CallRemoval> {
         self.shared.removals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    pub(crate) fn wake_courier(&self, name: &'static str) {
+        if let Some(wake) = self.shared.courier_wakes.get(name) {
+            wake.notify_one();
+        }
     }
     pub(crate) fn wake_couriers(&self) {
         for wake in self.shared.courier_wakes.values() {

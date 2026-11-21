@@ -300,7 +300,7 @@ async fn capable_resume_page_exact_reply() {
     let legacy_bytes = br#"{"frame_type":"resume","resume":{"target_delivery_id":"target-route","after_inbox_seq":7,"limit":64,"resume_token":"test-resume"}}"#.to_vec();
     for authoritative in [false, true] {
         let reply = forwarded(&json!({"frame_type":"resume","entries":[]}));
-        let (mut engine, sent) = session(SessionMode::Legacy, vec![reply]);
+        let (mut engine, sent) = session(SessionMode::Direct, vec![reply]);
         let result = if authoritative {
             engine.resume_authoritative_after(7, 64).await
         } else {
@@ -337,8 +337,9 @@ async fn capable_resume_page_exact_reply() {
 }
 
 async fn isolated_rows() {
-    // (r1) Legacy and (r2) Compat: refused locally, `wire_writes` unchanged, no retirement.
-    for mode in [SessionMode::Legacy, SessionMode::Compat] {
+    // A direct session refuses resume_page locally. `wire_writes` stays unchanged.
+    {
+        let mode = SessionMode::Direct;
         let (mut engine, sent) = session(mode, vec![typed(&page(7))]);
         let result = engine.resume_page(7, 64).await;
         assert!(matches!(&result, Err(SdkError::GatewaySessionRejected(m))

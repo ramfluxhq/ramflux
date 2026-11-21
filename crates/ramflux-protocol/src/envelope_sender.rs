@@ -7,30 +7,8 @@ use crate::{Envelope, ProtocolError};
 /// # Errors
 /// Returns canonical JSON errors.
 pub fn envelope_sender_signed_bytes(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
-    if envelope.schema == "ramflux.envelope.v2"
-        || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1
-    {
-        return Ok(crate::sender_signed_transcript(
-            envelope,
-            crate::SenderTranscriptMode::WithCiphertext,
-        )?
-        .bytes);
-    }
-    let mut sender = envelope.clone();
-    // Forwarders attach existing root-signed device-set evidence. Its independent signatures
-    // authenticate the same root and branch; this never removes the sender's signed root claim.
-    sender.ext.ext.remove("source_device_authority");
-    // The old home adds this hop marker after sender signing. The signed federation request
-    // authenticates it in transit, while the original sender signature remains verifiable.
-    sender.ext.ext.remove("home_node_migration_forward_count");
-    if let Some(receipt) =
-        sender.ext.ext.get_mut("franking").and_then(serde_json::Value::as_object_mut)
-    {
-        for field in ["franking_tag", "node_id", "accepted_at"] {
-            receipt.remove(field);
-        }
-    }
-    crate::signed_bytes(&sender)
+    Ok(crate::sender_signed_transcript(envelope, crate::SenderTranscriptMode::WithCiphertext)?
+        .bytes)
 }
 
 /// Sender-signed candidate outer bytes. Node receipt is excluded.
@@ -51,16 +29,10 @@ pub fn verify_envelope_sender_signature(
     envelope: &Envelope,
     public_key: &str,
 ) -> Result<(), ProtocolError> {
-    if envelope.schema == "ramflux.envelope.v2"
-        || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1
-    {
-        crate::verify_sender_signature(
-            envelope,
-            crate::SenderTranscriptMode::WithCiphertext,
-            public_key,
-        )?;
-        return Ok(());
-    }
-    let bytes = envelope_sender_signed_bytes(envelope)?;
-    crate::verify_canonical_signature(&bytes, &envelope.signed.signature, public_key)
+    crate::verify_sender_signature(
+        envelope,
+        crate::SenderTranscriptMode::WithCiphertext,
+        public_key,
+    )?;
+    Ok(())
 }

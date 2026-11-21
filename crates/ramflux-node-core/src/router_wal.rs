@@ -2655,9 +2655,9 @@ mod tests {
 
     fn router_wal_envelope(envelope_id: &str, target_delivery_id: &str) -> Envelope {
         Envelope {
-            schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
-            version: 1,
-            domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+            schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
+            version: 2,
+            domain: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.into(),
             ext: Ext::default(),
             signed: SignedFields {
                 signing_key_id: "router_wal_test".to_owned(),
@@ -2669,15 +2669,18 @@ mod tests {
             source_device_id: "device_router_wal".to_owned(),
             target_delivery_id: target_delivery_id.to_owned(),
             routing_set_id: None,
-            delivery_class: DeliveryClass::OpaqueEvent,
+            delivery_class: DeliveryClass::Message,
             priority: Priority::Normal,
             ttl: 300,
             created_at: 1_760_000_000,
-            encrypted_payload: "ciphertext".to_owned(),
-            payload_hash: "payload_hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
+            encrypted_payload: "UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA".into(),
+            payload_hash: ramflux_crypto::blake3_256_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                b"UkYxQwEAAAAQBwcHBwcHBwcHBwcHBwcHBwAAAAA",
+            ),
+            delivery_mode: Some("durable".into()),
+            collapse_tag: Some(ramflux_protocol::encode_base64url([0x22; 32])),
+            report_commitment: Some(ramflux_protocol::encode_base64url([0x33; 32])),
         }
     }
 

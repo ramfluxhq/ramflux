@@ -7,14 +7,14 @@ use crate::{LocalBusFrame, SdkError};
 use ramflux_storage::{AccountDb, OperationLookup, StorageError};
 use serde_json::Value;
 
-pub(super) struct MutationIntent<'a> {
+pub(crate) struct MutationIntent<'a> {
     pub key: Option<&'a str>,
     fingerprint: Option<String>,
     method: &'a str,
 }
 
 impl<'a> MutationIntent<'a> {
-    pub(super) fn new(request: &'a LocalBusFrame) -> Result<Self, SdkError> {
+    pub(crate) fn new(request: &'a LocalBusFrame) -> Result<Self, SdkError> {
         let key = request
             .operation_id
             .as_deref()
@@ -34,7 +34,7 @@ impl<'a> MutationIntent<'a> {
             .transpose()?;
         Ok(Self { key, fingerprint, method: request.method.as_str() })
     }
-    pub(super) fn lookup(&self, db: &AccountDb) -> Result<Option<Value>, SdkError> {
+    pub(crate) fn lookup(&self, db: &AccountDb) -> Result<Option<Value>, SdkError> {
         let (Some(key), Some(fingerprint)) = (self.key, self.fingerprint.as_deref()) else {
             return Ok(None);
         };
@@ -52,7 +52,7 @@ impl<'a> MutationIntent<'a> {
             OperationLookup::Mismatch => Err(StorageError::EventIdConflict(key.to_owned()).into()),
         }
     }
-    pub(super) fn reserve(&self, db: &AccountDb) -> Result<Option<Value>, SdkError> {
+    pub(crate) fn reserve(&self, db: &AccountDb) -> Result<Option<Value>, SdkError> {
         let (Some(key), Some(fingerprint)) = (self.key, self.fingerprint.as_deref()) else {
             return Ok(None);
         };

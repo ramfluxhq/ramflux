@@ -70,7 +70,11 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
                 }
             })?;
         }
-        tracing::info!(service, "service initialized");
+        tracing::info!(
+            service,
+            version = ramflux_node_core::version::VERSION_SHA,
+            "service initialized"
+        );
         if std::env::args().any(|arg| arg == "--once") {
             return Ok(());
         }
@@ -84,7 +88,11 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             Ok(())
         });
     }
-    tracing::info!(service, "service initialized");
+    tracing::info!(
+        service,
+        version = ramflux_node_core::version::VERSION_SHA,
+        "service initialized"
+    );
     if std::env::args().any(|arg| arg == "--once") {
         return Ok(());
     }
@@ -1285,6 +1293,7 @@ mod tests {
             gateway: None,
             signaling: None,
             relay: None,
+            gateway_client_capabilities: None,
         }
     }
 

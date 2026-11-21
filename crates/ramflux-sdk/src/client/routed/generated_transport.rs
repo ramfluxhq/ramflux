@@ -20,9 +20,38 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
     let identity = inner.identity.ok_or_else(|| invalid("generated transport identity missing"))?;
     g::identity::verify(&identity).map_err(|_| invalid("generated transport identity invalid"))?;
     let group = identity.group_id.clone();
+    let control = match scanned.kind {
+        8 | 11 | 12 => true,
+        9 => g::Surface::decode(scanned.body).is_ok_and(|value| match value.payload {
+            Some(g::surface::Payload::Delivery(delivery)) => matches!(
+                delivery.kind.and_then(|kind| kind.value),
+                Some(g::surface_control_kind::Value::Own(_))
+            ),
+            Some(g::surface::Payload::ResyncRequest(_) | g::surface::Payload::OwnHistory(_)) => {
+                true
+            }
+            None => false,
+        }),
+        10 => g::Task::decode(scanned.body).is_ok_and(|value| {
+            matches!(
+                value.payload,
+                Some(
+                    g::task::Payload::Control(_)
+                        | g::task::Payload::Approval(_)
+                        | g::task::Payload::OwnHistory(_)
+                )
+            )
+        }),
+        _ => false,
+    };
     let kind = match scanned.kind {
-        8 if group.is_some() => Kind::GroupControl,
-        8 | 11 | 12 => Kind::Control,
+        8 if group.is_some()
+            && g::Control::decode(scanned.body)
+                .is_ok_and(|value| matches!(value.operation, 4 | 5)) =>
+        {
+            Kind::GroupControl
+        }
+        _ if control => Kind::Control,
         6 => Kind::Receipt,
         _ if group.is_some() => Kind::GroupMessage,
         _ => Kind::Direct,
@@ -44,33 +73,25 @@ pub(super) fn generated_plaintext(bytes: &[u8]) -> Result<Plaintext, SdkError> {
 
 pub(super) fn seal_plaintext(
     body: &[u8],
-    route: &Routing,
+    _route: &Routing,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkError> {
-    if crate::client::target_selection::schema_v1_selected()
-        && let Some(mut inner) = identified_inner(body)
-    {
-        #[cfg(test)]
-        if super::report::allows_invalid_header_fixture() {
-            return Ok(zeroize::Zeroizing::new(body.to_vec()));
-        }
-        let closed_a2i = inner.kind == 8
-            && g::Control::decode(inner.body.as_slice())
-                .is_ok_and(|control| control.operation == 11);
-        inner.body.zeroize();
-        if inner.kind == 12 {
-            crate::RamfluxClient::require_self_sync_floor_bootstrap()?;
-        }
-        if closed_a2i {
-            crate::RamfluxClient::require_a2i_binding_authority()?;
-        }
-        generated_plaintext(body)?;
-        Ok(zeroize::Zeroizing::new(body.to_vec()))
-    } else {
-        Ok(zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
-            routing: route.clone(),
-            body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
-        })?))
+    #[cfg(test)]
+    if super::report::allows_invalid_header_fixture() {
+        return Ok(zeroize::Zeroizing::new(body.to_vec()));
     }
+    let mut inner =
+        identified_inner(body).ok_or_else(|| invalid("generated transport identity missing"))?;
+    let closed_a2i = inner.kind == 8
+        && g::Control::decode(inner.body.as_slice()).is_ok_and(|control| control.operation == 11);
+    inner.body.zeroize();
+    if inner.kind == 12 {
+        crate::RamfluxClient::require_self_sync_floor_bootstrap()?;
+    }
+    if closed_a2i {
+        crate::RamfluxClient::require_a2i_binding_authority()?;
+    }
+    generated_plaintext(body)?;
+    Ok(zeroize::Zeroizing::new(body.to_vec()))
 }
 
 #[cfg(test)]
@@ -109,7 +130,6 @@ mod tests {
     async fn shared_generated_sealer_refuses_closed_a2i_and_floorless_self_sync_before_framing()
     -> TestResult {
         let source = Fixture::new("native-closed-sealer").await?;
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let identity = source.client.allocate_generated_identity("closed-control", 1, false)?;
         let route = Routing {
             kind: Kind::Control,

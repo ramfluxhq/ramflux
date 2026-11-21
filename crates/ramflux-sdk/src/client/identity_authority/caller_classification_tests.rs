@@ -6,6 +6,34 @@ use super::HeadUse;
 
 const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
+        "client/contact_requests/ingress.rs",
+        include_str!("../contact_requests/ingress.rs"),
+        [0, 1, 0, 0],
+    ),
+    (
+        "client/routed/generated_applications.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/client/routed/generated_applications.rs"
+        )),
+        [0, 0, 0, 0],
+    ),
+    (
+        "client/surface/history_generated.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/client/surface/history_generated.rs"
+        )),
+        [1, 0, 0, 0],
+    ),
+    (
+        "client/routed/mod.rs",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/routed/mod.rs")),
+        [1, 0, 0, 0],
+    ),
+    ("client/authored_delete.rs", include_str!("../authored_delete.rs"), [1, 0, 0, 0]),
+    ("client/authored_send.rs", include_str!("../authored_send.rs"), [1, 0, 0, 0]),
+    (
         "bus/delivery_receipts.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bus/delivery_receipts.rs")),
         [1, 0, 0, 0],
@@ -26,7 +54,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
         "bus/dispatch/group/history.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bus/dispatch/group/history.rs")),
-        [1, 0, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "bus/dispatch/shared_group_transfer_tests.rs",
@@ -34,7 +62,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/bus/dispatch/shared_group_transfer_tests.rs"
         )),
-        [1, 0, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "bus/dispatch/surface_own_tests.rs",
@@ -72,7 +100,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
         "client/contact_requests/wire.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/contact_requests/wire.rs")),
-        [1, 0, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/delivery_receipts.rs",
@@ -105,7 +133,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/identity_authority/custody_directory.rs"
         )),
-        [0, 0, 0, 1],
+        [3, 0, 0, 1],
     ),
     (
         "client/identity_authority/custody_freshness.rs",
@@ -129,7 +157,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/identity_authority/gateway_tests.rs"
         )),
-        [0, 1, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/identity_authority/group_review_r3_tests.rs",
@@ -177,25 +205,9 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
         [0, 2, 0, 0],
     ),
     (
-        "client/own_device_sync/receive_job.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/own_device_sync/receive_job.rs"
-        )),
-        [2, 1, 0, 0],
-    ),
-    (
-        "client/own_device_sync/tests/stale_group_snapshot_tests.rs",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/client/own_device_sync/tests/stale_group_snapshot_tests.rs"
-        )),
-        [0, 1, 0, 0],
-    ),
-    (
         "client/own_device_sync.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/own_device_sync.rs")),
-        [0, 4, 0, 0],
+        [0, 0, 0, 0],
     ),
     (
         "client/own_group_lazy_authority.rs",
@@ -239,7 +251,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
             env!("CARGO_MANIFEST_DIR"),
             "/src/client/routed/device_revocation_tests.rs"
         )),
-        [1, 0, 0, 0],
+        [2, 0, 0, 0],
     ),
     (
         "client/routed/discovery_tests.rs",
@@ -387,21 +399,14 @@ fn scan_historical_consumers(
 
 // Historical scope bypasses only the fetch-age clock. The retained-input worker
 // rechecks receipt/header/source/scope, discards ephemeral and native controls,
-// and permits no legacy-origin operation except already-admitted Message projection.
+// and permits only projection backed by the retained verified native origin.
 fn historical_consumer_allowed(
     path: &std::path::Path,
     source: &str,
     offset: usize,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    if path.ends_with("bus/dispatch/group/history.rs") {
-        return Ok(true);
-    }
-    if path.ends_with("bus/dispatch/group.rs") {
-        return within_function(source, "group_receive_compat", offset);
-    }
     if path.ends_with("client/raw_inner_reparse.rs") {
-        return Ok(within_function(source, "install_raw_reparse", offset)?
-            || within_function(source, "legacy_raw_reparse_source", offset)?);
+        return within_function(source, "install_raw_reparse", offset);
     }
     // This terminal comparison defines the clock-only bypass, not a consumer.
     Ok(path.ends_with("client/identity_authority/custody_freshness.rs")

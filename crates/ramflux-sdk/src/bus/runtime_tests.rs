@@ -118,6 +118,7 @@ impl GatewaySessionFrameSource for Gateway {
                         envelope: submit.envelope,
                     },
                 },
+                None => return std::future::pending().await,
                 _ => {
                     GatewayServerFrame::Nack { reason: "unexpected test gateway frame".to_owned() }
                 }
@@ -245,6 +246,237 @@ fn account_with_setup(
     );
     Ok(LocalBusAccountState::new(client, engine, commitment))
 }
+
+/// Install a real native account beside the fixture's device branch.
+///
+/// `account` stays rootless so the missing-root pin still refuses. The ceremony uses its own
+/// directory because the fixture index already reserved this account id. Call this only after
+/// any step that must sign with that branch, and only on a fixture that opens a live gateway.
+pub(crate) fn graft_explicit_native_root(
+    client: &mut RamfluxClient,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    if client.born_v3_account.is_some() {
+        return Ok(());
+    }
+    let parent = client
+        .account_index
+        .as_ref()
+        .ok_or(SdkError::CustodySetupInvalid)?
+        .root()
+        .join("explicit-native-root");
+    std::fs::create_dir_all(&parent).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let device =
+        client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
+    let now = crate::custody::network_now()?;
+    let account = crate::custody::tests::create_with_device(
+        &parent,
+        account_id,
+        &device,
+        &crate::custody::tests::TestVault::default(),
+        now,
+    )
+    .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.born_v3_account = Some(Box::new(account));
+    Ok(())
+}
+
+/// Make `account.status` able to read the grafted account from the fixture index.
+///
+/// Status reloads `custody_accounts/<id>` and checks the index anchor. The ceremony cannot
+/// reserve an id the fixture already owns, so this copies the live authority and points the
+/// existing row at that anchor.
+pub(crate) fn publish_grafted_authority_for_status(
+    client: &mut RamfluxClient,
+    account_id: &str,
+) -> Result<(), SdkError> {
+    let index_root =
+        client.account_index.as_ref().ok_or(SdkError::CustodySetupInvalid)?.root().to_path_buf();
+    let side = index_root.join("explicit-native-root");
+    let account = client.born_v3_account.as_mut().ok_or(SdkError::IdentityRootMissing)?;
+    account.mark_live_for_test(&side).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let anchor = account.record().body.account_anchor.clone();
+    let source = side.join("custody_accounts").join(account_id).join("authority.json");
+    let destination = index_root.join("custody_accounts").join(account_id);
+    std::fs::create_dir_all(&destination).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    std::fs::copy(source, destination.join("authority.json"))
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.create_account(account_id, &anchor)?;
+    Ok(())
+}
+
+fn scripted_engine(
+    config: GatewaySessionConfig,
+    blocked: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+) -> GatewaySessionEngine {
+    GatewaySessionEngine::with_test_transport(
+        config,
+        Box::new(Gateway {
+            last: None,
+            pending_cursor: None,
+            blocked: blocked.map(|entered| GatewayBlock {
+                entered,
+                submit_envelope: None,
+                relay_token: false,
+            }),
+            cancelled,
+            submits: Arc::new(AtomicUsize::new(0)),
+            cancelled_notice: None,
+        }),
+    )
+}
+
+pub(crate) struct BornAccount {
+    pub state: LocalBusAccountState,
+    pub manifest: crate::prekey::SdkDeviceManifestResponse,
+}
+
+pub(crate) async fn born_account(
+    root: &Path,
+    account_id: &str,
+    principal_id: &str,
+    device_id: &str,
+    passphrase: &[u8],
+    target_delivery_id: &str,
+) -> Result<BornAccount, SdkError> {
+    std::fs::create_dir_all(root)?;
+    let vault = Arc::new(crate::custody::tests::TestVault::default());
+    let now = crate::custody::network_now()?;
+    let mut input = crate::custody::tests::input(account_id);
+    input.principal_id = principal_id.into();
+    input.device_id = device_id.into();
+    let mut ceremony = crate::custody::CreationCeremony::begin(root, input, now)?;
+    let phrase = ceremony.show_once()?;
+    let positions = ceremony.hidden_challenge()?;
+    let created = ceremony.confirm(
+        &crate::custody::tests::words(&phrase, positions)
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+        vault.as_ref(),
+        now,
+    )?;
+    let anchor = created.record().body.account_anchor.clone();
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.seal_new_account_data(account_id, &anchor, passphrase)?;
+    client.unlock_account(account_id, passphrase)?;
+    client.initialize_born_v3_branch(device_id, vault.clone()).await?;
+    let manifest = native_manifest(&client, device_id)?;
+    client.persist_observed_identity_directory_now(&manifest)?;
+    mark_account_live(&mut client, root, account_id)?;
+    let branch = client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+    let identity = client.owned_device_identity()?;
+    let endpoint = GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        gateway_addr: "127.0.0.1:1"
+            .parse()
+            .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+        server_name: "test-gateway".to_owned(),
+        ca_cert: root.join("ca.pem"),
+        principal_id: principal_id.to_owned(),
+        device_id: device_id.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        prekey_http_url: None,
+    };
+    let mut config = GatewaySessionConfig::quic(endpoint);
+    config.device_epoch = branch.device_epoch;
+    config.device_branch = Some(Arc::new(branch));
+    config.source_identity = Some(identity);
+    let engine = scripted_engine(config, None, Arc::new(AtomicBool::new(false)));
+    let state = LocalBusAccountState::new(client, engine, manifest.principal_commitment.clone());
+    Ok(BornAccount { state, manifest })
+}
+
+fn mark_account_live(client: &mut RamfluxClient, root: &Path, id: &str) -> Result<(), SdkError> {
+    let now = crate::custody::network_now()?;
+    crate::custody::tests::mark_live(root, id, now)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    client.born_v3_account = Some(Box::new(crate::custody::load_account(root, id, now)?));
+    Ok(())
+}
+
+fn native_manifest(
+    client: &RamfluxClient,
+    device_id: &str,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let account = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
+    let identity = client.owned_device_identity()?;
+    let bundle = client.load_x3dh_private_state(&identity)?.bundle;
+    let epoch = account
+        .record()
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .map(|device| device.device_epoch)
+        .ok_or(SdkError::CustodySetupInvalid)?;
+    let anchor = account.record().body.account_anchor.clone();
+    crate::prekey::SdkDeviceManifestResponse::from_native(
+        ramflux_protocol::custody::CustodyManifest {
+            publication: account.publication(),
+            custodian_publication: account.custodian_publication(
+                client.account_index()?.root(),
+                crate::custody::network_now()?,
+            )?,
+            devices: vec![ramflux_protocol::custody::CustodyManifestDevice {
+                device_ref: ramflux_protocol::custody::DeviceRef {
+                    account_anchor: anchor,
+                    device_id: device_id.into(),
+                    device_epoch: epoch,
+                },
+                target_delivery_id: identity.storage_key().into(),
+                prekey_bundle: serde_json::to_value(bundle)?,
+                message_layer: None,
+            }],
+        },
+    )
+}
+
+pub(crate) fn born_directory_initializer(
+    id: String,
+    passphrase: &'static [u8],
+    branch: ramflux_crypto::DeviceBranch,
+    commitment: String,
+    blocked: Option<oneshot::Sender<()>>,
+    cancelled: Arc<AtomicBool>,
+) -> AccountInitializer {
+    let root_device = branch.device_id.clone();
+    Box::new(move |index| {
+        let mut client = RamfluxClient::new();
+        client.open_account_index(index.root())?;
+        client.unlock_account(&id, passphrase)?;
+        client.device_branch = Some(branch.clone());
+        client
+            .active_account_db
+            .as_mut()
+            .ok_or(SdkError::AccountDbNotUnlocked)?
+            .set_device_signer(branch.clone());
+        let identity = client.owned_device_identity()?;
+        let endpoint = GatewayQuicEndpointConfig {
+            bind_addr: "127.0.0.1:0"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+            gateway_addr: "127.0.0.1:1"
+                .parse()
+                .map_err(|error| SdkError::LocalBus(format!("test addr: {error}")))?,
+            server_name: "test-gateway".to_owned(),
+            ca_cert: index.root().join("ca.pem"),
+            principal_id: id,
+            device_id: root_device,
+            target_delivery_id: "target".to_owned(),
+            prekey_http_url: None,
+        };
+        let mut config = GatewaySessionConfig::quic(endpoint);
+        config.device_epoch = branch.device_epoch;
+        config.device_branch = Some(Arc::new(branch));
+        config.source_identity = Some(identity);
+        let engine = scripted_engine(config, blocked, cancelled);
+        Ok(LocalBusAccountState::new(client, engine, commitment))
+    })
+}
+
 pub(super) fn actor_account(
     root: &Path,
     id: &str,
@@ -309,97 +541,112 @@ async fn client(
     Ok((client, task))
 }
 
-fn actor_account_with_cancellation_notice(
-    root: &Path,
-    id: &str,
-    blocked: oneshot::Sender<()>,
-    cancelled: Arc<AtomicBool>,
-    notice: oneshot::Sender<()>,
-) -> AccountInitializer {
-    let root = root.to_path_buf();
-    let id = id.to_owned();
-    Box::new(move |index| {
-        account_with_setup(
-            &root,
-            &id,
-            Some(blocked),
-            cancelled,
-            Arc::new(AtomicUsize::new(0)),
-            AccountSetup {
-                index: Some(index),
-                blocked_submit_envelope: Some("slow-envelope".to_owned()),
-                cancelled_notice: Some(notice),
-                blocked_relay_token: false,
-            },
-        )
-    })
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Result<(), SdkError> {
     // This is a deadlock watchdog, not a latency assertion for account startup or fsync.
-    tokio::time::timeout(Duration::from_secs(60), LocalSet::new().run_until(async {
-        let root = root("independent");
-        let (entered, blocked) = oneshot::channel();
-        let (cancelled_notice, cancellation) = oneshot::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let alice = actor_account_with_cancellation_notice(
-            &root, "alice", entered, Arc::clone(&cancelled), cancelled_notice,
-        );
-        let bob = actor_account(&root, "bob", None, Arc::new(AtomicBool::new(false)));
-        let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]))?;
-        let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
-        let (two, server_two) = client(Rc::clone(&supervisor), 2).await?;
-        // Warm the sending accounts before timing isolation from Alice's blocked gateway.
-        // The checked send below keeps its original 500 ms deadline and unique response id.
-        two.request_frame(request("warm-send", "bob", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"warm-message", "envelope_id":"warm-envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        one.request_frame(request("warm-alice", "alice", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"warm-alice-message", "envelope_id":"warm-alice-envelope",
-            "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"warm opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        // Background receive polls cannot consume this foreground submit's blocking signal.
-        let slow_client = one.clone();
-        let slow = tokio::task::spawn_local(async move {
-            slow_client.request_frame(request("slow", "alice", "message.submit", serde_json::json!({
-                "conversation_id":"conversation", "message_id":"slow-message", "envelope_id":"slow-envelope",
-                "source_principal_id":"alice", "sender_id":"device-alice", "recipient_principal_commitment":"alice",
-                "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-            }))).await
-        });
-        blocked.await.map_err(|_| failure("gateway dropped before entering its stall"))?;
-        assert!(!slow.is_finished());
-        assert!(!cancelled.load(Ordering::SeqCst));
-        let sent = two.request_frame(request("send", "bob", "message.submit", serde_json::json!({
-            "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-        }))).await?;
-        assert_eq!(sent["envelope"]["envelope_id"], "envelope");
-        let read = one.request_frame(request("read", "alice", "message.list", serde_json::json!({"conversation_id":"conversation"}))).await?;
-        assert!(read["messages"].is_array());
-        let other_read = two.request_frame(request("list", "bob", "conversation.list", serde_json::json!({}))).await?;
-        assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
-        // A completed receive or network timeout must not turn serialization into a false pass.
-        assert!(!slow.is_finished(), "the other account and both reads must finish during Alice's stall");
-        assert!(!cancelled.load(Ordering::SeqCst), "Alice's gateway must still be stalled");
-        slow.abort();
-        let _ = slow.await;
-        drop(one);
-        drop(two);
-        let _ = server_one.await;
-        let _ = server_two.await;
-        cancellation.await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
-        assert!(cancelled.load(Ordering::SeqCst));
-        supervisor.shutdown().await?;
-        drop(supervisor);
-        std::fs::remove_dir_all(root)?;
-        Ok(())
-    })).await.map_err(|_| failure("cross-account progress or cancellation deadlocked"))?
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Box::pin(LocalSet::new().run_until(Box::pin(async {
+            let pair = native_actor::pair()
+                .await
+                .map_err(|error| failure(&format!("native pair: {error}")))?;
+            let conversation =
+                pair.conversation().map_err(|error| failure(&format!("conversation: {error}")))?;
+            let (entered, blocked) = oneshot::channel();
+            let (cancelled_notice, cancellation) = oneshot::channel();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stalled = native_actor::gateway(
+                Some(native_actor::stall(entered, "slow-envelope")),
+                Arc::clone(&cancelled),
+                Arc::default(),
+                Some(cancelled_notice),
+            );
+            let quiet =
+                native_actor::gateway(None, Arc::new(AtomicBool::new(false)), Arc::default(), None);
+            let alice = pair.alice.initializer(&pair.data_root, &pair.bob.manifest, stalled);
+            let bob = pair.bob.initializer(&pair.data_root, &pair.alice.manifest, quiet);
+            let root = pair.data_root.clone();
+            let supervisor = supervisor(
+                &root,
+                BTreeMap::from([("alice".to_owned(), alice), ("bob".to_owned(), bob)]),
+            )?;
+            let (one, server_one) = client(Rc::clone(&supervisor), 1).await?;
+            let (two, server_two) = client(Rc::clone(&supervisor), 2).await?;
+            let (alice, bob) = (&pair.alice, &pair.bob);
+            // Warm the sending accounts before timing isolation from Alice's blocked gateway.
+            // The checked send below keeps its original 500 ms deadline and unique response id.
+            let warm = ("warm-message", "warm-envelope");
+            let warm_alice = ("warm-alice-message", "warm-alice-envelope");
+            two.request_frame(bob.submit_request(alice, &conversation, "warm-send", warm, b"warm"))
+                .await?;
+            one.request_frame(alice.submit_request(
+                bob,
+                &conversation,
+                "warm-alice",
+                warm_alice,
+                b"warm",
+            ))
+            .await?;
+            // Background receive polls cannot consume this foreground submit's blocking signal.
+            let slow_client = one.clone();
+            let slow_frame = alice.submit_request(
+                bob,
+                &conversation,
+                "slow",
+                ("slow-message", "slow-envelope"),
+                b"opaque",
+            );
+            let slow =
+                tokio::task::spawn_local(
+                    async move { slow_client.request_frame(slow_frame).await },
+                );
+            blocked.await.map_err(|_| failure("gateway dropped before entering its stall"))?;
+            assert!(!slow.is_finished());
+            assert!(!cancelled.load(Ordering::SeqCst));
+            let sent = two
+                .request_frame(bob.submit_request(
+                    alice,
+                    &conversation,
+                    "send",
+                    ("message", "envelope"),
+                    b"opaque",
+                ))
+                .await?;
+            assert_eq!(sent["envelope"]["envelope_id"], "envelope");
+            let read = one
+                .request_frame(request(
+                    "read",
+                    "alice",
+                    "message.list",
+                    serde_json::json!({"conversation_id":conversation}),
+                ))
+                .await?;
+            assert!(read["messages"].is_array());
+            let other_read = two
+                .request_frame(request("list", "bob", "conversation.list", serde_json::json!({})))
+                .await?;
+            assert_eq!(other_read["conversations"].as_array().map(Vec::len), Some(1));
+            // A completed receive or network timeout must not turn serialization into a false pass.
+            assert!(
+                !slow.is_finished(),
+                "the other account and both reads must finish during Alice's stall"
+            );
+            assert!(!cancelled.load(Ordering::SeqCst), "Alice's gateway must still be stalled");
+            slow.abort();
+            let _ = slow.await;
+            drop(one);
+            drop(two);
+            let _ = server_one.await;
+            let _ = server_two.await;
+            cancellation.await.map_err(|_| failure("gateway call not cancelled on disconnect"))?;
+            assert!(cancelled.load(Ordering::SeqCst));
+            supervisor.shutdown().await?;
+            drop(supervisor);
+            Ok(())
+        }))),
+    )
+    .await
+    .map_err(|_| failure("cross-account progress or cancellation deadlocked"))?
 }
 
 fn failure(message: &str) -> SdkError {
@@ -427,6 +674,7 @@ fn actor_account_with_blocked_upload(
                 ..AccountSetup::default()
             },
         )?;
+        graft_explicit_native_root(&mut account.client, "alice")?;
         account.client.node_relay_options = Some(RelayTransferOptions {
             relay_endpoint: "https://relay.invalid".into(),
 
@@ -483,39 +731,76 @@ async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_netw
 
 #[tokio::test(flavor = "current_thread")]
 async fn mutation_key_applies_once_and_survives_account_actor_restart() -> Result<(), SdkError> {
-    LocalSet::new().run_until(async {
-        let root = root("idempotency");
+    Box::pin(LocalSet::new().run_until(Box::pin(async {
+        let pair = native_actor::pair()
+            .await
+            .map_err(|error| failure(&format!("native pair: {error}")))?;
+        let conversation =
+            pair.conversation().map_err(|error| failure(&format!("conversation: {error}")))?;
+        let root = pair.data_root.clone();
         let submits = Arc::new(AtomicUsize::new(0));
-        let body = serde_json::json!({
-            "conversation_id":"conversation", "message_id":"message", "envelope_id":"envelope",
-            "source_principal_id":"bob", "sender_id":"device-bob", "recipient_principal_commitment":"alice",
-            "target_delivery_id":"target", "encrypted_body_base64":ramflux_protocol::encode_base64url(b"opaque"), "created_at":1, "ttl":60
-        });
+        let now = now_unix_timestamp();
+        let body = pair.bob.submit_body(
+            &pair.alice,
+            &conversation,
+            ("message", "envelope"),
+            b"opaque",
+            now,
+        );
         let mut expected = None;
         for round in 0..2 {
-            let bob = actor_account_with_counter(&root, "bob", None, Arc::new(AtomicBool::new(false)), Arc::clone(&submits));
+            let bob = pair.bob.initializer(
+                &root,
+                &pair.alice.manifest,
+                native_actor::gateway(
+                    None,
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::clone(&submits),
+                    None,
+                ),
+            );
             let supervisor = supervisor(&root, BTreeMap::from([("bob".to_owned(), bob)]))?;
             let (client, server) = client(Rc::clone(&supervisor), 1).await?;
             for retry in 0..2 {
-                let mut frame = request(&format!("send-{round}-{retry}"), "bob", "message.submit", body.clone());
+                let mut frame = request(
+                    &format!("send-{round}-{retry}"),
+                    "bob",
+                    "message.submit",
+                    body.clone(),
+                );
                 frame.operation_id = Some("send-operation".to_owned());
                 let result = client.request_frame(frame).await?;
-                if let Some(expected) = &expected { assert_eq!(&result, expected); }
-                else { expected = Some(result); }
+                if let Some(expected) = &expected {
+                    assert_eq!(&result, expected);
+                } else {
+                    expected = Some(result);
+                }
             }
-            let mut conflict = request("conflict", "bob", "message.submit", serde_json::json!({"different":"intent"}));
+            let mut conflict = request(
+                "conflict",
+                "bob",
+                "message.submit",
+                serde_json::json!({"different":"intent"}),
+            );
             conflict.operation_id = Some("send-operation".to_owned());
             assert!(client.request_frame(conflict).await.is_err());
-            let messages = client.request_frame(request("messages", "bob", "message.list", serde_json::json!({"conversation_id":"conversation"}))).await?;
+            let messages = client
+                .request_frame(request(
+                    "messages",
+                    "bob",
+                    "message.list",
+                    serde_json::json!({"conversation_id":conversation}),
+                ))
+                .await?;
             assert_eq!(messages["messages"].as_array().map(Vec::len), Some(1));
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;
         }
         assert_eq!(submits.load(Ordering::SeqCst), 1);
-        std::fs::remove_dir_all(root)?;
         Ok(())
-    }).await
+    })))
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -636,12 +921,10 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 .request_frame(request("read", "alice", "conversation.list", serde_json::json!({})))
                 .await?;
             let mut found = false;
-            let mut migration = false;
             let mut friend = false;
             let mut sequence = 0;
-            // Startup replays the migration marker as well as the friend and domain changes.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-            for _ in 0..3 {
+            for _ in 0..2 {
                 let event = tokio::time::timeout_at(
                     deadline.min(tokio::time::Instant::now() + Duration::from_secs(2)),
                     client.next_event(),
@@ -654,13 +937,6 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                 assert!(next > sequence);
                 sequence = next;
                 match event.body["table_name"].as_str() {
-                    Some("runtime_actor_state") => {
-                        assert_eq!(
-                            event.body["keys"]["state_kind"],
-                            crate::client::contact_verification::MIGRATION_MARKER
-                        );
-                        migration = true;
-                    }
                     Some("friend_link_projection") => {
                         assert_eq!(event.body["keys"]["link_id"], "friend");
                         friend = true;
@@ -669,7 +945,7 @@ async fn committed_unpublished_outbox_is_routed_when_account_starts() -> Result<
                     _ => return Err(failure("unexpected startup outbox change")),
                 }
             }
-            assert!(found && migration && friend);
+            assert!(found && friend);
             drop(client);
             let _ = server.await;
             supervisor.shutdown().await?;
@@ -942,59 +1218,67 @@ async fn daemon_stop_works_through_the_public_embedded_entrypoint() -> Result<()
 
 #[tokio::test(flavor = "current_thread")]
 async fn client_directories_progress_while_gateway_is_blocked() -> Result<(), SdkError> {
-    LocalSet::new()
-        .run_until(async {
-            let root = root("directories-progress");
-            let (entered, blocked) = oneshot::channel();
-            let initialize =
-                actor_account(&root, "alice", Some(entered), Arc::new(AtomicBool::new(false)));
-            let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
-            let (one, server) = client(Rc::clone(&supervisor), 1).await?;
-            let slow_client = one.clone();
-            let slow = tokio::task::spawn_local(async move {
-                slow_client
-                    .request_frame(request(
-                        "slow",
-                        "alice",
-                        "message.receive",
-                        serde_json::json!({"limit":1}),
-                    ))
-                    .await
-            });
-            tokio::time::timeout(Duration::from_secs(2), blocked)
+    Box::pin(LocalSet::new().run_until(async {
+        let root = root("directories-progress");
+        let (entered, blocked) = oneshot::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let born =
+            born_account(&root, "alice", "alice", "device-alice", b"actor-test-secret", "target")
+                .await?;
+        let branch =
+            born.state.client.device_branch.clone().ok_or(SdkError::CustodySetupInvalid)?;
+        let commitment = born.manifest.principal_commitment.clone();
+        drop(born);
+        let initialize = born_directory_initializer(
+            "alice".into(),
+            b"actor-test-secret",
+            branch,
+            commitment,
+            Some(entered),
+            cancelled,
+        );
+        let supervisor = supervisor(&root, BTreeMap::from([("alice".to_owned(), initialize)]))?;
+        let (one, server) = client(Rc::clone(&supervisor), 1).await?;
+        let slow_client = one.clone();
+        let slow = tokio::task::spawn_local(async move {
+            slow_client
+                .request_frame(request(
+                    "slow",
+                    "alice",
+                    "message.receive",
+                    serde_json::json!({"limit":1}),
+                ))
                 .await
-                .map_err(|_| failure("gateway not entered"))?
-                .map_err(|_| failure("gateway dropped"))?;
-            for method in [
-                "conversation.directory",
-                "identity.directory",
-                "object.directory",
-                "group.list",
-                "mcp.server.list",
-                "mcp.approval.list",
-            ] {
-                let result = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    one.request_frame(request(
-                        method,
-                        "alice",
-                        method,
-                        serde_json::json!({"limit":5}),
-                    )),
-                )
-                .await
-                .map_err(|_| failure("directory blocked behind gateway"))??;
-                assert!(result.get("next_cursor").is_some());
-            }
-            slow.abort();
-            let _ = slow.await;
-            drop(one);
-            let _ = server.await;
-            supervisor.shutdown().await?;
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        })
-        .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), blocked)
+            .await
+            .map_err(|_| failure("gateway not entered"))?
+            .map_err(|_| failure("gateway dropped"))?;
+        for method in [
+            "conversation.directory",
+            "identity.directory",
+            "object.directory",
+            "group.list",
+            "mcp.server.list",
+            "mcp.approval.list",
+        ] {
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                one.request_frame(request(method, "alice", method, serde_json::json!({"limit":5}))),
+            )
+            .await
+            .map_err(|_| failure("directory blocked behind gateway"))??;
+            assert!(result.get("next_cursor").is_some());
+        }
+        slow.abort();
+        let _ = slow.await;
+        drop(one);
+        let _ = server.await;
+        supervisor.shutdown().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }))
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1072,8 +1356,8 @@ async fn group_send_lists_every_missing_member_before_writing_a_message() -> Res
     LocalSet::new().run_until(async {
         let root=root("group-routes");let initialize=actor_account(&root,"alice",None,Arc::new(AtomicBool::new(false)));
         let initialize:AccountInitializer=Box::new(move |index| {
-            let account=initialize(index)?;account.client.create_group("group","device-alice")?;
-            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;Ok(account)
+            let mut account=initialize(index)?;account.client.create_group("group","device-alice")?;
+            account.client.account_db()?.add_group_member("group","device-bob","member")?;account.client.account_db()?.add_group_member("group","device-charlie","member")?;graft_explicit_native_root(&mut account.client,"alice")?;Ok(account)
         });
         let supervisor=supervisor(&root,BTreeMap::from([("alice".to_owned(),initialize)]))?;let (socket,server)=client(Rc::clone(&supervisor),1).await?;
         let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
@@ -1133,6 +1417,7 @@ mod stream;
 async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), SdkError> {
     let root = root("surface-outbound-isolation");
     let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+    graft_explicit_native_root(&mut account.client, "alice")?;
     account.client.account_db()?.persist_actor_state(
         "surface/transport/00000000000000000001",
         &serde_json::json!({"corrupt":true}),
@@ -1149,32 +1434,33 @@ async fn inbound_resume_ignores_obsolete_surface_delivery_rows() -> Result<(), S
 }
 
 #[tokio::test]
-async fn own_authorization_refresh_failure_has_a_distinct_error_code() -> Result<(), SdkError> {
-    let root = root("proof-refresh-status");
-    let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
-    account.gateway_config.timeout = Duration::from_millis(20);
-    account.gateway_config.quic_fallback_timeout = Duration::from_millis(20);
-    account.client.record_owned_proof_published(now_unix_timestamp() - 3600)?;
-    let error = account
-        .ensure_gateway_live()
-        .await
-        .err()
-        .ok_or_else(|| SdkError::LocalBus("expected refresh failure".into()))?;
-    assert!(matches!(error, SdkError::OwnDeviceAuthorizationRefreshFailed(_)));
-    assert_eq!(local_bus_error_code(&error), "OwnDeviceAuthorizationRefreshFailed");
-    drop(account);
-    Ok(())
+async fn gateway_live_without_native_root_is_identity_root_missing() -> Result<(), SdkError> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let root = root("proof-refresh-status");
+        let mut account = account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?;
+        let error = account
+            .ensure_gateway_live()
+            .await
+            .err()
+            .ok_or_else(|| SdkError::LocalBus("expected a missing identity root".into()))?;
+        assert!(matches!(error, SdkError::IdentityRootMissing));
+        drop(account);
+        Ok(())
+    })
+    .await
+    .expect("scenario deadline")
 }
 mod contact_state;
-mod group_legacy;
+mod group_generation;
 
 pub(crate) async fn assert_activated_group_unrouted_replay_refused() -> Result<(), SdkError> {
-    Box::pin(group_legacy::activated_group_unrouted_replay_refused()).await
+    Box::pin(group_generation::activated_group_unrouted_replay_refused()).await
 }
 
 mod status_snapshot;
 
 mod group_actor;
+mod native_actor;
 
 #[path = "runtime_tests/native_busy.rs"]
 mod native_busy;

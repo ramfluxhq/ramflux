@@ -37,7 +37,7 @@ async fn public_receivers_preserve_bare_directory_errors_and_log_kind() -> TestR
         } else {
             alice
                 .client
-                .receive_gateway_plaintext_deliveries(&mut engine, &pool, 32, "thread", false, None)
+                .receive_gateway_plaintext_deliveries(&mut engine, &pool, 32, "thread")
                 .await
                 .err()
         }

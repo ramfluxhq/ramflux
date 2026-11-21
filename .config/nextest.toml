@@ -19,7 +19,7 @@ filter = 'binary(/^e2e_/) | test(linux_vault_) | test(custody::vault::linux::wri
 retries = 0
 
 [[profile.ci.overrides]]
-filter = 'binary(graceful_shutdown) | binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group) | test(receive_resync_recovers_)'
+filter = 'binary(graceful_shutdown) | binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group) | binary(e2e_group_service) | binary(e2e_media_dm) | binary(e2e_contact_verify) | binary(e2e_unified_gate) | test(receive_resync_recovers_)'
 test-group = "heavy"
 
 [profile.ci.junit]
@@ -34,15 +34,59 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 
 # Durable overflow recovery applies 266 authenticated inbox entries (the 256-entry session
 # buffer plus overflow) through the real writer, about 0.2 s each on a loaded runner. Steady
-# progress is policed by recover()'s 10 s silence guard; this only widens the kill window to
-# 120 s. recover() fails with diagnostics at 100 s, before nextest terminates the process.
+# progress is policed by recover()'s 10 s silence guard. Generation-1 receive verifies each
+# entry's native custody authority, which made these rows about 25 % slower than before
+# activation (55 s to 69 s on the same host, over 120 s on a loaded runner, where the kill
+# leaked their temporary directories). The kill window is 300 s; each row enforces its own 240 s
+# deadline and drops its fixtures before the runner kills it.
 [[profile.default.overrides]]
 filter = 'package(ramflux-sdk) & test(/^bus::account_runtime::tests::receive_resync::receive_resync_recovers_/)'
-slow-timeout = { period = "60s", terminate-after = 2 }
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Seventy signed shared-group epochs are applied one by one so a lagging member must commit the
+# latest full state. The row is CPU bound: 30.2 s on one pinned core at this branch and 30.5 s on
+# main (measured with taskset -c 0 on the same host), so a loaded two-core runner crosses the
+# default 60 s kill without any regression. The row asserts the committed state itself; this only
+# widens the kill window to 180 s.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(=client::shared_group::tests::fork_tests::a_lagging_member_commits_latest_full_state_without_history_resolution)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Real-component courier rows that drive 20 busy passes or a hundred-ack backlog through a live
+# actor: 22 s and 26 s before activation, 26 s and 37 s now on the same host, so a loaded runner
+# crosses the default 60 s kill. Each enforces its own 150 s deadline inside a 180 s window.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & (test(=bus::account_runtime::tests::r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_and_lock) | test(=bus::account_runtime::tests::r6_hundred_ack_backlog_drains_through_signal_loop_with_a_per_pass_bound))'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The pairing tail relay admission row is 28 s on the same host before and after activation
+# (39 s to 49 s on a CI runner), so it only crosses 60 s under runner load. Its own paused-time
+# deadline helper bounds it; this widens the kill window to 180 s.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(=custody::pairing::component_tests::frontend_writer::tests::tail::hostile::pairing_full_tail_relay_admission_is_data_only_endpoints_enforce)'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The streamed own-device surface row seals and applies 64 authenticated events through two
+# real accounts (about 50 s unloaded, over 100 s on a loaded shard, where a kill at 60 s leaked
+# its temporary directories). The test enforces its own 200 s deadline and removes its
+# directories on expiry, before nextest's 240 s kill window.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(=bus::dispatch::surface_transport::own_tests::streamed_surface_fans_out_sixty_four_events_without_history_bundles_or_object_uploads)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# The sender refusal policy task row runs the whole typed-refusal lifecycle matrix (conflict,
+# decision approve and deny with reopen and retry, envelope, deferral, stale revision and task
+# delivery rows) through real accounts and a live actor. The test enforces its own 200 s
+# deadline, before nextest's 240 s kill window.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(=bus::account_runtime::tests::refusal::sender_refusal_policy_task)'
+slow-timeout = { period = "60s", terminate-after = 4 }
 
 # CLI e2e boots four node processes plus rf daemons; ignored by default, CI-only.
+# The unified backlog row commits 70 authenticated messages through the serial writer;
+# it uses the same bounded process-fixture budget as the other CLI binaries.
 [[profile.default.overrides]]
-filter = 'binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group)'
+filter = 'binary(e2e_boot_dm) | binary(e2e_resume) | binary(e2e_group) | binary(e2e_group_service) | binary(e2e_media_dm) | binary(e2e_contact_verify) | binary(e2e_unified_gate) | binary(e2e_conversation_actions)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The configured router test includes a 2,000-connection lifecycle check.
@@ -52,3 +96,21 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 
 [profile.shutdown.junit]
 path = "junit.xml"
+
+# This pairing row owns four real product services and its own 120-second deadline.
+[[profile.default.overrides]]
+filter = 'package(ramflux-federation) & test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay)'
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# These cold ownership rows perform several independent encrypted generation reopenings.
+# Scoped QA measures 70-75 seconds for the full row; each individual cut retains its
+# own 60-second semantic deadline, and the aggregate runner cap remains below 5 minutes.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & (test(=custody::pairing::component_tests::generation::recovery::tests::stage_union::pairing_full_stage_link_and_union_install_crash_cuts) | test(=custody::pairing::component_tests::generation::recovery::tests::primary_transfer_full_generation_publication_crash_cuts))'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# These rows own two encrypted accounts through cold install/tail recovery. Keep
+# their SQLCipher/KDF work serial with other long recovery rows on the CI runner.
+[[profile.ci.overrides]]
+filter = 'package(ramflux-sdk) & (test(generation::recovery::tests::) | test(frontend_writer::tests::tail::) | test(linked_reverse::tests::races::) | test(linked_reverse::tests::third::))'
+test-group = "heavy"

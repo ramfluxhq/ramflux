@@ -8,11 +8,15 @@ use super::*;
 use crate::gateway::{GatewayClientFrame, GatewayServerFrame};
 use crate::{GatewayDirectMessage, GatewayInboxEntry, GatewaySessionEngine};
 use std::{collections::VecDeque, future::Future, pin::Pin};
+pub(crate) type Captured = Arc<std::sync::Mutex<Vec<ramflux_protocol::Envelope>>>;
 type WireResult<T> = Result<T, ramflux_transport::TransportError>;
 struct Wire {
     bundle: ramflux_crypto::PrekeyBundle,
+    root: String,
+    target: String,
     replies: VecDeque<Vec<u8>>,
     nack: bool,
+    captured: Captured,
 }
 impl ramflux_transport::GatewaySessionFrameSink for Wire {
     fn finish(&mut self) -> WireResult<()> {
@@ -24,15 +28,28 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
     ) -> Pin<Box<dyn Future<Output = WireResult<()>> + Send + 'a>> {
         Box::pin(async move {
             let reply = match serde_json::from_slice::<GatewayClientFrame>(bytes)? {
+                GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
+                GatewayClientFrame::Resume { .. } => {
+                    GatewayServerFrame::Resume { entries: Vec::new() }
+                }
                 GatewayClientFrame::PrekeyFetch { device_id } => GatewayServerFrame::Prekey {
                     response: crate::prekey::SdkPrekeyResponse {
                         device_id: device_id.clone(),
                         bundle: Some(self.bundle.clone()),
-                        principal_commitment: device_id.clone(),
-                        target_delivery_id: Some(device_id),
+                        principal_commitment: self.root.clone(),
+                        target_delivery_id: Some(self.target.clone()),
                     },
                 },
                 GatewayClientFrame::Submit { submit } => {
+                    let mut captured = self.captured.lock().map_err(|_| {
+                        ramflux_transport::TransportError::Quic("capture poisoned".into())
+                    })?;
+                    if captured.len() >= 64 {
+                        return Err(ramflux_transport::TransportError::Quic(
+                            "capture limit".into(),
+                        ));
+                    }
+                    captured.push(submit.envelope.clone());
                     if self.nack {
                         GatewayServerFrame::Nack { reason: "fixture refusal".into() }
                     } else {
@@ -58,6 +75,11 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
     }
 }
 impl ramflux_transport::GatewaySessionFrameSource for Wire {
+    fn recv_idle_frame(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = WireResult<Vec<u8>>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
     fn recv_frame(&mut self) -> Pin<Box<dyn Future<Output = WireResult<Vec<u8>>> + Send + '_>> {
         Box::pin(async move {
             self.replies
@@ -66,14 +88,35 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
         })
     }
 }
-fn engine(source: &Fixture, target: &Fixture, nack: bool) -> TestResult<GatewaySessionEngine> {
+pub(crate) fn engine(
+    source: &Fixture,
+    target: &Fixture,
+    nack: bool,
+) -> TestResult<GatewaySessionEngine> {
+    engine_capture(source, target, nack).map(|(engine, _)| engine)
+}
+pub(crate) fn engine_capture(
+    source: &Fixture,
+    target: &Fixture,
+    nack: bool,
+) -> TestResult<(GatewaySessionEngine, Captured)> {
     let bundle =
         target.client.load_x3dh_private_state(&target.client.owned_device_identity()?)?.bundle;
-    Ok(GatewaySessionEngine::with_test_transport(
+    let captured = Captured::default();
+    let engine = GatewaySessionEngine::with_test_transport(
         source.config.clone(),
-        Box::new(Wire { bundle, replies: VecDeque::new(), nack }),
-    ))
+        Box::new(Wire {
+            bundle,
+            root: target.manifest.principal_commitment.clone(),
+            target: target.config.target_delivery_id.clone(),
+            replies: VecDeque::new(),
+            nack,
+            captured: captured.clone(),
+        }),
+    );
+    Ok((engine, captured))
 }
+
 fn message(source: &Fixture, target: &Fixture) -> TestResult<GatewayDirectMessage> {
     Ok(GatewayDirectMessage {
         conversation_id: ramflux_protocol::message::dm_scope::derive(
@@ -116,9 +159,8 @@ async fn native_guardian_send_retries_capture_and_requires_explicit_local_accept
 {
     let mut owner = Fixture::new("native-recovery-owner").await?;
     let mut guardian = Fixture::new("native-recovery-guardian").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
-        local.client.persist_fetched_identity_directory(&remote.manifest)?;
+        local.client.persist_observed_identity_directory_now(&remote.manifest)?;
         local.client.establish_friend_link(
             "recovery-link",
             &owner.client.own_account_anchor()?,
@@ -209,7 +251,6 @@ async fn native_object_revoke_sender_preserves_original_owner_and_uses_generated
 -> TestResult {
     let owner = Fixture::new("native-revoke-owner").await?;
     let mut recipient = Fixture::new("native-revoke-recipient").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (original, _, conversation) =
         Box::pin(super::history::receive_first_hand(&mut recipient, &owner)).await?;
     let id = ramflux_protocol::encode_base64url(&original.id);
@@ -262,7 +303,6 @@ async fn native_guardian_accept_capture_keeps_colliding_owner_invite_ids_indepen
     let first = Fixture::new("native-first-owner").await?;
     let second = Fixture::new("native-second-owner").await?;
     let guardian = Fixture::new("native-common-guardian").await?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let first_reply = guardian.client.accept_guardian_invite(&invite(&first, &guardian)?)?;
     let second_reply = guardian.client.accept_guardian_invite(&invite(&second, &guardian)?)?;
     assert_eq!(first_reply.invite_id, second_reply.invite_id);
@@ -284,7 +324,7 @@ async fn native_guardian_accept_capture_keeps_colliding_owner_invite_ids_indepen
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn pending_guardian_invites_refuses_generation_zero_without_expiry_writes() -> TestResult {
+async fn pending_guardian_invites_erases_only_expired_pending_shares() -> TestResult {
     super::watchdog::within(pending_guardian_invites_expiry_body()).await?
 }
 
@@ -293,9 +333,8 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     let mut guardian = Fixture::new("pending-invite-guardian").await?;
     let expires_at;
     {
-        let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         for (local, remote) in [(&owner, &guardian), (&guardian, &owner)] {
-            local.client.persist_fetched_identity_directory(&remote.manifest)?;
+            local.client.persist_observed_identity_directory_now(&remote.manifest)?;
             local.client.establish_friend_link(
                 "pending-invite-link",
                 &owner.client.own_account_anchor()?,
@@ -320,12 +359,6 @@ async fn pending_guardian_invites_expiry_body() -> TestResult {
     }
     let _clock = crate::time::FixedClock::set(expires_at.checked_add(1).ok_or("expiry overflow")?);
     let before = super::generation_zero_tests::actors(&guardian.client)?;
-    super::generation_zero_tests::dormant(guardian.client.pending_guardian_invites());
-    assert!(
-        super::generation_zero_tests::actors(&guardian.client)? == before,
-        "generation-zero expiry lookup must preserve pending shares and all actor bytes"
-    );
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     assert!(
         guardian.client.pending_guardian_invites()?.is_empty(),
         "active-profile lookup must still erase expired invitations"
@@ -355,14 +388,13 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
     use ramflux_protocol::message as g;
     let source = Fixture::new("conversation-event-source").await?;
     let mut peer = Fixture::new("conversation-event-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     let source_root = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
     source.client.establish_friend_link("conversation-peer-link", &source_root, &peer_root)?;
     peer.client.establish_friend_link("conversation-source-link", &source_root, &peer_root)?;
     let conversation = g::dm_scope::derive(&source_root, &peer_root)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let identity = source.client.allocate_generated_identity(&conversation, 1000, false)?;
     let id = ramflux_protocol::encode_base64url(&identity.id);
     let exact = RamfluxClient::encode_generated_inner(
@@ -393,7 +425,7 @@ async fn native_conversation_mutations_use_generated_carrier_and_update_source_a
     assert_eq!(accepted.envelope.version, 2);
     peer.receive(accepted.envelope, 1).await?;
     for (sequence, method, fields) in [
-        (2, "conversation.edit", serde_json::json!({"text":"replacement"})),
+        (2, "conversation.edit", serde_json::json!({"text":"replacement","expected_revision":0})),
         (3, "conversation.react", serde_json::json!({"token":"👍"})),
         (4, "conversation.delete", serde_json::json!({"scope":"everyone"})),
     ] {
@@ -457,12 +489,11 @@ async fn native_conversation_group_reply_keeps_reference_inside_sender_key_wrapp
     use ramflux_protocol::message as g;
     let source = Fixture::new("conversation-group-source").await?;
     let mut peer = Fixture::with_device("conversation-group-peer", "peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
-    peer.client.persist_fetched_identity_directory(&source.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     prepare_conversation_group(&source, &peer)?;
     let state =
         source.client.account_db()?.shared_group_state("conversation-group")?.ok_or("group")?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let distribution = ramflux_protocol::parse_i_json(
         &source
             .client
@@ -588,6 +619,35 @@ async fn native_conversation_edit_retry_survives_retirement_reopen_and_partial_f
     tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(durable_edit_retry())).await?
 }
 
+fn refuse_same_base_edit(client: &RamfluxClient, request: &crate::LocalBusFrame) -> TestResult {
+    use crate::bus::dispatch::{
+        conversation_journal as journal, conversation_mutation as mutation,
+    };
+    let mut pending = request.clone();
+    pending.operation_id = Some("superseded-pending".into());
+    pending.body["text"] = serde_json::json!("private superseded payload");
+    let conflict_key = journal::key("superseded-pending");
+    match mutation::prepare(client, &pending) {
+        Err(crate::SdkError::EditConflict { .. }) => {}
+        Err(error) => {
+            return Err(format!(
+                "a second edit of the same base must be edit_conflict, got {error}"
+            )
+            .into());
+        }
+        Ok(_) => {
+            return Err(
+                "a second edit of the same base must be edit_conflict, got a prepared edit".into(),
+            );
+        }
+    }
+    let db = client.account_db()?;
+    assert!(!db.actor_state_exists(&conflict_key)?, "refused edit keeps no operation receipt");
+    let intent = conflict_key.replace("conversation-operation/", "conversation-intent/");
+    assert!(!db.actor_state_exists(&intent)?, "refused edit stores no private payload");
+    Ok(())
+}
+
 async fn durable_edit_retry() -> TestResult {
     use crate::bus::dispatch::{
         conversation_delivery as delivery, conversation_journal as journal,
@@ -599,8 +659,8 @@ async fn durable_edit_retry() -> TestResult {
     let mut first = Fixture::new("durable-edit-peer").await?;
     let mut second = first.enroll_sibling("durable-edit-second", "second").await?;
     for peer in [&first, &second] {
-        source.client.persist_fetched_identity_directory(&peer.manifest)?;
-        peer.client.persist_fetched_identity_directory(&source.manifest)?;
+        source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+        peer.client.persist_observed_identity_directory_now(&source.manifest)?;
     }
     let own = source.client.own_account_anchor()?;
     let remote = first.client.own_account_anchor()?;
@@ -609,7 +669,6 @@ async fn durable_edit_retry() -> TestResult {
         peer.client.establish_friend_link("durable-source", &own, &remote)?;
     }
     let conversation = g::dm_scope::derive(&own, &remote)?;
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (target, recipients) =
         Box::pin(seed_durable_edit(&mut source, &mut first, &mut second, &conversation))
             .await
@@ -619,17 +678,14 @@ async fn durable_edit_retry() -> TestResult {
         Some("source".into()),
         "conversation",
         "conversation.edit",
-        serde_json::json!({"conversation_id":conversation,"message_id":target,"text":"replacement"}),
+        serde_json::json!({"conversation_id":conversation,"message_id":target,"text":"replacement","expected_revision":0}),
     );
     request.operation_id = Some("durable-edit-operation".into());
     let prepared = mutation::prepare(&source.client, &request)?;
     let expected = zeroize::Zeroizing::new(prepared.exact.clone());
     let event = prepared.identity.id.clone();
     let key = prepared.journal_key.clone();
-    let mut old_pending = request.clone();
-    old_pending.operation_id = Some("superseded-pending".into());
-    old_pending.body["text"] = serde_json::json!("private superseded payload");
-    let older = mutation::prepare(&source.client, &old_pending)?;
+    refuse_same_base_edit(&source.client, &request)?;
     let mut wire = engine(&source, &first, false)?;
     let reconcile = || delivery::reconcile_accepted(&source.client, &prepared, "first");
     let accepted = source
@@ -646,20 +702,10 @@ async fn durable_edit_retry() -> TestResult {
         )
         .await?;
     first.receive(accepted.envelope, 2).await?;
-    assert!(
-        !source.client.account_db()?.actor_state_exists(
-            &older.journal_key.replace("conversation-operation/", "conversation-intent/")
-        )?,
-        "edit retirement must erase OTHER pending private payloads"
-    );
-    assert!(
-        journal::load(&source.client, &older.journal_key)?.is_some(),
-        "superseded content-free identity remains reconcilable"
-    );
     drop(prepared);
     drop(wire);
     source.restart_authored_source().await?;
-    source.client.persist_fetched_identity_directory(&first.manifest)?;
+    source.client.persist_observed_identity_directory_now(&first.manifest)?;
     let prepared = mutation::prepare(&source.client, &request)?;
     assert_eq!(prepared.identity.id, event, "lost reply cannot allocate another mutation identity");
     assert_eq!(
@@ -798,7 +844,7 @@ async fn finish_durable_edit_retry(case: EditRetry) -> TestResult {
     drop(refused);
     drop(retry);
     source.restart_authored_source().await?;
-    source.client.persist_fetched_identity_directory(&first.manifest)?;
+    source.client.persist_observed_identity_directory_now(&first.manifest)?;
     let config = engine(&source, &first, false)?;
     let client = std::mem::replace(&mut source.client, RamfluxClient::new());
     let mut account = crate::prelude::LocalBusAccountState::new(client, config, own);

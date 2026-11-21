@@ -15,7 +15,10 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
 mod networking;
+pub(crate) mod pairing;
 mod publication;
+mod verification_cache;
+pub(crate) use verification_cache::PublicAuthorityCache;
 #[cfg(test)]
 mod race_hooks;
 mod recovery;
@@ -49,6 +52,8 @@ pub(super) struct StoredAuthority {
     #[serde(default)]
     pending_branch: bool,
     custody_v3_observed: bool,
+    #[serde(default)]
+    pairing_adoption_required: bool,
     pub(super) primary_vault_ref: String,
     pub(super) branch_vault_ref: String,
     vault_class: String,
@@ -229,12 +234,78 @@ pub(super) fn require_current_authority(
     })
 }
 impl BornAccount {
+    pub(crate) fn pairing_adoption_required(&self) -> bool {
+        self.stored.pairing_adoption_required
+    }
+    fn require_current_snapshot(&self) -> Result<(), SdkError> {
+        let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        let current = load_data_account(root, self.local_account_id(), super::network_now()?)?;
+        require_current_authority(&current.stored.pins, &current.verified)?;
+        pairing::require_installed_marker(root, &current)?;
+        if ramflux_protocol::custody::object_hash(current.record())?
+            != ramflux_protocol::custody::object_hash(self.record())?
+        {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn require_unfenced_primary_snapshot(&self) -> Result<std::fs::File, SdkError> {
+        self.require_current_snapshot()?;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        let lock = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
+        Ok(lock)
+    }
     /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
-    /// The caller may publish the returned candidate only through an explicit later action.
+    /// The caller holds the primary signing barrier through `lease`; no second lock is taken, so
+    /// the same lease may stay held through the prepared-journal commit that follows.
     /// # Errors
     /// Rejects a mismatched primary/branch credential, invalid validity bounds, exhausted native
     /// revision, or any candidate that fails native authority verification.
-    pub fn candidate_message_layer_publication(
+    pub(crate) fn candidate_message_layer_publication_leased(
+        &self,
+        root: &Path,
+        lease: &super::PrimarySigningLease,
+        branch: &super::BranchCredentials,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        self.require_current_snapshot()?;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        self.candidate_message_layer_publication_with(
+            root,
+            branch,
+            lease,
+            ramflux_protocol::custody::MAX_MESSAGE_LAYER,
+            validity,
+        )
+    }
+
+    /// Fixture entry that takes the signing barrier itself. Product code uses the leased builder.
+    /// # Errors
+    /// As [`Self::candidate_message_layer_publication_leased`].
+    #[cfg(test)]
+    pub(crate) fn candidate_message_layer_publication(
+        &self,
+        root: &Path,
+        branch: &super::BranchCredentials,
+        primary: &ramflux_crypto::custody::SelfSigningKey,
+        max_layer: u32,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        let _signing = self.require_unfenced_primary_snapshot()?;
+        self.candidate_message_layer_publication_with(root, branch, primary, max_layer, validity)
+    }
+
+    fn candidate_message_layer_publication_with(
         &self,
         root: &Path,
         branch: &super::BranchCredentials,
@@ -245,9 +316,6 @@ impl BornAccount {
         use ramflux_protocol::custody::{decode_epoch, encode_epoch};
         let now = validity.issued_at;
         let expires_at = validity.expires_at;
-        if self.branch_pending() || self.authority_blocked {
-            return Err(SdkError::NetworkingPending);
-        }
         require_current_authority(&self.stored.pins, &self.verified)?;
         let current = self.record();
         let body = &current.body;
@@ -348,18 +416,32 @@ impl BornAccount {
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,
-    ) -> Result<ramflux_crypto::custody::SelfSigningKey, SdkError> {
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
+        if self.stored.primary_vault_ref.is_empty()
+            || self.record().body.master_certificate.body.primary_device_ref.device_id
+                != self.local_device_id()?
+        {
+            return Err(SdkError::PairingCode("PrimaryRequired"));
+        }
+        let lock = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
         let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        self.require_current_snapshot()?;
         if primary.public_key()
             != self.record().body.master_certificate.body.self_signing_public_key
         {
             return Err(SdkError::CustodyVaultUnavailable);
         }
-        Ok(primary)
+        Ok(super::PrimarySigningLease::new(primary, lock))
     }
     pub(crate) fn sign_contact_card(
         &self,
@@ -371,11 +453,7 @@ impl BornAccount {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
-        Ok(vault.load_primary(&self.stored.primary_vault_ref)?.sign_contact_card_v3(
-            &self.verified,
-            body,
-            now,
-        )?)
+        Ok(self.group_primary(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
     }
     #[must_use]
     pub(crate) const fn branch_pending(&self) -> bool {
@@ -489,6 +567,21 @@ impl BornAccount {
         ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
         SdkError,
     > {
+        self.require_current_snapshot()?;
+        if self.stored.primary_vault_ref.is_empty()
+            || self.record().body.master_certificate.body.primary_device_ref.device_id
+                != self.local_device_id()?
+        {
+            return Err(super::home_authorization::refused(
+                ramflux_protocol::home_migration::Refusal::CustodyApprovalRequired,
+            ));
+        }
+        let _primary_barrier = super::primary_signing::lock(&self.networking_path)?;
+        super::primary_signing::require_available(
+            &self.networking_path,
+            self.local_account_id(),
+            self.record(),
+        )?;
         vault.home_authorization_preflight()?;
         let (actor, credentials) = self.credentials(vault, &body.actor.device_id, now)?;
         if actor != body.actor {
@@ -573,6 +666,15 @@ pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
         return Ok(false);
     }
     Ok(directory(root, id)?.try_exists()?)
+}
+/// A staging/reservation directory is not an installed native authority. Any existing
+/// artifact, including a dangling symlink, must still pass the ordinary strict loader.
+pub(crate) fn authority_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
+    match fs::symlink_metadata(directory(root, id)?.join("authority.json")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 pub(crate) fn reconcile_incomplete_markers(
     root: &Path,
@@ -687,18 +789,55 @@ pub(crate) fn failed_setup_error(id: &str, reason: &str) -> SdkError {
 /// # Errors
 /// Rejects missing/corrupt records, bad signatures, changed modes or missing custodian evidence.
 pub fn load_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
-    read_account(root, id, now, true)
+    read_account(root, id, now, true, None)
+}
+/// Like [`load_account`], but when a local head installation is in flight it awaits that
+/// installation's completion notification (bounded by 8 s, below the 15 s CLI subprocess
+/// timeout of the e2e harness) instead of reporting it as
+/// pending. A crashed installation never signals: the timeout elapses and the typed
+/// `PublicationPending` is returned, to be repaired at unlock.
+pub(crate) async fn load_account_after_install(
+    root: &Path,
+    id: &str,
+    now: u64,
+) -> Result<BornAccount, SdkError> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        // Arm before reading so a completion between the read and the wait is not lost.
+        let settled = super::pairing::activate::INSTALL_SETTLED.notified();
+        tokio::pin!(settled);
+        settled.as_mut().enable();
+        match load_account(root, id, now) {
+            Err(SdkError::PairingCode("PublicationPending")) => {
+                if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                    // Still in flight: a typed, retryable refusal, never masked.
+                    return load_account(root, id, now);
+                }
+            }
+            other => return other,
+        }
+    }
 }
 /// A signed public record can name existing data while its authority is fenced. This
 /// loader grants no branch permission and is used only by the data unlock/list paths.
 pub(crate) fn load_data_account(root: &Path, id: &str, now: u64) -> Result<BornAccount, SdkError> {
-    read_account(root, id, now, false)
+    read_account(root, id, now, false, None)
+}
+pub(crate) fn load_account_with_cache(
+    root: &Path,
+    id: &str,
+    now: u64,
+    cache: &mut PublicAuthorityCache,
+) -> Result<BornAccount, SdkError> {
+    read_account(root, id, now, true, Some(cache))
 }
 fn read_account(
     root: &Path,
     id: &str,
     now: u64,
     require_current: bool,
+    cache: Option<&mut PublicAuthorityCache>,
 ) -> Result<BornAccount, SdkError> {
     let path = directory(root, id)?.join("authority.json");
     let file = fs::File::open(path)?;
@@ -722,14 +861,21 @@ fn read_account(
     } else {
         stored.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?
     };
-    let verified =
-        verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?;
+    // Namespace/recovery selection and an external custodian are checked on every read.
+    let verified = if let Some(cache) = cache {
+        cache.verify(&stored, human.as_ref(), now)?
+    } else {
+        verify_record(&stored.record, now, stored.compacted_ids.as_deref(), human.as_ref())?
+    };
     let authority_blocked = stored.pins.require_current(&verified).is_err();
     if require_current {
         require_current_authority(&stored.pins, &verified)?;
     }
     let account =
         BornAccount { stored, verified, authority_blocked, networking_path: directory(root, id)? };
+    if require_current {
+        pairing::require_installed_marker(root, &account)?;
+    }
     let _ = account.networking_view(now);
     Ok(account)
 }
@@ -800,18 +946,26 @@ pub(super) fn persist(
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
     pins.discard_retained_records();
-    let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
-    let reference =
-        custody_vault_reference(root, &input.local_account_id, &record.body.account_anchor)?;
+    let account_id = input.local_account_id.clone();
+    let anchor = record.body.account_anchor.clone();
+    let dir = genesis::reserve_account(root, &account_id, &anchor)?;
+    let reference = match custody_vault_reference(root, &account_id, &anchor) {
+        Ok(reference) => reference,
+        Err(error) => {
+            genesis::discard_unpublished(root, &account_id, &anchor)?;
+            return Err(error);
+        }
+    };
     let branch_reference = format!("branch:{reference}");
     let agent_provisioning_reference = (input.principal_kind
         == ramflux_protocol::PrincipalKind::HeadlessAi)
         .then(|| format!("agent-provisioning:{reference}"));
-    // On failure retain the reservation; no caller may retry through legacy account.create.
-    vault.store_new(&reference, key)?;
+    let mut primary_written = false;
     let mut branch_written = false;
     let mut provisioning_written = false;
     let result = (|| {
+        vault.store_new(&reference, key)?;
+        primary_written = true;
         vault.store_branch(&branch_reference, branch)?;
         branch_written = true;
         if let Some(agent_reference) = &agent_provisioning_reference {
@@ -828,27 +982,18 @@ pub(super) fn persist(
                 secret,
             )?;
         }
-        let stored = StoredAuthority {
-            schema: "ramflux.local.custody_account.v1".into(),
-            local_account_id: input.local_account_id.clone(),
-            local_device_id: input.device_id.clone(),
-            state: CreationState::NetworkingPending,
-            networking_reason: None,
-            networking_node: None,
-            capacity_retry_at: None,
-            pending_branch: false,
-            custody_v3_observed: true,
-            primary_vault_ref: reference.clone(),
-            branch_vault_ref: branch_reference.clone(),
-            vault_class: vault.vault_class().into(),
+        let stored = networking_pending(
+            input,
+            &PendingRefs {
+                primary: &reference,
+                branch: &branch_reference,
+                vault_class: vault.vault_class(),
+                provisioning: &agent_provisioning_reference,
+            },
             record,
-            compacted_ids: None,
-            custodian_publication: None,
             pins,
             message_layer_sequences,
-            custodian_account_id: input.custodian_account_id.clone(),
-            agent_provisioning_vault_ref: agent_provisioning_reference.clone(),
-        };
+        );
         #[cfg(test)]
         race_hooks::run(race_hooks::Stage::BeforeAuthorityPublish, root, &input.local_account_id)?;
         genesis::require_owned_reservation(
@@ -867,20 +1012,92 @@ pub(super) fn persist(
         Ok(BornAccount { stored, verified, authority_blocked: false, networking_path: dir.clone() })
     })();
     if result.is_err() {
-        // Attempt both deletions even if one provider operation fails. The reservation remains
-        // latched, so a partial setup cannot fall back to another identity scheme.
-        let branch_cleanup = if branch_written { vault.delete(&branch_reference) } else { Ok(()) };
-        let provisioning_cleanup = if provisioning_written {
-            vault.delete(agent_provisioning_reference.as_deref().ok_or_else(invalid)?)
-        } else {
-            Ok(())
-        };
-        let primary_cleanup = vault.delete(&reference);
-        branch_cleanup?;
-        provisioning_cleanup?;
-        primary_cleanup?;
+        rollback_unpublished(
+            root,
+            &account_id,
+            &anchor,
+            vault,
+            &UnpublishedVaultWrites {
+                primary_reference: &reference,
+                primary_written,
+                branch_reference: &branch_reference,
+                branch_written,
+                provisioning_reference: &agent_provisioning_reference,
+                provisioning_written,
+            },
+        )?;
     }
     result
+}
+
+struct PendingRefs<'a> {
+    primary: &'a str,
+    branch: &'a str,
+    vault_class: &'a str,
+    provisioning: &'a Option<String>,
+}
+
+fn networking_pending(
+    input: &super::CreateInput,
+    refs: &PendingRefs<'_>,
+    record: Envelope<DeviceSet>,
+    pins: AuthorityPins,
+    message_layer_sequences: std::collections::BTreeMap<String, u64>,
+) -> StoredAuthority {
+    StoredAuthority {
+        schema: "ramflux.local.custody_account.v1".into(),
+        local_account_id: input.local_account_id.clone(),
+        local_device_id: input.device_id.clone(),
+        state: CreationState::NetworkingPending,
+        networking_reason: None,
+        networking_node: None,
+        capacity_retry_at: None,
+        pending_branch: false,
+        custody_v3_observed: true,
+        pairing_adoption_required: false,
+        primary_vault_ref: refs.primary.into(),
+        branch_vault_ref: refs.branch.into(),
+        vault_class: refs.vault_class.into(),
+        record,
+        compacted_ids: None,
+        custodian_publication: None,
+        pins,
+        message_layer_sequences,
+        custodian_account_id: input.custodian_account_id.clone(),
+        agent_provisioning_vault_ref: refs.provisioning.clone(),
+    }
+}
+
+struct UnpublishedVaultWrites<'a> {
+    primary_reference: &'a str,
+    primary_written: bool,
+    branch_reference: &'a str,
+    branch_written: bool,
+    provisioning_reference: &'a Option<String>,
+    provisioning_written: bool,
+}
+
+fn rollback_unpublished(
+    root: &Path,
+    account_id: &str,
+    anchor: &str,
+    vault: &dyn PrimaryVault,
+    writes: &UnpublishedVaultWrites<'_>,
+) -> Result<(), SdkError> {
+    let branch_cleanup =
+        if writes.branch_written { vault.delete(writes.branch_reference) } else { Ok(()) };
+    let provisioning_cleanup = if writes.provisioning_written {
+        vault.delete(writes.provisioning_reference.as_deref().ok_or_else(invalid)?)
+    } else {
+        Ok(())
+    };
+    let primary_cleanup =
+        if writes.primary_written { vault.delete(writes.primary_reference) } else { Ok(()) };
+    let discarded = genesis::discard_unpublished(root, account_id, anchor);
+    branch_cleanup?;
+    provisioning_cleanup?;
+    primary_cleanup?;
+    discarded
 }
 
 /// Export the one-use agent data credential for its live native human custodian.
@@ -964,7 +1181,7 @@ impl BornAccount {
         {
             return Err(invalid());
         }
-        let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
+        let primary = self.group_primary(vault)?;
         if primary.public_key()
             != current.envelope().body.master_certificate.body.self_signing_public_key
         {
@@ -979,6 +1196,7 @@ impl BornAccount {
         device_id: &str,
         now: u64,
     ) -> Result<(ramflux_protocol::custody::DeviceRef, super::BranchCredentials), SdkError> {
+        self.require_current_snapshot()?;
         if self.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }
@@ -1049,7 +1267,7 @@ impl BornAccount {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mark_live_for_test(&mut self, root: &Path) -> Result<(), SdkError> {
         self.mark_live(root)
     }

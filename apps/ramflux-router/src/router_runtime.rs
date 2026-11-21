@@ -30,6 +30,8 @@ pub(crate) struct TokioRouterRuntime {
     /// Per-router injected clock for ephemeral HTTP tests. Production stays None.
     #[cfg(test)]
     ephemeral_now_ms: std::sync::Mutex<Option<u64>>,
+    /// Set when config names gateway client capabilities. Unset keeps the historical echo.
+    gateway_client_capabilities: std::sync::OnceLock<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -86,6 +88,7 @@ impl TokioRouterRuntime {
             ingress_probe: IngressProbe::default(),
             #[cfg(test)]
             ephemeral_now_ms: std::sync::Mutex::new(None),
+            gateway_client_capabilities: std::sync::OnceLock::new(),
         }
     }
 }
@@ -149,6 +152,21 @@ impl RouterHandle {
         match self {
             Self::Tokio(runtime) => &runtime.node_id,
         }
+    }
+
+    pub(crate) fn install_gateway_client_capabilities(&self, configured: &[String]) {
+        let names = ramflux_node_core::router_echo_gateway_client_capabilities(Some(configured));
+        let Self::Tokio(runtime) = self;
+        let _ = runtime.gateway_client_capabilities.set(names);
+    }
+
+    pub(crate) fn echoed_gateway_client_capabilities(&self) -> Vec<String> {
+        let Self::Tokio(runtime) = self;
+        runtime
+            .gateway_client_capabilities
+            .get()
+            .cloned()
+            .unwrap_or_else(|| ramflux_node_core::router_echo_gateway_client_capabilities(None))
     }
 
     pub(crate) fn state(&self) -> &ramflux_node_core::RouterCore {
@@ -460,16 +478,7 @@ impl RouterHandle {
             migration.as_ref().map(|_| (config.node_id.as_str(), trusted.as_str())),
         )?;
         let pairing_seed = if ramflux_node_core::device_pairing_enabled()? {
-            let seed = config
-                .node_service_signing_seed_b64url
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("pairing requires the node service signing seed"))?;
-            let seed = ramflux_node_core::decode_node_service_signing_seed(seed.as_str())?;
-            let ticket_key = ramflux_crypto::public_key_base64url_from_seed(seed);
-            if ticket_key != node.envelope().body.node_signing_public_key {
-                anyhow::bail!("pairing ticket signing key does not match node identity");
-            }
-            Some(seed)
+            Some(crate::pairing_key::load(&node.envelope().body.node_signing_public_key)?)
         } else {
             None
         };
@@ -483,10 +492,10 @@ impl RouterHandle {
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
         }
-        if let Some(seed) = pairing_seed {
+        if let Some(secret) = pairing_seed {
             let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
                 .unwrap_or_else(|_| format!("https://{}", config.node_id));
-            service = service.with_pairing_relay_if_enabled(seed, origin)?;
+            service = service.with_pairing_relay_if_enabled(secret.guarded_seed(), origin)?;
         }
         let Self::Tokio(runtime) = self;
         let service = Arc::new(service);
@@ -542,6 +551,10 @@ impl RouterHandle {
                 ramflux_node_core::now_unix_seconds(),
             )
             .map_err(Into::into)
+    }
+    pub(crate) fn pairing_node(&self) -> Option<&ramflux_crypto::custody::VerifiedNodeRecord> {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().map(|service| service.pairing_node())
     }
     pub(crate) fn pairing_relay(
         &self,
@@ -770,7 +783,7 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use ramflux_protocol::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
+    use ramflux_protocol::{DeliveryClass, Ext, SignatureAlg, SignedFields};
 
     use super::*;
 
@@ -1445,7 +1458,7 @@ pub(crate) mod tests {
         envelope_id: &str,
         target_delivery_id: &str,
     ) -> anyhow::Result<ramflux_protocol::Envelope> {
-        let mut envelope = envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent);
+        let mut envelope = envelope(envelope_id, target_delivery_id, DeliveryClass::Message);
         envelope.created_at =
             i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX - 3_600);
         let root = ramflux_crypto::create_identity_root(
@@ -1503,7 +1516,7 @@ pub(crate) mod tests {
                 updated_at: 1,
                 expires_at: 2,
             },
-            envelope: envelope("env_forward", "target-b", DeliveryClass::OpaqueEvent),
+            envelope: envelope("env_forward", "target-b", DeliveryClass::Message),
             forward_count: 1,
         }
     }
@@ -1513,27 +1526,14 @@ pub(crate) mod tests {
         target_delivery_id: &str,
         delivery_class: DeliveryClass,
     ) -> ramflux_protocol::Envelope {
-        ramflux_protocol::Envelope {
-            schema: "ramflux.envelope.v1".to_owned(),
-            version: 1,
-            domain: "ramflux.envelope.v1".to_owned(),
-            ext: Ext::default(),
-            signed: signed_fields(),
-            envelope_id: envelope_id.to_owned(),
-            source_principal_id: "alice".to_owned(),
-            source_device_id: "alice_phone".to_owned(),
-            target_delivery_id: target_delivery_id.to_owned(),
-            routing_set_id: None,
+        let mut envelope = ramflux_node_core::test_support::federation_fixtures::envelope(
+            envelope_id,
+            target_delivery_id,
             delivery_class,
-            priority: Priority::Normal,
-            ttl: 3_600,
-            created_at: 1_760_000_000,
-            encrypted_payload: "ciphertext".to_owned(),
-            payload_hash: "payload_hash".to_owned(),
-            delivery_mode: None,
-            collapse_tag: None,
-            report_commitment: None,
-        }
+        );
+        envelope.source_device_id = "alice_phone".into();
+        envelope.signed = signed_fields();
+        envelope
     }
 
     fn ack(envelope_id: &str, inbox_seq: u64) -> ramflux_protocol::Ack {

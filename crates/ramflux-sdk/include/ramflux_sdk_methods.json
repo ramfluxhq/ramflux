@@ -309,6 +309,123 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.enable",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.read",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.import.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.chunk",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.finish",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.renew",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.prepare.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "attachment.revoke",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "bot",
       "key_export": false,
       "name": "bot.install",
@@ -588,9 +705,14 @@
     },
     {
       "bridge_allowed": true,
-      "capability": "contact",
+      "capability": "contact.verify.cas",
+      "contract": "CONTACT-VERIFY-CAS-01",
       "key_export": false,
+      "message_descriptor_blake3": "27b428c9c2ae18a52bc65ba2f39804bac2706fc1173a0c46a23dbdb5f2c046dc",
       "name": "contact.verify",
+      "product_pin": "170b67c5a3e4ced648d9dbfa1b50dcad4c1b4b08",
+      "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
+      "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -660,11 +782,11 @@
     },
     {
       "bridge_allowed": true,
-      "capability": "device",
+      "capability": "diag",
       "key_export": false,
-      "name": "device.activate",
+      "name": "diag.residue",
       "secret_input": true,
-      "secret_output": true,
+      "secret_output": false,
       "show_once": false
     },
     {
@@ -788,7 +910,70 @@
       "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
-      "name": "device.sync.import",
+      "name": "device.transfer.affirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.begin",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.cancel",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.confirm",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.join",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.prepare",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "device",
+      "key_export": false,
+      "name": "device.transfer.tail_abandon",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -1492,6 +1677,15 @@
       "key_export": false,
       "name": "object.put.status",
       "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "object",
+      "key_export": false,
+      "name": "object.revoke",
+      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },

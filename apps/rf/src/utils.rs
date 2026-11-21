@@ -13,21 +13,6 @@ pub(crate) fn repeated_seed(hex_byte: &str) -> Result<[u8; 32], RfError> {
     Ok([value; 32])
 }
 
-/// Resolve an identity/device seed for account or device commands.
-///
-/// When an explicit hex byte is provided (the deterministic test path), it is
-/// expanded into a reproducible 32-byte seed via [`repeated_seed`]. When absent
-/// (the production path), a fresh cryptographically secure 32-byte seed is drawn
-/// from the operating-system CSPRNG so a real account never ships a predictable,
-/// fully derivable identity key.
-pub(crate) fn resolve_seed(hex_byte: Option<&str>) -> Result<[u8; 32], RfError> {
-    match hex_byte {
-        Some(value) => repeated_seed(value),
-        None => ramflux_crypto::random_32()
-            .map_err(|error| RfError::Message(format!("failed to generate random seed: {error}"))),
-    }
-}
-
 pub(crate) fn parse_mcp_capability(
     capability: &str,
 ) -> Result<(McpCapability, Option<String>), RfError> {
@@ -53,32 +38,6 @@ pub(crate) fn rf_now_unix_timestamp() -> i64 {
 
 pub(crate) fn rf_now_unix_timestamp_u64() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_secs())
-}
-
-pub(crate) fn with_message_plaintext(mut value: serde_json::Value) -> serde_json::Value {
-    let Some(messages) = value.get_mut("messages").and_then(serde_json::Value::as_array_mut) else {
-        return value;
-    };
-    for message in messages {
-        let Some(body) = message.get("encrypted_body").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        let bytes = body
-            .iter()
-            .filter_map(|byte| byte.as_u64().and_then(|value| u8::try_from(value).ok()))
-            .collect::<Vec<_>>();
-        if bytes.len() != body.len() {
-            continue;
-        }
-        message["body_base64"] =
-            serde_json::Value::String(ramflux_protocol::encode_base64url(&bytes));
-        if message.get("body_utf8").is_none()
-            && let Ok(text) = String::from_utf8(bytes)
-        {
-            message["body_utf8"] = serde_json::Value::String(text);
-        }
-    }
-    value
 }
 
 pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), RfError> {
@@ -170,22 +129,35 @@ fn read_rf_http_response_by_content_length(
     Ok((status_line.trim_end().to_owned(), body))
 }
 
+/// Load bounded prepared r4 references; the SDK validates their manifest bindings.
+pub(crate) fn media_content(
+    caption: &str,
+    paths: &[std::path::PathBuf],
+) -> Result<ramflux_protocol::message::Content, RfError> {
+    const MAX_REFS: usize = 16;
+    const MAX_REF_JSON: u64 = 2 * 1024 * 1024;
+    if paths.len() > MAX_REFS {
+        return Err(RfError::Message("too many media references".into()));
+    }
+    let mut media = Vec::new();
+    for path in paths {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(MAX_REF_JSON + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_REF_JSON {
+            return Err(RfError::Message("media reference exceeds byte cap".into()));
+        }
+        media.push(
+            ramflux_protocol::parse_i_json(&bytes).map_err(|error| {
+                RfError::Message(format!("invalid media reference JSON: {error}"))
+            })?,
+        );
+    }
+    Ok(ramflux_sdk::RamfluxClient::attachment_message_content(caption, &media)?)
+}
+
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn message_plaintext_preserves_projected_history_and_narrow_tombstones() {
-        let tombstone = serde_json::json!({"message_id":"deleted","deleted":true});
-        let read = serde_json::json!({"messages":[
-            {"encrypted_body":b"opaque outbound envelope","body_utf8":"saved outgoing text"},
-            {"encrypted_body":b"legacy readable body"},
-            tombstone.clone(),
-        ]});
-        let displayed = super::with_message_plaintext(read);
-        assert_eq!(displayed["messages"][0]["body_utf8"], "saved outgoing text");
-        assert_eq!(displayed["messages"][1]["body_utf8"], "legacy readable body");
-        assert_eq!(displayed["messages"][2], tombstone);
-    }
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;

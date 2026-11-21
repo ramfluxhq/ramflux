@@ -292,4 +292,39 @@ mod tests {
         assert_eq!(TypingSender::default().lookup(&operation, &[1; 32])?, None);
         Ok(())
     }
+    #[test]
+    fn explicit_stop_stays_admitted_until_the_clear_is_sealed() -> TestResult {
+        let mut sender = TypingSender::default();
+        let start = Instant::now();
+        sender.focus(Some("c"))?;
+        assert!(sender.admit("c", "peer", true, start)?, "test: the start is admitted");
+        sender.sealed("c", "peer", true, start);
+        assert!(
+            sender.admit("c", "peer", false, start + Duration::from_millis(1))?,
+            "test: a stop is admitted while the start's target is still live"
+        );
+        assert!(
+            sender.admit("c", "peer", false, start + Duration::from_millis(2))?,
+            "test: a refused clear leaves the live target in place"
+        );
+        sender.sealed("c", "peer", false, start + Duration::from_millis(2));
+        assert!(
+            !sender.admit("c", "peer", false, start + Duration::from_millis(3))?,
+            "test: a sealed clear is no longer a live target"
+        );
+        Ok(())
+    }
+    #[test]
+    fn typing_clear_after_the_indicator_ttl_is_not_a_live_target() -> TestResult {
+        let mut sender = TypingSender::default();
+        let start = Instant::now();
+        sender.focus(Some("c"))?;
+        assert!(sender.admit("c", "peer", true, start)?, "test: the start is admitted");
+        sender.sealed("c", "peer", true, start);
+        assert!(
+            !sender.admit("c", "peer", false, start + Duration::from_secs(5))?,
+            "test: five seconds later the indicator is gone and the clear is not sent"
+        );
+        Ok(())
+    }
 }

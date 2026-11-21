@@ -149,6 +149,7 @@ impl RamfluxClient {
     }
 
     /// Persist before the message's receive checkpoint, without contacting any relay.
+    #[cfg(test)]
     pub(crate) fn persist_received_attachment_reference(
         &self,
         reference: &SdkDmAttachmentRef,
@@ -160,6 +161,7 @@ impl RamfluxClient {
         let prepared = self.decrypt_object_key_slot(&reference.key_slot).ok();
         self.persist_received_reference_prepared(reference, owner, conversation, message, prepared)
     }
+    #[cfg(test)]
     pub(crate) fn persist_received_reference_prepared(
         &self,
         reference: &SdkDmAttachmentRef,
@@ -248,6 +250,12 @@ impl RamfluxClient {
         object_id: &str,
         operation_id: &str,
     ) -> Result<Value, SdkError> {
+        if self.account_db()?.client_record("attachment-object", object_id)?.is_some() {
+            return Err(crate::attachment_send::Refusal::new(
+                crate::attachment_send::CODE_LAYOUT_INVALID,
+            )
+            .into());
+        }
         self.fetch_received_with(
             object_id,
             operation_id,
@@ -537,11 +545,6 @@ impl RamfluxClient {
                 Ok(DeferredObjectKeySlot {
                     object_key: slot.object_key,
                     session: None,
-                    legacy_slot: if slot.pair_slot.is_none() {
-                        Some(reference.key_slot.clone())
-                    } else {
-                        None
-                    },
                     conversation_id: std::mem::take(&mut slot.conversation_id),
                     commit_label: std::mem::take(&mut slot.commit_label),
                     pair_slot: slot.pair_slot.take(),
@@ -576,6 +579,21 @@ impl RamfluxClient {
             db.persist_actor_state(&chunk_key(reference, payload.chunk_index), payload)?;
         }
         Ok(())
+    }
+}
+
+impl RamfluxClient {
+    /// Whether a received attachment reference exists for `selector`. A media object that was
+    /// only recorded as a message owner (a layer-4 media reference carried by the message, with
+    /// no deferred attachment reference to fetch) has none and is not a background-fetch target.
+    pub(crate) fn has_received_attachment_reference(
+        &self,
+        selector: &str,
+    ) -> Result<bool, SdkError> {
+        Ok(self
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&reference_key(selector))?
+            .is_some())
     }
 }
 

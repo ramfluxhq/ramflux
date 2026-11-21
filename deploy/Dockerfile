@@ -13,7 +13,11 @@ RUN RAMFLUX_PRODUCTION_BUILD=1 cargo build --locked --release --bin "${BIN}"
 FROM debian:trixie-slim AS source-runtime
 
 ARG BIN
+ARG RAMFLUX_PRODUCT_VERSION
+ARG RAMFLUX_PRODUCT_REVISION
 ENV RAMFLUX_BIN="${BIN}"
+LABEL org.opencontainers.image.version="${RAMFLUX_PRODUCT_VERSION}"
+LABEL org.opencontainers.image.revision="${RAMFLUX_PRODUCT_REVISION}"
 
 COPY --from=source-build /workspace/target/release/${BIN} /usr/local/bin/${BIN}
 RUN apt-get update \
@@ -26,7 +30,11 @@ ENTRYPOINT ["/usr/local/bin/ramflux-service"]
 FROM debian:trixie-slim AS prebuilt-runtime
 
 ARG BIN
+ARG RAMFLUX_PRODUCT_VERSION
+ARG RAMFLUX_PRODUCT_REVISION
 ENV RAMFLUX_BIN="${BIN}"
+LABEL org.opencontainers.image.version="${RAMFLUX_PRODUCT_VERSION}"
+LABEL org.opencontainers.image.revision="${RAMFLUX_PRODUCT_REVISION}"
 
 COPY target/release/${BIN} /usr/local/bin/${BIN}
 RUN apt-get update \

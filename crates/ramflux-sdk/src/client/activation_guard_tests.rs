@@ -7,6 +7,7 @@
 use ramflux_protocol::schema_activation as activation;
 use ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION;
 use std::path::Path;
+mod scan;
 
 const PENDING_CONTROL: &str = concat!("generated native control executor is not yet ", "activated");
 const SELECTION_BRANCHES: [&str; 2] =
@@ -39,15 +40,13 @@ fn collect(dir: &Path, found: &mut Vec<(String, String)>) -> std::io::Result<()>
 fn offenders(markers: &[&str]) -> std::io::Result<Vec<String>> {
     let mut sources = Vec::new();
     collect(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut sources)?;
-    Ok(sources
-        .into_iter()
-        .filter(|(_, source)| {
-            // Inline test modules may keep the thread-local test gate.
-            let production = source.split("#[cfg(test)]").next().unwrap_or_default();
-            markers.iter().any(|marker| production.contains(marker))
-        })
-        .map(|(name, _)| name)
-        .collect())
+    let mut found = Vec::new();
+    for (name, source) in sources {
+        if scan::contains(&source, markers).map_err(std::io::Error::other)? {
+            found.push(name);
+        }
+    }
+    Ok(found)
 }
 
 #[test]

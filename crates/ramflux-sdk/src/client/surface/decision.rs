@@ -152,6 +152,7 @@ impl RamfluxClient {
             return Err(invalid("only the surface creator executes actions"));
         }
         let receipt = self.sign_surface_carrier(Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: None,
@@ -184,6 +185,7 @@ mod tests {
             "../../../../ramflux-protocol/fixtures/protocol/v1/a2ui_surface/submit.action.json"
         ))?;
         let carrier = Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: None,

@@ -89,6 +89,10 @@ pub enum CustodyProofAction {
     PairingCreate {
         request: Box<super::pairing::native::Create>,
     },
+    /// Full data-only lease. Appended to preserve existing binary action discriminants.
+    PairingDataLease {
+        request: Box<super::pairing::full_transfer::lease::LeaseRequest>,
+    },
 }
 impl CustodyProofAction {
     #[must_use]
@@ -99,7 +103,8 @@ impl CustodyProofAction {
             | Self::PrekeyStatus { .. }
             | Self::RegisterUpdate { .. }
             | Self::PairingIssue { .. }
-            | Self::PairingCreate { .. } => "register",
+            | Self::PairingCreate { .. }
+            | Self::PairingDataLease { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
@@ -224,6 +229,8 @@ pub enum CustodyRefusal {
     },
     IdempotencyConflict,
     PayloadTooLarge,
+    /// The connection served its frame budget and will not read another request.
+    FrameLimit,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -320,6 +327,10 @@ pub enum CustodyServerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryHint>,
     },
+    /// Node-signed data capability; never an ordinary session or publication receipt.
+    PairingDataLease {
+        lease: Box<Envelope<super::pairing::full_transfer::lease::DataLease>>,
+    },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
 /// absent: only the listener holding the actual TLS connection may supply it.
@@ -351,6 +362,35 @@ pub enum CustodyMeshRequest {
         request: Box<crate::SignedRequest>,
         action: CustodySessionAction,
     },
+}
+
+impl CustodyRefusal {
+    /// Stable name a client may print. Nested variants do not include their payload.
+    #[must_use]
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Unsupported => "Unsupported",
+            Self::InvalidInput => "InvalidInput",
+            Self::AuthorityUnavailable => "AuthorityUnavailable",
+            Self::PrincipalIdTaken => "PrincipalIdTaken",
+            Self::ChallengeUnknown => "ChallengeUnknown",
+            Self::ChallengeExpired => "ChallengeExpired",
+            Self::Replay => "Replay",
+            Self::BindingRefused => "BindingRefused",
+            Self::SessionRequired => "SessionRequired",
+            Self::SessionExpired => "SessionExpired",
+            Self::UpdateRequired => "UpdateRequired",
+            Self::Capacity => "Capacity",
+            Self::Busy => "Busy",
+            Self::PersistenceUnavailable => "PersistenceUnavailable",
+            Self::HomeMigration { .. } => "HomeMigration",
+            Self::AbortedRetrySafe => "AbortedRetrySafe",
+            Self::CapacityRetryAfter { .. } => "CapacityRetryAfter",
+            Self::IdempotencyConflict => "IdempotencyConflict",
+            Self::PayloadTooLarge => "PayloadTooLarge",
+            Self::FrameLimit => "FrameLimit",
+        }
+    }
 }
 
 impl std::fmt::Display for CustodyRefusal {
@@ -407,6 +447,18 @@ mod capacity_hint_tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn reason_code_names_the_variant_and_hides_nested_payload() {
+        assert_eq!(CustodyRefusal::BindingRefused.reason_code(), "BindingRefused");
+        assert_eq!(CustodyRefusal::AuthorityUnavailable.reason_code(), "AuthorityUnavailable");
+        assert_eq!(CustodyRefusal::SessionRequired.reason_code(), "SessionRequired");
+        assert_eq!(CustodyRefusal::AbortedRetrySafe.reason_code(), "AbortedRetrySafe");
+        assert_eq!(CustodyRefusal::FrameLimit.reason_code(), "FrameLimit");
+        let nested = CustodyRefusal::CapacityRetryAfter { retry_after_ms: 5 };
+        assert_eq!(nested.reason_code(), "CapacityRetryAfter");
+        assert!(!nested.reason_code().contains('5'));
     }
 }
 

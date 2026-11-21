@@ -22,6 +22,11 @@ pub(crate) fn set_owner_only_file(path: &Path) -> Result<(), SdkError> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn permission_bits(path: &Path) -> std::io::Result<u32> {
+    Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
 pub(crate) fn create_new_owner_only(path: &Path) -> Result<File, SdkError> {
     Ok(create_new_owner_only_io(path)?)
 }
@@ -81,6 +86,16 @@ pub(crate) fn open_owner_only_no_follow(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
+/// Open an existing file for reading without following a final symlink or creating it.
+pub(crate) fn open_read_only_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(
+        i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).map_err(std::io::Error::other)?,
+    );
+    options.open(path)
+}
+
 pub(crate) fn file_device_inode(file: &File) -> std::io::Result<(u64, u64)> {
     let metadata = file.metadata()?;
     Ok((metadata.dev(), metadata.ino()))
@@ -109,6 +124,47 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         rustix::fs::RenameFlags::NOREPLACE,
     )
     .map_err(Into::into)
+}
+
+#[cfg(test)]
+type HardLinkFn = fn(&Path, &Path) -> std::io::Result<()>;
+
+#[cfg(test)]
+thread_local! {
+    static HARD_LINK: std::cell::RefCell<Option<HardLinkFn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Link `from` to `to`. Tests replace this syscall; publication uses rename.
+///
+/// # Errors
+/// Returns the OS error, or the installed test hook's error.
+#[cfg(test)]
+pub(crate) fn hard_link(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = HARD_LINK.with(|slot| *slot.borrow()) {
+        return hook(from, to);
+    }
+    std::fs::hard_link(from, to)
+}
+
+/// Restores the real hard-link syscall when dropped.
+#[cfg(test)]
+pub(crate) struct HardLinkHook {
+    _private: (),
+}
+
+#[cfg(test)]
+pub(crate) fn install_hard_link(hook: HardLinkFn) -> HardLinkHook {
+    HARD_LINK.with(|slot| *slot.borrow_mut() = Some(hook));
+    HardLinkHook { _private: () }
+}
+
+#[cfg(test)]
+impl Drop for HardLinkHook {
+    fn drop(&mut self) {
+        HARD_LINK.with(|slot| *slot.borrow_mut() = None);
+    }
 }
 
 /// Flush a file, or a directory after an entry in it changed.

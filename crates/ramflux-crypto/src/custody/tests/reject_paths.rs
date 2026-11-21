@@ -79,9 +79,10 @@ fn roster_names_reject_blank_invisible_bidi_and_reserved_prefixes() -> Result {
             result?;
         } else if !matches!(
             result,
-            Err(CryptoError::Protocol(ProtocolError::InvalidIdentityRecord(
-                "invalid or reserved live device name"
-            )))
+            Err(CryptoError::Protocol(
+                ProtocolError::InvalidIdentityRecord("invalid or reserved live device name")
+                    | ProtocolError::DeviceNameControlCharacter
+            ))
         ) {
             accepted.push(format!("{name:?}: {result:?}"));
         }
@@ -103,9 +104,10 @@ fn compacted_names_reject_blank_invisible_bidi_and_reserved_prefixes() -> Result
             assert!(result?.revoked_ids().contains(name));
         } else if !matches!(
             result,
-            Err(CryptoError::Protocol(ProtocolError::InvalidIdentityRecord(
-                "invalid or reserved live device name"
-            )))
+            Err(CryptoError::Protocol(
+                ProtocolError::InvalidIdentityRecord("invalid or reserved live device name")
+                    | ProtocolError::DeviceNameControlCharacter
+            ))
         ) {
             accepted.push(format!("{name:?}: {result:?}"));
         }

@@ -72,12 +72,9 @@ impl RamfluxClient {
         .ok_or_else(|| refused("publication identity missing"))?;
         g::identity::verify(&identity)
             .map_err(|_| refused("invalid stored publication identity"))?;
-        Ok(g::Inner {
-            layer: g::registry::COMPILED_LAYER,
-            kind: 12,
-            identity: Some(identity),
-            body,
-        }
-        .encode_to_vec())
+        let layer = Self::required_content_layer(&g::Content {
+            value: Some(g::content::Value::SelfSync(value.clone())),
+        })?;
+        Ok(g::Inner { layer, kind: 12, identity: Some(identity), body }.encode_to_vec())
     }
 }

@@ -16,11 +16,6 @@ pub async fn serve_local_bus_until(
     config: LocalBusConfig,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
-    if config.itest_legacy_accounts && !cfg!(feature = "itest-legacy-accounts") {
-        return Err(SdkError::LocalBus(
-            "legacy fixture accounts require the integration feature".into(),
-        ));
-    }
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new().name("ramflux-local-bus".to_owned()).spawn(move || {
         let result = run_local_bus_thread(config, shutdown);
@@ -313,6 +308,9 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("object.") => {
             Box::pin(dispatch_object_bus_request(request, state)).await
         }
+        method if method.starts_with("attachment.") => {
+            crate::attachment_send::dispatch(request, state).await
+        }
         method if method.starts_with("call.") => {
             super::dispatch::call::dispatch(request, state).await
         }
@@ -325,6 +323,9 @@ pub(crate) async fn dispatch_local_bus_request(
             dispatch_grant_bus_request(request, state, connection)
         }
         method if method.starts_with("daemon.") => dispatch_daemon_bus_request(request, state),
+        method if method.starts_with("diag.") => {
+            crate::bus::dispatch::residue::dispatch_residue(request, state)
+        }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
@@ -701,24 +702,6 @@ mod tests {
             inbound.try_recv(),
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
         ));
-    }
-}
-
-#[cfg(all(test, not(feature = "itest-legacy-accounts")))]
-mod itest_legacy_startup_tests {
-    #[tokio::test]
-    async fn itest_legacy_opt_in_without_compiled_feature_refuses_before_socket_binding()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = crate::custody::tests::Root::new()?;
-        let socket = root.0.join("fixture.sock");
-        let config = crate::LocalBusConfig::new(&socket, &root.0).with_itest_legacy_accounts();
-        let error = super::serve_local_bus(config)
-            .await
-            .err()
-            .ok_or("unsupported fixture startup accepted")?;
-        assert!(error.to_string().contains("require the integration feature"));
-        assert!(!socket.exists());
-        Ok(())
     }
 }
 

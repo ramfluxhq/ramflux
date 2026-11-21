@@ -50,6 +50,7 @@ pub mod device_directory;
 mod device_metadata;
 mod event_counter;
 pub mod friend;
+pub(crate) mod full_transfer;
 mod group_device_address;
 mod group_key_safety;
 pub mod group_pending;
@@ -79,11 +80,16 @@ pub mod read_model;
 pub(crate) mod receive;
 pub mod recovery;
 mod replay_markers;
+mod residue;
+pub use residue::{
+    ResidueHit, ResidueScan, ResidueScanStatus, ResidueTable, ResidueTableStatus, residue_needles,
+};
 pub mod restore_floor;
 pub mod runtime;
 pub(crate) mod safety_verification;
 mod self_sync_retirement;
 mod shared_group_delivery;
+pub(crate) mod shared_group_denials;
 mod shared_group_floor_index;
 mod shared_group_heads;
 mod shared_group_members;
@@ -99,6 +105,7 @@ pub struct AccountDb {
     pub local_account_id: String,
     principal_commitment: String,
     pub path: PathBuf,
+    account_index: std::sync::Arc<AccountIndex>,
     mode: EncryptionMode,
     current_key: AccountDbKey,
     device_signer: Option<ramflux_crypto::DeviceBranch>,
@@ -127,8 +134,14 @@ impl AccountDb {
         // A concurrent erase may have tombstoned the account since the first read.
         let account = index.account(local_account_id)?;
         crate::account_erase::refuse_removed(&account)?;
-        let path = index.root().join(account.db_relative_path);
+        let path = index.root().join(&account.db_relative_path);
+        crate::schema_generation::creation::initialize_if_absent(&path, Some(key))?;
         let connection = Connection::open_account_writer(&path, writer)?;
+        // If G2 raced between selecting the path and capturing this worker's epoch,
+        // refuse before its first SQL (including migrations) can touch the old file.
+        if index.account(local_account_id)? != account {
+            return Err(StorageError::PairingField("Busy"));
+        }
         apply_key(&connection, key)?;
         crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL;")?;
@@ -149,6 +162,7 @@ impl AccountDb {
             local_account_id: local_account_id.to_owned(),
             principal_commitment: account.principal_commitment,
             path,
+            account_index: std::sync::Arc::new(index.clone()),
             mode,
             current_key: key.clone(),
             device_signer: None,
@@ -186,6 +200,12 @@ impl AccountDb {
         } else {
             Err(StorageError::AccountKeyMismatch)
         }
+    }
+
+    /// Root of this account's selected-generation index, with no key or authority.
+    #[must_use]
+    pub fn account_index_root(&self) -> &std::path::Path {
+        self.account_index.root()
     }
 
     #[must_use]

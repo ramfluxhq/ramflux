@@ -9,36 +9,39 @@ use crate::client::identity_authority::HeadUse;
 #[tokio::test]
 async fn copied_device_name_cannot_preclaim_an_honest_envelope_id_in_another_thread()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::owned("bob", "bob", 31, 32)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    let mut alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
-    alice.client.establish_friend_link("mallory-link", "alice", "mallory")?;
-    let mut engine =
-        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    let mut first = super::r5::outgoing(&bob, &alice, "tui_env_1");
-    first.conversation_id = "alice-bob".into();
-    let first = seal(&bob, &alice, first, b"first honest message")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &first, false).await?;
-    let mut attack = super::r5::outgoing(&mallory, &alice, "tui_env_2");
-    attack.conversation_id = "alice-mallory".into();
-    let attack = seal(&mallory, &alice, attack, b"legitimate message in Mallory's own thread")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &attack, false).await?;
-    let mut honest = super::r5::outgoing(&bob, &alice, "tui_env_2");
-    honest.conversation_id = "alice-bob".into();
-    let honest = seal(&bob, &alice, honest, b"second honest message")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &honest, false).await?;
+    for (link, peer) in [("bob-link", &bob), ("mallory-link", &mallory)] {
+        alice.client.establish_friend_link(
+            link,
+            &alice.client.own_account_anchor()?,
+            &peer.client.own_account_anchor()?,
+        )?;
+    }
+    let first = generated_delivery(&bob, &alice, "tui_env_1", "first honest message")?;
+    receive_generated(&mut alice, &first.entry).await?;
+    let attack = generated_delivery(
+        &mallory,
+        &alice,
+        "tui_env_2",
+        "legitimate message in Mallory's own thread",
+    )?;
+    receive_generated(&mut alice, &attack.entry).await?;
+    let honest = generated_delivery(&bob, &alice, "tui_env_2", "second honest message")?;
+    receive_generated(&mut alice, &honest.entry).await?;
+    assert_eq!(attack.entry.envelope.envelope_id, honest.entry.envelope.envelope_id);
+    assert_ne!(attack.message, honest.message);
     assert_ne!(
-        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack)?,
-        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &attack.entry)?,
+        alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest.entry)?
     );
-
-    assert_eq!(alice.client.direct_messages("alice-bob")?.len(), 2);
-    assert_eq!(alice.client.direct_messages("alice-mallory")?.len(), 1);
+    assert_eq!(alice.client.direct_messages(&first.conversation)?.len(), 2);
+    assert_eq!(alice.client.direct_messages(&attack.conversation)?.len(), 1);
     assert!(alice.client.account_db()?.actor_state_exists(
-        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest)?
+        &alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &honest.entry)?
     )?);
     Ok(())
 }
@@ -61,55 +64,28 @@ fn a2i(device: &str, target: &str) -> A2iControlEvent {
 #[tokio::test]
 async fn copied_name_controls_keep_independent_keys_but_require_native_authority()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::owned("bob", "bob", 31, 32)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    let mut engine =
-        GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
     let mut keys = std::collections::BTreeSet::new();
     for sender in [&mallory, &bob] {
-        let event = a2i("bob", "alice");
-        let entry = seal_as(
-            sender,
-            &alice,
-            super::r5::outgoing(sender, &alice, "same-control-envelope"),
-            &serde_json::to_vec(&event)?,
-            Route::control(),
-        )?;
-        let source =
-            alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
-        keys.insert(crate::client::routed::control::a2i_key(&source, &event.event_id)?);
+        let source = sender.client.owned_device_identity()?;
+        alice.client.trusted_device(HeadUse::NewAuthorization, &source)?;
+        keys.insert(crate::client::routed::control::a2i_key(&source, "same-control-event")?);
+        let mut engine =
+            GatewaySessionEngine::with_test_transport(sender.config()?, Box::new(NoNetwork));
         assert_a2i_authority_refused(
-            alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await,
+            sender
+                .client
+                .send_a2i_control_event_via_gateway(&mut engine, &a2i("bob", "alice"), None)
+                .await,
         );
+        assert_eq!(sender.client.account_db()?.actor_state_keys("a2i/")?.len(), 0);
     }
-    let before = alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?;
-    assert_eq!(keys.len(), 2, "authenticated roots still have independent private selectors");
-    assert_eq!(before.len(), 0, "neither root has installed native grant authority");
-    let mut forged = a2i("bob", "alice");
-    forged.source_principal_id = Some("bob".into());
-    forged.source_principal_commitment = Some(ramflux_crypto::identity_root_commitment(
-        &bob.client
-            .identity_root
-            .as_ref()
-            .ok_or(SdkError::IdentityRootMissing)?
-            .signing_key
-            .verifying_key(),
-    ));
-    let entry = seal_as(
-        &mallory,
-        &alice,
-        super::r5::outgoing(&mallory, &alice, "forged-attribution"),
-        &serde_json::to_vec(&forged)?,
-        Route::control(),
-    )?;
-    assert!(alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await.is_err());
-    assert_eq!(
-        alice.client.account_db()?.list_actor_states::<A2iControlEvent>("a2i/scoped/")?,
-        before
-    );
+    assert_eq!(keys.len(), 2, "independent native roots must have distinct private selectors");
+    assert_eq!(alice.client.account_db()?.actor_state_keys("a2i/scoped/")?.len(), 0);
     Ok(())
 }
 #[tokio::test]
@@ -143,37 +119,41 @@ async fn outgoing_a2i_refuses_forged_identity_and_engine_principal_before_peer_i
 }
 
 #[tokio::test]
-async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_root()
--> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 31)?;
-    let mallory = Fixture::owned("bob", "mallory", 51, 52)?;
+async fn retired_replay_rows_cannot_replace_current_root_qualified_receipts() -> Result<(), SdkError>
+{
+    let mut alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    let mallory = Fixture::native_principal("bob", "mallory").await?;
     trust(&alice, &bob)?;
     trust(&alice, &mallory)?;
-    alice.client.establish_friend_link("bob-link", "alice", "bob")?;
+    alice.client.establish_friend_link(
+        "bob-link",
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )?;
     let mut engine =
         GatewaySessionEngine::with_test_transport(alice.config()?, Box::new(NoNetwork));
-    let entry = seal(&bob, &alice, super::r5::outgoing(&bob, &alice, "migrate-id"), b"body")?;
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
-    let source = alice.client.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?;
+    let entry = generated_delivery(&bob, &alice, "migrate-id", "body")?.entry;
+    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry).await?;
     let key = alice.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?;
     let db = alice.client.account_db()?;
     let receipt =
         db.load_actor_state::<serde_json::Value>(&key)?.ok_or_else(|| invalid("receipt"))?;
-    // The legacy fixture predates the identity-independent seen marker.
+    // An unqualified retained row is never translated into current replay authority.
     let seen = db.routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
     db.remove_actor_state(&seen)?;
     db.remove_actor_state(&key)?;
-    db.remove_actor_state(&format!("identity/replay-upgrade/v3/{}", source.storage_key()))?;
     db.persist_actor_state("routed/committed/old-name-digest", &receipt)?;
     db.persist_actor_state("legacy/committed/migrate-id", &"mallory-thread")?;
     assert_eq!(alice.client.committed_direct_context(&entry)?, None);
-    alice.client.apply_routed_entry(&mut engine, &pool()?, &entry, false).await?;
+    assert!(
+        alice.client.apply_routed_entry(&mut engine, &pool()?, &entry).await.is_err(),
+        "retired receipts cannot resurrect an already consumed ratchet counter"
+    );
     let db = alice.client.account_db()?;
-    assert!(db.actor_state_exists(&key)?);
-    assert!(!db.actor_state_exists("routed/committed/old-name-digest")?);
-    let attack =
-        seal(&mallory, &alice, super::r5::outgoing(&mallory, &alice, "migrate-id"), b"attack")?;
+    assert!(!db.actor_state_exists(&key)?);
+    assert!(db.actor_state_exists("routed/committed/old-name-digest")?);
+    let attack = generated_delivery(&mallory, &alice, "migrate-id", "attack")?.entry;
     assert_eq!(alice.client.committed_direct_context(&attack)?, None);
     let messages = alice.client.direct_messages(
         receipt["routing"]["conversation_id"].as_str().ok_or_else(|| invalid("route"))?,
@@ -182,28 +162,35 @@ async fn verified_old_replay_rows_rekey_but_raw_legacy_ids_never_claim_another_r
     Ok(())
 }
 
-#[test]
-fn legacy_reset_work_requires_the_root_bound_pair_key_and_preserves_attempts()
--> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 11)?;
-    let bob = Fixture::new("bob", 31)?;
+#[tokio::test]
+async fn reset_work_requires_current_root_bound_state_without_translation() -> Result<(), SdkError>
+{
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
     trust(&alice, &bob)?;
-    alice.client.establish_friend_link("friend", "alice", "bob")?;
     let local = alice.client.owned_device_identity()?;
-    let remote = alice.client.device_identity(&bob.reference()?)?;
+    let remote = bob.client.owned_device_identity()?;
     let key = RamfluxClient::reset_work_key(&local, &remote)?;
-    let value = serde_json::json!({"local":"alice","remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
+    let value = serde_json::json!({"local":local.storage_key(),"remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
     let db = alice.client.account_db()?;
     db.persist_actor_state(&key, &value)?;
-    db.persist_actor_state("dm-pair/reset-work/unproven", &value)?;
-    let restored = alice.client.legacy_upgrade_reset_work(&local)?;
+    let restored = alice.client.retained_reset_work(&local)?;
     assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].local, local.storage_key());
     assert_eq!(restored[0].attempts, 5);
     assert_eq!(restored[0].first_at, Some(10));
     assert_eq!(restored[0].next_at, 120);
-    assert!(!db.actor_state_exists("dm-pair/reset-work/unproven")?);
-    assert_eq!(db.actor_state_keys("legacy/reset-work/")?.len(), 1);
+    let malformed = serde_json::json!({"local":"alice","remote":remote.storage_key(),"attempts":5,"next_at":120,"first_at":10});
+    db.persist_actor_state("dm-pair/reset-work/unproven", &malformed)?;
+    assert!(
+        alice.client.retained_reset_work(&local).is_err(),
+        "rootless work must fail without translation"
+    );
+    assert_eq!(db.load_actor_state::<serde_json::Value>(&key)?, Some(value));
+    assert_eq!(
+        db.load_actor_state::<serde_json::Value>("dm-pair/reset-work/unproven")?,
+        Some(malformed)
+    );
+    assert_eq!(db.actor_state_keys("legacy/reset-work/")?, Vec::<String>::new());
     Ok(())
 }
 
@@ -226,5 +213,32 @@ fn colliding_device_names_never_escape_inbox_failure_policy() -> Result<(), SdkE
         now_unix_timestamp(),
     )?);
     assert_ne!(alice.client.owned_device_identity()?, bob.client.owned_device_identity()?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cold_native_head_defers_reset_without_retiring_durable_work() -> Result<(), SdkError> {
+    let alice = Fixture::native_principal("alice", "alice").await?;
+    let bob = Fixture::native_principal("bob", "bob").await?;
+    trust(&alice, &bob)?;
+    let local = alice.client.owned_device_identity()?;
+    let remote = bob.client.owned_device_identity()?;
+    alice.client.establish_friend_link(
+        "reset-peer",
+        local.root_commitment(),
+        remote.root_commitment(),
+    )?;
+    assert!(alice.client.begin_pair_recovery(&local, &remote, now_unix_timestamp())?);
+    let key = RamfluxClient::reset_work_key(&local, &remote)?;
+    let before = alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?;
+    *alice.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    // A missing process-local head clock is not a relationship end: recovery stays allowed
+    // and the due reset is kept until the directory fetch restores the observation.
+    assert!(
+        alice.client.pair_recovery_allowed(&local, &remote)?,
+        "a missing live observation must defer recovery instead of retiring the pair"
+    );
+    assert_eq!(alice.client.account_db()?.load_actor_state::<serde_json::Value>(&key)?, before);
     Ok(())
 }

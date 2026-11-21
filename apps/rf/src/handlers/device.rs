@@ -45,24 +45,6 @@ pub(crate) async fn handle_device(socket: PathBuf, command: DeviceCommand) -> Re
             )
             .await?,
         ),
-        DeviceAction::Activate(activate) => {
-            let request = ramflux_sdk::LocalBusDeviceActivateRequest {
-                node_id: activate.node,
-                device_id: activate.device,
-                target_delivery_id: activate.target,
-                device_seed: resolve_seed(activate.device_seed_byte_hex.as_deref())?,
-                device_epoch: activate.device_epoch,
-            };
-            print_json(
-                &bus.request(
-                    Some(activate.account),
-                    "device",
-                    "device.activate",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
         DeviceAction::Revoke(revoke) => {
             let request = LocalBusDeviceRevokeRequest { device_id: revoke.device };
             print_json(
@@ -100,31 +82,6 @@ async fn handle_device_sync(
                     Some(export.account),
                     "device",
                     "device.sync.export",
-                    serde_json::to_value(request)?,
-                )
-                .await?,
-            )
-        }
-        DeviceSyncAction::Import(import) => {
-            let envelope = if let Some(envelope_json) = import.envelope_json {
-                serde_json::from_str(&envelope_json)?
-            } else if let Some(envelope_file) = import.envelope_file {
-                let body = std::fs::read_to_string(envelope_file)?;
-                serde_json::from_str(&body)?
-            } else {
-                return Err(RfError::Message(
-                    "device sync import requires --envelope-json or --envelope-file".to_owned(),
-                ));
-            };
-            let request = ramflux_sdk::LocalBusDeviceSyncImportRequest {
-                envelope,
-                relay_service_key_base64: None,
-            };
-            print_json(
-                &bus.request(
-                    Some(import.account),
-                    "device",
-                    "device.sync.import",
                     serde_json::to_value(request)?,
                 )
                 .await?,

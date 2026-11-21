@@ -136,13 +136,7 @@ pub(crate) fn verified_failure_policy(
         client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok();
     let authenticated = verified_source.is_some();
     let opened = if authenticated { client.open_routed(entry, local).ok() } else { None };
-    let legacy_group = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&bytes).ok())
-        .filter(|g| g.schema == "ramflux.sdk.group_sender_key.message.v1" && g.version == 1)
-        .map(|g| g.group_id);
-    let group =
-        opened.as_ref().and_then(|o| o.routing.group_id.as_deref()).or(legacy_group.as_deref());
+    let group = opened.as_ref().and_then(|opened| opened.routing.group_id.as_deref());
     let db = client.account_db()?;
     let source_record =
         verified_source.as_ref().and_then(|source| db.client_device_record(source).ok().flatten());

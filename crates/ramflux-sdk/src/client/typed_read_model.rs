@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Unified message read model consumed by `rf` and `rf-tui`.
+//! Unified message read model consumed by `rf`, `rf-tui`, and agent-host.
 //!
 //! Every view is rebuilt from the durable account store. No RAM-only delivery page is consulted,
 //! so a restart or a long unread backlog cannot hide a committed message from a reader.
@@ -51,6 +51,16 @@ pub struct ReactionView {
     pub count: u32,
 }
 
+/// A device sequence rendered as a zero-padded 20-digit decimal string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaddedSequence(pub u64);
+
+impl Serialize for PaddedSequence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{:020}", self.0))
+    }
+}
+
 /// One message as a client renders it.
 #[derive(Clone, Debug, Serialize)]
 pub struct MessageView {
@@ -58,8 +68,13 @@ pub struct MessageView {
     pub id: String,
     pub conversation_id: String,
     pub author: Option<AuthorView>,
-    pub device_sequence: u64,
-    pub hlc: u64,
+    /// Zero-padded 20-digit decimal: lexicographic order equals numeric order and the value
+    /// stays I-JSON safe even with bit 63 set (own-device sequences).
+    pub device_sequence: PaddedSequence,
+    /// Wall-clock milliseconds of the hybrid logical clock; always below 2^53.
+    pub hlc_ms: u64,
+    /// 16-bit logical counter of the hybrid logical clock.
+    pub hlc_logical: u64,
     pub group_id: Option<String>,
     /// Durable sequence of this row's last change; the change cursor.
     pub journal_sequence: u64,
@@ -161,13 +176,22 @@ fn erasure_view(delete: &g::Delete) -> ErasureView {
 /// stay with the object reader, which alone opens media for the local device.
 fn strip_media_keys(message: &mut g::Message) {
     for media in &mut message.media {
-        media.key_slots.clear();
+        wipe_slots(&mut media.key_slots);
         if let Some(manifest) = media.large_manifest.as_mut() {
-            manifest.key_slots.clear();
+            wipe_slots(&mut manifest.key_slots);
             manifest.read_capability.fill(0);
             manifest.read_capability.clear();
         }
     }
+}
+
+fn wipe_slots(slots: &mut Vec<g::MediaKeySlot>) {
+    for slot in slots.iter_mut() {
+        slot.encrypted_key.fill(0);
+        slot.grant_id.fill(0);
+        slot.read_capability.fill(0);
+    }
+    slots.clear();
 }
 
 fn strip_content_media_keys(content: &mut g::Content) {
@@ -426,8 +450,9 @@ impl RamfluxClient {
                 device_id: author.device_id,
                 device_epoch: author.device_epoch,
             }),
-            device_sequence: identity.device_sequence,
-            hlc: identity.hlc,
+            device_sequence: PaddedSequence(identity.device_sequence),
+            hlc_ms: identity.hlc >> 16,
+            hlc_logical: identity.hlc & 0xffff,
             group_id: identity.group_id,
             journal_sequence: update.journal_sequence,
             is_own: message.is_own,
@@ -499,6 +524,8 @@ mod tests {
             recipient: None,
             encrypted_key: b"slot-key-material".to_vec(),
             format: 1,
+            grant_id: b"grant-id-must-stay-out".to_vec(),
+            read_capability: b"slot-capability-must-stay-out".to_vec(),
         };
         let message = g::Message {
             text: "caption".into(),
@@ -541,6 +568,12 @@ mod tests {
             assert_eq!(manifest.key_slots.len(), 0);
             assert_eq!(manifest.read_capability.len(), 0);
             assert_eq!(manifest.relay_origin, "relay");
+            let rendered =
+                serde_json::to_string(&stripped).map_err(|_| SdkError::PayloadTooLarge)?;
+            assert!(!rendered.contains("slot-key-material"), "{rendered}");
+            assert!(!rendered.contains("grant-id-must-stay-out"), "{rendered}");
+            assert!(!rendered.contains("slot-capability-must-stay-out"), "{rendered}");
+            assert!(!rendered.contains("read-capability-secret"), "{rendered}");
         }
         Ok(())
     }

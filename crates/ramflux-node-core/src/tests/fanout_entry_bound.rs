@@ -4,11 +4,12 @@
 //! T3b preflights the rewritten child before replay or multi-target reservation.
 use super::*;
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
+const CIPHERTEXT_BYTES: usize = 64 * 1024;
 #[test]
 fn entry_admission_all_origins_fanout() -> Result {
     for mode in 0..=1 {
-        for over in [false, true] {
-            let root = temp_store_path(&format!("fanout-entry-bound-{mode}-{over}"))?;
+        for size_case in 0..3 {
+            let root = temp_store_path(&format!("fanout-entry-bound-{mode}-{size_case}"))?;
             let store = crate::publication::open_durability_fixture(&root, mode)?;
             let router = RouterCore::new();
             store.bootstrap_router(&router)?;
@@ -19,19 +20,26 @@ fn entry_admission_all_origins_fanout() -> Result {
                 registration.session_id = format!("session_{device}");
                 router.mvp1_register_identity(&registration)?;
             }
-            let mut raw =
-                envelope("parent-entry-bound", "unused", DeliveryClass::SelfDeviceControl);
+            let mut raw = envelope("parent-entry-bound", "unused", DeliveryClass::Message);
             raw.created_at = i64::try_from(crate::now_unix_seconds())?;
-            raw.encrypted_payload.clear();
             let envelope = signed_registered_envelope(raw, "fanout", "source", 601)?;
             let mut normalized = envelope.clone();
             router.refresh_registered_envelope_authority(&mut normalized)?;
             normalized.target_delivery_id = "target_left".into();
             normalized.envelope_id = mvp10_fanout_envelope_id(&envelope.envelope_id, "left");
+            normalized.ext.ext.insert("frame_padding".into(), serde_json::json!(""));
             let base = crate::single_entry_frame_size(&normalized)?;
             let mut envelope = envelope;
-            envelope.encrypted_payload =
-                "x".repeat(crate::ENTRY_FRAME_BYTE_CAP - base + usize::from(over));
+            if size_case > 0 {
+                envelope.ext.ext.insert(
+                    "frame_padding".into(),
+                    serde_json::json!(
+                        "x".repeat(
+                            crate::ENTRY_FRAME_BYTE_CAP - base + usize::from(size_case == 2)
+                        )
+                    ),
+                );
+            }
             let envelope = signed_registered_envelope(envelope, "fanout", "source", 601)?;
             let now = envelope.created_at;
             let request = ItestMvp10OwnDeviceFanoutRequest {
@@ -45,7 +53,7 @@ fn entry_admission_all_origins_fanout() -> Result {
             .published_blocking()??
             .resolved_blocking()?;
             assert_eq!(prepared.delivered.len(), 1);
-            if over {
+            if size_case > 0 {
                 assert_eq!(prepared.delivered[0].outcome, "payload_too_large");
             } else {
                 assert!(matches!(
@@ -53,10 +61,10 @@ fn entry_admission_all_origins_fanout() -> Result {
                     "online" | "offline_queued"
                 ));
             }
-            assert_eq!(store.inbox_status("target_left")?.1, u64::from(!over));
-            assert_eq!(router.resume("target_left", 0, 10).len(), usize::from(!over));
+            assert_eq!(store.inbox_status("target_left")?.1, u64::from(size_case == 0));
+            assert_eq!(router.resume("target_left", 0, 10).len(), usize::from(size_case == 0));
             assert_eq!(store.sender_retry_registry_size(), 0);
-            if over {
+            if size_case > 0 {
                 legacy_retry(&router, &store, &request, normalized, now)?;
             }
         }
@@ -73,6 +81,9 @@ fn legacy_retry(
 ) -> Result {
     // A pre-bound row may be above today's admission limit. Its retry creates nothing.
     child.encrypted_payload.clone_from(&request.envelope.encrypted_payload);
+    if let Some(padding) = request.envelope.ext.ext.get("frame_padding") {
+        child.ext.ext.insert("frame_padding".into(), padding.clone());
+    }
     child.signed.signature.clone_from(&request.envelope.signed.signature);
     let source = router.authenticated_envelope_source_durable(&request.envelope, store)?;
     let replay_key = crate::envelope_replay_tuple_key(&source, &child);
@@ -119,9 +130,18 @@ fn legacy_fanout_prepares_and_measures_each_child_once() -> Result {
                 registration.session_id = format!("session_{device}");
                 router.mvp1_register_identity(&registration)?;
             }
-            let mut raw = envelope("legacy-once", "unused", DeliveryClass::SelfDeviceControl);
+            let mut raw = envelope("legacy-once", "unused", DeliveryClass::Message);
             raw.created_at = i64::try_from(crate::now_unix_seconds())?;
-            raw.encrypted_payload = "x".repeat(64 * 1024);
+            raw.encrypted_payload = ramflux_protocol::encode_base64url(
+                ramflux_protocol::message::outer::encode_compact_cryptobox(
+                    &vec![7; CIPHERTEXT_BYTES],
+                    &[],
+                )?,
+            );
+            raw.payload_hash = ramflux_protocol::hash_base64url(
+                ramflux_protocol::domain::ENVELOPE,
+                raw.encrypted_payload.as_bytes(),
+            );
             let envelope = signed_registered_envelope(raw, "fanout", "source", 601)?;
             let now = envelope.created_at;
             let request = ItestMvp10OwnDeviceFanoutRequest {

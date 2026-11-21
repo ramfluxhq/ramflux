@@ -19,7 +19,7 @@ impl Fixture {
             self.client.device_branch.as_ref().ok_or("reopened branch")?.clone(),
         ));
         self.config.source_identity = Some(self.client.owned_device_identity()?);
-        self.client.persist_fetched_identity_directory(&self.manifest)?;
+        self.client.persist_observed_identity_directory_now(&self.manifest)?;
         Ok(())
     }
 }
@@ -29,7 +29,7 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
 {
     let mut source = Fixture::new("authored-source").await?;
     let peer = Fixture::new("authored-peer").await?;
-    source.client.persist_fetched_identity_directory(&peer.manifest)?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
     let own_root = source.client.own_account_anchor()?;
     let peer_root = peer.client.own_account_anchor()?;
     let conversation = g::dm_scope::derive(&own_root, &peer_root)?;
@@ -60,8 +60,7 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
         .await
         .map_err(|error| format!("enroll third: {error}"))?;
     second.manifest = source.manifest.clone();
-    second.client.persist_fetched_identity_directory(&source.manifest)?;
-    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    second.client.persist_observed_identity_directory_now(&source.manifest)?;
     Box::pin(bootstrap_peer_contact(&source, &peer, &mut second, &mut third, &conversation))
         .await?;
     source
@@ -113,7 +112,6 @@ pub(super) fn capture_before_enrollment(
     owner: &str,
     exact: &[u8],
 ) -> TestResult {
-    let _live = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     source.client.account_db()?.write_transaction(|| {
         let envelope = source.seal_inner_to(peer, exact)?;
         source.client.send_direct_message(
@@ -236,7 +234,17 @@ async fn retry_after_restart(
 }
 
 pub(super) fn authored_contact(source: &Fixture, peer: &Fixture) -> TestResult<g::OwnContactSync> {
-    let link = source.client.account_db()?.friend_link("authored-link")?;
+    let own = source.client.own_account_anchor()?;
+    let remote = peer.client.own_account_anchor()?;
+    let link = source
+        .client
+        .friend_links()?
+        .into_iter()
+        .find(|link| {
+            (link.requester_id == own && link.target_id == remote)
+                || (link.requester_id == remote && link.target_id == own)
+        })
+        .ok_or("test: exact native root-pair friend link")?;
     Ok(g::OwnContactSync {
         manifest: Some(g::NativeDeviceManifest::decode(
             source.client.encode_generated_task_manifest(&peer.manifest)?.as_slice(),
@@ -250,5 +258,6 @@ pub(super) fn authored_contact(source: &Fixture, peer: &Fixture) -> TestResult<g
             blocked: link.blocked,
             capability_revoked_at: link.capability_revoked_at,
         }),
+        ..Default::default()
     })
 }

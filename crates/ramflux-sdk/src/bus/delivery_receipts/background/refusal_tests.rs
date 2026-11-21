@@ -7,9 +7,9 @@
 //! functions and a real account DB reopen. Every expectation is an exact literal.
 use super::*;
 use crate::bus::dispatch::surface_transport::fixture::RecordingGateway;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Sent = Arc<Mutex<Vec<ramflux_protocol::Envelope>>>;
 
 /// The frozen test clock for the whole row.
@@ -50,8 +50,20 @@ fn recording(nack: Option<&str>) -> (RecordingGateway, Sent) {
 
 /// A real reopen: the account DB handle is dropped and unlocked again from disk.
 pub(crate) fn reopen(account: &mut LocalBusAccountState) -> TestResult {
+    let native = account.client.born_v3_account.is_some();
     account.client.active_account_db = None;
-    account.client.unlock_account(ACCOUNT, b"actor-test-secret")?;
+    account.client.unlock_account(
+        ACCOUNT,
+        if native { b"native fixture data passphrase" } else { b"actor-test-secret" },
+    )?;
+    if native {
+        let custody =
+            account.gateway_config.custody.as_ref().ok_or(SdkError::CustodyVaultUnavailable)?;
+        account.client.initialize_born_v3_branch_for_fixture(
+            &account.gateway_config.device_id,
+            custody.vault.as_ref(),
+        )?;
+    }
     Ok(())
 }
 
@@ -98,39 +110,67 @@ fn journal_failures(
         .count())
 }
 
-/// One due receipt with its ciphertext already sealed, addressed to the account's own device.
-fn seeded(
-    root: &std::path::Path,
-) -> Result<(LocalBusAccountState, ramflux_protocol::Envelope), SdkError> {
-    let account =
-        crate::bus::runtime_tests::account(root, ACCOUNT, None, Arc::new(AtomicBool::new(false)))?;
-    let manifest =
-        crate::client::identity_authority::test_support::public_manifest(&account.client)?;
-    account.client.persist_identity_directory(&manifest)?;
-    let identity = account.client.owned_device_identity()?;
+/// One retained native receipt with a qualified peer target; admission is covered by integration tests.
+pub(super) async fn seeded(
+    root: &ramflux_test_support::TestPath,
+) -> TestResult<(LocalBusAccountState, ramflux_protocol::Envelope)> {
+    use crate::client::native_test_support::Fixture;
+    use ramflux_protocol::message as g;
+    let source =
+        Box::pin(Fixture::with_principal_at(root.child(ACCOUNT), ACCOUNT, "device-alice", ACCOUNT))
+            .await?;
+    let peer = Box::pin(Fixture::new("receipt-peer")).await?;
+    source.client.persist_observed_identity_directory_now(&peer.manifest)?;
+    let own = source.client.owned_device_identity()?;
+    let remote = peer.client.owned_device_identity()?;
+    let conversation = g::dm_scope::derive(own.root_commitment(), remote.root_commitment())?;
+    source.client.account_db()?.persist_client_record("conversation", &conversation,
+        &serde_json::json!({"kind":"direct","group_id":null,"participants":[ACCOUNT,"receipt-peer"],"participant_roots":[own.root_commitment(),remote.root_commitment()]}))?;
+    let author = g::QualifiedDevice {
+        account_anchor: remote.root_commitment().into(),
+        device_id: remote.device_id().into(),
+        device_epoch: 1,
+    };
+    let identity = g::EventIdentity {
+        id: g::identity::derive(&author, &conversation, 1)?.to_vec(),
+        conversation_id: conversation.clone(),
+        author: Some(author),
+        device_sequence: 1,
+        hlc: 1000,
+        ..Default::default()
+    };
+    let target = ramflux_protocol::encode_base64url(&identity.id);
+    source.client.account_db()?.persist_message_actor_state(
+        &target,
+        &format!("routed/generated-identity/{target}"),
+        &identity,
+    )?;
+    let account = source.into_bus();
     let message = GatewayDirectMessage {
-        conversation_id: "thread".into(),
+        conversation_id: conversation.clone(),
         message_id: "receipt".into(),
         envelope_id: "retained-receipt".into(),
-        source_principal_id: account.gateway_config.principal_id.clone(),
-        sender_id: identity.device_id().into(),
-        recipient_device_id: Some(identity.device_id().into()),
-        recipient_principal_commitment: Some(identity.root_commitment().into()),
-        target_delivery_id: account.gateway_config.target_delivery_id.clone(),
+        source_principal_id: ACCOUNT.into(),
+        sender_id: own.device_id().into(),
+        recipient_device_id: Some(remote.device_id().into()),
+        recipient_principal_commitment: Some(remote.root_commitment().into()),
+        target_delivery_id: remote.storage_key().into(),
         encrypted_body: Vec::new(),
-        created_at: START,
+        created_at: now_unix_timestamp(),
         ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
-    let packet = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
+    let packet = retained_receipt_fixture(&account, &message)?;
     let work = Work {
         status_id: String::new(),
-        conversation: "thread".into(),
-        message: "stored-message".into(),
+        conversation,
+        message: target,
         wire_message: None,
-        receiver: identity.storage_key().into(),
-        sender: identity.storage_key().into(),
-        root: Some(identity.root_commitment().into()),
-        at: START,
+        receiver: own.storage_key().into(),
+        sender: remote.storage_key().into(),
+        root: Some(remote.root_commitment().into()),
+        at: now_unix_timestamp(),
+        sealed_at: now_unix_timestamp(),
+        retry_from: now_unix_timestamp(),
         attempts: 0,
         next_at: 0,
         packet: Some(packet.clone()),
@@ -141,14 +181,25 @@ fn seeded(
 
 /// S5: one due receipt, one scripted nack.
 async fn receipt_row(case: Case) -> TestResult {
-    let _clock = crate::time::FixedClock::set(START);
     let root = crate::bus::runtime_tests::root("receipt-refusal-s5");
-    let (mut account, packet) = seeded(&root)?;
+    let (mut account, packet) = Box::pin(seeded(&root)).await?;
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
+    let target = account
+        .client
+        .account_db()?
+        .load_actor_state::<Work>(&format!("{PREFIX}cell"))?
+        .ok_or("receipt work")?
+        .message;
     let key = format!("{PREFIX}cell");
     let (gateway, attempted) = recording(Some(case.nack()));
     install(&mut account, gateway);
     let first = drive(&mut account).await;
-    assert_eq!(attempted.lock().map_err(|_| "attempted")?.len(), 1, "one submit was written");
+    assert_eq!(
+        attempted.lock().map_err(|_| "attempted")?.len(),
+        1,
+        "one submit was written: {first:?}"
+    );
     assert_eq!(attempted.lock().map_err(|_| "attempted")?[0], packet);
 
     let db = account.client.account_db()?;
@@ -161,7 +212,7 @@ async fn receipt_row(case: Case) -> TestResult {
             let status = db.load_actor_state::<serde_json::Value>(STATUS)?.ok_or("status")?;
             assert_eq!(status["state"], "failed");
             assert_eq!(status["attempts"], 1);
-            assert_eq!(status["retry_work"]["message"], "stored-message");
+            assert_eq!(status["retry_work"]["message"], target);
             assert_eq!(journal_failures(&account.client, Some("submit_conflict"))?, 1);
             assert_eq!(journal_failures(&account.client, None)?, 0);
         }
@@ -177,7 +228,7 @@ async fn receipt_row(case: Case) -> TestResult {
             assert_eq!(text, expected);
             let kept = db.load_actor_state::<Work>(&key)?.ok_or("kept row")?;
             assert_eq!(kept.attempts, 1);
-            assert_eq!(kept.next_at, START + 2);
+            assert_eq!(kept.next_at, start + 2);
             assert_eq!(kept.packet.as_ref(), Some(&packet));
             assert!(!db.actor_state_exists(STATUS)?);
             assert_eq!(journal_failures(&account.client, Some("submit_conflict"))?, 0);
@@ -189,10 +240,10 @@ async fn receipt_row(case: Case) -> TestResult {
     reopen(&mut account)?;
     let (gateway, resent) = recording(None);
     install(&mut account, gateway);
-    crate::time::FixedClock::advance_to(START + 1);
+    crate::time::FixedClock::advance_to(start + 1);
     assert!(!drive(&mut account).await?);
     assert_eq!(resent.lock().map_err(|_| "resent")?.len(), 0, "no resend before the deadline");
-    crate::time::FixedClock::advance_to(START + 2);
+    crate::time::FixedClock::advance_to(start + 2);
     let due = drive(&mut account).await?;
     let resends = resent.lock().map_err(|_| "resent")?.clone();
     let db = account.client.account_db()?;
@@ -200,7 +251,7 @@ async fn receipt_row(case: Case) -> TestResult {
         Case::Conflict => {
             assert!(!due);
             assert!(resends.is_empty(), "a conflict is never resent");
-            crate::time::FixedClock::advance_to(START + 700);
+            crate::time::FixedClock::advance_to(start + 700);
             assert!(!drive(&mut account).await?);
             assert_eq!(resent.lock().map_err(|_| "resent")?.len(), 0);
             let status =

@@ -54,7 +54,7 @@ impl AccountView {
         views.insert("mcp.server.refresh", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash()}));
         views.insert("mcp.tool.list", json!({"registry_hash":account.mcp_registry.registry_hash(),"tool_manifest_set_hash":account.mcp_registry.tool_manifest_set_hash(),"tools":account.mcp_registry.tools()}));
         views.insert("bot.list", json!({"bots":account.bots.values().collect::<Vec<_>>()}));
-        let devices = super::super::dispatch::device::account_known_devices(state, id, account);
+        let devices = super::super::dispatch::device::account_known_devices(account);
         if let Ok(devices) = devices {
             views.insert(
                 "device.list",
@@ -200,6 +200,14 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             now,
         )?;
         status["networking"] = serde_json::to_value(native.state())?;
+        let last_error = client
+            .account_db()?
+            .load_actor_state::<Option<String>>(
+                crate::bus::couriers::layer_publish::LAST_ERROR_KEY,
+            )?
+            .flatten();
+        status["layer_declaration"] =
+            crate::bus::couriers::layer_publish::status_view(&native, now, last_error.as_deref());
         let reason = native.networking_view(now);
         status["networking_reason"] = serde_json::to_value(&reason)?;
         status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
@@ -253,8 +261,7 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         if view.native.is_none() {
             status["networking"] = json!(snapshot.state);
         }
-        status["session_delivery_mode"] =
-            json!(if connection.session_mode().is_push() { "push" } else { "compat" });
+        status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);
@@ -295,11 +302,27 @@ fn verification(
     if let Some(connection) = &view.connection {
         connection.refresh_contact_safety(&body.contact_identity_commitment);
     }
-    let safety = client.contact_safety_number(&body.contact_identity_commitment)?;
+    let compared = crate::client::contact_verification_cas::compared_safety_json(
+        client,
+        &body.contact_identity_commitment,
+    )?;
     let stored = client.contact_verification_status(&body.contact_identity_commitment)?;
-    Ok(
-        json!({"contact_identity_commitment":body.contact_identity_commitment,"verification_state":safety.verification_state,"stored_verification_state":stored.as_ref().map_or("unverified",|record|record.verification_state.as_str()),"verified_at":stored.as_ref().map(|record|record.verified_at),"verified_by_device_id":stored.as_ref().map(|record|record.verified_by_device_id.clone()),"safety_number":safety.safety_number,"fingerprint_hex":safety.fingerprint_hex}),
-    )
+    let state = compared.get("verification_state").cloned().ok_or_else(|| {
+        SdkError::LocalBus("contact safety snapshot missing verification_state".into())
+    })?;
+    let mut value = json!({
+        "contact_identity_commitment": body.contact_identity_commitment,
+        "verification_state": state,
+        "stored_verification_state": stored.as_ref().map_or("unverified", |record| record.verification_state.as_str()),
+        "verified_at": stored.as_ref().map(|record| record.verified_at),
+        "verified_by_device_id": stored.as_ref().map(|record| record.verified_by_device_id.clone()),
+        "safety_number": compared.get("safety_number").cloned().unwrap_or(Value::Null),
+        "fingerprint_hex": compared.get("fingerprint_hex").cloned().unwrap_or(Value::Null),
+    });
+    if let Some(expected) = compared.get("expected") {
+        value["expected"] = expected.clone();
+    }
+    Ok(value)
 }
 
 fn a2i(_client: &RamfluxClient, _pending: bool) -> Result<Value, SdkError> {

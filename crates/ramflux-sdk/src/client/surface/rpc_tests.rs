@@ -48,6 +48,7 @@ impl Fixture {
     fn carrier(&self, frame: &RpcFrame, message: &str) -> TestResult<Carrier> {
         let local = self.agent.device_branch.as_ref().ok_or("agent branch")?;
         Ok(self.agent.sign_surface_carrier(Carrier {
+            typed: None,
             schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
             content_type: "surface".into(),
             posted_at: None,

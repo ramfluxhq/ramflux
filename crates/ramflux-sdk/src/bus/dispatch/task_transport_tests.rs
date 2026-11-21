@@ -4,11 +4,11 @@
 //! Task carrier and own-control frame limits through the real encrypted transport adapters.
 use super::super::surface_transport::{
     fixture,
-    tests::{directory_config, members as members_count},
+    tests::{NativeGroup, native_group},
 };
 use super::*;
 use crate::bus::runtime_tests;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn confirmation_preparation_allows_slow_verified_directory_refresh() {
@@ -168,14 +168,7 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
 -> Result<(), Box<dyn std::error::Error>> {
     use ramflux_protocol::{TaskEvent, TaskEventBody, TaskStart};
     let root = runtime_tests::root("task-frame-budget");
-    let mut source = runtime_tests::account(
-        &root.join("sender"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let peers = members_count(&root, &source, 1)?;
-    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let NativeGroup { mut source, peers, config, directory } = native_group(&root, 1).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
@@ -206,7 +199,8 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     let result = super::send(&mut source, &c).await?;
     assert_eq!(result["accepted"], true);
     let before = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len();
-    assert_eq!(before, 2);
+    // One send to one native peer is one sealed envelope; there is no separate distribution.
+    assert_eq!(before, 1, "one native peer receives exactly one sealed task envelope");
     let mut engine = source.session_client().await?;
     let target = super::Target {
         identity: source.client.device_identity_for_root(
@@ -223,7 +217,8 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         federation: None,
         own: true,
     };
-    let page = vec![b'"'; crate::client::task::MAX_DELIVERY_BYTES];
+    let page = max_typed_task_body()?;
+    assert_eq!(page.len(), crate::client::task::MAX_DELIVERY_BYTES);
     let delivery = super::seal(
         &source,
         &mut engine,
@@ -243,10 +238,17 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
         captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(),
         before + 1
     );
-    let mut oversized = c.clone();
-    oversized.wire_base64 = "x".repeat(crate::client::task::MAX_DELIVERY_BYTES);
+    // A valid signed Task is bounded far below the delivery cap by its own field limits, so
+    // the over-cap gate is exercised through the approval transport, which applies the same
+    // delivery budget to its body before any sealing.
     assert!(matches!(
-        super::send(&mut source, &oversized).await,
+        super::super::task_approval_transport::send(
+            &mut source,
+            "thread",
+            "peer-0",
+            &vec![0; crate::client::task::MAX_DELIVERY_BYTES + 1],
+        )
+        .await,
         Err(SdkError::TaskDeliveryTooLarge { .. })
     ));
     assert_eq!(
@@ -259,6 +261,26 @@ async fn task_group_and_own_control_bodies_fit_actual_encoded_gateway_frames()
     drop(peers);
     drop(source);
     Ok(())
+}
+
+/// The largest typed Task body the delivery budget admits: an approval packet whose free-text
+/// signature field is padded until the encoding is exactly the cap.
+fn max_typed_task_body() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use prost::Message as _;
+    let cap = crate::client::task::MAX_DELIVERY_BYTES;
+    let packet = |pad: usize| ramflux_protocol::message::Task {
+        payload: Some(ramflux_protocol::message::task::Payload::Approval(
+            ramflux_protocol::message::TaskApprovalPacket {
+                signature: "x".repeat(pad),
+                ..Default::default()
+            },
+        )),
+    };
+    let base = packet(0).encoded_len();
+    let exact = (cap.saturating_sub(base + 8)..=cap.saturating_sub(base))
+        .find(|pad| packet(*pad).encoded_len() == cap)
+        .ok_or("no padding reaches the delivery cap exactly")?;
+    Ok(packet(exact).encode_to_vec())
 }
 
 async fn defer_then_drain_confirmation_jobs(
@@ -371,14 +393,7 @@ async fn requester_cancellation_after_compaction_prepares_original_sibling_event
 -> Result<(), Box<dyn std::error::Error>> {
     use ramflux_protocol::{TaskCancel, TaskEvent, TaskEventBody, TaskStart};
     let root = runtime_tests::root("task-compacted-cancel");
-    let mut source = runtime_tests::account(
-        &root.join("sender"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let peers = members_count(&root, &source, 1)?;
-    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let NativeGroup { mut source, peers, config, directory } = native_group(&root, 1).await?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     source.install_test_session(GatewaySessionEngine::with_test_transport(
         config,
@@ -442,14 +457,7 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
 -> Result<(), Box<dyn std::error::Error>> {
     use ramflux_protocol::{TaskEvent, TaskEventBody, TaskStart};
     let root = runtime_tests::root("task-private-approval");
-    let mut source = runtime_tests::account(
-        &root.join("sender"),
-        "sender",
-        None,
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    let peers = members_count(&root, &source, 2)?;
-    let (config, directory) = directory_config(&root, &mut source, &peers).await?;
+    let NativeGroup { mut source, peers, config, directory } = native_group(&root, 2).await?;
     for peer in &peers {
         source.client.persist_identity_directory(&fixture::manifest(&peer.client)?)?;
         source.client.pin_joined_group_member(
@@ -474,7 +482,7 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
             conversation_id: "thread".into(),
             requester: "sender".into(),
             assignee: "peer-0".into(),
-            text: "work".into(),
+            text: "PRIVATE_MCP_ARGUMENTS".into(),
             constraints: None,
         }),
         sdk_device_signed_fields("device-sender", ""),
@@ -484,13 +492,13 @@ async fn private_task_approvals_are_pair_encrypted_only_to_the_requester_among_g
         &mut source,
         &anchor.conversation_id,
         "peer-0",
-        b"PRIVATE_MCP_ARGUMENTS",
+        &anchor.bytes()?,
     )
     .await?;
     assert!(matches!(prepared, super::Preparation::Ready(())));
     let envelopes = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     assert_eq!(envelopes.len(), 1, "the unrelated group member receives no approval payload");
-    assert_eq!(envelopes[0].target_delivery_id, "peer-0");
+    assert_eq!(envelopes[0].target_delivery_id, peers[0].gateway_config.target_delivery_id);
     assert!(!serde_json::to_string(&envelopes)?.contains("PRIVATE_MCP_ARGUMENTS"));
     directory.abort();
     drop(peers);

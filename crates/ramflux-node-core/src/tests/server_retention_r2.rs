@@ -30,7 +30,7 @@ fn own_device_fanout_rejects_future_created_at_by_server_time()
             &format!("ip_future_fanout_{device}"),
         )?)?;
     }
-    let mut future = envelope("future", "unused", DeliveryClass::SelfDeviceControl);
+    let mut future = envelope("future", "unused", DeliveryClass::Message);
     future.created_at = wall_clock() + 10 * 365 * 86_400;
     future.ttl = 604_800;
     let future = signed_registered_envelope(future, "principal_future_fanout", "phone", 811)?;
@@ -46,7 +46,7 @@ fn own_device_fanout_rejects_future_created_at_by_server_time()
 #[test]
 fn nacked_mailbox_head_does_not_stall_later_acks() -> Result<(), Box<dyn std::error::Error>> {
     let mut inbox = OpaqueDeviceInbox::new();
-    let stuck = inbox.append(envelope("stuck", "target", DeliveryClass::OpaqueEvent));
+    let stuck = inbox.append(envelope("stuck", "target", DeliveryClass::Message));
     for _ in 0..3 {
         inbox.apply_nack(&sequence_nack(
             "stuck",
@@ -57,7 +57,7 @@ fn nacked_mailbox_head_does_not_stall_later_acks() -> Result<(), Box<dyn std::er
     let mut last = 0;
     for index in 0..=crate::inbox::ROUTER_ACK_WINDOW {
         let id = format!("later-{index}");
-        let entry = inbox.append(envelope(&id, "target", DeliveryClass::OpaqueEvent));
+        let entry = inbox.append(envelope(&id, "target", DeliveryClass::Message));
         inbox.apply_ack_for_target("target", &seq_ack(&id, entry.inbox_seq))?;
         last = entry.inbox_seq;
     }
@@ -92,7 +92,7 @@ fn idle_router_wal_segment_survives_retention_then_recovers_new_writes()
         std::fs::OpenOptions::new().write(true).open(segment)?.set_modified(old)?;
     }
     store.prune_expired(wall_clock())?;
-    let mut message = envelope("after-idle", "idle-mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("after-idle", "idle-mailbox", DeliveryClass::Message);
     message.created_at = wall_clock();
     let entry =
         InboxEntry { inbox_seq: 1, target_delivery_id: "idle-mailbox".into(), envelope: message };
@@ -119,7 +119,7 @@ fn router_restart_never_reuses_an_expired_logged_sequence() -> Result<(), Box<dy
     let path = temp_store_path("server_retention_seq_reuse")?;
     let wal = path.with_extension("wal");
     let store = RouterRedbStore::open_with_wal(&path, &wal)?;
-    let mut message = envelope("expired-before-checkpoint", "mailbox", DeliveryClass::OpaqueEvent);
+    let mut message = envelope("expired-before-checkpoint", "mailbox", DeliveryClass::Message);
     message.created_at = wall_clock() - 1_000;
     message.ttl = 10;
     let entry =

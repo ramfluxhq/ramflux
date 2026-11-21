@@ -145,6 +145,44 @@ impl AccountDb {
         if erased { Err(StorageError::ObjectErased) } else { Ok(()) }
     }
 
+    /// Ciphertext bytes of objects whose only message owner is `message_id`.
+    ///
+    /// Measured before a delete. The erasure trigger removes the ciphertext in the
+    /// same statement that drops the last owner, so the byte count has to be read first.
+    /// A second message that references the same payload is not included.
+    ///
+    /// # Errors
+    /// Returns an error when the ownership query cannot be read.
+    pub fn sole_owner_ciphertext(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<(String, u64)>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT p.wire_id, COALESCE(length(o.ciphertext), 0)
+             FROM object_message_reference m
+             JOIN object_retention_reference r ON r.reference_hash = m.reference_hash
+             JOIN object_retention_payload p ON p.commitment = r.commitment
+             LEFT JOIN object_index o ON o.object_id = p.wire_id
+             WHERE m.message_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM object_retention_reference r2
+                 JOIN object_message_reference m2 ON m2.reference_hash = r2.reference_hash
+                 WHERE r2.commitment = p.commitment AND m2.message_id <> ?1
+               )",
+        )?;
+        let rows = statement.query_map(params![message_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut owned = Vec::new();
+        for row in rows {
+            let (wire, length) = row?;
+            let length =
+                u64::try_from(length).map_err(|_| StorageError::Integrity("ciphertext length"))?;
+            owned.push((wire, length));
+        }
+        Ok(owned)
+    }
+
     /// # Errors
     /// Returns `ObjectErased` for an erased selector, including after payload removal.
     pub fn check_object_access(&self, selector: &str) -> Result<(), StorageError> {
@@ -250,18 +288,24 @@ impl AccountDb {
             object_erasure_commitment(&self.principal_commitment, parent_wire, parent_manifest);
         let child =
             object_erasure_commitment(&self.principal_commitment, child_wire, child_manifest);
-        self.connection.execute("INSERT INTO object_payload_dependency SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child])?;
-        Ok(())
+        self.write_transaction(|| {
+            self.connection.execute("INSERT INTO object_payload_dependency SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child])?;
+            // Record B's independent assertion even when A already supplied this edge.
+            // Only the current selected full generation can acquire local ownership.
+            self.connection.execute("INSERT INTO pairing_full_tail_dependency SELECT t.operation_id,1,?1,?2 FROM pairing_full_tail_apply t JOIN pairing_adoption a ON a.full_generation_nonce=t.generation_nonce WHERE t.tail_status='pending' AND a.account_id=?3 AND EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='transport') ON CONFLICT DO NOTHING", params![parent,child,self.local_account_id])?;
+            Ok(())
+        })
     }
 
     /// # Errors
     /// Registers each message even when a shared reference already exists; deleted messages fail closed.
+    /// Joins an open write so a message and its owners share one commit.
     pub fn register_object_reference(
         &self,
         admission: ObjectReferenceAdmission,
         owner: &ObjectReferenceOwner<'_>,
     ) -> Result<(), StorageError> {
-        self.write_transaction(|| {
+        self.join_write(|| {
             if self.message_is_deleted(owner.message_id)? { return Err(StorageError::ObjectErased); }
             self.check_object_identity(owner.wire_id, owner.manifest_hash)?;
             self.check_reference_admission(admission, owner)?;
@@ -300,3 +344,6 @@ mod selector_upgrade_tests;
 
 #[cfg(test)]
 mod selector_budget_tests;
+
+#[cfg(test)]
+mod tail_ownership_tests;

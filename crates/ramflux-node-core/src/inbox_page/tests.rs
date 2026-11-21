@@ -393,7 +393,8 @@ fn page_walk_releases_publication_lock_and_clones_each_entry_once() -> Result {
     source.restore_incarnation("target", id.clone());
     source.publication = Some(core.clone());
     for row in source.pending.get_mut("target").expect("rows").values_mut() {
-        row.envelope.encrypted_payload = "x".repeat(3500);
+        // The generation-1 fixture envelope carries more fields; keep 245 records under the page cap.
+        row.envelope.encrypted_payload = "x".repeat(3200);
     }
     let observed = std::rc::Rc::new(std::cell::Cell::new(0));
     let seen = observed.clone();

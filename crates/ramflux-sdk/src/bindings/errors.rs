@@ -226,9 +226,10 @@ impl AdapterError {
             | SdkError::NodeUnreachable { .. }
             | SdkError::NodeTimeout { .. }
             | SdkError::Transport(_) => GeneratedErrorCode::NotConnected,
-            SdkError::LocalBus(_) | SdkError::InvalidOfflineRetention(_) => {
-                GeneratedErrorCode::InvalidArgument
-            }
+            SdkError::LocalBus(_)
+            | SdkError::InvalidOfflineRetention(_)
+            | SdkError::CustodyConfirmRejected(_)
+            | SdkError::PassphrasePolicy(_) => GeneratedErrorCode::InvalidArgument,
             _ => GeneratedErrorCode::Internal,
         };
         Self::new(code, error.to_string())

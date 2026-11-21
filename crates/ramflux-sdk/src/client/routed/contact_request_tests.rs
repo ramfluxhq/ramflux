@@ -39,20 +39,27 @@ async fn deliver(
 ) -> Result<Delivery, SdkError> {
     let account = state.accounts.get_mut(who).ok_or_else(|| invalid("account"))?;
     let mut engine = account.session_client().await?;
-    let result = account
-        .client
-        .apply_routed_entry(&mut engine, &super::super::review::pool()?, entry, false)
-        .await;
+    let result =
+        account.client.apply_routed_entry(&mut engine, &super::super::review::pool()?, entry).await;
     account.install_test_session(engine);
     result
 }
 async fn message(state: &mut LocalBusDaemonState, text: &str) -> Result<(), SdkError> {
+    let target = account(state, "bob")?.owned_device_identity()?;
+    let source = account(state, "alice")?.owned_device_identity()?;
+    let target_delivery = state
+        .accounts
+        .get("bob")
+        .ok_or_else(|| invalid("bob account"))?
+        .gateway_config
+        .target_delivery_id
+        .clone();
     let request = request(
         "alice",
         "message.submit",
-        json!({"conversation_id":"request-thread",
-        "message_id":text,"envelope_id":text,"source_principal_id":"alice","sender_id":"alice",
-        "recipient_device_id":"bob","target_delivery_id":"bob","encrypted_body_base64":"",
+        json!({"conversation_id":direct_thread(state)?,
+        "message_id":text,"envelope_id":text,"source_principal_id":"alice","sender_id":source.device_id(),
+        "recipient_device_id":target.device_id(),"recipient_principal_commitment":target.root_commitment(),"target_delivery_id":target_delivery,"encrypted_body_base64":"",
         "plaintext_body_base64":ramflux_protocol::encode_base64url(text),"created_at":now_unix_timestamp().saturating_sub(120),"ttl":3600}),
     );
     let (outbound, _receiver) = tokio::sync::mpsc::channel(8);
@@ -100,8 +107,16 @@ async fn pending(
 #[tokio::test]
 async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_receiver_boundary()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 51)?;
-    let mut bob = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_request_auto_accept_then_first_message_crosses_the_cold_receiver_boundary_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_receiver_boundary_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 51)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 61)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     contact(
@@ -131,15 +146,23 @@ async fn contact02_request_auto_accept_then_first_message_crosses_the_cold_recei
     for entry in frames(&directory)? {
         assert!(deliver(&mut state, "bob", &entry).await?.plaintext.is_some());
     }
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+    assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn contact02_manual_request_holds_content_without_a_thread_then_accept_releases_it_once()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 71)?;
-    let mut bob = Fixture::new("bob", 81)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_manual_request_holds_content_without_a_thread_then_accept_releases_it_once_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_manual_request_holds_content_without_a_thread_then_accept_releases_it_once_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 71)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 81)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     let original = pending(&mut state, &directory).await?;
@@ -151,33 +174,33 @@ async fn contact02_manual_request_holds_content_without_a_thread_then_accept_rel
         assert!(deliver(&mut state, "bob", entry).await?.plaintext.is_none());
     }
     let bob = account(&state, "bob")?;
-    assert_eq!(bob.direct_messages("request-thread")?.len(), 0);
-    assert!(bob.account_db()?.client_record("conversation", "request-thread")?.is_none());
+    assert_eq!(bob.direct_messages(&direct_thread(&state)?)?.len(), 0);
+    assert!(bob.account_db()?.client_record("conversation", &direct_thread(&state)?)?.is_none());
     let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
     assert_eq!(list["requests"].as_array().map(Vec::len), Some(1));
     assert_eq!(list["requests"][0]["message_count"], 1);
     assert_eq!(list["requests"][0]["safety_number"].as_array().map(Vec::len), Some(12), "{list}");
     let id = list["requests"][0]["request_id"].clone();
     contact(&mut state, "bob", "contact.accept", json!({"request_id":id})).await?;
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+    assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 1);
+    let thread = direct_thread(&state)?;
+    let receiver = account(&state, "bob")?;
+    let messages = receiver.direct_messages(&thread)?;
+    let [stored] = messages.as_slice() else {
+        return Err(invalid("expected one released DM"));
+    };
+    let sent = entries.first().ok_or_else(|| invalid("sent frame"))?;
+    assert_eq!(stored.created_at, sent.envelope.created_at);
     assert_eq!(
-        account(&state, "bob")?.direct_messages("request-thread")?[0].created_at,
-        entries[0].envelope.created_at
-    );
-    assert_eq!(
-        account(&state, "bob")?
-            .account_db()?
-            .message_content(
-                &account(&state, "bob")?.direct_messages("request-thread")?[0].message_id
-            )?
-            .as_deref(),
-        Some(b"held-before-consent".as_slice())
+        receiver.generated_message_detail(&thread, &stored.message_id)?.message.text.as_deref(),
+        Some("held-before-consent"),
+        "consent release must retain typed Message text"
     );
     for entry in &entries {
         deliver(&mut state, "bob", entry).await?;
     }
     assert_eq!(
-        account(&state, "bob")?.direct_messages("request-thread")?.len(),
+        account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(),
         1,
         "consent replay must not duplicate content"
     );
@@ -191,9 +214,17 @@ async fn contact02_manual_request_holds_content_without_a_thread_then_accept_rel
 #[tokio::test]
 async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_sender_frames()
 -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(
+        contact02_decline_and_block_discard_held_messages_and_refuse_later_sender_frames_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_sender_frames_body()
+-> Result<(), SdkError> {
     for (action, seeds) in [("contact.decline", (91, 101)), ("contact.block", (111, 121))] {
-        let mut alice = Fixture::new("alice", seeds.0)?;
-        let mut bob = Fixture::new("bob", seeds.1)?;
+        let mut alice = Box::pin(Fixture::native_named("alice", seeds.0)).await?;
+        let mut bob = Box::pin(Fixture::native_named("bob", seeds.1)).await?;
         let directory = Directory::new(&alice, &bob).await?;
         let mut state = state(&mut alice, &mut bob, &directory)?;
         let original = pending(&mut state, &directory).await?;
@@ -215,12 +246,12 @@ async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_send
         assert_eq!(db.journal_bounds()?.head_seq, journal_before);
         let root = account(&state, "alice")?.owned_device_identity()?.root_commitment().to_owned();
         assert_eq!(account(&state, "bob")?.account_db()?.held_contact_messages(&root)?.len(), 0);
-        assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 0);
+        assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 0);
         message(&mut state, "new-message-after-refusal").await?;
         for entry in frames(&directory)? {
             assert!(deliver(&mut state, "bob", &entry).await.is_err());
         }
-        assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 0);
+        assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 0);
     }
     Ok(())
 }
@@ -228,29 +259,40 @@ async fn contact02_decline_and_block_discard_held_messages_and_refuse_later_send
 #[tokio::test]
 async fn contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust_cache()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 131)?;
-    let mut bob = Fixture::new("bob", 141)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust_cache_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust_cache_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 131)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 141)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     contact(&mut state, "alice", "contact.add", json!({"principal_id":"bob"})).await?;
     message(&mut state, "stranger-without-the-request").await?;
-    let mut entry = frames(&directory)?
-        .into_iter()
-        .find(|entry| {
-            decode(&entry.envelope)
-                .is_ok_and(|packet| packet.schema != contact_requests::ENVELOPE_SCHEMA)
-        })
-        .ok_or_else(|| invalid("direct frame"))?;
+    let mut entries = frames(&directory)?;
+    assert_eq!(entries.len(), 2, "native request precedes ordinary DM");
+    let mut entry = entries.pop().ok_or_else(|| invalid("direct frame"))?;
     assert!(
         deliver(&mut state, "bob", &entry).await.is_err(),
         "unrequested strangers stay rejected"
     );
     let raw = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|error| invalid(&error.to_string()))?;
-    let mut packet: SdkDmEncryptedEnvelope = serde_json::from_slice(&raw)?;
-    packet.schema = contact_requests::ENVELOPE_SCHEMA.into();
-    entry.envelope.encrypted_payload =
-        ramflux_protocol::encode_base64url(serde_json::to_vec(&packet)?);
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&raw)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut sidecar: Value = serde_json::from_slice(compact.sidecar)?;
+    sidecar["schema"] = json!("ramflux.sdk.contact_request.envelope.v1");
+    entry.envelope.encrypted_payload = ramflux_protocol::encode_base64url(
+        ramflux_protocol::message::outer::encode_compact_cryptobox(
+            compact.ciphertext,
+            &serde_json::to_vec(&sidecar)?,
+        )
+        .map_err(|error| invalid(&error.to_string()))?,
+    );
     entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         entry.envelope.encrypted_payload.as_bytes(),
@@ -265,15 +307,23 @@ async fn contact02_a_stranger_cannot_relabel_a_direct_packet_to_poison_the_trust
         contact(&mut state, "bob", "contact.requests.list", json!({})).await?["requests"],
         json!([])
     );
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 0);
+    assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 0);
     Ok(())
 }
 
 #[tokio::test]
 async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_send_ratchet()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 151)?;
-    let mut bob = Fixture::new("bob", 161)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_first_message_drains_its_request_before_loading_the_ordinary_send_ratchet_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_send_ratchet_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 151)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 161)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     {
@@ -309,23 +359,38 @@ async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_
     message(&mut state, "immediate-first-message").await?;
     let entries = frames(&directory)?;
     assert_eq!(entries.len(), 2, "request and message must both use normal gateway submission");
-    assert_eq!(decode(&entries[0].envelope)?.schema, contact_requests::ENVELOPE_SCHEMA);
-    assert_eq!(decode(&entries[1].envelope)?.schema, "ramflux.sdk.dm_x3dh_envelope.v2");
-    for entry in entries {
+    for (index, entry) in entries.into_iter().enumerate() {
         deliver(&mut state, "bob", &entry).await?;
+        if index == 0 {
+            let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
+            assert_eq!(
+                list["requests"].as_array().map(Vec::len),
+                Some(1),
+                "the first native control installs consent before the DM ratchet is opened"
+            );
+            assert_eq!(list["requests"][0]["message_count"], 0);
+        }
     }
     let list = contact(&mut state, "bob", "contact.requests.list", json!({})).await?;
     assert_eq!(list["requests"][0]["message_count"], 1);
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 0);
+    assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 0);
     Ok(())
 }
 
 #[tokio::test]
 async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
 -> Result<(), SdkError> {
+    crate::client::native_test_support::watchdog::within(
+        contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block_body()
+-> Result<(), SdkError> {
     for action in ["contact.decline", "contact.block"] {
-        let mut alice = Fixture::new("alice", 171)?;
-        let mut bob = Fixture::new("bob", 181)?;
+        let mut alice = Box::pin(Fixture::native_named("alice", 171)).await?;
+        let mut bob = Box::pin(Fixture::native_named("bob", 181)).await?;
         let directory = Directory::new(&alice, &bob).await?;
         let mut state = state(&mut alice, &mut bob, &directory)?;
         let original = pending(&mut state, &directory).await?;
@@ -388,7 +453,7 @@ async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
                     deliver(&mut state, "bob", &entry).await?;
                 }
             }
-            assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+            assert_eq!(account(&state, "bob")?.direct_messages(&direct_thread(&state)?)?.len(), 1);
         }
     }
     Ok(())
@@ -397,8 +462,16 @@ async fn contact02_fresh_request_after_decline_cooldown_does_not_clear_a_block()
 #[tokio::test]
 async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pending_messages()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 191)?;
-    let mut bob = Fixture::new("bob", 201)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_authenticated_own_contact_acceptance_releases_a_siblings_pending_messages_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pending_messages_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 191)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 201)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     pending(&mut state, &directory).await?;
@@ -412,16 +485,26 @@ async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pend
     let id = list["requests"][0]["link_id"].as_str().ok_or_else(|| invalid("link"))?;
     let mut link = client.account_db()?.friend_link(id)?;
     link.state = "accepted".into();
-    let manifest: Value = client
+    let manifest: SdkDeviceManifestResponse = client
         .account_db()?
         .load_actor_state(&format!("identity/manifest-root/{root}"))?
         .ok_or_else(|| invalid("manifest"))?;
-    // This decoder's caller already authenticated the owned-root packet. The existing
-    // own-device transport tests cover that boundary; this tests its consent projection.
-    let mut bytes = b"ramflux.own_contact.v1\n".to_vec();
-    bytes.extend(serde_json::to_vec(&json!({"manifest":manifest,"link":link}))?);
-    assert!(client.receive_own_contact(&bytes)?);
-    assert_eq!(client.direct_messages("request-thread")?.len(), 1);
+    // The owned-root transport authenticates this executor's caller; this case
+    // exercises the generated same-root consent projection and held-message release.
+    client.receive_generated_own_contact(&ramflux_protocol::message::OwnContactSync {
+        manifest: Some(ramflux_protocol::message::NativeDeviceManifest::try_from(&manifest)?),
+        link: Some(ramflux_protocol::message::FriendLinkRecord {
+            link_id: link.link_id,
+            requester_id: link.requester_id,
+            target_id: link.target_id,
+            state: link.state,
+            remove_scope: link.remove_scope,
+            blocked: link.blocked,
+            capability_revoked_at: link.capability_revoked_at,
+        }),
+        ..Default::default()
+    })?;
+    assert_eq!(client.direct_messages(&direct_thread(&state)?)?.len(), 1);
     assert_eq!(client.account_db()?.held_contact_messages(root)?.len(), 0);
     assert_eq!(
         contact(&mut state, "bob", "contact.requests.list", json!({})).await?["requests"],
@@ -433,8 +516,16 @@ async fn contact02_authenticated_own_contact_acceptance_releases_a_siblings_pend
 #[tokio::test]
 async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decision_codes()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 211)?;
-    let mut bob = Fixture::new("bob", 221)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decision_codes_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decision_codes_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 211)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 221)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     pending(&mut state, &directory).await?;
@@ -480,8 +571,16 @@ async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decis
 #[tokio::test]
 async fn contact02_note_character_limit_and_persistent_outbound_rate_refusal()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 31)?;
-    let mut bob = Fixture::new("bob", 41)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_note_character_limit_and_persistent_outbound_rate_refusal_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_note_character_limit_and_persistent_outbound_rate_refusal_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 31)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 41)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     for note in ["é".repeat(141), "unsafe\nnote".into()] {
@@ -517,8 +616,16 @@ async fn contact02_note_character_limit_and_persistent_outbound_rate_refusal()
 #[tokio::test]
 async fn contact02_expired_request_can_recover_a_lost_acceptance_without_reopening_consent()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 231)?;
-    let mut bob = Fixture::new("bob", 241)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_expired_request_can_recover_a_lost_acceptance_without_reopening_consent_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_expired_request_can_recover_a_lost_acceptance_without_reopening_consent_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 231)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 241)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     pending(&mut state, &directory).await?;
@@ -566,8 +673,16 @@ mod r4;
 #[tokio::test]
 async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_provenance()
 -> Result<(), SdkError> {
-    let mut alice = Fixture::new("alice", 71)?;
-    let mut bob = Fixture::new("bob", 81)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_accepting_a_received_lookup_request_keeps_stable_lookup_provenance_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact component exceeded its watchdog"))?
+}
+async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_provenance_body()
+-> Result<(), SdkError> {
+    let mut alice = Box::pin(Fixture::native_named("alice", 71)).await?;
+    let mut bob = Box::pin(Fixture::native_named("bob", 81)).await?;
     let directory = Directory::new(&alice, &bob).await?;
     let mut state = state(&mut alice, &mut bob, &directory)?;
     // The request reaches the cold receiver before it accepts by principal name.
@@ -602,3 +717,11 @@ async fn contact02_accepting_a_received_lookup_request_keeps_stable_lookup_prove
 mod followups;
 #[path = "contact_request_safety_tests.rs"]
 mod safety;
+
+fn direct_thread(state: &LocalBusDaemonState) -> Result<String, SdkError> {
+    ramflux_protocol::message::dm_scope::derive(
+        account(state, "alice")?.owned_device_identity()?.root_commitment(),
+        account(state, "bob")?.owned_device_identity()?.root_commitment(),
+    )
+    .map_err(|error| invalid(&error.to_string()))
+}

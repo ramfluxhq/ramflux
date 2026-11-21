@@ -65,6 +65,47 @@ impl Drop for Request {
 fn invalid(message: &str) -> CAbiError {
     CAbiError::new(RamfluxErrorCode::InvalidArgument, message)
 }
+
+/// A `message.submit` whose only content is Typing. Plaintext stays behind
+/// `allow_raw_messages`. Any sibling field, or a message next to typing, does not qualify.
+fn typing_only_submit(body: &serde_json::Value) -> bool {
+    let Some(map) = body.as_object() else {
+        return false;
+    };
+    if map.keys().any(|key| {
+        !matches!(key.as_str(), "send" | "requestId" | "request_id" | "accountId" | "account_id")
+    }) {
+        return false;
+    }
+    let Some(send) = map.get("send").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    if send.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "conversationId" | "conversation_id" | "operationId" | "operation_id" | "content"
+        )
+    }) {
+        return false;
+    }
+    let Some(content) = send.get("content").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    content.len() == 1 && content.contains_key("typing")
+}
+
+fn refuse_raw_submit(client: &Client, request: &Request) -> Result<(), CAbiError> {
+    if request.method == "message.submit"
+        && !client.shared.allow_raw_messages.load(std::sync::atomic::Ordering::Acquire)
+        && !typing_only_submit(&request.body)
+    {
+        return Err(CAbiError::new(
+            RamfluxErrorCode::PermissionDenied,
+            "raw_message capability is disabled",
+        ));
+    }
+    Ok(())
+}
 fn internal() -> CAbiError {
     CAbiError::new(RamfluxErrorCode::Internal, "bridge lock poisoned")
 }
@@ -355,13 +396,15 @@ pub extern "C" fn ramflux_v2_execute(
         {
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "secret_export"));
         }
-        if request.method == "message.submit"
-            && !client.shared.allow_raw_messages.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(CAbiError::new(
-                RamfluxErrorCode::PermissionDenied,
-                "raw_message capability is disabled",
-            ));
+        refuse_raw_submit(&client, &request)?;
+        if request.method == "contact.verify" {
+            let digest = blake3::hash(crate::message::FILE_DESCRIPTOR_SET).to_hex().to_string();
+            if !super::method_policy::loaded_cas_descriptor_matches(&digest) {
+                return Err(CAbiError::new(
+                    RamfluxErrorCode::CapabilityRejected,
+                    "contact.verify.cas",
+                ));
+            }
         }
         if client.closing.load(std::sync::atomic::Ordering::Acquire)
             || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
@@ -570,6 +613,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "InvalidRequest"
         | "ValidationFailed"
         | "CustodySetupInvalid"
+        | "CustodyPublicationFailed"
         | "invalid_argument"
         | "invalid_json"
         | "payload_too_large"
@@ -580,9 +624,11 @@ pub(super) fn error_code(name: &str) -> i32 {
         "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
             E::UnsupportedVersion as i32
         }
-        "AuthFailed" | "AccountLocked" | "Unauthenticated" | "TransportSecurity" => {
-            E::AuthFailed as i32
-        }
+        "AuthFailed"
+        | "AccountLocked"
+        | "Unauthenticated"
+        | "TransportSecurity"
+        | "CustodyConfirmationFailed" => E::AuthFailed as i32,
         "CapabilityRejected" => E::CapabilityRejected as i32,
         "ReplayRejected" | "ReplayMismatch" => E::ReplayRejected as i32,
         "McpGrantRejected" => E::McpGrantRejected as i32,

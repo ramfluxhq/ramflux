@@ -29,7 +29,7 @@ pub(crate) fn federation_discovery_surface(
             .unwrap_or_else(|_| config.node_id.clone()),
         public_endpoint: ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ENDPOINT")
             .unwrap_or_else(|_| config.mesh.listen_addr.clone()),
-        node_public_key: ramflux_crypto::public_key_base64url_from_seed(node_signing_seed),
+        node_public_key: ramflux_crypto::public_key_base64url_from_seed(&node_signing_seed),
         node_ca_cert_pem,
         node_signing_seed,
         protocol_versions: vec!["v1".to_owned()],
@@ -39,6 +39,10 @@ pub(crate) fn federation_discovery_surface(
             "federation_relay".to_owned(),
             "friend_request".to_owned(),
         ],
+        // An unset list is not a mesh address. Federation cannot see the router echo.
+        served_gateway_capabilities: ramflux_node_core::published_gateway_client_capabilities(
+            config.gateway_client_capabilities.as_deref(),
+        ),
         attachment_authority: None,
     };
     surface.attachment_authority = attachment_authority_from(
@@ -55,7 +59,22 @@ pub(crate) fn federation_discovery_surface(
     if ramflux_node_core::home_migration_enabled().unwrap_or(false) {
         surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
+    if ramflux_node_core::device_pairing_enabled().unwrap_or(false) {
+        surface.node_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
+        surface.node_capabilities.push(ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY.into());
+    }
     surface
+}
+
+fn base_client_capabilities(served_gateway: &[String]) -> Vec<String> {
+    let mut capabilities =
+        vec!["opaque_delivery".to_owned(), "prekey".to_owned(), "object_relay".to_owned()];
+    for capability in served_gateway {
+        if !capabilities.iter().any(|existing| existing == capability) {
+            capabilities.push(capability.clone());
+        }
+    }
+    capabilities
 }
 
 pub(crate) fn federation_node_signing_seed(
@@ -112,11 +131,8 @@ impl FederationDiscoverySurface {
             protocol_versions: ramflux_protocol::advertised_client_protocol_versions(
                 &self.protocol_versions,
             ),
-            client_capabilities: vec![
-                "opaque_delivery".to_owned(),
-                "prekey".to_owned(),
-                "object_relay".to_owned(),
-            ],
+            client_capabilities: base_client_capabilities(&self.served_gateway_capabilities),
+            version: ramflux_node_core::version::VERSION_SHA.to_owned(),
             updated_at: now,
             expires_at: now.saturating_add(ramflux_protocol::DISCOVERY_MAX_CACHE_TTL_SECONDS),
             signature: String::new(),
@@ -129,9 +145,7 @@ impl FederationDiscoverySurface {
         {
             record.client_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
         }
-        if ramflux_node_core::DEVICE_PAIRING_RELEASE_GATE
-            && ramflux_node_core::device_pairing_enabled().unwrap_or(false)
-        {
+        if ramflux_node_core::device_pairing_enabled().unwrap_or(false) {
             record.client_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
         }
         let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
@@ -145,6 +159,7 @@ impl FederationDiscoverySurface {
         &self,
     ) -> Result<ramflux_node_core::FederationServerRecord, ramflux_node_core::NodeCoreError> {
         let now = now_unix_seconds()?;
+        let pairing_enabled = ramflux_node_core::device_pairing_enabled().unwrap_or(false);
         let mut record = ramflux_node_core::FederationServerRecord {
             schema: "ramflux.well_known_server.v1".to_owned(),
             node_id: self.node_id.clone(),
@@ -157,8 +172,14 @@ impl FederationDiscoverySurface {
                 .node_capabilities
                 .iter()
                 .filter(|cap| {
-                    (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
-                        || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+                    (pairing_enabled
+                        || !matches!(
+                            cap.as_str(),
+                            ramflux_node_core::DEVICE_PAIRING_CAPABILITY
+                                | ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY
+                        ))
+                        && (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+                            || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
                         && (self.attachment_authority.is_some()
                             || cap.as_str() != ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY)
                 })
@@ -168,6 +189,7 @@ impl FederationDiscoverySurface {
                 ramflux_protocol::domain::FEDERATION_HANDSHAKE,
                 self.node_id.as_bytes(),
             ),
+            version: ramflux_node_core::version::VERSION_SHA.to_owned(),
             updated_at: now,
             expires_at: now.saturating_add(86_400),
             attachment_authority: self.attachment_authority.clone(),
@@ -193,7 +215,7 @@ mod tests {
         let surface = FederationDiscoverySurface {
             node_id: "node_test.realnet".to_owned(),
             public_endpoint: "ramflux-test-federation:7443".to_owned(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed(seed),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&seed),
             node_ca_cert_pem: "test-ca".to_owned(),
             node_signing_seed: seed,
             protocol_versions: vec!["v1".to_owned()],
@@ -202,6 +224,7 @@ mod tests {
                 "opaque_delivery".to_owned(),
                 ramflux_node_core::HOME_MIGRATION_CAPABILITY.into(),
             ],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: None,
         };
 
@@ -293,7 +316,7 @@ mod attachment_capability_tests {
         FederationDiscoverySurface {
             node_id: "A".into(),
             public_endpoint: "https://a.example".into(),
-            node_public_key: ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             node_ca_cert_pem: "test-ca".into(),
             node_signing_seed: [8; 32],
             protocol_versions: vec!["v1".into()],
@@ -302,6 +325,7 @@ mod attachment_capability_tests {
                 "opaque_delivery".into(),
                 ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY.into(),
             ],
+            served_gateway_capabilities: Vec::new(),
             attachment_authority: authority,
         }
     }
@@ -342,5 +366,198 @@ mod attachment_capability_tests {
         assert!(attachment_authority_from(Some("0"), Some(&k)).is_none());
         assert!(attachment_authority_from(Some("x"), Some(&k)).is_none());
         assert!(attachment_authority_from(Some("3"), Some(&k[..42])).is_none());
+    }
+}
+
+#[cfg(test)]
+mod gateway_capability_tests {
+    fn config(
+        endpoints: &serde_json::Value,
+        capabilities: Option<&serde_json::Value>,
+    ) -> Result<ramflux_node_core::NodeServiceConfig, Box<dyn std::error::Error>> {
+        let mut value = serde_json::json!({
+            "node_id": "A",
+            "service_id": "ramflux-federation",
+            "redb_path": "unused.redb",
+            "mesh": {
+                "listen_addr": "127.0.0.1:0",
+                "ca_cert": "unused.pem",
+                "service_cert": "unused.pem",
+                "service_key": "unused.key",
+                "allowed_service_ids": [],
+                "endpoints": endpoints
+            }
+        });
+        if let Some(capabilities) = capabilities {
+            value["gateway_client_capabilities"] = capabilities.clone();
+        }
+        Ok(serde_json::from_value(value)?)
+    }
+
+    fn client_capabilities(
+        endpoints: &serde_json::Value,
+        capabilities: Option<&serde_json::Value>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut surface =
+            super::federation_discovery_surface(&config(endpoints, capabilities)?, [8; 32]);
+        surface.node_ca_cert_pem = "test-ca".into();
+        let client = surface.client_record()?;
+        let server = surface.well_known_record()?;
+        assert!(
+            server.node_capabilities.iter().all(|capability| {
+                capability != ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+                    && capability != ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY
+            }),
+            "the federation server record does not advertise gateway client capabilities"
+        );
+        Ok(client.client_capabilities)
+    }
+
+    fn has(capabilities: &[String], name: &str) -> bool {
+        capabilities.iter().filter(|capability| capability.as_str() == name).count() == 1
+    }
+
+    fn lacks_gateway_features(capabilities: &[String], push: &str, ephemeral: &str) -> bool {
+        !capabilities.iter().any(|capability| capability == push || capability == ephemeral)
+    }
+
+    #[test]
+    fn record_contains_gateway_capabilities_only_when_the_node_serves_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let push = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY;
+        let ephemeral = ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
+        let absent = client_capabilities(&serde_json::json!({}), None)?;
+        assert!(has(&absent, "opaque_delivery"), "base opaque_delivery stays");
+        assert!(has(&absent, "prekey"), "base prekey stays");
+        assert!(has(&absent, "object_relay"), "base object_relay stays");
+        assert!(
+            lacks_gateway_features(&absent, push, ephemeral),
+            "an unset list publishes neither gateway feature"
+        );
+        let addressed = client_capabilities(
+            &serde_json::json!({"gateway": "ramflux-gateway:7443", "router": "ramflux-router:7443"}),
+            None,
+        )?;
+        assert!(
+            lacks_gateway_features(&addressed, push, ephemeral),
+            "mesh addresses do not publish gateway client capabilities"
+        );
+        let disabled = client_capabilities(
+            &serde_json::json!({"gateway": "ramflux-gateway:7443", "router": "ramflux-router:7443"}),
+            Some(&serde_json::json!([])),
+        )?;
+        assert!(
+            lacks_gateway_features(&disabled, push, ephemeral),
+            "an empty capability list serves neither feature"
+        );
+        let ephemeral_only =
+            client_capabilities(&serde_json::json!({}), Some(&serde_json::json!([ephemeral])))?;
+        assert!(
+            lacks_gateway_features(&ephemeral_only, push, ephemeral),
+            "ephemeral is not served without session push"
+        );
+        let push_only = client_capabilities(
+            &serde_json::json!({"gateway": "ramflux-gateway:7443"}),
+            Some(&serde_json::json!([push])),
+        )?;
+        assert!(has(&push_only, push), "session push is published from the configured list");
+        assert!(
+            !push_only.iter().any(|capability| capability == ephemeral),
+            "session push does not imply ephemeral"
+        );
+        let served = client_capabilities(
+            &serde_json::json!({"router": "  "}),
+            Some(&serde_json::json!([ephemeral, push, push, "not-a-capability"])),
+        )?;
+        assert!(has(&served, "opaque_delivery"), "base opaque_delivery stays when features are on");
+        assert!(has(&served, "prekey"), "base prekey stays when features are on");
+        assert!(has(&served, "object_relay"), "base object_relay stays when features are on");
+        assert!(has(&served, push), "session push is published once");
+        assert!(has(&served, ephemeral), "ephemeral is published once with session push");
+        let push_at = served.iter().position(|capability| capability == push);
+        let ephemeral_at = served.iter().position(|capability| capability == ephemeral);
+        assert!(
+            push_at.is_some_and(|push_at| ephemeral_at.is_some_and(|at| push_at < at)),
+            "ephemeral follows session push"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pairing_capability_tests {
+    const CHILD: &str = "RAMFLUX_PAIRING_DISCOVERY_CHILD";
+    const NAME: &str = "discovery::pairing_capability_tests::pairing_capability_is_advertised_only_when_the_node_enables_pairing";
+
+    #[test]
+    fn pairing_capability_is_advertised_only_when_the_node_enables_pairing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(CHILD).is_none() {
+            for flag in [None, Some("0"), Some("1")] {
+                let mut child = std::process::Command::new(std::env::current_exe()?);
+                child
+                    .args(["--exact", NAME])
+                    .env(CHILD, "1")
+                    .env_remove("RAMFLUX_DEVICE_PAIRING_ENABLED");
+                if let Some(flag) = flag {
+                    child.env("RAMFLUX_DEVICE_PAIRING_ENABLED", flag);
+                }
+                let output = child.output()?;
+                assert!(
+                    output.status.success(),
+                    "test: pairing discovery child for {flag:?} failed: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                    "test: pairing discovery child for {flag:?} ran no test"
+                );
+            }
+            return Ok(());
+        }
+        let config: ramflux_node_core::NodeServiceConfig = serde_json::from_value(
+            serde_json::json!({
+                "node_id": "A", "service_id": "ramflux-federation", "redb_path": "unused.redb",
+                "mesh": {"listen_addr": "127.0.0.1:0", "ca_cert": "unused.pem", "service_cert": "unused.pem", "service_key": "unused.key", "allowed_service_ids": [], "endpoints": {}}
+            }),
+        )?;
+        let enabled = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").as_deref() == Ok("1");
+        let mut surface = super::federation_discovery_surface(&config, [8; 32]);
+        surface.node_ca_cert_pem = "test-ca".into();
+        // A surface that carries the names by other means must still obey the node opt-in.
+        surface.node_capabilities.extend([
+            ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into(),
+            ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY.into(),
+        ]);
+        let client = surface.client_record()?;
+        let server = surface.well_known_record()?;
+        let has = |caps: &[String], name: &str| caps.iter().any(|cap| cap == name);
+        assert_eq!(
+            has(&client.client_capabilities, ramflux_node_core::DEVICE_PAIRING_CAPABILITY),
+            enabled,
+            "test: client discovery must advertise device_pairing_v2 exactly when the node enables pairing"
+        );
+        for name in [
+            ramflux_node_core::DEVICE_PAIRING_CAPABILITY,
+            ramflux_node_core::PRIMARY_TRANSFER_FULL_CAPABILITY,
+        ] {
+            assert_eq!(
+                has(&server.node_capabilities, name),
+                enabled,
+                "test: federation record must advertise {name} exactly when the node enables pairing"
+            );
+        }
+        assert!(
+            has(&client.client_capabilities, "opaque_delivery"),
+            "test: pairing opt-in removed ordinary client discovery capabilities"
+        );
+        ramflux_node_core::verify_federation_server_record(&server, server.updated_at)?;
+        ramflux_crypto::verify_canonical_signature(
+            &ramflux_protocol::client_discovery_signing_bytes(&client)?,
+            &client.signature,
+            &client.node_public_key,
+        )?;
+        Ok(())
     }
 }

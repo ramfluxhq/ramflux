@@ -2,10 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Born-v3 account authority. Legacy v1/v2 signing functions remain separate.
+mod cooperative_transfer;
 mod genesis;
 mod keys;
 mod management;
 mod recovery;
+pub use cooperative_transfer::{
+    CooperativeTransferInput, cooperative_transfer_preserving_devices,
+    verify_cooperative_preservation,
+};
 pub use recovery::{RecoveryInput, recover_primary};
 mod contact_card;
 pub use contact_card::verify_contact_card_v3;

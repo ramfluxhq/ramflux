@@ -97,7 +97,7 @@ pub(crate) fn capture(
     let db = account.client.account_db()?;
     let body = &request.body;
     let own = &account.gateway_config.principal_id;
-    if matches!(request.method.as_str(), "account.create" | "account.itest_legacy.create") {
+    if request.method.as_str() == "account.create" {
         let root = account.client.account_index()?.root();
         let path = local_bus_account_manifest_path(root, &db.local_account_id);
         let mut manifest = read_local_bus_account_manifest(&path)?;
@@ -122,44 +122,7 @@ pub(crate) fn capture(
         db.persist_client_record("identity", id, &value)?;
     }
     if request.method == "message.submit" {
-        let id = required(body, "conversation_id")?;
-        let peer = body
-            .get("recipient_device_id")
-            .and_then(Value::as_str)
-            .map(|device| {
-                let reference = body["recipient_principal_commitment"]
-                    .as_str()
-                    .map(|root| ramflux_protocol::qualified_device_id(root, device))
-                    .transpose()?
-                    .unwrap_or_else(|| device.to_owned());
-                db.client_record("device", &reference)
-            })
-            .transpose()?
-            .flatten();
-        let principal =
-            peer.as_ref().and_then(|peer| peer.get("principal_id")).and_then(Value::as_str);
-        let participants = std::iter::once(own.as_str())
-            .chain(principal)
-            .collect::<std::collections::BTreeSet<_>>();
-        let commitment = body
-            .get("recipient_principal_commitment")
-            .filter(|v| !v.is_null())
-            .cloned()
-            .or_else(|| peer.as_ref().and_then(|p| p.get("principal_commitment")).cloned());
-        db.persist_client_record("conversation",id,&json!({"kind":"direct","title":body.get("title"),"participants":participants,"group_id":null,"direct_route":{"recipient_principal_commitment":commitment,"recipient_device_ids":body.get("recipient_device_id").map(|id|vec![id.clone()]).unwrap_or_default(),"target_delivery_id":body.get("target_delivery_id"),"federation":body.get("federation")}}))?;
-        if let Some(attachments) = body.get("attachments").and_then(Value::as_array) {
-            for attachment in attachments {
-                let attachment: LocalBusMessageAttachmentInput =
-                    serde_json::from_value(attachment.clone())?;
-                object_metadata(
-                    db,
-                    &attachment.object_id,
-                    &serde_json::to_value(&attachment)?,
-                    own,
-                    Some(body),
-                )?;
-            }
-        }
+        capture_direct_route(db, body)?;
     }
     capture_group(account, request)?;
     if request.method.starts_with("object.put")
@@ -322,5 +285,28 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
         }
         db.persist_client_record("conversation", conversation, &metadata)?;
     }
+    Ok(())
+}
+
+/// Authored send owns participants and immutable roots. Capture only presentation/route fields.
+fn capture_direct_route(db: &AccountDb, body: &Value) -> Result<(), SdkError> {
+    let id = required(body, "conversation_id")?;
+    let mut record = db
+        .client_record("conversation", id)?
+        .ok_or_else(|| SdkError::LocalBus("authored conversation context missing".into()))?;
+    if record["kind"] != "direct" || !record["group_id"].is_null() {
+        return Err(SdkError::LocalBus("authored direct context mismatch".into()));
+    }
+    if let Some(title) = body.get("title") {
+        record["title"] = title.clone();
+    }
+    record["direct_route"] = json!({
+        "recipient_principal_commitment": body.get("recipient_principal_commitment"),
+        "recipient_device_ids": body.get("recipient_device_id")
+            .map(|id| vec![id.clone()]).unwrap_or_default(),
+        "target_delivery_id": body.get("target_delivery_id"),
+        "federation": body.get("federation"),
+    });
+    db.persist_client_record("conversation", id, &record)?;
     Ok(())
 }

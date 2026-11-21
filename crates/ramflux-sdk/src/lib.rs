@@ -23,18 +23,12 @@ compile_error!("production builds must not enable itest-memory-vault");
 #[cfg(all(feature = "itest-memory-vault", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-memory-vault");
 
-#[cfg(all(feature = "itest-legacy-accounts", not(any(test, ramflux_itest))))]
-compile_error!("itest-legacy-accounts requires cfg(test) or RAMFLUX_ITEST_BUILD=1");
-#[cfg(all(feature = "itest-legacy-accounts", ramflux_production))]
-compile_error!("production builds must not enable itest-legacy-accounts");
-#[cfg(all(feature = "itest-legacy-accounts", ramflux_release_profile))]
-compile_error!("release profiles must not enable itest-legacy-accounts");
-
 pub mod bindings;
 mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+pub mod diag;
 mod platform;
 /// Default data root on Windows: `%LOCALAPPDATA%\ramflux\<profile>`, resolved with the Known
 /// Folder API. `None` selects the profile `default`. The roaming folder is never used.
@@ -51,6 +45,8 @@ pub use client::home_migration::{
 };
 pub mod attachment_renewal;
 pub mod attachment_retirement;
+mod attachment_send;
+pub use attachment_send::PlaintextDigester;
 pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
@@ -71,6 +67,11 @@ mod dm;
 mod ephemeral;
 mod error;
 mod error_policy;
+mod passphrase;
+pub use passphrase::{
+    MIN_ACCEPTED_PASSPHRASE_SCALARS, MIN_PASSPHRASE_SCALARS, PassphrasePolicyError,
+    check_new_passphrase,
+};
 mod federation;
 mod gateway;
 mod group;
@@ -109,9 +110,8 @@ pub use bus::{
     LocalBusContactSafetyRequest, LocalBusConversationDisappearingExpireRequest,
     LocalBusConversationDisappearingSetRequest, LocalBusConversationMuteRequest,
     LocalBusConversationRequest, LocalBusCreatedAccount, LocalBusCreatedAccountState,
-    LocalBusCreationClient, LocalBusDeviceActivateRequest, LocalBusDeviceActivateResponse,
-    LocalBusDeviceListResponse, LocalBusDeviceRecord, LocalBusDeviceRevokeRequest,
-    LocalBusDeviceSyncExportRequest, LocalBusDeviceSyncImportRequest, LocalBusErrorBody,
+    LocalBusCreationClient, LocalBusDeviceListResponse, LocalBusDeviceRecord,
+    LocalBusDeviceRevokeRequest, LocalBusDeviceSyncExportRequest, LocalBusErrorBody,
     LocalBusFederationRoute, LocalBusFrame, LocalBusFrameKind, LocalBusGrantRequest,
     LocalBusGrantRevokeRequest, LocalBusGrantStandingApprovalCreateRequest,
     LocalBusGrantStandingApprovalRevokeRequest, LocalBusGroupCreateRequest,
@@ -129,7 +129,7 @@ pub use bus::{
     LocalBusObjectGetReadRequest, LocalBusObjectGetRequest, LocalBusObjectGetStatusRequest,
     LocalBusObjectImportRequest, LocalBusObjectPutBeginRequest, LocalBusObjectPutChunkRequest,
     LocalBusObjectPutFinishRequest, LocalBusObjectPutRequest, LocalBusObjectPutStatusRequest,
-    LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
+    LocalBusObjectRevokeRequest, LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, LocalBusPendingCreation, LocalBusPendingRecovery,
     LocalBusRecoveryClient, LocalBusSubscriptionOpenRequest, LocalMcpGrantSigningBody,
     LocalMcpStandingApprovalSigningBody, TaskApprovalBinding, serve_local_bus,
@@ -139,6 +139,7 @@ pub use bus::{
 #[doc(hidden)]
 pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
+pub use client::account::account_db_key_encryption_key;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 #[cfg(feature = "itest-fingerprint")]
@@ -165,7 +166,10 @@ pub use ephemeral::{
     ReceiverLifetime, admit_authenticated_ciphertext, authenticate, decode_ephemeral_result,
     echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral, ttl_seconds,
 };
-pub use error::{GeneratedRefusalCode, GroupOperation, ReceiveEpochReconcileFailure, SdkError};
+pub use error::{
+    CustodyConfirmReason, GeneratedRefusalCode, GroupOperation, ReceiveEpochReconcileFailure,
+    SdkError,
+};
 mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,
@@ -208,9 +212,15 @@ pub use object::{SdkObjectRelayCapability, SdkRelayToken};
 pub use prekey::SdkDeviceManifestResponse;
 
 #[cfg(feature = "test-support")]
-pub use bus::account_runtime::testing::{AccountSessionFixture, AccountSessionHarness};
+pub use bus::account_runtime::testing::{
+    AccountSessionFixture, AccountSessionHarness, NativePairingNetworkFixture,
+    NativePairingSessionFixture,
+};
 #[cfg(feature = "test-support")]
 pub use bus::account_runtime::testing_calls::NativeCallAccount;
 
 #[cfg(all(feature = "test-support", any(ramflux_production, ramflux_release_profile)))]
 compile_error!("test-support is excluded from production and release builds");
+
+#[cfg(feature = "test-support")]
+pub use bus::account_runtime::testing_messages::NativeMessageBus;

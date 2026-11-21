@@ -22,6 +22,7 @@ pub struct SdkGroupSenderKeyDistribution {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cfg(test)]
 pub(crate) struct SdkGroupSenderKeyDistributionEnvelope {
     pub(crate) schema: String,
     pub(crate) version: u32,
@@ -56,25 +57,6 @@ pub(crate) struct SdkGroupEncryptedEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) group_state_hash: Option<String>,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub(crate) struct SdkGroupControlEnvelope {
-    pub(crate) schema: String,
-    pub(crate) version: u32,
-    pub(crate) event: ramflux_protocol::GroupEvent,
-}
-
-pub(crate) enum GroupGatewayDeliveryResult {
-    Message(Vec<u8>),
-    SenderKeyDistribution(SdkGroupSenderKeyDistribution),
-}
-
-pub(crate) struct SdkGroupPendingPlaintext {
-    pub(crate) group_id: String,
-    pub(crate) conversation_id: String,
-    pub(crate) message_id: String,
-    pub(crate) plaintext: Vec<u8>,
 }
 
 pub(crate) fn group_sender_key_checkpoint_name(
@@ -139,13 +121,6 @@ pub(crate) fn group_key_associated_data(
         head,
     ))?)
 }
-pub(crate) fn group_message_schema(schema: &str) -> bool {
-    matches!(
-        schema,
-        "ramflux.sdk.group_sender_key.message.v1" | "ramflux.sdk.group_sender_key.message.v2"
-    )
-}
-
 pub(crate) fn group_sender_session_id(group_id: &str, sender_id: &str, epoch: u64) -> String {
     format!("group:{group_id}:sender:{sender_id}:epoch:{epoch}")
 }
@@ -217,15 +192,6 @@ pub(crate) fn group_member_kicked_event_id(
     format!("group.member_kicked:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
 }
 
-pub(crate) fn group_member_banned_event_id(
-    group_id: &str,
-    actor_device_id: &str,
-    target_member_id: &str,
-    new_group_epoch: u64,
-) -> String {
-    format!("group.member_banned:{group_id}:{actor_device_id}:{target_member_id}:{new_group_epoch}")
-}
-
 pub(crate) fn group_message_deleted_event_id(
     group_id: &str,
     actor_device_id: &str,
@@ -253,6 +219,7 @@ pub(crate) fn group_member_accepted_event_id(
     format!("group.member_accepted:{group_id}:{invitee_identity}:{invite_id}:{new_group_epoch}")
 }
 
+#[cfg(test)]
 pub(crate) fn group_member_joined_event_id(
     group_id: &str,
     actor_device_id: &str,
@@ -260,35 +227,6 @@ pub(crate) fn group_member_joined_event_id(
     new_group_epoch: u64,
 ) -> String {
     format!("group.member_joined:{group_id}:{actor_device_id}:{joined_identity}:{new_group_epoch}")
-}
-
-pub(crate) fn group_entry_is_sender_key_message(
-    entry: &GatewayInboxEntry,
-) -> Result<bool, SdkError> {
-    let encrypted_body = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        .map_err(|error| SdkError::LocalBus(format!("invalid group payload: {error}")))?;
-    Ok(serde_json::from_slice::<SdkGroupEncryptedEnvelope>(&encrypted_body)
-        .is_ok_and(|envelope| envelope.schema == "ramflux.sdk.group_sender_key.message.v1"))
-}
-
-pub(crate) fn group_plaintext_json(
-    conversation_id: &str,
-    group_id: &str,
-    message_id: &str,
-    plaintext: &[u8],
-) -> serde_json::Value {
-    serde_json::json!({
-        "conversation_id": conversation_id,
-        "group_id": group_id,
-        "message_id": message_id,
-        "plaintext_body_base64": ramflux_protocol::encode_base64url(plaintext),
-        "body_utf8": String::from_utf8_lossy(plaintext),
-    })
-}
-
-pub(crate) fn is_missing_group_sender_key_error(error: &SdkError) -> bool {
-    let message = error.to_string();
-    message.contains("missing group sender key")
 }
 
 pub(crate) fn group_associated_data(group_id: &str, sender_id: &str, epoch: u64) -> Vec<u8> {

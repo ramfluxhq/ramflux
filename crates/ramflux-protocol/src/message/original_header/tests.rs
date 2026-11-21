@@ -11,7 +11,7 @@ fn original() -> Result<g::Inner, validation::ValidationError> {
         device_epoch: 7,
     };
     Ok(g::Inner {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 1,
         identity: Some(g::EventIdentity {
             id: g::identity::derive(&author, "conversation", 3)?.to_vec(),
@@ -21,7 +21,12 @@ fn original() -> Result<g::Inner, validation::ValidationError> {
             hlc: 9,
             ..Default::default()
         }),
-        body: g::Message { text: "erased body".into(), ..Default::default() }.encode_to_vec(),
+        body: g::Message {
+            erasure_nonce: vec![0x71; 32],
+            text: "erased body".into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
     })
 }
 
@@ -62,6 +67,7 @@ fn original_header_never_commits_body_fields() -> TestResult {
     let mut inner = original()?;
     let first = for_inner(&inner.encode_to_vec(), 100, 400)?;
     inner.body = g::Message {
+        erasure_nonce: vec![0x71; 32],
         text: "replacement body".into(),
         reply_to: Some(g::MessageRef {
             id: vec![9; 32],
@@ -75,7 +81,7 @@ fn original_header_never_commits_body_fields() -> TestResult {
     assert!(first.is_some());
     let identity = inner.identity.ok_or("identity")?.encode_to_vec();
     let transcript = transcript(&Header {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 1,
         exact_identity: &identity,
         issued_at: 100,
@@ -118,7 +124,7 @@ fn edited_group_header_requires_exact_redacted_group_binding() -> TestResult {
     };
     let exact = identity.encode_to_vec();
     let first = commitment(&Header {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 1,
         exact_identity: &exact,
         issued_at: 100,
@@ -129,7 +135,7 @@ fn edited_group_header_requires_exact_redacted_group_binding() -> TestResult {
     assert_ne!(
         first,
         commitment(&Header {
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
             kind: 1,
             exact_identity: &exact,
             issued_at: 100,
@@ -140,7 +146,7 @@ fn edited_group_header_requires_exact_redacted_group_binding() -> TestResult {
     group.author.as_mut().ok_or("author")?.device_epoch = 9;
     assert_eq!(
         commitment(&Header {
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
             kind: 1,
             exact_identity: &exact,
             issued_at: 100,
@@ -178,7 +184,7 @@ fn edited_history_evidence_fields_have_permanent_layer_bindings() -> TestResult 
                 key_epoch: 2,
                 group_state_hash: vec![3; 32],
             }),
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
         }),
         ..Default::default()
     };
@@ -242,7 +248,7 @@ fn edited_group_history_item_drops_wrapper_commitments() -> TestResult {
     ext.ext.insert(
         EXT_KEY.into(),
         serde_json::json!(commitment(&Header {
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
             kind: 1,
             exact_identity: &exact,
             issued_at: 100,
@@ -256,7 +262,7 @@ fn edited_group_history_item_drops_wrapper_commitments() -> TestResult {
             &ext,
             1,
             Some(&Header {
-                layer: 2,
+                layer: g::registry::PROFILE_FLOOR,
                 kind: 1,
                 exact_identity: &exact,
                 issued_at: 100,

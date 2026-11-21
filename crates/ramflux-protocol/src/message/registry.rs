@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant schema ownership and permanent kind/operation bindings.
+//! Active schema ownership and permanent kind/operation bindings.
 use super::validation::ValidationError;
 use super::{
     Call, Content, Control, Delete, Edit, FILE_DESCRIPTOR_SET, Message, Reaction, Receipt,
@@ -12,7 +12,7 @@ use prost_reflect::{DescriptorPool, MessageDescriptor};
 use std::{collections::BTreeMap, sync::OnceLock};
 
 /// Highest application layer implemented by this schema stage.
-pub const COMPILED_LAYER: u32 = 3;
+pub const COMPILED_LAYER: u32 = 4;
 /// Admitted schema floor; declaration freshness cannot lower it.
 pub const PROFILE_FLOOR: u32 = 3;
 /// Permanently withdrawn kind numbers.

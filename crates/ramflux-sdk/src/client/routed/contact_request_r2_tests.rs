@@ -17,8 +17,17 @@ pub(super) async fn outbound(
 #[tokio::test]
 async fn contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget() -> Result<(), SdkError>
 {
-    let mut a = Fixture::new("alice", 31)?;
-    let mut b = Fixture::new("bob", 41)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 31)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 41)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let valid = outbound(&mut state, &directory).await?;
@@ -46,15 +55,46 @@ async fn contact02_r2_unsigned_junk_cannot_spend_the_genuine_request_budget() ->
 #[tokio::test]
 async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_controls()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 51)?;
-    let mut b = Fixture::new("bob", 61)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_controls_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_controls_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 51)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 61)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = outbound(&mut state, &directory).await?;
-    let manifest = directory.records.lock().map_err(|_| invalid("directory lock"))?[0].clone();
-    account(&state, "bob")?.persist_identity_directory(&manifest)?;
+    let manifest = directory
+        .records
+        .lock()
+        .map_err(|_| invalid("directory lock"))?
+        .first()
+        .cloned()
+        .ok_or_else(|| invalid("source manifest"))?;
+    account(&state, "bob")?.persist_observed_identity_directory_now(&manifest)?;
     let opened = account(&state, "bob")?.open_routed(&entry, "bob")?;
-    let original: contact_requests::Control = serde_json::from_slice(&opened.body)?;
+    account(&state, "bob")?.verify_contact_control(&entry, &opened.routing, &opened.body)?;
+    let original = crate::client::contact_requests::native_tests::decoded_consent(&opened.body)
+        .map_err(|e| invalid(&e.to_string()))?;
+    let native = a.native.as_ref().ok_or_else(|| invalid("native source"))?;
+    let public = native
+        .manifest
+        .custody
+        .as_ref()
+        .ok_or_else(|| invalid("native manifest"))?
+        .publication
+        .record
+        .body
+        .master_certificate
+        .body
+        .self_signing_public_key
+        .clone();
+    let primary = native.vault.primary_for_public_key(&public)?;
     for short_lifetime in [true, false] {
         let mut control = original.clone();
         if short_lifetime {
@@ -62,22 +102,38 @@ async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_con
         } else {
             control.body.request_id = ramflux_protocol::encode_base64url([9; 32]);
         }
+        // A genuine management signer signs invalid semantics deliberately.
         control.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
-            &ramflux_protocol::canonical_json_bytes(
-                &json!({"domain":"ramflux.contact_request.v1","body":control.body}),
+            &ramflux_protocol::custody::signing_bytes(
+                ramflux_protocol::domain::CONTACT_REQUEST_V2,
+                &control.body,
             )?,
-            account(&state, "alice")?
-                .identity_root
-                .as_ref()
-                .ok_or(SdkError::IdentityRootMissing)?
-                .signing_key
-                .to_bytes(),
+            *primary.vault_seed(),
         );
+        let payload = crate::client::generated_control::control_from_payload(
+            ramflux_protocol::message::control::Payload::ContactControl(
+                ramflux_protocol::message::ContactControl {
+                    consent: Some(ramflux_protocol::message::NativeContactConsent {
+                        canonical: ramflux_protocol::canonical_json_bytes(&control)?,
+                    }),
+                },
+            ),
+        )?;
+        let original_inner =
+            <ramflux_protocol::message::Inner as prost::Message>::decode(opened.body.as_slice())
+                .map_err(|_| invalid("original native Inner"))?;
+        let identity = original_inner.identity.ok_or_else(|| invalid("original identity"))?;
+        let exact = RamfluxClient::encode_generated_inner(
+            identity,
+            &ramflux_protocol::message::Content {
+                value: Some(ramflux_protocol::message::content::Value::Control(payload)),
+            },
+        )?;
         assert!(
             account(&state, "bob")?
-                .verify_contact_control(&entry, &opened.routing, &serde_json::to_vec(&control)?)
+                .verify_contact_control(&entry, &opened.routing, &exact)
                 .is_err(),
-            "a root signer cannot choose expiry or another selector as its request ID"
+            "a primary signer cannot choose expiry or another selector as its request ID"
         );
     }
     Ok(())
@@ -85,8 +141,17 @@ async fn contact02_r2_short_expiry_and_chosen_request_ids_are_not_valid_wire_con
 #[tokio::test]
 async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_authority()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 71)?;
-    let mut b = Fixture::new("bob", 81)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_persists_a_compact_request_and_prunes_closed_requester_authority_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_authority_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 71)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 81)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let source = root(&state, "alice")?;
@@ -137,8 +202,17 @@ async fn contact02_r2_persists_a_compact_request_and_prunes_closed_requester_aut
 #[tokio::test]
 async fn contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_receipt()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 91)?;
-    let mut b = Fixture::new("bob", 101)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_receipt_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_receipt_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 91)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 101)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let a_root = root(&state, "alice")?;
@@ -171,8 +245,16 @@ async fn contact02_r2_exhausted_reply_items_cannot_roll_back_a_new_auto_accept_r
 }
 #[tokio::test]
 async fn contact02_r2_readding_a_pending_request_retries_delivery() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 111)?;
-    let mut b = Fixture::new("bob", 121)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_readding_a_pending_request_retries_delivery_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_readding_a_pending_request_retries_delivery_body() -> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 111)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 121)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let first = outbound(&mut state, &directory).await?;
@@ -199,8 +281,17 @@ async fn contact02_r2_readding_a_pending_request_retries_delivery() -> Result<()
 }
 #[tokio::test]
 async fn contact02_r2_root_selector_cannot_match_an_attackers_request_id() -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 131)?;
-    let mut b = Fixture::new("bob", 141)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_root_selector_cannot_match_an_attackers_request_id_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_root_selector_cannot_match_an_attackers_request_id_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 131)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 141)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let victim = root(&state, "alice")?;
@@ -228,8 +319,17 @@ async fn contact02_r2_root_selector_cannot_match_an_attackers_request_id() -> Re
 #[tokio::test]
 async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_content()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 151)?;
-    let mut b = Fixture::new("bob", 161)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_expiry_between_admission_and_projection_cannot_publish_content_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_content_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 151)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 161)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
@@ -253,7 +353,13 @@ async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_con
     )?;
     assert!(
         client
-            .project_accepted_contact_message(&opened.routing, &entry, &opened.body, None)
+            .project_accepted_contact_message_at(
+                &opened.routing,
+                &entry,
+                &opened.body,
+                None,
+                entry.envelope.created_at
+            )
             .is_err()
     );
     assert_eq!(client.direct_messages("request-thread")?.len(), 0);
@@ -263,18 +369,21 @@ async fn contact02_r2_expiry_between_admission_and_projection_cannot_publish_con
 #[tokio::test]
 async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_without_blocking_dm()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 171)?;
-    let mut b = Fixture::new("bob", 181)?;
+    crate::client::native_test_support::watchdog::within(contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_without_blocking_dm_body())
+        .await.map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_without_blocking_dm_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 171)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 181)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let entry = outbound(&mut state, &directory).await?;
     let source = root(&state, "alice")?;
-    let target = root(&state, "bob")?;
     {
         let receiver = account(&state, "bob")?;
-        let manifest = directory.records.lock().map_err(|_| invalid("directory"))?[0].clone();
-        receiver.persist_identity_directory(&manifest)?;
-        receiver.establish_friend_link("known-root", &source, &target)?;
+        receiver.set_contact_request_policy("auto_accept")?;
         for _ in 0..120 {
             assert!(receiver.account_db()?.charge_contact_request(
                 "bootstrap-attempts",
@@ -284,13 +393,12 @@ async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_
             )?);
         }
     }
-    message(&mut state, "ordinary-traffic-behind-backpressure").await?;
-    let mut dm = frames(&directory)?.into_iter().next().ok_or_else(|| invalid("dm"))?;
+    let (mut dm, conversation) = known_peer_traffic(&mut state, &directory).await?;
     dm.inbox_seq = 2;
     *directory.incoming.lock().map_err(|_| invalid("inbox"))? = vec![entry.clone(), dm];
     crate::bus::sync_driver::run(state.accounts.get_mut("bob").ok_or_else(|| invalid("bob"))?)
         .await?;
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+    assert_eq!(account(&state, "bob")?.direct_messages(&conversation)?.len(), 1);
     assert_eq!(
         directory.incoming.lock().map_err(|_| invalid("inbox"))?.len(),
         1,
@@ -324,15 +432,24 @@ async fn contact02_r2_budget_backpressure_keeps_gateway_ciphertext_and_redrives_
             .state,
         "accepted"
     );
-    assert_eq!(account(&state, "bob")?.direct_messages("request-thread")?.len(), 1);
+    assert_eq!(account(&state, "bob")?.direct_messages(&conversation)?.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_consent()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 191)?;
-    let mut b = Fixture::new("bob", 201)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_consent_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_consent_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 191)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 201)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     let source = root(&state, "alice")?;
@@ -406,26 +523,59 @@ async fn contact02_r2_full_active_queue_defers_the_reply_without_rolling_back_co
 #[tokio::test]
 async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 211)?;
-    let mut b = Fixture::new("bob", 221)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 211)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 221)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
     let receiver = account(&state, "bob")?;
     let source = root(&state, "alice")?;
-    let mut set = receiver.observed_device_set(&source)?.ok_or_else(|| invalid("authority"))?;
+    let native = a.native.as_ref().ok_or_else(|| invalid("source native vault"))?;
+    let mut manifest = native.manifest.clone();
+    let record = manifest
+        .custody
+        .as_ref()
+        .ok_or_else(|| invalid("native authority"))?
+        .publication
+        .record
+        .clone();
+    let primary = native
+        .vault
+        .primary_for_public_key(&record.body.master_certificate.body.self_signing_public_key)?;
+    let mut next = record.body.clone();
+    next.device_set_epoch += 1;
+    next.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&record)?);
+    next.profile.display_name = "verified successor".into();
+    let successor = primary.sign_record(next.clone())?;
     let now = now_unix_timestamp();
     let db = receiver.account_db()?;
     assert!(db.retain_contact_request_authority_floor(
         &source,
-        set.device_set_epoch + 1,
-        "newer-record",
+        successor.body.device_set_epoch,
+        &ramflux_protocol::custody::object_hash(&successor)?,
         now + 604_800,
-        now
+        now,
     )?);
-    assert!(receiver.check_observed_set(&set).is_err());
-    set.device_set_epoch += 1;
-    assert!(receiver.check_observed_set(&set).is_err(), "same-epoch fork must also fail");
+    assert!(
+        receiver.remember_contact_request_cache(&manifest).is_err(),
+        "a lower signed native head cannot roll back the retained floor"
+    );
+    next.profile.display_name = "conflicting successor".into();
+    manifest.custody.as_mut().ok_or_else(|| invalid("native authority"))?.publication.record =
+        primary.sign_record(next)?;
+    assert!(
+        receiver.remember_contact_request_cache(&manifest).is_err(),
+        "a genuinely signed same-epoch fork must also fail"
+    );
     db.write_transaction(|| -> Result<(), SdkError> {
         for n in 0..4095 {
             assert!(db.retain_contact_request_authority_floor(
@@ -459,37 +609,55 @@ async fn contact02_r2_retired_authority_floors_are_bounded_and_reject_rollback()
 async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_without_renderer_recovery()
 -> Result<(), SdkError> {
     use crate::client::surface::test_support::{append_frame, create_frame, text_snapshot};
-    use crate::client::surface::{Carrier, PayloadKind};
+    use crate::client::surface::{Carrier, ControlKind, PayloadKind};
+    use ramflux_protocol::message as g;
     use ramflux_protocol::{SurfaceEvent as E, SurfaceState};
-    let mut a = Fixture::new("alice", 231)?;
-    let mut b = Fixture::new("bob", 241)?;
+    let mut a = Box::pin(Fixture::native_named("alice", 231)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 241)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     pending(&mut state, &directory).await?;
+    let conversation = direct_thread(&state)?;
     let create =
-        create_frame("request-thread", &text_snapshot("held", "Working", ""))?.wire_bytes()?;
+        create_frame(&conversation, &text_snapshot("held", "Working", ""))?.wire_bytes()?;
     let base = SurfaceState::default().apply(&E::from_wire_bytes(&create)?)?;
     let append = append_frame(&base, "/result", "hello", false)?.wire_bytes()?;
     let carrier = account(&state, "alice")?.sign_surface_carrier(Carrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         posted_at: None,
         updated_at: None,
         payload_kind: PayloadKind::Event,
-        conversation_id: "request-thread".into(),
+        conversation_id: conversation.clone(),
         surface_id: "held".into(),
         message_id: "held-v2".into(),
         sender_principal_id: "alice".into(),
         sender_device_id: "alice".into(),
         author_principal_id: "alice".into(),
-        wire_base64: ramflux_protocol::encode_base64url(append),
+        wire_base64: ramflux_protocol::encode_base64url(&append),
         signature: String::new(),
         snapshot: None,
     })?;
+    let delivery =
+        account(&state, "alice")?.surface_control_packet(&carrier, ControlKind::Peer, None)?;
+    let content = g::Content {
+        value: Some(g::content::Value::Surface(g::Surface {
+            payload: Some(g::surface::Payload::Delivery(delivery.to_generated()?)),
+        })),
+    };
+    let peer = root(&state, "bob")?;
+    let recipient = ramflux_protocol::qualified_device_id(&peer, "bob")?;
     let request = request(
         "alice",
         "message.submit",
-        json!({"conversation_id":"request-thread","message_id":"held-surface","envelope_id":"held-surface","source_principal_id":"alice","sender_id":"alice","recipient_device_id":"bob","target_delivery_id":"bob","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(carrier.bytes()?),"created_at":now_unix_timestamp()-120,"ttl":3600}),
+        json!({
+            "content": content, "conversation_id": conversation, "message_id":"held-surface",
+            "envelope_id":"held-surface", "source_principal_id":"alice","sender_id":"alice",
+            "recipient_device_id":"bob","recipient_principal_commitment":peer,
+            "target_delivery_id":recipient,"encrypted_body_base64":"",
+            "created_at":now_unix_timestamp()-120,"ttl":3600,
+        }),
     );
     let (outbound, _) = tokio::sync::mpsc::channel(8);
     let connection = crate::bus::state::LocalBusConnectionState::new(1, outbound);
@@ -502,28 +670,37 @@ async fn contact02_r2_held_human_surface_release_creates_a_fallback_thread_witho
     let receiver = account(&state, "bob")?;
     let pending = receiver.account_db()?.list_actor_states::<Value>("surface/pending/")?;
     assert!(pending.is_empty(), "human-authored cards must not enter the renderer recovery queue");
-    let messages = receiver.direct_messages("request-thread")?;
+    let messages = receiver.direct_messages(&conversation)?;
     assert_eq!(
         messages.first().map(|message| message.created_at),
         Some(entry.envelope.created_at),
         "contact consent must preserve the fallback message's authenticated send time"
     );
     assert!(
-        receiver.surface_list("request-thread", "", 100)?["surfaces"]
+        receiver.surface_list(&conversation, "", 100)?["surfaces"]
             .as_array()
             .is_some_and(Vec::is_empty),
         "fallback-only authors must not bootstrap card state"
     );
-    assert!(receiver.account_db()?.client_record("conversation", "request-thread")?.is_some());
-    assert_eq!(receiver.direct_messages("request-thread")?.len(), 1);
+    assert!(receiver.account_db()?.client_record("conversation", &conversation)?.is_some());
+    assert_eq!(receiver.direct_messages(&conversation)?.len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_consent()
 -> Result<(), SdkError> {
-    let mut a = Fixture::new("alice", 23)?;
-    let mut b = Fixture::new("bob", 33)?;
+    crate::client::native_test_support::watchdog::within(
+        contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_consent_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_consent_body()
+-> Result<(), SdkError> {
+    let mut a = Box::pin(Fixture::native_named("alice", 23)).await?;
+    let mut b = Box::pin(Fixture::native_named("bob", 33)).await?;
     let directory = Directory::new(&a, &b).await?;
     let mut state = state(&mut a, &mut b, &directory)?;
     account(&state, "bob")?.account_db()?.establish_friend_link("legacy-name", "bob", "alice")?;
@@ -536,4 +713,62 @@ async fn contact02_r2_requester_cache_cannot_supply_the_pin_for_legacy_name_cons
     assert!(receiver.pending_contact_root(&root(&state, "alice")?)?);
     assert_eq!(receiver.account_db()?.contact_message_count(&root(&state, "alice")?)?, 1);
     Ok(())
+}
+
+async fn known_peer_traffic(
+    bus_state: &mut LocalBusDaemonState,
+    directory: &Directory,
+) -> Result<(GatewayInboxEntry, String), SdkError> {
+    let mut carol = Box::pin(Fixture::native_named("carol", 17)).await?;
+    let mut unused_peer = Box::pin(Fixture::native_named("bob", 27)).await?;
+    let manifest = carol.manifest()?;
+    directory.records.lock().map_err(|_| invalid("directory"))?.push(manifest.clone());
+    let mut other = state(&mut carol, &mut unused_peer, directory)?;
+    let account = other.accounts.remove("carol").ok_or_else(|| invalid("known source"))?;
+    bus_state.accounts.insert("carol".into(), account);
+    let bob_manifest = directory
+        .records
+        .lock()
+        .map_err(|_| invalid("directory"))?
+        .iter()
+        .find(|row| row.principal_id == "bob")
+        .cloned()
+        .ok_or_else(|| invalid("known receiver manifest"))?;
+    let source_root = manifest.principal_commitment.clone();
+    let peer_root = bob_manifest.principal_commitment.clone();
+    let conversation = ramflux_protocol::message::dm_scope::derive(&source_root, &peer_root)
+        .map_err(|_| invalid("known direct scope"))?;
+    let receiver = bus_state.accounts.get("bob").ok_or_else(|| invalid("receiver"))?;
+    receiver.client.persist_observed_identity_directory_now(&manifest)?;
+    receiver.client.establish_friend_link("known-peer", &source_root, &peer_root)?;
+    let source = bus_state.accounts.get_mut("carol").ok_or_else(|| invalid("source"))?;
+    source.client.persist_observed_identity_directory_now(&bob_manifest)?;
+    source.client.establish_friend_link("known-peer", &source_root, &peer_root)?;
+    let device = bob_manifest.devices.first().ok_or_else(|| invalid("peer device"))?;
+    let message = GatewayDirectMessage {
+        conversation_id: conversation.clone(),
+        message_id: "known-traffic".into(),
+        envelope_id: "known-traffic".into(),
+        source_principal_id: "carol".into(),
+        sender_id: source.gateway_config.device_id.clone(),
+        recipient_device_id: Some(device.device_id.clone()),
+        recipient_principal_commitment: Some(peer_root),
+        target_delivery_id: device.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 3600,
+    };
+    let mut engine = source.session_client().await?;
+    let sent = source
+        .client
+        .send_plaintext_direct_message_via_gateway(
+            &mut engine,
+            message,
+            b"ordinary traffic behind stranger admission pressure",
+        )
+        .await;
+    source.install_test_session(engine);
+    sent?;
+    let entry = frames(directory)?.into_iter().next().ok_or_else(|| invalid("known DM frame"))?;
+    Ok((entry, conversation))
 }

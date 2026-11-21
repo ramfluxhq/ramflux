@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
+pub(crate) const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
 const NODE_ID: &str = "localhost";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
@@ -76,9 +76,12 @@ impl ChildGuard {
 pub struct Stack {
     pub discovery_url: String,
     pub gateway_public: String,
+    pub gateway_quic: String,
     pub router_mesh: String,
     pub node_id: String,
     pub admin_url: String,
+    /// Mesh address of the relay attachment surface; present only when booted with a relay.
+    pub relay_attachment: Option<String>,
     _servers: Vec<ChildGuard>,
     pub root: ramflux_test_support::TestPath,
 }
@@ -159,7 +162,47 @@ fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
         || text.contains("addrinuse")
 }
 
+/// Boot ordinary product services with explicit test-owned operator settings.
+/// # Errors
+/// Returns configuration, child-process or readiness failures.
+pub fn boot_pairing_stack(extra: &[(&str, &str)]) -> Result<Stack> {
+    boot_stack_once_with_env(NODE_ID, true, extra)
+}
+
 fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
+    boot_stack_once_with_env(node_id, wal, &[])
+}
+
+/// Boot the ordinary stack plus a real `ramflux-relay` serving the native attachment plane.
+/// The gateway forwards attachment calls to it over the mesh; no client QUIC object surface
+/// and no keyring provider are started.
+/// # Errors
+/// Returns configuration, child-process or readiness failures.
+pub fn boot_stack_with_relay() -> Result<Stack> {
+    let mut last = None;
+    for attempt in 1..=BOOT_ATTEMPTS {
+        match boot_stack_core(NODE_ID, true, &[], true) {
+            Ok(stack) => return Ok(stack),
+            Err(error) if attempt < BOOT_ATTEMPTS && is_addr_in_use(&error) => {
+                last = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| "boot stack retries exhausted".into()))
+}
+
+fn boot_stack_once_with_env(node_id: &str, wal: bool, extra: &[(&str, &str)]) -> Result<Stack> {
+    boot_stack_core(node_id, wal, extra, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn boot_stack_core(
+    node_id: &str,
+    wal: bool,
+    extra: &[(&str, &str)],
+    with_relay: bool,
+) -> Result<Stack> {
     // The owning directory is already unique. Keep socket paths short under CI TMPDIR.
     let root = ramflux_test_support::TestPath::new()?.child("s");
     let mut guard = RootGuard { path: root.clone(), keep: false };
@@ -167,8 +210,12 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     std::fs::create_dir_all(root.join("state"))?;
     std::fs::create_dir_all(root.join("certs"))?;
     create_ca(&root)?;
-    let services = ["ramflux-federation", "ramflux-router", "ramflux-retention", "ramflux-gateway"];
-    for service in services {
+    let mut services =
+        vec!["ramflux-federation", "ramflux-router", "ramflux-retention", "ramflux-gateway"];
+    if with_relay {
+        services.push("ramflux-relay");
+    }
+    for service in services.iter().copied() {
         issue_service_cert(&root, service, node_id)?;
     }
     let mesh: Vec<String> =
@@ -189,11 +236,12 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
     #[cfg(windows)]
     let custody = init_custody_record(&root, node_id, seed)?;
     let router_async = free_udp_addr()?;
+    let relay_attachment = if with_relay { mesh.get(4).cloned() } else { None };
     for (service, mesh_addr) in services.iter().zip(mesh.iter()) {
         write_service_toml(&root, service, mesh_addr, &mesh, &gateway_tcp, node_id)?;
     }
     let mut servers = Vec::new();
-    let order = startup_order();
+    let order = startup_order(with_relay);
     let ca_pem = root.join("certs").join("ca.pem");
     for (service, markers) in order {
         let mut command = Command::new(sibling_bin(service)?);
@@ -209,6 +257,8 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             // Also supports the gateway binary built by the local-mint feature matrix.
             .env("RAMFLUX_RELAY_SERVICE_KEY_REF", "literal:rf-cli-e2e-relay-test-key")
             .env("RAMFLUX_FEDERATION_NODE_SIGNING_SEED_FILE", &signing_seed)
+            // The router reads the node identity key from its own file when pairing is on.
+            .env("RAMFLUX_ROUTER_PAIRING_NODE_SIGNING_SEED_FILE", &signing_seed)
             .env("RAMFLUX_FEDERATION_PUBLIC_ADDR", &public_addr)
             .env("RAMFLUX_FEDERATION_ADMIN_ADDR", &admin_addr)
             .env("RAMFLUX_ITEST_GATEWAY_QUIC_ADDR", &gateway_quic)
@@ -228,7 +278,13 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
             .env_remove("RAMFLUX_RELAY_CLIENT_QUIC_ADDR")
             .env("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY", &custody.node_public_key)
             .env("RAMFLUX_CUSTODY_NODE_RECORD_FILE", &custody.node_record_file)
-            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed);
+            .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", &custody.proxy_signing_seed)
+            .envs(extra.iter().copied());
+        if let Some(relay) = relay_attachment.as_deref() {
+            command
+                .env("RAMFLUX_RELAY_ATTACHMENT_ADDR", relay)
+                .env("RAMFLUX_RELAY_ATTACHMENT_ENDPOINT", relay);
+        }
         let log_path = root.join("logs").join(format!("{service}.log"));
         let mut child = ChildGuard::spawn(service.to_owned(), command, log_path.clone())?;
         if let Err(error) = wait_for_log_markers(&log_path, markers, READY_TIMEOUT) {
@@ -251,29 +307,32 @@ fn boot_stack_once(node_id: &str, wal: bool) -> Result<Stack> {
         root,
         discovery_url,
         gateway_public: gateway_tcp,
+        gateway_quic,
         router_mesh,
         node_id,
         admin_url,
+        relay_attachment,
         _servers: servers,
     })
 }
 
-fn startup_order() -> [(&'static str, &'static [&'static str]); 4] {
-    [
+fn startup_order(with_relay: bool) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut order: Vec<(&'static str, &'static [&'static str])> = vec![
         ("ramflux-federation", federation_ready()),
         (
             "ramflux-router",
             &["router mesh mTLS surface listening", "router async QUIC ingress listening"][..],
         ),
         ("ramflux-retention", &["retention mesh mTLS surface listening"][..]),
-        (
-            "ramflux-gateway",
-            &[
-                "gateway QUIC session surface listening",
-                "gateway TCP-TLS session surface listening",
-            ][..],
-        ),
-    ]
+    ];
+    if with_relay {
+        order.push(("ramflux-relay", &["relay attachment surface listening"][..]));
+    }
+    order.push((
+        "ramflux-gateway",
+        &["gateway QUIC session surface listening", "gateway TCP-TLS session surface listening"][..],
+    ));
+    order
 }
 
 fn validate_discovery(
@@ -323,7 +382,7 @@ fn init_custody(
     seed: [u8; 32],
 ) -> Result<CustodyEnv> {
     let output_dir = root.join("custody");
-    let public = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let public = ramflux_crypto::public_key_base64url_from_seed(&seed);
     let mut command = Command::new(rf_bin());
     command
         .args([
@@ -361,7 +420,7 @@ fn init_custody_record(root: &Path, node_id: &str, seed: [u8; 32]) -> Result<Cus
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sign_until = now.checked_add(VALIDITY_DAYS * DAY).ok_or("custody expiry overflow")?;
     let overlap_until = sign_until.checked_add(OVERLAP).ok_or("custody overlap overflow")?;
-    let node_public_key = ramflux_crypto::public_key_base64url_from_seed(seed);
+    let node_public_key = ramflux_crypto::public_key_base64url_from_seed(&seed);
     let proxy_seed = ramflux_crypto::random_32()?;
     let key_seed = ramflux_crypto::random_32()?;
     let proxy_public = ramflux_protocol::encode_base64url(
@@ -510,8 +569,8 @@ pub fn spawn_daemon_with_env(
         .arg(&data_root)
         .arg("--itest-memory-vault")
         .env_remove("RAMFLUX_TEST_CRASH_AFTER_COMMITS")
-        .envs(env.iter().copied())
-        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug");
+        .env("RUST_LOG", "info,ramflux_sdk::bus::connection_manager::receive=debug,ramflux_sdk::bus::couriers::layer_publish=debug")
+        .envs(env.iter().copied());
     let log_path = data_root.join("daemon.log");
     let mut child = ChildGuard::spawn(format!("rf-{}", socket.display()), command, log_path)?;
     let deadline = Instant::now() + SOCKET_TIMEOUT;
@@ -541,7 +600,22 @@ pub fn configure_node(daemon: &Daemon, discovery_url: &str) -> Result<String> {
 
 pub fn create_account(daemon: &Daemon, display_name: &str) -> Result<Account> {
     let created = pty_account_create(&daemon.socket, display_name, PASSPHRASE)?;
-    let id = required_str(&created, "account_id")?;
+    created_account(daemon, display_name, &created)
+}
+
+#[cfg(unix)]
+pub fn create_owned_agent(daemon: &Daemon, custodian: &Account) -> Result<Account> {
+    let created = pty_account_create_with_args(
+        &daemon.socket,
+        "Surface agent",
+        PASSPHRASE,
+        &["--kind", "headless_ai", "--custodian", &custodian.id],
+    )?;
+    created_account(daemon, "Surface agent", &created)
+}
+
+fn created_account(daemon: &Daemon, display_name: &str, created: &Value) -> Result<Account> {
+    let id = required_str(created, "account_id")?;
     wait_networking_live(daemon, &id)?;
     let status = rf_json(&daemon.socket, &["account", "status", "--account", &id])?;
     Ok(Account {
@@ -629,8 +703,8 @@ pub fn wait_receive_settled(daemon: &Daemon, account: &Account) -> Result<Value>
 }
 
 pub fn exchange_contacts(a: &Daemon, alice: &Account, b: &Daemon, bob: &Account) -> Result<()> {
-    let alice_card = rf_json(&a.socket, &["contact", "card", "--account", &alice.id])?;
-    let bob_card = rf_json(&b.socket, &["contact", "card", "--account", &bob.id])?;
+    let alice_card = contact_card_json(a, &alice.id)?;
+    let bob_card = contact_card_json(b, &bob.id)?;
     let alice_text = required_str(&alice_card, "card")?;
     let bob_text = required_str(&bob_card, "card")?;
     rf_json(&b.socket, &["contact", "add", "--account", &bob.id, "--card", &alice_text])?;
@@ -657,6 +731,13 @@ fn contact_list_has_peer(value: &Value, peer: &Account) -> bool {
             || row.get("target_id").and_then(Value::as_str) == Some(peer.principal_id.as_str())
             || row.get("requester_id").and_then(Value::as_str) == Some(peer.principal_id.as_str())
     })
+}
+
+pub fn dm_conversation(first: &Account, second: &Account) -> Result<String> {
+    Ok(ramflux_protocol::message::dm_scope::derive(
+        &first.principal_commitment,
+        &second.principal_commitment,
+    )?)
 }
 
 pub fn dm_send(
@@ -746,25 +827,20 @@ pub fn wait_dm_receipt(
 }
 
 pub fn message_has_peer_receipt(value: &Value, message_id: &str, peer: &Account) -> bool {
-    for key in ["decrypted_messages", "messages"] {
-        let Some(rows) = value.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            if row.get("message_id").and_then(Value::as_str) != Some(message_id)
-                && row.get("id").and_then(Value::as_str) != Some(message_id)
-            {
-                continue;
-            }
-            let Some(receipts) = row.get("receipts").and_then(Value::as_array) else {
-                continue;
-            };
-            if receipts.iter().any(|receipt| receipt_matches_peer(receipt, peer)) {
-                return true;
-            }
-        }
-    }
-    false
+    let rows = ["changes", "messages"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_array))
+        .flatten()
+        .chain(value.get("message"));
+    rows.filter(|row| {
+        row.get("id").and_then(Value::as_str) == Some(message_id)
+            || row.get("message_id").and_then(Value::as_str) == Some(message_id)
+    })
+    .any(|row| {
+        row.get("receipts").and_then(Value::as_array).is_some_and(|receipts| {
+            receipts.iter().any(|receipt| receipt_matches_peer(receipt, peer))
+        })
+    })
 }
 
 fn receipt_matches_peer(receipt: &Value, peer: &Account) -> bool {
@@ -954,13 +1030,14 @@ pub fn dm_ack(
     })
 }
 
+/// Reads the generation-1 `rf dm send` shape: `{"envelope": {"envelope_id": ...}, ...}`.
 pub fn envelope_id_from_read(value: &Value) -> Option<String> {
-    for key in ["decrypted_messages", "gateway_entries", "messages", "envelope"] {
-        if let Some(id) = nested_envelope_id(value.get(key).unwrap_or(&Value::Null)) {
-            return Some(id);
-        }
-    }
-    nested_envelope_id(value)
+    value
+        .get("envelope")
+        .and_then(|envelope| envelope.get("envelope_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 pub fn inbox_seq_from_read(value: &Value, envelope_id: &str) -> Option<u64> {
@@ -985,21 +1062,6 @@ fn nested_inbox_seq(value: &Value, envelope_id: &str) -> Option<u64> {
             map.values().find_map(|child| nested_inbox_seq(child, envelope_id))
         }
         Value::Array(rows) => rows.iter().find_map(|row| nested_inbox_seq(row, envelope_id)),
-        _ => None,
-    }
-}
-
-fn nested_envelope_id(value: &Value) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            if let Some(id) =
-                map.get("envelope_id").and_then(Value::as_str).filter(|id| !id.is_empty())
-            {
-                return Some(id.to_owned());
-            }
-            map.values().find_map(nested_envelope_id)
-        }
-        Value::Array(rows) => rows.iter().find_map(nested_envelope_id),
         _ => None,
     }
 }
@@ -1186,18 +1248,26 @@ pub fn unique(prefix: &str) -> String {
 }
 
 pub fn message_texts(value: &Value) -> Vec<String> {
-    let mut texts = Vec::new();
-    for key in ["decrypted_messages", "messages"] {
-        let Some(rows) = value.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            if let Some(text) = row.get("body_utf8").and_then(Value::as_str) {
-                texts.push(text.to_owned());
-            }
-        }
+    if value.get("schema").and_then(Value::as_str) != Some("ramflux.message.read_model.v1") {
+        return Vec::new();
     }
-    texts
+    if let Some(rows) = value.get("changes").and_then(Value::as_array) {
+        return rows.iter().filter_map(|row| row["text"].as_str().map(str::to_owned)).collect();
+    }
+    if let Some(rows) = value.get("messages").and_then(Value::as_array) {
+        // Message pages are newest first; the causal batch assertions compare authored order.
+        return rows
+            .iter()
+            .rev()
+            .filter_map(|row| row["text"].as_str().map(str::to_owned))
+            .collect();
+    }
+    value
+        .get("message")
+        .and_then(|row| row["text"].as_str())
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
 }
 
 pub fn contains_all_texts(value: &Value, expected: &[&str]) -> bool {
@@ -1215,6 +1285,47 @@ pub fn assert_texts_once_in_order(value: &Value, expected: &[&str]) -> Result<()
     Ok(())
 }
 
+/// Exports a contact card, retrying only the typed retryable `PublicationPending` refusal (a
+/// layer install still in flight on a slow host) within a bounded deadline; any other refusal
+/// fails at once.
+pub fn contact_card_json(daemon: &Daemon, account_id: &str) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match rf_json(&daemon.socket, &["contact", "card", "--account", account_id]) {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.to_string().contains("PublicationPending")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(error) => {
+                return Err(format!("{error}; {}", pending_diagnostics(daemon, account_id)).into());
+            }
+        }
+    }
+}
+
+/// Failure evidence for a stuck install: the daemon log and every file under the account's
+/// `pairing-install` directory (pending rows and the installed marker; public refs and hashes only).
+fn pending_diagnostics(daemon: &Daemon, account_id: &str) -> String {
+    let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
+    let dir = daemon.data_root.join("custody_accounts").join(account_id).join("pairing-install");
+    let markers = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| {
+                let body = std::fs::read_to_string(entry.path())
+                    .unwrap_or_else(|error| format!("<unreadable: {error}>"));
+                format!("{}={body}", entry.file_name().display())
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+        Err(error) => format!("<no pairing-install dir: {error}>"),
+    };
+    format!("pending_markers=[{markers}]; daemon_log={log}")
+}
+
 /// Poll one CLI command until `ready` accepts its JSON, within the shared poll budget.
 pub fn wait_json(daemon: &Daemon, args: &[&str], ready: impl Fn(&Value) -> bool) -> Result<Value> {
     poll_json(daemon, args, POLL_TIMEOUT, ready)
@@ -1227,6 +1338,7 @@ fn poll_json(
     ready: impl Fn(&Value) -> bool,
 ) -> Result<Value> {
     let deadline = Instant::now() + timeout;
+    let mut reported_failure = false;
     loop {
         match rf_json(&daemon.socket, args) {
             Ok(value) if ready(&value) => return Ok(value),
@@ -1235,6 +1347,14 @@ fn poll_json(
             }
             Err(error) if Instant::now() >= deadline => {
                 return Err(format!("timed out waiting for CLI JSON; last={error}").into());
+            }
+            Err(error) if !reported_failure => {
+                let reason = error.to_string().chars().take(768).collect::<String>();
+                eprintln!(
+                    "CLI poll {} first refusal: {reason}",
+                    args.first().copied().unwrap_or("unknown command"),
+                );
+                reported_failure = true;
             }
             _ => {}
         }
@@ -1280,8 +1400,20 @@ pub fn rf_json(socket: &Path, args: &[&str]) -> Result<Value> {
     rf_json_env(socket, args, &[])
 }
 
+/// Same JSON CLI call as [`rf_json`], with the caller's deadline.
+/// The wait lives in the shared process-group runner.
+pub fn rf_json_timeout(socket: &Path, args: &[&str], timeout: Duration) -> Result<Value> {
+    let output = rf_output_env_timeout(socket, args, &[], timeout)
+        .map_err(|error| format!("rf {args:?} failed to spawn: {error}"))?;
+    finish_rf_json(args, output)
+}
+
 fn rf_json_env(socket: &Path, args: &[&str], extra: &[(&str, &str)]) -> Result<Value> {
     let output = rf_output_env(socket, args, extra)?;
+    finish_rf_json(args, output)
+}
+
+fn finish_rf_json(args: &[&str], output: std::process::Output) -> Result<Value> {
     if !output.status.success() {
         return Err(format!(
             "rf {args:?} failed ({}): stdout={} stderr={}",
@@ -1296,8 +1428,17 @@ fn rf_json_env(socket: &Path, args: &[&str], extra: &[(&str, &str)]) -> Result<V
         .map_err(|error| format!("rf {args:?} produced non-JSON stdout ({error}): {stdout}").into())
 }
 
-fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+pub(crate) fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     rf_output_env(socket, args, &[])
+}
+
+/// One CLI call with the caller's deadline; the exit status and stderr stay inspectable.
+pub fn rf_output_with_timeout(
+    socket: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    rf_output_env_timeout(socket, args, &[], timeout)
 }
 
 fn rf_output_timeout(
@@ -1340,9 +1481,19 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
 
 #[cfg(not(windows))]
 fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Result<Value> {
+    pty_account_create_with_args(socket, display_name, passphrase, &[])
+}
+
+#[cfg(not(windows))]
+fn pty_account_create_with_args(
+    socket: &Path,
+    display_name: &str,
+    passphrase: &str,
+    extra: &[&str],
+) -> Result<Value> {
     let rf = rf_bin();
     let socket_text = socket.to_str().ok_or("socket path")?;
-    let inner = [
+    let mut inner = vec![
         rf.to_str().ok_or("rf path")?,
         "--socket",
         socket_text,
@@ -1351,6 +1502,7 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
         "--display-name",
         display_name,
     ];
+    inner.extend_from_slice(extra);
     let mut command = Command::new("script");
     if cfg!(target_os = "linux") {
         command.args(["-q", "-e", "-f", "-c", &shell_join(&inner), "/dev/null"]);
@@ -1663,7 +1815,12 @@ fn shell_join(args: &[&str]) -> String {
 }
 
 fn rf_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rf"))
+    if let Some(root) = std::env::var_os("RAMFLUX_PAIRING_BIN_DIR") {
+        return PathBuf::from(root).join("rf");
+    }
+    option_env!("CARGO_BIN_EXE_rf")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/debug/rf"))
 }
 
 fn sibling_bin(name: &str) -> Result<PathBuf> {
@@ -1776,7 +1933,7 @@ fn create_ca(root: &Path) -> Result<()> {
     ])
 }
 
-fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
+pub fn issue_service_cert(root: &Path, service: &str, node_id: &str) -> Result<()> {
     let certs = root.join("certs");
     let key = certs.join(format!("{service}.key"));
     let csr = certs.join(format!("{service}.csr"));
@@ -1832,13 +1989,23 @@ fn write_service_toml(
     node_id: &str,
 ) -> Result<()> {
     let certs = root.join("certs");
+    let service_seed = ramflux_protocol::encode_base64url(ramflux_crypto::blake3_256(
+        "ramflux.cli.e2e.node.v1",
+        node_id.as_bytes(),
+    ));
     let database = root.join("state").join(service).join(format!("{service}.redb"));
     if let Some(parent) = database.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let endpoints = format!(
         "gateway = \"{}\"\nrouter = \"{}\"\nnotify = \"{}\"\nfederation = \"{}\"\nrelay = \"{}\"\nsignaling = \"{}\"\nretention = \"{}\"",
-        mesh[3], mesh[1], mesh[1], mesh[0], mesh[1], mesh[1], mesh[2]
+        mesh[3],
+        mesh[1],
+        mesh[1],
+        mesh[0],
+        mesh.get(4).unwrap_or(&mesh[1]),
+        mesh[1],
+        mesh[2]
     );
     std::fs::write(
         certs.join(format!("{service}.toml")),
@@ -1846,7 +2013,7 @@ fn write_service_toml(
             r#"node_id = "{node_id}"
 service_id = "{service}"
 redb_path = "{}"
-node_service_signing_seed_b64url = "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio"
+node_service_signing_seed_b64url = "{service_seed}"
 
 [mesh]
 listen_addr = "{listen}"

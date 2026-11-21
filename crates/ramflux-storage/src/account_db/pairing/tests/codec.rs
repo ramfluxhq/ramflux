@@ -10,7 +10,7 @@ use super::super::schema::{
 };
 use super::helpers::{
     TestResult, ack_bytes, adoption, context_bytes, field_err, floor, h, head, invited,
-    publication, publication_at, terminal,
+    publication, publication_at, ref_bytes, terminal,
 };
 use ramflux_protocol::MAX_SAFE_JSON_INTEGER;
 
@@ -354,5 +354,43 @@ pub(super) fn adoption_role_arms() -> TestResult {
     let mut extra = secondary;
     extra.primary_vault_ref = Some("vault-primary".into());
     field_err(&decode_adoption(&extra), "primary_vault_ref");
+    Ok(())
+}
+
+pub(super) fn layer_update_head_is_closed_to_pairing_columns_and_discards_only_when_prepared()
+-> TestResult {
+    let (root, db) = crate::tests::test_db("pair04-layer-head")?;
+    let mut layer = head()?;
+    layer.kind = "layer_update".into();
+    layer.invitation_id = None;
+    layer.recipient_ref = None;
+    decode_head(&layer)?;
+    let mut with_recipient = layer.clone();
+    with_recipient.recipient_ref = Some(ref_bytes("dev-b")?);
+    field_err(&decode_head(&with_recipient), "recipient_ref");
+    db.put_pairing_head(&layer)?;
+    assert!(
+        !db.discard_prepared_layer_head(&layer.operation_id, &h(99))?,
+        "a different candidate hash must not discard"
+    );
+    assert!(db.pairing_head()?.is_some(), "a refused discard must keep the row");
+    let mut acked = layer.clone();
+    let (_, hash, epoch) = publication()?;
+    acked.state = "acknowledged".into();
+    acked.ack = Some(ack_bytes(&hash, epoch)?);
+    db.put_pairing_head(&acked)?;
+    assert!(
+        !db.discard_prepared_layer_head(&layer.operation_id, &layer.candidate_hash)?,
+        "an acknowledged head must never be discarded"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let (root, db) = crate::tests::test_db("pair04-layer-head-2")?;
+    db.put_pairing_head(&layer)?;
+    assert!(
+        db.discard_prepared_layer_head(&layer.operation_id, &layer.candidate_hash)?,
+        "a prepared layer head with the matching hash is discarded"
+    );
+    assert!(db.pairing_head()?.is_none(), "the discarded row must be gone");
+    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }

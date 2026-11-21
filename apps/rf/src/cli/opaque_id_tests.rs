@@ -58,7 +58,7 @@ fn other_opaque_message_and_surface_selectors_accept_hyphen_prefixed_values()
 }
 
 #[test]
-fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), clap::Error> {
+fn native_account_commands_parse_and_unknown_create_aliases_do_not() -> Result<(), clap::Error> {
     Cli::try_parse_from(["rf", "account", "create", "--display-name", "Alice"])?;
     Cli::try_parse_from([
         "rf",
@@ -100,11 +100,7 @@ fn itest_legacy_creation_is_a_separate_feature_gated_command() -> Result<(), cla
         "--expected-commitment",
         "-abc",
     ];
-    if cfg!(feature = "itest-legacy-accounts") {
-        Cli::try_parse_from(fixture)?;
-    } else {
-        assert!(Cli::try_parse_from(fixture).is_err());
-    }
+    assert!(Cli::try_parse_from(fixture).is_err());
     Ok(())
 }
 
@@ -170,10 +166,11 @@ fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Resu
 
 #[test]
 fn contact_selectors_accept_hyphen_values_for_links_and_federation() -> Result<(), clap::Error> {
-    for verb in ["accept", "request"] {
-        parse_both(&format!(
-            "contact {verb} --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc --federation-url https://node.example --source-node -abc --target-node -abc"
-        ))?;
+    parse_both(
+        "contact request --account -abc --link -abc --requester -abc --target -abc --conversation -abc --message -abc --envelope -abc --source-principal -abc --sender -abc --recipient-device -abc --target-delivery -abc --federation-url https://node.example --source-node -abc --target-node -abc",
+    )?;
+    for selector in ["--principal -abc", "--request -abc", "--link -abc", "--root -abc"] {
+        parse_both(&format!("contact accept --account -abc {selector}"))?;
     }
     for verb in ["reject", "block", "unblock", "remove"] {
         parse_both(&format!("contact {verb} --account -abc --link -abc"))?;
@@ -197,7 +194,7 @@ macro_rules! selector_group_test {
 }
 selector_group_test!(
     device_ids_accept_hyphens,
-    "device activate --account -abc --device -abc --target -abc --node -abc",
+    "device revoke --account -abc --device -abc",
     "device refresh --account -abc --principal-commitment -abc"
 );
 selector_group_test!(

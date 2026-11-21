@@ -15,7 +15,7 @@ impl RamfluxClient {
         let Some(bytes) = db.message_content(message)? else {
             return Ok(());
         };
-        if !bytes.starts_with(super::carrier::PREFIX) {
+        if Carrier::decode(&bytes)?.is_none() {
             return Ok(());
         }
         let row = db

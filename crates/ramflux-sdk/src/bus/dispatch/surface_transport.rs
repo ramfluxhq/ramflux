@@ -31,7 +31,43 @@ pub(crate) async fn send(
     let group_epoch = group
         .map(|group| account.client.group_state(group).map(|state| state.group_epoch))
         .transpose()?;
-    let outcome = account.client.stage_surface_outgoing(carrier, group_epoch)?;
+    let mut authored = crate::GatewayDirectMessage {
+        conversation_id: carrier.conversation_id.clone(),
+        message_id: RamfluxClient::surface_timeline_id(carrier)?,
+        envelope_id: crate::new_surface_message_id()?,
+        source_principal_id: carrier.sender_principal_id.clone(),
+        sender_id: carrier.sender_device_id.clone(),
+        recipient_device_id: Some(carrier.sender_device_id.clone()),
+        recipient_principal_commitment: Some(account.client.own_account_anchor()?),
+        target_delivery_id: account.target_delivery_id.clone(),
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: account.client.content_ttl()?,
+    };
+    if group.is_none() {
+        Box::pin(prepare_direct_target(account, carrier, &thread, &mut authored)).await?;
+    }
+    let prepared = account.client.prepare_authored_content(
+        &mut authored,
+        group,
+        &surface_content(carrier, group_epoch)?,
+    )?;
+    let outcome = account.client.account_db()?.surface_transaction(|| {
+        let outcome =
+            account.client.stage_surface_outgoing_as(carrier, group_epoch, &authored.message_id)?;
+        if outcome.accepted {
+            account.client.project_authored_message(&authored, &prepared.exact, &[])?;
+            account.client.account_db()?.persist_message_actor_state(
+                &authored.message_id,
+                &format!(
+                    "surface/generated-alias/{}",
+                    RamfluxClient::surface_timeline_id(carrier)?
+                ),
+                &authored.message_id,
+            )?;
+        }
+        Ok::<_, SdkError>(outcome)
+    })?;
     if !outcome.accepted {
         return Ok(serde_json::to_value(outcome)?);
     }
@@ -43,13 +79,15 @@ pub(crate) async fn send(
             None,
             "ramflux.sdk.v1",
             "group.send",
-            json!({"group_id":group,"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"sender_id":carrier.sender_device_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(&bytes),"encrypted_body_base64":""}),
+            json!({"group_id":group,"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"sender_id":carrier.sender_device_id,"content":surface_content(carrier, group_epoch)?,"encrypted_body_base64":""}),
         );
-        if let Err(error) = super::group::dispatch_group_send_request(&request, account).await {
+        if let Err(error) =
+            Box::pin(super::group::dispatch_group_send_request(&request, account)).await
+        {
             failure = Some(error);
         }
     } else {
-        (devices, failure) = send_direct(account, carrier, &thread, &bytes).await?;
+        (devices, failure) = Box::pin(send_direct(account, carrier, &thread, &bytes)).await?;
     }
     let delivery = if failure.is_some() { "failed" } else { "submitted" };
     account.client.set_surface_outgoing_state(carrier, delivery)?;
@@ -58,21 +96,14 @@ pub(crate) async fn send(
     let own = copy_own_for_test(account, carrier, group_epoch).await;
     #[cfg(not(test))]
     let own = copy_own(account, carrier, group_epoch);
-    let own_state = match own {
-        Ok(state) => state,
-        Err(error) => {
-            tracing::warn!(%error,"surface own-device copy could not be staged");
-            account.client.set_surface_own_copy_state(carrier, "failed")?;
-            "failed".into()
-        }
-    };
+    let own_state = finish_own(account, carrier, own)?;
     if let Some(error) = failure {
         return Err(error);
     }
     let mut response = serde_json::to_value(outcome)?;
     response["surface_id"] = json!(carrier.surface_id);
     response["surface_ref"] = json!(carrier.surface_reference()?);
-    response["message_id"] = json!(carrier.message_id);
+    response["message_id"] = json!(authored.message_id);
     response["delivery_state"] = json!(delivery);
     response["delivery_devices"] = json!(devices);
     response["own_device_copy_state"] = json!(own_state);
@@ -82,7 +113,7 @@ async fn send_direct(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
     thread: &Value,
-    bytes: &[u8],
+    _bytes: &[u8],
 ) -> Result<(Vec<Value>, Option<SdkError>), SdkError> {
     let mut devices = Vec::new();
     let mut failure = None;
@@ -119,7 +150,7 @@ async fn send_direct(
         for device in manifest.devices {
             let id = device.device_id.clone();
             let body: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(bytes),"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}),
+                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"content":surface_content(carrier, None)?,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}),
             )?;
             match super::message::submit_message(account, body).await {
                 Ok(_) => devices.push(json!({"root":root,"device_id":id,"state":"submitted"})),
@@ -132,6 +163,31 @@ async fn send_direct(
     }
     Ok((devices, failure))
 }
+async fn prepare_direct_target(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    thread: &Value,
+    authored: &mut GatewayDirectMessage,
+) -> Result<(), SdkError> {
+    let root = peer_commitments(account, carrier, thread)?
+        .into_keys()
+        .next()
+        .ok_or_else(|| invalid("surface direct peer missing"))?;
+    let engine = account.session_client().await?;
+    let manifest = account
+        .client
+        .cache_verified_device_manifest(engine.config(), &root, "surface_prepare")
+        .await;
+    account.apply_session_metadata(engine);
+    let manifest = manifest?;
+    let target =
+        manifest.devices.first().ok_or_else(|| invalid("surface peer has no active device"))?;
+    authored.recipient_principal_commitment = Some(root);
+    authored.recipient_device_id = Some(target.device_id.clone());
+    authored.target_delivery_id.clone_from(&target.target_delivery_id);
+    Ok(())
+}
+
 fn copy_own(
     account: &mut LocalBusAccountState,
     carrier: &Carrier,
@@ -146,7 +202,7 @@ fn copy_own(
 
     super::super::own_device_copy::status(
         &account.client,
-        &RamfluxClient::surface_timeline_id(carrier)?,
+        &account.client.surface_generated_message_id(carrier)?,
     )
 }
 
@@ -157,9 +213,23 @@ pub(super) async fn submit_pair_control(
     body: &[u8],
     group: Option<&str>,
 ) -> Result<(), SdkError> {
-    let mut route = crate::client::routed::Route::control();
-    route.group_id = group.map(str::to_owned);
-    let sealed = client.seal_routed_as(engine, &message, body, route).await?;
+    use prost::Message as _;
+    use ramflux_protocol::message as g;
+    g::validation::scan_message("Surface", body, g::registry::COMPILED_LAYER)
+        .map_err(|_| invalid("invalid Surface control"))?;
+    let surface = g::Surface::decode(body).map_err(|_| invalid("invalid Surface control"))?;
+    let requested_group = match surface.payload.as_ref() {
+        Some(g::surface::Payload::ResyncRequest(request)) => request.group.clone(),
+        _ => None,
+    };
+    let group = group.or(requested_group.as_deref());
+    let prepared = client.prepare_authored_content(
+        &mut message,
+        group,
+        &g::Content { value: Some(g::content::Value::Surface(surface)) },
+    )?;
+    let route = crate::client::routed::Route::from_inner(&prepared.wire)?;
+    let sealed = client.seal_routed_as(engine, &message, &prepared.wire, route).await?;
     // Pair control has no Direct report payload; into_parts still carries committed_a0 (None).
     engine
         .submit_envelope(gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?)
@@ -208,7 +278,7 @@ fn peer_commitments(
 
 #[cfg(test)]
 #[path = "surface_text_fixture.rs"]
-pub(in crate::bus) mod fixture;
+pub(crate) mod fixture;
 #[cfg(test)]
 #[path = "surface_text_tests.rs"]
 pub(super) mod tests;
@@ -219,7 +289,7 @@ mod dm_tests;
 
 #[cfg(test)]
 #[path = "surface_own_tests.rs"]
-mod own_tests;
+pub(crate) mod own_tests;
 
 #[cfg(test)]
 #[path = "surface_resync_tests.rs"]
@@ -282,7 +352,7 @@ async fn copy_own_for_test(
     super::super::own_device_copy::flush(account).await?;
     super::super::own_device_copy::status(
         &account.client,
-        &RamfluxClient::surface_timeline_id(carrier)?,
+        &account.client.surface_generated_message_id(carrier)?,
     )
 }
 
@@ -297,7 +367,7 @@ async fn send_private(
         .ok_or_else(|| invalid("surface conversation missing"))?;
     let group = thread.get("group_id").and_then(Value::as_str);
     let epoch = group.map(|g| account.client.group_state(g).map(|s| s.group_epoch)).transpose()?;
-    let outcome = account.client.stage_surface_outgoing(carrier, epoch)?;
+    let outcome = account.client.stage_surface_outgoing_as(carrier, epoch, &carrier.message_id)?;
     if !outcome.accepted {
         return Ok(serde_json::to_value(outcome)?);
     }
@@ -379,4 +449,39 @@ async fn send_private_to_manifest(
         return Err(invalid("surface private destination has no active devices"));
     }
     Ok(())
+}
+
+fn surface_content(
+    carrier: &Carrier,
+    epoch: Option<u64>,
+) -> Result<ramflux_protocol::message::Content, SdkError> {
+    use ramflux_protocol::message as g;
+    Ok(g::Content {
+        value: Some(g::content::Value::Surface(g::Surface {
+            payload: Some(g::surface::Payload::Delivery(g::SurfaceDelivery {
+                kind: Some(g::SurfaceControlKind {
+                    value: Some(g::surface_control_kind::Value::Peer(g::SurfaceControlKindPeer {})),
+                }),
+                carrier: Some(carrier.to_generated()?),
+                group_epoch: epoch,
+                context: None,
+                manifests: Vec::new(),
+            })),
+        })),
+    })
+}
+
+fn finish_own(
+    account: &mut LocalBusAccountState,
+    carrier: &Carrier,
+    own: Result<String, SdkError>,
+) -> Result<String, SdkError> {
+    match own {
+        Ok(state) => Ok(state),
+        Err(error) => {
+            tracing::warn!(%error,"surface own-device copy could not be staged");
+            account.client.set_surface_own_copy_state(carrier, "failed")?;
+            Ok("failed".into())
+        }
+    }
 }

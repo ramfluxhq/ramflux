@@ -454,7 +454,7 @@ fn native_registered_envelope_uses_current_custody_without_a_legacy_device_set()
     let branch =
         ramflux_crypto::create_device_branch("native-envelope-alice", "primary", 1, [seed + 2; 32]);
     let mut envelope =
-        envelope("native-envelope", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+        envelope("native-envelope", "recipient", ramflux_protocol::DeliveryClass::Message);
     envelope.source_principal_id = branch.principal_id.clone();
     envelope.source_device_id = branch.device_id.clone();
     envelope.ext.ext.insert(
@@ -513,7 +513,7 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
     let branch =
         ramflux_crypto::create_device_branch("foreign-native-sender", "primary", 1, [seed + 2; 32]);
     let mut message =
-        envelope("native-forward", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+        envelope("native-forward", "recipient", ramflux_protocol::DeliveryClass::Message);
     message.source_principal_id = branch.principal_id.clone();
     message.source_device_id = branch.device_id.clone();
     message.ext.ext.insert(
@@ -576,7 +576,7 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     let branch =
         ramflux_crypto::create_device_branch("forwarded-floors", "primary", 1, [seed + 2; 32]);
     let mut message =
-        envelope("native-floors", "recipient", ramflux_protocol::DeliveryClass::OpaqueEvent);
+        envelope("native-floors", "recipient", ramflux_protocol::DeliveryClass::Message);
     message.source_principal_id = branch.principal_id.clone();
     message.source_device_id = branch.device_id.clone();
     message.ext.ext.insert(

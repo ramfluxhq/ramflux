@@ -11,7 +11,7 @@ fn contacts(a: &Fixture, b: &Fixture) -> Result<(), SdkError> {
     for (local, peer) in [(a, b), (b, a)] {
         review::trust(local, peer)?;
         let own = r9::manifest(local)?;
-        local.client.persist_fetched_identity_directory(&own)?;
+        local.client.persist_observed_identity_directory_now(&own)?;
         let remote = r9::manifest(peer)?;
         local
             .client
@@ -35,12 +35,17 @@ fn control(a: &Fixture, b: &Fixture, id: u8, thread: &str) -> Result<LiveCall, S
     )?;
     call.pin_peer(
         b.client.call_local_endpoint()?,
-        r9::manifest(b)?.devices[0].branch_public_key.clone(),
+        r9::manifest(b)?
+            .devices
+            .first()
+            .ok_or_else(|| invalid("test: peer device missing"))?
+            .branch_public_key
+            .clone(),
     )?;
     Ok(call)
 }
 fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError> {
-    if matches!(c.body, CallAction::Invite { .. }) && c.call_start.is_none() {
+    if matches!(c.body, CallAction::Invite { .. }) {
         let branch = sender.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let peer = sender.client.call_device_identity(&c.callee)?;
         let peer_record = sender.client.trusted_device(HeadUse::NewAuthorization, &peer)?;
@@ -61,7 +66,11 @@ fn signed(sender: &Fixture, mut c: CallControl) -> Result<CallControl, SdkError>
                 .get("device_epoch")
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| invalid("test: peer epoch"))?,
-            target_delivery_id: c.callee.device_id.clone(),
+            target_delivery_id: peer_record
+                .get("target_delivery_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid("test: peer delivery route"))?
+                .into(),
             call_ref: ramflux_protocol::encode_base64url(reference),
             source_event_id: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
             kind: ramflux_protocol::CallIntentKind::OneToOne,
@@ -92,68 +101,123 @@ fn entry(
     id: &str,
     thread: &str,
 ) -> Result<GatewayInboxEntry, SdkError> {
+    use ramflux_protocol::message as g;
     let id = c.call_start.as_ref().map_or(id, |start| start.body.source_event_id.as_str());
-    seal_as(
-        sender,
-        receiver,
-        GatewayDirectMessage {
-            conversation_id: thread.into(),
-            message_id: id.into(),
-            envelope_id: id.into(),
-            source_principal_id: sender.id.clone(),
-            sender_id: sender.id.clone(),
-            recipient_device_id: Some(receiver.id.clone()),
-            recipient_principal_commitment: None,
-            target_delivery_id: receiver.id.clone(),
-            encrypted_body: Vec::new(),
-            created_at: now_unix_timestamp(),
-            ttl: 300,
+    let identity = sender.client.account_db()?.write_transaction(|| {
+        sender.client.allocate_generated_identity(
+            thread,
+            crate::client::generated_identity::now_ms(),
+            false,
+        )
+    })?;
+    let exact = RamfluxClient::encode_generated_inner(
+        identity.clone(),
+        &g::Content {
+            value: Some(g::content::Value::Call(
+                crate::client::generated_call::native::from_native(c)?,
+            )),
         },
-        &call::bytes(c)?,
-        Route::control(),
-    )
+    )?;
+    let message = GatewayDirectMessage {
+        conversation_id: thread.into(),
+        message_id: ramflux_protocol::encode_base64url(identity.id),
+        envelope_id: id.into(),
+        source_principal_id: sender.config()?.principal_id,
+        sender_id: sender.id.clone(),
+        recipient_device_id: Some(receiver.id.clone()),
+        recipient_principal_commitment: Some(receiver.client.own_account_anchor()?),
+        target_delivery_id: receiver.config()?.target_delivery_id,
+        encrypted_body: Vec::new(),
+        created_at: now_unix_timestamp(),
+        ttl: 300,
+    };
+    let (mut message, sealed) =
+        seal_native_fixture(sender, receiver, message, &exact, Route::control())?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut message, sealed)?;
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: receiver.config()?.target_delivery_id,
+        envelope,
+    })
 }
 async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
     let mut engine =
         GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
-    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry, false).await?;
+    receiver.client.apply_routed_entry(&mut engine, &review::pool()?, entry).await?;
     Ok(())
 }
 #[tokio::test]
 async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_do_not_rering()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        first_call_invite_creates_a_bound_direct_thread_and_committed_retries_do_not_rering_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_do_not_rering_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let origin = control(&alice, &bob, 1, "private-first-call-thread")?;
-    let invite = signed(&alice, origin.pending[0].clone())?;
-    let entry = entry(&alice, &bob, &invite, "call-invite", "private-first-call-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let origin = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        origin.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let entry = entry(&alice, &bob, &invite, "call-invite", &conversation)?;
     let outer = serde_json::to_string(&entry)?;
-    assert!(!outer.contains("private-first-call-thread"));
+    assert!(!outer.contains(&conversation));
     assert!(!outer.contains(&invite.call_id));
     apply(&mut bob, &entry).await?;
-    let call = &bob.client.voice_calls[&invite.call_id];
+    let call = &bob
+        .client
+        .voice_calls
+        .get(&invite.call_id)
+        .ok_or_else(|| invalid("test: call missing"))?;
     assert_eq!(call.row.state, "incoming_ringing");
     assert_eq!(call.pending.len(), 1);
     let head = bob.client.account_db()?.journal_bounds()?.head_seq;
     apply(&mut bob, &entry).await?;
     assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
-    assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
-    // A retransmit preserves the original Start-bound envelope identity and bytes.
+    assert_eq!(
+        bob.client
+            .voice_calls
+            .get(&invite.call_id)
+            .ok_or_else(|| invalid("test: call missing"))?
+            .pending
+            .len(),
+        1
+    );
     let redrive = entry.clone();
     apply(&mut bob, &redrive).await?;
     assert_eq!(bob.client.account_db()?.journal_bounds()?.head_seq, head);
-    assert_eq!(bob.client.voice_calls[&invite.call_id].pending.len(), 1);
+    assert_eq!(
+        bob.client
+            .voice_calls
+            .get(&invite.call_id)
+            .ok_or_else(|| invalid("test: call missing"))?
+            .pending
+            .len(),
+        1
+    );
     let mut changed = invite.clone();
     changed.created_at += 1;
     let changed = signed(&alice, changed)?;
-    let equivocation =
-        self::entry(&alice, &bob, &changed, "call-equivocation", "private-first-call-thread")?;
+    let equivocation = self::entry(&alice, &bob, &changed, "call-equivocation", &conversation)?;
     assert!(apply(&mut bob, &equivocation).await.is_err());
     let thread = bob
         .client
         .account_db()?
-        .client_record("conversation", "private-first-call-thread")?
+        .client_record("conversation", &conversation)?
         .ok_or_else(|| invalid("thread missing"))?;
     assert_eq!(thread["kind"], "direct");
     assert_eq!(thread["participants"], json!(["alice", "bob"]));
@@ -162,22 +226,42 @@ async fn first_call_invite_creates_a_bound_direct_thread_and_committed_retries_d
 #[tokio::test]
 async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 41)?;
-    let mut bob = Fixture::new("bob", 51)?;
+    crate::client::native_test_support::watchdog::within(
+        forged_call_signatures_and_cross_conversation_controls_publish_no_call_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn forged_call_signatures_and_cross_conversation_controls_publish_no_call_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 41).await?;
+    let mut bob = Fixture::native_named("bob", 51).await?;
     contacts(&alice, &bob)?;
-    let origin = control(&alice, &bob, 2, "thread")?;
-    let mut forged = signed(&alice, origin.pending[0].clone())?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let origin = control(&alice, &bob, 2, &conversation)?;
+    let mut forged = signed(
+        &alice,
+        origin.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
     forged.created_at += 1;
-    let forged_entry = entry(&alice, &bob, &forged, "forged-call", "thread")?;
+    let forged_entry = entry(&alice, &bob, &forged, "forged-call", &conversation)?;
     assert!(apply(&mut bob, &forged_entry).await.is_err());
     assert_eq!(bob.client.account_db()?.voice_call_rows(false)?.len(), 0);
     bob.client.account_db()?.persist_client_record(
         "conversation",
-        "thread",
+        &conversation,
         &json!({"kind":"direct","participants":["bob","carol"]}),
     )?;
-    let genuine = signed(&alice, origin.pending[0].clone())?;
-    let cross = entry(&alice, &bob, &genuine, "cross-thread-call", "thread")?;
+    let genuine = signed(
+        &alice,
+        origin.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let cross = entry(&alice, &bob, &genuine, "cross-thread-call", &conversation)?;
     assert!(apply(&mut bob, &cross).await.is_err());
     assert_eq!(bob.client.account_db()?.voice_call_rows(false)?.len(), 0);
     assert_eq!(bob.client.voice_calls.len(), 0);
@@ -189,13 +273,25 @@ async fn a_signed_invite_stays_held_without_a_correlated_gateway_decision() -> R
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         Box::pin(async {
-            let alice = Fixture::new("alice", 61)?;
-            let mut bob = Fixture::new("bob", 71)?;
+            let alice = Fixture::native_named("alice", 61).await?;
+            let mut bob = Fixture::native_named("bob", 71).await?;
             contacts(&alice, &bob)?;
-            let origin = control(&alice, &bob, 3, "voice-thread")?;
+            let conversation = ramflux_protocol::message::dm_scope::derive(
+                &alice.client.own_account_anchor()?,
+                &bob.client.own_account_anchor()?,
+            )
+            .map_err(|e| invalid(&e.to_string()))?;
+            let origin = control(&alice, &bob, 3, &conversation)?;
             let id = origin.row.call_id.clone();
-            let invite = signed(&alice, origin.pending[0].clone())?;
-            let packet = entry(&alice, &bob, &invite, "invite", "voice-thread")?;
+            let invite = signed(
+                &alice,
+                origin
+                    .pending
+                    .first()
+                    .ok_or_else(|| invalid("test: pending call missing"))?
+                    .clone(),
+            )?;
+            let packet = entry(&alice, &bob, &invite, "invite", &conversation)?;
             apply(&mut bob, &packet).await?;
             let recipient = bob
                 .client
@@ -226,15 +322,35 @@ async fn a_signed_invite_stays_held_without_a_correlated_gateway_decision() -> R
 #[tokio::test]
 async fn an_established_pair_cannot_create_an_unrelated_call_conversation() -> Result<(), SdkError>
 {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        an_established_pair_cannot_create_an_unrelated_call_conversation_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn an_established_pair_cannot_create_an_unrelated_call_conversation_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
-    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let packet = entry(&alice, &bob, &invite, "first-call", &conversation)?;
     apply(&mut bob, &packet).await?;
     let injected = control(&alice, &bob, 2, "unrelated-thread")?;
-    let invite = signed(&alice, injected.pending[0].clone())?;
+    let invite = signed(
+        &alice,
+        injected.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
     let packet = entry(&alice, &bob, &invite, "injected-call", "unrelated-thread")?;
     assert!(apply(&mut bob, &packet).await.is_err());
     assert!(bob.client.account_db()?.client_record("conversation", "unrelated-thread")?.is_none());
@@ -244,12 +360,29 @@ async fn an_established_pair_cannot_create_an_unrelated_call_conversation() -> R
 #[tokio::test]
 async fn retiring_a_call_removes_control_receipts_without_reviving_keys_on_redelivery()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        retiring_a_call_removes_control_receipts_without_reviving_keys_on_redelivery_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn retiring_a_call_removes_control_receipts_without_reviving_keys_on_redelivery_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
-    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let packet = entry(&alice, &bob, &invite, "first-call", &conversation)?;
     apply(&mut bob, &packet).await?;
     let prefix = format!("voice/control/{}/", invite.call_id);
     assert_eq!(bob.client.account_db()?.actor_state_usage(&prefix)?.0, 1);
@@ -265,12 +398,29 @@ async fn retiring_a_call_removes_control_receipts_without_reviving_keys_on_redel
 #[tokio::test]
 async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_message_keys_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
-    let packet = entry(&alice, &bob, &invite, "first-call", "direct-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let packet = entry(&alice, &bob, &invite, "first-call", &conversation)?;
     apply(&mut bob, &packet).await?;
     let envelope = decode(&packet.envelope)?;
     let pair = bob
@@ -285,7 +435,7 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
     let mut restored = ramflux_crypto::DmSession::from_snapshot(serde_json::from_value(
         pair["snapshot"].clone(),
     )?)?;
-    let aad = associated_data(&packet.envelope.envelope_id, "alice", "bob", &bundle)?;
+    let aad = associated_data_from_outer(&packet.envelope, "alice", "bob", &bundle)?;
     assert!(restored.decrypt_with_franking_keys(&envelope.ciphertext, &aad).is_err());
     // Consumed ratchet keys are gone, but retained static X3DH private prekeys can reconstruct
     // a bootstrap packet. This is why even encrypted call controls must not remain in receipts.
@@ -320,16 +470,33 @@ async fn committed_call_controls_retain_neither_ciphertext_nor_consumed_pair_mes
 
 #[tokio::test]
 async fn a_call_refuses_control_receipts_beyond_its_bounded_capacity() -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        a_call_refuses_control_receipts_beyond_its_bounded_capacity_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn a_call_refuses_control_receipts_beyond_its_bounded_capacity_body() -> Result<(), SdkError>
+{
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
     let prefix = format!("voice/control/{}/", invite.call_id);
     for index in 0..128 {
         bob.client.account_db()?.persist_actor_state(&format!("{prefix}{index:03}"), &"receipt")?;
     }
-    let packet = entry(&alice, &bob, &invite, "over-cap-call", "direct-thread")?;
+    let packet = entry(&alice, &bob, &invite, "over-cap-call", &conversation)?;
     let Err(error) = apply(&mut bob, &packet).await else {
         return Err(invalid("receipt cap accepted control"));
     };
@@ -343,12 +510,29 @@ async fn a_call_refuses_control_receipts_beyond_its_bounded_capacity() -> Result
 #[tokio::test]
 async fn new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
-    let packet = entry(&alice, &bob, &invite, "retained-call", "direct-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let packet = entry(&alice, &bob, &invite, "retained-call", &conversation)?;
     assert!(bob.client.is_call_control_entry(&packet, "bob")?);
 
     let old_bytes = serde_json::to_vec(&packet)?;
@@ -392,12 +576,29 @@ async fn new_call_failure_rows_drop_ciphertext_while_existing_rows_still_decode(
 #[tokio::test]
 async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
 -> Result<(), SdkError> {
-    let alice = Fixture::new("alice", 21)?;
-    let mut bob = Fixture::new("bob", 31)?;
+    crate::client::native_test_support::watchdog::within(
+        stripped_call_ack_retry_uses_committed_receipt_before_payload_decode_body(),
+    )
+    .await
+    .map_err(|_| invalid("test: native contact admission exceeded its watchdog"))?
+}
+
+async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode_body()
+-> Result<(), SdkError> {
+    let alice = Fixture::native_named("alice", 21).await?;
+    let mut bob = Fixture::native_named("bob", 31).await?;
     contacts(&alice, &bob)?;
-    let first = control(&alice, &bob, 1, "direct-thread")?;
-    let invite = signed(&alice, first.pending[0].clone())?;
-    let packet = entry(&alice, &bob, &invite, "call-ack-retry", "direct-thread")?;
+    let conversation = ramflux_protocol::message::dm_scope::derive(
+        &alice.client.own_account_anchor()?,
+        &bob.client.own_account_anchor()?,
+    )
+    .map_err(|e| invalid(&e.to_string()))?;
+    let first = control(&alice, &bob, 1, &conversation)?;
+    let invite = signed(
+        &alice,
+        first.pending.first().ok_or_else(|| invalid("test: pending call missing"))?.clone(),
+    )?;
+    let packet = entry(&alice, &bob, &invite, "call-ack-retry", &conversation)?;
     apply(&mut bob, &packet).await?;
     let envelope_id = packet.envelope.envelope_id.as_str();
 
@@ -407,12 +608,30 @@ async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
         bob.client.retained_committed_receipt_key(&retained)?.as_deref(),
         Some(key.as_str())
     );
+    assert_eq!(
+        bob.client.committed_direct_context(&retained)?,
+        None,
+        "attachment prefetch must skip a stripped committed control without rechecking erased ciphertext"
+    );
     let mut mismatched = retained.clone();
     mismatched.envelope.payload_hash.push('x');
     assert!(matches!(
         bob.client.retained_committed_receipt_key(&mismatched),
         Err(SdkError::InboundRejected(_))
     ));
+    let mut node_metadata = retained.clone();
+    node_metadata
+        .envelope
+        .ext
+        .ext
+        .insert("home_node_migration_forward_count".into(), serde_json::json!(1));
+    bob.client.validate_routed_receipt_or_ciphertext(&node_metadata)?;
+    let mut changed_header = retained.clone();
+    changed_header.envelope.ttl = changed_header.envelope.ttl.saturating_add(1);
+    assert!(bob.client.validate_routed_receipt_or_ciphertext(&changed_header).is_err());
+    let mut changed_payload = packet.clone();
+    changed_payload.envelope.encrypted_payload = ramflux_protocol::encode_base64url(b"changed");
+    assert!(bob.client.validate_routed_receipt_or_ciphertext(&changed_payload).is_err());
     let now = now_unix_timestamp();
     assert_ne!(
         bob.client.account_db()?.defer_inbox_entry(
@@ -424,11 +643,9 @@ async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
     );
     let (engine, writes) =
         review::Inbox::engine_with_acknowledgements(bob.config()?, Vec::new(), 1)?;
-    let mut account = crate::bus::state::LocalBusAccountState::new(
-        std::mem::take(&mut bob.client),
-        engine,
-        "bob".to_owned(),
-    );
+    let root = bob.client.own_account_anchor()?;
+    let mut account =
+        crate::bus::state::LocalBusAccountState::new(std::mem::take(&mut bob.client), engine, root);
     crate::bus::sync_driver::run(&mut account).await?;
 
     assert!(
@@ -437,8 +654,7 @@ async fn stripped_call_ack_retry_uses_committed_receipt_before_payload_decode()
             .map_err(|_| invalid("mutex"))?
             .iter()
             .any(|v| v["frame_type"] == "ack"
-                && v["ack"]["envelope_id"].as_str() == Some(envelope_id)),
-        "committed call retry was not ACKed under its immutable envelope identity"
+                && v["ack"]["envelope_id"].as_str() == Some(envelope_id))
     );
     assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
     let events = account.client.account_db()?.journal_after(0, 128)?;

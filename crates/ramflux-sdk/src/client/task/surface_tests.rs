@@ -13,6 +13,7 @@ fn surface_carrier(
 ) -> Result<SurfaceCarrier, SdkError> {
     let device = sender.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     sender.sign_surface_carrier(SurfaceCarrier {
+        typed: None,
         schema: ramflux_protocol::domain::SURFACE_CARRIER.into(),
         content_type: "surface".into(),
         payload_kind: kind,
@@ -112,6 +113,7 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
     let decision_id = view["actions"][0]["action_receipt_id"].as_str().ok_or("decision id")?;
     assert_eq!(view["action_receipt_id"], decision_id);
     assert_eq!(view["actions"][0]["receipt_verified"], true);
+    check_receipt_roundtrip(&f.agent, &action, decision_id)?;
     if read_only {
         mark_read_only(&f.agent, &action, decision_id)?;
     }
@@ -148,13 +150,20 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
     let intent =
         sign(&f.human, "thread", "resolve-form", TaskEventBody::Resolve(resolution.clone()))?;
     assert!(project(&f.human, &intent)?.pending);
-    assert!(project(&f.agent, &intent)?.accepted);
+    let outcome = project(&f.agent, &intent)?;
+    assert!(
+        outcome.accepted,
+        "typed Task creator receipt refused: {:?} {:?}",
+        outcome.reason_code, outcome.reject
+    );
     let history = f.agent.task_history("thread", "task")?;
     let cert =
         history.events.last().and_then(|e| e.decision_certificate.as_ref()).ok_or("certificate")?;
+    let wire = ramflux_protocol::decode_base64url(&cert.encoded()?)?;
+    let private_value = b"PRIVATE_TASK_FORM_VALUE";
     assert!(
-        !String::from_utf8(ramflux_protocol::decode_base64url(&cert.encoded()?)?)?
-            .contains("PRIVATE_TASK_FORM_VALUE")
+        !wire.windows(private_value.len()).any(|window| window == private_value),
+        "typed creator receipt must not export private form values"
     );
     f.human.save_task_commit_certificate(&intent, cert)?;
     assert_eq!(f.human.retry_pending_tasks(crate::time::now_unix_timestamp())?, 1);
@@ -260,4 +269,63 @@ fn create_form(f: &Fixture) -> TestResult {
         assert!(surface_project(local, &c)?.accepted);
     }
     Ok(())
+}
+
+fn check_receipt_roundtrip(
+    client: &RamfluxClient,
+    action: &SurfaceCarrier,
+    id: &str,
+) -> TestResult {
+    let encoded = client.task_surface_receipt("thread", "form", "agent", id)?;
+    let reference = action.surface_reference()?;
+    let key = format!("{}/{id}", crate::client::surface::key("actions", &reference));
+    let mut row =
+        client.account_db()?.load_actor_state::<serde_json::Value>(&key)?.ok_or("receipt row")?;
+    let original: SurfaceCarrier = serde_json::from_value(row["attestation"].clone())?;
+    let decoded = SurfaceCarrier::decode(&ramflux_protocol::decode_base64url(&encoded)?)?
+        .ok_or("receipt decode")?;
+    assert_eq!(
+        original.to_generated()?,
+        decoded.to_generated()?,
+        "Surface receipt must retain its exact typed signing fields"
+    );
+    client.verify_surface_carrier(&decoded, "agent", &decoded.sender_device_id)?;
+    let explicit = explicit_zero_surface_timestamp(client, decoded.to_generated()?)?;
+    row["attestation"] = serde_json::to_value(explicit)?;
+    client.account_db()?.persist_actor_state(&key, &row)?;
+    Ok(())
+}
+
+fn explicit_zero_surface_timestamp(
+    client: &RamfluxClient,
+    mut value: ramflux_protocol::message::SurfaceCarrier,
+) -> Result<SurfaceCarrier, Box<dyn std::error::Error>> {
+    use prost::Message as _;
+    // Explicit presence of a zero scalar must survive native storage and re-encoding.
+    // The v3 proof is a single event; there is no separate checkpoint/content carrier.
+    value.posted_at = Some(0);
+    value.signature.clear();
+    let signer = client.device_branch.as_ref().ok_or("creator device")?;
+    value.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+        &crate::client::task::generated::typed_transcript(
+            "SurfaceCarrier",
+            &value.encode_to_vec(),
+        )?,
+        signer,
+    );
+    let decoded =
+        SurfaceCarrier::decode(&value.encode_to_vec())?.ok_or("explicit typed receipt")?;
+    let mut restored: SurfaceCarrier = serde_json::from_value(serde_json::to_value(&decoded)?)?;
+    assert_eq!(
+        restored.to_generated()?,
+        value,
+        "reload must preserve explicitly present empty protobuf fields and their signature"
+    );
+    client.verify_surface_carrier(&restored, "agent", &restored.sender_device_id)?;
+    restored.message_id.push_str("-tampered-native-view");
+    assert!(
+        client.verify_surface_carrier(&restored, "agent", &restored.sender_device_id).is_err(),
+        "retained typed bytes cannot authenticate a changed native projection"
+    );
+    Ok(decoded)
 }

@@ -4,7 +4,9 @@
 //! Fresh data restore, explicit phrase recovery and exact durable publication over real TLS.
 use super::*;
 use crate::custody::{CreationState, CustodyConnection, CustodyNetworkConfig, RecoveryCeremony};
+use prost::Message as _;
 use ramflux_protocol::custody::{BindingMode, CustodyRefusal};
+use ramflux_protocol::message as g;
 use std::{path::Path, sync::Arc, time::Duration};
 
 fn network(
@@ -15,6 +17,7 @@ fn network(
     ca: &Path,
 ) -> CustodyNetworkConfig {
     CustodyNetworkConfig {
+        pairing_admission: None,
         account_root: root.into(),
         account_id: id.into(),
         device_id: device.into(),
@@ -216,36 +219,50 @@ async fn native_fresh_restore_requires_phrase_recovery_and_exact_ack_before_live
 }
 
 fn persist_outbound_history(client: &RamfluxClient, sender: &str) -> TestResult {
-    // Native sends persist the encrypted envelope and plaintext content separately.
-    client.send_direct_message(
+    let identity = client.allocate_generated_identity(
         "outbound-thread",
-        "own-history",
+        u64::try_from(crate::time::now_unix_timestamp())?.saturating_mul(1000),
+        false,
+    )?;
+    persist_generated_fixture(
+        client,
+        &identity,
         sender,
         b"opaque encrypted outbound envelope",
-    )?;
-    client.account_db()?.store_message_content(
-        "outbound-thread",
-        "own-history",
-        b"restored outgoing history",
+        "restored outgoing history",
     )?;
     Ok(())
 }
 
 async fn assert_restored_outbound_history(reader: &RamfluxClient) -> TestResult {
     let messages = reader.direct_messages("outbound-thread")?;
-    let stored = messages.first().ok_or("outbound history")?;
-    assert_eq!(stored.encrypted_body, b"opaque encrypted outbound envelope");
+    let stored = messages.first().ok_or("test: outbound history missing")?;
+    assert_eq!(
+        stored.encrypted_body, b"opaque encrypted outbound envelope",
+        "restore must retain outgoing ciphertext"
+    );
     for method in ["message.list", "message.read"] {
         let request = LocalBusFrame::request(
             "restored-outbound-history",
             None,
             "message",
             method,
-            json!({"conversation_id":"outbound-thread"}),
+            json!({"conversation_id":"outbound-thread","read_model":true}),
         );
         let page =
             crate::bus::readers::test_account_reader_request(reader.account_db()?, request).await?;
-        assert_eq!(page["messages"][0]["body_utf8"], "restored outgoing history");
+        assert_eq!(
+            page["schema"], "ramflux.message.read_model.v1",
+            "reader must expose the activated contract"
+        );
+        let messages = page["messages"].as_array().ok_or("test: unified message page missing")?;
+        let [message] = messages.as_slice() else {
+            return Err("test: restored outgoing message count differs".into());
+        };
+        assert_eq!(
+            message["text"], "restored outgoing history",
+            "restored raw Inner must reach the unified reader"
+        );
     }
     Ok(())
 }
@@ -263,12 +280,35 @@ fn assert_restored_group_history(
         "historical display must not supply current roster authority"
     );
     let rows = reader.direct_messages("restore-group-thread")?;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].message_id, "group-history");
-    assert_eq!(
-        reader.account_db()?.message_content("group-history")?,
-        Some(b"restored group history".to_vec())
-    );
+    let mut history = false;
+    let mut fences = 0_u32;
+    for message in &rows {
+        let exact = reader
+            .account_db()?
+            .message_content(&message.message_id)?
+            .ok_or("test: restored group Inner missing")?;
+        let (_, content) = RamfluxClient::decode_generated_inner(&exact)?;
+        match content.value {
+            Some(g::content::Value::Message(value)) if value.text == "restored group history" => {
+                history = true;
+            }
+            Some(g::content::Value::Service(_)) => {
+                let stored = reader.account_db()?.service_body_fence(&message.message_id)?;
+                let expected = ramflux_crypto::blake3_256("ramflux.group-service-body.v1", &exact);
+                if stored.as_deref() != Some(expected.as_slice()) {
+                    return Err("test: restored service body fence differs".into());
+                }
+                fences = fences.saturating_add(1);
+            }
+            _ => return Err("test: restored group row is not history or a service event".into()),
+        }
+    }
+    if !history {
+        return Err("test: restored group history missing".into());
+    }
+    if fences == 0 {
+        return Err("test: restored service body fence is missing".into());
+    }
     Ok(())
 }
 
@@ -303,20 +343,31 @@ async fn recover_group_read_projection(
         crate::custody::load_account(root, id, crate::custody::network_now()?)?.state(),
         CreationState::NetworkingPending
     );
-    let request = LocalBusGroupReceiveRequest {
-        group_id: "restore-group".into(),
-        conversation_id: "restore-group-thread".into(),
-        limit: 100,
-    };
-    let mut plaintext = Vec::new();
-    crate::bus::dispatch::group::append_native_group_history(reader, &request, &mut plaintext)?;
-    crate::bus::dispatch::group::append_native_group_history(reader, &request, &mut plaintext)?;
-    assert_eq!(plaintext.len(), 1, "cached history is independent of receive-page repetition");
-    assert_eq!(plaintext[0]["body_utf8"], "restored group history");
-    let alias = LocalBusGroupReceiveRequest { conversation_id: "unbound-thread".into(), ..request };
-    let mut unrelated = Vec::new();
-    crate::bus::dispatch::group::append_native_group_history(reader, &alias, &mut unrelated)?;
-    assert!(unrelated.is_empty(), "history must follow the signed conversation binding");
+    let page = reader.generated_message_view_page("restore-group-thread", None, 100)?;
+    let repeated = reader.generated_message_view_page("restore-group-thread", None, 100)?;
+    assert_eq!(
+        serde_json::to_value(&page)?,
+        serde_json::to_value(&repeated)?,
+        "repeated reads must preserve the restored durable view"
+    );
+    let history = page
+        .messages
+        .iter()
+        .find(|message| message.text.as_deref() == Some("restored group history"))
+        .ok_or("test: restored group history missing from the view")?;
+    assert_eq!(
+        history.text.as_deref(),
+        Some("restored group history"),
+        "restored group raw Inner must render"
+    );
+    assert!(
+        page.messages.iter().any(|message| message.kind == "service"),
+        "restored service rows must stay beside the generated message"
+    );
+    assert!(
+        reader.generated_message_view_page("unbound-thread", None, 100)?.messages.is_empty(),
+        "history must remain scoped to its signed conversation"
+    );
     assert_restored_outbound_history(reader).await?;
     Ok(())
 }
@@ -370,14 +421,14 @@ async fn source_group_history(
         "peer-device",
     )
     .await?;
-    data.persist_fetched_identity_directory(&peer.manifest)
+    data.persist_observed_identity_directory_now(&peer.manifest)
         .map_err(|error| format!("cache peer authority: {error}"))?;
     let owner_manifest = history_manifest(data, account)
         .map_err(|error| format!("source own authority: {error}"))?;
-    data.persist_fetched_identity_directory(&owner_manifest)
+    data.persist_observed_identity_directory_now(&owner_manifest)
         .map_err(|error| format!("cache own authority: {error}"))?;
     peer.client
-        .persist_fetched_identity_directory(&owner_manifest)
+        .persist_observed_identity_directory_now(&owner_manifest)
         .map_err(|error| format!("cache owner at peer: {error}"))?;
     data.shared_group_create_with_primary(
         "restore-group",
@@ -409,26 +460,38 @@ async fn source_group_history(
     );
     data.import_group_sender_key_distribution(&distribution)
         .map_err(|error| format!("import sender key: {error}"))?;
-    let encrypted = peer
-        .client
-        .encrypt_group_message("restore-group", member.device_id(), b"restored group history")
-        .map_err(|error| format!("encrypt source group history: {error}"))?;
-    data.send_direct_message(
+    let mut identity = peer.client.allocate_generated_identity(
         "restore-group-thread",
-        "group-history",
-        member.storage_key(),
-        &encrypted,
+        u64::try_from(crate::time::now_unix_timestamp())?.saturating_mul(1000),
+        false,
     )?;
+    identity.group_id = Some("restore-group".into());
+    identity.group_epoch = Some(group.view().epoch);
+    let exact = RamfluxClient::encode_generated_inner(
+        identity.clone(),
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: "restored group history".into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    let inner = g::Inner::decode(exact.as_slice())?;
+    let wrapped = peer.client.encrypt_generated_group_message(
+        "restore-group",
+        member.device_id(),
+        &g::Message::decode(inner.body.as_slice())?,
+    )?;
+    let sealed = wrapped.sealed_group.as_ref().ok_or("native group wrapper")?;
+    let native = crate::client::generated_group::to_native(sealed)?;
+    let event_id = ramflux_protocol::encode_base64url(&identity.id);
+    let plaintext = data.decrypt_group_envelope_for_identity(&native, &event_id, &member)?;
     assert_eq!(
-        data.decrypt_group_message("restore-group-thread", "group-history")
-            .map_err(|error| format!("decrypt source group history: {error}"))?,
-        b"restored group history"
+        plaintext, inner.body,
+        "native group crypto must preserve the exact prepared Message before backup"
     );
-    data.account_db()?.store_message_content(
-        "restore-group-thread",
-        "group-history",
-        b"restored group history",
-    )?;
+    let encrypted = g::Inner { body: wrapped.encode_to_vec(), ..inner }.encode_to_vec();
+    persist_generated_fixture_exact(data, &identity, member.storage_key(), &encrypted, &exact)?;
     persist_group_driver_progress(data)?;
     persist_outbound_history(data, owner.storage_key())
         .map_err(|error| format!("capture outbound fixture: {error}"))?;
@@ -472,4 +535,111 @@ async fn native_backup_fresh_restore_completes_offline_and_lists_pending_account
             Ok(())
         }))
         .await
+}
+
+fn persist_generated_fixture(
+    client: &RamfluxClient,
+    identity: &g::EventIdentity,
+    sender: &str,
+    encrypted: &[u8],
+    text: &str,
+) -> TestResult<String> {
+    let exact = RamfluxClient::encode_generated_inner(
+        identity.clone(),
+        &g::Content {
+            value: Some(g::content::Value::Message(g::Message {
+                text: text.into(),
+                ..Default::default()
+            })),
+        },
+    )?;
+    persist_generated_fixture_exact(client, identity, sender, encrypted, &exact)
+}
+
+fn persist_generated_fixture_exact(
+    client: &RamfluxClient,
+    identity: &g::EventIdentity,
+    sender: &str,
+    encrypted: &[u8],
+    exact: &[u8],
+) -> TestResult<String> {
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        db.send_direct_message(&identity.conversation_id, &id, sender, encrypted)?;
+        db.store_message_content(&identity.conversation_id, &id, exact)?;
+        db.persist_message_actor_state(&id, &format!("routed/generated-identity/{id}"), &identity)?;
+        let own_anchor = client.own_account_anchor()?;
+        if identity.author.as_ref().is_some_and(|author| author.account_anchor == own_anchor) {
+            db.mark_generated_message_owned(&id, &client.owned_device_identity()?)?;
+        }
+        db.persist_message_actor_state(
+            &id,
+            &format!("routed/generated-order/{id}"),
+            &identity.hlc,
+        )?;
+        db.persist_message_actor_state(
+            &id,
+            &format!("routed/generated-display-hlc/{id}"),
+            &identity.hlc,
+        )?;
+        client.journal_generated_receive_updates(exact)?;
+        Ok::<_, SdkError>(())
+    })?;
+    Ok(id)
+}
+
+/// Real backup create -> verify -> install into a NEW root: archived peer authority is historical
+/// evidence only. Neither its pins nor any network observation become live state in the new root.
+#[tokio::test(flavor = "current_thread")]
+async fn native_restore_into_a_new_root_imports_no_peer_authority_and_no_freshness() -> TestResult {
+    crate::client::native_test_support::watchdog::within(LocalSet::new().run_until(Box::pin(
+        async {
+            let source_root = Root::new()?;
+            let target_root = Root::new()?;
+            let vault = Arc::new(TestVault::default());
+            let (_account, _phrase) = source_with_history(&source_root.0, vault.as_ref())?;
+            let peer = crate::client::native_test_support::Fixture::new("restore-pin-peer").await?;
+            let root = peer.manifest.principal_commitment.clone();
+            let record = peer
+                .manifest
+                .custody
+                .as_ref()
+                .ok_or("test: native peer")?
+                .publication
+                .record
+                .clone();
+            {
+                let mut holder = RamfluxClient::new();
+                holder.open_account_index(&source_root.0)?;
+                holder.unlock_account("account", LOCAL_SECRET.as_bytes())?;
+                holder.persist_observed_identity_directory_now(&peer.manifest)?;
+                assert!(
+                    holder.account_db()?.actor_state_exists(&format!("identity/custody/{root}"))?,
+                    "test: the source must hold a retained peer authority to archive"
+                );
+            }
+            let restored_id = install_archive(&source_root.0, &target_root.0, vault).await?;
+            let mut restored = RamfluxClient::new();
+            restored.open_account_index(&target_root.0)?;
+            restored.unlock_account(&restored_id, LOCAL_SECRET.as_bytes())?;
+            assert!(
+                !restored.account_db()?.actor_state_exists(&format!("identity/custody/{root}"))?,
+                "archived peer authority must not be installed as live state in the new root"
+            );
+            assert!(
+                restored
+                    .require_fresh_custody_head(
+                        crate::client::identity_authority::HeadUse::NewAuthorization,
+                        &root,
+                        &record,
+                    )
+                    .is_err(),
+                "a restore must not carry a network observation into the new root"
+            );
+            Ok(())
+        },
+    )))
+    .await
+    .map_err(|_| "test: deadline exceeded")?
 }

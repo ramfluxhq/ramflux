@@ -456,7 +456,6 @@ mod tests {
 
     #[tokio::test]
     async fn own_sent_unsupported_message_keeps_exact_private_evidence_and_settles() -> TestResult {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let (mut own, proof, mut sent) = fixture().await?;
         bind_private_thread(&own, &sent)?;
         let mut nested = g::Inner::decode(sent.exact_inner.as_slice())?;
@@ -517,7 +516,6 @@ mod tests {
     #[tokio::test]
     async fn private_own_message_reparse_uses_own_attestation_and_keeps_peer_origin_separate()
     -> TestResult {
-        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
         let (mut own, proof, sent) = fixture().await?;
         bind_private_thread(&own, &sent)?;
         let identity = g::Inner::decode(sent.exact_inner.as_slice())?.identity.ok_or("identity")?;

@@ -243,7 +243,7 @@ async fn custody_child() -> anyhow::Result<bool> {
             .env("RAMFLUX_CUSTODY_ALLOW_NO_CHANNEL_BINDING", "1")
             .env(
                 "RAMFLUX_CUSTODY_NODE_PUBLIC_KEY",
-                ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+                ramflux_crypto::public_key_base64url_from_seed(&[8; 32]),
             )
             .env("RAMFLUX_CUSTODY_PROXY_SIGNING_SEED", ramflux_protocol::encode_base64url([9; 32]))
             .output()

@@ -46,8 +46,24 @@ fn inner(
     sequence: u64,
     content: g::content::Value,
 ) -> TestResult<g::Inner> {
+    let mut content = content;
+    let message = match &mut content {
+        g::content::Value::Message(message) => Some(message),
+        g::content::Value::Edit(edit) => edit.replacement.as_mut(),
+        _ => None,
+    };
+    if let Some(message) = message
+        && message.sealed_group.is_none()
+    {
+        message.erasure_nonce = vec![0x71; 32];
+    }
     let (kind, body) = g::registry::encode_body(&g::Content { value: Some(content) })?;
-    Ok(g::Inner { layer: 2, kind, identity: Some(identity(sender, sequence)?), body })
+    Ok(g::Inner {
+        layer: g::registry::PROFILE_FLOOR,
+        kind,
+        identity: Some(identity(sender, sequence)?),
+        body,
+    })
 }
 fn evidence(
     sender: &HistorySenderFixture,
@@ -141,7 +157,7 @@ fn item_with_message(
         original_metadata_evidence: Some(g::HistoryOriginalMetadataEvidence {
             canonical_sender_envelope: original_evidence.canonical_sender_envelope,
             source_authority: original_evidence.source_authority,
-            layer: 2,
+            layer: g::registry::PROFILE_FLOOR,
             ..Default::default()
         }),
         ..Default::default()
@@ -300,8 +316,12 @@ fn import_receiver_with_message(
 ) -> TestResult<RamfluxClient> {
     let client = empty_import_receiver(root)?;
     let id = ramflux_protocol::encode_base64url(&original.id);
+    let mut message = message.clone();
+    if message.sealed_group.is_none() {
+        message.erasure_nonce = vec![0x71; 32];
+    }
     let old = g::Inner {
-        layer: 2,
+        layer: g::registry::PROFILE_FLOOR,
         kind: 1,
         identity: Some(original.clone()),
         body: message.encode_to_vec(),
@@ -342,6 +362,7 @@ fn apply_claim(client: &RamfluxClient, item: &g::HistoryItem) -> TestResult<bool
                 source: &author.device,
                 imported: Some(item),
                 own_sent: false,
+                author_submit: false,
             },
             &original.conversation_id,
             &item.exact_inner,
@@ -406,7 +427,12 @@ fn delete_after_edit_erases_original_evidence_and_fences_reimport() -> TestResul
     let client = import_receiver(&root, &original)?;
     assert!(apply_claim(&client, &item)?);
     let id = ramflux_protocol::encode_base64url(&original.id);
-    client.delete_direct_message(&original.conversation_id, &id, "local", "delete-edited")?;
+    client.delete_direct_message(
+        &original.conversation_id,
+        &id,
+        "local",
+        &ramflux_protocol::hash_base64url("ramflux.test.local-delete.v1", b"delete-edited"),
+    )?;
     assert!(!client.account_db()?.actor_state_exists(&format!("routed/original-header/{id}"))?);
     assert!(!client.account_db()?.actor_state_exists(&format!("routed/current-edit-proof/{id}"))?);
     assert!(client.account_db()?.raw_inner_copy(&format!("history/current-edit/{id}"))?.is_none());
@@ -706,7 +732,6 @@ fn retain_upgrade_candidate(
 
 #[test]
 fn reparse_preserves_original_channel_and_authority() -> TestResult {
-    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     for mode in ["ephemeral", "durable"] {
         let root = Root::new()?;
         let now = crate::custody::network_now()?;

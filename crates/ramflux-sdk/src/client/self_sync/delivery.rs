@@ -56,9 +56,6 @@ impl RamfluxClient {
         &self,
         config: &GatewaySessionConfig,
     ) -> Result<Option<Plan>, SdkError> {
-        if !crate::client::target_selection::schema_v1_selected() {
-            return Ok(None);
-        }
         // A restored archive never sends before its fresh activation completes.
         if self.require_backup_outbound_ready().is_err() {
             return Ok(None);

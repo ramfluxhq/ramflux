@@ -38,19 +38,19 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
     let admin_config = admin_gateway(&config, &admin.client)?;
     admin.gateway_config = admin_config.clone();
     admin.target_delivery_id = admin_config.target_delivery_id.clone();
-    owner.client.shared_group_create("group", "group-thread", None, "sender")?;
-    let base = owner.client.shared_group_change(
+    owner.client.fixture_group_create("group", "group-thread", None, "sender")?;
+    let base = owner.client.fixture_group_change(
         "group",
         "sender",
         ramflux_protocol::GroupStateChange::Add {
-            member: admin.client.owned_group_actor("device-peer-one")?.identity,
+            member: admin.client.fixture_group_actor("device-peer-one")?.identity,
             role: ramflux_protocol::SharedGroupRole::Admin,
         },
     )?;
-    admin.client.accept_shared_group_state(&base, "device-peer-one")?;
+    admin.client.fixture_accept_group_state(&base, "device-peer-one")?;
     admin.client.stage_group_change_request(
         "group",
-        "device-peer-one",
+        admin_config.target_delivery_id.as_str(),
         ramflux_protocol::GroupStateChange::SetName { name: "Requested name".into() },
         Some("wire-request"),
     )?;
@@ -94,10 +94,17 @@ async fn check_request_round_trip(step_clock: bool, poisoned_deadline: Option<&s
         assert_poisoned_deadlines(&[&owner.client, &admin.client], prefix)?;
     }
     assert_result_did_not_replace_snapshot(&admin.client)?;
-    admin.client.accept_shared_group_state(&current, "device-peer-one")?;
+    admin.client.fixture_accept_group_state(&current, "device-peer-one")?;
     assert_eq!(admin.client.group_state("group")?.group_epoch, 3);
-    assert_eq!(owner.client.direct_messages("group-thread")?.len(), 0);
-    assert_eq!(admin.client.direct_messages("group-thread")?.len(), 0);
+    let (owner_service, owner_messages) = timeline_counts(&owner.client)?;
+    let (admin_service, admin_messages) = timeline_counts(&admin.client)?;
+    assert_eq!(owner_messages, 0, "a group state change is not an application message");
+    assert_eq!(admin_messages, 0, "a group state change is not an application message");
+    assert_eq!(owner_service, 2, "the owner records the member add and the rename");
+    assert_eq!(
+        admin_service, 2,
+        "the admin's first snapshot projects the add, and the rename adds the name row"
+    );
     Box::pin(reject_demoted_federated_add(
         &mut owner.client,
         &admin.client,
@@ -122,7 +129,7 @@ async fn receive_control(
         config,
         Box::new(super::fixture::RecordingGateway::new(Arc::default())),
     );
-    account.client.apply_routed_entry(&mut receiver, pool, &incoming, false).await?;
+    account.client.apply_routed_entry(&mut receiver, pool, &incoming).await?;
     Ok(())
 }
 
@@ -170,12 +177,7 @@ fn admin_gateway(
     config: &GatewaySessionConfig,
     client: &RamfluxClient,
 ) -> Result<GatewaySessionConfig, SdkError> {
-    let mut admin_config = config.clone();
-    admin_config.principal_id = "peer".into();
-    admin_config.device_id = "device-peer-one".into();
-    admin_config.target_delivery_id = "device-peer-one".into();
-    admin_config = admin_config.with_account_identity(client)?;
-    Ok(admin_config)
+    crate::client::native_test_support::bus::config_for(client, config)
 }
 
 async fn reject_demoted_federated_add(
@@ -186,14 +188,14 @@ async fn reject_demoted_federated_add(
 ) -> TestResult {
     let request = admin.stage_group_change_request(
         "group",
-        "device-peer-one",
+        admin.owned_device_identity()?.storage_key(),
         ramflux_protocol::GroupStateChange::Add {
-            member: sibling.owned_group_actor("device-peer-two")?.identity,
+            member: sibling.fixture_group_actor("device-peer-two")?.identity,
             role: ramflux_protocol::SharedGroupRole::Member,
         },
         Some("stale-federation-add"),
     )?;
-    let before = owner.shared_group_change(
+    let before = owner.fixture_group_change(
         "group",
         "sender",
         ramflux_protocol::GroupStateChange::SetRole {
@@ -234,19 +236,18 @@ async fn reject_demoted_federated_add(
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    message.encrypted_body = serde_json::to_vec(
-        &admin
-            .seal_routed_as(
-                &mut sender,
-                &message,
-                &serde_json::to_vec(&packet)?,
-                crate::client::routed::Route::group_control("group"),
-            )
-            .await?,
-    )?;
+    let body = admin.generated_group_control_inner(&packet)?;
+    let sealed = admin
+        .seal_routed_as(
+            &mut sender,
+            &message,
+            &body,
+            crate::client::routed::Route::from_inner(&body)?,
+        )
+        .await?;
     let incoming = request_entry(
         2,
-        crate::dm::gateway_direct_message_envelope(&sender.config, &message, None)?,
+        crate::dm::gateway_generated_envelope_from_sealed(&sender.config, &mut message, sealed)?,
     );
     let mut receiver = GatewaySessionEngine::with_test_transport(
         config.clone(),
@@ -255,9 +256,15 @@ async fn reject_demoted_federated_add(
     let pool = ramflux_transport::RelayQuicPool::new(
         ramflux_transport::RelayQuicPoolConfig::functional_default()?,
     );
-    owner.apply_routed_entry(&mut receiver, &pool, &incoming, false).await?;
+    owner.apply_routed_entry(&mut receiver, &pool, &incoming).await?;
     assert_eq!(
-        owner.process_group_request(&request, "sender")?.status,
+        owner
+            .process_group_request_with_primary(
+                &request,
+                owner.owned_device_identity()?.storage_key(),
+                owner.fixture_primary()?.as_ref()
+            )?
+            .status,
         ramflux_protocol::GroupChangeStatus::PermissionDenied
     );
     assert_eq!(
@@ -304,4 +311,11 @@ async fn send_admin_request(admin: &mut LocalBusAccountState, step_clock: bool) 
     }
 
     Ok(())
+}
+
+fn timeline_counts(client: &RamfluxClient) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let page = client.generated_message_view_page("group-thread", None, 100)?;
+    let service = page.messages.iter().filter(|row| row.kind == "service").count();
+    let messages = page.messages.iter().filter(|row| row.kind == "message").count();
+    Ok((service, messages))
 }

@@ -5,8 +5,8 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 use ramflux_crypto::{
-    VerifiedGroupState, advance_group_state, advance_native_group_state, certify_group_state_actor,
-    certify_native_group_state_actor, create_group_state, create_native_group_state,
+    VerifiedGroupState, advance_native_group_state_with_order, certify_native_group_state_actor,
+    create_native_group_state,
 };
 use ramflux_protocol::group_state::{GroupMemberIdentity, GroupStateActor, GroupStateChange};
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 mod bootstrap;
 mod controls;
 mod generated;
+mod generated_send;
 mod receive_directory;
 mod snapshot_generated;
 pub(crate) use receive_directory::{GroupDirectoryEvidence, GroupDirectoryRequest};
@@ -28,12 +29,13 @@ mod message_ids;
 mod own_consent;
 mod requests;
 mod routes;
+mod service_row;
 mod transfer;
 mod transfer_outcome;
 mod transfer_wire;
-pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 #[cfg(test)]
-use bootstrap::{decode_packet, packet_bytes};
+pub(crate) use bootstrap::decode_packet as decode_shared_group_packet;
+pub(crate) use bootstrap::{PreparedSharedGroup, is_packet as is_shared_group_packet};
 pub(crate) use controls::{BeaconRecord, GroupControlBody, GroupControlPacket};
 pub(crate) use requests::request_key as request_record_key;
 pub(crate) use transfer::{SEND_PREFIX as TRANSFER_SEND_PREFIX, TransferDelivery};
@@ -53,13 +55,8 @@ impl RamfluxClient {
                 .effective_role(local.root_commitment(), local.device_id())
                 .is_some());
         }
-        // A pending invitation has no joined projection yet. Absence is a
-        // negative membership answer; real storage failures still propagate.
-        if self.account_db()?.group_snapshot_epoch(group)?.is_none() {
-            return Ok(false);
-        }
-        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        Ok(self.group_state(group)?.members.contains(&branch.device_id))
+        self.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(false)
     }
 
     pub(super) fn shared_group_local_target(&self, group: &str) -> Result<String, SdkError> {
@@ -72,21 +69,16 @@ impl RamfluxClient {
     }
 
     pub(crate) fn owned_group_actor(&self, target: &str) -> Result<GroupStateActor, SdkError> {
-        if let Some(account) = &self.born_v3_account {
-            let branch = self.device_branch.as_ref().ok_or(SdkError::NetworkingPending)?;
-            return Ok(certify_native_group_state_actor(
-                account.verified(),
-                branch,
-                target,
-                crate::custody::network_now()?,
-            )?);
-        }
-        Ok(certify_group_state_actor(
-            self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-            self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        let account = self.born_v3_account.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        Ok(certify_native_group_state_actor(
+            account.verified(),
+            branch,
             target,
+            crate::custody::network_now()?,
         )?)
     }
+
     pub(crate) fn shared_group_create(
         &self,
         group: &str,
@@ -117,23 +109,15 @@ impl RamfluxClient {
             name,
             now: now_unix_timestamp(),
         };
-        let verified = if self.born_v3_account.is_some() {
-            create_native_group_state(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                branch,
-                &actor,
-                input,
-            )?
-        } else {
-            create_group_state(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                branch,
-                &actor,
-                input,
-            )?
-        };
+        let verified = create_native_group_state(
+            primary.ok_or(SdkError::CustodyVaultUnavailable)?,
+            branch,
+            &actor,
+            input,
+        )?;
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
             self.account_db()?.commit_shared_group_state(&verified, &actor)?;
+            self.observe_native_task_roster(&verified)?;
             crate::bus::enqueue_shared_group(self, &verified, None)
         })?;
         Ok(verified)
@@ -166,29 +150,26 @@ impl RamfluxClient {
         self.check_group_transfer_lease(group, nonce)?;
         let actor = self.owned_group_actor(target)?;
         let branch = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-        let state = if self.born_v3_account.is_some() {
-            advance_native_group_state(
-                primary.ok_or(SdkError::CustodyVaultUnavailable)?,
-                branch,
-                &actor,
-                &previous,
-                change.clone(),
-            )?
-        } else {
-            advance_group_state(
-                self.identity_root.as_ref().ok_or(SdkError::IdentityRootMissing)?,
-                branch,
-                &actor,
-                &previous,
-                change.clone(),
-            )?
-        };
-        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            self.account_db()?.commit_shared_group_state(&state, &actor)?;
-            self.record_group_write(&state, change)?;
-            self.finish_group_transfer_head_change(&state)?;
-            crate::bus::enqueue_shared_group(self, &state, Some(&previous))
-        })?;
+        let primary = primary.ok_or(SdkError::CustodyVaultUnavailable)?;
+        let state =
+            self.account_db()?.write_transaction(|| -> Result<VerifiedGroupState, SdkError> {
+                let order = self.service_order_for_change(&previous, &change, &actor)?;
+                let state = advance_native_group_state_with_order(
+                    primary,
+                    branch,
+                    &actor,
+                    &previous,
+                    change.clone(),
+                    order,
+                )?;
+                self.account_db()?.commit_shared_group_state(&state, &actor)?;
+                self.observe_native_task_roster(&state)?;
+                self.record_group_write(&state, change)?;
+                self.finish_group_transfer_head_change(&state)?;
+                self.project_accepted_group_service(Some(&previous), &state)?;
+                crate::bus::enqueue_shared_group(self, &state, Some(&previous))?;
+                Ok(state)
+            })?;
         Ok(state)
     }
     pub(crate) fn accept_shared_group_state(
@@ -202,30 +183,54 @@ impl RamfluxClient {
             if verified.member_storage_key(&actor.identity)?.is_none() && previous.is_none() {
                 return Err(invalid("first group snapshot does not grant local membership"));
             }
-            let Some(reconciled) = self.reconcile_group_state(verified, local_target)? else {
-                return Ok(false);
-            };
-            let changed = self.account_db()?.commit_shared_group_state(&reconciled, &actor)?;
-            self.finish_group_transfer_head_change(&reconciled)?;
-            for record in self.group_change_records()?.into_iter().filter(|record| {
-                !record.incoming && record.request.group_id == reconciled.view().group_id
-            }) {
-                if let (GroupStateChange::Add { member, .. }, Some(federation)) =
-                    (&record.request.change, record.federation)
-                    && reconciled.view().members.iter().any(|current| current.identity == *member)
-                {
-                    self.persist_shared_group_federation_route(
-                        &reconciled.view().group_id,
-                        &member.root_commitment,
-                        &federation,
-                    )?;
+            match self.reconcile_group_state(verified, local_target, None)? {
+                creator_conflicts::Reconciled::Adopt(reconciled) => self
+                    .commit_reconciled_group_state(
+                        &reconciled,
+                        verified,
+                        previous.as_ref(),
+                        &actor,
+                    ),
+                // Skipped states change nothing; a deferred creator repair is held by its marker
+                // and committed once `redrive_creator_repairs` runs with the account primary.
+                creator_conflicts::Reconciled::Skip | creator_conflicts::Reconciled::Deferred => {
+                    Ok(false)
                 }
             }
-            if reconciled.snapshot().state_hash != verified.snapshot().state_hash {
-                crate::bus::enqueue_shared_group(self, &reconciled, previous.as_ref())?;
-            }
-            Ok(changed)
         })
+    }
+    /// Commit a reconciled state; republish it only when it differs from the received one.
+    pub(super) fn commit_reconciled_group_state(
+        &self,
+        reconciled: &VerifiedGroupState,
+        received: &VerifiedGroupState,
+        previous: Option<&VerifiedGroupState>,
+        actor: &GroupStateActor,
+    ) -> Result<bool, SdkError> {
+        let changed = self.account_db()?.commit_shared_group_state(reconciled, actor)?;
+        self.observe_native_task_roster(reconciled)?;
+        self.finish_group_transfer_head_change(reconciled)?;
+        for record in self.group_change_records()?.into_iter().filter(|record| {
+            !record.incoming && record.request.group_id == reconciled.view().group_id
+        }) {
+            if let (GroupStateChange::Add { member, .. }, Some(federation)) =
+                (&record.request.change, record.federation)
+                && reconciled.view().members.iter().any(|current| current.identity == *member)
+            {
+                self.persist_shared_group_federation_route(
+                    &reconciled.view().group_id,
+                    &member.root_commitment,
+                    &federation,
+                )?;
+            }
+        }
+        if changed {
+            self.project_accepted_group_service(previous, reconciled)?;
+        }
+        if reconciled.snapshot().state_hash != received.snapshot().state_hash {
+            crate::bus::enqueue_shared_group(self, reconciled, previous)?;
+        }
+        Ok(changed)
     }
     pub(crate) async fn verify_shared_group_source(
         &self,
@@ -351,6 +356,7 @@ impl RamfluxClient {
         let state = verified.view();
         let display = self.shared_group_display(group)?.ok_or_else(|| invalid("group absent"))?;
         let mut value = serde_json::to_value(display)?;
+        value["conversation_id"] = json!(state.conversation_id);
         value["member_roster"] = json!(state.members);
         value["excluded_devices"] = json!(state.excluded);
         value["name"] = json!(state.name);
