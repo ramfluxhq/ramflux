@@ -4,9 +4,7 @@
 //! Encrypted, fixed-owner base-row spool. SQLite key order is the protocol's encoded order.
 use super::record_spool as blob;
 use super::source_owner::SourceContext;
-use super::{
-    FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog, write_full_scalar_sql_row,
-};
+use super::{FamilyRule, FamilySelector, FullTransferStage, full_transfer_catalog};
 use crate::{StorageError, database::Connection};
 use ramflux_protocol::custody::pairing::full_transfer::Disposition;
 use rusqlite::{OptionalExtension as _, params};
@@ -234,11 +232,14 @@ fn build(
             }
         }
         let mut probe = blob::Probe::new();
-        let bytes = write_full_scalar_sql_row(rule, row, &mut probe)?;
+        let bytes =
+            super::owner_sql::write(source, rule, row, &mut probe, Some(&source_guard.principal))?;
         let header = probe.header(bytes, rule)?;
         let mut sink =
             blob::Sink::create(spool, snapshot, rule.id, &header.0.key, bytes, source_guard)?;
-        if write_full_scalar_sql_row(rule, row, &mut sink)? != bytes {
+        if super::owner_sql::write(source, rule, row, &mut sink, Some(&source_guard.principal))?
+            != bytes
+        {
             return Err(invalid());
         }
         sink.finish()?;

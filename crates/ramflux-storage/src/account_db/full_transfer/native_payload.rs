@@ -3,7 +3,9 @@
 
 //! Closed native payload framing. These checks grant neither origin nor installation authority.
 use crate::StorageError;
+#[cfg(test)]
 use prost::Message as _;
+#[cfg(test)]
 use ramflux_protocol::message as g;
 use std::io::{Read, Write};
 use zeroize::Zeroizing;
@@ -13,7 +15,7 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativePayload {
-    DirectInnerV1,
+    DirectHistoryV1,
 }
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
@@ -21,12 +23,12 @@ fn invalid() -> StorageError {
 impl NativePayload {
     pub(super) const fn family(self) -> &'static str {
         match self {
-            Self::DirectInnerV1 => "sql/runtime_message_content",
+            Self::DirectHistoryV1 => "sql/runtime_message_content",
         }
     }
     pub(super) const fn max_bytes(self) -> usize {
         match self {
-            Self::DirectInnerV1 => g::validation::MAX_INNER_BYTES,
+            Self::DirectHistoryV1 => super::FULL_DIRECT_HISTORY_LIMIT,
         }
     }
     pub(super) fn validate(self, bytes: &[u8]) -> Result<(), StorageError> {
@@ -34,7 +36,10 @@ impl NativePayload {
             return Err(invalid());
         }
         match self {
-            Self::DirectInnerV1 => direct_inner(bytes),
+            Self::DirectHistoryV1 => {
+                let own = super::direct_history::payload_account(bytes)?;
+                super::FullDirectHistory::read(bytes, own).map(|_| ())
+            }
         }
     }
     pub(super) fn copy(
@@ -58,29 +63,6 @@ impl NativePayload {
         Ok(())
     }
 }
-fn direct_inner(bytes: &[u8]) -> Result<(), StorageError> {
-    let scanned = g::validation::scan_inner(bytes).map_err(|_| invalid())?;
-    if scanned.outcome != g::validation::ScanOutcome::Supported || !matches!(scanned.kind, 1 | 3) {
-        return Err(invalid());
-    }
-    let inner = g::Inner::decode(bytes).map_err(|_| invalid())?;
-    let identity = inner.identity.as_ref().ok_or_else(invalid)?;
-    g::identity::verify(identity).map_err(|_| invalid())?;
-    if identity.group_id.is_some()
-        || identity.group_epoch.is_some()
-        || identity.device_sequence & (1 << 63) != 0
-    {
-        return Err(invalid());
-    }
-    let content =
-        g::registry::decode_body(inner.kind, &inner.body, inner.layer).map_err(|_| invalid())?;
-    if matches!(content.value, Some(g::content::Value::Message(message)) if message.sealed_group.is_some())
-    {
-        return Err(invalid());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests;
 

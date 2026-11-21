@@ -8,14 +8,14 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn native_direct_payload_keeps_exact_native_text_larger_than_the_metadata_bound() -> TestResult {
-    let bytes = inner(g::validation::MAX_TEXT_BYTES)?.encode_to_vec();
+    let bytes = super::test_support::frame(&inner(g::validation::MAX_TEXT_BYTES)?)?;
     assert!(
         bytes.len() > super::super::fixed_union::MAX_METADATA_BYTES,
         "fixture did not cross the metadata boundary"
     );
     let mut input = bytes.as_slice();
     let mut output = Vec::new();
-    NativePayload::DirectInnerV1.copy(bytes.len() as u64, &mut input, &mut output)?;
+    NativePayload::DirectHistoryV1.copy(bytes.len() as u64, &mut input, &mut output)?;
     assert!(input.is_empty(), "native decoder left bytes unread");
     assert_eq!(output, bytes, "native payload was rewritten");
     Ok(())
@@ -23,8 +23,8 @@ fn native_direct_payload_keeps_exact_native_text_larger_than_the_metadata_bound(
 #[test]
 fn native_direct_payload_refuses_oversize_before_reading_or_emitting() -> TestResult {
     let mut output = Vec::new();
-    let result = NativePayload::DirectInnerV1.copy(
-        g::validation::MAX_INNER_BYTES as u64 + 1,
+    let result = NativePayload::DirectHistoryV1.copy(
+        super::super::FULL_DIRECT_HISTORY_LIMIT as u64 + 1,
         &mut std::io::empty(),
         &mut output,
     );
@@ -33,9 +33,9 @@ fn native_direct_payload_refuses_oversize_before_reading_or_emitting() -> TestRe
         "native decoder attempted to read an oversized payload: {result:?}"
     );
     assert!(output.is_empty(), "invalid native data escaped admission");
-    let too_much_text = inner(g::validation::MAX_TEXT_BYTES + 1)?.encode_to_vec();
+    let too_much_text = super::test_support::frame(&inner(g::validation::MAX_TEXT_BYTES + 1)?)?;
     assert!(
-        NativePayload::DirectInnerV1.validate(&too_much_text).is_err(),
+        NativePayload::DirectHistoryV1.validate(&too_much_text).is_err(),
         "native text semantic bound was replaced by the outer byte cap"
     );
     Ok(())
@@ -46,7 +46,10 @@ fn native_direct_payload_refuses_group_and_control_identity_shapes() -> TestResu
         let mut value = inner(16)?;
         let identity = value.identity.as_mut().ok_or("fixture identity")?;
         match mode {
-            "group" => identity.group_id = Some("foreign-group".into()),
+            "group" => {
+                identity.group_id = Some("foreign-group".into());
+                identity.group_epoch = Some(1);
+            }
             "control" => {
                 identity.device_sequence |= 1 << 63;
                 identity.id = g::identity::derive(
@@ -60,7 +63,7 @@ fn native_direct_payload_refuses_group_and_control_identity_shapes() -> TestResu
             _ => return Err("unknown fixture change".into()),
         }
         assert!(
-            NativePayload::DirectInnerV1.validate(&value.encode_to_vec()).is_err(),
+            NativePayload::DirectHistoryV1.validate(&super::test_support::frame(&value)?).is_err(),
             "native direct physical shape accepted {mode}"
         );
     }
@@ -74,7 +77,7 @@ fn native_sql_payload_preserves_exact_large_bytes_through_independent_stream_adm
     let mut rule = super::test_support::rule()?;
     let inner = inner(g::validation::MAX_TEXT_BYTES)?;
     let identity = inner.identity.as_ref().ok_or("fixture identity")?;
-    let body = inner.encode_to_vec();
+    let body = super::test_support::frame(&inner)?;
     let db = rusqlite::Connection::open_in_memory()?;
     db.execute_batch("CREATE TABLE runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);")?;
     db.execute(

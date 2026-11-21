@@ -119,25 +119,34 @@ not a full source stream/import/install or real-binary transfer.
 
 ## Native payload framing versus semantic ownership
 
-Storage `full_transfer/native_payload.rs` defines closed native formats separately
-from small SQL metadata. `DirectInnerV1` uses the native Inner bound, scans exact
-protobuf bytes, checks the event-id transcript and Message/Edit content, and
-rejects group/control shapes. The SQL field codec is restricted to its declared
-content family/column; it is not an arbitrary BLOB or JSON adapter. Source SQL
-encoding and independent stream admission preserve exact bytes, including valid
-native text whose encoding exceeds the metadata bound.
+Storage native_payload has one DirectHistoryV1 field format, replacing the earlier
+raw-Inner prototype without a compatibility path. It admits bounded NDH1 records
+through FullDirectHistory, checking the appropriate historical evidence class,
+exact native bytes, original order, supported content and direct scope. Native
+Inner/text bounds remain unchanged. This is restricted to runtime_message_content
+body; it is not a generic BLOB/JSON adapter or current authorization grant.
 
-This is physical admission only. It authenticates no original signature or HLC,
-creates no erasure edge and proves no materialization or installation. The live
-runtime_message_content declaration remains RequiresOwner while native evidence,
-contribution merge, erasure closure and dedicated payload spooling are built.
-Metadata records retain the262144-byte bound. The shared record profile gives
-only the declared native family its format-specific payload allowance and still
-counts its header/other cells against the metadata budget. Source, incoming,
-original-contribution, refreshed-B and independent comparison spools use that
-profile; native payloads do not acquire a generic BLOB allowance. Older local
-metadata-only/pending-slot or WITHOUT ROWID shapes refuse SchemaMismatch without
-conversion. This prerequisite does not increase declaration coverage.
+Shared owner_sql assembles logical framed cells from the actual immutable native
+source, B-original cut, refreshed-B cut or materialized private generation. All
+four paths supply the authenticated transfer account separately; SQL's embedded
+root must match it. The metadata spool is a separate operand and cannot become
+the source of native evidence. Prepared scalar field validation also checks every
+frame. Physical admission's embedded account claim alone grants no contribution,
+erasure bypass, semantic receipt or generation selection.
+
+Metadata remains capped at262144 bytes, including native-record header/other
+cells. Only the declared native family receives its two existing4-MiB history
+parts plus fixed framing allowance. Source, input, original ledger, refreshed-B
+and comparison spools share that profile. Old local raw-Inner/metadata-only,
+pending-slot and WITHOUT ROWID shapes refuse SchemaMismatch without conversion.
+Independent fixtures retain the current format when testing rowid refusal, so
+format checks cannot mask it. Keyed spool tests verify exact frame bytes and
+separate source/spool operands, plus a wrong authenticated account refusal.
+
+The live content declaration remains RequiresOwner until semantic native merge,
+restriction-first erasure, raw/actor ownership closure and actual materialization
+are complete. None of this prerequisite alone increases declaration coverage or
+proves a full native transfer/install.
 
 ## Revised execution order
 

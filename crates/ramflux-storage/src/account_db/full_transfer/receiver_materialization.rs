@@ -139,7 +139,14 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
             let mut count = 0_u64;
             while let Some(row) = rows.next()? {
                 self.stage.require_io()?;
-                super::record_spool::Comparison::sql(db, rule, row)?.mark()?;
+                super::record_spool::Comparison::sql(
+                    &self.private.db,
+                    db,
+                    rule,
+                    row,
+                    self.stage.principal(),
+                )?
+                .mark()?;
                 count = count.checked_add(1).ok_or_else(mismatch)?;
             }
             if count != family.source_rows.0 {

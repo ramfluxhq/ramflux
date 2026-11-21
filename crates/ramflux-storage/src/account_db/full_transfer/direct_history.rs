@@ -293,3 +293,11 @@ impl Write for Limited {
         Ok(())
     }
 }
+
+// Physical field admission has no authenticated account operand. Semantic import must
+// still call read with the stage account; this embedded claim alone grants no receipt.
+pub(super) fn payload_account(bytes: &[u8]) -> Result<&str, StorageError> {
+    let start = MAGIC.len() + 1;
+    std::str::from_utf8(bytes.get(start..start + ROOT_BYTES).ok_or_else(invalid)?)
+        .map_err(|_| invalid())
+}

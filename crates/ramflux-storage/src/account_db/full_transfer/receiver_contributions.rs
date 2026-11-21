@@ -110,11 +110,14 @@ impl Contributions {
                         return Err(invalid());
                     }
                 }
-                super::record_spool::Candidate::sql(&tx, rule, row)?.retain_union(
-                    &value.nonce,
-                    &value.owners[1],
-                    false,
-                )?;
+                super::record_spool::Candidate::sql(
+                    &private.db,
+                    &tx,
+                    rule,
+                    row,
+                    &owners[1].account_anchor,
+                )?
+                .retain_union(&value.nonce, &value.owners[1], false)?;
                 count = count.checked_add(1).ok_or_else(invalid)?;
             }
             if count != family.source_rows.0 {

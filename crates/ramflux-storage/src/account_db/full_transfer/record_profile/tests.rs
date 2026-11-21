@@ -35,7 +35,7 @@ fn record_profile_metadata_does_not_borrow_the_native_allowance() -> TestResult 
 #[test]
 fn record_profile_native_sql_and_input_spools_retain_exact_keyed_bytes() -> TestResult {
     const MAX_NATIVE_RECORD_BYTES: u64 =
-        (METADATA_LIMIT + ramflux_protocol::message::validation::MAX_INNER_BYTES) as u64;
+        (METADATA_LIMIT + super::super::FULL_DIRECT_HISTORY_LIMIT) as u64;
     let root = tempfile::tempdir()?;
     let mut db = rusqlite::Connection::open(root.path().join("native-spool.db"))?;
     let key = crate::AccountDbKey::derive("native-spool", b"native-spool-fixture");
@@ -47,23 +47,22 @@ fn record_profile_native_sql_and_input_spools_retain_exact_keyed_bytes() -> Test
     db.execute_batch(&super::super::union_encoding::schema())?;
     super::super::union_encoding::require_existing_format(&db)?;
     let inner = test_support::inner(ramflux_protocol::message::validation::MAX_TEXT_BYTES)?;
-    let identity = inner.identity.as_ref().ok_or("fixture identity")?;
-    let body = inner.encode_to_vec();
-    db.execute_batch("CREATE TABLE runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);")?;
-    db.execute(
-        "INSERT INTO runtime_message_content VALUES(?1,?2,?3)",
-        rusqlite::params![
-            ramflux_protocol::encode_base64url(&identity.id),
-            &identity.conversation_id,
-            &body,
-        ],
-    )?;
+    let body = test_support::frame(&inner)?;
+    test_support::install_source(&db, &inner)?;
     let rule = test_support::rule()?;
     let tx = db.transaction()?;
     let candidate = tx.query_row(
         "SELECT message_id,conversation_id,body FROM runtime_message_content",
         [],
-        |row| Ok(record_spool::Candidate::sql(&tx, &rule, row)),
+        |row| {
+            Ok(record_spool::Candidate::sql(
+                &tx,
+                &tx,
+                &rule,
+                row,
+                &ramflux_protocol::encode_base64url([31; 32]),
+            ))
+        },
     )??;
     let stable = Zeroizing::new(candidate.header.0.key.clone());
     candidate.retain_original(&[3; 32], "first")?;
@@ -79,6 +78,7 @@ fn record_profile_native_sql_and_input_spools_retain_exact_keyed_bytes() -> Test
         .take(MAX_NATIVE_RECORD_BYTES + 1)
         .read_to_end(&mut encoded)?;
     assert_eq!(encoded.len() as u64, length, "keyed spool lost native bytes");
+    assert!(encoded.ends_with(&body), "source SQL adapter rewrote exact native frame bytes");
     let mut probe = record_spool::Probe::new();
     probe.write_all(&encoded)?;
     let header = probe.header(length, &rule)?;
@@ -136,6 +136,7 @@ fn record_profile_old_pending_slot_refuses_without_conversion() -> TestResult {
     let rule = test_support::rule()?;
     let inner = test_support::inner(16)?;
     let identity = inner.identity.as_ref().ok_or("fixture identity")?;
+    test_support::install_source(&db, &inner)?;
     let tx = db.transaction()?;
     let result = tx.query_row(
         "SELECT ?1 AS message_id,?2 AS conversation_id,?3 AS body",
@@ -144,7 +145,15 @@ fn record_profile_old_pending_slot_refuses_without_conversion() -> TestResult {
             &identity.conversation_id,
             inner.encode_to_vec()
         ],
-        |row| Ok(record_spool::Candidate::sql(&tx, &rule, row)),
+        |row| {
+            Ok(record_spool::Candidate::sql(
+                &tx,
+                &tx,
+                &rule,
+                row,
+                &ramflux_protocol::encode_base64url([31; 32]),
+            ))
+        },
     )?;
     assert!(
         matches!(result, Err(StorageError::PairingField("SchemaMismatch"))),
@@ -153,5 +162,60 @@ fn record_profile_old_pending_slot_refuses_without_conversion() -> TestResult {
     let bytes: Vec<u8> =
         tx.query_row("SELECT record FROM full_stream_pending", [], |row| row.get(0))?;
     assert_eq!(bytes, vec![17], "old pending bytes were changed to unblock transfer");
+    Ok(())
+}
+
+#[test]
+fn record_profile_native_adapter_reads_source_not_metadata_spool() -> TestResult {
+    let source = rusqlite::Connection::open_in_memory()?;
+    let inner = test_support::inner(32)?;
+    test_support::install_source(&source, &inner)?;
+    let mut spool = rusqlite::Connection::open_in_memory()?;
+    spool.execute_batch(&super::super::union_encoding::schema())?;
+    let rule = test_support::rule()?;
+    let tx = spool.transaction()?;
+    let candidate = source.query_row(
+        "SELECT message_id,conversation_id,body FROM runtime_message_content",
+        [],
+        |row| {
+            Ok(record_spool::Candidate::sql(
+                &source,
+                &tx,
+                &rule,
+                row,
+                &ramflux_protocol::encode_base64url([31; 32]),
+            ))
+        },
+    )??;
+    candidate.retain_original(&[7; 32], "source-owner")?;
+    let bytes: Vec<u8> = tx.query_row(
+        "SELECT record FROM full_union_input WHERE owner='source-owner'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(
+        bytes.ends_with(&test_support::frame(&inner)?),
+        "native source context was taken from the unrelated spool"
+    );
+    let wrong = source.query_row(
+        "SELECT message_id,conversation_id,body FROM runtime_message_content",
+        [],
+        |row| {
+            Ok(record_spool::Candidate::sql(
+                &source,
+                &tx,
+                &rule,
+                row,
+                &ramflux_protocol::encode_base64url([32; 32]),
+            ))
+        },
+    )?;
+    assert!(
+        matches!(wrong, Err(StorageError::PairingField("UnsupportedRecord"))),
+        "source's embedded account replaced the authenticated transfer account"
+    );
+    let body: Vec<u8> =
+        source.query_row("SELECT body FROM runtime_message_content", [], |row| row.get(0))?;
+    assert_eq!(body, inner.encode_to_vec(), "source assembly rewrote live native body");
     Ok(())
 }

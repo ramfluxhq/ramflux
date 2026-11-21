@@ -100,7 +100,14 @@ impl Contributions {
                         return Err(invalid());
                     }
                 }
-                super::super::record_spool::Candidate::sql(target, rule, row)?.target()?;
+                super::super::record_spool::Candidate::sql(
+                    &current.db,
+                    target,
+                    rule,
+                    row,
+                    stage.principal(),
+                )?
+                .target()?;
                 count = count.checked_add(1).ok_or_else(invalid)?;
             }
             if count != family.source_rows.0 {

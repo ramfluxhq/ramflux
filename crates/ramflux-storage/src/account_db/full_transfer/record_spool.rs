@@ -226,11 +226,13 @@ impl<'db> LocalSink<'db> {
 }
 impl<'db> Candidate<'db> {
     pub(super) fn sql(
+        source: &rusqlite::Connection,
         db: &'db rusqlite::Connection,
         rule: &super::FamilyRule,
         row: &rusqlite::Row<'_>,
+        account: &str,
     ) -> Result<Self, StorageError> {
-        let header = encode_sql(db, rule, row, Scope::Main)?;
+        let header = encode_sql(source, db, rule, row, Scope::Main, Some(account))?;
         Ok(Self { db, header })
     }
     pub(super) fn input(
@@ -357,16 +359,18 @@ pub(super) fn copy_blob(
 }
 
 fn encode_sql(
+    source: &rusqlite::Connection,
     db: &rusqlite::Connection,
     rule: &super::FamilyRule,
     row: &rusqlite::Row<'_>,
     scope: Scope,
+    account: Option<&str>,
 ) -> Result<PrivateHeader, StorageError> {
     let mut probe = Probe::new();
-    let length = super::write_full_scalar_sql_row(rule, row, &mut probe)?;
+    let length = super::owner_sql::write(source, rule, row, &mut probe, account)?;
     let header = probe.header(length, rule)?;
     let mut output = LocalSink::create(db, length, scope, rule)?;
-    if super::write_full_scalar_sql_row(rule, row, &mut output)? != length {
+    if super::owner_sql::write(source, rule, row, &mut output, account)? != length {
         return Err(invalid());
     }
     output.finish()?;
@@ -380,11 +384,13 @@ pub(super) struct Comparison<'db> {
 }
 impl<'db> Comparison<'db> {
     pub(super) fn sql(
+        source: &rusqlite::Connection,
         db: &'db rusqlite::Connection,
         rule: &super::FamilyRule,
         row: &rusqlite::Row<'_>,
+        account: &str,
     ) -> Result<Self, StorageError> {
-        Ok(Self { db, header: encode_sql(db, rule, row, Scope::Verifier)? })
+        Ok(Self { db, header: encode_sql(source, db, rule, row, Scope::Verifier, Some(account))? })
     }
     pub(super) fn mark(self) -> Result<(), StorageError> {
         if self.db.execute("UPDATE verifier.materialized_record SET seen=1 WHERE family=?1 AND key=?2 AND record=(SELECT record FROM verifier.full_stream_pending WHERE slot=1)",params![self.header.0.family,self.header.0.key])? != 1 {return Err(StorageError::PairingField("ManifestMismatch"));}
@@ -403,7 +409,7 @@ pub(super) fn expected_imported_mac(
     let header = db.query_row(
         "SELECT ?1 AS source_ref,?2 AS bundle_id,?3 AS subkeys",
         params![owner, cells.text(0)?, cells.bytes(1)?],
-        |row| Ok(encode_sql(db, rule, row, Scope::Verifier)),
+        |row| Ok(encode_sql(db, db, rule, row, Scope::Verifier, None)),
     )??;
     if db.execute("INSERT INTO verifier.materialized_record(family,key,record) SELECT ?1,?2,record FROM verifier.full_stream_pending WHERE slot=1 ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE verifier.materialized_record.record=excluded.record",params![header.0.family,header.0.key])? != 1 {return Err(StorageError::PairingField("ManifestMismatch"));}
     db.execute("DELETE FROM verifier.full_stream_pending WHERE slot=1", [])?;
