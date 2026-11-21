@@ -144,8 +144,22 @@ pub(super) struct Candidate<'db> {
     db: &'db rusqlite::Connection,
     pub(super) header: PrivateHeader,
 }
+#[derive(Clone, Copy)]
+enum Scope {
+    Main,
+    Verifier,
+}
+impl Scope {
+    fn schema(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Verifier => "verifier",
+        }
+    }
+}
 struct LocalSink<'db> {
     db: &'db rusqlite::Connection,
+    scope: Scope,
     expected: usize,
     written: usize,
 }
@@ -162,7 +176,7 @@ impl Write for LocalSink<'_> {
             .ok_or_else(|| std::io::Error::other("candidate exceeds measured record"))?;
         let mut blob = self
             .db
-            .blob_open("main", "full_stream_pending", "record", 1, false)
+            .blob_open(self.scope.schema(), "full_stream_pending", "record", 1, false)
             .map_err(std::io::Error::other)?;
         if blob.len() != self.expected {
             return Err(std::io::Error::other("candidate size changed"));
@@ -180,13 +194,23 @@ impl Write for LocalSink<'_> {
     }
 }
 impl<'db> LocalSink<'db> {
-    fn create(db: &'db rusqlite::Connection, length: u64) -> Result<Self, StorageError> {
+    fn create(
+        db: &'db rusqlite::Connection,
+        length: u64,
+        scope: Scope,
+    ) -> Result<Self, StorageError> {
         if db.is_autocommit() || length == 0 || length > RECORD_LIMIT as u64 {
             return Err(invalid());
         }
-        db.execute_batch("CREATE TABLE IF NOT EXISTS full_stream_pending(slot INTEGER PRIMARY KEY CHECK(slot=1),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144));")?;
-        db.execute("INSERT INTO full_stream_pending VALUES(1,zeroblob(?1)) ON CONFLICT(slot) DO UPDATE SET record=excluded.record",[length])?;
-        Ok(Self { db, expected: usize::try_from(length).map_err(|_| invalid())?, written: 0 })
+        let schema = scope.schema();
+        db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {schema}.full_stream_pending(slot INTEGER PRIMARY KEY CHECK(slot=1),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144));"))?;
+        db.execute(&format!("INSERT INTO {schema}.full_stream_pending VALUES(1,zeroblob(?1)) ON CONFLICT(slot) DO UPDATE SET record=excluded.record"),[length])?;
+        Ok(Self {
+            db,
+            scope,
+            expected: usize::try_from(length).map_err(|_| invalid())?,
+            written: 0,
+        })
     }
     fn finish(self) -> Result<(), StorageError> {
         if self.written != self.expected {
@@ -201,14 +225,7 @@ impl<'db> Candidate<'db> {
         rule: &super::FamilyRule,
         row: &rusqlite::Row<'_>,
     ) -> Result<Self, StorageError> {
-        let mut probe = Probe::new();
-        let length = super::write_full_scalar_sql_row(rule, row, &mut probe)?;
-        let header = probe.header(length)?;
-        let mut output = LocalSink::create(db, length)?;
-        if super::write_full_scalar_sql_row(rule, row, &mut output)? != length {
-            return Err(invalid());
-        }
-        output.finish()?;
+        let header = encode_sql(db, rule, row, Scope::Main)?;
         Ok(Self { db, header })
     }
     pub(super) fn input(
@@ -228,7 +245,7 @@ impl<'db> Candidate<'db> {
             header.0.cell_lengths.iter().try_fold(prefix.len() as u64, |sum, length| {
                 sum.checked_add(length.0).ok_or_else(invalid)
             })?;
-        let mut output = LocalSink::create(db, length)?;
+        let mut output = LocalSink::create(db, length, Scope::Main)?;
         output.write_all(&prefix)?;
         super::copy_full_scalar_record(rule, &header.0, input, &mut output)?;
         output.finish()?;
@@ -333,5 +350,59 @@ pub(super) fn copy_blob(
     if copied != length {
         return Err(invalid());
     }
+    Ok(())
+}
+
+fn encode_sql(
+    db: &rusqlite::Connection,
+    rule: &super::FamilyRule,
+    row: &rusqlite::Row<'_>,
+    scope: Scope,
+) -> Result<PrivateHeader, StorageError> {
+    let mut probe = Probe::new();
+    let length = super::write_full_scalar_sql_row(rule, row, &mut probe)?;
+    let header = probe.header(length)?;
+    let mut output = LocalSink::create(db, length, scope)?;
+    if super::write_full_scalar_sql_row(rule, row, &mut output)? != length {
+        return Err(invalid());
+    }
+    output.finish()?;
+    Ok(header)
+}
+/// Actual private values can only mark a pre-existing expected row, never construct
+/// one or become a qualified contribution. Scratch lives outside both sealed files.
+pub(super) struct Comparison<'db> {
+    db: &'db rusqlite::Connection,
+    header: PrivateHeader,
+}
+impl<'db> Comparison<'db> {
+    pub(super) fn sql(
+        db: &'db rusqlite::Connection,
+        rule: &super::FamilyRule,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<Self, StorageError> {
+        Ok(Self { db, header: encode_sql(db, rule, row, Scope::Verifier)? })
+    }
+    pub(super) fn mark(self) -> Result<(), StorageError> {
+        if self.db.execute("UPDATE verifier.materialized_record SET seen=1 WHERE family=?1 AND key=?2 AND record=(SELECT record FROM verifier.full_stream_pending WHERE slot=1)",params![self.header.0.family,self.header.0.key])? != 1 {return Err(StorageError::PairingField("ManifestMismatch"));}
+        self.db.execute("DELETE FROM verifier.full_stream_pending WHERE slot=1", [])?;
+        Ok(())
+    }
+}
+/// The only derived expected encoding here is the established source-qualified MAC
+/// mapping. Its operands come from the independently verified original ledger row.
+pub(super) fn expected_imported_mac(
+    db: &rusqlite::Connection,
+    owner: &str,
+    cells: &super::fixed_union::Cells,
+) -> Result<(), StorageError> {
+    let rule = super::source_scalar::compiled("sql/full_imported_mac_bundle")?;
+    let header = db.query_row(
+        "SELECT ?1 AS source_ref,?2 AS bundle_id,?3 AS subkeys",
+        params![owner, cells.text(0)?, cells.bytes(1)?],
+        |row| Ok(encode_sql(db, rule, row, Scope::Verifier)),
+    )??;
+    if db.execute("INSERT INTO verifier.materialized_record(family,key,record) SELECT ?1,?2,record FROM verifier.full_stream_pending WHERE slot=1 ON CONFLICT(family,key) DO UPDATE SET record=excluded.record WHERE verifier.materialized_record.record=excluded.record",params![header.0.family,header.0.key])? != 1 {return Err(StorageError::PairingField("ManifestMismatch"));}
+    db.execute("DELETE FROM verifier.full_stream_pending WHERE slot=1", [])?;
     Ok(())
 }
