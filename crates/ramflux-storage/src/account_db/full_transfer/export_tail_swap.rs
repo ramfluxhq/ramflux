@@ -64,7 +64,11 @@ impl StagedCopy {
         let StagedCopy { mut after, after_path, after_remove } = self;
         let applied = apply_on_scratch(&mut after, apply);
         drop(after);
-        let published = applied.and_then(|()| publish(&after_path, live_path));
+        // The open account is WAL. Its sidecar makes the rename look like a foreign file.
+        let published = applied.and_then(|()| {
+            release_live_sidecar(live)?;
+            publish(&after_path, live_path)
+        });
         drop(after_remove);
         published?;
         refuse_reopen(live)
@@ -79,6 +83,15 @@ fn apply_on_scratch(
     apply(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+fn release_live_sidecar(live: &rusqlite::Connection) -> Result<(), StorageError> {
+    let mode: String = live.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+    if mode.eq_ignore_ascii_case("delete") {
+        Ok(())
+    } else {
+        Err(StorageError::PairingField("Busy"))
+    }
 }
 
 fn publish(scratch: &Path, live_path: &Path) -> Result<(), StorageError> {
