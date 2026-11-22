@@ -12,7 +12,7 @@ use super::tables::EXPORT_TABLES;
 use crate::{AccountDbKey, StorageError};
 use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OpenFlags};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use zeroize::Zeroizing;
 
@@ -32,6 +32,16 @@ pub(crate) struct Built {
     pub(crate) bytes: u64,
     /// Rows written per declared table, in export order.
     pub(crate) tables: Vec<(&'static str, u64)>,
+    /// Key names (never values) of the projected directory bodies, one entry per prefix.
+    pub(crate) directory: Vec<DirectoryShape>,
+}
+
+/// Which JSON keys a projected directory namespace actually wrote.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DirectoryShape {
+    pub(crate) prefix: &'static str,
+    pub(crate) rows: u64,
+    pub(crate) keys: Vec<String>,
 }
 
 /// Classification of one `runtime_actor_state` kind.
@@ -142,13 +152,22 @@ pub(crate) fn build(
 ) -> Result<Built, StorageError> {
     let mut dest = create_target(target, key)?;
     let mut unknown = BTreeSet::new();
+    let mut shapes = BTreeMap::new();
     let mut built = Built::default();
     let transaction = dest.transaction()?;
     for table in EXPORT_TABLES {
-        let rows = copy_table(source, &transaction, table, side, &mut unknown)?;
+        let rows = copy_table(source, &transaction, table, side, &mut unknown, &mut shapes)?;
         built.rows += rows;
         built.tables.push((table.name, rows));
     }
+    built.directory = shapes
+        .into_iter()
+        .map(|(prefix, (rows, keys))| DirectoryShape {
+            prefix,
+            rows,
+            keys: keys.into_iter().collect(),
+        })
+        .collect();
     if !unknown.is_empty() {
         for name in &unknown {
             tracing::warn!(namespace = %name, "transfer export refused an unclassified actor namespace");
@@ -193,6 +212,7 @@ fn copy_table(
     table: &Table,
     side: Side,
     unknown: &mut BTreeSet<String>,
+    shapes: &mut BTreeMap<&'static str, (u64, BTreeSet<String>)>,
 ) -> Result<u64, StorageError> {
     if side == Side::Account && !source_has_table(source, table)? {
         return Ok(0);
@@ -219,6 +239,7 @@ fn copy_table(
         for (index, column) in table.columns.iter().enumerate() {
             values.push(checked(row.get_ref(index)?, column, side, actor)?);
         }
+        note_directory(actor, &values, shapes)?;
         write.execute(rusqlite::params_from_iter(values.iter())).map_err(|error| {
             match error.sqlite_error_code() {
                 Some(rusqlite::ErrorCode::ConstraintViolation) => refused("constraint"),
@@ -249,6 +270,27 @@ fn actor_row(
         }
         (Kind::Excluded | Kind::Unknown, Side::Received) => Err(refused("filtered_row")),
     }
+}
+
+/// Records the key names of a projected directory body. Other namespaces are not summarized.
+fn note_directory(
+    actor: Option<ActorCodec>,
+    values: &[Value],
+    shapes: &mut BTreeMap<&'static str, (u64, BTreeSet<String>)>,
+) -> Result<(), StorageError> {
+    let Some(prefix) = actor.and_then(ActorCodec::directory_prefix) else {
+        return Ok(());
+    };
+    let Some(bytes) = values.iter().find_map(|value| match value {
+        Value::Blob(bytes) => Some(bytes.as_slice()),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    let entry = shapes.entry(prefix).or_default();
+    entry.0 += 1;
+    entry.1.extend(bodies::census_keys(bytes)?);
+    Ok(())
 }
 
 /// One declared cell: exact storage class, then the body rule.

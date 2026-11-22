@@ -39,6 +39,7 @@ const JOIN_CREATED: &[&str] = &["runtime_account_identity"];
 impl AccountDb {
     /// A4: a transfer installs only into a FRESH recipient. B checks this itself and does not
     /// trust A's flag: no exported table may hold a carried row besides what its join wrote.
+    /// Account creation writes one `directory/identity/` row for the owner; that row is bootstrap.
     /// # Errors
     /// `PairingField("RecipientNotFresh")` when carried rows exist; SQL errors.
     pub fn require_fresh_transfer_target(&self) -> Result<(), StorageError> {
@@ -78,18 +79,52 @@ impl AccountDb {
     }
 }
 
+fn glob_pattern(prefix: &str) -> String {
+    format!("{}*", prefix.replace('[', "[[]").replace('*', "[*]").replace('?', "[?]"))
+}
+
+fn glob_count(db: &rusqlite::Connection, prefix: &str) -> rusqlite::Result<u64> {
+    db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB ?1",
+        [glob_pattern(prefix)],
+        |row| row.get(0),
+    )
+}
+
+/// Identity rows other than the single account-creation row. That row's root commitment is
+/// the account root (`capture::initialize_own_identity`); a contact row carries a different one.
+fn identity_rows_beyond_owner(
+    db: &rusqlite::Connection,
+    prefix: &str,
+    own: &str,
+) -> rusqlite::Result<u64> {
+    let pattern = glob_pattern(prefix);
+    let others: u64 = db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB ?1 AND COALESCE(json_extract(CAST(state_json AS TEXT), '$.contact_identity_commitment'), '') != ?2",
+        (pattern.clone(), own),
+        |row| row.get(0),
+    )?;
+    let own_rows: u64 = db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB ?1 AND json_extract(CAST(state_json AS TEXT), '$.contact_identity_commitment') = ?2",
+        (pattern, own),
+        |row| row.get(0),
+    )?;
+    Ok(others + own_rows.saturating_sub(1))
+}
+
 fn carried_actor_rows(db: &rusqlite::Connection) -> rusqlite::Result<u64> {
+    let own: String = db.query_row(
+        "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
     let mut total = 0_u64;
     for namespace in classification::ACTOR_EXPORTED {
-        let pattern = format!(
-            "{}*",
-            namespace.prefix.replace('[', "[[]").replace('*', "[*]").replace('?', "[?]")
-        );
-        total += db.query_row(
-            "SELECT count(*) FROM runtime_actor_state WHERE state_kind GLOB ?1",
-            [pattern],
-            |row| row.get::<_, u64>(0),
-        )?;
+        total += if namespace.prefix == "directory/identity/" {
+            identity_rows_beyond_owner(db, namespace.prefix, &own)?
+        } else {
+            glob_count(db, namespace.prefix)?
+        };
     }
     Ok(total)
 }

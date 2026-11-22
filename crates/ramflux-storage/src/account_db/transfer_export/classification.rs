@@ -12,8 +12,11 @@ pub(crate) struct ActorNamespace {
     pub(crate) codec: ActorCodec,
 }
 
-pub(crate) const ACTOR_EXPORTED: &[ActorNamespace] =
-    &[ActorNamespace { prefix: "routed/generated-identity/", codec: ActorCodec::EventIdentity }];
+pub(crate) const ACTOR_EXPORTED: &[ActorNamespace] = &[
+    ActorNamespace { prefix: "directory/conversation/", codec: ActorCodec::DirectoryConversation },
+    ActorNamespace { prefix: "directory/identity/", codec: ActorCodec::DirectoryIdentity },
+    ActorNamespace { prefix: "routed/generated-identity/", codec: ActorCodec::EventIdentity },
+];
 
 /// Excluded namespace prefixes. Inside a first segment that has an exported namespace every
 /// second segment is listed; elsewhere the whole first segment is excluded.
@@ -40,7 +43,23 @@ pub(crate) const ACTOR_EXCLUDED: &[(&str, &str)] = &[
     ("delete-send/", "not exported: no typed declaration"),
     ("delivery-receipt/", "delivery receipt work and status; no typed declaration yet"),
     ("device/", "not exported: no typed declaration"),
-    ("directory/", "contact and conversation directory; no typed declaration yet (step 3)"),
+    ("directory/approval/", "directory record outside the contact and conversation subset"),
+    ("directory/attachment-object/", "attachment object directory; not the conversation list"),
+    ("directory/attachment-roster/", "attachment roster directory; not the conversation list"),
+    ("directory/call/", "call directory records"),
+    ("directory/commitment/", "root-to-principal index; the identity row carries the root"),
+    ("directory/contact_request_status/", "contact request status; not the contact subset"),
+    ("directory/device/", "device records are outside the contact subset"),
+    ("directory/group-local/", "local group directory; not the conversation list"),
+    ("directory/group-name/", "group name directory; not the conversation list"),
+    ("directory/group/", "group directory; not the conversation list"),
+    ("directory/message/", "directory message records"),
+    ("directory/object/", "object directory"),
+    ("directory/self/", "own device id lives here; the account root is already exported"),
+    ("directory/settings/", "settings directory; not the contact subset"),
+    ("directory/surface/", "surface directory"),
+    ("directory/surface_error/", "surface error directory"),
+    ("directory/{directory}/", "format template in read_model, not a stored kind"),
     ("dm-pair/", "DM ratchet sessions and pair work (secret)"),
     ("early-edit/", "not exported: no typed declaration"),
     ("edit-conflict/", "not exported: no typed declaration"),

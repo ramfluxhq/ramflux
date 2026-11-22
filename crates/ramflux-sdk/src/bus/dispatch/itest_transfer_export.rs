@@ -117,6 +117,7 @@ fn export(
         "contract_digest": ramflux_protocol::encode_base64url(written.contract_digest),
         "elapsed_ms": written.elapsed_ms,
         "tables": written.tables.iter().map(|(name, rows)| serde_json::json!([name, rows])).collect::<Vec<_>>(),
+        "directory": directory_json(&written.directory),
         "root": written.root,
     })))
 }
@@ -165,6 +166,7 @@ fn open(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
             "open_ms": opened.open_ms,
             "copy_ms": opened.copy_ms,
             "tables": opened.tables.iter().map(|(name, rows)| serde_json::json!([name, rows])).collect::<Vec<_>>(),
+            "directory": directory_json(&opened.directory),
         }),
         Err(ramflux_storage::StorageError::TransferExportRefused(step)) => {
             serde_json::json!({ "step": step, "refused": true })
@@ -177,4 +179,9 @@ fn open(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
         }
         Err(_) => serde_json::json!({ "step": "storage", "refused": true }),
     }))
+}
+
+/// Prefix, row count, and JSON key names. Values stay out of the response.
+fn directory_json(shapes: &[ramflux_storage::DirectoryKeys]) -> Vec<serde_json::Value> {
+    shapes.iter().map(|shape| serde_json::json!([shape.prefix, shape.rows, shape.keys])).collect()
 }

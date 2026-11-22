@@ -29,6 +29,10 @@ CREATE = re.compile(
 ADD_COLUMN = re.compile(r'ALTER\s+TABLE\s+"?([a-z_][a-z0-9_]*)"?\s+ADD\s+COLUMN\s+"?([a-z_][a-z0-9_]*)')
 ENSURE_COLUMN = re.compile(r'ensure_column\(\s*[a-z_]+\s*,\s*"([a-z_][a-z0-9_]*)"\s*,\s*"([a-z_][a-z0-9_]*)"')
 KIND_LITERAL = re.compile(r'"([a-z][a-z0-9-]*/[a-z0-9_{}./:-]*)"')
+# `client_record` / `persist_client_record` store `directory/{segment}/{id}` (read_model.rs).
+# The segment is a separate literal, so the kind scan above does not see it.
+CLIENT_DIRECTORY = re.compile(
+    r'(?:persist_client_record|client_record)\(\s*"([a-z][a-z0-9_-]*)"')
 CONSTRAINTS = ('PRIMARY', 'UNIQUE', 'FOREIGN', 'CHECK', 'CONSTRAINT')
 
 
@@ -115,6 +119,8 @@ def census():
     sdk_texts = [production_text(path) for path in production_files(SDK)]
     for text in list(texts.values()) + sdk_texts:
         kinds.update(KIND_LITERAL.findall(text))
+        for segment in CLIENT_DIRECTORY.findall(text):
+            kinds.add('directory/%s/' % segment)
     return tables, columns, kinds, texts
 
 

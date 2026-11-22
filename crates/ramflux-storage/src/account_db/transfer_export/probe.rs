@@ -20,8 +20,18 @@ pub struct ProbeExport {
     pub contract_digest: [u8; 32],
     pub elapsed_ms: u64,
     pub tables: Vec<(&'static str, u64)>,
+    /// Projected directory namespaces: prefix, row count, JSON key names (no values).
+    pub directory: Vec<DirectoryKeys>,
     /// `runtime_account_identity.principal_commitment` of the exported account (public).
     pub root: String,
+}
+
+/// Key names written for one directory namespace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectoryKeys {
+    pub prefix: &'static str,
+    pub rows: u64,
+    pub keys: Vec<String>,
 }
 
 /// What B's open probe verified and copied.
@@ -32,6 +42,8 @@ pub struct ProbeOpen {
     pub open_ms: u64,
     pub copy_ms: u64,
     pub tables: Vec<(&'static str, u64)>,
+    /// Projected directory namespaces: prefix, row count, JSON key names (no values).
+    pub directory: Vec<DirectoryKeys>,
 }
 
 fn millis(start: Instant) -> u64 {
@@ -71,6 +83,7 @@ impl AccountDb {
             }
         };
         let framed_bytes = super::require_cut_size(built.bytes, 0)?;
+        let directory = directory_keys(&built);
         Ok(ProbeExport {
             rows: built.rows,
             bytes: built.bytes,
@@ -78,6 +91,7 @@ impl AccountDb {
             contract_digest: export_contract_digest()?,
             elapsed_ms: millis(start),
             tables: built.tables,
+            directory,
             root,
         })
     }
@@ -106,11 +120,25 @@ pub fn itest_transfer_open(
             return Err(error);
         }
     };
+    let directory = directory_keys(&built);
     Ok(ProbeOpen {
         rows: built.rows,
         bytes: built.bytes,
         open_ms,
         copy_ms: millis(copy_start),
         tables: built.tables,
+        directory,
     })
+}
+
+fn directory_keys(built: &builder::Built) -> Vec<DirectoryKeys> {
+    built
+        .directory
+        .iter()
+        .map(|shape| DirectoryKeys {
+            prefix: shape.prefix,
+            rows: shape.rows,
+            keys: shape.keys.clone(),
+        })
+        .collect()
 }
