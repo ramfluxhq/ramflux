@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-specific command demand. The fetch uses the network admission deadline.
-//! A fetch that has already succeeded waits only until the claimed-command bound.
+//! Work already queued for the writer is applied before that deadline refuses.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -155,30 +155,6 @@ pub(crate) fn stale_roots_since(
     Ok(stale)
 }
 
-/// Fetch budget stays at network admission. A finished fetch may wait for the
-/// writer Apply until the claimed-command bound, and no later.
-fn authority_wait_deadline(
-    refresh: &crate::bus::couriers::head_refresh::RefreshState,
-    roots: &BTreeSet<String>,
-    since: std::time::Instant,
-    network_deadline: Instant,
-    claimed_deadline: Instant,
-) -> Instant {
-    let fetched = !roots.is_empty() && roots.iter().all(|root| refresh.fetched_since(root, since));
-    if fetched { network_deadline.max(claimed_deadline) } else { network_deadline }
-}
-
-fn claimed_command_deadline(
-    command: &AccountCommand,
-    admitted_at: Instant,
-    command_bound: std::time::Duration,
-) -> Instant {
-    command
-        .admission
-        .as_ref()
-        .map_or(admitted_at + command_bound, |admission| admission.command_deadline)
-}
-
 impl AccountRuntime {
     pub(super) async fn prepare_command_heads(
         &mut self,
@@ -186,8 +162,6 @@ impl AccountRuntime {
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
         let network_deadline = admitted_at + self.timeouts.network_wait;
-        let claimed_deadline =
-            claimed_command_deadline(command, admitted_at, self.timeouts.command);
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
@@ -222,15 +196,11 @@ impl AccountRuntime {
             }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
-            let deadline = authority_wait_deadline(
-                &account.head_refresh,
-                &roots,
-                since,
-                network_deadline,
-                claimed_deadline,
-            );
-            if Instant::now() >= deadline {
-                return Err(pending(account));
+            // Leave the actor once the fetch budget ends. Staying here to wait for
+            // Apply holds the only reader of `connection_work`, so the refresh task
+            // cannot finish this Apply or start the next fetch.
+            if Instant::now() >= network_deadline {
+                return self.refuse_or_apply_queued(command, since).await;
             }
             for root in roots {
                 if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
@@ -239,15 +209,44 @@ impl AccountRuntime {
             }
             tokio::select! {
                 biased;
-                () = tokio::time::sleep_until(deadline) => {
-                    // The next iteration reads a fetch that finished during this wait.
-                }
+                () = tokio::time::sleep_until(network_deadline) => {}
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
                     self.apply_connection_work(work).await?;
                 }
             }
         }
+    }
+
+    /// The biased sleep above wins when the deadline and a queued item are both
+    /// ready. Apply what is already queued, then refuse if the head is still stale.
+    async fn refuse_or_apply_queued(
+        &mut self,
+        command: &AccountCommand,
+        since: std::time::Instant,
+    ) -> Result<(), SdkError> {
+        self.drain_queued_connection_work().await?;
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return Ok(());
+        };
+        if stale_roots_since(account, &command.request, Some(since))?.is_empty() {
+            let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
+            return Ok(());
+        }
+        Err(pending(account))
+    }
+
+    async fn drain_queued_connection_work(&mut self) -> Result<(), SdkError> {
+        for _ in 0..super::CONNECTION_WORK_QUEUE {
+            match self.connection_work.try_recv() {
+                Ok(work) => self.apply_connection_work(work).await?,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(SdkError::NetworkingPending);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
