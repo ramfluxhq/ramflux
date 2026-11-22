@@ -54,6 +54,7 @@ impl NotifyRedbStore {
     pub fn sweep_retention(&self, now: u64) -> Result<usize, NodeCoreError> {
         let txn = self.db.begin_write().map_err(error)?;
         let mut removed = 0;
+        let mut changed = false;
         {
             let mut table = txn.open_table(NOTIFY_QUEUE_ENTRY_TABLE).map_err(error)?;
             let mut keys = Vec::new();
@@ -102,21 +103,23 @@ impl NotifyRedbStore {
                 table.get(NOTIFY_QUEUE_KEY).map_err(error)?.map(|value| value.value().to_vec());
             if let Some(bytes) = bytes {
                 let mut state = deserialize_notify_bounded_snapshot(&bytes)?;
+                let before = serialize_notify_value(&state)?;
                 removed += state.prune_retention(now);
-                table
-                    .insert(NOTIFY_QUEUE_KEY, serialize_notify_value(&state)?.as_slice())
-                    .map_err(error)?;
+                let after = serialize_notify_value(&state)?;
+                if before != after {
+                    table.insert(NOTIFY_QUEUE_KEY, after.as_slice()).map_err(error)?;
+                    changed = true;
+                }
             }
         }
-        txn.commit().map_err(error)?;
+        if changed || removed != 0 {
+            txn.commit().map_err(error)?;
+        } else {
+            txn.abort().map_err(error)?;
+        }
         removed += self.prune_expired_routes(now)?;
         self.prune_route_owners()?;
         removed += self.prune_route_fences(now)?;
-        if let Some(shards) = &self.wal_shards {
-            for shard in shards {
-                shard.store.prune_expired(now)?;
-            }
-        }
         removed += self.prune_notification_authority(now)?;
         Ok(removed)
     }
