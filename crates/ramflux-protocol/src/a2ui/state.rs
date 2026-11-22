@@ -307,6 +307,22 @@ impl SurfaceState {
             snapshot: self.snapshot.clone().ok_or(Reject::NotCreated)?,
         })
     }
+    /// Admit the authorized snapshot a `surface.get` read returns, at its conversation and
+    /// version, through the same validation as a checkpoint restore. Callers compare
+    /// `hash()` with the read's `surface_hash`.
+    /// # Errors
+    /// Refuses any snapshot that admission would not produce unchanged.
+    pub fn from_authorized_snapshot(
+        conversation_id: &str,
+        version: u64,
+        snapshot: SurfaceSnapshot,
+    ) -> Result<Self, Reject> {
+        Self::from_checkpoint_bytes(&canonical(&Checkpoint {
+            conversation_id: conversation_id.to_owned(),
+            surface_version: version,
+            snapshot,
+        })?)
+    }
     /// Restore local canonical state, validating every final text commitment.
     /// # Errors
     /// Refuses tampering, unknown fields, invalid versions, finality and incomplete state.

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::{LocalBusClient, PathBuf, RfError, SurfaceAction, SurfaceCommand, print_json};
+use ramflux_protocol::{ResolvedSurface, SurfaceReject, SurfaceSnapshot, SurfaceState};
 use ramflux_sdk::LocalBusFrame;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) async fn handle_surface(
@@ -18,11 +19,15 @@ pub(crate) async fn handle_surface(
             conversation,
             author,
             action_id,
-        } => (
-            account,
-            "surface.get",
-            json!({"surface_id":surface_id,"surface_ref":surface_ref,"conversation_id":conversation,"author_principal_id":author,"action_id":action_id}),
-        ),
+            resolved,
+        } => {
+            let body = json!({"surface_id":surface_id,"surface_ref":surface_ref,"conversation_id":conversation,"author_principal_id":author,"action_id":action_id});
+            if resolved {
+                let response = bus.request(Some(account), "surface", "surface.get", body).await?;
+                return print_resolved(&response);
+            }
+            (account, "surface.get", body)
+        }
         SurfaceAction::List { account, conversation, limit, cursor } => (
             account,
             "surface.list",
@@ -80,6 +85,50 @@ pub(crate) async fn handle_surface(
     }
     let response = bus.request(Some(account), "surface", method, body).await?;
     print_json(&response)
+}
+
+/// Resolve the authorized snapshot of a `surface.get` read with the shared protocol resolver.
+/// A refusal is printed as `{"refusal": …}` and fails the process.
+fn print_resolved(view: &Value) -> Result<(), RfError> {
+    let mut out = json!({
+        "surface_ref": view.get("surface_ref"),
+        "surface_id": view.get("surface_id"),
+        "version": view.get("version"),
+        "surface_hash": view.get("surface_hash"),
+        "render_allowed": view.get("render_allowed"),
+    });
+    let resolved = match resolve_view(view) {
+        Ok(resolved) => resolved,
+        Err(refusal) => {
+            out["refusal"] = refusal;
+            print_json(&out)?;
+            return Err(RfError::Message("surface resolver refused the snapshot".into()));
+        }
+    };
+    out["resolved"] = serde_json::to_value(resolved)?;
+    print_json(&out)
+}
+
+fn resolve_view(view: &Value) -> Result<ResolvedSurface, Value> {
+    let snapshot = match view.get("snapshot") {
+        Some(snapshot) if !snapshot.is_null() => snapshot.clone(),
+        _ => return Err(json!({"reject":"snapshot_unavailable"})),
+    };
+    let snapshot: SurfaceSnapshot =
+        serde_json::from_value(snapshot).map_err(|_| json!({"reject":"encoding"}))?;
+    let (Some(conversation), Some(version)) = (
+        view.get("conversation_id").and_then(Value::as_str),
+        view.get("version").and_then(Value::as_u64),
+    ) else {
+        return Err(json!({"reject":"view_incomplete"}));
+    };
+    let refusal = |reject: SurfaceReject| json!(reject);
+    let state =
+        SurfaceState::from_authorized_snapshot(conversation, version, snapshot).map_err(refusal)?;
+    if state.hash() != view.get("surface_hash").and_then(Value::as_str) {
+        return Err(json!({"reject":"hash_mismatch"}));
+    }
+    state.content().ok_or_else(|| json!({"reject":"not_created"}))?.resolve().map_err(refusal)
 }
 
 fn request_id() -> String {

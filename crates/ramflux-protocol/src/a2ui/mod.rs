@@ -5,8 +5,11 @@
 mod action;
 mod expression;
 mod format_string;
+mod graph;
 mod link;
 mod pointer;
+mod resolve;
+pub use resolve::*;
 mod rpc;
 pub use rpc::*;
 mod schema;
