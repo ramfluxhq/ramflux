@@ -452,8 +452,6 @@ async fn tcp_session_frames_refuse_i_json(
         peers: context.peers,
         router: context.router,
         notify: context.notify,
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key: context.relay_service_key,
         state: context.state,
         store: context.store,
         hub: context.hub,

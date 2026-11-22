@@ -64,8 +64,6 @@ impl Gateway {
             peers: context.peers,
             router: context.router,
             notify: context.notify,
-            #[cfg(feature = "itest-local-mint")]
-            relay_service_key: context.relay_service_key,
             state: context.state,
             store: context.store,
             hub: context.hub,

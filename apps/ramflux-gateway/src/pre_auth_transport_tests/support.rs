@@ -168,8 +168,6 @@ pub(crate) fn listener_context(
         peers: c.peers.clone(),
         router: c.router.clone(),
         notify: c.notify.clone(),
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key: c.relay_service_key.clone(),
         state: c.state.clone(),
         store: c.store.clone(),
         hub: c.hub.clone(),

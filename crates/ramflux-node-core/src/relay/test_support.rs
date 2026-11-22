@@ -6,45 +6,20 @@ use super::{
     FederatedIssuerTrustSnapshot, FederatedIssuerTrustStatus, FederatedTrustSnapshotEnvelope,
     GATEWAY_CERTIFICATE_REQUEST_SCHEMA, GATEWAY_ISSUER_CERTIFICATE_SCHEMA,
     GatewayCertificateRequest, GatewayIssuerCertificate, NodeCoreError, OBJECT_ACCESS_GRANT_SCHEMA,
-    OBJECT_RELAY_TOKEN_AUDIENCE_RELAY, OBJECT_RELAY_TOKEN_ISSUER_GATEWAY,
-    OBJECT_RELAY_TOKEN_V3_VERSION, OBJECT_RELAY_TOKEN_VERSION, OBJECT_RELAY_V3_PROOF_VERSION,
-    OWNER_AUTHORIZATION_PROOF_SCHEMA, ObjectAccessGrant, ObjectPermissionEnvelope,
-    ObjectRelayCapability, OwnerAuthorizationProof, OwnerSessionTombstoneRequest,
-    PROVIDER_KEYRING_SCHEMA, PROVIDER_KEYRING_VERSION,
+    OBJECT_RELAY_TOKEN_V3_VERSION, OBJECT_RELAY_V3_PROOF_VERSION, OWNER_AUTHORIZATION_PROOF_SCHEMA,
+    ObjectAccessGrant, ObjectRelayCapability, OwnerAuthorizationProof,
+    OwnerSessionTombstoneRequest, PROVIDER_KEYRING_SCHEMA, PROVIDER_KEYRING_VERSION,
     PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_SCHEMA,
     PROVIDER_SIGNED_TRUST_SNAPSHOT_ENVELOPE_VERSION, ProviderKeyEntry, ProviderKeyring,
     ProviderSignedTrustSnapshot, RELAY_TOKEN_V3_AUDIENCE_RELAY, REQUESTER_POP_SCHEMA,
-    RelayAuthorizationKind, RelayChunkEntry, RelayChunkStatus, RelayToken, RelayTokenV3,
+    RelayAuthorizationKind, RelayChunkEntry, RelayChunkStatus, RelayTokenV3,
     RequesterProofOfPossession, TrustedNodeRootKey, ValidatedProviderKeyring,
     federated_trust_snapshot_envelope_signing_bytes, gateway_certificate_request_signing_bytes,
     gateway_issuer_certificate_signing_bytes, object_access_grant_binding_hash,
-    object_access_grant_signing_bytes, object_permission_canonical_bytes,
-    owner_authorization_proof_signing_bytes, provider_keyring_signing_bytes,
-    provider_signed_trust_snapshot_signing_bytes, relay_token_mac, relay_token_v3_signing_bytes,
-    requester_pop_signing_bytes, verify_provider_keyring,
+    object_access_grant_signing_bytes, owner_authorization_proof_signing_bytes,
+    provider_keyring_signing_bytes, provider_signed_trust_snapshot_signing_bytes,
+    relay_token_v3_signing_bytes, requester_pop_signing_bytes, verify_provider_keyring,
 };
-
-pub(super) fn test_object_permission(
-    capability: ObjectRelayCapability,
-    issued_at: u64,
-    expires_at: u64,
-) -> Result<ObjectPermissionEnvelope, String> {
-    let mut permission = ObjectPermissionEnvelope {
-        object_id: "object_relay_clock_skew".to_owned(),
-        manifest_hash: "manifest_relay_clock_skew".to_owned(),
-        grantee_device_hash: "recipient_clock_skew".to_owned(),
-        capability,
-        issued_at,
-        expires_at,
-        owner_signing_key_id: "owner_fixture_key".to_owned(),
-        owner_public_key: ramflux_crypto::fixture_public_key_base64url(),
-        owner_signature: String::new(),
-    };
-    permission.owner_signature = ramflux_crypto::sign_canonical_bytes(
-        &object_permission_canonical_bytes(&permission).map_err(|source| source.to_string())?,
-    );
-    Ok(permission)
-}
 
 // ---- RQ-03-V3-T1 pure-verification tests ----
 

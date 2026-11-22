@@ -21,7 +21,6 @@ pub(crate) enum FrameKind {
     PrincipalManifest,
     PrekeyPublished,
     Prekey,
-    RelayTokenIssued,
     RelayTokenV3Issued,
     Ack,
     Cursor,
@@ -66,7 +65,6 @@ impl FrameKind {
             GatewayServerFrame::PrincipalManifest { .. } => Self::PrincipalManifest,
             GatewayServerFrame::PrekeyPublished { .. } => Self::PrekeyPublished,
             GatewayServerFrame::Prekey { .. } => Self::Prekey,
-            GatewayServerFrame::RelayTokenIssued { .. } => Self::RelayTokenIssued,
             GatewayServerFrame::RelayTokenV3Issued { .. } => Self::RelayTokenV3Issued,
             GatewayServerFrame::Ack { .. } => Self::Ack,
             GatewayServerFrame::Cursor { .. } => Self::Cursor,
@@ -111,7 +109,6 @@ impl FrameKind {
             | Self::PrincipalManifest
             | Self::PrekeyPublished
             | Self::Prekey
-            | Self::RelayTokenIssued
             | Self::RelayTokenV3Issued
             | Self::Ack
             | Self::Cursor

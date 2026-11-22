@@ -50,42 +50,6 @@ pub(crate) enum SdkRelayChunkStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-/// Legacy relay token, available to fixture-enabled session capabilities.
-pub struct SdkRelayToken {
-    #[serde(default = "sdk_relay_token_default_version")]
-    pub token_version: u32,
-    pub token_id: String,
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub chunk_id: String,
-    pub recipient_device_hash: String,
-    pub owner_signing_key_id: String,
-    pub owner_public_key: String,
-    pub issuer_service: String,
-    #[serde(default)]
-    pub audience_service: String,
-    pub capabilities: Vec<SdkObjectRelayCapability>,
-    pub delete_after_ack: bool,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub nonce: String,
-    pub mac: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SdkObjectPermissionEnvelope {
-    pub object_id: String,
-    pub manifest_hash: String,
-    pub grantee_device_hash: String,
-    pub capability: SdkObjectRelayCapability,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub owner_signing_key_id: String,
-    pub owner_public_key: String,
-    pub owner_signature: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SdkRelayChunkEntry {
     pub chunk_id: String,
     pub object_id: String,
@@ -274,10 +238,6 @@ pub(crate) fn relay_quic_config(
         (None, None, None) => Ok(None),
         _ => Err(SdkError::LocalBus("relay QUIC configuration is incomplete".to_owned())),
     }
-}
-
-fn sdk_relay_token_default_version() -> u32 {
-    1
 }
 
 pub(crate) fn object_relay_chunk_cipher_hash(

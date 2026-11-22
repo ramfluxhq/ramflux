@@ -451,7 +451,7 @@ async fn isolated_rows() {
         );
     }
 
-    // (r15)-(r28) each legacy reply kind: the 13 of the submit table plus `forward_ack`.
+    // Each legacy reply kind: the 12 of the submit table plus `forward_ack`.
     let mut legacy = legacy_unexpected_kinds();
     legacy.push((
         "forward_ack",
@@ -459,7 +459,7 @@ async fn isolated_rows() {
             "envelope_id":"env-route","target_delivery_id":"target-route","inbox_seq":9}}),
         "unexpected gateway reply: ForwardAck".into(),
     ));
-    assert_eq!(legacy.len(), 14);
+    assert_eq!(legacy.len(), 13, "page coverage includes every supported unexpected reply");
     for (name, wire, message) in legacy {
         let (result, engine) = ask(vec![forwarded(&wire)], 7).await;
         match result {

@@ -4,11 +4,10 @@
 //! Payload-free chunk index, reservations, and in-memory publication.
 
 use super::{
-    BTreeMap, BTreeSet, NodeCoreError, OBJECT_RELAY_TOKEN_VERSION,
-    OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS, ObjectPermissionEnvelope, ObjectRelayCapability,
+    BTreeMap, BTreeSet, NodeCoreError, OBJECT_RELAY_TOMBSTONE_MAX_TTL_SECONDS,
     ObjectRelayTombstone, RELAY_METADATA_MAX_BYTES_DEFAULT, RelayChunkEntry, RelayChunkMeta,
     RelayChunkStatus, RelayInternalInvariant, RelayResidentBudgetExceeded, RelayStoreOpError,
-    RelayToken, Serialize, clamp_relay_chunk_expires_at, existing_tombstone_matches_replay,
+    Serialize, clamp_relay_chunk_expires_at, existing_tombstone_matches_replay,
     tombstone_resident_charge,
 };
 
@@ -770,7 +769,7 @@ impl RelayCacheState {
         if self
             .chunks_by_id
             .values()
-            .any(|chunk| matches_scope(chunk) && !chunk.owner_matches_token(&retained.relay_token))
+            .any(|chunk| matches_scope(chunk) && !chunk.owner_matches_tombstone(&retained))
         {
             return Err(NodeCoreError::Unauthorized(
                 "object relay tombstone owner binding mismatch".to_owned(),
@@ -825,35 +824,6 @@ impl RelayCacheState {
                 "owner-session tombstone missing owner binding".to_owned(),
             ));
         }
-        let relay_token = RelayToken {
-            token_version: OBJECT_RELAY_TOKEN_VERSION,
-            token_id: String::new(),
-            object_id: request.object_id.clone(),
-            manifest_hash: request.manifest_hash.clone().unwrap_or_default(),
-            chunk_id: String::new(),
-            recipient_device_hash: String::new(),
-            owner_signing_key_id: request.owner_signing_key_id.clone(),
-            owner_public_key: request.owner_public_key.clone(),
-            issuer_service: String::new(),
-            audience_service: String::new(),
-            capabilities: vec![ObjectRelayCapability::Tombstone],
-            delete_after_ack: false,
-            issued_at: request.signed_at,
-            expires_at: request.expires_at,
-            nonce: String::new(),
-            mac: String::new(),
-        };
-        let object_permission_envelope = ObjectPermissionEnvelope {
-            object_id: request.object_id.clone(),
-            manifest_hash: request.manifest_hash.clone().unwrap_or_default(),
-            grantee_device_hash: String::new(),
-            capability: ObjectRelayCapability::Tombstone,
-            issued_at: request.signed_at,
-            expires_at: request.expires_at,
-            owner_signing_key_id: request.owner_signing_key_id.clone(),
-            owner_public_key: request.owner_public_key.clone(),
-            owner_signature: String::new(),
-        };
         let retained = ObjectRelayTombstone {
             object_id: request.object_id,
             manifest_hash: request.manifest_hash,
@@ -861,8 +831,8 @@ impl RelayCacheState {
             source_event_id: request.source_event_id,
             signed_at: request.signed_at,
             expires_at: request.expires_at,
-            relay_token,
-            object_permission_envelope,
+            owner_signing_key_id: request.owner_signing_key_id,
+            owner_public_key: request.owner_public_key,
         };
         self.plan_object_tombstone_record(retained, now)
     }
