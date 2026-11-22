@@ -118,6 +118,19 @@ pub(in crate::account_db) fn inspect(
     }
     Ok(FullTransferSchema { census_hash, families })
 }
+
+/// Refuse before an invitation when one cut's framed export exceeds the signed stop.
+/// # Errors
+/// `PairingField("NoSpace")` when `framed` is over the pre-publication delta stop.
+pub(in crate::account_db) fn require_export_before_invitation(
+    framed: u64,
+) -> Result<u64, StorageError> {
+    if framed > ramflux_protocol::custody::pairing::full_transfer::PREPUBLICATION_DELTA_STOP_BYTES {
+        tracing::warn!(framed, "transfer export exceeds the pre-invitation size limit");
+        return Err(StorageError::PairingField("NoSpace"));
+    }
+    Ok(framed)
+}
 pub(super) fn validate_columns(
     connection: &Connection,
     table: &str,

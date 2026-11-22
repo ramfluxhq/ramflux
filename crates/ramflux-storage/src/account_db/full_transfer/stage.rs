@@ -203,6 +203,13 @@ impl FullTransferStage<'_> {
         &self.reference
     }
 
+    /// A4: a new recipient may retain a manifest only when this account holds no transferred rows.
+    /// # Errors
+    /// `PairingField("RecipientNotFresh")` when carried rows exist; SQL errors.
+    pub fn require_fresh_recipient(&self) -> Result<(), StorageError> {
+        self.db.require_fresh_transfer_target()
+    }
+
     /// Retrieve only authenticated encrypted local operands, without private-key SQL Row copies.
     /// The crypto owner must still verify its independently pinned node and local branch.
     /// # Errors

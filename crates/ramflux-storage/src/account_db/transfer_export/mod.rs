@@ -5,16 +5,17 @@
 //! A builds one canonical export file from its pinned cut through the shared builder; B
 //! opens it only through `open_verified` and installs only a clean copy it rebuilt itself.
 mod bodies;
-mod builder;
+pub(super) mod builder;
 mod classification;
 mod contract;
-mod open_verified;
+pub(super) mod open_verified;
 #[cfg(feature = "itest-transfer-probe")]
 pub mod probe;
 mod tables;
 
 use crate::{AccountDb, StorageError};
 use contract::RowFilter;
+pub use contract::export_contract_digest;
 
 /// Framing in front of the file in a transfer stream: domain tag, 32-byte file key, u64 length.
 pub(crate) const FRAME_HEADER_BYTES: u64 = 28 + 32 + 8;

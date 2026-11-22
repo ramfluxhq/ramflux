@@ -6,6 +6,9 @@ use super::{
     FullScalarInputCounts, FullTargetObservation, FullTransferStage, receiver_scratch::Scratch,
 };
 use crate::{AccountDbKey, BackupDatabase, StorageError, account_db::backup::FullTransferCut};
+use ramflux_crypto::custody::pairing::PairingRole;
+use ramflux_protocol::custody::pairing::full_transfer::{ManifestKind, SourceManifest};
+use std::io::{Read as _, Seek as _};
 use std::sync::{Arc, atomic::AtomicBool};
 
 pub(super) mod application;
@@ -54,6 +57,8 @@ pub struct FullReceiverBaseCopy {
     // Close the encrypted database and erase its key before removing its scratch directory.
     scratch: Scratch,
     attested: std::sync::Mutex<Option<seal::CopySeal>>,
+    /// The private file is a clean export copy, not a record projection.
+    export_installed: bool,
 }
 
 impl FullTransferStage<'_> {
@@ -119,6 +124,7 @@ impl FullPinnedReceiverBase {
             hash: self.hash,
             scratch: self.scratch,
             attested: std::sync::Mutex::new(None),
+            export_installed: false,
         })
     }
 }
@@ -157,6 +163,16 @@ impl FullReceiverBaseCopy {
         stage.require_target(&self.observation)?;
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
             return Err(wrong());
+        }
+        if self.export_installed {
+            self.attested
+                .lock()
+                .map_err(|_| wrong())?
+                .as_ref()
+                .ok_or_else(wrong)?
+                .require(&self.scratch.path)?;
+            stage.require_target(&self.observation)?;
+            return Ok(());
         }
         self.attested.lock().map_err(|_| wrong())?.take();
         let encoding = self.union.as_ref().ok_or_else(wrong)?;
@@ -217,7 +233,80 @@ impl FullReceiverBaseCopy {
         &mut self,
         stage: &FullTransferStage<'_>,
     ) -> Result<FullScalarInputCounts, StorageError> {
+        let manifest = stage.forward_manifest(&self.hash)?;
+        let digest = crate::account_db::transfer_export::export_contract_digest()?;
+        if manifest.manifest.census_hash == ramflux_protocol::encode_base64url(digest) {
+            return self.project_export(stage, &manifest);
+        }
         self.project_input(stage)
+    }
+    /// Install a framed export: open the received file, keep only the clean copy, and do not
+    /// parse family records. A non-fresh account refuses before the file is written.
+    /// # Errors
+    /// `RecipientNotFresh` before the file is written; `TransferExportRefused` at the open
+    /// step that failed; `NoSpace`; `ManifestMismatch` when the stream length disagrees.
+    fn project_export(
+        &mut self,
+        stage: &FullTransferStage<'_>,
+        manifest: &SourceManifest,
+    ) -> Result<FullScalarInputCounts, StorageError> {
+        self.projected = None;
+        self.union = None;
+        self.export_installed = false;
+        self.attested.lock().map_err(|_| wrong())?.take();
+        stage.require_io()?;
+        let record = stage.resume_record()?;
+        if record.stage_digest()? != self.stage_digest
+            || record.role != PairingRole::Responder
+            || record.grant.destination_ref.account_anchor != stage.db.principal_commitment
+            || record.grant.source_ref.account_anchor != stage.db.principal_commitment
+            || manifest.manifest.kind != ManifestKind::Base
+        {
+            return Err(wrong());
+        }
+        stage.db.require_fresh_transfer_target()?;
+        self.observation.require_current(stage.db)?;
+        let clean = self.scratch.path.join("private-clean.db");
+        let mut reader = stage.forward_reader(&self.hash)?;
+        let built = super::export_cut::install_framed_export(
+            &mut reader,
+            &clean,
+            &self.key,
+            &manifest.manifest.account_anchor,
+        )?;
+        let mut extra = [0_u8; 1];
+        let trailing = reader.read(&mut extra)?;
+        if trailing != 0 || reader.stream_position()? != manifest.manifest.total_bytes.0 {
+            drop(reader);
+            let _ = std::fs::remove_file(&clean);
+            return Err(StorageError::PairingField("ManifestMismatch"));
+        }
+        drop(reader);
+        let private = self.scratch.path.join("private.db");
+        if let Err(error) = std::fs::rename(&clean, &private) {
+            let _ = std::fs::remove_file(&clean);
+            return Err(error.into());
+        }
+        super::stage::sync_regular(&private)?;
+        let chunks_root = decode_root(&manifest.manifest.chunks_root)?;
+        let counts = FullScalarInputCounts {
+            records: built.rows,
+            encoded_bytes: manifest.manifest.total_bytes.0,
+        };
+        let union = super::FullUnionEncoding {
+            generation_nonce: self.contributions.nonce,
+            records: built.rows,
+            total_bytes: manifest.manifest.total_bytes.0,
+            chunks_root,
+        };
+        let sealed = seal::CopySeal::capture(&self.scratch.path)?;
+        sealed.require(&self.scratch.path)?;
+        self.observation.require_current(stage.db)?;
+        *self.attested.lock().map_err(|_| wrong())? = Some(sealed);
+        self.union = Some(union);
+        self.projected = Some(counts);
+        self.export_installed = true;
+        Ok(counts)
     }
     pub(super) fn project_input(
         &mut self,
@@ -225,6 +314,7 @@ impl FullReceiverBaseCopy {
     ) -> Result<FullScalarInputCounts, StorageError> {
         self.projected = None;
         self.union = None;
+        self.export_installed = false;
         self.attested.lock().map_err(|_| wrong())?.take();
         stage.require_io()?;
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
@@ -266,6 +356,12 @@ impl FullReceiverBaseCopy {
         self.projected = Some(counts);
         Ok(counts)
     }
+}
+
+fn decode_root(encoded: &str) -> Result<[u8; 32], StorageError> {
+    let bytes = ramflux_protocol::decode_base64url(encoded)
+        .map_err(|_| StorageError::PairingField("ManifestMismatch"))?;
+    bytes.try_into().map_err(|_| StorageError::PairingField("ManifestMismatch"))
 }
 
 #[cfg(test)]

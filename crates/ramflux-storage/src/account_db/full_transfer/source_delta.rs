@@ -83,15 +83,17 @@ impl SourceContext<'_> {
         // The compiled preflight walks BOTH actual cuts, not peer-provided family counts.
         // Existing source-family rows are immutable and idempotent for an exact cut/rule.
         let (_, previous) =
-            source.encode_fixed_cut_source(cut - 1, previous_snapshot, std::io::sink())?;
-        let (_, mut current) =
-            source.encode_fixed_cut_source(cut, current_snapshot, std::io::sink())?;
+            source.encode_cut_census(cut - 1, previous_snapshot, std::io::sink())?;
+        let (_, mut current) = source.encode_cut_census(cut, current_snapshot, std::io::sink())?;
         if previous.storage_generation != current.storage_generation {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
         if previous.source_erasure_generation > current.source_erasure_generation {
             return Err(StorageError::PairingField("ManifestMismatch"));
         }
+        // The diff below stays the typed family stream. This gate refuses an unknown
+        // namespace or an over-limit export of the current cut and does not spool.
+        source.gate_account_export(cut, current_snapshot)?;
         let guard = source.guard.clone();
         let mut total = 0_u64;
         for (family, rule) in current.schema.families.iter_mut().zip(full_transfer_catalog()) {

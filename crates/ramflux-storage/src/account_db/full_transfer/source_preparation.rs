@@ -149,6 +149,21 @@ impl FullSourcePreparation<'_> {
         let (_, stored) = self.prepared.insert((snapshot_id.to_owned(), encoded));
         Ok((output, stored))
     }
+    /// Publish the canonical framed export of the pinned base cut. The stored census is the
+    /// export contract digest, and the byte stream is that frame, not family records.
+    /// # Errors
+    /// Refuses an unclassified namespace, a framed file over the pre-invitation limit,
+    /// a missing cut, or output failure.
+    pub fn encode_account_export<W: Write + Send + 'static>(
+        &mut self,
+        snapshot_id: &str,
+        writer: W,
+    ) -> Result<(W, &FullBaseSourceEncoding), StorageError> {
+        self.prepared = None;
+        let (output, encoded) = self.context()?.publish_account_export(snapshot_id, writer)?;
+        let (_, stored) = self.prepared.insert((snapshot_id.to_owned(), encoded));
+        Ok((output, stored))
+    }
 }
 
 mod checkpoint;

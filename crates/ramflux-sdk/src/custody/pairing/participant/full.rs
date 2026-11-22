@@ -266,6 +266,12 @@ impl LocalPairingParticipant {
         source: &DeviceRef,
         unreserved_new: bool,
     ) -> Result<ramflux_crypto::custody::VerifiedRecord, SdkError> {
+        if unreserved_new {
+            let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+            if let Some(db) = slot.as_ref() {
+                db.require_fresh_transfer_target()?;
+            }
+        }
         let verified = if unreserved_new {
             self.full_native_head_inner(&common.account_anchor, None, true)?
         } else {
@@ -310,7 +316,7 @@ impl LocalPairingParticipant {
         register(cancel.clone())?;
         let snapshot = encode_base64url(ramflux_crypto::random_32()?);
         source.capture_base_cut(&snapshot)?;
-        source.encode_fixed_base_source(&snapshot, std::io::sink())?;
+        source.encode_account_export(&snapshot, std::io::sink())?;
         Ok((source.close_ready()?, cancel))
     }
     fn full_branch_vault_ref(&self, reference: &DeviceRef) -> Result<String, SdkError> {

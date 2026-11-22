@@ -155,6 +155,12 @@ impl FullReceiverDatabaseWork {
                 }
             }
         }
+        if self.copy.export_installed {
+            drop(target);
+            super::super::stage::sync_regular(&self.path)?;
+            crate::sync_path::sync_path(parent)?;
+            return Ok(());
+        }
         objects::require_supported(&target)?;
         let row = &self.adoption;
         let tx = target.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -203,6 +209,12 @@ impl FullReceiverDatabaseWork {
     ) -> Result<super::seal::FileSeal, StorageError> {
         self.live()?;
         self.copy.verify_input(stage)?;
+        if self.copy.export_installed {
+            let sealed = super::seal::FileSeal::capture(&self.path)?;
+            objects::verify(&self.path)?;
+            stage.require_target(&self.copy.observation)?;
+            return Ok(sealed);
+        }
         let sealed = super::seal::FileSeal::capture(&self.path)?;
         let private = BackupDatabase::open_full_receiver_copy(&self.path, &self.key)?;
         objects::require_supported(&private.db)?;

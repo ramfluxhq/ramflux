@@ -139,7 +139,7 @@ fn put_str(hasher: &mut blake3::Hasher, value: &str) {
 /// the body-declaration versions and the SQLite/SQLCipher engine versions (A2).
 /// # Errors
 /// Returns SQL errors while building the in-memory reference schema.
-pub(crate) fn export_contract_digest() -> Result<[u8; 32], StorageError> {
+pub fn export_contract_digest() -> Result<[u8; 32], StorageError> {
     let mut hasher = blake3::Hasher::new_derive_key(CONTRACT_DOMAIN);
     put_str(&mut hasher, rusqlite::version());
     put_str(&mut hasher, if cfg!(feature = "sqlcipher") { "sqlcipher" } else { "plain" });

@@ -9,7 +9,8 @@ use ramflux_protocol::custody::pairing::full_transfer::{
     CHUNK_BYTES, Family, Manifest, SourceManifest, chunk_digest,
 };
 use ramflux_storage::{
-    AccountDb, AccountIndex, FullStageIoCancel, FullTransferStage, full_transfer_catalog,
+    AccountDb, AccountIndex, FullStageIoCancel, FullTransferStage, export_contract_digest,
+    full_transfer_catalog,
 };
 use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
@@ -363,12 +364,11 @@ fn retain_forward_manifest(
     manifest: &SourceManifest,
 ) -> Result<FullLocalResult, SdkError> {
     if manifest.manifest.census_hash
-        != ramflux_protocol::encode_base64url(ramflux_storage::full_census_hash(
-            full_transfer_catalog(),
-        )?)
+        != ramflux_protocol::encode_base64url(export_contract_digest()?)
     {
         return Err(SdkError::PairingCode("SchemaMismatch"));
     }
+    stage.require_fresh_recipient()?;
     let catalog: Vec<Family> = full_transfer_catalog()
         .iter()
         .map(ramflux_storage::FamilyRule::manifest_family)

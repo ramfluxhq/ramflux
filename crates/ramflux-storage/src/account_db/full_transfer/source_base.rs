@@ -47,14 +47,23 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
-        self.encode_selected_cut_source(cut, snapshot_id, writer, false)
+        self.encode_selected_cut_source(cut, snapshot_id, writer, false, true)
     }
     pub(super) fn encode_fixed_reverse_source<W: Write + Send + 'static>(
         &mut self,
         snapshot_id: &str,
         writer: W,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
-        self.encode_selected_cut_source(0, snapshot_id, writer, true)
+        self.encode_selected_cut_source(0, snapshot_id, writer, true, true)
+    }
+    /// Walk a pinned cut for its family census without replacing a published wire spool.
+    pub(super) fn encode_cut_census<W: Write + Send + 'static>(
+        &mut self,
+        cut: u64,
+        snapshot_id: &str,
+        writer: W,
+    ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
+        self.encode_selected_cut_source(cut, snapshot_id, writer, false, false)
     }
     fn encode_selected_cut_source<W: Write + Send + 'static>(
         &mut self,
@@ -62,6 +71,7 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         writer: W,
         restrictive_only: bool,
+        publish_wire: bool,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         let rules = full_transfer_catalog();
         let mut schema = self.source_cut_schema(cut, snapshot_id, rules)?;
@@ -104,7 +114,7 @@ impl SourceContext<'_> {
             }
         }
         let mut output = Rooted::new(writer, total)?;
-        if cut == 0 {
+        if publish_wire && cut == 0 {
             output = output.with_wire(self.wire_spool(cut, snapshot_id)?);
         }
         for family in &schema.families {

@@ -132,6 +132,7 @@ pub use account_db::raw_inner::{
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
 pub use account_db::shared_group_denials::{GroupRemovalFloor, PrunedGroupFloor};
+pub use account_db::transfer_export::export_contract_digest;
 #[cfg(feature = "itest-transfer-probe")]
 pub use account_db::transfer_export::probe::{
     DirectoryKeys, ProbeExport, ProbeOpen, itest_transfer_open,
