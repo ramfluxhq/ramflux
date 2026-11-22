@@ -3,6 +3,7 @@
 
 //! Real encrypted group-state fanout across partial drains and one failed recipient.
 use super::*;
+use crate::bus::connection_manager::SessionMetadata;
 use crate::bus::runtime_tests;
 use prost::Message as _;
 use ramflux_protocol::message as g;
@@ -233,8 +234,9 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
+    let sealing = SessionMetadata::sealing_config_for(&source.config)?;
     let sealed = source.client.seal_routed_prepared(
-        &source.config,
+        &sealing,
         &message,
         &payload,
         crate::client::routed::Route::group_control("group"),
@@ -243,8 +245,7 @@ async fn shared_group_member_cap_snapshot_seals_and_submits_within_one_gateway_f
             bundle: Some(peer.manifest.devices.first().ok_or("peer device")?.prekey_bundle.clone()),
         },
     )?;
-    let envelope =
-        crate::dm::gateway_envelope_from_sealed(&source.config, &mut message, sealed, None)?;
+    let envelope = crate::dm::gateway_envelope_from_sealed(&sealing, &mut message, sealed, None)?;
     engine.submit_envelope(envelope).await?;
     assert_eq!(captured.lock().map_err(|_| "capture lock")?.len(), 1);
     let state_bytes = ramflux_protocol::canonical_json_bytes(state.snapshot())?.len();

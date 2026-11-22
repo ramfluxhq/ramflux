@@ -40,14 +40,17 @@ pub(super) fn revocation_entry(f: &Fixture) -> Result<GatewayInboxEntry, SdkErro
     };
     let bundle = f.client.load_x3dh_private_state(&local)?.bundle;
     let sealed = f.source.client.seal_generated_routed_prepared(
-        &f.source.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&f.source.config)?,
         &message,
         &exact,
         Route::control(),
         SendMaterial { manifest: None, bundle: Some(bundle) },
     )?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&f.source.config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&f.source.config)?,
+        &mut message,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

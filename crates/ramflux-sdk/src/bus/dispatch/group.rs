@@ -404,7 +404,7 @@ pub(crate) async fn dispatch_group_send_request(
                     // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
                     engine
                         .submit_envelope(gateway_envelope_from_sealed(
-                            engine.config(),
+                            &engine.sealing_config()?,
                             &mut message,
                             sealed,
                             None,
@@ -501,7 +501,7 @@ pub(crate) async fn dispatch_group_send_request(
                         Ok(sealed) => {
                             engine
                                 .submit_envelope(gateway_envelope_from_sealed(
-                                    engine.config(),
+                                    &engine.sealing_config()?,
                                     &mut message,
                                     sealed,
                                     None,

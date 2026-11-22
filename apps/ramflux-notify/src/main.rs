@@ -6,12 +6,13 @@
 mod provider_issuance;
 mod provider_outcome;
 use provider_issuance::SendBoundary;
+mod delivery_loop;
 mod provider_payload;
 mod push_registration;
 mod retention;
 mod send_authority;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -90,7 +91,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         }
         let async_accept = notify_async_accept_enabled();
         if async_accept {
-            start_notify_async_delivery_workers(&store)?;
+            delivery_loop::start(&store)?;
         }
         let store_gate = Arc::new(Mutex::new(()));
         let runtime = Arc::new(NotifyRuntime::from_env(&store, &store_gate)?);
@@ -2293,52 +2294,6 @@ fn notify_mesh_tls_config(
     }
 }
 
-fn start_notify_async_delivery_workers(
-    store: &Arc<ramflux_node_core::NotifyRedbStore>,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let worker_count = notify_runtime_usize_env("RAMFLUX_NOTIFY_ASYNC_DELIVERY_WORKERS", || {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-    })
-    .max(1);
-    let scan_limit =
-        notify_runtime_usize_env("RAMFLUX_NOTIFY_ASYNC_DELIVERY_SCAN_LIMIT", || 256).max(1);
-    let idle_sleep_ms =
-        notify_runtime_usize_env("RAMFLUX_NOTIFY_ASYNC_DELIVERY_IDLE_SLEEP_MS", || 10).max(1);
-    let provider_worker_count =
-        notify_runtime_usize_env("RAMFLUX_NOTIFY_ASYNC_PROVIDER_WORKERS", || {
-            worker_count.saturating_mul(2).max(1)
-        })
-        .max(1);
-    let provider_workers = Arc::new(ConcurrentProviderPushWorkerPool::new(provider_worker_count)?);
-    let in_flight = Arc::new(Mutex::new(BTreeSet::<String>::new()));
-    for worker_id in 0..worker_count {
-        let thread_store = Arc::clone(store);
-        let thread_provider_workers = Arc::clone(&provider_workers);
-        let thread_in_flight = Arc::clone(&in_flight);
-        ramflux_node_core::spawn_service_worker(
-            format!("ramflux-notify-async-delivery-{worker_id}"),
-            move |_| {
-                notify_async_delivery_worker_loop(
-                    &thread_store,
-                    &thread_provider_workers,
-                    &thread_in_flight,
-                    scan_limit,
-                    Duration::from_millis(u64::try_from(idle_sleep_ms).unwrap_or(u64::MAX)),
-                );
-            },
-        )
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestHttp(source.to_string()))?;
-    }
-    tracing::info!(
-        worker_count,
-        provider_worker_count,
-        scan_limit,
-        idle_sleep_ms,
-        "notify async accept delivery workers initialized"
-    );
-    Ok(())
-}
-
 fn log_notify_wal_recovery(store: &ramflux_node_core::NotifyRedbStore) {
     for shard in store.notify_wal_recovered_counts() {
         tracing::debug!(
@@ -2349,131 +2304,6 @@ fn log_notify_wal_recovery(store: &ramflux_node_core::NotifyRedbStore) {
             "notify WAL shard recovered"
         );
     }
-}
-
-fn notify_async_delivery_worker_loop(
-    store: &Arc<ramflux_node_core::NotifyRedbStore>,
-    provider_workers: &ConcurrentProviderPushWorkerPool,
-    in_flight: &Arc<Mutex<BTreeSet<String>>>,
-    scan_limit: usize,
-    idle_sleep: Duration,
-) {
-    while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-        match notify_async_claim_entries(store, in_flight, scan_limit) {
-            Ok(entries) if entries.is_empty() => std::thread::sleep(idle_sleep),
-            Ok(entries) => {
-                for entry in entries {
-                    let queue_id = entry.queue_id.clone();
-                    if let Err(error) = notify_async_deliver_entry(store, provider_workers, &entry)
-                    {
-                        tracing::warn!(
-                            queue_id = queue_id,
-                            %error,
-                            "notify async delivery failed"
-                        );
-                    }
-                    notify_async_release_entry(in_flight, &queue_id);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "notify async delivery scan failed");
-                std::thread::sleep(idle_sleep);
-            }
-        }
-    }
-}
-
-fn notify_async_claim_entries(
-    store: &ramflux_node_core::NotifyRedbStore,
-    in_flight: &Arc<Mutex<BTreeSet<String>>>,
-    scan_limit: usize,
-) -> Result<Vec<ramflux_node_core::NotifyQueueEntry>, ramflux_node_core::NodeCoreError> {
-    if tracing::enabled!(tracing::Level::TRACE) {
-        for shard in store.notify_wal_pending_counts(scan_limit.saturating_mul(2)) {
-            tracing::trace!(
-                shard_id = shard.shard_id,
-                pending_queue_entries = shard.counts.queue_entry_count,
-                pending_raw_wakes = shard.counts.raw_wake_count,
-                "notify async delivery WAL pending scan"
-            );
-        }
-    }
-    let candidates = store.pending_entries_without_attempts(scan_limit.saturating_mul(2))?;
-    let candidate_count = candidates.len();
-    let mut claimed = Vec::new();
-    let mut guard = in_flight.lock().map_err(|source| {
-        ramflux_node_core::NodeCoreError::ItestHttp(format!(
-            "notify async in-flight lock poisoned: {source}"
-        ))
-    })?;
-    for entry in candidates {
-        if claimed.len() >= scan_limit {
-            break;
-        }
-        if guard.insert(entry.queue_id.clone()) {
-            claimed.push(entry);
-        }
-    }
-    tracing::trace!(
-        candidate_count,
-        claimed_count = claimed.len(),
-        scan_limit,
-        "notify async delivery claimed pending entries"
-    );
-    Ok(claimed)
-}
-
-fn notify_async_release_entry(in_flight: &Arc<Mutex<BTreeSet<String>>>, queue_id: &str) {
-    match in_flight.lock() {
-        Ok(mut guard) => {
-            guard.remove(queue_id);
-        }
-        Err(error) => tracing::warn!(%error, "notify async in-flight lock poisoned on release"),
-    }
-}
-
-fn notify_async_deliver_entry(
-    store: &Arc<ramflux_node_core::NotifyRedbStore>,
-    provider_workers: &ConcurrentProviderPushWorkerPool,
-    entry: &ramflux_node_core::NotifyQueueEntry,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let pushes = store.prepare_provider_pushes_for_entry(entry)?;
-    if pushes.is_empty() {
-        tracing::debug!("notify async delivery found no provider pushes for pending entry");
-        return Ok(());
-    }
-    tracing::trace!(push_count = pushes.len(), "notify async delivery prepared provider pushes");
-    let mut pending = Vec::with_capacity(pushes.len());
-    for prepared in pushes {
-        let response = provider_workers.dispatch(Arc::clone(store), prepared.clone())?;
-        pending.push((prepared, response));
-    }
-    let total_count = pending.len();
-    let mut accepted_count = 0_usize;
-    for (prepared, response) in pending {
-        let received = response.recv().map_err(|error| {
-            ramflux_node_core::NodeCoreError::ItestHttp(format!(
-                "notify async provider worker response closed: {error}"
-            ))
-        })?;
-        let accepted = note_provider_send(store, &prepared, received);
-        if accepted {
-            accepted_count = accepted_count.saturating_add(1);
-        }
-        let attempt = ramflux_node_core::redacted_provider_attempt(
-            entry,
-            &prepared,
-            accepted,
-            (!accepted).then(|| "provider_send_failed".to_owned()),
-        );
-        store.record_provider_attempt(attempt)?;
-    }
-    tracing::trace!(
-        accepted_count,
-        total_count,
-        "notify async delivery recorded provider attempts"
-    );
-    Ok(())
 }
 
 fn send_provider_push(

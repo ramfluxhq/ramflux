@@ -100,14 +100,17 @@ async fn cached_history(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, Strin
     let prepared = peer.prepare_authored_content(&mut message, None, &content)?;
     let logical = message.message_id.clone();
     let sealed = peer.seal_generated_routed_prepared(
-        &peer_config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&peer_config)?,
         &message,
         &prepared.wire,
         Route::from_inner(&prepared.wire)?,
         SendMaterial { manifest: None, bundle: None },
     )?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&peer_config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&peer_config)?,
+        &mut message,
+        sealed,
+    )?;
     let entry = GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
@@ -135,14 +138,17 @@ async fn cached_history(fixture: &mut Fixture) -> Case<(GatewayInboxEntry, Strin
         ttl: 600,
     };
     let sealed = sibling.seal_generated_routed_prepared(
-        &sibling_config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sibling_config)?,
         &message,
         &exact,
         Route::from_inner(&exact)?,
         SendMaterial { manifest: None, bundle: None },
     )?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sibling_config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sibling_config)?,
+        &mut message,
+        sealed,
+    )?;
     Ok((
         GatewayInboxEntry {
             forwarded: false,
