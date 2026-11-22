@@ -613,9 +613,9 @@ impl RamfluxClient {
                 return Ok(());
             }
             self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
-            let already_projected = self.direct_message_by_id(message_id)?.is_some_and(|message| {
-                message.conversation_id == conversation_id
-            });
+            let already_projected = self
+                .direct_message_by_id(message_id)?
+                .is_some_and(|message| message.conversation_id == conversation_id);
             if already_projected {
                 self.stage_delivery_receipt(conversation_id, message_id, entry)?;
                 return Ok(());
