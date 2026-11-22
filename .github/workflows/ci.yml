@@ -274,6 +274,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
           shared-key: sdk-c-abi-${{ matrix.features }}
+      - name: Compile the SDK library test binary (untimed; the timed steps below only run tests)
+        run: bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib --no-run
       - name: Execute real supervisor, event and trust regressions
         env:
           RUST_TEST_THREADS: '1'
