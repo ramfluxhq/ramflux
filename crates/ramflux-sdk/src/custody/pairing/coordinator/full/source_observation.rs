@@ -56,6 +56,38 @@ impl PairingActor {
 }
 
 impl PairingActor {
+    pub(super) fn note_source_owner_refusals(db: &ramflux_storage::AccountDb) {
+        let rules = ramflux_storage::full_transfer_catalog();
+        match db.inspect_full_transfer_schema(rules) {
+            Ok(schema) => {
+                for (family, rule) in schema.families.iter().zip(rules) {
+                    if family.source_rows.0 > 0 && rule.require_typed_codec().is_err() {
+                        tracing::debug!(
+                            family = rule.id,
+                            rows = family.source_rows.0,
+                            "full source nonempty family has no typed owner"
+                        );
+                    }
+                }
+            }
+            Err(error) => Self::note_source_preflight_failure("schema inspection", &error.into()),
+        }
+    }
+
+    pub(super) async fn prepare_full_begin_source(
+        &mut self,
+    ) -> Result<
+        (ramflux_storage::PreparedFullSource, ramflux_storage::FullSourcePreparationCancel),
+        SdkError,
+    > {
+        self.refresh_generation().await.inspect_err(|error| {
+            Self::note_source_preflight_failure("frontend generation", error);
+        })?;
+        self.prepare_refreshed_full_source().await.inspect_err(|error| {
+            Self::note_source_preflight_failure("prepared source and native head", error);
+        })
+    }
+
     pub(super) async fn prepare_refreshed_full_source(
         &mut self,
     ) -> Result<
