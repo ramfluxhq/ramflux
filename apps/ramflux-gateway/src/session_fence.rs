@@ -14,7 +14,7 @@ pub(crate) async fn channel_closed(context: &GatewayQuicContext, target: &str) -
     }
 }
 
-/// Nack a submit or heartbeat on a closed router session and tell the caller to drop it.
+/// Nack submit, heartbeat, or classic resume on a closed session, then drop it.
 ///
 /// # Errors
 /// Returns an error when the nack cannot be written.
@@ -28,6 +28,7 @@ pub(crate) async fn refuse_closed_channel(
         frame,
         ramflux_node_core::GatewayClientFrame::Submit { .. }
             | ramflux_node_core::GatewayClientFrame::Heartbeat { .. }
+            | ramflux_node_core::GatewayClientFrame::Resume { .. }
     );
     if !watched || !channel_closed(context, target).await {
         return Ok(false);

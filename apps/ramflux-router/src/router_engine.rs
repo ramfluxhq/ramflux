@@ -94,19 +94,6 @@ fn complete_response(response: ramflux_node_core::EnvelopeSubmitResponse) -> Pre
     complete_mesh_response(response, (None, None))
 }
 
-fn fenced_agent_response(
-    envelope: &ramflux_protocol::Envelope,
-) -> ramflux_node_core::EnvelopeSubmitResponse {
-    ramflux_node_core::EnvelopeSubmitResponse {
-        migration_refusal: None,
-        outcome: "rejected_security:recipient unreachable".to_owned(),
-        target_delivery_id: envelope.target_delivery_id.clone(),
-        inbox_seq: None,
-        cursor: None,
-        nack: None,
-    }
-}
-
 fn complete_mesh_response(
     delivery: ramflux_node_core::EnvelopeSubmitResponse,
     (incarnation_id, retain_until): (Option<String>, Option<i64>),
@@ -168,8 +155,8 @@ fn early_submit_refusal(
     store: &ramflux_node_core::RouterRedbStore,
     envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<Option<PreparedSubmit>> {
-    if state.envelope_reaches_fenced_agent(store, envelope, submission_now())? {
-        return Ok(Some(complete_response(fenced_agent_response(envelope))));
+    if let Some(outcome) = state.fenced_submit_outcome(store, envelope, submission_now())? {
+        return Ok(Some(complete_response(submit_response_from_outcome(state, outcome))));
     }
     if let Some(refusal) = entry_bound_refusal(
         &ramflux_node_core::check_entry_bound(envelope),

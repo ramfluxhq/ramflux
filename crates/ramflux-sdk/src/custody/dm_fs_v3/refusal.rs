@@ -133,7 +133,8 @@ impl TryFrom<&CustodyRefusal> for DmFsV3Refusal {
             | CustodyRefusal::PayloadTooLarge
             | CustodyRefusal::FrameLimit
             | CustodyRefusal::AgentAuthorizationRequired
-            | CustodyRefusal::AgentRetired => Err(value.clone()),
+            | CustodyRefusal::AgentRetired
+            | CustodyRefusal::RecipientUnreachable => Err(value.clone()),
         }
     }
 }

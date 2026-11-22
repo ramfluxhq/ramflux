@@ -6,7 +6,10 @@
 
 use super::CustodyPublication;
 use crate::router_store::agent_host::{AgentHostBinding, AgentRetirement};
-use crate::{IdentityRegistry, NodeCoreError, RouterCore, RouterRedbStore, SessionDescriptor};
+use crate::{
+    IdentityRegistry, NodeCoreError, RouterCore, RouterRedbStore, RouterSubmitOutcome,
+    SessionDescriptor,
+};
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::{CustodyRefusal, DeviceRef};
 use ramflux_protocol::{DeviceSetStatus, PrincipalKind};
@@ -96,6 +99,18 @@ fn is_agent_device(prover: &CustodyPublication, device: &DeviceRef, agent_anchor
         })
 }
 
+/// Desktop delete of this anchor's stored host device. A sibling agent, or another device of
+/// the same headless account, is not this device.
+fn retires_own_host(
+    prover: &CustodyPublication,
+    device: &DeviceRef,
+    agent_anchor: &str,
+    host: Option<&AgentHostBinding>,
+) -> bool {
+    host.is_some_and(|row| &row.agent_device == device)
+        && is_agent_device(prover, device, agent_anchor)
+}
+
 fn empty_binding(owner: &str, agent_anchor: &str) -> AgentHostBinding {
     let blank = |account: &str| DeviceRef {
         account_anchor: account.to_owned(),
@@ -119,7 +134,11 @@ fn owner_of(
         .ok_or_else(|| refused(CustodyRefusal::BindingRefused))
 }
 
-/// Admit `AgentRetire` and store the row. Already retired is success for the same callers.
+/// Admit `AgentRetire` and store the row.
+///
+/// The current primary may retire any agent of that owner. An agent device may retire only
+/// the stored host device of this same anchor, and only while that agent is still operable.
+/// Already retired is success for those callers and does not rewrite the row.
 pub(super) fn retire_agent(
     registry: &IdentityRegistry,
     store: &RouterRedbStore,
@@ -132,24 +151,16 @@ pub(super) fn retire_agent(
     let retired = store.agent_retirement(agent_anchor)?;
     let owner = owner_of(host.as_ref(), retired.as_ref())?;
     let primary = is_current_primary(registry, &owner, device, now)?;
-    let agent = is_agent_device(prover, device, agent_anchor);
-    if retired.is_some() {
-        if primary || agent {
-            return Ok(host.unwrap_or_else(|| empty_binding(&owner, agent_anchor)));
-        }
+    let self_device = retires_own_host(prover, device, agent_anchor, host.as_ref());
+    if !primary && !self_device {
         return Err(refused(CustodyRefusal::BindingRefused));
     }
+    if retired.is_some() {
+        return Ok(host.unwrap_or_else(|| empty_binding(&owner, agent_anchor)));
+    }
     let host = host.ok_or_else(|| refused(CustodyRefusal::BindingRefused))?;
-    let allowed = if primary {
-        true
-    } else if agent {
+    if !primary {
         require_operable(registry, store, agent_anchor, now)?;
-        true
-    } else {
-        false
-    };
-    if !allowed {
-        return Err(refused(CustodyRefusal::BindingRefused));
     }
     store.record_agent_retirement(
         agent_anchor,
@@ -206,6 +217,28 @@ impl RouterCore {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Shared submit admission. `Some` must not be retried, accepted, or queued.
+    ///
+    /// `submit_envelope_at` cannot see this store, and an already assigned retry returns
+    /// before that call. Callers invoke this first.
+    ///
+    /// # Errors
+    /// Returns an error when an agent row cannot be read. Callers fail closed.
+    pub fn fenced_submit_outcome(
+        &self,
+        store: &RouterRedbStore,
+        envelope: &ramflux_protocol::Envelope,
+        now: u64,
+    ) -> Result<Option<RouterSubmitOutcome>, NodeCoreError> {
+        if !self.envelope_reaches_fenced_agent(store, envelope, now)? {
+            return Ok(None);
+        }
+        Ok(Some(RouterSubmitOutcome::RejectedSecurity {
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            reason: "recipient unreachable".to_owned(),
+        }))
     }
 
     /// Upsert one gateway session. A fenced agent target is refused and left unchanged.

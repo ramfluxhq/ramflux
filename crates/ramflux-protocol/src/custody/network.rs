@@ -253,6 +253,8 @@ pub enum CustodyRefusal {
     /// The agent is retired, or its host desktop or approving primary is not an active
     /// device of the custodian's current record. A missing host binding fails the same way.
     AgentRetired,
+    /// A submit to or from a suspended or retired agent. Not accepted and not queued.
+    RecipientUnreachable,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -422,6 +424,7 @@ impl CustodyRefusal {
             Self::FrameLimit => "FrameLimit",
             Self::AgentAuthorizationRequired => "AgentAuthorizationRequired",
             Self::AgentRetired => "agent_retired",
+            Self::RecipientUnreachable => "recipient_unreachable",
         }
     }
 }
