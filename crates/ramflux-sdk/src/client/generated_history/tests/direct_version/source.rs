@@ -194,3 +194,31 @@ async fn direct_source_reads_real_sdk_authored_capture_and_refuses_conflicting_b
         Ok(())
     }).await?
 }
+
+#[test]
+fn direct_source_refuses_saved_original_identity_that_disagrees_with_signed_product_history()
+-> TestResult {
+    let root = Root::new()?;
+    let (client, item) = installed_edit(&root)?;
+    let original = g::original_header::decode_identity(&item.exact_original_identity)?;
+    let id = ramflux_protocol::encode_base64url(&original.id);
+    assert_product_body(&client, &original)?;
+    let mut wrong = original;
+    wrong.hlc += 1;
+    g::identity::verify(&wrong)?; // Event ids do not commit to original HLC.
+    client.account_db()?.persist_message_actor_state(
+        &id,
+        &format!("routed/generated-identity/{id}"),
+        &wrong,
+    )?;
+    assert!(
+        client.account_db()?.read_full_direct_history(&id).is_err(),
+        "valid body proof hid a different original identity in the actual SDK read model"
+    );
+    assert_eq!(
+        client.account_db()?.message_content(&id)?,
+        Some(item.exact_inner),
+        "refused source read changed native body"
+    );
+    Ok(())
+}

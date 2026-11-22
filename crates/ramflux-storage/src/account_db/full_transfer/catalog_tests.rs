@@ -214,8 +214,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
     let rules = full_transfer_catalog();
     assert_eq!(
         rules.len(),
-        174,
-        "test: census includes five native receive tables and excludes the cleanup ledger"
+        175,
+        "test: census includes native receive tables and local proof selection; excludes cleanup ledger"
     );
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,
@@ -238,8 +238,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         tables.len(),
-        168,
-        "test: schema coverage includes native receive tables and omits the cleanup ledger"
+        169,
+        "test: schema coverage includes native receive and proof selection; omits cleanup ledger"
     );
     assert!(
         matches!(

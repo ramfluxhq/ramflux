@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded snapshot assembly from existing native owners, never a SQL BLOB fallback.
-use super::FullDirectHistory;
+use super::{FullDirectHistory, native_selection::Selected};
 use crate::{AccountDb, StorageError};
 use prost::Message as _;
 use ramflux_crypto::native_origin::{
@@ -51,34 +51,46 @@ pub(super) fn read(
         return Ok(None);
     }
     let peer = peer(db, own, &conversation)?;
-    let body = body(db, message, &conversation)?;
+    let body = body(db, message, &conversation)?.ok_or_else(invalid)?;
+    let mut inner = g::Inner::decode(body.as_slice()).map_err(|_| invalid())?;
+    inner.body.zeroize();
+    let current = inner.identity.as_ref().ok_or_else(invalid)?;
+    let original = actor::<g::EventIdentity>(db, &format!("routed/generated-identity/{message}"))?
+        .ok_or_else(invalid)?;
     let capture = actor::<OwnAuthoredCapture>(db, &format!("own-history/capture/{message}"))?;
-    let value = if let Some(capture) = capture {
-        // An inconsistent capture cannot silently disappear behind another evidence class.
-        if body.as_ref().is_none_or(|bytes| bytes.as_slice() != capture.sent.exact_inner) {
-            return Err(invalid());
-        }
-        FullDirectHistory::authored(own, &peer, &capture)?
-    } else {
-        let body = body.ok_or_else(invalid)?;
-        let mut inner = g::Inner::decode(body.as_slice()).map_err(|_| invalid())?;
-        inner.body.zeroize();
-        let current = inner.identity.as_ref().ok_or_else(invalid)?;
-        let key = format!(
-            "routed/own-sent-attestation/{message}/{}",
-            ramflux_protocol::encode_base64url(&current.id)
-        );
-        if let Some(attestation) = actor::<OwnSentAttestation>(db, &key)? {
-            let original =
-                actor::<g::EventIdentity>(db, &format!("routed/generated-identity/{message}"))?
-                    .ok_or_else(invalid)?;
-            FullDirectHistory::own_copy(own, &peer, body.to_vec(), &original, attestation)?
+    if capture.as_ref().is_some_and(|capture| capture.sent.exact_inner != body.as_slice()) {
+        return Err(invalid());
+    }
+    let key = format!(
+        "routed/own-sent-attestation/{message}/{}",
+        ramflux_protocol::encode_base64url(&current.id)
+    );
+    let attestation = actor::<OwnSentAttestation>(db, &key)?;
+    let selected = super::native_selection::read(db, message, &body)?.unwrap_or_else(|| {
+        if capture.is_some() {
+            Selected::Authored
+        } else if attestation.is_some() {
+            Selected::OwnCopy
         } else {
-            received(db, own, &peer, message, &body, &inner)?
+            Selected::Received
         }
+    });
+    let value = match selected {
+        Selected::Authored => {
+            FullDirectHistory::authored(own, &peer, capture.as_ref().ok_or_else(invalid)?)?
+        }
+        Selected::OwnCopy => FullDirectHistory::own_copy(
+            own,
+            &peer,
+            body.to_vec(),
+            &original,
+            attestation.ok_or_else(invalid)?,
+        )?,
+        Selected::Received => received(db, own, &peer, message, &body, &inner)?,
     };
     let version = value.verify(own)?;
-    if ramflux_protocol::encode_base64url(&version.original().id) != message
+    if version.original() != &original
+        || ramflux_protocol::encode_base64url(&version.original().id) != message
         || version.original().conversation_id != conversation
     {
         return Err(invalid());

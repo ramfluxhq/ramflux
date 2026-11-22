@@ -115,6 +115,11 @@ pub(in crate::account_db::full_transfer) fn install_source(
         "INSERT INTO runtime_message_content VALUES(?1,?2,?3)",
         rusqlite::params![&id, &identity.conversation_id, value.encode_to_vec()],
     )?;
+    db.execute_batch(super::super::native_selection::SCHEMA)?;
+    db.execute(
+        "INSERT INTO runtime_actor_state VALUES(?1,?2)",
+        rusqlite::params![format!("routed/generated-identity/{id}"), serde_json::to_vec(identity)?],
+    )?;
     let capture = ramflux_crypto::native_origin::OwnAuthoredCapture {
         target: identity.id.clone(),
         current: identity.id.clone(),

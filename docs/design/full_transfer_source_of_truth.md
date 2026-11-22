@@ -294,3 +294,20 @@ diagnostics list compiled category constants and counts only; they preserve the
 first admission error and expose no row keys, contents or remote error text.
 The positive preflight remains red until the owners exist. This inventory adds
 no owner coverage or successful native-transfer claim.
+
+
+## Local historical proof selection
+
+`runtime_native_history_selection` is B-local rebuilt state, not a portable
+family or source of authority. A chosen received/authored/own-copy evidence class
+is bound to the exact current event id and body hash. The selected evidence must
+still pass its native verifier under the independently authenticated account.
+Body/conversation changes and content erasure invalidate this preference through
+the content owner's triggers; identical writes retain it. Source inspection
+rejects orphan or malformed selectors even when the body family is empty.
+
+The source assembler also requires the verified original identity to equal the
+SDK's saved `routed/generated-identity` value. A valid proof cannot conceal a
+corrupt saved identity. Selection does not restore historical capture metadata;
+the future typed actor owner must preserve that separately without adopting
+execution state. Native SQL import and semantic materialization remain pending.

@@ -710,6 +710,7 @@ mod integrations;
 mod keys;
 mod message_sequence;
 mod messages;
+mod native_selection_local;
 mod objects;
 mod own_sync_local;
 mod pairing;
@@ -890,6 +891,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     runtime::RULE_142,      // sql/runtime_journal_bounds
     messages::RULE_143,     // sql/runtime_message_content
     message_sequence::RULE,
+    native_selection_local::RULE,
     runtime::RULE_144,  // sql/runtime_operation
     runtime::RULE_145,  // sql/runtime_outbox
     runtime::RULE_146,  // sql/runtime_own_copy_state

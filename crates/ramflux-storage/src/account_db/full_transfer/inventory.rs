@@ -122,6 +122,9 @@ pub(in crate::account_db) fn inspect(
         );
         return Err(unsupported());
     }
+    if actual.contains("runtime_native_history_selection") {
+        connection.call(|db| Ok(super::native_selection::require_rows(db)))??;
+    }
     let mut families = Vec::with_capacity(rules.len());
     for rule in rules {
         let mut family = rule.manifest_family().inspect_err(|_| {
