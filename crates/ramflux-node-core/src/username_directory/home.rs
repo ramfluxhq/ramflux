@@ -13,6 +13,7 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefiniti
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 mod publication;
+mod recovery;
 pub use publication::*;
 
 const ROOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("username_home_roots");
@@ -258,11 +259,18 @@ impl HomeDirectory {
         let mut table = tx.open_table(ROOTS).map_err(storage)?;
         let mut state = read_root(&table, &root)?.unwrap_or_default();
         if let Some(intent) = &state.intent {
-            ensure(intent.operation == operation, Code::OperationPending)?;
-            if let Some(profile) = profile {
-                ensure(profile == intent.profile, Code::Replay)?;
+            if intent.operation == operation {
+                if let Some(profile) = profile {
+                    ensure(profile == intent.profile, Code::Replay)?;
+                }
+                return Ok(());
             }
-            return Ok(());
+            ensure(operation.body.action == w::Action::Delete, Code::OperationPending)?;
+            // Preserve the uncertain predecessor's exact bytes for fresh-tuple base repair.
+            let mut meta = tx.open_table(META).map_err(storage)?;
+            let key = format!("preempted:{root}");
+            ensure(meta.get(key.as_str()).map_err(storage)?.is_none(), Code::OperationPending)?;
+            meta.insert(key.as_str(), canonical(intent)?.as_slice()).map_err(storage)?;
         }
         ensure(!state.deleted, Code::AccountDeleted)?;
         ensure(state.directory_epoch == operation.body.expected_epoch, Code::StaleEpoch)?;
@@ -280,10 +288,22 @@ impl HomeDirectory {
             ensure(table.len().map_err(storage)? < 100_000, Code::Capacity)?;
         }
         put_root(&mut table, &root, &state)?;
-        tx.open_table(OUTBOX)
+        if let Some(old) = tx
+            .open_table(OUTBOX)
             .map_err(storage)?
             .insert(root.as_str(), canonical(&now)?.as_slice())
-            .map_err(storage)?;
+            .map_err(storage)?
+        {
+            let at: u64 = serde_json::from_slice(old.value())?;
+            ensure(
+                tx.open_table(DUE)
+                    .map_err(storage)?
+                    .remove((at, root.as_str()))
+                    .map_err(storage)?
+                    .is_some(),
+                Code::DirectoryUnavailable,
+            )?;
+        }
         tx.open_table(DUE).map_err(storage)?.insert((now, root.as_str()), 1).map_err(storage)?;
         drop(table);
         tx.commit().map_err(storage)?;
@@ -525,11 +545,33 @@ impl HomeDirectory {
     /// # Errors
     /// Refuses missing work, clock overflow and delays beyond the 60-second reconciliation cap.
     pub fn retry_later(&self, root: &str, now: u64, delay_seconds: u64) -> Result<()> {
+        self.retry_later_for(root, None, now, delay_seconds)
+    }
+
+    /// An old worker cannot postpone an operation that preempted it during network I/O.
+    /// # Errors
+    /// Refuses unavailable storage, malformed IDs, overflow and out-of-bound delays.
+    pub fn retry_later_for(
+        &self,
+        root: &str,
+        operation_id: Option<&str>,
+        now: u64,
+        delay_seconds: u64,
+    ) -> Result<()> {
         ensure((1..=60).contains(&delay_seconds), Code::RateLimited)?;
         fixed(root)?;
         let next = after(now, delay_seconds)?;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        if let Some(id) = operation_id {
+            let roots = tx.open_table(ROOTS).map_err(storage)?;
+            if !read_root(&roots, root)?
+                .and_then(|state| state.intent)
+                .is_some_and(|intent| intent.operation.body.operation_id == id)
+            {
+                return Ok(());
+            }
+        }
         let mut outbox = tx.open_table(OUTBOX).map_err(storage)?;
         let old: u64 = serde_json::from_slice(
             outbox
@@ -612,6 +654,28 @@ impl HomeDirectory {
             read_root(&table, root)?.ok_or(CheckpointError::Directory(Code::NotFound))?;
         let result = change(&mut state)?;
         put_root(&mut table, root, &state)?;
+        if state.intent.is_none() {
+            tx.open_table(META)
+                .map_err(storage)?
+                .remove(format!("preempted:{root}").as_str())
+                .map_err(storage)?;
+        } else if let Some(committed) = &state.committed {
+            let mut meta = tx.open_table(META).map_err(storage)?;
+            let key = format!("preempted:{root}");
+            let restored = meta
+                .get(key.as_str())
+                .map_err(storage)?
+                .map(|bytes| {
+                    require(bytes.value().len() <= 16384, "home_intent_size")?;
+                    let old: HomeIntent = serde_json::from_slice(bytes.value())?;
+                    Ok::<_, CheckpointError>(old.operation == committed.operation)
+                })
+                .transpose()?
+                .unwrap_or(false);
+            if restored {
+                meta.remove(key.as_str()).map_err(storage)?;
+            }
+        }
         if state.intent.is_none()
             && let Some(old) =
                 tx.open_table(OUTBOX).map_err(storage)?.remove(root).map_err(storage)?

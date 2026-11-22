@@ -4,6 +4,7 @@
 //! Witness-owned live authority. Every transport write rechecks the same nontransferable context.
 use super::{CheckpointError, CheckpointHead, CheckpointTime, Result, fixed, require};
 use std::collections::BTreeMap;
+mod refusal;
 
 const LEASE_MILLIS: u64 = 10_000;
 const CALL_MILLIS: u64 = 10_000;
@@ -40,7 +41,9 @@ pub struct ServingCall {
 }
 
 struct Call {
-    owner: ServingCall,
+    owner: Option<ServingCall>,
+    channel: String,
+    refusal: Option<ramflux_protocol::username_directory::DirectoryCode>,
     deadline: u64,
     head: CheckpointHead,
     identity: WriterIdentity,
@@ -188,8 +191,18 @@ impl ServingFence {
         owner.request.validate()?;
         require(
             self.calls.len() < 64
-                && self.calls.values().filter(|c| c.owner.root == owner.root).count() < 4
-                && self.calls.values().filter(|c| c.owner.home == owner.home).count() < 16,
+                && self
+                    .calls
+                    .values()
+                    .filter(|c| c.owner.as_ref().is_some_and(|call| call.root == owner.root))
+                    .count()
+                    < 4
+                && self
+                    .calls
+                    .values()
+                    .filter(|c| c.owner.as_ref().is_some_and(|call| call.home == owner.home))
+                    .count()
+                    < 16,
             "serving_capacity",
         )?;
         let id = random_id()?;
@@ -199,7 +212,9 @@ impl ServingFence {
         self.calls.insert(
             id.clone(),
             Call {
-                owner,
+                channel: owner.channel.clone(),
+                owner: Some(owner),
+                refusal: None,
                 deadline,
                 head: head.clone(),
                 identity: identity.clone(),
@@ -221,6 +236,20 @@ impl ServingFence {
         channel: &str,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        require(
+            self.calls.get(call_id).is_some_and(|call| call.owner.is_some()),
+            "anonymous_response",
+        )?;
+        self.queue_inner(state, call_id, channel, bytes)
+    }
+
+    fn queue_inner(
+        &mut self,
+        state: ServingState<'_>,
+        call_id: &str,
+        channel: &str,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
         let ServingState { identity, head, time } = state;
         self.check_ready(identity, head, time)?;
         require(bytes.len() <= MAX_RESPONSE_BYTES, "candidate_size")?;
@@ -228,7 +257,7 @@ impl ServingFence {
         require(
             call.identity == *identity
                 && call.head == *head
-                && call.owner.channel == channel
+                && call.channel == channel
                 && call.bytes.is_none(),
             "call_mismatch",
         )?;
@@ -257,7 +286,7 @@ impl ServingFence {
             let call =
                 self.calls.get_mut(call_id).ok_or(CheckpointError::Refused("call_missing"))?;
             require(
-                call.identity == *identity && call.head == *head && call.owner.channel == channel,
+                call.identity == *identity && call.head == *head && call.channel == channel,
                 "call_mismatch",
             )?;
             let bytes = call.bytes.as_ref().ok_or(CheckpointError::Refused("candidate_missing"))?;
@@ -287,7 +316,7 @@ impl ServingFence {
     pub(crate) fn call(&self, call_id: &str) -> Result<&ServingCall> {
         self.calls
             .get(call_id)
-            .map(|call| &call.owner)
+            .and_then(|call| call.owner.as_ref())
             .ok_or(CheckpointError::Refused("call_missing"))
     }
 }

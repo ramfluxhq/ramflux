@@ -13,24 +13,13 @@ impl HomeService {
         master: &str,
     ) -> Result<w::NativeUsernameReply> {
         let master = ramflux_crypto::verifying_key_from_base64url(master)?;
-        if let Some(intent) = self.directory.intent(root)?
-            && operation_id.as_ref().is_none_or(|id| id == &intent.operation.body.operation_id)
-        {
-            return Ok(w::NativeUsernameReply::Status {
-                status: Box::new(w::NativeUsernameStatus {
-                    operation_id: Some(intent.operation.body.operation_id),
-                    state: w::NativeUsernameState::Pending,
-                    binding: None,
-                    profile: None,
-                    receipt: None,
-                    operation_receipt: None,
-                    current_operation: None,
-                }),
-            });
-        }
+        let pending = self.directory.intent(root)?.filter(|intent| {
+            operation_id.as_ref().is_none_or(|id| id == &intent.operation.body.operation_id)
+        });
+        let query_id = if pending.is_some() { None } else { operation_id.clone() };
         let receipt = match self.client.exchange_blocking(
             root,
-            &directory::DirectoryRequest::Status { operation_id: operation_id.clone() },
+            &directory::DirectoryRequest::Status { operation_id: query_id.clone() },
         )? {
             directory::AuthorityResponse::Receipt { receipt } => {
                 let center =
@@ -42,7 +31,7 @@ impl HomeService {
                 )?;
                 let now = crate::now_unix_seconds()?;
                 if receipt.body.principal_commitment != root
-                    || operation_id.as_ref().is_some_and(|id| id != &receipt.body.operation_id)
+                    || query_id.as_ref().is_some_and(|id| id != &receipt.body.operation_id)
                     || receipt.body.committed_at > now
                     || now >= receipt.body.expires_at
                     || receipt.body.state != w::ReceiptState::Reserved
@@ -54,7 +43,7 @@ impl HomeService {
                 Some(*receipt)
             }
             directory::AuthorityResponse::Refused { failure }
-                if failure.code == w::DirectoryCode::NotFound && operation_id.is_none() =>
+                if failure.code == w::DirectoryCode::NotFound && query_id.is_none() =>
             {
                 None
             }
@@ -73,7 +62,11 @@ impl HomeService {
             w::ReceiptState::Committed => w::NativeUsernameState::Committed,
             w::ReceiptState::Aborted => w::NativeUsernameState::Aborted,
         });
-        let operation_id = operation_id
+        let state = if pending.is_some() { w::NativeUsernameState::Pending } else { state };
+        let operation_id = pending
+            .as_ref()
+            .map(|intent| intent.operation.body.operation_id.clone())
+            .or(operation_id)
             .or_else(|| receipt.as_ref().map(|receipt| receipt.body.operation_id.clone()));
         let (binding, profile, current, current_operation) = if let Some(view) = view {
             (view.binding, Some(view.profile), Some(view.receipt), Some(view.operation))
@@ -87,7 +80,7 @@ impl HomeService {
                 binding,
                 profile,
                 receipt: current,
-                operation_receipt: receipt,
+                operation_receipt: if pending.is_some() { None } else { receipt },
                 current_operation,
             }),
         })

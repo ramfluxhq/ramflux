@@ -67,7 +67,9 @@ pub fn prepare_username_draft(
 ) -> Result<Option<UsernameDraft>, SdkError> {
     let change = change.normalized()?;
     center.validate().map_err(|_| w::DirectoryCode::DirectoryUnavailable)?;
-    if status.state == w::NativeUsernameState::Pending {
+    if status.state == w::NativeUsernameState::Pending
+        && (!matches!(change, UsernameChange::Delete) || status.receipt.is_none())
+    {
         return Err(w::DirectoryCode::OperationPending.into());
     }
     if status.current_operation.as_ref().is_some_and(|op| op.body.action == w::Action::Delete) {

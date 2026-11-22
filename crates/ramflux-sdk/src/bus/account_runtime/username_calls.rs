@@ -71,7 +71,10 @@ impl Calls {
     ) {
         self.background = caller.is_none();
         self.task = Some(tokio::spawn(async move {
-            let result = tokio::time::timeout_at(deadline, prepared.exchange())
+            // Leave the writer a bounded reply margin before the caller's absolute fence.
+            let exchange_deadline =
+                deadline.checked_sub(Duration::from_secs(1)).unwrap_or(deadline);
+            let result = tokio::time::timeout_at(exchange_deadline, prepared.exchange())
                 .await
                 .map_err(|_| {
                     SdkError::UsernameDirectoryRefused(
@@ -185,7 +188,7 @@ impl AccountRuntime {
                     Ok(Some(prepared)) => {
                         self.username.spawn(prepared, None, Instant::now() + self.timeouts.command);
                     }
-                    Ok(None) => {}
+                    Ok(None) => self.username.next = Instant::now() + Duration::from_secs(60),
                     Err(error) => tracing::debug!(
                         error_code = crate::prelude::local_bus_error_code(&error),
                         "username retry refused"

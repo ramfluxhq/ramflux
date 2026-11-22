@@ -25,7 +25,8 @@ struct Peer {
 
 struct Pending {
     incoming: tcp::Incoming,
-    call: directory::ServingCall,
+    call: Option<directory::ServingCall>,
+    channel: String,
     refusal: Option<ramflux_protocol::username_directory::DirectoryCode>,
     call_id: Option<String>,
 }
@@ -333,19 +334,23 @@ fn admit(
     incoming: tcp::Incoming,
     pin: &directory::CenterPin,
 ) -> Result<(Pending, directory::CheckpointHead)> {
-    let report = directory::decode_reporting_request(&incoming.body)?;
-    if report.request.path() != incoming.path {
-        return refuse("reporting HTTP path mismatch");
-    }
-    let chain = incoming.certificates().ok_or_else(|| error("reporting TLS certificate"))?;
-    tls::verify_reporter(chain, &report.evidence, crate::now_unix_seconds()?)?;
-    let channel = directory::ReportingChannel {
-        node_id: &report.evidence.discovery.node_id,
-        node_key: &report.evidence.discovery.node_public_key,
-        exporter: &incoming.exporter,
+    let (report, reporter) = match authenticate(authority, &incoming, pin) {
+        Ok(value) => value,
+        Err(error) => {
+            use ramflux_protocol::username_directory::DirectoryCode as Code;
+            let code = match error.downcast_ref::<directory::CheckpointError>() {
+                Some(directory::CheckpointError::Directory(Code::RateLimited)) => Code::RateLimited,
+                Some(directory::CheckpointError::Directory(Code::Capacity)) => Code::Capacity,
+                _ => Code::AuthenticationRequired,
+            };
+            let before = authority.head();
+            let channel = ramflux_protocol::encode_base64url(incoming.exporter);
+            return Ok((
+                Pending { incoming, call: None, channel, refusal: Some(code), call_id: None },
+                before,
+            ));
+        }
     };
-    let (report, reporter) =
-        authority.admit_reporting(&incoming.body, &channel, pin, incoming.source)?;
     let before = authority.head();
     let refusal = if let directory::DirectoryRequest::Mutate { phase, operation, profile } =
         &report.request
@@ -364,7 +369,35 @@ fn admit(
         channel: ramflux_protocol::encode_base64url(incoming.exporter),
         request: report.request,
     };
-    Ok((Pending { incoming, call, refusal, call_id: None }, before))
+    Ok((
+        Pending {
+            incoming,
+            channel: call.channel.clone(),
+            call: Some(call),
+            refusal,
+            call_id: None,
+        },
+        before,
+    ))
+}
+
+fn authenticate(
+    authority: &mut directory::DirectoryAuthority,
+    incoming: &tcp::Incoming,
+    pin: &directory::CenterPin,
+) -> Result<(directory::ReportingRequest, directory::VerifiedReporter)> {
+    let report = directory::decode_reporting_request(&incoming.body)?;
+    if report.request.path() != incoming.path {
+        return refuse("reporting HTTP path mismatch");
+    }
+    let chain = incoming.certificates().ok_or_else(|| error("reporting TLS certificate"))?;
+    tls::verify_reporter(chain, &report.evidence, crate::now_unix_seconds()?)?;
+    let channel = directory::ReportingChannel {
+        node_id: &report.evidence.discovery.node_id,
+        node_key: &report.evidence.discovery.node_public_key,
+        exporter: &incoming.exporter,
+    };
+    Ok(authority.admit_reporting(&incoming.body, &channel, pin, incoming.source)?)
 }
 
 fn serve(
@@ -377,17 +410,25 @@ fn serve(
         return refuse("directory request deadline");
     }
     if pending.call_id.is_none() {
-        let id = authority.admit_call(writer, pending.call.clone())?;
+        let id = if let Some(call) = &pending.call {
+            authority.admit_call(writer, call.clone())?
+        } else {
+            authority.admit_anonymous_refusal(
+                writer,
+                &pending.channel,
+                pending.refusal.ok_or_else(|| error("anonymous refusal missing"))?,
+            )?
+        };
         pending.call_id = Some(id.clone());
         if let Some(code) = pending.refusal {
-            authority.prepare_http_refusal(writer, &id, &pending.call.channel, code)?;
+            authority.prepare_http_refusal(writer, &id, &pending.channel, code)?;
         } else {
-            signer.prepare_http_response(authority, writer, &id, &pending.call.channel)?;
+            signer.prepare_http_response(authority, writer, &id, &pending.channel)?;
         }
         pending.call_id = Some(id);
     }
     let id = pending.call_id.as_ref().ok_or_else(|| error("directory serving context"))?;
-    Ok(authority.write_response_step(writer, id, &pending.call.channel, |bytes| {
+    Ok(authority.write_response_step(writer, id, &pending.channel, |bytes| {
         pending.incoming.try_write(bytes)
     })?)
 }

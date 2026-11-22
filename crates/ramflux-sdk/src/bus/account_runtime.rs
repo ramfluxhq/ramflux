@@ -10,6 +10,8 @@ use crate::prelude::*;
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
+mod maintenance;
+use maintenance::Maintenance;
 mod transient;
 pub(super) use transient::TransientHost;
 mod agent_calls;
@@ -469,22 +471,20 @@ impl AccountRuntime {
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
                     self.maintain_expired_object_holds();
-                    let mut shutdown = self.shutdown.clone();
-                    let active = tokio::select! {
-                        _ = shutdown.changed() => break,
-                        result = self.sync() => match result {
-                            Ok(active) => active,
-                            Err(error) => {
-                                tracing::warn!(account_id = %self.id, %error,
-                                    error_code = local_bus_error_code(&error),
-                                    "background synchronization deferred; account remains open");
-                                false
-                            }
-                        },
-                    };
-                    schedule.completed(active);
-                    next = tokio::time::Instant::now() + schedule.interval;
-                    continue;
+                    match self.maintain_until_command().await {
+                        Maintenance::Stopped => break,
+                        Maintenance::Interrupted => continue,
+                        Maintenance::Command(command) => Some(*command),
+                        Maintenance::Username(completion) => {
+                            if self.finish_username(*completion).await? { break; }
+                            continue;
+                        }
+                        Maintenance::Completed(active) => {
+                            schedule.completed(active);
+                            next = tokio::time::Instant::now() + schedule.interval;
+                            continue;
+                        }
+                    }
                 },
             };
             checkpoints = 0;

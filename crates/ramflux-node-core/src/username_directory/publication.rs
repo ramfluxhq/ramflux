@@ -39,6 +39,26 @@ impl DirectoryAuthority {
         self.fence.admit(writer, &self.head(), call, self.witness.sample_time()?)
     }
 
+    /// A refusal-only context carries no invented reporting root or home.
+    /// # Errors
+    /// Refuses name-specific facts, stale authority and bounded anonymous capacity.
+    pub fn admit_anonymous_refusal(
+        &mut self,
+        writer: &WriterIdentity,
+        channel: &str,
+        code: Code,
+    ) -> Result<String> {
+        self.fence.admit_anonymous(
+            super::ServingState {
+                identity: writer,
+                head: &self.head(),
+                time: self.witness.sample_time()?,
+            },
+            channel,
+            code,
+        )
+    }
+
     /// Build/sign one response candidate against the same protected image and live call.
     /// Signing key must match the independently provisioned centre pin before this entry point.
     /// # Errors
@@ -109,12 +129,16 @@ impl DirectoryAuthority {
         } else {
             body
         };
-        self.fence.queue(
-            super::ServingState { identity: writer, head: &self.head(), time },
-            call_id,
-            channel,
-            bytes,
-        )
+        let head = self.head();
+        let state = super::ServingState { identity: writer, head: &head, time };
+        if self.fence.anonymous(call_id) {
+            let AuthorityResponse::Refused { failure } = response else {
+                return Err(CheckpointError::Refused("anonymous_response"));
+            };
+            self.fence.queue_anonymous(state, call_id, channel, failure.code, bytes)
+        } else {
+            self.fence.queue(state, call_id, channel, bytes)
+        }
     }
 
     /// # Errors

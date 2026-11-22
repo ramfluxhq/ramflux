@@ -118,7 +118,7 @@ pub(crate) fn local(
     crate::admin_http::require_admin_token(context.admin_token.as_deref(), &local.admin_token)?;
     let deadline = ramflux_node_core::migration_hop_deadline(local.budget_ms, received)?;
     let home = HOME.get().ok_or_else(|| error("username home unavailable"))?;
-    let reply = home.execute(local.call);
+    let reply = home.execute(local.call, deadline);
     if Instant::now() >= deadline {
         return refuse("local username deadline");
     }
@@ -136,7 +136,11 @@ pub(crate) fn local(
 }
 
 impl HomeService {
-    fn execute(&self, call: directory::UsernameHomeCall) -> Result<w::NativeUsernameReply> {
+    fn execute(
+        &self,
+        call: directory::UsernameHomeCall,
+        deadline: Instant,
+    ) -> Result<w::NativeUsernameReply> {
         call.request.validate()?;
         if call.request.center != self.client.pin.public_identity() {
             return refuse("independent username centre pins disagree");
@@ -152,7 +156,7 @@ impl HomeService {
         }
         self.directory.enrol(root)?;
         match call.request.action {
-            w::NativeUsernameAction::Mutate { operation, profile } => {
+            w::NativeUsernameAction::Recover { operation, profile } => {
                 let native = &call.history.home.authority.record.body;
                 if profile.body.principal_id != native.principal_id
                     || profile.body.kind
@@ -163,26 +167,26 @@ impl HomeService {
                     )
                     .into());
                 }
-                let operation_id = operation.body.operation_id.clone();
-                self.directory.begin(
+                let live = self.client.revalidate(&self.directory, root, None)?;
+                self.directory.recover_committed(
                     &master,
-                    *operation,
-                    Some(*profile),
+                    directory::HomeIntent {
+                        operation: *operation,
+                        profile: *profile,
+                        reservation: None,
+                    },
+                    live,
                     crate::now_unix_seconds()?,
                 )?;
-                self.coordinator.wake();
-                Ok(w::NativeUsernameReply::Status {
-                    status: Box::new(w::NativeUsernameStatus {
-                        operation_id: Some(operation_id),
-                        state: w::NativeUsernameState::Pending,
-                        binding: None,
-                        profile: None,
-                        receipt: None,
-                        operation_receipt: None,
-                        current_operation: None,
-                    }),
-                })
+                self.status(root, None, &native.master_certificate.body.master_public_key)
             }
+            w::NativeUsernameAction::Mutate { operation, profile } => self.mutate(
+                root,
+                &call.history.home.authority.record.body,
+                *operation,
+                *profile,
+                deadline,
+            ),
             w::NativeUsernameAction::Status { operation_id } => self.status(
                 root,
                 operation_id,
@@ -190,6 +194,54 @@ impl HomeService {
             ),
             w::NativeUsernameAction::Resolve { name, nonce } => self.resolve(root, &name, &nonce),
         }
+    }
+
+    fn mutate(
+        &self,
+        root: &str,
+        native: &ramflux_protocol::custody::DeviceSet,
+        operation: w::UsernameOperation,
+        profile: w::SignedIdentityProfileV2,
+        deadline: Instant,
+    ) -> Result<w::NativeUsernameReply> {
+        if profile.body.principal_id != native.principal_id
+            || profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
+        {
+            return Err(
+                directory::CheckpointError::Directory(w::DirectoryCode::InvalidProfile).into()
+            );
+        }
+        let master = ramflux_crypto::verifying_key_from_base64url(
+            &native.master_certificate.body.master_public_key,
+        )?;
+        let operation_id = operation.body.operation_id.clone();
+        let attempt = self.coordinator.watch_attempt(root, &operation_id)?;
+        self.directory.begin(&master, operation, Some(profile), crate::now_unix_seconds()?)?;
+        self.coordinator.wake();
+        match attempt.wait(deadline.saturating_duration_since(Instant::now())) {
+            directory::HomeAttemptOutcome::Refused(code) => {
+                return Ok(w::NativeUsernameReply::Refused { failure: directory::failure(code) });
+            }
+            directory::HomeAttemptOutcome::Complete => {
+                return self.status(
+                    root,
+                    Some(operation_id),
+                    &native.master_certificate.body.master_public_key,
+                );
+            }
+            directory::HomeAttemptOutcome::Pending => {}
+        }
+        Ok(w::NativeUsernameReply::Status {
+            status: Box::new(w::NativeUsernameStatus {
+                operation_id: Some(operation_id),
+                state: w::NativeUsernameState::Pending,
+                binding: None,
+                profile: None,
+                receipt: None,
+                operation_receipt: None,
+                current_operation: None,
+            }),
+        })
     }
 
     async fn renew_locator(self: Arc<Self>, shutdown: tokio_util::sync::CancellationToken) {

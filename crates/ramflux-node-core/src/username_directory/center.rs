@@ -78,6 +78,11 @@ impl DirectoryAuthority {
         ensure(time.wall < reporter.expires_at, Code::AuthenticationRequired)?;
         crypto::verify_operation(&reporter.master, operation)?;
         ensure(operation.body.principal_commitment == reporter.root, Code::OwnershipMismatch)?;
+        if operation.body.action == w::Action::Delete
+            && self.preempt_delete_if_needed(writer, reporter, phase, operation, profile)?
+        {
+            return Ok(self.head());
+        }
         ensure(
             operation.body.issued_at <= time.wall && time.wall < operation.body.expires_at,
             Code::Replay,
@@ -202,7 +207,7 @@ impl DirectoryAuthority {
     }
 }
 
-fn verify_profile(
+pub(super) fn verify_profile(
     reporter: &VerifiedReporter,
     operation: &w::UsernameOperation,
     profile: Option<&w::SignedIdentityProfileV2>,

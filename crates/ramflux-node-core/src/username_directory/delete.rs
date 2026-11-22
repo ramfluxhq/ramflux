@@ -11,6 +11,36 @@ use super::{
 use ramflux_protocol::username_directory::{self as w, DirectoryCode as Code};
 
 impl DirectoryAuthority {
+    pub(super) fn preempt_delete_if_needed(
+        &mut self,
+        writer: &WriterIdentity,
+        reporter: &VerifiedReporter,
+        phase: super::MutationPhase,
+        operation: &w::UsernameOperation,
+        profile: Option<&w::SignedIdentityProfileV2>,
+    ) -> Result<bool> {
+        if let Some(request) = self.witness.retained_delete_request(operation)? {
+            self.delete_preempting_pending(writer, reporter, &w::encode(&request)?)?;
+            return Ok(true);
+        }
+        if phase == super::MutationPhase::Reserve
+            && let Some(root) = self.current_root(&reporter.root)?
+            && root.pending_operation_id.is_some()
+        {
+            super::center::verify_profile(reporter, operation, profile, Some(&root.profile))?;
+            let head = self.head();
+            let request = w::DeletePreemptingPending {
+                tx_id: operation.body.operation_id.clone(),
+                operation: operation.clone(),
+                expected_head: w::ExpectedHead { lsn: head.lsn, digest: head.digest },
+                requested_time: operation.body.issued_at,
+            };
+            self.delete_preempting_pending(writer, reporter, &w::encode(&request)?)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Whole-request retry lookup precedes stale-head and operation freshness checks.
     /// The returned result is private until primary application and fenced publication.
     /// # Errors

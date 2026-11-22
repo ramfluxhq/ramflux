@@ -112,6 +112,7 @@ impl BackupDatabase {
                 after = key;
             }
         }
+        self.merge_username_candidates()?;
         // User restores never turn a saved operation into a live daemon outbox.
         self.db.execute(
             "DELETE FROM main.runtime_actor_state WHERE state_kind>=?1 AND state_kind<?2",

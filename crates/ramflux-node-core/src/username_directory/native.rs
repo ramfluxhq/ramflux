@@ -98,7 +98,8 @@ impl NativeUsernameService {
             }
             router.ensure_home_genesis(store, &self.node, declaration, now)?;
         }
-        if let wire::NativeUsernameAction::Mutate { operation, .. } = &request.action
+        if let wire::NativeUsernameAction::Mutate { operation, .. }
+        | wire::NativeUsernameAction::Recover { operation, .. } = &request.action
             && operation.body.principal_commitment != source.root_commitment()
         {
             return Err(NodeCoreError::Unauthorized("username operation owner mismatch".into()));

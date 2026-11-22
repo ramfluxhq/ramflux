@@ -25,6 +25,12 @@ pub(in crate::bus) fn delivery_status(
             account.principal_commitment
         ))?
         .is_none()
+        && account
+            .client
+            .account_db()?
+            .username_recovery_candidates(&account.principal_commitment)?
+            .is_empty()
+        && account.client.account_db()?.username_floor(&account.principal_commitment)?.is_none()
     {
         return Ok(None);
     }

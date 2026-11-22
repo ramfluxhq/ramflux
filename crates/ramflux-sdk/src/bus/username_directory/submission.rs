@@ -42,14 +42,18 @@ pub(super) fn prepare(
             }
             let db = account.client.account_db()?;
             let key = format!("username/intent/{root}");
-            if let Some(old) = db.load_actor_state::<SignedUsernameChange>(&key)?
-                && (old.operation != signed.operation
-                    || old.profile != signed.profile
-                    || old.center != signed.center)
-            {
-                return Err(w::DirectoryCode::OperationPending.into());
-            }
-            db.persist_actor_state(&key, signed.as_ref())?;
+            db.write_transaction(|| {
+                if let Some(old) = db.load_actor_state::<SignedUsernameChange>(&key)?
+                    && old != *signed
+                {
+                    if signed.operation.body.action != w::Action::Delete {
+                        return Err(w::DirectoryCode::OperationPending.into());
+                    }
+                    db.retain_username_candidate(&old)?;
+                }
+                db.persist_actor_state(&key, signed.as_ref())?;
+                Ok::<_, SdkError>(())
+            })?;
             Ok((
                 w::NativeUsernameAction::Mutate {
                     operation: Box::new(signed.operation),

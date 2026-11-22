@@ -58,6 +58,7 @@ impl super::ProfileKind {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeUsernameAction {
     Mutate { operation: Box<UsernameOperation>, profile: Box<SignedIdentityProfileV2> },
+    Recover { operation: Box<UsernameOperation>, profile: Box<SignedIdentityProfileV2> },
     Status { operation_id: Option<String> },
     Resolve { name: String, nonce: String },
 }
@@ -193,7 +194,8 @@ impl NativeUsernameRequest {
             .map_err(|_| super::CodecError::Field("home_declaration"))?;
         }
         match &self.action {
-            NativeUsernameAction::Mutate { operation, profile } => {
+            NativeUsernameAction::Mutate { operation, profile }
+            | NativeUsernameAction::Recover { operation, profile } => {
                 operation.validate()?;
                 profile.validate()?;
                 need(profile.body.avatar.is_none(), "avatar_out_of_scope")?;

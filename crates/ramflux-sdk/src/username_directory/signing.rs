@@ -5,16 +5,9 @@
 use super::{UsernameChange, UsernameDraft};
 use crate::SdkError;
 use ramflux_protocol::username_directory as w;
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SignedUsernameChange {
-    pub center: w::NativeDirectoryPin,
-    pub operation: w::UsernameOperation,
-    pub profile: w::SignedIdentityProfileV2,
-}
+pub type SignedUsernameChange = ramflux_storage::UsernameRecoveryCandidate;
 
 /// Authorize exactly the requested typed change. The caller owns this transient ceremony;
 /// only the resulting signed public records may be submitted or journalled.

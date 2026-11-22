@@ -10,6 +10,8 @@ use ramflux_protocol::username_directory::{self as w, DirectoryCode as Code};
 use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
+mod attempt;
+pub use attempt::{HomeAttempt, HomeAttemptOutcome};
 
 pub type UsernameExchange<'a> =
     Pin<Box<dyn Future<Output = Result<AuthorityResponse>> + Send + 'a>>;
@@ -24,17 +26,25 @@ pub struct HomeCoordinator {
     home: Arc<HomeDirectory>,
     center: Arc<dyn UsernameCenterClient>,
     wake: Notify,
+    attempts: attempt::Attempts,
 }
 
 impl HomeCoordinator {
     #[must_use]
     pub fn new(home: Arc<HomeDirectory>, center: Arc<dyn UsernameCenterClient>) -> Self {
-        Self { home, center, wake: Notify::new() }
+        Self { home, center, wake: Notify::new(), attempts: attempt::Attempts::default() }
     }
 
     /// H1 callers notify after their durable commit; the worker also discovers work after restart.
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Subscribe before H1 so the caller can observe this attempt's live result, never a cache.
+    /// # Errors
+    /// Refuses malformed correlation IDs, unavailable bookkeeping or bounded subscriber capacity.
+    pub fn watch_attempt(&self, root: &str, operation_id: &str) -> Result<HomeAttempt> {
+        self.attempts.watch(root, operation_id)
     }
 
     /// Runs independently of user/API polling. At most 16 owned reconciliation tasks, one/root.
@@ -51,12 +61,22 @@ impl HomeCoordinator {
                 _ = interval.tick() => self.schedule(&mut tasks, &mut active)?,
                 () = self.wake.notified() => self.schedule(&mut tasks, &mut active)?,
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
-                    let (root, outcome) = joined.map_err(|_| CheckpointError::Refused("home_worker_stopped"))?;
+                    let (root, operation_id, outcome) = joined.map_err(|_| CheckpointError::Refused("home_worker_stopped"))?;
                     active.remove(&root);
+                    let code = match &outcome {
+                        Ok(()) => None,
+                        Err(CheckpointError::Directory(code)) => Some(*code),
+                        Err(_) => Some(Code::DirectoryUnavailable),
+                    };
+                    self.attempts.complete(&root, &operation_id, code)?;
                     if let Err(error) = outcome {
                         tracing::warn!(%error, "username reconciliation retained for retry");
                         if self.home.intent(&root)?.is_some() {
-                            self.home.retry_later(&root, crate::now_unix_seconds(), 5)?;
+                            let delay = match code {
+                                Some(Code::RateLimited | Code::UsernameTaken | Code::UsernameHeld | Code::UsernameReserved) => 60,
+                                _ => 5,
+                            };
+                            self.home.retry_later_for(&root, Some(&operation_id), crate::now_unix_seconds(), delay)?;
                         }
                     }
                 }
@@ -68,7 +88,7 @@ impl HomeCoordinator {
 
     fn schedule(
         self: &Arc<Self>,
-        tasks: &mut JoinSet<(String, Result<()>)>,
+        tasks: &mut JoinSet<(String, String, Result<()>)>,
         active: &mut BTreeSet<String>,
     ) -> Result<()> {
         let available = 16_usize.saturating_sub(active.len());
@@ -77,15 +97,19 @@ impl HomeCoordinator {
         }
         let now = crate::now_unix_seconds();
         for root in self.home.due_roots(now, available)? {
+            let Some(intent) = self.home.intent(&root)? else {
+                continue;
+            };
             if !active.insert(root.clone()) {
                 continue;
             }
             // A crash leaves at most a 60-second indexed backoff, not an in-RAM-only claim.
-            self.home.retry_later(&root, now, 60)?;
+            self.home.retry_later_for(&root, Some(&intent.operation.body.operation_id), now, 60)?;
             let owner = Arc::clone(self);
             tasks.spawn(async move {
-                let outcome = owner.reconcile(&root).await;
-                (root, outcome)
+                let operation_id = intent.operation.body.operation_id.clone();
+                let outcome = owner.reconcile(&root, intent).await;
+                (root, operation_id, outcome)
             });
         }
         Ok(())
@@ -118,10 +142,7 @@ impl HomeCoordinator {
         }
     }
 
-    async fn reconcile(&self, root: &str) -> Result<()> {
-        let Some(intent) = self.home.intent(root)? else {
-            return Ok(());
-        };
+    async fn reconcile(&self, root: &str, intent: HomeIntent) -> Result<()> {
         let status = self
             .call(
                 root,

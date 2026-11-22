@@ -43,6 +43,8 @@ pub(crate) async fn handle(socket: PathBuf, command: UsernameCommand) -> Result<
         }
         UsernameAction::Release(input) => mutate(&mut bus, input, UsernameChange::Release).await,
         UsernameAction::Delete(input) => mutate(&mut bus, input, UsernameChange::Delete).await,
+        UsernameAction::Visibility(input) => mutate(&mut bus, input.authorization,
+            UsernameChange::Visibility { discoverable: input.discoverable }).await,
         UsernameAction::Profile(input) => {
             mutate(
                 &mut bus,

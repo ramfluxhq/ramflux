@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordered writer preparation and application; only owned public input crosses network waits.
+mod recovery;
 mod retry;
 mod submission;
 use crate::prelude::{
@@ -29,6 +30,7 @@ pub(super) struct Prepared {
     pub(super) pin: w::NativeDirectoryPin,
     pub(super) root: String,
     pub(super) action: w::NativeUsernameAction,
+    repairs: Vec<directory::SignedUsernameChange>,
     purpose: Purpose,
 }
 enum Purpose {
@@ -83,12 +85,17 @@ pub(super) fn prepare(
         }
         _ => return Err(w::DirectoryCode::UnsupportedVersion.into()),
     };
-    Ok(Prepared { gateway, pin, root, action, purpose })
+    let repairs = if matches!(purpose, Purpose::Status { .. } | Purpose::Draft { .. }) {
+        recovery::candidates(account.client.account_db()?, &root, &pin)?
+    } else {
+        Vec::new()
+    };
+    Ok(Prepared { gateway, pin, root, action, repairs, purpose })
 }
 
 impl Prepared {
     pub(super) async fn exchange(&self) -> Result<directory::UsernameNetworkReply, SdkError> {
-        directory::exchange_username(&self.gateway, self.pin.clone(), self.action.clone()).await
+        self.exchange_with_recovery().await
     }
 }
 

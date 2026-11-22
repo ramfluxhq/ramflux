@@ -11,22 +11,7 @@ pub(crate) async fn handle_contact(
 ) -> Result<(), RfError> {
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
-        ContactAction::Add(add) => {
-            if let Some(name) = &add.username {
-                let name = ramflux_sdk::username_directory::normalize_name(name)?;
-                return print_json(
-                    &bus.request(
-                        Some(add.account),
-                        "username",
-                        "username.contact.add",
-                        serde_json::json!({"name":name}),
-                    )
-                    .await?,
-                );
-            }
-            let body = contact_add_body(&add);
-            contact_add_response(&bus, add.account, body).await
-        }
+        ContactAction::Add(add) => handle_contact_add(&mut bus, add).await,
         ContactAction::Card(selector) => print_json(
             &bus.request(
                 Some(selector.account),
@@ -112,6 +97,23 @@ pub(crate) async fn handle_contact(
             handle_contact_verification(&mut bus, command).await
         }
     }
+}
+
+async fn handle_contact_add(bus: &mut LocalBusClient, add: ContactAdd) -> Result<(), RfError> {
+    if let Some(name) = &add.username {
+        let name = ramflux_sdk::username_directory::normalize_name(name)?;
+        return print_json(
+            &bus.request(
+                Some(add.account),
+                "username",
+                "username.contact.add",
+                serde_json::json!({"name":name}),
+            )
+            .await?,
+        );
+    }
+    let body = contact_add_body(&add);
+    contact_add_response(bus, add.account, body).await
 }
 
 async fn handle_contact_verify(

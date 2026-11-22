@@ -18,6 +18,7 @@ pub(crate) enum UsernameAction {
     Release(UsernameAuthorize),
     Delete(UsernameAuthorize),
     Profile(UsernameProfile),
+    Visibility(UsernameVisibility),
 }
 
 #[derive(Args)]
@@ -53,6 +54,14 @@ pub(crate) struct UsernameProfile {
     pub bio: Option<String>,
     #[arg(long)]
     pub display_name: Option<String>,
+    #[command(flatten)]
+    pub authorization: UsernameAuthorize,
+}
+
+#[derive(Args)]
+pub(crate) struct UsernameVisibility {
+    #[arg(long, required = true, action = clap::ArgAction::Set)]
+    pub discoverable: bool,
     #[command(flatten)]
     pub authorization: UsernameAuthorize,
 }

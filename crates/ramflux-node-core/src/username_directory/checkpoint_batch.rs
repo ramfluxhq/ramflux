@@ -270,6 +270,38 @@ pub(super) fn prune_batches(tx: &redb::WriteTransaction, now: u64) -> Result<()>
 }
 
 impl CheckpointWitness {
+    /// Reconstruct the immutable whole request from its verified retained pair, never a new head.
+    pub(super) fn retained_delete_request(
+        &mut self,
+        operation: &w::UsernameOperation,
+    ) -> Result<Option<w::DeletePreemptingPending>> {
+        let operation = operation.clone();
+        let time = self.sample_time()?;
+        self.update_aux(time, move |tx| {
+            let Some(row) = member_batch(tx, &operation.body.operation_id)? else {
+                return Ok(None);
+            };
+            require(
+                row.batch_id == operation.body.operation_id
+                    && row.root == operation.body.principal_commitment,
+                "batch_replay",
+            )?;
+            let records = pair(tx, &row)?;
+            let abort = records.first().ok_or(CheckpointError::Refused("batch_count"))?;
+            let delete = records.last().ok_or(CheckpointError::Refused("batch_count"))?;
+            require(delete.delta.operation.as_ref() == Some(&operation), "batch_replay")?;
+            Ok(Some(w::DeletePreemptingPending {
+                tx_id: operation.body.operation_id.clone(),
+                requested_time: operation.body.issued_at,
+                operation,
+                expected_head: w::ExpectedHead {
+                    lsn: abort.lsn.checked_sub(1).ok_or(CheckpointError::Refused("batch_lsn"))?,
+                    digest: abort.previous_digest.clone(),
+                },
+            }))
+        })
+    }
+
     /// Only an identical original whole delete request may retrieve a batch result.
     /// # Errors
     /// Refuses reused IDs, member retries and incomplete/corrupt durable associations.
