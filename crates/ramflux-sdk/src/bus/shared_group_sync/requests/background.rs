@@ -246,7 +246,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     let Some(state) = db.shared_group_state(packet.group())? else { return Ok(None) };
     defer(client, &id, &packet, now.saturating_add(DEFER_SECS))?;
     let Some(fingerprint) = fingerprint(client, &id, &packet)? else { return Ok(None) };
-    Ok(Some(Plan { id, packet, state, fingerprint, config: account.gateway_config.clone() }))
+    Ok(Some(Plan { id, packet, state, fingerprint, config: account.sealing_config()? }))
 }
 fn fingerprint(
     client: &RamfluxClient,
