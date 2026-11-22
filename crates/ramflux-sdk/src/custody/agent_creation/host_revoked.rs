@@ -61,6 +61,44 @@ pub(crate) fn note_host_branch_revoked(
     write_json_atomic(dir, FILE_NAME, &bytes)
 }
 
+/// Store the marker when this verified publication revokes the local device.
+/// A publication that leaves the device active writes nothing, so a pairing
+/// adoption that is still pending does not suspend the desktop.
+/// # Errors
+/// Refuses an invalid device id or a failed marker or inventory write.
+pub(crate) fn note_if_verified_revokes(
+    root: &Path,
+    account_id: &str,
+    local: &crate::custody::BornAccount,
+    verified: &ramflux_crypto::custody::VerifiedRecord,
+    now: u64,
+) -> Result<bool, SdkError> {
+    if verified.envelope().body.account_anchor != local.record().body.account_anchor {
+        return Ok(false);
+    }
+    let device_id = local.local_device_id()?;
+    if !verified.revoked_ids().contains(device_id) {
+        return Ok(false);
+    }
+    let epoch = local
+        .record()
+        .body
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+        .map_or(0, |device| device.device_epoch);
+    note_host_branch_revoked(
+        root,
+        account_id,
+        device_id,
+        epoch,
+        &local.record().body.account_anchor,
+        now,
+    )?;
+    suspend_hosted_agents(root, account_id)?;
+    Ok(true)
+}
+
 fn marker_bytes_ok(bytes: &[u8]) -> bool {
     if bytes.len() > MAX_MARKER_BYTES {
         return false;
