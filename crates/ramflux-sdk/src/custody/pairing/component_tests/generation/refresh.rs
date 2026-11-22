@@ -247,7 +247,7 @@ fn reopen_refreshed_frontends(
         ),
         (
             &rig.participant_b,
-            b"component-recipient-passphrase".as_slice(),
+            b"752913".as_slice(),
             primary.branch_vault_ref().to_owned(),
             primary.primary_vault_ref().to_owned(),
             "branch-vault",

@@ -105,10 +105,7 @@ fn token_present(screen: &str, word: &str) -> bool {
 }
 
 fn public_prompt(line: &str) -> bool {
-    if matches!(
-        line,
-        "New local data passphrase (hidden):" | "Repeat local data passphrase (hidden):"
-    ) {
+    if matches!(line, "New account code, 6 digits (hidden):" | "Repeat account code (hidden):") {
         return true;
     }
     line.strip_prefix("Recovery word ").and_then(|s| s.strip_suffix(" (hidden):")).is_some_and(
@@ -334,7 +331,7 @@ mod tests {
         let stream = hidden_stream().replace("word00", "local").replace("word01", "word");
         (
             format!(
-                "{stream}\r\nNew local data passphrase (hidden):\r\nRepeat local data passphrase (hidden):"
+                "{stream}\r\nNew account code, 6 digits (hidden):\r\nRepeat account code (hidden):"
             ),
             phrase,
         )

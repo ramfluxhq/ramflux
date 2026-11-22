@@ -58,6 +58,12 @@ impl Spec {
             let answers = crate::custody::tests::words(&phrase, positions)
                 .map_err(|_| SdkError::CustodySetupInvalid)?;
             let account = ceremony.confirm(&answers, self.vault.as_ref(), now)?;
+            client.bind_device_unlock(
+                std::path::Path::new(&self.root),
+                self.vault.as_ref(),
+                &self.principal,
+                crate::client::device_unlock::DeviceSecret::Create,
+            )?;
             client.seal_new_account_data(
                 &self.principal,
                 &account.record().body.account_anchor,

@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const PHRASE: &[u8] = b"correct-passphrase";
+const PHRASE: &[u8] = b"852147";
 const STAGE: &str = "acct-p08-stage";
 const RESTART: &str = "acct-p08-restart";
 const SHARED: &str = "acct-p08-shared";
@@ -258,6 +258,22 @@ impl PrimaryVault for DiskVault {
             fs::read(self.slot(reference)).map_err(|_| SdkError::CustodyVaultUnavailable)?,
         ))
     }
+
+    fn store_device_unlock_secret(
+        &self,
+        reference: &str,
+        secret: &Zeroizing<[u8; 32]>,
+    ) -> Result<(), SdkError> {
+        require_vault_reference(reference, crate::custody::DEVICE_UNLOCK_PREFIX)?;
+        self.put(reference, secret.as_slice())
+    }
+
+    fn load_device_unlock_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        require_vault_reference(reference, crate::custody::DEVICE_UNLOCK_PREFIX)?;
+        Ok(Zeroizing::new(
+            fs::read(self.slot(reference)).map_err(|_| SdkError::CustodyVaultUnavailable)?,
+        ))
+    }
 }
 
 struct FailVault;
@@ -467,10 +483,10 @@ async fn existing_open_leg() -> TestResult {
 }
 
 #[test]
-fn pairing_setup_refuses_short_and_blocklisted_passphrases() -> TestResult {
+fn pairing_setup_refuses_codes_that_are_not_six_digits() -> TestResult {
     for (bytes, expected) in [
-        (b"aaaaaaaaaaaaaa".as_slice(), crate::PassphrasePolicyError::TooShort { scalars: 14 }),
-        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+        (b"12345".as_slice(), crate::PassphrasePolicyError::NotSixDigits),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::NotSixDigits),
     ] {
         let root = tempfile::tempdir()?;
         let vault_dir = root.path().join("disk-vault");

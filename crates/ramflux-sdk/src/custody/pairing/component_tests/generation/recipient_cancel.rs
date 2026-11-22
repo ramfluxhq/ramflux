@@ -82,7 +82,7 @@ async fn cancel_and_restart(published_before_cancel: bool) -> TestResult {
         .open_account_index(&rig.participant_b.root)
         .map_err(|e| format!("B reopen index: {e}"))?;
     frontend
-        .unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")
+        .unlock_account(&rig.participant_b.account_id, b"752913")
         .map_err(|e| format!("B reopen data credential: {e}"))?;
     let previous = &rig.participant_b;
     let reopened = Arc::new(LocalPairingParticipant {
@@ -213,7 +213,7 @@ fn verify_primary_reopen(
     // Drop the selected writer before reopening through the ordinary authenticated data path.
     *frontend = crate::RamfluxClient::new();
     reopened.open_account_index(&rig.participant_b.root)?;
-    reopened.unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")?;
+    reopened.unlock_account(&rig.participant_b.account_id, b"752913")?;
     assert!(ordinary_session_admitted(&reopened, &install.account_id)?);
     let account =
         crate::custody::load_account(&rig.participant_b.root, &install.account_id, rig.now)?;

@@ -475,9 +475,10 @@ async fn shutdown_uncommitted_authority() -> Result {
         bus.begin("Native lease", ramflux_protocol::PrincipalKind::Human).await?;
         let phrase = bus.show_once().await?;
         let answers = words(&phrase, bus.hidden_challenge().await?)?;
-        let confirm = tokio::spawn(async move {
-            bus.confirm(&answers, &Zeroizing::new("independent data passphrase".into())).await
-        });
+        let confirm =
+            tokio::spawn(
+                async move { bus.confirm(&answers, &Zeroizing::new("246802".into())).await },
+            );
         tokio::time::timeout(std::time::Duration::from_secs(10), vault.entered.notified()).await?;
         stop.send(true)?;
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

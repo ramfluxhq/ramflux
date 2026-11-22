@@ -3,7 +3,6 @@
 
 //! Generic all-column inspection of message-copy stores, independent of erasure implementation.
 use super::*;
-use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
 use rusqlite::{Connection, types::ValueRef};
 use std::fmt::Write;
 pub(super) type IdentitySnapshot = Vec<(String, Vec<Vec<u8>>)>;
@@ -33,10 +32,10 @@ pub(super) fn open(
     client: &RamfluxClient,
 ) -> Result<Connection, Box<dyn std::error::Error>> {
     client.account_db()?.checkpoint_retired_secrets()?;
-    let vault = FileVaultSecretSource::new(&spec.root).vault_secret(&spec.principal)?;
+    let vault = client.vault_secret_source()?.vault_secret(&spec.principal)?;
     let wrapped = client.account_index()?.load_wrapped_db_key(&spec.principal)?.ok_or("key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
-        &crate::client::account::account_db_key_encryption_key(&vault, b"receipt-test"),
+        &crate::client::account::account_db_key_encryption_key(&vault, b"receipt-test")?,
         &wrapped,
     )?;
     let db = Connection::open_with_flags(

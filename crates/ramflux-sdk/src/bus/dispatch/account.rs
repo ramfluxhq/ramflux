@@ -384,7 +384,7 @@ fn encrypt_account_backup(
     contacts: Vec<String>,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupFile, SdkError> {
-    crate::passphrase::admit_new_passphrase(passphrase.as_bytes())?;
+    crate::passphrase::admit_new_archive_passphrase(passphrase.as_bytes())?;
     let salt = ramflux_crypto::random_32()?;
     let nonce_seed = ramflux_crypto::random_32()?;
     let nonce = &nonce_seed[..12];

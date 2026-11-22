@@ -71,6 +71,7 @@ impl AccountIndex {
               WHERE local_account_id = ?1",
             params![local_account_id, REMOVED],
         )?;
+        self.erase_device_unlock(local_account_id)?;
         remove_root_payload(&self.root().join("accounts").join(local_account_id))?;
         crate::FileVaultSecretSource::new(self.root()).remove_erased_owner(local_account_id)
     }
