@@ -251,8 +251,15 @@ impl RamfluxClient {
             }
             db.persist_client_record("commitment", expected, &json!({"principal_id":body.principal_id}))?;
             db.persist_client_record("identity", &body.principal_id, &row)?;
-            let sdk = crate::prekey::SdkDeviceManifestResponse::from_native(manifest.clone())?;
-            db.persist_actor_state(&format!("identity/manifest-root/{expected}"), &sdk)?;
+            // Authority-only material (an agent's custodian publication carries no device
+            // entries) proves the head but cannot describe the human's devices, so it must
+            // never replace a stored manifest with an empty one; the first observation of a
+            // root still stores it.
+            let manifest_key = format!("identity/manifest-root/{expected}");
+            if !manifest.devices.is_empty() || !db.actor_state_exists(&manifest_key)? {
+                let sdk = crate::prekey::SdkDeviceManifestResponse::from_native(manifest.clone())?;
+                db.persist_actor_state(&manifest_key, &sdk)?;
+            }
             for device in &manifest.devices {
                 let cert = verified.authorize(&device.device_ref, "message", now)?;
                 let identity = RootQualifiedDeviceRef::from_custody_record(verified, &device.device_ref.device_id)?;

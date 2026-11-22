@@ -481,6 +481,7 @@ impl AccountRuntime {
     async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
         self.maintain_pairing_own_sync().await;
+        self.maintain_agent_record_broadcast();
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
         };

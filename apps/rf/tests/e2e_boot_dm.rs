@@ -6,6 +6,11 @@
 
 #[path = "e2e/mod.rs"]
 mod e2e;
+// The agent lifecycle e2e lives in the shared harness directory and runs in this target, which the
+// cli-e2e job already runs with `--run-ignored ignored-only` (the job lists targets by name).
+#[cfg(unix)]
+#[path = "e2e/agent_lifecycle.rs"]
+mod agent_lifecycle;
 
 use e2e::{
     assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_ack,

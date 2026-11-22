@@ -240,3 +240,54 @@ fn native_safety_uses_stable_anchor_comparison_and_separate_roster_stamp() -> Te
     assert_eq!(revoked.verification_state, "verification_stale");
     Ok(())
 }
+
+#[tokio::test]
+async fn observing_agent_custodian_preserves_human_own_device_manifest() -> TestResult {
+    async {
+        use ramflux_protocol::custody::{CustodyManifest, CustodyManifestDevice, DeviceRef};
+        let root = crate::bus::runtime_tests::root("custodian-manifest");
+        let (clients, _vault) =
+            crate::client::surface::test_support::owned_terminals_with_vault(&root).await?;
+        let agent = clients.first().ok_or("agent terminal")?;
+        let human = clients.get(2).ok_or("human terminal")?;
+        let sibling = clients.get(3).ok_or("human sibling")?;
+        let account = human.born_v3_account.as_ref().ok_or("human account")?;
+        let mut devices = Vec::new();
+        for client in [human, sibling] {
+            let identity = client.owned_device_identity()?;
+            let branch = client.device_branch.as_ref().ok_or("human branch")?;
+            devices.push(CustodyManifestDevice {
+                device_ref: DeviceRef {
+                    account_anchor: identity.root_commitment().into(),
+                    device_id: identity.device_id().into(),
+                    device_epoch: branch.device_epoch,
+                },
+                target_delivery_id: identity.storage_key().into(),
+                prekey_bundle: serde_json::to_value(
+                    client.load_x3dh_private_state(&identity)?.bundle,
+                )?,
+                message_layer: None,
+            });
+        }
+        let manifest = crate::prekey::SdkDeviceManifestResponse::from_native(CustodyManifest {
+            publication: account.publication(),
+            custodian_publication: None,
+            devices,
+        })?;
+        human.persist_observed_identity_directory_now(&manifest)?;
+        assert_eq!(
+            human.local_own_copy_manifest()?.devices.len(),
+            2,
+            "the real human manifest must start with both enrolled terminals",
+        );
+        let agent_manifest = agent.local_own_copy_manifest()?;
+        human.persist_observed_identity_directory_now(&agent_manifest)?;
+        assert_eq!(
+            human.local_own_copy_manifest()?.devices.len(),
+            2,
+            "an agent's authority-only custodian observation must preserve the human's ready own-device manifest",
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await
+}

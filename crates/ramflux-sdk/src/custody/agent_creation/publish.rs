@@ -79,12 +79,7 @@ pub(crate) fn complete_with_receipt(
         return Ok(record);
     }
     AgentPublishing::from_record(store.clone(), record)?.mark_complete()?;
-    let completed = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
-    // Stage E2: the agent record exists once the creation completes (a rebind keeps its record).
-    if !super::rebind_plan::is_rebind(&completed) {
-        crate::agent_record::record_completed(store.agent_record_dir(), &completed)?;
-    }
-    Ok(completed)
+    store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)
 }
 
 impl AgentPublishing {
@@ -185,6 +180,13 @@ impl AgentPublishing {
         if record.state != AgentCreationState::Complete {
             record.state = AgentCreationState::Complete;
             self.store.save(&record)?;
+        }
+        // Stage E2: the agent record exists once the creation completes (a rebind keeps its
+        // record). The account going live completes the request (`complete_publication`), and
+        // the advance step then finds it complete, so the record is written here, where the
+        // state changes, and never only by the later advance. Writing it again is a no-op.
+        if self.plan.purpose != RegisterPurpose::Rebind {
+            crate::agent_record::record_completed(self.store.agent_record_dir(), &record)?;
         }
         // Stage D4: a verified rebind publication binds the agent to the new primary (state B).
         if self.plan.purpose == RegisterPurpose::Rebind {

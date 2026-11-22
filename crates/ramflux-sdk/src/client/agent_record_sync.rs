@@ -184,6 +184,46 @@ impl RamfluxClient {
         )
     }
 
+    /// Sends the records this device wrote (the author is this device) to the other devices of
+    /// the root once per stored change. A new agent's record is written where its creation
+    /// completes, which is the account going live and not an edit, so nothing else would carry it
+    /// to the owner's other devices. Records that arrived from a sibling are not echoed back.
+    /// # Errors
+    /// The store's and the stage's refusals; a root without a sibling sends nothing yet.
+    pub(crate) fn broadcast_own_agent_records(
+        &self,
+        dir: std::path::PathBuf,
+        now: u64,
+    ) -> Result<(), SdkError> {
+        let store = crate::agent_record::AgentRecordStore::at(dir);
+        let own = self.own_device_ref()?;
+        let mut cursor: Option<String> = None;
+        loop {
+            let (records, next) = store.page(cursor.as_deref(), 100)?;
+            for record in records {
+                let ours = record
+                    .identity
+                    .author
+                    .as_ref()
+                    .is_some_and(|author| author.device_id == own.device_id);
+                let key = format!("agent-record/broadcast/{}", record.agent_anchor);
+                let db = self.account_db()?;
+                if !ours || db.load_actor_state::<u64>(&key)? == Some(record.change_seq) {
+                    continue;
+                }
+                if !self.own_sent_has_siblings()? {
+                    return Ok(());
+                }
+                self.stage_agent_metadata(&record, now)?;
+                db.persist_actor_state(&key, &record.change_seq)?;
+            }
+            match next {
+                Some(after) => cursor = Some(after),
+                None => return Ok(()),
+            }
+        }
+    }
+
     /// One page of the agent records of this root (contract 2 `AgentList`).
     /// # Errors
     /// The store's listing and record refusals.

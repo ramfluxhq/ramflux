@@ -17,6 +17,14 @@ pub const AGENT_CATALOG_V1: &str = "agent_catalog_v1";
 pub const AGENT_CRUD_V1: &str = "agent_crud_v1";
 /// `GET /api/agents/main`.
 pub const AGENT_MAIN_READBACK_V1: &str = "agent_main_readback_v1";
+/// `POST /api/sessions` with a caller-chosen `session_key`.
+pub const SESSION_KEY_V1: &str = "session_key_v1";
+/// The rf message route accepts a target together with caller context.
+pub const MESSAGE_TARGET_V1: &str = "message_target_v1";
+/// The rf message route delivers caller context (`deliver`: `turn` or `context`).
+pub const MESSAGE_CONTEXT_DELIVERY_V1: &str = "message_context_delivery_v1";
+/// `GET /api/owner`: one stable install owner id for every paired bearer.
+pub const OWNER_ID_STABLE_V1: &str = "owner_id_stable_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +124,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "67c5274ef9ee0eefa1521e45bdf9100ef8719fba";
+    const SHA: &str = "5d92a43a43a6373b063cd67b26dddbe0662fc2de";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(
