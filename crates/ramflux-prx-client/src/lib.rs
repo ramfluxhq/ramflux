@@ -17,11 +17,13 @@ mod capabilities;
 mod catalog;
 mod client;
 mod error;
+mod history;
 mod job;
 mod message;
 mod name;
 mod owner;
 mod revision;
+mod run;
 mod session;
 mod targeted;
 #[cfg(test)]
@@ -36,17 +38,21 @@ pub use apply::ApplyOutcome;
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, BuildCommit, CAPABILITIES_V1,
-    Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1,
-    SESSION_KEY_V1, require,
+    Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
+    OWNER_ID_STABLE_V1, SESSION_KEY_V1, TARGETED_AGENTS_V1, require,
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;
 pub use error::{ApiCode, NotReadyReason, PrxError};
+pub use history::HistoryRow;
 pub use job::{JobState, JobStatus};
-pub use message::{Chat, ChatKind, ContextRecorded, RfMessage, Sender, Target, TurnAccepted};
+pub use message::{
+    Chat, ChatKind, ContextRecorded, RfMessage, Sender, Target, TurnAccepted, TurnDisposition,
+};
 pub use name::AgentName;
 pub use owner::OwnerId;
 pub use revision::{CatalogRevision, ConfigRevision};
+pub use run::{JobCancel, RunCancel, RunCode, RunState};
 pub use session::SessionCreated;
 pub use targeted::{ReloadReport, ReloadStatus, TargetedAgents};
 pub use transport::{ClientConfig, DEFAULT_MAX_BODY_BYTES, DEFAULT_REQUEST_TIMEOUT};

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant reorder admission: durable W0 first, then RAM refs, one gap timer, coalesced catch-up.
+//! Reorder admission: durable W0 first, then RAM refs, one gap timer, coalesced catch-up.
 use ramflux_storage::ReceiveStageResult;
 use std::collections::{BTreeMap, BTreeSet};
 
