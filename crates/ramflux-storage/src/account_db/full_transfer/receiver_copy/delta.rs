@@ -86,6 +86,7 @@ impl FullReceiverBaseCopy {
             let _ = std::fs::remove_file(&private);
             return Err(error);
         }
+        self.carry_installed_pairing(stage, &private)?;
         let counts = FullScalarInputCounts {
             records: built.rows,
             encoded_bytes: manifest.manifest.total_bytes.0,

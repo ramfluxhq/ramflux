@@ -68,20 +68,43 @@ impl FullTailEndpoint<'_> {
         let export = super::export_tail::is_export_census(
             &self.stage.forward_manifest(&input.hash)?.manifest.census_hash,
         )?;
-        if !export {
-            let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
-            let nonce = adoption.full_generation_nonce.ok_or_else(wrong)?;
-            let source = super::super::mac_subkeys::full::source_key(
-                &self.stage.resume_record()?.grant.source_ref,
-            )?;
-            if self.stage.db.connection.execute("UPDATE pairing_full_tail_apply SET tail_hash=?1 WHERE operation_id=?2 AND generation_nonce=?3 AND stage_digest=?4 AND source_owner=?5 AND tail_status IN('pending','merged') AND (tail_hash IS NULL OR tail_hash=?1)",
-                params![input.hash,self.operation,nonce,input.digest.as_slice(),source])? != 1 {
-                return Err(wrong());
-            }
-        }
+        bind_apply_hash(self, input, export)?;
         super::stage::sync_stage(&self.stage.directory)?;
         self.require_live(now)
     }
+}
+
+fn bind_apply_hash(
+    endpoint: &FullTailEndpoint<'_>,
+    input: &FullValidatedTailInput,
+    export: bool,
+) -> Result<(), StorageError> {
+    if export && !apply_table_present(endpoint)? {
+        return Ok(());
+    }
+    let nonce =
+        match endpoint.stage.db.pairing_adoption()?.and_then(|row| row.full_generation_nonce) {
+            Some(nonce) => nonce,
+            None if export => return Ok(()),
+            None => return Err(wrong()),
+        };
+    let source = super::super::mac_subkeys::full::source_key(
+        &endpoint.stage.resume_record()?.grant.source_ref,
+    )?;
+    let changed = endpoint.stage.db.connection.execute(
+        "UPDATE pairing_full_tail_apply SET tail_hash=?1 WHERE operation_id=?2 AND generation_nonce=?3 AND stage_digest=?4 AND source_owner=?5 AND tail_status IN('pending','merged') AND (tail_hash IS NULL OR tail_hash=?1)",
+        params![input.hash, endpoint.operation, nonce, input.digest.as_slice(), source],
+    )?;
+    let bound = if export { changed <= 1 } else { changed == 1 };
+    if bound { Ok(()) } else { Err(wrong()) }
+}
+
+fn apply_table_present(endpoint: &FullTailEndpoint<'_>) -> Result<bool, StorageError> {
+    Ok(endpoint.stage.db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='pairing_full_tail_apply')",
+        [],
+        |row| row.get(0),
+    )?)
 }
 impl FullTailValidationWork {
     /// Verify the complete signed root, unique ordered keys, closed codecs and exact totals.

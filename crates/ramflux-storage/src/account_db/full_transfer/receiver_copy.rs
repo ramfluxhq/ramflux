@@ -240,6 +240,23 @@ impl FullReceiverBaseCopy {
         }
         self.project_input(stage)
     }
+    fn carry_installed_pairing(
+        &self,
+        stage: &FullTransferStage<'_>,
+        private: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        if let Err(error) =
+            super::export_local::carry_local_pairing(&stage.db.connection, private, &self.key)
+        {
+            let _ = std::fs::remove_file(private);
+            let _ = std::fs::remove_file(private.with_extension("db-journal"));
+            let _ = std::fs::remove_file(private.with_extension("db-wal"));
+            let _ = std::fs::remove_file(private.with_extension("db-shm"));
+            stage.destroy_retained_digests()?;
+            return Err(error);
+        }
+        Ok(())
+    }
     /// Install a framed export: open the received file, keep only the clean copy, and do not
     /// parse family records. A non-fresh account refuses before the file is written.
     /// # Errors
@@ -294,6 +311,7 @@ impl FullReceiverBaseCopy {
             let _ = std::fs::remove_file(&private);
             return Err(error);
         }
+        self.carry_installed_pairing(stage, &private)?;
         let chunks_root = decode_root(&manifest.manifest.chunks_root)?;
         let counts = FullScalarInputCounts {
             records: built.rows,

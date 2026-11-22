@@ -62,7 +62,8 @@ pub(super) fn validate_export_tail(
     })
 }
 
-/// Apply the whole tail in one account transaction, then destroy the keyed set.
+/// Apply the tail on a scratch copy of B's current file, then back that copy up over
+/// the open account. The keyed set is destroyed only after that replace and its sync.
 /// A retry that finds this hash's marker destroys any leftover key and returns success.
 /// # Errors
 /// `RetainedDigestMissing` when the set is gone and this hash was not marked;
@@ -90,22 +91,39 @@ pub(super) fn apply_export_tail(
     let mac_bytes: &[u8; 32] = &mac;
     let tail = digest::rows_with_values(spilled.verified.connection(), mac_bytes)?;
     let retained = load_digests(&endpoint.stage.connection)?;
-    let account_mac = mac.clone();
-    let current = digest_map(endpoint.stage.db.connection.call(move |db| {
-        let mac_bytes: &[u8; 32] = &account_mac;
-        Ok(digest::rows(db, mac_bytes))
-    })??)?;
     let tail_keys = key_set(tail.iter().map(|row| (row.table.to_owned(), row.key.clone())));
     require_section(&deletion, &retained_keys(&retained), &tail_keys)?;
-    let (deletes, inserts) = plan(&tail, &retained, &current, &tail_keys)?;
-    endpoint
-        .stage
-        .db
-        .connection
-        .call_immediate_result(move |tx| commit(tx, &deletes, &inserts))??;
+    let job = CopyJob {
+        directory: endpoint.stage.directory.clone(),
+        key: endpoint.stage.db.current_key.clone(),
+        mac,
+        tail,
+        retained,
+    };
+    endpoint.stage.db.connection.call(move |db| Ok(apply_on_copy(db, &job)))??;
+    let parent = endpoint.stage.db.path.parent().ok_or_else(wrong)?;
+    super::stage::sync_regular(&endpoint.stage.db.path)?;
+    crate::sync_path::sync_path(parent)?;
     endpoint.stage.mark_retained_tail_applied(hash)?;
     endpoint.stage.destroy_retained_digests()?;
     Ok(true)
+}
+
+struct CopyJob {
+    directory: std::path::PathBuf,
+    key: crate::AccountDbKey,
+    mac: zeroize::Zeroizing<[u8; 32]>,
+    tail: Vec<ExportedRow>,
+    retained: Digests,
+}
+
+fn apply_on_copy(live: &mut rusqlite::Connection, job: &CopyJob) -> Result<(), StorageError> {
+    let copies = super::export_tail_swap::stage_copies(live, &job.directory, &job.key)?;
+    let mac_bytes: &[u8; 32] = &job.mac;
+    let current = digest_map(digest::rows(copies.after(), mac_bytes)?)?;
+    let tail_keys = key_set(job.tail.iter().map(|row| (row.table.to_owned(), row.key.clone())));
+    let (deletes, inserts) = plan(&job.tail, &job.retained, &current, &tail_keys)?;
+    copies.commit_and_swap(live, |tx| commit(tx, &deletes, &inserts))
 }
 
 fn spill(
