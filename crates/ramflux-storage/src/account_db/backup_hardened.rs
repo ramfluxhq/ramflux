@@ -5,13 +5,6 @@
 //! The attacker file is read only after `open_verified::harden`. Rows are inserted into a
 //! database this binary migrated. The original path is replaced only after that copy commits.
 use super::transfer_export::open_verified::{self, Budget};
-use crate::schema::{
-    ACCOUNT_SCHEMA_COLUMN_LIMIT, ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT,
-    ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT, ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT,
-    ACCOUNT_SCHEMA_LENGTH_LIMIT, ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT, ACCOUNT_SCHEMA_OBJECT_LIMIT,
-    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_ROW_CELL_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
-    ACCOUNT_SCHEMA_VARIABLE_LIMIT, ACCOUNT_SCHEMA_VDBE_OP_LIMIT,
-};
 use crate::{AccountDbKey, StorageError};
 use rusqlite::Connection;
 use rusqlite::config::DbConfig;
@@ -123,7 +116,7 @@ fn open_source(
 ) -> Result<Source, StorageError> {
     let budget = Budget::new();
     budget.reset(progress_calls(pages), OPEN_DEADLINE);
-    let mut db = open_verified::harden(path, &backup_limits(), &budget)?;
+    let mut db = open_verified::harden(path, &backup_limits()?, &budget)?;
     let phase = Arc::new(AtomicU8::new(open_verified::PHASE_KEY));
     let gate = Arc::clone(&phase);
     let tables = reference.to_vec();
@@ -134,26 +127,15 @@ fn open_source(
     db.execute_batch(&key_pragma(key)).map_err(|error| open_verified::refused_by("key", &error))?;
     phase.store(open_verified::PHASE_SCHEMA, Ordering::SeqCst);
     let objects = schema_objects(&db)?;
+    super::backup_schema_budget::require_known(&objects)?;
     let copy = tables_to_copy(reference, &objects)?;
     phase.store(open_verified::PHASE_QUICK_CHECK, Ordering::SeqCst);
     open_verified::quick_check(&db)?;
     Ok(Source { db, phase, budget, pages, copy })
 }
 
-fn backup_limits() -> open_verified::EngineLimits {
-    open_verified::EngineLimits {
-        length: ACCOUNT_SCHEMA_LENGTH_LIMIT,
-        sql_length: ACCOUNT_SCHEMA_SQL_LIMIT,
-        column: ACCOUNT_SCHEMA_COLUMN_LIMIT,
-        expr_depth: ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
-        compound_select: ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT,
-        vdbe_op: ACCOUNT_SCHEMA_VDBE_OP_LIMIT,
-        function_arg: ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT,
-        like_pattern: ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT,
-        variable_number: ACCOUNT_SCHEMA_VARIABLE_LIMIT,
-        parser_depth: ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT,
-        schema: ACCOUNT_SCHEMA_OBJECT_LIMIT,
-    }
+fn backup_limits() -> Result<open_verified::EngineLimits, StorageError> {
+    Ok(super::backup_schema_budget::budget()?.limits)
 }
 
 fn progress_calls(pages: u64) -> u64 {
@@ -225,7 +207,7 @@ fn copy_tables(source: &Source, dest: &mut Connection) -> Result<(), StorageErro
     source.budget.reset(progress_calls(source.pages), COPY_DEADLINE);
     source
         .db
-        .set_limit(Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_ROW_CELL_LIMIT)
+        .set_limit(Limit::SQLITE_LIMIT_LENGTH, super::backup_schema_budget::budget()?.row_cell)
         .map_err(|error| open_verified::refused_by("harden", &error))?;
     let tx = dest.transaction().map_err(|error| open_verified::refused_by("rows", &error))?;
     for table in &source.copy {

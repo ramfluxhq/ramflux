@@ -6,20 +6,11 @@
 //! NOFOLLOW, URI `immutable=1`; engine pragmas that do no I/O; every `db_config` flag; every
 //! `sqlite3_limit`; the progress handler; the phase authorizer; then `PRAGMA key`. Then the
 //! schema compare (no table is read before it passes), `quick_check`, the root check.
-//! Backup restore uses this same owner (`backup_hardened`), with its own limits and a
-//! row copy into a database this binary migrated. The export open below is unchanged.
+//! Backup restore uses this same owner (`backup_hardened`) and the same catalog budget,
+//! then copies rows into a database this binary migrated.
 use super::builder::{self, Built, Side};
 use super::contract::{SchemaRow, canonical_schema_rows, schema_rows};
 use super::tables::EXPORT_TABLES;
-use crate::schema::{
-    ACCOUNT_SCHEMA_ATTACHED_LIMIT, ACCOUNT_SCHEMA_COLUMN_LIMIT,
-    ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT, ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
-    ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT, ACCOUNT_SCHEMA_LENGTH_LIMIT,
-    ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT, ACCOUNT_SCHEMA_OBJECT_LIMIT,
-    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_ROW_CELL_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
-    ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT, ACCOUNT_SCHEMA_VARIABLE_LIMIT,
-    ACCOUNT_SCHEMA_VDBE_OP_LIMIT, ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT, MAX_DECLARED_TRIGGER_STEPS,
-};
 use crate::{AccountDbKey, StorageError};
 use rusqlite::config::DbConfig;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -38,7 +29,8 @@ pub(crate) const RECEIVED_FILE_CAP: u64 =
 pub(crate) const CIPHER_PAGE_BYTES: u64 = 4096;
 const PROGRESS_PERIOD_OPS: i32 = 1_000;
 
-/// SQLite limits applied by [`harden`]. Transfer and backup share the call; the numbers differ.
+/// SQLite limits applied by [`harden`]. Transfer and backup share one catalog budget.
+#[derive(Clone, Copy)]
 pub(crate) struct EngineLimits {
     pub(crate) length: i32,
     pub(crate) sql_length: i32,
@@ -51,23 +43,10 @@ pub(crate) struct EngineLimits {
     pub(crate) variable_number: i32,
     pub(crate) parser_depth: i32,
     pub(crate) schema: i32,
-}
-
-/// The limits `VerifiedExport::open` already applied, including its schema-object cap.
-pub(crate) fn transfer_limits() -> EngineLimits {
-    EngineLimits {
-        length: ACCOUNT_SCHEMA_LENGTH_LIMIT,
-        sql_length: ACCOUNT_SCHEMA_SQL_LIMIT,
-        column: ACCOUNT_SCHEMA_COLUMN_LIMIT,
-        expr_depth: ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
-        compound_select: ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT,
-        vdbe_op: ACCOUNT_SCHEMA_VDBE_OP_LIMIT,
-        function_arg: ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT,
-        like_pattern: ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT,
-        variable_number: ACCOUNT_SCHEMA_VARIABLE_LIMIT,
-        parser_depth: ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT,
-        schema: ACCOUNT_SCHEMA_OBJECT_LIMIT,
-    }
+    pub(crate) attached: i32,
+    pub(crate) trigger_depth: i32,
+    pub(crate) worker_threads: i32,
+    pub(crate) trigger_steps: i32,
 }
 /// Progress callbacks allowed per page of input, per phase (open checks, then the copy).
 const PROGRESS_CALLS_PER_PAGE: u64 = 64;
@@ -206,14 +185,14 @@ pub(crate) fn harden(
         (Limit::SQLITE_LIMIT_COMPOUND_SELECT, limits.compound_select),
         (Limit::SQLITE_LIMIT_VDBE_OP, limits.vdbe_op),
         (Limit::SQLITE_LIMIT_FUNCTION_ARG, limits.function_arg),
-        (Limit::SQLITE_LIMIT_ATTACHED, ACCOUNT_SCHEMA_ATTACHED_LIMIT),
+        (Limit::SQLITE_LIMIT_ATTACHED, limits.attached),
         (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, limits.like_pattern),
         (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, limits.variable_number),
-        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT),
-        (Limit::SQLITE_LIMIT_WORKER_THREADS, ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT),
+        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, limits.trigger_depth),
+        (Limit::SQLITE_LIMIT_WORKER_THREADS, limits.worker_threads),
         (Limit::SQLITE_LIMIT_PARSER_DEPTH, limits.parser_depth),
         (Limit::SQLITE_LIMIT_SCHEMA, limits.schema),
-        (Limit::SQLITE_LIMIT_TRIGGER_STEPS, MAX_DECLARED_TRIGGER_STEPS),
+        (Limit::SQLITE_LIMIT_TRIGGER_STEPS, limits.trigger_steps),
     ];
     for (limit, value) in applied {
         db.set_limit(limit, value).map_err(|error| refused_by("harden", &error))?;
@@ -277,7 +256,8 @@ impl VerifiedExport {
             PROGRESS_CALLS_BASE.saturating_add(pages.saturating_mul(PROGRESS_CALLS_PER_PAGE)),
             OPEN_DEADLINE,
         );
-        let mut db = harden(path, &transfer_limits(), &budget)?;
+        let catalog = super::super::backup_schema_budget::budget()?;
+        let mut db = harden(path, &catalog.limits, &budget)?;
         let phase = Arc::new(AtomicU8::new(PHASE_KEY));
         let gate = Arc::clone(&phase);
         let tables: Vec<String> =
@@ -298,8 +278,8 @@ impl VerifiedExport {
         }
         phase.store(PHASE_QUICK_CHECK, Ordering::SeqCst);
         quick_check(&db)?;
-        // Schema load measured a 24505-byte statement. A restored cell may be larger.
-        db.set_limit(Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_ROW_CELL_LIMIT)
+        // Schema-load length is the catalog statement size. A copied cell may be larger.
+        db.set_limit(Limit::SQLITE_LIMIT_LENGTH, catalog.row_cell)
             .map_err(|error| refused_by("harden", &error))?;
         phase.store(PHASE_ROWS, Ordering::SeqCst);
         let verified = Self { db, phase, budget, pages };

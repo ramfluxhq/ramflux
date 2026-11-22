@@ -34,6 +34,7 @@ mod backup_object_metadata;
 mod backup_original_header;
 mod backup_reaction;
 mod backup_retirement;
+pub(crate) mod backup_schema_budget;
 mod backup_selector_admission;
 mod backup_self_sync;
 #[cfg(test)]
