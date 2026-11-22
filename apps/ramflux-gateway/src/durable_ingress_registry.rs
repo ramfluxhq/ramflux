@@ -34,10 +34,10 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
     ),
     ("itest_http.rs:dispatch_protected_itest_request", Class::Edge),
     ("quic_dispatch.rs:forward_quic_envelope", Class::Edge),
-    ("session.rs:handle_gateway_submit", Class::Edge),
-    ("session.rs:handle_gateway_own_device_fanout", Class::Edge),
+    ("session/submission.rs:handle_gateway_submit", Class::Edge),
+    ("session/submission.rs:handle_gateway_own_device_fanout", Class::Edge),
     (
-        "session.rs:dispatch_offline_wake",
+        "session/submission.rs:dispatch_offline_wake",
         Class::NonIngress("offline wake via spawn_blocking; no envelope persist"),
     ),
     (
@@ -168,7 +168,7 @@ async fn drive_control_gateway_edge(
     control: &ramflux_node_core::GatewaySubmitFrame,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
-        "session.rs:handle_gateway_submit" => {
+        "session/submission.rs:handle_gateway_submit" => {
             let (_fixture_directory_0, fixture_value_0) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_0;
@@ -178,7 +178,7 @@ async fn drive_control_gateway_edge(
                 Err(error) => assert_eq!(error.to_string(), CONTROL_SUBMIT_ERR, "{entry}"),
             }
         }
-        "session.rs:handle_gateway_own_device_fanout" => {
+        "session/submission.rs:handle_gateway_own_device_fanout" => {
             let (_fixture_directory_1, fixture_value_1) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_1;
@@ -219,7 +219,7 @@ async fn drive_marked_gateway_edge(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (_capture_directory, capture) = capture_path(ordinal);
     match entry {
-        "session.rs:handle_gateway_submit" => {
+        "session/submission.rs:handle_gateway_submit" => {
             let (_fixture_directory_3, fixture_value_3) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_3;
@@ -240,7 +240,7 @@ async fn drive_marked_gateway_edge(
                 "{entry} gateway store changed"
             );
         }
-        "session.rs:handle_gateway_own_device_fanout" => {
+        "session/submission.rs:handle_gateway_own_device_fanout" => {
             let (_fixture_directory_4, fixture_value_4) =
                 crate::session::tests::test_gateway_context()?;
             let context = fixture_value_4;

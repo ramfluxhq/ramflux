@@ -1368,9 +1368,9 @@ fn device_lookup_mesh_response(
 fn handle_mvp1_device_auth_key_fetch(
     path: &str,
     state: &ramflux_node_core::RouterCore,
-) -> anyhow::Result<Option<ramflux_node_core::DeviceAuthKeyResponse>> {
+) -> anyhow::Result<ramflux_node_core::DeviceAuthKeyLookup> {
     let device_id = path.trim_start_matches("/mvp1/device-auth-key/");
-    Ok(state.mvp1_device_auth_key_checked(device_id)?)
+    Ok(state.mvp1_device_auth_key_lookup_checked(device_id)?)
 }
 
 /// Answers up to 256 current-authority lookups; invalid selectors read as absent devices.
