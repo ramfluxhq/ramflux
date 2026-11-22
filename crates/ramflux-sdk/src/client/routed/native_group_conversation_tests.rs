@@ -69,8 +69,12 @@ fn carrier(
             bundle,
         },
     )?;
-    let envelope =
-        crate::dm::gateway_envelope_from_sealed(&owner.config, &mut message, packet, None)?;
+    let envelope = crate::dm::gateway_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&owner.config)?,
+        &mut message,
+        packet,
+        None,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 42,

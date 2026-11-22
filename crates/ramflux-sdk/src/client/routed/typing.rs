@@ -132,7 +132,7 @@ impl RamfluxClient {
         };
         let mut message = message.clone();
         let envelope = crate::dm::gateway_ephemeral_envelope_from_sealed(
-            engine.config(),
+            &engine.sealing_config()?,
             &mut message,
             sealed,
         )?;

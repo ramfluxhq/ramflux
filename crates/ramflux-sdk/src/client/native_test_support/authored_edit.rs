@@ -20,7 +20,11 @@ async fn own_authored_current_edit_for_later_third_sibling_stays_pending_without
     let prepared = source.client.prepare_authored_history(&source.config)?.ok_or("second plan")?;
     let (plan, envelope) = source
         .client
-        .seal_authored_history(&source.config, prepared, source.material_for(&second)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            prepared,
+            source.material_for(&second)?,
+        )?
         .ok_or("second sealed")?;
     second.receive(envelope, 2).await?;
     assert_pending(&second, &owner, &exact)?;
@@ -32,7 +36,11 @@ async fn own_authored_current_edit_for_later_third_sibling_stays_pending_without
     assert_eq!(prepared.target.device_id, third.config.device_id);
     let (_, envelope) = source
         .client
-        .seal_authored_history(&source.config, prepared, source.material_for(&third)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            prepared,
+            source.material_for(&third)?,
+        )?
         .ok_or("third sealed")?;
     third.receive(envelope, 2).await?;
     assert_pending(&third, &owner, &exact)?;
@@ -95,7 +103,11 @@ fn prepare_current_edit(
     let old = source.client.prepare_authored_history(&source.config)?.ok_or("queued original")?;
     let (old, _) = source
         .client
-        .seal_authored_history(&source.config, old, source.material_for(target)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            old,
+            source.material_for(target)?,
+        )?
         .ok_or("cached original")?;
     let exact = encoded_edit(source, &original, &message)?;
     let entry = GatewayInboxEntry {
@@ -123,7 +135,9 @@ fn prepare_current_edit(
         source
             .client
             .seal_authored_history(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config
+                )?,
                 old,
                 crate::client::routed::SendMaterial { manifest: None, bundle: None }
             )?

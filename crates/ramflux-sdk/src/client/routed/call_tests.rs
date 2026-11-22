@@ -133,8 +133,11 @@ fn entry(
     };
     let (mut message, sealed) =
         seal_native_fixture(sender, receiver, message, &exact, Route::control())?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
+        &mut message,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

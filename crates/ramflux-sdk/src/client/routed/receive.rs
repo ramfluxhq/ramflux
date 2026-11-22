@@ -425,7 +425,7 @@ impl RamfluxClient {
         // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply) is P17;
         // the seen early-return stays for those.
         let pair_reply = if background {
-            match self.prepare_received_pair_reply(engine.config(), &opened, &body) {
+            match self.prepare_received_pair_reply(&engine.sealing_config()?, &opened, &body) {
                 Ok(reply) => reply,
                 Err(error) => {
                     tracing::debug!(%error, "encrypted reset acknowledgement awaits a later reset");
