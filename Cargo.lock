@@ -1642,9 +1642,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3468,7 +3468,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ramflux-agent-host"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bytes",
  "clap",
@@ -3496,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-card"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3515,11 +3515,11 @@ dependencies = [
 
 [[package]]
 name = "ramflux-client-model"
-version = "0.2.4"
+version = "0.2.5"
 
 [[package]]
 name = "ramflux-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-crypto"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "aes-gcm 0.11.1",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-federation"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "compio",
  "quinn",
@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-gateway"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "compio",
@@ -3621,7 +3621,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-message-schema"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "pbjson-build",
  "prettyplease",
@@ -3634,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-node-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "arc-swap",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-notify"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-protocol"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "base64",
  "blake3",
@@ -3737,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-prx-client"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ramflux-protocol",
  "reqwest",
@@ -3751,7 +3751,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-relay"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "dhat",
@@ -3775,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-retention"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ramflux-node-core",
  "ramflux-test-support",
@@ -3791,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-rf"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "base64",
  "clap",
@@ -3821,7 +3821,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-router"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "compio",
@@ -3847,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sdk"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-signaling"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "ramflux-node-core",
@@ -3916,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-storage"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "blake3",
  "caseless",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "ramflux-sync"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "chacha20poly1305",
  "ramflux-core",
@@ -3960,14 +3960,14 @@ dependencies = [
 
 [[package]]
 name = "ramflux-test-support"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "ramflux-transport"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "arc-swap",
  "base64",
@@ -5496,9 +5496,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

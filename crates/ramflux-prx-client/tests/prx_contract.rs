@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 296a83367e7aecde824974d16c08db3f508b447a>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at c5aab92e51dfb17e3d47de09396643e466dd719b>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -19,12 +19,13 @@
 )]
 
 use ramflux_prx_client::{
-    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentStatus,
-    ApiCode, ApplyOutcome, Autonomy, BuildCommit, CAPABILITIES_V1, Capabilities, Chat, ChatKind,
-    ClientConfig, ConfigRevision, HistoryRow, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
-    MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, NotReadyReason, OWNER_ID_STABLE_V1,
-    PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, ReloadStatus, RfMessage, RunCode, RunState,
-    SESSION_KEY_V1, Sender, TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
+    AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentRuns,
+    AgentStatus, ApiCode, ApplyOutcome, Autonomy, BatchItem, BuildCommit, CAPABILITIES_V1,
+    Capabilities, Chat, ChatKind, ClientConfig, ConfigRevision, HistoryRow, JobState, JobStatus,
+    MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
+    NotReadyReason, OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind,
+    ReloadStatus, RfMessage, RowBody, RunCode, RunState, SESSION_KEY_V1, Sender,
+    TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
 };
 use serde_json::Value;
 use std::fs::File;
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "296a83367e7aecde824974d16c08db3f508b447a";
+const PIN: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -540,6 +541,20 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
+/// The tokens K-AC2-1 accepts at the pin: the AC-2 cards plus the B1, B2a, B2b and HOST-1a tokens.
+const LANDED_AT_PIN: [&str; 10] = [
+    CAPABILITIES_V1,
+    AGENT_CATALOG_V1,
+    AGENT_CRUD_V1,
+    AGENT_MAIN_READBACK_V1,
+    SESSION_KEY_V1,
+    MESSAGE_TARGET_V1,
+    MESSAGE_CONTEXT_DELIVERY_V1,
+    OWNER_ID_STABLE_V1,
+    MESSAGE_IDEMPOTENCY_V1,
+    MESSAGE_DELETE_V1,
+];
+
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn k_ac2_capabilities_and_catalog() {
@@ -557,20 +572,8 @@ async fn k_ac2_capabilities_and_catalog() {
             caps.has(CAPABILITIES_V1) && caps.has(AGENT_CATALOG_V1),
             "K-AC2-1: documented tokens advertised"
         );
-        // Landed at the pin: the AC-2 cards plus the B1 and HOST-1a tokens (see K-B1-16).
-        let known = [
-            CAPABILITIES_V1,
-            AGENT_CATALOG_V1,
-            AGENT_CRUD_V1,
-            AGENT_MAIN_READBACK_V1,
-            SESSION_KEY_V1,
-            MESSAGE_TARGET_V1,
-            MESSAGE_CONTEXT_DELIVERY_V1,
-            OWNER_ID_STABLE_V1,
-            MESSAGE_IDEMPOTENCY_V1,
-        ];
         assert!(
-            caps.capabilities.iter().all(|t| known.contains(&t.as_str())),
+            caps.capabilities.iter().all(|t| LANDED_AT_PIN.contains(&t.as_str())),
             "K-AC2-1: no token beyond the landed cards: {:?}",
             caps.capabilities
         );
@@ -1394,6 +1397,7 @@ async fn k_b1_sessions_and_message_validation() {
             "agent_main_readback_v1",
             "capabilities_v1",
             "message_context_delivery_v1",
+            "message_delete_v1",
             "message_idempotency_v1",
             "message_target_v1",
             "owner_id_stable_v1",
@@ -1403,9 +1407,7 @@ async fn k_b1_sessions_and_message_validation() {
         .map(|t| (*t).to_owned())
         .collect();
         assert_eq!(caps.capabilities, expected, "K-B1-16: advertised tokens at the pin");
-        for token in ["message_delete_v1", "targeted_agents_v1"] {
-            assert!(!caps.has(token), "K-B1-16: {token} must not be advertised yet");
-        }
+        assert!(!caps.has(TARGETED_AGENTS_V1), "K-B1-16: targeted_agents_v1 is off here");
         assert_eq!(caps.commit, BuildCommit::Sha(PIN.to_owned()), "K-B1-16: commit is the pin");
         report("K-B1-16");
 
@@ -2220,11 +2222,10 @@ async fn k_b3_partitioned_reads_and_capabilities() {
 
         // K-B3-0: the advertised set at the pin with targeting on: the landed B1, B2a and B3
         // tokens; none of the tokens that have not landed.
-        for token in [TARGETED_AGENTS_V1, MESSAGE_IDEMPOTENCY_V1] {
+        for token in [TARGETED_AGENTS_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_DELETE_V1] {
             assert!(caps.has(token), "K-B3-0: {token} is advertised");
         }
         for token in [
-            "message_delete_v1",
             "sync_snapshot_v1",
             "sync_ws_v1",
             "stream_frames_v1",
@@ -2260,8 +2261,9 @@ async fn k_b3_partitioned_reads_and_capabilities() {
             .await
             .expect("test: context for N2");
 
-        let has =
-            |rows: &[HistoryRow], marker: &str| rows.iter().any(|row| row.content.contains(marker));
+        let has = |rows: &[HistoryRow], marker: &str| {
+            rows.iter().any(|row| row.content().is_some_and(|text| text.contains(marker)))
+        };
         let all = client.session_messages(&caps, session, None).await.expect("K-B3-1: read all");
         assert!(all.iter().all(|row| matches!(row.agent, Target::Main | Target::Named(_))));
         assert!(has(&all, n1) && has(&all, n2), "K-B3-1: every partition is readable unfiltered");
@@ -2318,14 +2320,40 @@ async fn k_b3_partitioned_reads_and_capabilities() {
                 None,
             )
             .await;
+        // Changed at 4f1a8bc05 (was the uncoded 404 at 296a83367, D2): a key-shaped id that was
+        // never created is the coded `session_unknown`, for reading and for sending.
         eprintln!("ROW K-B3-7 raw unknown session: {status} {text}");
         assert_eq!(status, 404, "K-B3-7: unknown session is 404");
-        assert!(
-            matches!(
-                client.session_messages(&caps, "rf-no-such-session-0001", None).await,
-                Err(PrxError::Protocol { .. })
-            ),
-            "K-B3-7: the uncoded 404 is a Protocol refusal, not session_unknown"
+        assert_eq!(error_code(&text).as_deref(), Some("session_unknown"), "K-B3-7 raw code");
+        assert_api(
+            "K-B3-7 read",
+            client.session_messages(&caps, "rf-no-such-session-0001", None).await,
+            404,
+            ApiCode::SessionUnknown,
+        );
+        assert_api(
+            "K-B3-7 send turn",
+            client
+                .post_turn(
+                    &caps,
+                    "rf-no-such-session-0001",
+                    &rf_message("rf-b3-unknown-1", Target::Main, "unknown session"),
+                )
+                .await,
+            404,
+            ApiCode::SessionUnknown,
+        );
+        assert_api(
+            "K-B3-7 send context",
+            client
+                .post_context(
+                    &caps,
+                    "rf-no-such-session-0001",
+                    &rf_message("rf-b3-unknown-2", Target::Main, "unknown session"),
+                )
+                .await,
+            404,
+            ApiCode::SessionUnknown,
         );
         report("K-B3-7");
 
@@ -2385,8 +2413,8 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
         let jobs = daemon_job_total(&daemon).await;
         let model_before = stub.count();
 
-        // Open point 2: the daemon answers 500 storage_unavailable, nothing is written, and the
-        // client reports the outcome as unknown (it cannot tell this from a lost answer).
+        // Changed at 4f1a8bc05 (was D1: a context answered 200 and was stored). With user-message
+        // recording off, a turn and a context are both refused 500 storage_unavailable.
         let turn = client
             .post_turn(&caps, RF_SESSION, &rf_message("rf-op2-turn-1", Target::Main, "op2"))
             .await;
@@ -2403,16 +2431,30 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
                 Some(rf_body("turn", Some("rf-op2-turn-2"))),
             )
             .await;
-        eprintln!("ROW K-OP2-1 raw answer: {raw_status} {raw_text}");
+        eprintln!("ROW K-OP2-1 raw turn answer: {raw_status} {raw_text}");
+        assert_eq!(raw_status, 500, "K-OP2-1 raw status");
         assert_eq!(error_code(&raw_text).as_deref(), Some("storage_unavailable"), "K-OP2-1 raw");
+        report("K-OP2-1");
+
         let context = client
             .post_context(&caps, RF_SESSION, &rf_message("rf-op2-ctx-1", Target::Main, "op2"))
             .await;
         eprintln!("ROW K-OP2-2 context with user messages not recorded: {context:?}");
-        // Finding: the documented 500 does not come for a context at this pin; PRX answers
-        // 200 recorded. Recorded as observed; whether the row is durable is checked below.
-        let context = context.expect("K-OP2-2: context answers 200 at this pin");
-        assert!(!context.replayed, "K-OP2-2: first answer");
+        assert!(
+            matches!(context, Err(PrxError::OutcomeUnknown { http_status: Some(500) })),
+            "K-OP2-2: a context is refused 500 storage_unavailable, got {context:?}"
+        );
+        let (raw_status, raw_text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(rf_body("context", Some("rf-op2-ctx-2"))),
+            )
+            .await;
+        eprintln!("ROW K-OP2-2 raw context answer: {raw_status} {raw_text}");
+        assert_eq!(raw_status, 500, "K-OP2-2 raw status");
+        assert_eq!(error_code(&raw_text).as_deref(), Some("storage_unavailable"), "K-OP2-2 raw");
         let (_, history) = daemon
             .raw_authorized(
                 reqwest::Method::GET,
@@ -2422,16 +2464,9 @@ async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
             )
             .await;
         let rows: Vec<Value> = serde_json::from_str(&history).expect("test: history is JSON");
-        let stored = rows
-            .iter()
-            .filter(|row| {
-                row.get("content").and_then(Value::as_str).is_some_and(|c| c.contains("op2"))
-            })
-            .count();
-        eprintln!("ROW K-OP2-2 rows holding the context text with recording off: {stored}");
+        assert!(rows.is_empty(), "K-OP2-2: nothing is stored, got {} row(s)", rows.len());
         assert_eq!(daemon_job_total(&daemon).await, jobs, "K-OP2: no job admitted");
         assert_eq!(stub.count(), model_before, "K-OP2: no model request");
-        report("K-OP2-1");
         report("K-OP2-2");
         daemon.stop();
     })
@@ -2560,15 +2595,28 @@ async fn k_b2a_failed_turn_replay_is_failed() {
     .await;
 }
 
-/// PIN-296A-STATE (documents a requirement; at this pin it asserts what the daemon does). A state
-/// dir under a group-writable ancestor: PRX refuses its recovery key ("unsafe recovery ancestor"),
-/// admission lets the turn in, and the terminal write then fails, so the job ends `failed` with
-/// "terminal cleanup persistence failed". The next PRX repin is expected to flip this to a coded
-/// refusal up front (`storage_unavailable`, reason `recovery_unavailable`): when it does, this row
-/// must change to assert the refusal.
+/// Live assistant rows of the rf session (the stub's reply text is "stub reply").
+async fn assistant_replies(client: &PrxClient, caps: &Capabilities) -> usize {
+    client
+        .session_messages(caps, RF_SESSION, None)
+        .await
+        .expect("test: history reads")
+        .iter()
+        .filter(|row| {
+            matches!(&row.body, RowBody::Text { role, content }
+                if role == "assistant" && content.contains("stub reply"))
+        })
+        .count()
+}
+
+/// REC-ANCESTOR-1 (replaces PIN-296A-STATE, which asserted the 296a83367 behaviour). A state dir
+/// under a group-writable ancestor. At 4f1a8bc05 PRX refuses the recovery key: a new turn answers
+/// `500 storage_unavailable` with `reason: recovery_unavailable` and writes nothing, and a context
+/// still answers `200` with its replay. At 296a83367 the same setup was admitted and the job
+/// Succeeded (observed then, see the report).
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
-async fn pin_296a_state_group_writable_ancestor_turn_admitted_terminal_fails() {
+async fn rec_ancestor_group_writable_refuses_turns_context_still_answers() {
     bounded(async {
         use std::os::unix::fs::PermissionsExt;
         let base = state_base().join("gw-probe");
@@ -2578,40 +2626,311 @@ async fn pin_296a_state_group_writable_ancestor_turn_admitted_terminal_fails() {
         let stub = ModelStub::start_completing(Duration::ZERO).await;
         let mut daemon =
             Daemon::prepare_unchecked_in(&base, &stub.provider(), "targeted_agents = true\n");
+        // prepare_in sets the base to 0700 ("private by construction"), which made the earlier
+        // version of this row a private ancestor, not a group-writable one. Set 0775 again.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o775))
+            .expect("test: chmod probe base after the harness set it private");
+        let mode = std::fs::metadata(&base).expect("test: stat probe base").permissions().mode();
+        assert_eq!(mode & 0o777, 0o775, "REC-ANCESTOR-1: the probe base is group-writable");
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
         let client = daemon.client();
         let caps = capabilities(&client).await;
         client.create_session(&caps, RF_SESSION).await.expect("test: session");
-        put_agent(&client, &caps, "gw1", &stub.provider(), true).await;
-        let gw1 = Target::Named(AgentName::parse("gw1").expect("test: name"));
+        let jobs = daemon_job_total(&daemon).await;
+
+        // REC-ANCESTOR-1: <state>/gw-probe (0775) is on the physical path to <cfg>/workspace/memory.
+        // PRX refuses the recovery key: a turn is 500 storage_unavailable with reason
+        // recovery_unavailable, no job starts and no model request is made.
         let turn = client
-            .post_turn(&caps, RF_SESSION, &rf_message("rf-gw-turn-0001", gw1, "probe"))
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-gw-turn-0001", Target::Main, "probe"))
+            .await;
+        eprintln!("ROW REC-ANCESTOR-1 turn: {turn:?}");
+        assert!(
+            matches!(turn, Err(PrxError::OutcomeUnknown { http_status: Some(500) })),
+            "REC-ANCESTOR-1: refused 500, got {turn:?}"
+        );
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(rf_body("turn", Some("rf-gw-turn-0002"))),
+            )
+            .await;
+        eprintln!("ROW REC-ANCESTOR-1 raw: {status} {text}");
+        assert_eq!(status, 500, "REC-ANCESTOR-1 raw status");
+        assert_eq!(error_code(&text).as_deref(), Some("storage_unavailable"), "REC-ANCESTOR-1");
+        assert_eq!(error_reason(&text).as_deref(), Some("recovery_unavailable"), "REC-ANCESTOR-1");
+        assert_eq!(daemon_job_total(&daemon).await, jobs, "REC-ANCESTOR-1: no job");
+        assert_eq!(stub.count(), 0, "REC-ANCESTOR-1: no model request");
+        report("REC-ANCESTOR-1");
+
+        // REC-ANCESTOR-2: a context answers 200 and its replay is replayed:true with the same id.
+        let context = client
+            .post_context(&caps, RF_SESSION, &rf_message("rf-gw-ctx-0001", Target::Main, "rec ctx"))
             .await
-            .expect("PIN-296A-STATE: admission lets the turn in");
-        assert_eq!(turn.disposition, TurnDisposition::Admitted, "PIN-296A-STATE: admitted");
-        let job = wait_job_terminal(&client, &caps, &turn.job_id).await;
-        let error = job.error.clone().unwrap_or_default();
-        // Observed at this pin (2026-11-22, QA): the job SUCCEEDS with a group-writable ancestor,
-        // and the daemon logs the recovery refusal. PRX's description said the terminal write
-        // fails. The row asserts the observation and prints the daemon's recovery lines.
-        eprintln!(
-            "ROW PIN-296A-STATE observed job {:?} error {:?}; daemon: {:?}",
-            job.status,
-            job.error,
-            daemon.error_lines()
+            .expect("REC-ANCESTOR-2: context answers");
+        assert!(!context.replayed, "REC-ANCESTOR-2: first answer");
+        let replay = client
+            .post_context(&caps, RF_SESSION, &rf_message("rf-gw-ctx-0001", Target::Main, "rec ctx"))
+            .await
+            .expect("REC-ANCESTOR-2: replay answers");
+        assert!(
+            replay.replayed && replay.message_id == context.message_id,
+            "REC-ANCESTOR-2: replay of the context: {replay:?}"
         );
-        assert_eq!(
-            job.status,
-            JobState::Succeeded,
-            "PIN-296A-STATE: observed Succeeded (PRX described failed); error {error:?}; daemon: {:?}",
-            daemon.error_lines()
-        );
-        report("PIN-296A-STATE (group-writable ancestor: admitted; observed terminal Succeeded)");
+        report("REC-ANCESTOR-2");
         daemon.stop();
         drop(daemon);
         let _ = std::fs::remove_dir_all(&base);
+    })
+    .await;
+}
+
+/// REC-CFG-1 (item 5 of the repin card): the group-writable directory is `<cfg>/workspace`, which
+/// is on the physical path to `<cfg>/workspace/memory`. Set after the state is built, with
+/// PRX's order intact, so only that directory is group-writable.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn rec_cfg_workspace_group_writable_refuses_turns() {
+    bounded(async {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon = Daemon::prepare_unchecked_in(&state_base(), &stub.provider(), "");
+        // The harness does not create <cfg>/workspace (the daemon does); create it first.
+        let workspace = daemon.dir.path().join("cfg/workspace");
+        std::fs::create_dir_all(&workspace).expect("test: create cfg/workspace");
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o775))
+            .expect("test: chmod cfg/workspace");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(rf_body("turn", Some("rf-cfg-turn-0001"))),
+            )
+            .await;
+        eprintln!("ROW REC-CFG-1 raw turn: {status} {text}; daemon: {:?}", daemon.error_lines());
+        assert_eq!(status, 500, "REC-CFG-1 raw status");
+        assert_eq!(error_code(&text).as_deref(), Some("storage_unavailable"), "REC-CFG-1 code");
+        assert_eq!(error_reason(&text).as_deref(), Some("recovery_unavailable"), "REC-CFG-1");
+        assert_eq!(stub.count(), 0, "REC-CFG-1: no model request");
+        report("REC-CFG-1");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-DEL-6..10: the reply of one run, an unknown run, a batch, an empty batch and a context
+/// delete, on the rf session. Split out of the K-DEL row to keep it within the lint limit.
+async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
+    // K-DEL-6: the reply of one run goes; its input stays; a repeat answers the same.
+    let two = client
+        .post_turn(caps, RF_SESSION, &rf_message("rf-del-2", Target::Main, "del marker two"))
+        .await
+        .expect("test: turn two admitted");
+    let two_job = wait_job_terminal(client, caps, &two.job_id).await;
+    assert_eq!(two_job.status, JobState::Succeeded, "K-DEL-6 precondition: {:?}", two_job.error);
+    assert!(assistant_replies(client, caps).await >= 1, "K-DEL-6 precondition: a reply");
+    let reply = client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6");
+    assert_eq!(reply.run_id, two.run_id, "K-DEL-6: names the run");
+    client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6: repeat");
+    assert_eq!(assistant_replies(client, caps).await, 0, "K-DEL-6: no reply left");
+    let rows = client.session_messages(caps, RF_SESSION, None).await.expect("K-DEL-6 read");
+    assert!(
+        rows.iter().any(|row| row.content().is_some_and(|text| text.contains("del marker two"))),
+        "K-DEL-6: the input stays"
+    );
+    report("K-DEL-6");
+
+    // K-DEL-7: an unknown run is 404 run_unknown.
+    assert_api(
+        "K-DEL-7",
+        client.delete_reply(caps, RF_SESSION, "0f3c2a1e-0000-4000-8000-0000000000ff").await,
+        404,
+        ApiCode::RunUnknown,
+    );
+    report("K-DEL-7");
+
+    // K-DEL-8: a batch with one live and one unknown id answers in request order.
+    let items = client
+        .delete_messages(
+            caps,
+            RF_SESSION,
+            &["rf-del-2".to_owned(), "rf-del-none-2".to_owned()],
+            None,
+        )
+        .await
+        .expect("K-DEL-8");
+    match items.as_slice() {
+        [BatchItem::Deleted(first), BatchItem::Refused { message_id, code }] => {
+            assert_eq!(first.message_id, "rf-del-2", "K-DEL-8: first id");
+            assert_eq!(message_id, "rf-del-none-2", "K-DEL-8: second id");
+            assert_eq!(*code, ApiCode::MessageUnknown, "K-DEL-8: code");
+        }
+        other => panic!("K-DEL-8: unexpected batch answer {other:?}"),
+    }
+    report("K-DEL-8");
+
+    // K-DEL-9: an empty batch is refused 400 field_invalid.
+    assert_api(
+        "K-DEL-9",
+        client.delete_messages(caps, RF_SESSION, &[], None).await,
+        400,
+        ApiCode::FieldInvalid,
+    );
+    report("K-DEL-9");
+
+    // K-DEL-10: a context message deletes with no runs.
+    client
+        .post_context(caps, RF_SESSION, &rf_message("rf-del-ctx-1", Target::Main, "del ctx"))
+        .await
+        .expect("test: context recorded");
+    let ctx =
+        client.delete_message(caps, RF_SESSION, "rf-del-ctx-1", None).await.expect("K-DEL-10");
+    assert_eq!(ctx.agents, vec![AgentRuns { agent: Target::Main, runs: Vec::new() }]);
+    report("K-DEL-10");
+}
+
+/// K-DEL: message deletes at 4f1a8bc05 (`message_delete_v1`): a message, its replay, a repeat,
+/// the reply of one run, a batch, a context, and the job result of a deleted run.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_del_message_reply_and_batch_deletes() {
+    bounded(async {
+        const DEL_TEXT: &str = "del marker one";
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        assert!(caps.has(MESSAGE_DELETE_V1), "K-DEL-0: message_delete_v1 is advertised");
+        report("K-DEL-0");
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+
+        let one = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-del-1", Target::Main, DEL_TEXT))
+            .await
+            .expect("test: turn one admitted");
+        let one_job = wait_job_terminal(&client, &caps, &one.job_id).await;
+        assert_eq!(one_job.status, JobState::Succeeded, "K-DEL precondition: {:?}", one_job.error);
+
+        // K-DEL-1: the answer names Main and the run whose rows were deleted.
+        let deleted = client
+            .delete_message(&caps, RF_SESSION, "rf-del-1", None)
+            .await
+            .expect("K-DEL-1: delete answers");
+        assert_eq!(
+            deleted.agents,
+            vec![AgentRuns { agent: Target::Main, runs: vec![one.run_id.clone()] }],
+            "K-DEL-1: agents"
+        );
+        eprintln!("ROW K-DEL-1 answer: {deleted:?}");
+        report("K-DEL-1");
+
+        // K-DEL-2: the row is a tombstone, the text is gone, and the raw shape is the four keys.
+        let rows = client.session_messages(&caps, RF_SESSION, None).await.expect("K-DEL-2");
+        assert!(rows.iter().any(|row| row.body == RowBody::Deleted), "K-DEL-2: a tombstone");
+        assert!(
+            !rows.iter().any(|row| row.content().is_some_and(|text| text.contains(DEL_TEXT))),
+            "K-DEL-2: the deleted text is not read back"
+        );
+        let (_, raw) = daemon
+            .raw_authorized(
+                reqwest::Method::GET,
+                &format!("/api/sessions/{RF_SESSION}/messages"),
+                None,
+                None,
+            )
+            .await;
+        let raw_rows: Vec<Value> = serde_json::from_str(&raw).expect("test: history JSON");
+        assert!(
+            raw_rows.iter().any(|row| {
+                row.get("deleted") == Some(&Value::Bool(true))
+                    && row.as_object().is_some_and(|object| object.len() == 4)
+            }),
+            "K-DEL-2 raw: tombstone is exactly message_id, agent, deleted, timestamp: {raw}"
+        );
+        report("K-DEL-2");
+
+        // K-DEL-3: a repeat answers the same 200.
+        let again = client
+            .delete_message(&caps, RF_SESSION, "rf-del-1", None)
+            .await
+            .expect("K-DEL-3: repeat answers");
+        assert_eq!(again, deleted, "K-DEL-3");
+        report("K-DEL-3");
+
+        // K-DEL-4: a resend of the deleted key is 409 message_deleted; nothing runs.
+        let jobs = daemon_job_total(&daemon).await;
+        let model = stub.count();
+        let resend = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-del-1", Target::Main, DEL_TEXT))
+            .await;
+        assert_api("K-DEL-4", resend, 409, ApiCode::MessageDeleted);
+        assert_eq!(daemon_job_total(&daemon).await, jobs, "K-DEL-4: no job");
+        assert_eq!(stub.count(), model, "K-DEL-4: no model request");
+        report("K-DEL-4");
+
+        // K-DEL-5: an id with no record in this session is 404 message_unknown.
+        assert_api(
+            "K-DEL-5",
+            client.delete_message(&caps, RF_SESSION, "rf-del-none-1", None).await,
+            404,
+            ApiCode::MessageUnknown,
+        );
+        report("K-DEL-5");
+
+        del_reply_and_batches(&client, &caps).await;
+
+        // K-DEL-11: the job of a deleted run reads result {"deleted":true}.
+        let job = client.job_status(&caps, &one.job_id).await.expect("K-DEL-11: job reads");
+        assert_eq!(job.result, Some(serde_json::json!({ "deleted": true })), "K-DEL-11");
+        report("K-DEL-11");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-DEL-12: the reply of a running run is `409 run_active` until it is cancelled.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_del_running_reply_is_run_active() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::from_secs(20)).await;
+        let mut daemon = Daemon::prepare_with_provider(&stub.provider(), "");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-del-run-1", Target::Main, "held"))
+            .await
+            .expect("test: turn admitted");
+        wait_model_requests(&daemon, &stub, 1).await;
+        assert_api(
+            "K-DEL-12",
+            client.delete_reply(&caps, RF_SESSION, &turn.run_id).await,
+            409,
+            ApiCode::RunActive,
+        );
+        report("K-DEL-12");
+        client.cancel_run(&caps, RF_SESSION, &turn.run_id).await.expect("test: cancel");
+        wait_job_terminal(&client, &caps, &turn.job_id).await;
+        daemon.stop();
     })
     .await;
 }

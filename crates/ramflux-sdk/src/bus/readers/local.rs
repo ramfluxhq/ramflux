@@ -258,8 +258,10 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
             receive.ack_intents_pending = counters.ack_intents_pending;
             receive.held_entries = counters.held_entries;
         }
-        if view.native.is_none() {
+        if status["networking"] != json!(snapshot.state) {
             status["networking"] = json!(snapshot.state);
+            status["networking_reason"] = json!(snapshot.cause);
+            status.as_object_mut().ok_or(SdkError::CustodySetupInvalid)?.remove("networking_hint");
         }
         status["session_delivery_mode"] = json!(connection.session_mode().receive_label());
         status["networking_snapshot"] = json!(snapshot);
