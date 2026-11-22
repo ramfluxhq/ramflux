@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Agent routes (`agent_crud_v1`) and Main readback (`agent_main_readback_v1`).
-//! Every call checks its token first; `PUT` and `DELETE` send `If-Match` with the config
-//! revision, and the request body never carries a `limits` field.
+//! Every call checks its token first. `PUT` and `DELETE` send `If-Match` with the config
+//! revision. `limits` is sent only when a bound is set and `agent_limits_v1` is advertised.
 
 use crate::autonomy::Autonomy;
-use crate::capabilities::{AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, Capabilities, require};
+use crate::capabilities::{
+    AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1, Capabilities, require,
+};
 use crate::client::PrxClient;
 use crate::error::{ApiCode, PrxError, decode_ok, local_refusal, present, protocol};
 use crate::name::AgentName;
@@ -58,6 +60,28 @@ impl Tools {
     }
 }
 
+/// Admission limits for a named agent's rf turns (`agent_limits_v1`).
+///
+/// Each field unset means that limit is off. A set `max_concurrent_turns` is `1..=1024`.
+/// A set `max_cost_per_day_cents` is `1..=1_000_000_000`. Both unset is the same as omitting
+/// `AgentConfig::limits`: nothing is sent.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentLimits {
+    pub max_concurrent_turns: Option<u32>,
+    pub max_cost_per_day_cents: Option<u64>,
+}
+
+impl AgentLimits {
+    fn is_unset(&self) -> bool {
+        self.max_concurrent_turns.is_none() && self.max_cost_per_day_cents.is_none()
+    }
+
+    fn bounds_ok(&self) -> bool {
+        self.max_concurrent_turns.is_none_or(|value| (1..=1024).contains(&value))
+            && self.max_cost_per_day_cents.is_none_or(|value| (1..=1_000_000_000).contains(&value))
+    }
+}
+
 /// The config an agent is written with (`PUT`) and read back with (`GET`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -68,6 +92,8 @@ pub struct AgentConfig {
     pub autonomy: Autonomy,
     pub tools: Tools,
     pub enabled: bool,
+    /// `None`, or both inner fields unset, means PRX's default (no admission limits).
+    pub limits: Option<AgentLimits>,
 }
 
 impl AgentConfig {
@@ -75,10 +101,19 @@ impl AgentConfig {
         if self.prompt.as_ref().is_some_and(|p| p.len() > PROMPT_MAX_BYTES) {
             return Err(local_refusal(ApiCode::FieldInvalid));
         }
+        if self.limits.as_ref().is_some_and(|limits| !limits.bounds_ok()) {
+            return Err(local_refusal(ApiCode::FieldInvalid));
+        }
         self.tools.check_local()
     }
 
-    /// The `PUT` body: a full replacement, `prompt` only when present.
+    /// A bound that must be sent. Both-unset limits are omitted.
+    fn limits_to_send(&self) -> Option<&AgentLimits> {
+        self.limits.as_ref().filter(|limits| !limits.is_unset())
+    }
+
+    /// The `PUT` body: a full replacement, `prompt` only when present, `limits` only when a bound
+    /// is set. An unset inner field is JSON null, which is what PRX stores.
     fn to_body(&self) -> Value {
         let mut body = Map::new();
         body.insert("provider".to_owned(), json!(self.provider));
@@ -88,6 +123,15 @@ impl AgentConfig {
         body.insert("enabled".to_owned(), json!(self.enabled));
         if let Some(prompt) = &self.prompt {
             body.insert("prompt".to_owned(), json!(prompt));
+        }
+        if let Some(limits) = self.limits_to_send() {
+            body.insert(
+                "limits".to_owned(),
+                json!({
+                    "max_concurrent_turns": limits.max_concurrent_turns,
+                    "max_cost_per_day_cents": limits.max_cost_per_day_cents,
+                }),
+            );
         }
         Value::Object(body)
     }
@@ -111,6 +155,36 @@ struct WireConfig {
     autonomy: Autonomy,
     tools: Vec<String>,
     enabled: bool,
+    /// Absent on older readbacks. An explicit JSON null fails closed. Inner nulls are unset.
+    #[serde(default, deserialize_with = "present")]
+    limits: Option<WireLimits>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLimits {
+    #[serde(default)]
+    max_concurrent_turns: Option<u32>,
+    #[serde(default)]
+    max_cost_per_day_cents: Option<u64>,
+}
+
+fn limits_from_wire(wire: Option<WireLimits>) -> Result<Option<AgentLimits>, PrxError> {
+    let Some(wire) = wire else {
+        return Ok(None);
+    };
+    let limits = AgentLimits {
+        max_concurrent_turns: wire.max_concurrent_turns,
+        max_cost_per_day_cents: wire.max_cost_per_day_cents,
+    };
+    if limits.is_unset() {
+        return Ok(None);
+    }
+    if limits.bounds_ok() {
+        Ok(Some(limits))
+    } else {
+        Err(protocol("limits are outside the documented range"))
+    }
 }
 
 impl WireConfig {
@@ -122,6 +196,7 @@ impl WireConfig {
             autonomy: self.autonomy,
             tools: Tools::from_wire(self.tools)?,
             enabled: self.enabled,
+            limits: limits_from_wire(self.limits)?,
         })
     }
 }
@@ -169,7 +244,7 @@ impl WireReadback {
     }
 }
 
-fn check_uuid(raw: &str) -> Result<(), PrxError> {
+pub(crate) fn check_uuid(raw: &str) -> Result<(), PrxError> {
     let shaped = raw.len() == 36
         && raw.bytes().enumerate().all(|(i, b)| match i {
             8 | 13 | 18 | 23 => b == b'-',
@@ -343,6 +418,9 @@ impl PrxClient {
     ) -> Result<PutOutcome, PrxError> {
         require(caps, AGENT_CRUD_V1)?;
         config.check_local()?;
+        if config.limits_to_send().is_some() {
+            require(caps, AGENT_LIMITS_V1)?;
+        }
         let mut path = format!("/api/agents/{}", name.as_str());
         if confirm_high_risk {
             path.push_str("?confirm_high_risk=true");
@@ -536,11 +614,27 @@ mod tests {
             autonomy: Autonomy::Full,
             tools: Tools::All,
             enabled: true,
+            limits: None,
         };
         let body = config.to_body();
         assert!(body.get("prompt").is_none(), "absent prompt is not sent");
         assert_eq!(body.get("tools"), Some(&json!(["*"])));
-        assert!(body.get("limits").is_none(), "limits is never sent");
+        assert!(body.get("limits").is_none(), "unset limits are not sent");
+        let bounded = AgentConfig {
+            limits: Some(AgentLimits {
+                max_concurrent_turns: Some(1),
+                max_cost_per_day_cents: None,
+            }),
+            ..config.clone()
+        };
+        let sent = bounded.to_body();
+        assert_eq!(
+            sent.get("limits"),
+            Some(&json!({"max_concurrent_turns": 1, "max_cost_per_day_cents": null})),
+            "a set bound sends both fields"
+        );
+        let both_unset = AgentConfig { limits: Some(AgentLimits::default()), ..config.clone() };
+        assert!(both_unset.to_body().get("limits").is_none(), "both-unset limits are omitted");
         let empty =
             AgentConfig { prompt: Some(String::new()), tools: Tools::List(Vec::new()), ..config };
         assert_eq!(
@@ -549,6 +643,43 @@ mod tests {
             "empty prompt is sent as empty"
         );
         assert_eq!(empty.to_body().get("tools"), Some(&json!([])));
+    }
+
+    #[test]
+    fn limits_nulls_decode_as_unset_and_a_bound_round_trips() {
+        let unset = readback(
+            r#"{"provider":"ollama","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":{"max_concurrent_turns":null,"max_cost_per_day_cents":null}}"#,
+            "active",
+        );
+        let parsed = AgentReadback::from_body(unset.as_bytes(), &name())
+            .expect("test: both-null limits decode");
+        assert_eq!(parsed.config.limits, None, "both nulls are unset");
+        let set = readback(
+            r#"{"provider":"ollama","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":{"max_concurrent_turns":1,"max_cost_per_day_cents":null}}"#,
+            "active",
+        );
+        let parsed =
+            AgentReadback::from_body(set.as_bytes(), &name()).expect("test: a set bound decodes");
+        assert_eq!(
+            parsed.config.limits,
+            Some(AgentLimits { max_concurrent_turns: Some(1), max_cost_per_day_cents: None })
+        );
+        let null_object = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":null}"#,
+            "active",
+        );
+        assert!(matches!(
+            AgentReadback::from_body(null_object.as_bytes(), &name()),
+            Err(PrxError::Protocol { .. })
+        ));
+        let out_of_range = readback(
+            r#"{"provider":"p","model":"m","autonomy":"full","tools":["*"],"enabled":true,"limits":{"max_concurrent_turns":0,"max_cost_per_day_cents":null}}"#,
+            "active",
+        );
+        assert!(matches!(
+            AgentReadback::from_body(out_of_range.as_bytes(), &name()),
+            Err(PrxError::Protocol { .. })
+        ));
     }
 
     #[tokio::test]
@@ -563,6 +694,7 @@ mod tests {
             autonomy: Autonomy::Full,
             tools: Tools::All,
             enabled: true,
+            limits: None,
         };
         let oversized =
             AgentConfig { prompt: Some("x".repeat(PROMPT_MAX_BYTES + 1)), ..base.clone() };
@@ -574,10 +706,36 @@ mod tests {
             tools: Tools::List(vec!["*".to_owned(), "read_file".to_owned()]),
             ..base.clone()
         };
+        let turns_zero = AgentConfig {
+            limits: Some(AgentLimits { max_concurrent_turns: Some(0), ..AgentLimits::default() }),
+            ..base.clone()
+        };
+        let turns_high = AgentConfig {
+            limits: Some(AgentLimits {
+                max_concurrent_turns: Some(1025),
+                ..AgentLimits::default()
+            }),
+            ..base.clone()
+        };
+        let cost_zero = AgentConfig {
+            limits: Some(AgentLimits { max_cost_per_day_cents: Some(0), ..AgentLimits::default() }),
+            ..base.clone()
+        };
+        let cost_high = AgentConfig {
+            limits: Some(AgentLimits {
+                max_cost_per_day_cents: Some(1_000_000_001),
+                ..AgentLimits::default()
+            }),
+            ..base.clone()
+        };
         let cases = [
             (oversized, ApiCode::FieldInvalid),
             (duplicate, ApiCode::AgentToolsInvalid),
             (wildcard_beside_name, ApiCode::AgentToolsInvalid),
+            (turns_zero, ApiCode::FieldInvalid),
+            (turns_high, ApiCode::FieldInvalid),
+            (cost_zero, ApiCode::FieldInvalid),
+            (cost_high, ApiCode::FieldInvalid),
         ];
         for (config, expected) in cases {
             let result = client.put(&caps, &name(), &config, &revision, false).await;
@@ -586,6 +744,15 @@ mod tests {
                 "local refusal must return {expected:?} without a request, got {result:?}"
             );
         }
+        let limited = AgentConfig {
+            limits: Some(AgentLimits { max_concurrent_turns: Some(1), ..AgentLimits::default() }),
+            ..base
+        };
+        let refused = client.put(&caps, &name(), &limited, &revision, false).await;
+        assert!(
+            matches!(&refused, Err(PrxError::Unsupported { token, .. }) if token == AGENT_LIMITS_V1),
+            "a bound without agent_limits_v1 sends nothing, got {refused:?}"
+        );
     }
 
     #[tokio::test]

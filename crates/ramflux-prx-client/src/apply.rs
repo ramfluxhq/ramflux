@@ -165,6 +165,7 @@ mod tests {
             autonomy: Autonomy::Full,
             tools: Tools::All,
             enabled: true,
+            limits: None,
         }
     }
 

@@ -36,6 +36,16 @@ pub const MESSAGE_DELETE_V1: &str = "message_delete_v1";
 /// The three delete routes accept `"forget_writes": true` and also forget the memories and
 /// documents the deleted runs wrote. Sending the field without this token is refused.
 pub const MESSAGE_FORGET_WRITES_V1: &str = "message_forget_writes_v1";
+/// `limits` on an agent `PUT`: `max_concurrent_turns` and `max_cost_per_day_cents`.
+pub const AGENT_LIMITS_V1: &str = "agent_limits_v1";
+/// `DELETE /api/sessions/{id}/agents/{name}/history`, including `main`.
+pub const HISTORY_ERASE_V1: &str = "history_erase_v1";
+/// `POST /api/agents/{name}/purge` after the agent has been retired.
+pub const AGENT_MEMORY_PURGE_V1: &str = "agent_memory_purge_v1";
+/// `GET /api/sync/snapshot`. Advertised when the daemon's store publishes the journal.
+pub const SYNC_SNAPSHOT_V1: &str = "sync_snapshot_v1";
+/// `GET /api/sync/ws`. Advertised together with `sync_snapshot_v1`.
+pub const SYNC_WS_V1: &str = "sync_ws_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +145,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15";
+    const SHA: &str = "f6ff62bff51877992c99afca3439b3fdee10a260";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(
