@@ -14,6 +14,12 @@ struct AccountMigration {
     sql: &'static str,
 }
 
+/// Most SQL statements in one trigger this catalog installs (`object_erase_message`).
+/// SQLite counts each statement in the trigger body and refuses the trigger when
+/// that count is greater than `SQLITE_LIMIT_TRIGGER_STEPS`. A hardened open uses
+/// this value, so a foreign trigger with more statements still fails schema load.
+pub(crate) const MAX_DECLARED_TRIGGER_STEPS: i32 = 65;
+
 const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
     AccountMigration {
         schema_version: 1,
