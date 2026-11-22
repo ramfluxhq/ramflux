@@ -1071,7 +1071,7 @@ def set_node_id(state, node_id):
     for config in sorted((state / "config").glob("*.toml")):
         content = config.read_text().replace(
             'node_id = "localhost"', f'node_id = "{node_id}"'
-        ).encode()
+        ).replace('"spiffe://localhost/', f'"spiffe://{node_id}/').encode()
         atomic_bytes(config, content, mode=0o644)
 
 
