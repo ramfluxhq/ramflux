@@ -116,7 +116,9 @@ impl FullSourcePreparation<'_> {
             return Err(super::stage::context());
         }
         let rules = super::full_transfer_catalog();
-        self.db.inspect_full_transfer_schema(rules)?.require_typed_owners(rules)?;
+        // Schema shape still refuses. A nonempty family without a typed codec does not:
+        // the export allowlist is the gate, and the snapshot is written before that gate.
+        self.db.inspect_full_transfer_schema(rules)?;
         let path = self.directory.join("source-preparation-copy.db");
         let snapshot = self
             .db

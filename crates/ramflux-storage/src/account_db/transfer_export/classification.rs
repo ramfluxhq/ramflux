@@ -169,6 +169,7 @@ pub(crate) const ACTOR_EXCLUDED: &[(&str, &str)] = &[
 pub(crate) const EXCLUDED_TABLES: &[(&str, &str)] = &[
     ("a2ui_surface_cache", "bot or MCP grant, pin or cache; reconfigured on B"),
     ("account_backup_generation", "schema, index or device-local bookkeeping"),
+    ("account_device_unlock", "credential, key check or MAC verifier (stripped by default)"),
     ("account_erasure_generation", "bound to the source device erasure generation or MAC bundle"),
     ("account_index_migration", "schema, index or device-local bookkeeping"),
     ("account_key_check", "credential, key check or MAC verifier (stripped by default)"),
@@ -346,6 +347,10 @@ pub(crate) const EXCLUDED_TABLES: &[(&str, &str)] = &[
     ("rejected_inbox_projection", "not on the read path or device-signed; not declared"),
     ("repeated_real", "transfer or stage state, raw copy or key material"),
     ("resume", "transfer or stage state, raw copy or key material"),
+    ("retained_cut", "transfer or stage state, raw copy or key material"),
+    ("retained_digest_key", "transfer or stage state, raw copy or key material"),
+    ("retained_row", "transfer or stage state, raw copy or key material"),
+    ("retained_tail_applied", "transfer or stage state, raw copy or key material"),
     ("reverse_application", "transfer or stage state, raw copy or key material"),
     ("reverse_input_validated", "transfer or stage state, raw copy or key material"),
     ("reverse_merge_progress", "transfer or stage state, raw copy or key material"),
