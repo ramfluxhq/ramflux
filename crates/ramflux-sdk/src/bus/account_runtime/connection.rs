@@ -119,6 +119,14 @@ impl AccountRuntime {
             tokio::spawn(async {}).await.map_err(|_| SdkError::NetworkingPending)?;
         }
         let publish_networking = self.apply_connection_work_inner(work).await?;
+        // A courier that refused with `FreshHeadRequired` waits for a wake; a head that became
+        // current in this step (refresh, receive, another courier) is that wake.
+        if let Some(account) = self.state.accounts.get(&self.id)
+            && account.client.take_newly_fresh_head()
+            && let Some(connection) = &account.connection
+        {
+            connection.wake_couriers();
+        }
         if let Some(pool) = self.readers.lock().map_err(|_| super::stopped())?.as_ref() {
             pool.set_account_view(&self.state, &self.id)?;
         }

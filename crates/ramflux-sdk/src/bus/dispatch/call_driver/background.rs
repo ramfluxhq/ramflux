@@ -141,7 +141,7 @@ fn prepare(account: &LocalBusAccountState, id: &str) -> Result<Option<Prepared>,
         .ok_or_else(|| invalid("call conversation absent"))?;
     let input = task_transport::direct_target_input(account, &thread);
     Ok(Some(Prepared {
-        plan: Plan { original: call.clone(), thread, config: account.gateway_config.clone() },
+        plan: Plan { original: call.clone(), thread, config: account.sealing_config()? },
         input,
     }))
 }
