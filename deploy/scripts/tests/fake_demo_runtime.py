@@ -211,15 +211,19 @@ if args and args[0] == "run":
     target = next(value[4:] for value in mount.split(",") if value.startswith("src="))
     if target != "demo-test_relay-redb" or target not in resources:
         sys.exit("unexpected service-state helper target")
-    tar_args = args[args.index("--entrypoint=tar") + 2:]
-    if "-xpf" in tar_args and "--interactive" not in args:
+    script = args[-1]
+    if "--entrypoint=sh" not in args or "-c" not in args:
+        sys.exit("unexpected state helper")
+    operation = next((kind for kind in ("backup", "reset", "restore")
+                      if "# ramflux-state-" + kind in script), None)
+    if operation == "restore" and "--interactive" not in args:
         sys.exit("restore helper must attach its archive stdin")
-    if control.get("backup_exit") and "-cpf" in tar_args:
+    if control.get("backup_exit") and operation == "backup":
         sys.exit(control["backup_exit"])
-    if control.get("restore_exit") and "-xpf" in tar_args:
+    if control.get("restore_exit") and operation == "restore":
         sys.exit(control["restore_exit"])
-    tar_args[1] = str(root / "volume-data" / target)
-    sys.exit(subprocess.run(["tar", *tar_args], check=False, timeout=30).returncode)
+    script = script.replace("cd /state", "cd " + str(root / "volume-data" / target))
+    sys.exit(subprocess.run(["sh", "-c", script], check=False, timeout=30).returncode)
 
 service_filter = next((value.split("=", 2)[-1] for value in args
                        if value.startswith("label=com.docker.compose.service=")), None)

@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Closed-list, stopped-volume backup and reset for the demo lifecycle."""
+"""Closed-list, stopped-file backup and reset for the demo relay lifecycle."""
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import tarfile
 
 # Never derive a target from user input. Keys, accounts and routing are excluded.
 RESETTABLE_STATES = {"relay": "relay-redb"}
+RESET_FILES = ("relay.redb", "trust-snapshot.json")
 ENGINE_TIMEOUT_SECONDS = 300
 
 
@@ -64,6 +66,16 @@ def archive_digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def archive_members(config, archive):
+    members = []
+    with tarfile.open(archive, "r:") as source:
+        for entry in source:
+            if entry.name not in RESET_FILES or not entry.isfile() or entry.name in members:
+                raise config.SnapshotError("relay backup contains a protected or unsupported member")
+            members.append(entry.name)
+    return sorted(members)
+
+
 def verify_archive(config, state, reference):
     archive = archive_path(config, state, reference)
     manifest = archive.with_suffix(".json")
@@ -71,7 +83,8 @@ def verify_archive(config, state, reference):
             or not manifest.is_file()):
         raise config.SnapshotError("missing or unsafe relay state backup")
     metadata = json.loads(manifest.read_text())
-    if (metadata.get("service") != "relay" or metadata.get("sha256") != archive_digest(archive)):
+    if (metadata.get("service") != "relay" or metadata.get("sha256") != archive_digest(archive)
+            or metadata.get("files") != archive_members(config, archive)):
         raise config.SnapshotError("relay state backup checksum mismatch")
     return archive
 
@@ -82,8 +95,8 @@ def plan(config, state, command, engine):
     service = selected(command, owner, transaction)
     if not service:
         return
-    # Recovery can run after the selected volume was removed but before Compose recreated it.
-    inspect_volume(engine, owner, service, allow_missing=command == "recover")
+    # The volume and its signing keys must survive every operation.
+    inspect_volume(engine, owner, service, allow_missing=False)
     if command == "rollback":
         reference = owner["state_reset"]["backup_snapshot"]
         if reference != owner["snapshot_history"][-2]:
@@ -120,14 +133,44 @@ def checkpoint(config, state, command, owner):
     return record
 
 
-def tar_command(engine, owner, record, readonly):
+# Every target is a literal leaf, never a volume or directory containing signing keys.
+VALIDATE_FILES = """set -eu
+cd /state
+for name in relay.redb trust-snapshot.json; do
+  if [ -L "$name" ] || { [ -e "$name" ] && [ ! -f "$name" ]; }; then
+    echo 'refusing protected or non-regular relay state target' >&2; exit 1
+  fi
+  if [ -f "$name" ] && [ "$(stat -c %h -- "$name")" != 1 ]; then
+    echo 'refusing hard-linked relay state target' >&2; exit 1
+  fi
+done
+"""
+HELPER_SCRIPTS = {
+    "backup": VALIDATE_FILES + """# ramflux-state-backup
+set --
+for name in relay.redb trust-snapshot.json; do
+  if [ -f "$name" ]; then set -- "$@" "$name"; fi
+done
+exec tar -cpf - --files-from=/dev/null -- "$@"
+""",
+    "reset": VALIDATE_FILES + """# ramflux-state-reset
+rm -f -- relay.redb trust-snapshot.json
+""",
+    "restore": VALIDATE_FILES + """# ramflux-state-restore
+rm -f -- relay.redb trust-snapshot.json
+exec tar -xpf -
+""",
+}
+
+
+def helper_command(engine, owner, record, operation):
     name = volume_name(owner, record["service"])
-    mount = f"type=volume,src={name},dst=/state" + (",readonly" if readonly else "")
-    return [engine, "run", *([] if readonly else ["--interactive"]),
+    mount = f"type=volume,src={name},dst=/state" + (",readonly" if operation == "backup" else "")
+    return [engine, "run", *(["--interactive"] if operation == "restore" else []),
             "--rm", "--pull=never", "--network=none", "--read-only",
             "--user=0:0", "--label", f"org.ramflux.demo.owner={owner['token']}",
-            "--mount", mount, "--entrypoint=tar", record["image"],
-            "-C", "/state", "-cpf" if readonly else "-xpf", "-", "."]
+            "--mount", mount, "--entrypoint=sh", record["image"],
+            "-c", HELPER_SCRIPTS[operation]]
 
 
 def capture_archive(config, state, engine, owner, record):
@@ -139,7 +182,7 @@ def capture_archive(config, state, engine, owner, record):
         raise config.SnapshotError("unsafe partial relay state backup")
     temporary.unlink(missing_ok=True)
     with temporary.open("xb") as output:
-        subprocess.run(tar_command(engine, owner, record, True), check=True,
+        subprocess.run(helper_command(engine, owner, record, "backup"), check=True,
                        stdout=output, timeout=ENGINE_TIMEOUT_SECONDS)
         output.flush()
         os.fsync(output.fileno())
@@ -148,25 +191,24 @@ def capture_archive(config, state, engine, owner, record):
     config.fsync_directory(archive.parent)
     config.atomic_bytes(archive.with_suffix(".json"), (json.dumps({
         "service": record["service"], "volume": volume_name(owner, record["service"]),
-        "sha256": archive_digest(archive),
+        "sha256": archive_digest(archive), "files": archive_members(config, archive),
     }) + "\n").encode(), mode=0o400)
 
 
-def replace_volume(config, state, engine, owner, record, restore_reference=None):
+def replace_state(config, state, engine, owner, record, restore_reference=None):
     archive = verify_archive(config, state, restore_reference) if restore_reference else None
     name = volume_name(owner, record["service"])
-    present = inspect_volume(engine, owner, record["service"], allow_missing=True)
-    # Read and act on this exact closed list, without wildcards or force removal.
-    print(f"service-state target: {name}; action: {'restore' if archive else 'reset'}", flush=True)
-    if present:
-        engine_run(engine, "volume", "rm", name)
+    inspect_volume(engine, owner, record["service"])
+    targets = [name + ":/" + filename for filename in RESET_FILES]
+    print(f"service-state targets: {', '.join(targets)}; "
+          f"action: {'restore' if archive else 'reset'}", flush=True)
     if archive:
-        engine_run(engine, "volume", "create", "--label", f"org.ramflux.demo.owner={owner['token']}",
-                   "--label", f"com.docker.compose.project={owner['settings']['DEMO_PROJECT']}",
-                   "--label", "com.docker.compose.volume=relay-redb", name)
         with archive.open("rb") as source:
-            subprocess.run(tar_command(engine, owner, record, False), check=True,
+            subprocess.run(helper_command(engine, owner, record, "restore"), check=True,
                            stdin=source, timeout=ENGINE_TIMEOUT_SECONDS)
+    else:
+        subprocess.run(helper_command(engine, owner, record, "reset"), check=True,
+                       timeout=ENGINE_TIMEOUT_SECONDS)
 
 
 def apply(config, state, engine, command):
@@ -184,11 +226,11 @@ def apply(config, state, engine, command):
         sys.exit("refusing service-state operation while project containers still exist")
     if command == "recover":
         if record.get("backup_ready"):
-            replace_volume(config, state, engine, owner, record, record["backup_snapshot"])
+            replace_state(config, state, engine, owner, record, record["backup_snapshot"])
         return
     inspect_volume(engine, owner, record["service"])
     capture_archive(config, state, engine, owner, record)
     verify_archive(config, state, record["backup_snapshot"])
     record["backup_ready"] = True
     config.atomic_json(state / "transaction.pending", transaction)
-    replace_volume(config, state, engine, owner, record, record.get("restore_snapshot"))
+    replace_state(config, state, engine, owner, record, record.get("restore_snapshot"))

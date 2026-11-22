@@ -444,16 +444,21 @@ the relevant configuration key.
 #### Resetting relay state for a stored-format break
 
 The reset list is closed: **only `relay`**, only on `upgrade`, exactly once per
-invocation. It selects the exact owned `${DEMO_PROJECT}_relay-redb` volume.
+invocation. It selects only `relay.redb` and `trust-snapshot.json` inside the exact owned
+`${DEMO_PROJECT}_relay-redb` volume. The volume itself is never removed.
 Unknown services, volume names, paths, patterns, repeated flags and reset flags
 on other commands are rejected before running any tools. An env variable cannot
 enable reset. Stores containing identity, keys, accounts or routing are excluded.
 
-This discards the relay's stored object data and authorization metadata, verified
-trust cache and anti-rollback state. Use it only for an explicitly approved
-stored-format break; retain the old images and the complete private snapshot tree.
+This discards the relay database's object/authorization metadata and payloads,
+verified trust cache and anti-rollback state. The same volume also contains
+`attachment-authority.seed`, an Ed25519 signing key: it MUST survive. The wrapper
+preserves that key, `attachment-objects/`, and every other unlisted entry.
+Existing object files can become unreachable when their ledger rows are reset;
+preserving their bytes does not promise attachment availability. Use it only for
+an explicitly approved stored-format break; retain the old images and the complete private snapshot tree.
 A reset interrupts the whole stack and active calls. It does not migrate data.
-Ensure enough free disk space for an uncompressed copy of the whole relay volume.
+Ensure enough free disk space for an uncompressed copy of both selected files.
 For the next incompatible relay store format (such as removal of v2 relay tokens),
 load the selected version's seven images, update only `DEMO_VERSION`, then run:
 
@@ -463,20 +468,25 @@ deploy/scripts/demo-node.sh upgrade /absolute/path/to/demo.env --reset-service r
 
 Before removing anything, the wrapper checks ownership, snapshots the current
 managed files, stops the stack with ordinary Compose `down` (no `--volumes`),
-and archives the relay volume using `tar` from the already-installed relay image.
-The helper runs with no network, never pulls an image, and mounts only the exact
-relay volume read-only. No extra image, package or service dependency is needed.
+and archives only those two literal files using `tar` from the installed relay
+image. Absent files are recorded as absent. Symlinks, directories and hard links
+at either target are refused. The helper runs with no network, never pulls an
+image, and mounts only the exact relay volume read-only for backup. No extra
+image, package or service dependency is needed.
 The archive is streamed into `version-snapshots/<version>/<id>/service-state/relay.tar`
 (mode 0400 in a private directory), fsynced and SHA-256 checked before removal.
-`relay.json` records its digest and exact volume. `transaction.pending` records
-backup readiness; the committed `owner.json.state_reset` retains the backup
-reference, including across repeated `up`. The wrapper prints the exact reset
-target, removes that one volume without force, and starts the selected images.
+`relay.json` records its digest, exact volume and present file list. Archive
+members must be regular files from the same two-name closed list.
+`transaction.pending` records backup readiness; the committed `owner.json.state_reset` retains the backup
+reference, including across repeated `up`. The wrapper prints the
+two exact final file targets, removes only those files, and starts the selected images.
+It does not remove or recreate any named volume, identity, key or object directory.
 All seven health checks and the signed public probes must pass before commit.
 
-Ordinary `rollback` automatically stops the stack and restores the archived volume,
-including file bytes, ownership, modes and empty directories, before starting the
-old images. Other seven named volumes remain untouched. No reset flag is used:
+Ordinary `rollback` stops the stack and restores the two selected files,
+including bytes, ownership, modes and original absence, before starting the old
+images. It preserves the relay signing key and all unlisted files/directories;
+all eight named volumes remain intact. No reset flag is used:
 
 ```sh
 deploy/scripts/demo-node.sh rollback /absolute/path/to/demo.env
@@ -484,8 +494,8 @@ deploy/scripts/demo-node.sh rollback /absolute/path/to/demo.env
 
 If upgrade or rollback fails, retain the marker and run the existing `recover`
 command (or `rollback` while pending). Recovery restores the pre-operation relay
-state as well as files/images: a failed rollback can recover the newer store.
-A backup failure never removes the source volume; a missing/corrupt completed
+database/cache as well as files/images: a failed rollback can recover the newer
+store. A backup failure never removes the selected files; a missing/corrupt completed
 backup refuses restoration. Failed restoration keeps the marker for retry. Keep
 old images, including the relay image used as the archive helper, until acceptance.
 Rollback discards relay writes made after reset. This option is not a substitute
@@ -497,8 +507,7 @@ To combine reset with call authority and voice configuration in one version upgr
    `provision-node.sh` and renders their origin identities. The origin renderer
    alone cannot create missing sections; the current generic provisioner omits
    these sections, so call signaling cannot yet be claimed from this sequence.
-   With the **old**
-   `DEMO_VERSION` still selected, set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` and run
+   With the **old** `DEMO_VERSION` still selected, set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` and run
    `demo-node.sh up ENV_FILE` first if voice was not already applied. `upgrade`
    refuses a newly selected voice/admin overlay; setting it for the first time
    on the reset upgrade will fail before writes. Retain the prior firewall rules.
@@ -522,7 +531,7 @@ To combine reset with call authority and voice configuration in one version upgr
 
 Compose prefixes the following literal names with `${DEMO_PROJECT}_`. Each service
 mounts its own store at `/var/lib/ramflux/<service>`. Ordinary upgrades and rollbacks
-preserve all of these volumes; the sole exception is the relay reset described above.
+preserve all of these volumes. The relay reset changes only its two named files.
 
 | Named volume | Owner and contents | Resettable |
 | --- | --- | --- |
@@ -530,7 +539,7 @@ preserve all of these volumes; the sole exception is the relay reset described a
 | `router-redb` | Router identity/account authority, routing, inbox and WAL | No |
 | `notify-redb` | Notify encrypted push routes, wakes and send/call authority | No |
 | `federation-redb` | Federation forwarding spool, trust/pins and revocations | No |
-| `relay-redb` | Relay object state, attachment authorization and trust cache | `relay` only |
+| `relay-redb` | Relay database, trust cache, **attachment signing key** and object directory | Only `relay.redb` + `trust-snapshot.json`; volume/key/objects preserved |
 | `signaling-redb` | Signaling allocation/service state | No |
 | `retention-redb` | Retention lifecycle, hold and incident state | No |
 | `node-privacy` | Shared privacy and fingerprint keys, mounted by all seven services | No |

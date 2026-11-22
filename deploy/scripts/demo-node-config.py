@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from urllib.parse import urlsplit
 
 SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
@@ -1141,7 +1142,7 @@ def main():
             sys.exit("invalid demo configuration action")
     except subprocess.SubprocessError:
         sys.exit("service-state runtime command failed; retain the transaction and run recover")
-    except (SnapshotError, OSError, ValueError) as error:
+    except (SnapshotError, OSError, ValueError, tarfile.TarError) as error:
         if action == "recover" or (action in ("image-version", "router-admin-settings") and sys.argv[4] == "recover"):
             sys.exit(f"cannot recover last-good snapshot: {error}; {MANUAL_RECOVERY}")
         sys.exit(str(error))
