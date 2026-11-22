@@ -130,7 +130,23 @@ impl Transport {
         self.send_once(&method, path, None, body).await
     }
 
-    fn check_status(raw: Raw) -> Result<Raw, PrxError> {
+    /// Sends one request and returns the raw answer, with the same single token re-read on a 401
+    /// as `call`. The caller checks the status, so it can tell an uncoded 404 from a coded one.
+    pub(crate) async fn call_raw(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Raw, PrxError> {
+        let mut raw = self.send_once(&method, path, None, body).await?;
+        if raw.status == 401 {
+            self.reload_token()?;
+            raw = self.send_once(&method, path, None, body).await?;
+        }
+        Ok(raw)
+    }
+
+    pub(crate) fn check_status(raw: Raw) -> Result<Raw, PrxError> {
         if (200..300).contains(&raw.status) {
             Ok(raw)
         } else if raw.status == 429 {

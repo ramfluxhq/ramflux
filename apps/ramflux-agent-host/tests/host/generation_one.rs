@@ -19,7 +19,7 @@ struct Bus {
 }
 impl AgentBus for Bus {
     async fn request(&mut self, method: &str, body: Value, _: Option<&str>) -> Result<Value> {
-        if method == "message.list" {
+        if method == "message.read" {
             assert!(
                 body["message_id"].is_string(),
                 "engine reads must select the exact durable message"

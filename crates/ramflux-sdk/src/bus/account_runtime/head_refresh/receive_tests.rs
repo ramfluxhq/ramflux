@@ -19,7 +19,7 @@ fn receive_command() -> AccountCommand {
             "receive",
             Some("sender".into()),
             "group",
-            "group.receive",
+            "group.read",
             json!({"group_id":"group", "conversation_id":"thread", "limit":32}),
         ),
         connection_id: 1,
@@ -104,7 +104,7 @@ async fn successful_group_receive_resumes_gateway_once_per_command() -> TestResu
             assert_eq!(
                 count.get(),
                 after_first,
-                "activated group.receive must not bind standalone after the actor owns the ledger"
+                "activated group.read must not bind standalone after the actor owns the ledger"
             );
             let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
             crate::bus::dispatch::group::dispatch_group_receive_request(

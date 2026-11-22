@@ -75,7 +75,7 @@ async fn native_send_and_read_capture_only_the_signed_group_link() -> TestResult
         owner.config,
         owner.manifest.principal_commitment,
     );
-    for method in ["group.send", "group.read", "group.receive"] {
+    for method in ["group.send", "group.read"] {
         let db = account.client.account_db()?;
         // Reproduce metadata left by an earlier CLI send/read before upgrading the daemon.
         db.persist_client_record(

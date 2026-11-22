@@ -25,6 +25,11 @@ pub const MESSAGE_TARGET_V1: &str = "message_target_v1";
 pub const MESSAGE_CONTEXT_DELIVERY_V1: &str = "message_context_delivery_v1";
 /// `GET /api/owner`: one stable install owner id for every paired bearer.
 pub const OWNER_ID_STABLE_V1: &str = "owner_id_stable_v1";
+/// Replay answers (`replayed:true`), the crash-retry attempt fields and cancel by run id on the
+/// message route.
+pub const MESSAGE_IDEMPOTENCY_V1: &str = "message_idempotency_v1";
+/// Per-agent partitioned reads: the message history carries `agent` and filters by it.
+pub const TARGETED_AGENTS_V1: &str = "targeted_agents_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +129,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "5d92a43a43a6373b063cd67b26dddbe0662fc2de";
+    const SHA: &str = "296a83367e7aecde824974d16c08db3f508b447a";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(

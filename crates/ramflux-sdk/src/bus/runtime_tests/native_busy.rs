@@ -217,7 +217,7 @@ async fn reads(fixture: &Harness) -> Case<Value> {
         ("contact.requests.list", json!({})),
         ("contact.requests.policy.get", json!({})),
         ("contact.verification.status", json!({"contact_identity_commitment":fixture.peer_root})),
-        ("message.list", json!({"conversation_id":"healthy"})),
+        ("message.read", json!({"conversation_id":"healthy"})),
         ("message.read", json!({"conversation_id":"healthy"})),
         ("conversation.list", json!({})),
         ("group.list", json!({})),

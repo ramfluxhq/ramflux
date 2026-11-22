@@ -91,6 +91,9 @@ pub enum ApiCode {
     SessionBusy,
     AgentTargetingDisabled,
     AgentScopeRefused,
+    IdempotencyConflict,
+    RunUnknown,
+    JobUnknown,
     Unknown(String),
 }
 
@@ -115,6 +118,9 @@ impl ApiCode {
             "session_busy" => Self::SessionBusy,
             "agent_targeting_disabled" => Self::AgentTargetingDisabled,
             "agent_scope_refused" => Self::AgentScopeRefused,
+            "idempotency_conflict" => Self::IdempotencyConflict,
+            "run_unknown" => Self::RunUnknown,
+            "job_unknown" => Self::JobUnknown,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -329,6 +335,9 @@ mod tests {
             ("not_applied", ApiCode::NotApplied),
             ("confirmation_required", ApiCode::ConfirmationRequired),
             ("storage_unavailable", ApiCode::StorageUnavailable),
+            ("idempotency_conflict", ApiCode::IdempotencyConflict),
+            ("run_unknown", ApiCode::RunUnknown),
+            ("job_unknown", ApiCode::JobUnknown),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);

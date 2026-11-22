@@ -107,9 +107,6 @@ policies! {
     "contact.rejected" => ("contact", false, true, false, false),
     "contact.remove" => ("contact", true, true, false, false),
     "contact.request" => ("contact", true, true, false, false),
-    "contact.request.accept" => ("contact", true, true, false, false),
-    "contact.request.block" => ("contact", true, true, false, false),
-    "contact.request.decline" => ("contact", true, true, false, false),
     "contact.requests.list" => ("contact", false, true, false, false),
     "contact.requests.policy.get" => ("contact", false, true, false, false),
     "contact.requests.policy.set" => ("contact", true, true, false, false),
@@ -125,9 +122,7 @@ policies! {
     "daemon.status" => ("daemon", false, false, false, false),
     "daemon.stop" => ("daemon", true, false, false, false),
     "diag.residue" => ("diag", true, false, false, false),
-    "device.authorize" => ("device", true, true, false, false),
     "device.list" => ("device", false, true, false, false),
-    "device.migrate" => ("device", true, true, false, false),
     "device.pair.approve" => ("device", true, true, false, false),
     "device.pair.begin" => ("device", true, true, false, false),
     "device.pair.cancel" => ("device", true, true, false, false),
@@ -159,19 +154,14 @@ policies! {
     "group.invitation.accept" => ("group", true, true, false, false),
     "group.invitation.decline" => ("group", true, true, false, false),
     "group.invitations.list" => ("group", false, true, false, false),
-    "group.invite.accept" => ("group", true, true, false, false),
-    "group.invite.create" => ("group", true, true, false, false),
     "group.list" => ("group", false, true, false, false),
     "group.member.add" => ("group", true, true, false, false),
-    "group.member.ban" => ("group", true, true, false, false),
     "group.member.kick" => ("group", true, true, false, false),
     "group.member.remove" => ("group", true, true, false, false),
     "group.members" => ("group", false, true, false, false),
-    "group.message.delete" => ("group", true, true, false, false),
     "group.name.set" => ("group", true, true, false, false),
     "group.owner.transfer" => ("group", true, true, false, false),
     "group.read" => ("group", true, true, false, false),
-    "group.receive" => ("group", true, true, false, false),
     "group.requests.list" => ("group", false, true, false, false),
     "group.role.set" => ("group", true, true, false, false),
     "group.send" => ("group", true, true, false, false),
@@ -191,7 +181,6 @@ policies! {
     "message.focus" => ("message", true, true, false, false),
     "message.delete" => ("message", true, true, false, false),
     "message.franking_evidence" => ("message", false, true, false, false),
-    "message.list" => ("message", false, true, false, false),
     "message.read" => ("message", false, true, false, false),
     "message.receipt.delivered" => ("message", true, true, false, false),
     "message.receipt.read" => ("message", true, true, false, false),
@@ -291,7 +280,7 @@ pub(super) const CONTACT_VERIFY_CAS_RESPONSE_TYPE: &str =
 pub(super) const CONTACT_VERIFY_CAS_DESCRIPTOR: &str =
     "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5";
 /// Immutable product commit whose tree contains this CAS policy and descriptor.
-pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "8ba8ea13c2d63a339527476398b1ed6503709dbe";
+pub(super) const CONTACT_VERIFY_CAS_PRODUCT_PIN: &str = "5d9281898913f2104e2a077865979059bc3e3c51";
 
 pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
     let mut rows = METHOD_POLICIES.iter().filter(|row| row.name == "contact.verify");
@@ -307,7 +296,7 @@ pub(super) fn loaded_cas_descriptor_matches(descriptor_hex: &str) -> bool {
         && CONTACT_VERIFY_CAS_CONTRACT == "CONTACT-VERIFY-CAS-01"
         && CONTACT_VERIFY_CAS_REQUEST_TYPE == "ramflux.message.v1.ContactSafetyVerifyRequest"
         && CONTACT_VERIFY_CAS_RESPONSE_TYPE == "ramflux.message.v1.ContactSafetyVerifyResult"
-        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "8ba8ea13c2d63a339527476398b1ed6503709dbe"
+        && CONTACT_VERIFY_CAS_PRODUCT_PIN == "5d9281898913f2104e2a077865979059bc3e3c51"
 }
 
 #[cfg(test)]

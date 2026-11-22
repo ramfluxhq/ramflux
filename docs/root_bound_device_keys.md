@@ -201,25 +201,17 @@ and the subsequent client safety policy remain necessary.
 
 ## Client migration and verification interfaces
 
-For a single legacy device, migration binds its locally held signing/agreement
-keys. For multiple devices, collect a v2 root-signed authorization independently
-from each device; the SDK never upgrades server-advertised v1 keys by signing them.
-The complete set includes remote directory devices, independently supplied
-authorizations and known local account devices. Missing authorizations fail
-closed. Devices remain fenced between publication and matching v2 registration /
-prekey installation; each legacy sibling must migrate with its own private keys.
-A complete root-signed set already observed remains authoritative after restart.
+The local bus no longer exposes the legacy `device.authorize` / `device.migrate`
+methods (removed before v1): accounts are created natively and add devices through
+`device.pair.*` or move the primary through `device.transfer.*`.
 
 ```sh
-rf --socket /path/to/device-two.sock device authorize --account account > device-two.json
-rf --socket /path/to/device-one.sock device migrate --account account --authorization-file device-two.json
 rf --socket /path/to/device-one.sock device refresh --account account --principal-commitment ROOT_COMMITMENT
 rf --socket /path/to/device-one.sock device revoke --account account --device DEVICE_ID
 ```
 
-The generic C ABI JSON request interface uses the same `device.authorize`,
-`device.migrate {authorizations:[...]}`, `device.refresh {principal_commitment}` and
-`device.revoke {device_id}` methods; no C struct layout or exported symbol changes
+The generic C ABI JSON request interface uses the same `device.refresh {principal_commitment}`
+and `device.revoke {device_id}` methods; no C struct layout or exported symbol changes
 are required. Revocation responses include `device_set_epoch`; the TUI verifies
 the matching device/result/epoch before reporting success.
 

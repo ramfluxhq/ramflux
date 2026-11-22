@@ -676,7 +676,7 @@ mod tests {
                 "conversation.directory" => {
                     json!({"conversations":[{"id":"conversation","kind":"direct","participants":["agent-principal","human-principal"]},{"id":"other","kind":"direct","participants":["agent-principal","human-principal"]}],"next_cursor":null})
                 }
-                "message.list" => {
+                "message.read" => {
                     json!({"schema":ramflux_sdk::typed_read_model::READ_MODEL_SCHEMA,"snapshot_sequence":11,
                         "message":{"id":body["message_id"],"conversation_id":body["conversation_id"],
                             "is_own":false,"state":"content","kind":"message","text":"hello",

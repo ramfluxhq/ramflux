@@ -161,7 +161,6 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         }
         GroupAction::Disappearing(command) => handle_group_disappearing(&mut bus, command).await,
         GroupAction::Mute(mute) => handle_group_mute(&mut bus, mute).await,
-        GroupAction::Invite(invite) => handle_group_invite(&mut bus, invite).await,
         GroupAction::Message(message) => handle_group_message(&mut bus, message).await,
         GroupAction::Member(member) => handle_group_member(&mut bus, member).await,
         GroupAction::Role(role) => handle_group_role(&mut bus, role).await,
@@ -224,17 +223,6 @@ async fn handle_group_member(
                     .await?,
             )
         }
-        GroupMemberAction::Ban(ban) => {
-            let request = LocalBusGroupMemberBanRequest {
-                group_id: ban.group,
-                actor_id: ban.actor,
-                member_id: ban.member_device,
-                reason: ban.reason,
-            };
-            print_json(
-                &request_body(bus, Some(ban.account), "group", "group.member.ban", request).await?,
-            )
-        }
         GroupMemberAction::List(members) => {
             let request = LocalBusGroupRequest { group_id: members.group };
             print_json(
@@ -272,46 +260,6 @@ async fn handle_group_message(
             };
             print_json(
                 &request_body(bus, Some(delete.account), "message", "message.delete", request)
-                    .await?,
-            )
-        }
-    }
-}
-
-async fn handle_group_invite(
-    bus: &mut LocalBusClient,
-    invite: GroupInviteCommand,
-) -> Result<(), RfError> {
-    match invite.action {
-        GroupInviteAction::Create(create) => {
-            let request = LocalBusGroupInviteCreateRequest {
-                group_id: create.group,
-                actor_id: create.actor,
-                invitee_id: create.invitee_device,
-                invitee_signing_public_key: create.invitee_signing_public_key,
-                invitee_principal_commitment: create.invitee_principal_commitment,
-                target_delivery_id: create.target_delivery,
-                role: create.role,
-                expires_at: create.expires_at,
-                reason: create.reason,
-                federation: None,
-            };
-            print_json(
-                &request_body(bus, Some(create.account), "group", "group.invite.create", request)
-                    .await?,
-            )
-        }
-        GroupInviteAction::Accept(accept) => {
-            let request = LocalBusGroupInviteAcceptRequest {
-                group_id: accept.group,
-                actor_id: accept.actor,
-                invite_id: accept.invite_id,
-                target_delivery_id: accept.target_delivery,
-                member_principal_commitment: accept.member_principal_commitment,
-                federation: None,
-            };
-            print_json(
-                &request_body(bus, Some(accept.account), "group", "group.invite.accept", request)
                     .await?,
             )
         }

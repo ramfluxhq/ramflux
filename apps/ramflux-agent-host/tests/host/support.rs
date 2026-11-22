@@ -119,7 +119,7 @@ impl Fake {
                 }
                 json!({"head_seq":10,"floor_seq":1,"subscribed":true})
             }
-            "message.list" => message_detail(
+            "message.read" => message_detail(
                 body["conversation_id"].as_str().ok_or(Error::State)?,
                 body["message_id"].as_str().ok_or(Error::State)?,
                 "@agent ping",

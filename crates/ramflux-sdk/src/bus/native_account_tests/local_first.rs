@@ -151,8 +151,7 @@ async fn publication_case(with_network_command: bool) -> Result {
             )
             .await?;
         let mut bus = connect(&socket).await?;
-        let request =
-            bus.request(Some(account.account_id), "account", "device.authorize", json!({}));
+        let request = bus.request(Some(account.account_id), "account", "device.refresh", json!({}));
         tokio::pin!(request);
         if with_network_command {
             tokio::select! {

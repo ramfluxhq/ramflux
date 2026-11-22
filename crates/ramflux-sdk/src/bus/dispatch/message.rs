@@ -41,7 +41,7 @@ pub(crate) async fn dispatch_message_bus_request(
             let account = local_bus_account_mut(state, account_id)?;
             dispatch_message_receipt_read(request, account).await
         }
-        "message.list" | "message.read" => {
+        "message.read" => {
             let account_id = request_account_id(request)?;
 
             let account = local_bus_account(state, account_id)?;

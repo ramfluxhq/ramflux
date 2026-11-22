@@ -123,7 +123,7 @@ the same cycle when at least eight seconds remain for a second priority pass.
 This admission floor is independent of the fifteen-second call allowance. Each
 courier timeout is capped by the time left in the existing cycle, so a second
 pass cannot allocate a fresh call window beyond that deadline.
-Explicit `message.receive` and `group.receive` use this path too: priority work
+Explicit `message.receive` and `group.read` use this path too: priority work
 can add up to nineteen seconds before inbox receive begins. Each priority pass
 scans at most 256 pending receipt keys and loads those rows; a second pass can
 repeat that local scan when the eight-second admission floor remains. Both priority passes
@@ -301,9 +301,9 @@ the final history. Snapshot pages can be incomplete when the budget is reached.
 ## Read models
 
 `task.get` returns the task, steps, revision, timestamps and unverified-kind
-marker; `task.list` returns `tasks` plus `next_cursor`. `message.list` and
-`message.read` include task content type, escaped fallback and the same marker.
-Both message methods expose `task_id`, authenticated `actor_kind` (null for
+marker; `task.list` returns `tasks` plus `next_cursor`. `message.read`
+includes task content type, escaped fallback and the same marker.
+It exposes `task_id`, authenticated `actor_kind` (null for
 unknown or legacy metadata) and the role-aware `actor_kind_verified` boolean.
 Reads include `result_ref` and
 `result_summary` (at most 4,096 safe text characters, signed, terminal updates

@@ -151,7 +151,7 @@ An expired/revoked selected device produces a null route; the client must select
 
 There is no network lookup to invent a route for an unknown contact. Existing conversations with
 no captured association keep unknown peer/title fields empty/null. `group.create` may supply an
-additional `conversation_id`; `group.send`/`group.receive` already carry it explicitly. Those
+additional `conversation_id`; `group.send`/`group.read` already carry it explicitly. Those
 operations persist the association. Group IDs are never treated as conversation IDs by the reader.
 
 ## Identity directory

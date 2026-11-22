@@ -48,7 +48,7 @@ impl AgentBus for GroupBus {
                 _ => {}
             }
         }
-        if method == "message.list" {
+        if method == "message.read" {
             value["message"]["sender_id"] = json!("human-principal");
             value["message"]["author"]["device_id"] = json!("human-device");
         }
@@ -69,7 +69,7 @@ async fn native_groups_require_the_verified_root_principal_key_pin_and_effective
         host.start(&mut bus).await?;
         host.apply(&mut bus, incoming(11, true), 2000).await?;
         assert!(bus.inner.replies.is_empty(), "spoke with invalid pin: {mutation}");
-        assert!(!bus.inner.requests.iter().any(|(method, _)| method == "message.list"));
+        assert!(!bus.inner.requests.iter().any(|(method, _)| method == "message.read"));
     }
     Ok(())
 }
