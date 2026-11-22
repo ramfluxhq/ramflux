@@ -101,6 +101,10 @@ pub(crate) struct LocalBusAccountState {
     /// deliberately not stored inside the `GatewaySessionEngine`). `None` until first use; an rfd
     /// restart cold-rebuilds it.
     pub(crate) relay_quic_pool: Option<std::sync::Arc<ramflux_transport::RelayQuicPool>>,
+    /// Endpoint and authority settings for the next connection. Not a sealing config: a native
+    /// account's copy drops its device branch and source identity whenever its authority changes
+    /// (unlock, pairing, role refresh) and regains them only when a session is installed. Anything
+    /// that seals or signs an envelope outside a live session uses [`Self::sealing_config`].
     pub(crate) gateway_config: GatewaySessionConfig,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
