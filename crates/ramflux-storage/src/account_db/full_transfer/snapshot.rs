@@ -35,6 +35,10 @@ const CARRY_EVENTS: &[&str] = &[
 const STRIP_ACTORS: &[&str] = &[
     "dm-pair/",
     "group-state/send/",
+    "group-distribution/",
+    "group/distribution-envelope/",
+    "group-key/",
+    "layer-publish/",
     "secrets/",
     "identity/owned_",
     "identity/custody/",
@@ -181,11 +185,13 @@ fn event_list() -> String {
 /// # Errors
 /// Refuses `UnsupportedRecord` on the first unclassified non-empty category.
 pub(super) fn preflight(db: &Connection) -> Result<(), StorageError> {
+    // Name every unclassified category before refusing, so one attempt shows the whole gap.
+    let mut unknown: Vec<(&'static str, String)> = Vec::new();
     for table in table_names(db)? {
         let known = KNOWN_TABLES.contains(&table.as_str())
             || crate::account_db::local_search::lifecycle::is_namespace(&table);
         if !known && nonempty(db, &table)? {
-            return Err(refused("table", &table));
+            unknown.push(("table", table));
         }
     }
     if table_exists(db, "runtime_actor_state")? {
@@ -195,7 +201,7 @@ pub(super) fn preflight(db: &Connection) -> Result<(), StorageError> {
         while let Some(row) = rows.next()? {
             let kind: String = row.get(0)?;
             if !actor_known(&kind) && seen.insert(namespace(&kind).to_owned()) {
-                return Err(refused("actor", namespace(&kind)));
+                unknown.push(("actor", namespace(&kind).to_owned()));
             }
         }
     }
@@ -205,11 +211,15 @@ pub(super) fn preflight(db: &Connection) -> Result<(), StorageError> {
         for kind in kinds {
             let kind = kind?;
             if !event_known(&kind) {
-                return Err(refused("event", &kind));
+                unknown.push(("event", kind));
             }
         }
     }
-    Ok(())
+    let mut first = None;
+    for (kind, name) in unknown {
+        first.get_or_insert(refused(kind, &name));
+    }
+    first.map_or(Ok(()), Err)
 }
 
 /// Refuse a snapshot that still holds any stripped category. Runs on A after sanitizing

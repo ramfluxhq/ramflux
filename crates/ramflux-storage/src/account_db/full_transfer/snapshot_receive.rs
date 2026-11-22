@@ -14,6 +14,22 @@ use std::path::Path;
 fn mismatch() -> StorageError {
     StorageError::PairingField("ManifestMismatch")
 }
+/// Name the failed step and error class only; underlying messages are never formatted.
+fn step<T>(name: &'static str, result: Result<T, StorageError>) -> Result<T, StorageError> {
+    result.inspect_err(|error| {
+        let (class, code) = match error {
+            StorageError::Sqlite(error) => {
+                ("sqlite", error.sqlite_error().map_or(0, |code| code.extended_code))
+            }
+            StorageError::PairingField(field) => (*field, 0),
+            StorageError::Io(_) => ("io", 0),
+            StorageError::AuthorizationRejected => ("authorization", 0),
+            StorageError::AccountKeyMismatch => ("key", 0),
+            _ => ("storage", 0),
+        };
+        tracing::warn!(step = name, class, code, "transfer snapshot install step failed");
+    })
+}
 
 /// True when the compiled catalog is the snapshot family.
 pub(super) fn active() -> bool {
@@ -62,12 +78,14 @@ pub(super) fn merge_cut(
     let result = (|| {
         let key = {
             let mut reader = stage.forward_reader(hash)?;
-            snapshot::reassemble(&mut reader, total, &incoming)?
+            step("reassemble", snapshot::reassemble(&mut reader, total, &incoming))?
         };
-        snapshot::verify_incoming(&incoming, &key)?;
-        let mut private =
-            BackupDatabase::open_full_receiver_copy(&scratch.join("private.db"), private_key)?;
-        let report = private.merge_transfer_snapshot(&incoming, &key)?;
+        step("verify", snapshot::verify_incoming(&incoming, &key))?;
+        let mut private = step(
+            "open private",
+            BackupDatabase::open_full_receiver_copy(&scratch.join("private.db"), private_key),
+        )?;
+        let report = step("merge", private.merge_transfer_snapshot(&incoming, &key))?;
         tracing::info!(
             restored_messages = report.restored.messages,
             restored_contacts = report.restored.contacts,
