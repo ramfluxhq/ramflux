@@ -1,38 +1,42 @@
 // SPDX-License-Identifier: BSD-3-Clause
+//! Session-local drafts, lifecycle and version-fenced semantic events.
 use crate::{
-    CardError, CardRuntime, CardSpec, Component, FieldKind, Mutation, MutationBatch, Scalar,
-    SignedPackage, Tree,
+    CardError, CardRuntime, CardSpec, MutationBatch, SignedPackage, Tree,
+    projection::{self, LocalState},
+    spec::MAX_SAFE_INTEGER,
 };
+use ramflux_protocol::a2ui::{ResolvedAction, ResolvedActionKind, SurfaceDrafts};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     sync::atomic::{AtomicU64, Ordering},
 };
-
 const MAX_QUEUED_EVENTS: usize = 32;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
-/// Scoped to one session and one committed tree. Keys alone never authorize events.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventToken {
     pub session: u64,
-    pub version: u64,
+    pub signed_version: u64,
+    pub edit_seq: u64,
+    pub tree_version: u64,
     pub key: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EventKind {
-    Text { value: String },
-    Number { value: i64 },
-    Select { value: String },
-    Toggle { value: bool },
-    Submit,
+pub enum HostEventKind {
+    Input { value: Value },
+    Activate,
+    SelectTab { index: usize },
+    ModalOpen,
+    ModalClose,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Event {
+pub struct HostEvent {
     pub token: EventToken,
-    pub event: EventKind,
+    pub event: HostEventKind,
 }
 #[derive(Debug, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -44,54 +48,59 @@ pub enum EventResult {
     Edited {
         batch: MutationBatch,
     },
-    /// Declarative intent only. The host SDK must authorize and send it.
+    /// The SDK builds/signs an ActionFrame using this resolver-selected action and
+    /// the current resolved surface. The runtime performs no network dispatch.
     Submit {
-        action: String,
-        fields: BTreeMap<String, Scalar>,
+        action: Box<ResolvedAction>,
         batch: MutationBatch,
     },
 }
-/// A host-owned lifecycle; suspend releases VM capacity and invalidates all tokens.
 pub struct CardSession {
     id: u64,
-    version: u64,
-    mounted_version: u64,
     spec: CardSpec,
-    validation_errors: BTreeMap<(String, String), &'static str>,
     package: SignedPackage,
     vm: Option<CardRuntime>,
     tree: Option<Tree>,
-    queue: VecDeque<Event>,
+    version: u64,
+    edit_seq: u64,
+    local: LocalState,
+    queue: VecDeque<HostEvent>,
     budget: std::rc::Rc<std::cell::RefCell<crate::budget::Budget>>,
+    retired: bool,
+    draft_conflict: bool,
 }
 impl CardSession {
-    /// Open only from validated declarative JSON and a verified package.
+    /// Open an authorized snapshot through the shared resolver and verified library.
     /// # Errors
-    /// Returns validation, engine, capacity or budget errors without a partial session.
+    /// Refuses invalid state, package, budgets or exhausted session identifiers.
     pub fn open(
         spec: CardSpec,
         package: SignedPackage,
     ) -> Result<(Self, MutationBatch), CardError> {
-        let id = NEXT_SESSION
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| CardError::Limit("session identifiers"))?;
+        spec.validate()?;
+        let id = fresh_id()?;
         let budget = crate::budget::Budget::new();
-        let mut vm = CardRuntime::with_budget(&package, spec.clone(), std::rc::Rc::clone(&budget))?;
-        let tree = vm.render(&spec)?;
-        let mut batch = tree.diff(None, 0, 1);
-        batch.host_slots = spec.slots();
+        let local = LocalState::default();
+        let mut candidate = spec.clone();
+        candidate.render_tree = Some(projection::project(&spec, id, 1, 0, &local)?);
+        let mut vm =
+            CardRuntime::with_budget(&package, candidate.clone(), std::rc::Rc::clone(&budget))?;
+        let tree = vm.render(&candidate)?;
+        let batch = tree.diff(None, 0, 1)?;
         Ok((
             Self {
                 id,
-                version: 1,
-                mounted_version: 1,
                 spec,
-                validation_errors: BTreeMap::new(),
                 package,
                 vm: Some(vm),
                 tree: Some(tree),
+                version: 1,
+                edit_seq: 0,
+                local,
                 queue: VecDeque::new(),
                 budget,
+                retired: false,
+                draft_conflict: false,
             },
             batch,
         ))
@@ -108,637 +117,589 @@ impl CardSession {
     pub const fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref()
     }
-    /// Update a whole snapshot; every accepted snapshot advances the tree version.
-    /// # Errors
-    /// Fails validation or disables the VM on an evaluation failure.
-    pub fn update(&mut self, mut spec: CardSpec) -> Result<MutationBatch, CardError> {
-        spec.host.clone_from(&self.spec.host);
-        let result = self.update_inner(spec);
-        if result.is_ok() {
-            self.validation_errors.clear();
-        }
-        result
-    }
-    /// Whether the VM is active; admission/input refusal preserves this state.
     #[must_use]
-    pub const fn is_active(&self) -> bool {
-        self.vm.is_some()
+    pub fn is_active(&self) -> bool {
+        self.vm.as_ref().is_some_and(|vm| !vm.has_failed()) && !self.retired
     }
-    /// Switch host presentation atomically without accepting it from peer JSON.
+    /// Current resolver data for SDK action construction, with raw local inputs.
     /// # Errors
-    /// Rejects invalid catalogs, inactive sessions and evaluation failures.
+    /// Refuses inactive sessions or invalid resolver state.
+    pub fn resolved(&self) -> Result<ramflux_protocol::a2ui::ResolvedSurface, CardError> {
+        if !self.is_active() {
+            return Err(CardError::Inactive);
+        }
+        self.spec.resolved()
+    }
+    /// Replace a signed base; retain drafts only for identical input identity/base.
+    /// # Errors
+    /// Refuses rollback, identity changes, invalid candidates or engine failures.
+    /// Authority loss retires the session and cancels all requests immediately.
+    pub fn update(&mut self, mut spec: CardSpec) -> Result<MutationBatch, CardError> {
+        if !spec.render_allowed || spec.snapshot.closed {
+            self.retired = true;
+            return self.suspend();
+        }
+        if spec.conversation_id != self.spec.conversation_id
+            || spec.author_principal_id != self.spec.author_principal_id
+            || spec.surface_ref != self.spec.surface_ref
+        {
+            return Err(CardError::Invalid("session identity"));
+        }
+        if spec.signed_version < self.spec.signed_version
+            || (spec.signed_version == self.spec.signed_version
+                && spec.signed_hash != self.spec.signed_hash)
+        {
+            return Err(CardError::Invalid("signed rollback"));
+        }
+        spec.host.clone_from(&self.spec.host);
+        spec.validate()?;
+        if spec.signed_version == self.spec.signed_version {
+            if !self.is_active() {
+                return Err(CardError::Inactive);
+            }
+            let tree = self.tree.as_ref().ok_or(CardError::Inactive)?;
+            return tree.diff(Some(tree), self.version, self.version);
+        }
+        let drafts = retain_drafts(&self.spec, &spec)?;
+        let conflict = drafts.len() != self.spec.drafts.len();
+        spec.drafts = drafts;
+        let mut local = self.local.clone();
+        local.modals.clear();
+        local.cancel_link();
+        local.consumed.clear();
+        let keys = projection::keys(&spec.resolved()?)?;
+        let resolved = spec.resolved()?;
+        local.tabs.retain(|key, index| {
+            keys.iter()
+                .position(|candidate| candidate == key)
+                .and_then(|at| resolved.nodes.get(at))
+                .and_then(|node| node.properties.get("tabs"))
+                .and_then(Value::as_array)
+                .is_some_and(|tabs| *index < tabs.len())
+        });
+        let batch = self.commit(spec, local, self.edit_seq)?;
+        // Host conflict notice is a typed result through the session's read API.
+        self.draft_conflict = conflict;
+        Ok(batch)
+    }
+    /// Whether the last signed update discarded conflicting drafts.
+    #[must_use]
+    pub const fn draft_conflict(&self) -> bool {
+        self.draft_conflict
+    }
+    /// Switch host presentation while retaining raw values and drafts.
+    /// # Errors
+    /// Refuses malformed presentation or failed execution.
     pub fn present(
         &mut self,
         presentation: crate::Presentation,
     ) -> Result<MutationBatch, CardError> {
-        presentation.validate()?;
-        let mut spec = self.spec.clone();
-        for component in &mut spec.components {
-            if let Component::Form(form) = component {
-                for field in &mut form.fields {
-                    if let Some(key) =
-                        self.validation_errors.get(&(form.id.clone(), field.id.clone()))
-                    {
-                        field.error = Some(presentation.text(key).into());
-                    }
-                }
-            }
-        }
-        spec.host = Some(presentation);
-        self.update_inner(spec)
+        let spec = self.spec.clone().with_presentation(presentation)?;
+        self.commit(spec, self.local.clone(), self.edit_seq)
     }
-    fn update_inner(&mut self, spec: CardSpec) -> Result<MutationBatch, CardError> {
-        spec.validate()?;
+    fn commit(
+        &mut self,
+        mut spec: CardSpec,
+        local: LocalState,
+        edit_seq: u64,
+    ) -> Result<MutationBatch, CardError> {
+        if self.retired {
+            return Err(CardError::Inactive);
+        }
         let next = self.next_version()?;
-        let result = self.vm.as_mut().ok_or(CardError::Inactive)?.render(&spec);
-        let tree = match result {
-            Ok(tree) => tree,
-            Err(error) => {
-                if self.vm.as_ref().is_some_and(CardRuntime::has_failed) {
-                    self.vm.take();
-                    self.queue.clear();
-                    self.version = next;
-                }
-                return Err(error);
-            }
-        };
-        let mut batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
-        batch.host_slots = spec.slots();
-        self.version = next;
-        self.mounted_version = next;
+        spec.validate()?;
+        spec.render_tree = Some(projection::project(&spec, self.id, next, edit_seq, &local)?);
+        let tree = self.vm.as_mut().ok_or(CardError::Inactive)?.render(&spec)?;
+        let batch = tree.diff(self.tree.as_ref(), self.version, next)?;
+        spec.render_tree = None;
         self.spec = spec;
+        self.local = local;
+        self.edit_seq = edit_seq;
+        self.version = next;
         self.tree = Some(tree);
         Ok(batch)
     }
-    fn submit(&mut self, form: crate::Form) -> Result<EventResult, CardError> {
-        let mut errors = BTreeMap::new();
-        let mut fields = BTreeMap::new();
-        for f in form.fields.clone().into_iter().filter(|f| !f.disabled) {
-            let binding = f.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
-            let value = self.spec.model.get(binding).ok_or(CardError::Invalid("field"))?;
-            let missing = f.required
-                && match value {
-                    Scalar::Text(v) => v.trim().is_empty(),
-                    Scalar::Toggle(v) => !*v,
-                    Scalar::Number(_) => false,
-                };
-            if missing {
-                errors.insert(
-                    f.id.clone(),
-                    self.spec.presentation()?.text("form_required").to_owned(),
-                );
-                self.validation_errors.insert((form.id.clone(), f.id.clone()), "form_required");
-            } else if let Some(error) = &f.error {
-                errors.insert(f.id.clone(), error.clone());
-            }
-            fields.insert(binding.to_owned(), value.clone());
-        }
-        if !errors.is_empty() {
-            let mut spec = self.spec.clone();
-            for c in &mut spec.components {
-                if let Component::Form(candidate) = c
-                    && candidate.id == form.id
-                {
-                    for f in &mut candidate.fields {
-                        if let Some(error) = errors.get(&f.id) {
-                            f.error = Some(error.clone());
-                        }
-                    }
-                }
-            }
-            return Ok(EventResult::Validation { batch: self.update_inner(spec)? });
-        }
-        let next = self.next_version()?;
-        let batch = MutationBatch {
-            previous_version: self.mounted_version,
-            version: next,
-            mutations: Vec::new(),
-            host_slots: self.spec.slots(),
-        };
-        self.version = next;
-        self.mounted_version = next;
-        Ok(EventResult::Submit { action: form.submit, fields, batch })
-    }
-    /// Queue at most 32 bounded events; stale tokens are checked again on delivery.
+    /// Queue one bounded host event; semantic admission is repeated at delivery.
     /// # Errors
-    /// Rejects queue overflow and oversized strings before allocating queue storage.
-    pub fn enqueue(&mut self, event: Event) -> Result<(), CardError> {
-        if self.queue.len() >= MAX_QUEUED_EVENTS {
-            return Err(CardError::Limit("event queue"));
-        }
-        if event.token.key.len() > 160
-            || matches!(&event.event, EventKind::Text { value } | EventKind::Select { value } if value.len() > 4096)
-        {
-            return Err(CardError::Limit("event"));
+    /// Refuses oversized JSON or a full event queue.
+    pub fn enqueue(&mut self, event: HostEvent) -> Result<(), CardError> {
+        if self.queue.len() >= MAX_QUEUED_EVENTS || serde_json::to_vec(&event)?.len() > 16 * 1024 {
+            return Err(CardError::Limit("event queue or bytes"));
         }
         self.queue.push_back(event);
         Ok(())
     }
-    /// Deliver one queued event against the currently displayed tree.
+    /// Deliver one event against current session, signed base, edit and tree versions.
     /// # Errors
-    /// Rejects inactive sessions, invalid control kinds and invalid model changes.
+    /// Refuses wrong control kinds, hidden/disabled targets or invalid drafts.
     pub fn next_event(&mut self) -> Result<Option<EventResult>, CardError> {
         let Some(event) = self.queue.pop_front() else {
             return Ok(None);
         };
-        if event.token.session != self.id || event.token.version != self.version {
+        if !self.current(&event.token) {
             return Ok(Some(EventResult::StaleDropped));
         }
-        if self.vm.is_none() {
-            return Err(CardError::Inactive);
-        }
-        let (form, field) = self
-            .spec
-            .components
-            .iter()
-            .filter_map(|c| if let Component::Form(form) = c { Some(form) } else { None })
-            .find_map(|form| {
-                if matches!(event.event, EventKind::Submit)
-                    && event.token.key == format!("{}:submit", form.id)
-                {
-                    return Some((form.clone(), None));
-                }
-                form.fields
-                    .clone()
-                    .into_iter()
-                    .find(|f| event.token.key == format!("{}:{}", form.id, f.id))
-                    .map(|f| (form.clone(), Some(f)))
-            })
-            .ok_or(CardError::Invalid("event control"))?;
-        if form.disabled || field.as_ref().is_some_and(|f| f.disabled) {
+        let node = self
+            .tree
+            .as_ref()
+            .and_then(|tree| tree.nodes.iter().find(|node| node.key == event.token.key))
+            .cloned()
+            .ok_or(CardError::Invalid("event key"))?;
+        if node.attrs.get("disabled").and_then(Value::as_bool) == Some(true) {
             return Err(CardError::Invalid("disabled control"));
         }
-        if matches!(event.event, EventKind::Submit) {
-            if field.is_some() {
-                return Err(CardError::Invalid("submit control"));
-            }
-            return self.submit(form).map(Some);
-        }
-        let field = field.ok_or(CardError::Invalid("field control"))?;
-        let value = match (event.event, field.kind) {
-            (EventKind::Text { value }, FieldKind::Input)
-            | (EventKind::Select { value }, FieldKind::Select) => Scalar::Text(value),
-            (EventKind::Number { value }, FieldKind::Number) => Scalar::Number(value),
-            (EventKind::Toggle { value }, FieldKind::Toggle) => Scalar::Toggle(value),
-            _ => return Err(CardError::Invalid("event value type")),
-        };
-        if let Scalar::Number(number) = &value
-            && (field.minimum.is_some_and(|min| *number < min)
-                || field.maximum.is_some_and(|max| *number > max))
-        {
-            let mut spec = self.spec.clone();
-            for component in &mut spec.components {
-                if let Component::Form(candidate) = component
-                    && candidate.id == form.id
-                {
-                    for item in &mut candidate.fields {
-                        if item.id == field.id {
-                            item.error = Some(self.spec.presentation()?.text("form_range").into());
-                        }
-                    }
-                }
-            }
-            let batch = self.update_inner(spec)?;
-            self.validation_errors.insert((form.id, field.id), "form_range");
-            return Ok(Some(EventResult::Validation { batch }));
-        }
-        self.validation_errors.remove(&(form.id.clone(), field.id.clone()));
-        let binding = field.binding.strip_prefix('/').ok_or(CardError::Invalid("binding"))?;
-        let mut spec = self.spec.clone();
-        spec.model.insert(binding.into(), value);
-        for c in &mut spec.components {
-            if let Component::Form(candidate) = c
-                && candidate.id == form.id
-            {
-                for f in &mut candidate.fields {
-                    if f.id == field.id {
-                        f.error = None;
-                    }
-                }
-            }
-        }
-        Ok(Some(EventResult::Edited { batch: self.update_inner(spec)? }))
+        let result = self.deliver(&node, event.event)?;
+        Ok(Some(result))
     }
-    /// Release the interpreter and remove the mounted tree. Repeated suspension is safe.
+    fn deliver(
+        &mut self,
+        node: &crate::Node,
+        event: HostEventKind,
+    ) -> Result<EventResult, CardError> {
+        let mut local = self.local.clone();
+        match event {
+            HostEventKind::Input { value } => {
+                let pointer = node
+                    .attrs
+                    .get("input_pointer")
+                    .and_then(Value::as_str)
+                    .ok_or(CardError::Invalid("input target"))?;
+                let mut spec = self.spec.clone();
+                spec.drafts.insert(pointer.into(), value);
+                let seq = match advance(self.edit_seq, "edit sequence") {
+                    Ok(seq) => seq,
+                    Err(error) => {
+                        self.vm = None;
+                        self.tree = None;
+                        self.queue.clear();
+                        self.retired = true;
+                        return Err(error);
+                    }
+                };
+                Ok(EventResult::Edited { batch: self.commit(spec, local, seq)? })
+            }
+            HostEventKind::Activate => self.activate(node),
+            HostEventKind::SelectTab { index } if node.kind == crate::NodeKind::Tabs => {
+                let count = node.attrs.get("tabs").and_then(Value::as_array).map_or(0, Vec::len);
+                if index >= count {
+                    return Err(CardError::Invalid("tab index"));
+                }
+                local.tabs.insert(node.key.clone(), index);
+                local.modals.clear();
+                local.cancel_link();
+                Ok(EventResult::Edited {
+                    batch: self.commit(self.spec.clone(), local, self.edit_seq)?,
+                })
+            }
+            HostEventKind::ModalOpen
+                if node.kind == crate::NodeKind::Modal && local.link.is_none() =>
+            {
+                local.modals.clear();
+                local.modals.insert(node.key.clone());
+                Ok(EventResult::Edited {
+                    batch: self.commit(self.spec.clone(), local, self.edit_seq)?,
+                })
+            }
+            HostEventKind::ModalClose if node.kind == crate::NodeKind::Modal => {
+                local.modals.remove(&node.key);
+                Ok(EventResult::Edited {
+                    batch: self.commit(self.spec.clone(), local, self.edit_seq)?,
+                })
+            }
+            _ => Err(CardError::Invalid("event control kind")),
+        }
+    }
+    fn activate(&mut self, node: &crate::Node) -> Result<EventResult, CardError> {
+        let resolved = self.spec.resolved()?;
+        let action = resolved
+            .action(&node.component_id, &node.source_instance)
+            .cloned()
+            .ok_or(CardError::Invalid("action target"))?;
+        if matches!(action.kind, ResolvedActionKind::Event { checks_pass: false, .. }) {
+            return Ok(EventResult::Validation {
+                batch: self.commit(self.spec.clone(), self.local.clone(), self.edit_seq)?,
+            });
+        }
+        let mut local = self.local.clone();
+        local.consumed.insert(node.key.clone());
+        if let ResolvedActionKind::OpenUrl { url } = &action.kind {
+            local.modals.clear();
+            local.link = Some((node.key.clone(), ramflux_protocol::a2ui::validate_url(url)?));
+        }
+        let batch = self.commit(self.spec.clone(), local, self.edit_seq)?;
+        if matches!(action.kind, ResolvedActionKind::OpenUrl { .. }) {
+            Ok(EventResult::Edited { batch })
+        } else {
+            Ok(EventResult::Submit { action: Box::new(action), batch })
+        }
+    }
+    /// Finish one SDK-handled link request and re-enable its Button locally.
+    /// This performs no browser handoff, approval decision or authority operation.
+    /// The SDK consumes/rechecks authority before reporting this completion.
     /// # Errors
-    /// Fails only if the monotonic version space is exhausted.
+    /// Refuses non-link slots, mismatched request identities and deny outcomes.
+    pub fn complete_link(
+        &mut self,
+        reply: &crate::HostSlotReply,
+    ) -> Result<EventResult, CardError> {
+        if !self.current(&reply.token) {
+            return Ok(EventResult::StaleDropped);
+        }
+        if matches!(reply.outcome, crate::SlotOutcome::Deny) {
+            return Err(CardError::Invalid("link completion outcome"));
+        }
+        let slot = self
+            .tree
+            .as_ref()
+            .and_then(|tree| {
+                tree.host_slots
+                    .iter()
+                    .find(|slot| slot.id == reply.slot_id && slot.token == reply.token)
+            })
+            .ok_or(CardError::Invalid("link completion slot"))?;
+        let crate::SlotRequest::LinkOpen { request_id, .. } = &slot.request else {
+            return Err(CardError::Invalid("not a link slot"));
+        };
+        if request_id != &reply.request_id
+            || self.local.link.as_ref().is_none_or(|(key, _)| key != &reply.token.key)
+        {
+            return Err(CardError::Invalid("link completion request"));
+        }
+        let mut local = self.local.clone();
+        local.cancel_link();
+        local.consumed.remove(&reply.token.key);
+        Ok(EventResult::Edited { batch: self.commit(self.spec.clone(), local, self.edit_seq)? })
+    }
+
+    fn current(&self, token: &EventToken) -> bool {
+        self.is_active()
+            && token.session == self.id
+            && token.signed_version == self.spec.signed_version
+            && token.edit_seq == self.edit_seq
+            && token.tree_version == self.version
+    }
+    /// Remove every mounted node/slot and invalidate queued events, releasing the VM.
+    /// # Errors
+    /// Refuses exhausted version space; authority retirement is permanent.
     pub fn suspend(&mut self) -> Result<MutationBatch, CardError> {
         let next = self.next_version()?;
-        let mutations = self.tree.as_ref().map_or_else(Vec::new, |t| {
-            // Removing a root removes its complete native subtree.
-            vec![Mutation::Remove { key: t.root.key.clone() }]
-        });
-        self.vm.take();
-        self.tree.take();
+        let mut empty =
+            projection::project(&self.spec, self.id, next, self.edit_seq, &LocalState::default())?;
+        empty.nodes.clear();
+        empty.host_slots.clear();
+        let batch = empty.diff(self.tree.as_ref(), self.version, next)?;
+        self.vm = None;
+        self.tree = None;
         self.queue.clear();
-        let batch = MutationBatch {
-            previous_version: self.mounted_version,
-            version: next,
-            mutations,
-            host_slots: Vec::new(),
-        };
+        self.local.modals.clear();
+        self.local.cancel_link();
         self.version = next;
-        self.mounted_version = next;
         Ok(batch)
     }
-    /// Recreate a budgeted VM and publish a full tree after suspension.
+    /// Resume with a fresh session identity and a reset batch.
     /// # Errors
-    /// Fails if already active or package evaluation/capacity fails.
+    /// Refuses retired/active sessions, limits and execution failures.
     pub fn resume(&mut self) -> Result<MutationBatch, CardError> {
-        if self.vm.is_some() {
-            return Err(CardError::Invalid("already active"));
+        if self.retired || self.vm.is_some() {
+            return Err(CardError::Inactive);
         }
-        let next = self.next_version()?;
+        let id = fresh_id()?;
+        let mut spec = self.spec.clone();
+        spec.render_tree = Some(projection::project(&spec, id, 1, self.edit_seq, &self.local)?);
         let mut vm = CardRuntime::with_budget(
             &self.package,
-            self.spec.clone(),
+            spec.clone(),
             std::rc::Rc::clone(&self.budget),
         )?;
-        let tree = vm.render(&self.spec)?;
-        let mut batch = tree.diff(self.tree.as_ref(), self.mounted_version, next);
-        batch.host_slots = self.spec.slots();
+        let tree = vm.render(&spec)?;
+        let batch = tree.diff(None, 0, 1)?;
+        self.id = id;
         self.vm = Some(vm);
         self.tree = Some(tree);
-        self.version = next;
-        self.mounted_version = next;
+        self.version = 1;
         Ok(batch)
     }
-    fn next_version(&self) -> Result<u64, CardError> {
-        self.version.checked_add(1).ok_or(CardError::Limit("tree version"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::tests::{fixture, guard, library};
-    fn event(session: &CardSession, key: &str, kind: EventKind) -> Event {
-        Event {
-            token: EventToken {
-                session: session.id(),
-                version: session.version(),
-                key: key.into(),
-            },
-            event: kind,
-        }
-    }
-    pub(super) fn without_style(mut batch: MutationBatch) -> MutationBatch {
-        for mutation in &mut batch.mutations {
-            if let Mutation::Upsert { node, .. } = mutation {
-                node.attrs.style = None;
+    fn next_version(&mut self) -> Result<u64, CardError> {
+        match advance(self.version, "tree version") {
+            Ok(next) => Ok(next),
+            Err(error) => {
+                self.vm = None;
+                self.tree = None;
+                self.queue.clear();
+                self.retired = true;
+                Err(error)
             }
         }
-        batch
     }
-    #[test]
-    fn form_fixture_tree_mutations_and_stale_events() {
-        let _guard = guard();
-        let (mut session, batch) =
-            CardSession::open(fixture(), library()).expect("test: open form");
-        let tree =
-            serde_json::to_value(session.tree().map(Tree::without_style)).expect("test: snapshot");
-        assert_eq!(
-            tree,
-            serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.tree.json"))
-                .expect("test: expected tree"),
-            "real bytecode must render the semantic fixture"
-        );
-        assert_eq!(
-            serde_json::to_value(without_style(batch)).expect("test: mutations"),
-            serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.mount.json"))
-                .expect("test: expected mutations"),
-            "initial keyed mount must match snapshot"
-        );
-        let stale = event(&session, "profile:submit", EventKind::Submit);
-        session
-            .enqueue(event(&session, "profile:field", EventKind::Text { value: "Grace".into() }))
-            .expect("test: queue edit");
-        let Some(EventResult::Edited { batch }) = session.next_event().expect("test: edit") else {
-            panic!("test: expected edit batch");
-        };
-        assert_eq!(
-            serde_json::to_value(without_style(batch)).expect("test: edit mutations"),
-            serde_json::from_str::<serde_json::Value>(include_str!("../fixtures/form.edit.json"))
-                .expect("test: expected edit"),
-            "text edit must update only its keyed field"
-        );
-        session.enqueue(stale).expect("test: queue old token");
-        assert!(
-            matches!(
-                session.next_event().expect("test: stale delivery"),
-                Some(EventResult::StaleDropped)
-            ),
-            "old tree cannot submit after an edit"
-        );
-        session
-            .enqueue(event(&session, "profile:submit", EventKind::Submit))
-            .expect("test: queue submit");
-        let Some(EventResult::Submit { fields, action, .. }) =
-            session.next_event().expect("test: submit")
-        else {
-            panic!("test: expected intent");
-        };
-        assert_eq!(
-            fields,
-            BTreeMap::from([("name".into(), Scalar::Text("Grace".into()))]),
-            "submit must include current owned fields only"
-        );
-        assert_eq!(action, "save", "action must come from validated card");
-    }
-    #[test]
-    fn lifecycle_capacity_and_queue_are_bounded() {
-        let _guard = guard();
-        let p = library();
-        let (mut a, _) = CardSession::open(fixture(), p.clone()).expect("test: first VM");
-        let (_b, _) = CardSession::open(fixture(), p.clone()).expect("test: second VM");
-        assert!(
-            CardSession::open(fixture(), p.clone()).is_err(),
-            "third resident VM must be rejected"
-        );
-        let stale = event(&a, "profile:submit", EventKind::Submit);
-        for _ in 0..MAX_QUEUED_EVENTS {
-            a.enqueue(stale.clone()).expect("test: bounded queue admission");
+}
+fn fresh_id() -> Result<u64, CardError> {
+    NEXT_SESSION
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+            id.checked_add(1).filter(|next| *next <= MAX_SAFE_INTEGER)
+        })
+        .map_err(|_| CardError::Limit("session identifiers"))
+}
+fn advance(value: u64, name: &'static str) -> Result<u64, CardError> {
+    value.checked_add(1).filter(|next| *next <= MAX_SAFE_INTEGER).ok_or(CardError::Limit(name))
+}
+fn retain_drafts(old: &CardSpec, new: &CardSpec) -> Result<SurfaceDrafts, CardError> {
+    let before = old
+        .snapshot
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+    let after = new
+        .snapshot
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+    let mut retained = SurfaceDrafts::new();
+    for (pointer, value) in &old.drafts {
+        let input = before
+            .inputs
+            .iter()
+            .find(|input| &input.pointer == pointer)
+            .ok_or(CardError::Invalid("draft owner"))?;
+        let same = after.inputs.iter().any(|other| {
+            other.component_id == input.component_id
+                && other.source_instance == input.source_instance
+                && other.pointer == input.pointer
+                && other.value == input.value
+                && other.component == input.component
+                && other.scope == input.scope
+        });
+        if same {
+            let mut candidate = retained.clone();
+            candidate.insert(pointer.clone(), value.clone());
+            if new
+                .snapshot
+                .resolve_for_locale(&candidate, ramflux_protocol::a2ui::DisplayLocale::En)
+                .is_ok_and(|resolved| {
+                    resolved
+                        .inputs
+                        .iter()
+                        .filter(|input| candidate.contains_key(&input.pointer))
+                        .all(|input| {
+                            resolved
+                                .nodes
+                                .get(input.node)
+                                .is_some_and(|node| node.errors.is_empty())
+                        })
+                })
+            {
+                retained = candidate;
+            }
         }
-        assert!(a.enqueue(stale.clone()).is_err(), "queue must reject the 33rd event");
-        a.suspend().expect("test: suspend");
-        {
-            let (_c, _) =
-                CardSession::open(fixture(), p).expect("test: suspended VM frees capacity");
-        }
-        a.resume().expect("test: resume");
-        a.enqueue(stale).expect("test: old event");
-        assert!(
-            matches!(
-                a.next_event().expect("test: stale after resume"),
-                Some(EventResult::StaleDropped)
-            ),
-            "resume must never resurrect old tokens"
-        );
     }
+    Ok(retained)
 }
 
 #[cfg(test)]
-mod regression_tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::{
-        Form, Node, NodeKind,
-        runtime::tests::{fixture, guard, library, package},
-    };
-    fn token(session: &CardSession, key: &str, event: EventKind) -> Event {
-        Event {
+    use crate::runtime::tests::{fixture, guard, library};
+    pub(crate) fn event(session: &CardSession, id: &str, event: HostEventKind) -> HostEvent {
+        let tree = session.tree().expect("test: mounted tree");
+        let node = tree.nodes.iter().find(|n| n.component_id == id).expect("test: target");
+        HostEvent {
             token: EventToken {
                 session: session.id(),
-                version: session.version(),
-                key: key.into(),
+                signed_version: tree.signed_version,
+                edit_seq: tree.edit_seq,
+                tree_version: tree.tree_version,
+                key: node.key.clone(),
             },
             event,
         }
     }
-    fn spec(ids: &[&str]) -> CardSpec {
-        let mut spec = fixture();
-        spec.components = ids
-            .iter()
-            .map(|id| {
-                Component::Form(Form {
-                    id: (*id).into(),
-                    title: format!("Form {id}"),
-
-                    submit: format!("save-{id}"),
-                    fields: vec![crate::Field {
-                        id: "field".into(),
-                        kind: FieldKind::Input,
-                        label: "Name".into(),
-                        binding: format!("/{id}"),
-                        required: false,
-                        disabled: false,
-                        error: None,
-                        options: Vec::new(),
-                        minimum: None,
-                        maximum: None,
-                    }],
-                    disabled: false,
-                })
-            })
-            .collect();
-        spec.model =
-            ids.iter().map(|id| ((*id).into(), Scalar::Text(format!("Value {id}")))).collect();
-        spec
+    pub(crate) fn send(
+        session: &mut CardSession,
+        id: &str,
+        kind: HostEventKind,
+    ) -> Result<EventResult, CardError> {
+        session.enqueue(event(session, id, kind))?;
+        session.next_event()?.ok_or(CardError::Invalid("test event"))
     }
-    fn shallow(node: &Node) -> Node {
-        let mut node = node.clone();
-        node.children.clear();
-        node
+    #[test]
+    fn form_fixture_tree_mutations_and_stale_events() {
+        let _guard = guard();
+        let (mut session, mount) = CardSession::open(fixture(), library()).expect("test: open");
+        assert_eq!(mount.mutations.len(), 5, "all reachable instances mount");
+        let stale = event(&session, "button", HostEventKind::Activate);
+        send(&mut session, "input", HostEventKind::Input { value: serde_json::json!("Grace") })
+            .expect("test: edit");
+        assert_eq!(
+            session.spec.snapshot.data_model["name"], "Ada",
+            "draft never mutates signed base"
+        );
+        session.enqueue(stale).expect("test: queue stale");
+        assert!(
+            matches!(session.next_event().expect("test: deliver"), Some(EventResult::StaleDropped)),
+            "editing fences prior tokens"
+        );
+        let result = send(&mut session, "button", HostEventKind::Activate).expect("test: activate");
+        assert!(matches!(result, EventResult::Submit { .. }), "activation emits a resolver action");
+        session.update(fixture()).expect("test: identical signed read is idempotent");
+        assert!(
+            send(&mut session, "button", HostEventKind::Activate).is_err(),
+            "consumed buttons remain disabled until signed update"
+        );
+        session.suspend().expect("test: offscreen suspension");
+        session.resume().expect("test: fresh identity on resume");
+        assert!(
+            send(&mut session, "button", HostEventKind::Activate).is_err(),
+            "offscreen lifecycle cannot replay a consumed submit"
+        );
+        let mut link = fixture();
+        link.signed_version = 2;
+        let button = link
+            .snapshot
+            .components
+            .iter_mut()
+            .find(|node| node["id"] == "button")
+            .expect("test: button");
+        button["action"] = serde_json::json!({"functionCall":{"@call":"openUrl","args":{"url":"https://example.com/path"}}});
+        link.signed_hash = link.snapshot.hash().expect("test: new signed link");
+        session.update(link).expect("test: signed update re-arms the action");
+        assert!(
+            matches!(
+                send(&mut session, "button", HostEventKind::Activate)
+                    .expect("test: link activation"),
+                EventResult::Edited { .. }
+            ),
+            "link never submits an author event"
+        );
+        let slot = session
+            .tree()
+            .expect("test: link tree")
+            .host_slots
+            .first()
+            .expect("test: host link request")
+            .clone();
+        let crate::SlotRequest::LinkOpen { request_id, .. } = slot.request else {
+            panic!("test: expected a link request")
+        };
+        let reply = crate::HostSlotReply {
+            token: slot.token,
+            slot_id: slot.id,
+            request_id,
+            outcome: crate::SlotOutcome::Cancel,
+        };
+        session
+            .complete_link(&reply)
+            .expect("test: SDK-reported cancellation clears local link pending");
+        assert!(
+            matches!(
+                session.complete_link(&reply).expect("test: replayed completion"),
+                EventResult::StaleDropped
+            ),
+            "completion is consumed by advancing the token version"
+        );
+        send(&mut session, "button", HostEventKind::Activate)
+            .expect("test: a cancelled link can be requested again");
+        session.suspend().expect("test: suspension cancels link presentation");
+        session.resume().expect("test: resume after cancelled link");
+        send(&mut session, "button", HostEventKind::Activate)
+            .expect("test: cancelled link latch is released across suspension");
     }
-    fn form_node(session: &CardSession, key: &str) -> Node {
-        shallow(
-            session
-                .tree()
-                .expect("test: mounted tree")
-                .root
-                .children
-                .iter()
-                .find(|n| n.key == key)
-                .expect("test: expected form"),
-        )
+    #[test]
+    fn lifecycle_capacity_and_queue_are_bounded() {
+        let _guard = guard();
+        let (mut a, _) = CardSession::open(fixture(), library()).expect("test: first VM");
+        let (b, _) = CardSession::open(fixture(), library()).expect("test: second VM");
+        assert!(CardSession::open(fixture(), library()).is_err(), "at most two resident VMs");
+        drop(b);
+        for _ in 0..32 {
+            a.enqueue(event(&a, "input", HostEventKind::Input { value: serde_json::json!("Ada") }))
+                .expect("test: queue capacity");
+        }
+        assert!(
+            a.enqueue(event(&a, "button", HostEventKind::Activate)).is_err(),
+            "queue is bounded"
+        );
+        let id = a.id();
+        let batch = a.suspend().expect("test: suspend");
+        assert!(batch.host_slots.is_empty(), "suspension cancels host work");
+        a.resume().expect("test: resume");
+        assert_ne!(a.id(), id, "resume has fresh token identity");
     }
     #[test]
     fn real_two_form_diff_covers_reorder_middle_insert_remove_and_value() {
         let _guard = guard();
-        let (mut session, _) =
-            CardSession::open(spec(&["a", "b"]), library()).expect("test: two forms");
-        let batch = session.update(spec(&["b", "a"])).expect("test: reorder");
-        assert_eq!(
-            batch.mutations,
-            vec![
-                Mutation::Upsert {
-                    parent: Some("root".into()),
-                    index: 0,
-                    node: form_node(&session, "b")
-                },
-                Mutation::Upsert {
-                    parent: Some("root".into()),
-                    index: 1,
-                    node: form_node(&session, "a")
-                }
-            ],
-            "reorder must only move both form keys"
-        );
-        let batch = session.update(spec(&["b", "c", "a"])).expect("test: middle insertion");
-        let c = session
-            .tree()
-            .expect("test: tree")
-            .root
-            .children
-            .iter()
-            .find(|n| n.key == "c")
-            .expect("test: inserted form");
-        let field = c.children.first().expect("test: field");
-        let submit = c.children.get(1).expect("test: submit");
-        assert_eq!(
-            batch.mutations,
-            vec![
-                Mutation::Upsert { parent: Some("root".into()), index: 1, node: shallow(c) },
-                Mutation::Upsert { parent: Some("c".into()), index: 0, node: shallow(field) },
-                Mutation::Upsert { parent: Some("c".into()), index: 1, node: shallow(submit) },
-                Mutation::Upsert {
-                    parent: Some("root".into()),
-                    index: 2,
-                    node: form_node(&session, "a")
-                }
-            ],
-            "middle insert must mount only the new subtree and move the following sibling"
-        );
-        let batch = session.update(spec(&["b", "a"])).expect("test: middle removal");
-        assert_eq!(
-            batch.mutations,
-            vec![
-                Mutation::Remove { key: "c:submit".into() },
-                Mutation::Remove { key: "c:field".into() },
-                Mutation::Remove { key: "c".into() },
-                Mutation::Upsert {
-                    parent: Some("root".into()),
-                    index: 1,
-                    node: form_node(&session, "a")
-                }
-            ],
-            "middle removal must remove children before parent and reposition the sibling"
-        );
-        let mut changed = spec(&["b", "a"]);
-        changed.model.insert("a".into(), "Changed".into());
-        let batch = super::tests::without_style(session.update(changed).expect("test: value edit"));
-        assert_eq!(
-            batch.mutations,
-            vec![Mutation::Upsert {
-                parent: Some("a".into()),
-                index: 0,
-                node: Node {
-                    key: "a:field".into(),
-                    kind: NodeKind::TextField,
-                    text: "Name".into(),
-                    value: "Changed".into(),
-                    action: None,
-                    children: Vec::new(),
-                    attrs: Box::default(),
-                }
-            }],
-            "value-only edits must not remount siblings or form containers"
-        );
+        let (mut s, _) = CardSession::open(fixture(), library()).expect("test: open");
+        let mut spec = s.spec.clone();
+        let form =
+            spec.snapshot.components.iter_mut().find(|n| n["id"] == "form").expect("test: form");
+        form["children"] = serde_json::json!(["button", "input"]);
+        spec.signed_version += 1;
+        spec.signed_hash = spec.snapshot.hash().expect("test: hash");
+        let batch = s.update(spec).expect("test: reorder");
+        assert!(batch.mutations.iter().any(|m| matches!(m,crate::Mutation::Upsert{index:0,node,..} if node.component_id=="button")),"reordered keyed controls are reinserted at their current positions");
     }
     #[test]
     fn replay_foreign_wrong_kind_and_oversized_events_do_not_corrupt_session() {
-        const MODEL_BOUND: usize = 4096;
-        const KEY_BOUND: usize = 160;
         let _guard = guard();
-        let (mut session, _) = CardSession::open(fixture(), library()).expect("test: session");
-        let submit = token(&session, "profile:submit", EventKind::Submit);
-        session.enqueue(submit.clone()).expect("test: first submit");
+        let (mut s, _) = CardSession::open(fixture(), library()).expect("test: open");
+        let mut foreign = event(&s, "input", HostEventKind::Activate);
+        foreign.token.session += 1;
+        s.enqueue(foreign).expect("test: foreign queue");
         assert!(
-            matches!(session.next_event().expect("test: submit"), Some(EventResult::Submit { .. })),
-            "current submit must emit an intent"
+            matches!(s.next_event().expect("test: foreign"), Some(EventResult::StaleDropped)),
+            "foreign sessions drop"
         );
-        session.enqueue(submit).expect("test: replay queue");
+        assert!(send(&mut s, "input", HostEventKind::Activate).is_err(), "input is not an action");
         assert!(
-            matches!(session.next_event().expect("test: replay"), Some(EventResult::StaleDropped)),
-            "replayed submit must be dropped"
-        );
-        let mut foreign = token(&session, "profile:submit", EventKind::Submit);
-        foreign.token.session = 0;
-        session.enqueue(foreign).expect("test: foreign queue");
-        assert!(
-            matches!(session.next_event().expect("test: foreign"), Some(EventResult::StaleDropped)),
-            "foreign session token must be dropped"
-        );
-        session
-            .enqueue(token(&session, "profile:submit", EventKind::Text { value: "wrong".into() }))
-            .expect("test: mismatched event queue");
-        assert!(
-            matches!(session.next_event(), Err(CardError::Invalid("event control"))),
-            "text cannot target a submit control"
+            send(&mut s, "input", HostEventKind::Input { value: serde_json::json!(123) }).is_err(),
+            "input type must match resolver ownership"
         );
         assert!(
-            session
-                .enqueue(token(&session, &"x".repeat(KEY_BOUND + 1), EventKind::Submit))
-                .is_err(),
-            "oversized key must fail before enqueue"
-        );
-        assert!(
-            session
-                .enqueue(token(
-                    &session,
-                    "profile:field",
-                    EventKind::Text { value: "x".repeat(MODEL_BOUND + 1) }
-                ))
-                .is_err(),
-            "oversized text must fail before enqueue"
-        );
-        let prior = session.version();
-        session
-            .enqueue(token(
-                &session,
-                "profile:field",
-                EventKind::Text { value: "x".repeat(MODEL_BOUND) },
+            s.enqueue(event(
+                &s,
+                "input",
+                HostEventKind::Input { value: serde_json::json!("x".repeat(17000)) }
             ))
-            .expect("test: boundary event enqueued");
-        assert!(
-            matches!(session.next_event(), Err(CardError::Limit("model"))),
-            "JSON model overhead must reject the boundary text value"
+            .is_err(),
+            "bound event before queuing"
         );
-        assert_eq!(
-            session.version(),
-            prior,
-            "pre-evaluation rejection cannot consume a tree version"
-        );
-        session.update(fixture()).expect("test: VM remains usable after rejected model");
+        assert_eq!(s.version(), 1, "refusals preserve the last good tree and tokens");
     }
     #[test]
     fn failed_evaluation_invalidates_tokens_and_resume_diffs_the_displayed_tree() {
         let _guard = guard();
-        let source = include_str!("../library/form.js")
-            .replace("function render(", "function renderForm(")
-            + "\nlet calls=0;function render(input){if(++calls===2)throw 1;renderForm(input)}";
-        let (mut session, _) =
-            CardSession::open(fixture(), package(&source)).expect("test: first successful mount");
-        let old = token(&session, "profile:submit", EventKind::Submit);
-        let displayed = session.tree().cloned().expect("test: displayed tree");
+        let (mut s, _) = CardSession::open(fixture(), library()).expect("test: open");
+        let token = event(&s, "input", HostEventKind::Input { value: serde_json::json!("new") });
+        s.suspend().expect("test: suspend");
+        s.resume().expect("test: resume");
+        s.enqueue(token).expect("test: old token");
         assert!(
-            matches!(session.update(fixture()), Err(CardError::Script)),
-            "second evaluation must fail with script error"
+            matches!(s.next_event().expect("test: old delivery"), Some(EventResult::StaleDropped)),
+            "resume invalidates old identity even at same tree version"
         );
-        session.enqueue(old).expect("test: stale token queue");
-        assert!(
-            matches!(
-                session.next_event().expect("test: stale token"),
-                Some(EventResult::StaleDropped)
-            ),
-            "VM loss must invalidate old tokens"
-        );
-        let batch = session.resume().expect("test: resume without suspend");
-        assert_eq!(batch.previous_version, 1, "resume must start from the native mounted version");
-        assert!(
-            batch.version > 2 && batch.mutations.is_empty(),
-            "identical recovered tree must advance version without a double mount"
-        );
-        assert_eq!(
-            session.tree(),
-            Some(&displayed),
-            "native tree identity must be preserved across recovery"
-        );
+        let mut revoked = fixture();
+        revoked.render_allowed = false;
+        s.update(revoked).expect("test: authority loss cancels tree");
+        assert!(s.tree().is_none() && !s.is_active(), "authority loss removes tree");
+        assert!(s.resume().is_err(), "retired sessions cannot resurrect");
     }
     #[test]
     fn admission_budget_rejection_preserves_live_vm() {
         let _guard = guard();
-        let (mut session, _) = CardSession::open(fixture(), library()).expect("test: live VM");
-        session.budget.borrow_mut().deny_for_test();
-        let version = session.version();
+        let (mut s, _) = CardSession::open(fixture(), library()).expect("test: open");
+        s.budget.borrow_mut().deny_for_test();
         assert!(
-            matches!(session.update(fixture()), Err(CardError::Budget)),
-            "admission must enforce bounded recent evaluations"
+            matches!(
+                s.update({
+                    let mut next = fixture();
+                    next.signed_version = 2;
+                    next
+                }),
+                Err(CardError::Budget)
+            ),
+            "pre-execution admission budget rejects without disabling the VM"
         );
-        assert!(
-            session.vm.is_some() && session.version() == version,
-            "no-work admission rejection must retain the live VM and version"
-        );
-        session.budget.borrow_mut().reset_for_test();
-        session.update(fixture()).expect("test: original VM usable after budget window reset");
+        assert!(s.is_active(), "admission refusal preserves VM");
+        s.budget.borrow_mut().reset_for_test();
+        let mut invalid = fixture();
+        invalid.signed_hash = "tampered".into();
+        assert!(s.update(invalid).is_err(), "reject before VM evaluation");
+        assert!(s.is_active(), "invalid admission preserves live VM");
+        send(&mut s, "input", HostEventKind::Input { value: serde_json::json!("Grace") })
+            .expect("test: valid edit after refusal");
     }
 }

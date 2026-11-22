@@ -30,6 +30,16 @@ pub(super) fn evaluate(
     prefix: &str,
     depth: usize,
 ) -> Result<Value, Reject> {
+    evaluate_display(expression, model, prefix, depth, None)
+}
+
+pub(super) fn evaluate_display(
+    expression: &Value,
+    model: &Value,
+    prefix: &str,
+    depth: usize,
+    locale: Option<super::DisplayLocale>,
+) -> Result<Value, Reject> {
     if depth > 16 {
         return Err(Reject::Limit);
     }
@@ -57,30 +67,22 @@ pub(super) fn evaluate(
         None if name == "@index" => &empty,
         None => return Err(Reject::Expression),
     };
-    let get =
-        |key: &str| evaluate(args.get(key).ok_or(Reject::Expression)?, model, prefix, depth + 1);
+    let get = |key: &str| {
+        evaluate_display(args.get(key).ok_or(Reject::Expression)?, model, prefix, depth + 1, locale)
+    };
     match name {
         "@index" => evaluate_index(args, model, prefix, depth),
         "formatString" => {
             let value = get("value")?;
-            Ok(serde_json::json!(super::format_string::render(
+            Ok(serde_json::json!(super::format_string::render_display(
                 value.as_str().ok_or(Reject::Expression)?,
                 model,
                 prefix,
-                depth + 1
+                depth + 1,
+                locale
             )?))
         }
-        "required" => {
-            let value = get("value")?;
-            let valid = match &value {
-                Value::Null => false,
-                Value::String(s) => !s.is_empty(),
-                Value::Array(a) => !a.is_empty(),
-                Value::Object(o) => !o.is_empty(),
-                _ => true,
-            };
-            Ok(json!({"valid":valid}))
-        }
+        "required" => Ok(required(&get("value")?)),
         "length" => {
             let value = get("value")?;
             let n = value.as_str().ok_or(Reject::Expression)?.chars().count();
@@ -111,7 +113,7 @@ pub(super) fn evaluate(
             let values = args.get("values").and_then(Value::as_array).ok_or(Reject::Expression)?;
             let mut result = name == "and";
             for value in values {
-                let v = evaluate(value, model, prefix, depth + 1)?;
+                let v = evaluate_display(value, model, prefix, depth + 1, locale)?;
                 let v = v.as_bool().ok_or(Reject::Expression)?;
                 if name == "and" {
                     result &= v;
@@ -122,10 +124,31 @@ pub(super) fn evaluate(
             Ok(json!(result))
         }
         "not" => Ok(json!(!get("value")?.as_bool().ok_or(Reject::Expression)?)),
+        name if locale_sensitive(name) => {
+            let locale = locale.ok_or(Reject::LocaleDependentCheck)?;
+            let mut resolved = serde_json::Map::new();
+            for (key, value) in args {
+                resolved.insert(
+                    key.clone(),
+                    evaluate_display(value, model, prefix, depth + 1, Some(locale))?,
+                );
+            }
+            super::locale::format(name, &resolved, locale).map(Value::String)
+        }
         // Locale-dependent functions are forbidden in button checks at admission. Display
         // formatting belongs to the card runtime; it never becomes an action witness.
         _ => Err(Reject::Expression),
     }
+}
+fn required(value: &Value) -> Value {
+    let valid = match value {
+        Value::Null => false,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        _ => true,
+    };
+    json!({"valid":valid})
 }
 fn email_check(value: &Value) -> Result<Value, Reject> {
     let text = value.as_str().ok_or(Reject::Expression)?;

@@ -195,18 +195,25 @@ pub(super) fn expressions(program: &str) -> Result<Vec<Value>, Reject> {
         .filter_map(|part| if let Part::Expression(value) = part { Some(value) } else { None })
         .collect())
 }
-pub(super) fn render(
+pub(super) fn render_display(
     program: &str,
     model: &Value,
     prefix: &str,
     depth: usize,
+    locale: Option<super::DisplayLocale>,
 ) -> Result<String, Reject> {
     let mut out = String::new();
     for part in parse(program)? {
         let text = match part {
             Part::Text(text) => text,
             Part::Expression(expression) => {
-                let value = super::expression::evaluate(&expression, model, prefix, depth + 1)?;
+                let value = super::expression::evaluate_display(
+                    &expression,
+                    model,
+                    prefix,
+                    depth + 1,
+                    locale,
+                )?;
                 match value {
                     Value::Null => String::new(),
                     Value::String(text) => text,

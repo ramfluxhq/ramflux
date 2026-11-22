@@ -78,6 +78,14 @@ pub(super) fn component(value: &Value) -> Result<(), Reject> {
     {
         reject_locale_checks(checks, 0)?;
     }
+    if name == "Icon"
+        && let Some(path) = value.pointer("/name/svgPath").and_then(Value::as_str)
+    {
+        super::icon_path::validate(path)?;
+    }
+    if name == "Table" {
+        validate_table(value)?;
+    }
     expressions(value, false, 0)
 }
 fn reject_locale_checks(value: &Value, depth: usize) -> Result<(), Reject> {
@@ -325,4 +333,23 @@ pub(super) fn function(value: &Value) -> Result<(), Reject> {
         .ok_or(Reject::Expression)?
         .validate(value)
         .map_err(|_| Reject::Expression)
+}
+
+fn validate_table(value: &Value) -> Result<(), Reject> {
+    let columns = value.get("columns").and_then(Value::as_array).ok_or(Reject::Encoding)?;
+    let rows = value.get("rows").and_then(Value::as_array).ok_or(Reject::Encoding)?;
+    let mut column_keys = std::collections::BTreeSet::new();
+    let mut row_keys = std::collections::BTreeSet::new();
+    if columns.iter().any(|column| !column_keys.insert(column.get("key").and_then(Value::as_str)))
+        || rows.iter().any(|row| {
+            !row_keys.insert(row.get("key").and_then(Value::as_str))
+                || row
+                    .get("cells")
+                    .and_then(Value::as_array)
+                    .is_none_or(|cells| cells.len() != columns.len())
+        })
+    {
+        return Err(Reject::Validation("Table keys or rectangular cells".into()));
+    }
+    Ok(())
 }

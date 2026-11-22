@@ -15,7 +15,7 @@ use super::{
     ACTION_SCHEMA, Action, ActionFrame, ActionMessage, JsonPointer, MAX_CONTEXT_ENTRIES,
     MAX_MODEL_BYTES, Reject, SurfaceSnapshot, SurfaceState,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,7 +27,7 @@ const MAX_DEPTH: usize = 16;
 pub type SurfaceDrafts = BTreeMap<String, Value>;
 
 /// Where a node sits under its parent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "slot", content = "position")]
 pub enum ResolvedSlot {
     Root,
@@ -60,6 +60,8 @@ pub struct ResolvedNode {
     /// with resolved arguments for the host's locale formatter. `action` and `@checks`
     /// stay declarations; see [`ResolvedSurface::actions`].
     pub properties: Map<String, Value>,
+    /// Messages for failed local checks; raw input values remain unchanged.
+    pub errors: Vec<String>,
 }
 
 /// An input the card owns: its model pointer is unique and overlaps no other input.
@@ -137,6 +139,17 @@ impl<'a> Resolution<'a> {
             super::schema::component(component)?;
         }
         let graph = Graph::new(snapshot)?;
+        for instance in &graph.instances {
+            if instance.component.get("weight").is_some() {
+                let parent =
+                    instance.parent.and_then(|index| graph.instances.get(index)).ok_or_else(
+                        || Reject::Validation("weight requires Row/Column parent".into()),
+                    )?;
+                if !matches!(kind(parent.component)?, "Row" | "Column") {
+                    return Err(Reject::Validation("weight requires Row/Column parent".into()));
+                }
+            }
+        }
         let inputs = graph.inputs(snapshot)?;
         let mut actions = Vec::new();
         for (index, instance) in graph.instances.iter().enumerate() {
@@ -361,13 +374,36 @@ impl SurfaceSnapshot {
     /// owned input or fails its input type/range, `Expression` for a display function that
     /// cannot be evaluated, and `Limit` for over 64 KiB of resolved properties.
     pub fn resolve_with_drafts(&self, drafts: &SurfaceDrafts) -> Result<ResolvedSurface, Reject> {
+        self.resolve_display(drafts, None)
+    }
+
+    /// Resolve local display values and check messages in a supported host locale.
+    /// # Errors
+    /// Returns the same admission, expression and resource refusals as `resolve_with_drafts`.
+    pub fn resolve_for_locale(
+        &self,
+        drafts: &SurfaceDrafts,
+        locale: super::DisplayLocale,
+    ) -> Result<ResolvedSurface, Reject> {
+        self.resolve_display(drafts, Some(locale))
+    }
+
+    fn resolve_display(
+        &self,
+        drafts: &SurfaceDrafts,
+        locale: Option<super::DisplayLocale>,
+    ) -> Result<ResolvedSurface, Reject> {
         validate_identifier(&self.surface_id)?;
         let resolution = Resolution::new(self)?;
         let model = overlay(self, &resolution.inputs, drafts)?;
         let mut nodes = Vec::with_capacity(resolution.graph.instances.len());
         let mut resolved_bytes = 0usize;
         for instance in &resolution.graph.instances {
-            let properties = properties(instance.component, &model, &instance.prefix)?;
+            let properties = properties(instance.component, &model, &instance.prefix, locale)?;
+            let mut checked = properties.clone();
+            checked.insert("id".into(), Value::String(id(instance.component)?.into()));
+            checked.insert("component".into(), Value::String(kind(instance.component)?.into()));
+            super::schema::component(&Value::Object(checked))?;
             resolved_bytes =
                 resolved_bytes.checked_add(canonical(&properties)?.len()).ok_or(Reject::Limit)?;
             if resolved_bytes > MAX_RESOLVED_BYTES {
@@ -381,6 +417,12 @@ impl SurfaceSnapshot {
                 children: Vec::new(),
                 source_instance: instance.source.clone(),
                 scope: instance.scope.clone(),
+                errors: check_messages(
+                    instance.component.get("@checks"),
+                    &model,
+                    &instance.prefix,
+                    locale,
+                )?,
                 properties,
             });
         }
@@ -438,6 +480,7 @@ fn properties(
     component: &Value,
     model: &Value,
     prefix: &str,
+    locale: Option<super::DisplayLocale>,
 ) -> Result<Map<String, Value>, Reject> {
     let mut out = Map::new();
     for (key, value) in component.as_object().ok_or(Reject::Encoding)? {
@@ -447,14 +490,24 @@ fn properties(
                 out.insert(key.clone(), value.clone());
             }
             _ => {
-                out.insert(key.clone(), display(value, model, prefix, 0)?);
+                let value = display(value, model, prefix, 0, locale)?;
+                if locale.is_some() && !matches!(key.as_str(), "@metadata" | "@catalogId") {
+                    resolved_data(&value, 0)?;
+                }
+                out.insert(key.clone(), value);
             }
         }
     }
     Ok(out)
 }
 
-fn display(value: &Value, model: &Value, prefix: &str, depth: usize) -> Result<Value, Reject> {
+fn display(
+    value: &Value,
+    model: &Value,
+    prefix: &str,
+    depth: usize,
+    locale: Option<super::DisplayLocale>,
+) -> Result<Value, Reject> {
     if depth > MAX_DEPTH {
         return Err(Reject::Limit);
     }
@@ -465,25 +518,27 @@ fn display(value: &Value, model: &Value, prefix: &str, depth: usize) -> Result<V
                 return Ok(pointer.get(model).cloned().unwrap_or(Value::Null));
             }
             if let Some(name) = map.get("@call").and_then(Value::as_str) {
-                if !super::expression::locale_sensitive(name) {
-                    return super::expression::evaluate(value, model, prefix, depth);
+                if locale.is_some() || !super::expression::locale_sensitive(name) {
+                    return super::expression::evaluate_display(
+                        value, model, prefix, depth, locale,
+                    );
                 }
                 // Locale formatting belongs to the host; hand it resolved arguments.
                 let mut call = map.clone();
                 if let Some(args) = map.get("args") {
-                    call.insert("args".into(), display(args, model, prefix, depth + 1)?);
+                    call.insert("args".into(), display(args, model, prefix, depth + 1, locale)?);
                 }
                 return Ok(Value::Object(call));
             }
             let mut out = Map::new();
             for (key, value) in map {
-                out.insert(key.clone(), display(value, model, prefix, depth + 1)?);
+                out.insert(key.clone(), display(value, model, prefix, depth + 1, locale)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(values) => values
             .iter()
-            .map(|value| display(value, model, prefix, depth + 1))
+            .map(|value| display(value, model, prefix, depth + 1, locale))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         _ => Ok(value.clone()),
@@ -600,4 +655,66 @@ impl ResolvedSurface {
         frame.args_hash = frame.arguments_hash()?;
         Ok(frame)
     }
+}
+
+fn check_messages(
+    checks: Option<&Value>,
+    model: &Value,
+    prefix: &str,
+    locale: Option<super::DisplayLocale>,
+) -> Result<Vec<String>, Reject> {
+    let mut errors = Vec::new();
+    if let Some(checks) = checks {
+        for check in checks.as_array().ok_or(Reject::Expression)? {
+            let result = super::expression::evaluate(
+                check.get("condition").ok_or(Reject::Expression)?,
+                model,
+                prefix,
+                0,
+            )?;
+            if result.as_bool().or_else(|| result.get("valid").and_then(Value::as_bool))
+                != Some(true)
+            {
+                let Some(message) = check.get("message") else {
+                    errors.push(
+                        if locale == Some(super::DisplayLocale::ZhCn) {
+                            "值无效"
+                        } else {
+                            "Invalid value"
+                        }
+                        .into(),
+                    );
+                    continue;
+                };
+                let message = display(message, model, prefix, 0, locale)?;
+                errors.push(message.as_str().ok_or(Reject::Expression)?.to_owned());
+            }
+        }
+    }
+    Ok(errors)
+}
+
+// A model value is data. It must never smuggle a second, unevaluated display
+// program to a native/TSX consumer through a binding result.
+fn resolved_data(value: &Value, depth: usize) -> Result<(), Reject> {
+    if depth > MAX_DEPTH {
+        return Err(Reject::Limit);
+    }
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("@call") || map.contains_key("@path") {
+                return Err(Reject::Expression);
+            }
+            for value in map.values() {
+                resolved_data(value, depth + 1)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                resolved_data(value, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

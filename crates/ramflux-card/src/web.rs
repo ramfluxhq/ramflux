@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! Single-worker facade. Only selected JSON and public release material cross it.
-use crate::{AcceptancePolicy, CardSession, CardSpec, Event, SignedPackage};
+use crate::{AcceptancePolicy, CardSession, CardSpec, HostEvent, SignedPackage};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -72,6 +72,17 @@ impl CardWorker {
         self.session = Some(session);
         self.reply(batch)
     }
+    /// Read the complete current tree after host version mismatch.
+    /// # Errors
+    /// Refuses inactive sessions.
+    pub fn tree(&self) -> Result<String, JsValue> {
+        let session = self
+            .session
+            .as_ref()
+            .filter(|session| session.is_active())
+            .ok_or_else(|| error("inactive card"))?;
+        self.reply(session.tree().ok_or_else(|| error("inactive card"))?)
+    }
     /// # Errors
     /// Rejects invalid selected JSON, inactive sessions, or execution failure.
     pub fn update(&mut self, selected_json: &str) -> Result<String, JsValue> {
@@ -83,7 +94,7 @@ impl CardWorker {
     /// Rejects malformed/oversized events; stale tokens are returned as dropped.
     pub fn event(&mut self, event_json: &str) -> Result<String, JsValue> {
         crate::spec::preflight(event_json.as_bytes(), 8192).map_err(error)?;
-        let event: Event = serde_json::from_str(event_json).map_err(error)?;
+        let event: HostEvent = serde_json::from_str(event_json).map_err(error)?;
         let session = self.active()?;
         session.enqueue(event).map_err(error)?;
         let outcome = session.next_event().map_err(error)?;

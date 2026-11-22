@@ -1,198 +1,170 @@
 # ramflux-card
 
-A dormant interpreter-only card renderer, with no SDK dependency, network,
-storage or approval authority. `rf-card/v1` is a local closed component profile; it
-activates no wire catalog. Native hosts retain identity, Surface/hash binding,
-permission checks, signing, delivery and receipts.
+A bounded interpreter for authorized Surface v3 snapshots. ABI **5** consumes
+`urn:ramflux:catalog:rf-card:1.0` through the public `ramflux-protocol` resolver.
+The sole schema is `ramflux-protocol/catalogs/rf-card-v1.json`; the signed package
+binds its digest, ABI, engine, bytecode and host-pinned release floor. There is
+one catalog and one renderer path.
 
-The application validates `CardSpec`, admits a project package using its own
-release-pinned key **and acceptance policy**, and opens `CardSession` on a renderer
-thread. The engine is exactly rquickjs/core/sys 0.14.0 / QuickJS-NG 0.16.2. Each VM
-has 32 MiB engine heap, 256 KiB stack, a 50 ms evaluation deadline, rolling
-100 ms/second allowance, and 128 admissions/second. At most two VMs are resident
-per linked crate instance, with 32 events per session. Suspend/resume preserves
-CPU accounting. These are engine limits, not RSS limits or OS isolation.
+## Input and authority
 
-The execution context has JSON/Promise intrinsics and no Eval compiler, loader,
-network or storage API. Before any package evaluates, a host-owned bootstrap
-freezes the global object and every reachable intrinsic/prototype, including
-function, async-function, generator, async-generator and Promise chains, plus
-array/string iterators and iterator helper/wrapper prototypes. Hardening failure refuses
-initialization. The bootstrap is compiled by the same pinned build engine with
-little-endian bytecode. Package source never reaches that compiler. The sole
-native JS bridge is immutable `__rf_commit`; the render function remains private
-to Rust. Engine objects never cross a thread or await.
+`CardSpec` is the SDK-supplied envelope:
 
-Project modules export synchronous `render(inputJson)` and must commit exactly
-once. Rust validates the whole tree before producing any mutation. Unknown
-controls/props, duplicate keys, wrong values/bindings and security chrome fail
-closed. Input is capped at 16 KiB, 32 components, a 4 KiB typed scalar model, and **16 JSON
-nesting levels** (wrapper objects and children arrays count). A separate semantic
-node-depth ceiling is 16; the JSON ceiling currently admits fewer node levels.
-Expanded output is capped at 256 nodes / 64 KiB. Forms own unique local text/number/select/toggle bindings; submit returns only
-the enabled fields of that form, preserving scalar types. Required/error/disabled
-checks happen in Rust; validation failure emits a non-actionable validation batch.
-The host SDK must independently authorize any operation.
-
-Every accepted update, edit, submit, suspend and resume advances a monotonic token
-version. Events also carry a process-unique session ID; stale/foreign tokens are
-dropped at dequeue and submit consumes its version. Invalid input and no-work
-budget admission rejection preserve the live VM. An actual failed evaluation
-drops the VM, advances the token epoch and retains the last mounted tree/version.
-Disable interaction and show host fallback on that failure; retain the keyed
-native tree until a suspend/removal batch or resume delta arrives. Resume can be
-called directly and diffs against that retained tree, avoiding duplicate mounts.
-A suspend clears the tree and queue; the next resume mounts a complete tree.
-
-## Release descriptor and rollback policy
-
-Enable `compiler` only for offline build tooling. Run `npm ci && npm test && npm
-run typecheck && npm run build && npm run check` in `library/`. Source and bundled
-AST checks reject eval/Function, unapproved source imports, all bundled imports,
-ambient APIs, reflection/prototype
-mutation and intrinsic aliasing; permitted globals are narrowly used
-`Object.freeze`, `JSON.parse`, `JSON.stringify`, and `__rf_commit`. Runtime
-hardening enforces the boundary independently of lint.
-
-```sh
-cargo run -p ramflux-card --features compiler --bin card-pack -- \
-  crates/ramflux-card/library/form.js /secure/release-seed release.json /release/form.v1
+```json
+{
+  "conversation_id": "conversation",
+  "author_principal_id": "own-agent",
+  "surface_ref": "surface",
+  "signed_version": 1,
+  "signed_hash": "<signed snapshot commitment>",
+  "render_allowed": true,
+  "snapshot": {"surfaceId":"surface", "catalogId":"urn:ramflux:catalog:rf-card:1.0", "fallbackText":"Example", "components":[], "dataModel":{}, "final":[], "closed":false}
+}
 ```
 
-`release.json` is closed JSON with `app_id`, `package_id`, `security_epoch` and
-`version` (nonzero u32 values). The tool appends `.qjb`, `.descriptor.json`, `.sig`
-and `.pub`, preserving dotted prefixes. It uses the exact compile-and-sign path
-exercised by tests. Never distribute the private 32-byte seed.
+The example documents the shape; an empty component list is not an admitted
+surface. `surface_ref` is the snapshot's `surfaceId`. The SDK must authenticate
+the conversation and author and set `render_allowed` from its own-agent read
+gate. A supplied boolean is not proof of authority. This crate validates the
+signed snapshot commitment and protocol state; it has no account registry,
+network, signing credentials, approval authority or attachment access. Closure
+or loss of `render_allowed` retires an existing session and removes its tree and
+host requests. SDK lifecycle/author-retirement wiring belongs to M3.
 
-The canonical descriptor binds application/package identity, catalog identity and
-SHA-256 of the exact LF-normalized catalog file, host ABI, exact engine pin,
-security epoch/version, and SHA-256 of the complete bytecode. Fixed lexicographic
-fields, ASCII metadata and u32 values give one JSON encoding; other encodings are
-rejected. Ed25519 authenticates a v2 domain plus those complete descriptor bytes.
-There are no additional package assets or OTA channel. Future assets must be
-explicitly authenticated before introduction.
+The parser bounds the envelope at 32 KiB and uses strict I-JSON. Protocol
+admission separately bounds signed state at 16 KiB, model at 12 KiB, definitions
+at 32, nesting at 16, templates at 16 items/two scopes, expanded instances at
+256 and resolved properties at 64 KiB. The SDK passes presentation separately;
+peer `theme`, `host`, script and unknown fields are refused.
 
-Admission requires an `AcceptancePolicy` supplied independently by the embedding
-release: expected app/package IDs, nonzero minimum epoch/version, and optional
-exact descriptor SHA-256. Floors compare `(epoch, version)` lexicographically.
-The current catalog, host ABI, engine and bytecode digest must also match before
-`SignedPackage` exists. Never derive the key, floor or exact digest from a peer or
-received package. Applications persist/pin their own rollback policy. Engine or
-host-contract changes regenerate packages and fixtures.
+## Shared evaluation and drafts
 
-## Optional C bridge (`c-abi`, standalone ABI major 4)
+The resolver owns graph expansion, input ownership, expressions, checks and
+action declarations. Rust resolves display calls before the library runs.
+`resolve_for_locale` supports launch locales `en` and `zh-CN`, including nested
+`formatString`, grouped numbers, currency, TR35 date tokens and plural category
+selection. Unknown locale identifiers, malformed dates/patterns and unsupported
+patterns refuse. Both locales use three-digit numeric groups, `.` decimals,
+zero number decimals by default and two currency decimals (JPY/KRW use zero).
+Date-only values use midnight UTC, RFC3339 values retain their encoded offset,
+and integer timestamps are Unix milliseconds. Formats are display only; raw
+values drive checks and egress. No JS `Intl` or second expression evaluator.
 
-`include/ramflux_card.h` defines open/update/event/suspend/resume/dispose plus a
-version query. ABI 2 added descriptor and application-pinned policy spans
-to open. ABI 4 includes host presentation alongside typed fields/events, expanded semantic attributes and
-`host_slots` outside the tree. Hosts must negotiate version 3 before calling. The SDK lane links this rlib into its existing core static/dynamic library;
-do not create a second Rust static runtime or infer SDK ABI numbers from this ABI.
-All calls run synchronously on the creating renderer thread. There is no detached
-work or cancellation handle. Up to 32 logical sessions may be retained per thread.
+The signed base remains immutable. Session drafts hold at most 32 owned
+pointers/4 KiB and are never persisted or sent as model updates. Signed updates
+retain only drafts with matching component instance, pointer and base value
+whose new constraints accept them. `draft_conflict()` reports discarded drafts.
+Tab selection survives by key; Modal presentation and outstanding confirmations
+are cancelled on a signed update. Every accepted edit increments `editSeq`.
 
-Callbacks are mandatory, execute before return and borrow UTF-8 JSON
-`{session,payload}`. Copy before posting to a UI thread. Inputs are borrowed only
-for the call and copied within explicit limits. No callback/user pointer is
-retained. Callbacks must return normally, without reentry or foreign unwinding.
-Success invokes exactly one callback; errors invoke none. Open zeros its output
-on failure. Serialization/output-cap failure disposes the handle; discard that
-native view. Other input/admission errors preserve valid session state as above.
+## Native tree and events
 
-Events use `{token:{session,version,key},event:{kind:"text",value:"..."}}` or number/select/toggle events with a matching scalar `value`, or
-`{token:{session,version,key},event:{kind:"submit"}}`. Outputs are mutation batches,
-stale drops, edits, validation errors or submit intents. Upserts are shallow; removals precede
-parent-before-child upserts. Removing a parent removes its native subtree;
-reparenting re-emits retained descendants. Apply the batch's `previous_version`
-to the last mounted version and refresh all tokens even for an empty mutation
-list. Statuses: 0 success, 1 invalid input/JSON, 2 resource limit (including
-memory/stack), 3 signature/policy, 4 script/engine/hardening, 5 budget, 6 inactive,
-7 stale/foreign-thread handle, 8 reentry/busy. Engine memory/stack classification
-uses exact messages from the pinned engine; these diagnostics confer no authority.
+`ramflux.card.tree.v1` is a flat preorder tree with session, signed version/hash,
+edit sequence, tree version, root key, nodes and a complete host-slot array.
+Keys canonically encode `[component_id, source_instance, route]`; edges are keys.
+Every node corresponds to exactly one resolver instance. The library handles
+all 20 kinds: Text, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button,
+TextField, CheckBox, ChoicePicker, Slider, DateTimeInput, Image, Approval, Task,
+Chart and Table. Structural references and executable declarations are removed
+from attrs. Input pointers, action refs, disabled state, errors and accessibility
+are runtime-owned. Rust compares the entire library output to its projection;
+the library cannot change semantics or introduce CSS, geometry or host chrome.
+Native hosts select host theme tokens for kinds/variants.
 
-## Signed component library
+`ramflux.card.mutations.v1` carries `session`, `previous_version`, `version`,
+`signed_version`, `signed_hash`, `edit_seq`, shallow remove/upsert operations and
+the complete replacement `host_slots`. Removals are descendants first; upserts
+are parents first and detach/reinsert by index. Hosts stage a batch atomically
+at the matching session/version or pause interaction and request a reset tree.
+Tree/batch transport is bounded at 256 KiB and 512 operations.
 
-The library consumes manifest-owned BSD presentation components and light/dark
-Palettes through project-owned `@rf/card` semantic primitives. Hosts pass independently validated locale catalogs and theme tokens;
-peer input cannot supply styles. The generated token/component files are read-only.
-The final design catalog also contains header/search signatures; these are
-typechecked but explicitly refused by this closed profile and pruned from the
-production bundle. `form.tsx` is the entry point for the four admitted components:
+Host events contain `token:{session,signedVersion,editSeq,treeVersion,key}` and
+`event:{kind,...}`. Kinds are `input{value}`, `activate`, `select_tab{index}`,
+`modal_open`, `modal_close`. Only mounted, compatible current controls can act.
+Stale tokens return `stale_dropped`. Activation consumes the Button until a
+signed update; there is no automatic resend. A submit returns a resolver-selected
+action, not success or network dispatch. M3 uses the current resolved surface's
+`action_frame` with the exact shown `SurfaceState`, then signs and submits it.
+Suspend drops the VM/requests while retaining drafts, surviving tab selection and consumed submits; resume creates a fresh token session identity. `complete_link` accepts an SDK-handled link completion, clears only its local pending slot and re-enables its Button; it performs no browser or authority effect.
+Counters never wrap and are bounded to positive safe JSON integers (edit starts
+at zero). The C handle remains stable across resume; use the batch session for
+event tokens, not the registry handle.
 
-- `rf.form`: 1–16 typed fields, each with unique id/binding, optional required/error/
-  disabled state; select has 1–16 closed choices; number uses safe integers and
-  optional inclusive bounds. Only the explicit fields array is accepted.
-- `rf.task`: reported requester/owner, closed status, optional 0–100 progress and
-  up to 16 steps. All labels describe untrusted presentation, never authority.
-- `rf.chart`: line/bar, 1–2 aligned series of 1–16 safe-integer points, integer
-  scale 1–1,000,000, unit text and complete table alternative. **Design pending:**
-  the token-based plot has no approved chart artboard.
-- `rf.approval`: untrusted explanation only. `request_ref` and optional
-  `task_binding` become host-slot metadata outside the semantic tree. The host
-  independently resolves facts and warnings and draws Deny/Allow controls,
-  each confirmed by a single tap. The card has no security controls or approval events.
+## Host-only requests
 
-Every component has JSON/tree/mount/edit fixtures, theme/stale-event tests and
-component-specific over-limit/loop/recursion rejection tests. Generated styles are
-validated separately from exact Rust business-semantic projection.
+`host_slots` replaces the previous array on every commit. Slot ids encode
+`[kind,key]`; tokens and request ids fence all callbacks. Replacing/removing a
+slot cancels its old work. Hidden tabs and closed Modal content cannot activate
+controls or request images. The host retains local Tabs selection and Modal
+presentation after its accepted semantic event; signed update/suspend cancels
+sheets. Only one sheet may be active, with security sheets taking precedence.
 
-## Dedicated web worker
+- Approval contains `request_ref` and typed optional `task_binding`. The SDK
+  resolves current facts and authority. The host draws facts, Deny and a single
+  tap Confirm outside the tree. No hold gesture; no approval card event.
+- Modal contains trigger/content keys. The host owns the trigger affordance,
+  sheet, scrim, focus and close/back/Escape. Nested trigger actions never dispatch.
+- Link activation yields the canonical ASCII https URL validated by the protocol.
+  The host shows that identical full URL, trusted author and privacy notice with
+  Cancel and a single tap Open. M3 consumes the request, rechecks authority and
+  uses a qualified browser-only handoff; no author event or prefetch.
+- Image contains only an attachment selector, description, fit and variant.
+  M3 verifies conversation membership, exact manifest digest, access and erasure
+  before delivering encoded bytes out of band. JSON/JS never receive bytes,
+  paths, URLs or data URIs. B owns PNG/JPEG header checks and decoding: encoded
+  <=8 MiB, dimension <=4096, <=4,194,304 pixels/16 MiB RGBA, <=32 MiB decoded per
+  session and one decode in flight. It copies borrowed callback bytes before
+  posting to UI and releases buffers on cancellation/erasure. These decoder and
+  authenticated-fetch behaviors are downstream requirements, not runtime proof.
 
-Feature `web` exposes the same Rust validation/session/runtime through wasm-bindgen
-0.2.126. `web/worker.ts` runs it in a dedicated Worker and accepts one private
-MessagePort. Only selected card JSON, versioned events and mutation results cross
-that port. The Worker has public release material and no SDK, private signing key,
-account keys or storage. Trusted glue supplies the pinned C shim's sole clock
-import from worker performance time; that function is not a QuickJS global.
-The application must keep the worker URL app-owned and
-enforce the restrictive CSP and Trusted Types policy in `tests/web-host.html`; only the adjacent app-owned `worker.js` URL is accepted.
+`HostSlotReply` and borrowed `ImageResult` define the downstream boundary; the
+runtime grants no authority to them. M3 must consume each confirmation once.
+Chart retains independent series/labels/raw integers and requires a complete
+native table alternative (up to 32 rows). Table keys are unique and rows must be
+rectangular. Task is untrusted reported status. Icon accepts bounded named icons
+or path data (4 KiB/1024 commands/finite coordinates), never an SVG document.
 
-`web/adapter.ts` maps fixed semantic controls to DOM elements using `textContent`,
-never HTML. It keeps native input identity/focus, applies keyed mutations in
-order, bounds in-flight requests to 32, forwards declarative intents to the host,
-and exposes untrusted host-slot references through a separate callback. Mount the
-card root independently of host security chrome. The adapter admits at most two Worker instances, since each owns a distinct
-WASM heap. `suspend` releases its VM but retains its worker slot for resume;
-`dispose` terminates the worker and releases that slot. Dispose offscreen web
-cards when admitting another card, and on host lock/revoke.
+## Sandbox and packages
 
-Build on the same engine/toolchain used by the release packer:
+QuickJS-NG 0.16.2 / rquickjs 0.14.0 is interpreter-only. The sole bridge is
+immutable `__rf_commit`; eval compilation, module loading, network and storage
+are absent. The host bootstrap freezes reachable intrinsics before the signed
+library loads. Signature/policy checks precede bytecode loading. Trust keys and
+rollback floors come from the app release, never the received envelope/package.
+Limits remain 32 MiB heap, 256 KiB stack, 50 ms per evaluation, 100 ms/s cumulative,
+128 admissions/s, 32 queued events and two resident VMs. These are engine budgets,
+not OS/RSS isolation. Failed evaluation preserves the last published data but
+makes the VM inactive; hosts must suspend/dispose and cancel requests.
 
-```sh
-cargo build -p ramflux-card --features web --lib --target wasm32-unknown-unknown
-wasm-bindgen --target web --out-dir crates/ramflux-card/web/pkg \
-  target/wasm32-unknown-unknown/debug/ramflux_card.wasm
-node crates/ramflux-card/web/build-web.mjs /release/cards.v1 /release/host-policy.json
-```
+The offline `card-pack` tool signs the linted `library/form.js` using an
+operator-provided seed and release metadata. ABI 5 requires fresh artifacts;
+old artifacts fail admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
+loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
+`.policy.json` and prints the actual tree/mount/update batches. It accepts only
+local operator files and performs no authentication on their behalf. Production
+release-key custody/rotation is an owner release-process decision.
 
-The build tool embeds only public `.qjb/.descriptor.json/.sig/.pub` artifacts and
-an **independently pinned** policy. It never reads a private seed. Serve `web/dist`
-from the app origin; `tests/web-host.html` is a development-only harness using
-synthetic signed release artifacts, not a shipping application. `npm run
-typecheck:web` checks the adapter/worker, and CI checks the WASM facade on Linux.
+Native C calls are synchronous/thread-affine; callback JSON is borrowed for the
+call and must be copied before posting to UI. The header documents status codes.
+C builds require unwind mode (`ffi-release`), with the existing defensive C
+boundary retained. Web uses the same Rust core in a dedicated worker. The web
+preview maps semantic nodes with text/native controls, stages mutations and
+forwards host slots; it does not implement SDK approval/link/image authority or
+native Modal sheets. Mobile and desktop hosts are separate modules.
 
-## Validation boundary
+## Validation
 
-CI builds, strict-clippies and tests every feature on Linux x86_64, Apple Silicon
-macOS and Windows MSVC; each row also runs TS types, capability lint and bundle
-freshness. Real-engine tests cover hardening, release floors, exact error kinds,
-recovery, multi-form diffs, replay and C error/lifetime paths. A bounded child
-process integration test runs the shipping packer and loads its output. Mobile,
-Intel macOS, ARM64 Linux and WASM compile checks complement those native tests;
-compilation alone establishes no device, worker, SDK or end-to-end acceptance.
+Existing parser, keyed-diff, session, signed-library, C bridge and packer tests
+were adapted to the replacement contract; no new tests were added. Existing
+fixtures now contain authorized ABI-5 envelopes and snapshots, including
+Image/Tabs/Modal and nested locale display. `.styles.json` snapshots now contain
+host-owned theme tokens, rather than VM style geometry. Security hardening,
+bytecode signature/floor and failure-budget regressions remain intact.
 
-### Host presentation (ABI 4)
-
-Peer JSON contains only catalog, components and model; peer `theme` or `host` properties are rejected. Forms require 1–16 explicit `fields`; the single-field spelling is rejected. Host `Presentation` contains locale, direction, a complete bounded string table and a token set. `ramflux_card_open` accepts a separate presentation span; `ramflux_card_present` switches it atomically. Packages must be regenerated for ABI 4. Locale tables live in `locales/{en,zh-CN}.json`; peer labels remain opaque data. Tables display exact integer fractions for scale > 1; status containers use `role=group`.
-
-`web/settings.ts` registers JSON token sets and locales (including RTL), checks contrast, follows system changes and persists the per-device selection. The external preview offers runtime language/theme settings and query previews (`?locale=zh-CN&theme=dark`, `?locale=pseudo&rtl`). Additional themes use `PresentationRegistry.addTheme(name, tokenFile)` without changing its implementation. Security slots remain host drawn with host presentation.
-
-Native edits retain their shown version. Submit is disabled while edits or invalid numeric drafts remain unresolved. Stale edits restore the latest committed value and report the conflict; host snapshots are never replayed. A typed runtime liveness check distinguishes pre-work refusal from a dead VM; dead VM replies settle all requests, clear security slots, make the view inert and release its worker.
-
-`npm test` includes automated DOM/settings tests and presentation lint; `web:check -- <release-prefix> <policy>` rejects web bundle drift after `web:build`. Release material is public and independently pinned; signing keys never enter the worker.
-
-Rust unwinds in every fallible C entry point are contained and return Engine (4).
-The constant ABI version query cannot unwind. A contained panic invalidates the
-creating thread's sessions and clears callback reentry state; hosts must discard
-the affected handles and recreate the renderer. Foreign callbacks must not unwind.
-C ABI builds refuse `panic=abort`; use the workspace `ffi-release` profile or set
-`CARGO_PROFILE_RELEASE_PANIC=unwind` with existing release packaging.
+Cargo runs on QA through the lane wrapper; PR CI owns full suites/platform and
+WASM checks. The controller's real run must feed actual `rf surface get` reads
+from rf-produced own-agent cards through a `card-pack`-signed package and this
+real-process driver, inspect mutations and refusals (bad id, bounds, tamper),
+and retain the authenticated read evidence. Fixture/engine proof is not that
+real account flow. SDK trust regeneration/session wiring, mobile linking,
+authenticated actions and bounded native image decoding remain M3/B/host work.
