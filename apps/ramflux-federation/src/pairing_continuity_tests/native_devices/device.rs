@@ -192,6 +192,12 @@ impl Device {
             actor.bind_frontend_writer(slot.as_ref().ok_or("test: original writer absent")?)?
         };
         self.participant.return_client(&mut self.client)?;
+        self.client.bind_device_unlock(
+            self.local.root.path(),
+            self.local.vault.as_ref(),
+            &self.local.id,
+            ramflux_sdk::DeviceSecret::Load,
+        )?;
         Ok((actor, service))
     }
     pub(super) fn service_data(&mut self, actor: &mut PairingActor) -> TestResult {
