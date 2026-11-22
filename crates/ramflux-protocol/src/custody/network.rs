@@ -255,6 +255,9 @@ pub enum CustodyRefusal {
     AgentRetired,
     /// A submit to or from a suspended or retired agent. Not accepted and not queued.
     RecipientUnreachable,
+    /// The stored custodian anchor, the stored host owner and the proposed owner are not
+    /// one account. A missing stored owner is the same refusal. Cross-human transfer is refused.
+    OwnerContinuity,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -425,6 +428,7 @@ impl CustodyRefusal {
             Self::AgentAuthorizationRequired => "AgentAuthorizationRequired",
             Self::AgentRetired => "agent_retired",
             Self::RecipientUnreachable => "recipient_unreachable",
+            Self::OwnerContinuity => "owner_continuity",
         }
     }
 }
