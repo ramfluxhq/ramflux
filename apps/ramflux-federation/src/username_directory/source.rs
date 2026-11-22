@@ -32,6 +32,9 @@ impl Sources {
         }
         let entry = rows.entry(prefix).or_insert((window, 0));
         entry.1 = entry.1.saturating_add(1);
+        if entry.1 == 61 {
+            tracing::warn!(limit = 60, window, "username source-prefix admission exhausted");
+        }
         entry.1 <= 60
     }
 }

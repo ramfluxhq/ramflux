@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant typed persistence primitive: durable image, bounded redo and atomic delta CAS.
+//! Typed persistence primitive: durable image, bounded redo and atomic delta CAS.
 //! Semantic authority admission is a prerequisite supplied by the directory layer.
 use super::{
     COMPACTED, CheckpointClock, CheckpointError, CheckpointHead, IMAGE, ImagePage, META, REDO,
@@ -15,7 +15,7 @@ use std::{path::Path, sync::Arc};
 ///
 /// Callers must validate image relationships, action semantics, quota accounting and
 /// signatures before append. Authentication, leases and serving barriers are separate layers.
-/// No service adapter calls this dormant component.
+/// The directory authority supplies those checks before a service can publish a result.
 pub struct CheckpointWitness {
     pub(crate) db: redb::Database,
     pub(super) head: CheckpointHead,

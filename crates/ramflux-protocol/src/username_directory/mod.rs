@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant, closed username wire vocabulary. No service or production caller is enabled.
+//! Closed username wire vocabulary for the explicitly provisioned directory.
 use serde::{Deserialize, Serialize};
 
 mod codec;
@@ -11,8 +11,8 @@ pub use native::*;
 
 /// Frozen schema and comparison data identity; changing it needs an audited migration.
 pub const SCHEMA_POLICY: &str = "username-ascii-uts39-us0.1.2-v1";
-const RELEASE_ENABLED: bool = false;
-/// The complete directory remains disabled until final activation.
+const RELEASE_ENABLED: bool = true;
+/// Complete CLI/service support; authority still requires explicit provisioning.
 #[must_use]
 pub const fn enabled() -> bool {
     RELEASE_ENABLED

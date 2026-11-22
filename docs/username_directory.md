@@ -1,8 +1,8 @@
 # Username directory
 
-The directory is under implementation. Provisioning inputs and wire admission exist;
-public routes and SDK support remain disabled until the complete flow is available.
-Configuration does not enable a partial implementation.
+The directory supports the `rf` CLI and local bus when the centre, homes and client
+are explicitly provisioned. Unconfigured installations have no directory authority.
+Partial configuration fails closed.
 
 The product supports one explicitly provisioned centre. The centre orders uniqueness,
 directory epochs and profile commitments; homes retain signed account data. Account
@@ -33,6 +33,8 @@ in this module.
 Exact authenticated lookup reduces bulk scraping but does not hide the query or prevent
 dictionary enumeration. The centre sees root/home/name and timing. Per-reporting-home
 quotas and fixed global/durable caps bound storage; they do not prevent Sybil squatting.
+Before authentication, TCP and QUIC share a limit of sixty connections per source
+prefix per minute. Exhaustion closes new connections; it grants no name facts.
 Public deployment requires an operator/key-rotation policy and an accepted admission
 cost or explicit acceptance of this limit.
 
@@ -151,7 +153,8 @@ set/resolve, original-request contact acceptance and both default conversations,
 rename/exact-match/hold, and two-home lookup with the foreign contact barrier.
 Additional runs cover visibility/release/delete, uncertain committed operations,
 protected-store restart and exact signed-state recovery after ordinary-home loss.
-Final activation and PR CI remain required for release.
+Final PR CI remains required for acceptance. Public deployment additionally requires
+the operator and abuse-policy decisions described above.
 
 An account owns at most one reusable native directory transport. Every reuse rechecks
 local pairing admission, current native authority, branch credentials and capacity;
@@ -160,7 +163,7 @@ Cancellation and transport failure close the stream. Replies are never cached as
 serving authority. A failed command can have committed: inspect fresh operation status
 before authorizing another mutation.
 
-## Live transport configuration under development
+## Live transport configuration
 
 Home provisioning additionally requires `RAMFLUX_USERNAME_HOME_URL`,
 `RAMFLUX_USERNAME_HOME_TLS_SERVER_NAME`, and `RAMFLUX_USERNAME_LISTEN_ADDR`.
