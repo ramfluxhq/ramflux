@@ -105,30 +105,7 @@ impl DirectoryAuthority {
             return Ok(self.witness.head());
         }
         let current_profile = plan.root(&reporter.root)?.map(|row| row.profile);
-        if let Some(profile) = profile {
-            crypto::verify_profile(&reporter.master, profile)?;
-            let native = &reporter.history.evidence().authority.record.body;
-            ensure(
-                profile.body.principal_id == native.principal_id
-                    && profile.body.kind
-                        == w::ProfileKind::from_principal_kind(native.principal_kind),
-                Code::InvalidProfile,
-            )?;
-            ensure(profile.body.avatar.is_none(), Code::InvalidAvatar)?;
-            ensure(
-                profile.body.principal_commitment == reporter.root
-                    && operation.body.profile.version == 2
-                    && operation.body.profile.epoch == profile.body.epoch
-                    && operation.body.profile.hash.as_ref()
-                        == Some(&crypto::profile_hash_v2(profile)?),
-                Code::InvalidProfile,
-            )?;
-        } else {
-            ensure(
-                current_profile.as_ref() == Some(&operation.body.profile),
-                Code::InvalidProfile,
-            )?;
-        }
+        verify_profile(reporter, operation, profile, current_profile.as_ref())?;
         let kind = match phase {
             MutationPhase::Reserve => {
                 let details = plan.detail_count(&reporter.root)?;
@@ -191,7 +168,7 @@ impl DirectoryAuthority {
     /// Refuses malformed roots and unavailable/corrupt image storage.
     pub fn current_root(&self, root: &str) -> Result<Option<w::RootRow>> {
         super::fixed(root)?;
-        ImagePlan::new(&self.witness.db).root(&root.to_owned())
+        ImagePlan::new(&self.witness.db).root(root)
     }
 
     /// Current committed receipt facts survive latest-detail GC and redo compaction.
@@ -223,4 +200,32 @@ impl DirectoryAuthority {
             expires_at: transitions::after(now, 60)?,
         })
     }
+}
+
+fn verify_profile(
+    reporter: &VerifiedReporter,
+    operation: &w::UsernameOperation,
+    profile: Option<&w::SignedIdentityProfileV2>,
+    current_profile: Option<&w::ProfileRef>,
+) -> Result<()> {
+    if let Some(profile) = profile {
+        crypto::verify_profile(&reporter.master, profile)?;
+        let native = &reporter.history.evidence().authority.record.body;
+        ensure(
+            profile.body.principal_id == native.principal_id
+                && profile.body.kind == w::ProfileKind::from_principal_kind(native.principal_kind),
+            Code::InvalidProfile,
+        )?;
+        ensure(profile.body.avatar.is_none(), Code::InvalidAvatar)?;
+        ensure(
+            profile.body.principal_commitment == reporter.root
+                && operation.body.profile.version == 2
+                && operation.body.profile.epoch == profile.body.epoch
+                && operation.body.profile.hash.as_ref() == Some(&crypto::profile_hash_v2(profile)?),
+            Code::InvalidProfile,
+        )?;
+    } else {
+        ensure(current_profile == Some(&operation.body.profile), Code::InvalidProfile)?;
+    }
+    Ok(())
 }

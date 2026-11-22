@@ -70,6 +70,10 @@ pub struct LiveHomeRevalidation {
 }
 
 impl LiveHomeRevalidation {
+    fn into_result(self) -> w::HomeRevalidateResult {
+        self.result
+    }
+
     /// Called by the pinned TLS exchange adapter, never on an offline/archive/user payload.
     /// # Errors
     /// Refuses wrong root/nonce, stale wrappers and substituted or expired inner receipts.
@@ -315,37 +319,31 @@ impl HomeDirectory {
         live: LiveHomeRevalidation,
         now: u64,
     ) -> Result<HomeProfileView> {
-        ensure(
-            live.result.issued_at <= now && now < live.result.expires_at,
-            Code::DirectoryUnavailable,
-        )?;
-        ensure(live.result.root == root, Code::OwnershipMismatch)?;
+        let live = live.into_result();
+        ensure(live.issued_at <= now && now < live.expires_at, Code::DirectoryUnavailable)?;
+        ensure(live.root == root, Code::OwnershipMismatch)?;
         let current = live
-            .result
             .current_receipt
             .as_ref()
             .ok_or(CheckpointError::Directory(Code::OperationPending))?;
         ensure(current.body.state == w::ReceiptState::Committed, Code::OperationPending)?;
         let mut result = None;
         self.update(root, |state| {
-            observe(state, &live.result)?;
+            observe(state, &live)?;
             if let Some(intent) = &state.intent {
                 matches_intent(intent, current)?;
                 // Normal coordination persists H2 before requesting commit. After home rollback,
                 // this fresh exact committed tuple also authorizes recovery of retained bytes;
                 // it does not replay an expired operation as a new mutation.
-                ensure(
-                    live.result.current_binding == intent.operation.body.binding,
-                    Code::StaleEpoch,
-                )?;
+                ensure(live.current_binding == intent.operation.body.binding, Code::StaleEpoch)?;
                 let committed = HomeProfileView {
                     operation: intent.operation.clone(),
-                    binding: live.result.current_binding.clone(),
+                    binding: live.current_binding.clone(),
                     profile: intent.profile.clone(),
                     receipt: current.clone(),
                 };
                 state.deleted |= intent.operation.body.action == w::Action::Delete;
-                state.suppressed = !live.result.lookup_allowed;
+                state.suppressed = !live.lookup_allowed;
                 state.committed = Some(committed.clone());
                 state.intent = None;
                 result = Some(committed);
@@ -357,10 +355,10 @@ impl HomeDirectory {
                 ensure(
                     committed.receipt.body.operation_id == current.body.operation_id
                         && committed.receipt.body.operation_hash == current.body.operation_hash
-                        && committed.binding == live.result.current_binding,
+                        && committed.binding == live.current_binding,
                     Code::StaleEpoch,
                 )?;
-                state.suppressed = !live.result.lookup_allowed;
+                state.suppressed = !live.lookup_allowed;
                 let mut current_view = committed.clone();
                 current_view.receipt = current.clone();
                 result = Some(current_view);
@@ -407,33 +405,31 @@ impl HomeDirectory {
         now: u64,
         require_lookup: bool,
     ) -> Result<Option<HomeProfileView>> {
-        ensure(
-            live.result.issued_at <= now && now < live.result.expires_at,
-            Code::DirectoryUnavailable,
-        )?;
-        ensure(live.result.root == root, Code::OwnershipMismatch)?;
+        let live = live.into_result();
+        ensure(live.issued_at <= now && now < live.expires_at, Code::DirectoryUnavailable)?;
+        ensure(live.root == root, Code::OwnershipMismatch)?;
         let mut view = None;
         let mut refused = None;
         self.update(root, |state| {
-            observe(state, &live.result)?;
-            let allowed = !require_lookup
-                || live.result.lookup_allowed && !state.deleted && !state.suppressed;
+            observe(state, &live)?;
+            let allowed =
+                !require_lookup || live.lookup_allowed && !state.deleted && !state.suppressed;
             if !allowed {
                 refused = Some(Code::NotFound);
                 return Ok(());
             }
             let Some(committed) = &state.committed else {
-                if !require_lookup && live.result.current_receipt.is_none() {
+                if !require_lookup && live.current_receipt.is_none() {
                     return Ok(());
                 }
                 refused = Some(Code::DirectoryUnavailable);
                 return Ok(());
             };
-            let Some(current) = &live.result.current_receipt else {
+            let Some(current) = &live.current_receipt else {
                 refused = Some(Code::DirectoryUnavailable);
                 return Ok(());
             };
-            if committed.binding != live.result.current_binding
+            if committed.binding != live.current_binding
                 || committed.receipt.body.epoch != current.body.epoch
                 || committed.receipt.body.profile != current.body.profile
             {
@@ -563,11 +559,12 @@ impl HomeDirectory {
         live: LiveHomeRevalidation,
         now: u64,
     ) -> Result<()> {
+        let live = live.into_result();
         ensure(
-            live.result.root == root
-                && live.result.issued_at <= now
-                && now < live.result.expires_at
-                && live.result.pending_receipt.is_none(),
+            live.root == root
+                && live.issued_at <= now
+                && now < live.expires_at
+                && live.pending_receipt.is_none(),
             Code::OperationPending,
         )?;
         if let Some(abort) = abort {
@@ -582,26 +579,25 @@ impl HomeDirectory {
                 ensure(now >= intent.operation.body.expires_at, Code::OperationPending)?;
             }
             ensure(
-                live.result.current_receipt.as_ref().map_or(0, |r| r.body.epoch)
+                live.current_receipt.as_ref().map_or(0, |r| r.body.epoch)
                     == intent.operation.body.expected_epoch,
                 Code::StaleEpoch,
             )?;
-            observe(state, &live.result)?;
+            observe(state, &live)?;
             if let Some(committed) = &state.committed {
                 ensure(
-                    live.result.current_binding == committed.binding
+                    live.current_binding == committed.binding
                         && live
-                            .result
                             .current_receipt
                             .as_ref()
                             .is_some_and(|r| r.body.profile == committed.receipt.body.profile),
                     Code::DirectoryUnavailable,
                 )?;
             } else {
-                ensure(live.result.current_receipt.is_none(), Code::DirectoryUnavailable)?;
+                ensure(live.current_receipt.is_none(), Code::DirectoryUnavailable)?;
             }
             state.intent = None;
-            state.suppressed = !live.result.lookup_allowed;
+            state.suppressed = !live.lookup_allowed;
             Ok(())
         })
     }
@@ -616,20 +612,15 @@ impl HomeDirectory {
             read_root(&table, root)?.ok_or(CheckpointError::Directory(Code::NotFound))?;
         let result = change(&mut state)?;
         put_root(&mut table, root, &state)?;
-        if state.intent.is_none() {
-            if let Some(old) =
+        if state.intent.is_none()
+            && let Some(old) =
                 tx.open_table(OUTBOX).map_err(storage)?.remove(root).map_err(storage)?
-            {
-                let at: u64 = serde_json::from_slice(old.value())?;
-                ensure(
-                    tx.open_table(DUE)
-                        .map_err(storage)?
-                        .remove((at, root))
-                        .map_err(storage)?
-                        .is_some(),
-                    Code::DirectoryUnavailable,
-                )?;
-            }
+        {
+            let at: u64 = serde_json::from_slice(old.value())?;
+            ensure(
+                tx.open_table(DUE).map_err(storage)?.remove((at, root)).map_err(storage)?.is_some(),
+                Code::DirectoryUnavailable,
+            )?;
         }
         drop(table);
         tx.commit().map_err(storage)?;
@@ -726,7 +717,7 @@ fn observe(state: &mut HomeRoot, live: &w::HomeRevalidateResult) -> Result<()> {
         ensure(tuple.profile == state.profile_floor, Code::ProfileEquivocation)?;
     }
     state.directory_epoch = tuple.epoch;
-    state.binding_hash = tuple.binding_hash.clone();
+    state.binding_hash.clone_from(&tuple.binding_hash);
     state.profile_floor = tuple.profile.clone();
     if !live.lookup_allowed {
         state.suppressed = true;

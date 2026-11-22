@@ -19,6 +19,12 @@ pub struct HomePublication {
     offset: usize,
 }
 
+#[derive(Clone, Copy)]
+pub struct HomePublicationTarget<'a> {
+    pub root: &'a str,
+    pub channel: &'a str,
+}
+
 impl HomeDirectory {
     pub(super) fn publication_guard(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
         self.serving.lock().map_err(|_| CheckpointError::Refused("home_publication_lock"))
@@ -29,13 +35,13 @@ impl HomeDirectory {
     /// Refuses noncurrent/hidden profiles, malformed channels and oversized final response bytes.
     pub fn prepare_publication(
         &self,
-        root: &str,
+        target: HomePublicationTarget<'_>,
         live: LiveHomeRevalidation,
         master: &ed25519_dalek::VerifyingKey,
         now: u64,
-        channel: &str,
         encode: impl FnOnce(&HomeProfileView) -> Result<Vec<u8>>,
     ) -> Result<HomePublication> {
+        let HomePublicationTarget { root, channel } = target;
         fixed(channel)?;
         let expires = live.result.expires_at;
         let view = self.visible_profile(root, live, master, now)?;

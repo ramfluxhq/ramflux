@@ -61,7 +61,7 @@ impl DirectoryAuthority {
             }
             Err(error) => return Err(error),
         };
-        self.queue_response(writer, call_id, channel, response, false)
+        self.queue_response(writer, call_id, channel, &response, false)
     }
 
     /// HTTP framing is part of the same fenced candidate, including its length/status headers.
@@ -84,7 +84,7 @@ impl DirectoryAuthority {
             }
             Err(error) => return Err(error),
         };
-        self.queue_response(writer, call_id, channel, response, true)
+        self.queue_response(writer, call_id, channel, &response, true)
     }
 
     fn queue_response(
@@ -92,13 +92,13 @@ impl DirectoryAuthority {
         writer: &WriterIdentity,
         call_id: &str,
         channel: &str,
-        response: AuthorityResponse,
+        response: &AuthorityResponse,
         http: bool,
     ) -> Result<()> {
         let time = self.witness.sample_time()?;
-        let body = super::canonical(&response)?;
+        let body = super::canonical(response)?;
         let bytes = if http {
-            let status = if let AuthorityResponse::Refused { failure } = &response {
+            let status = if let AuthorityResponse::Refused { failure } = response {
                 super::http_status(failure.code)
             } else {
                 200
@@ -109,7 +109,12 @@ impl DirectoryAuthority {
         } else {
             body
         };
-        self.fence.queue(writer, &self.head(), call_id, channel, bytes, time)
+        self.fence.queue(
+            super::ServingState { identity: writer, head: &self.head(), time },
+            call_id,
+            channel,
+            bytes,
+        )
     }
 
     /// # Errors
@@ -122,11 +127,13 @@ impl DirectoryAuthority {
         try_write: impl FnMut(&[u8]) -> std::io::Result<usize>,
     ) -> Result<bool> {
         self.fence.write_step(
-            writer,
-            &self.head(),
+            super::ServingState {
+                identity: writer,
+                head: &self.head(),
+                time: self.witness.sample_time()?,
+            },
             call_id,
             channel,
-            self.witness.sample_time()?,
             try_write,
         )
     }
@@ -146,7 +153,7 @@ impl DirectoryAuthority {
         code: Code,
     ) -> Result<()> {
         let response = AuthorityResponse::Refused { failure: super::failure(code) };
-        self.queue_response(writer, call_id, channel, response, false)
+        self.queue_response(writer, call_id, channel, &response, false)
     }
 
     /// # Errors
@@ -162,7 +169,7 @@ impl DirectoryAuthority {
             writer,
             call_id,
             channel,
-            AuthorityResponse::Refused { failure: super::failure(code) },
+            &AuthorityResponse::Refused { failure: super::failure(code) },
             true,
         )
     }
@@ -190,59 +197,7 @@ impl DirectoryAuthority {
                 Ok(AuthorityResponse::Receipt { receipt: Box::new(receipt) })
             }
             DirectoryRequest::Resolve { name, nonce } => {
-                let plan = ImagePlan::new(&self.witness.db);
-                let index = plan.name(name)?.ok_or(CheckpointError::Directory(Code::NotFound))?;
-                ensure(index.state == w::IndexState::Active, Code::NotFound)?;
-                let root = plan
-                    .root(&index.root)?
-                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                ensure(self.lookup_allowed(&index.root, &root)?, Code::NotFound)?;
-                let binding = root
-                    .current_binding
-                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                ensure(
-                    binding.body.name == *name
-                        && binding.body.node == root.node
-                        && binding.body.epoch == root.epoch
-                        && binding.body.principal_commitment == index.root
-                        && Some(crypto::binding_hash(&binding)?) == root.binding_hash,
-                    Code::DirectoryUnavailable,
-                )?;
-                let home = self
-                    .reporting_floor(&index.root)?
-                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                ensure(
-                    home.home == root.node && home.service.body.node == root.node,
-                    Code::DirectoryUnavailable,
-                )?;
-                let service = self
-                    .reporting_service(&root.node)?
-                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                service.verify(&root.node, &home.service.body.public_key, now)?;
-                let resolve = crypto::sign_resolve(
-                    signer,
-                    &center,
-                    w::DirectoryResolveBody {
-                        center_id: center.clone(),
-                        name: name.clone(),
-                        node: root.node,
-                        principal_commitment: index.root,
-                        epoch: root.epoch,
-                        binding_hash: root
-                            .binding_hash
-                            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?,
-                        profile: root.profile,
-                        request_nonce: nonce.clone(),
-                        issued_at: now,
-                        expires_at: after(now, 60)?,
-                    },
-                )?;
-                Ok(AuthorityResponse::Resolved {
-                    resolve: Box::new(resolve),
-                    binding: Box::new(binding),
-                    master_public_key: home.master_public_key,
-                    service: Box::new(service),
-                })
+                self.resolve_response(name, nonce, signer, now)
             }
             DirectoryRequest::Revalidate { request } => {
                 ensure(request.root == call.root, Code::OwnershipMismatch)?;
@@ -297,6 +252,68 @@ impl DirectoryAuthority {
                 Ok(AuthorityResponse::Revalidated { result: Box::new(result) })
             }
         }
+    }
+
+    fn resolve_response(
+        &self,
+        name: &str,
+        nonce: &str,
+        signer: &SigningKey,
+        now: u64,
+    ) -> Result<AuthorityResponse> {
+        let center = self.head().center_id;
+        let plan = ImagePlan::new(&self.witness.db);
+        let index = plan.name(name)?.ok_or(CheckpointError::Directory(Code::NotFound))?;
+        ensure(index.state == w::IndexState::Active, Code::NotFound)?;
+        let root = plan
+            .root(&index.root)?
+            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+        ensure(self.lookup_allowed(&index.root, &root)?, Code::NotFound)?;
+        let binding =
+            root.current_binding.ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+        ensure(
+            binding.body.name == name
+                && binding.body.node == root.node
+                && binding.body.epoch == root.epoch
+                && binding.body.principal_commitment == index.root
+                && Some(crypto::binding_hash(&binding)?) == root.binding_hash,
+            Code::DirectoryUnavailable,
+        )?;
+        let home = self
+            .reporting_floor(&index.root)?
+            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+        ensure(
+            home.home == root.node && home.service.body.node == root.node,
+            Code::DirectoryUnavailable,
+        )?;
+        let service = self
+            .reporting_service(&root.node)?
+            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+        service.verify(&root.node, &home.service.body.public_key, now)?;
+        let resolve = crypto::sign_resolve(
+            signer,
+            &center,
+            w::DirectoryResolveBody {
+                center_id: center.clone(),
+                name: name.to_owned(),
+                node: root.node,
+                principal_commitment: index.root,
+                epoch: root.epoch,
+                binding_hash: root
+                    .binding_hash
+                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?,
+                profile: root.profile,
+                request_nonce: nonce.to_owned(),
+                issued_at: now,
+                expires_at: after(now, 60)?,
+            },
+        )?;
+        Ok(AuthorityResponse::Resolved {
+            resolve: Box::new(resolve),
+            binding: Box::new(binding),
+            master_public_key: home.master_public_key,
+            service: Box::new(service),
+        })
     }
 
     pub(super) fn lookup_allowed(&self, root_key: &str, root: &w::RootRow) -> Result<bool> {

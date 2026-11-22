@@ -103,7 +103,7 @@ impl HomeService {
     ) -> Result<w::NativeUsernameReply> {
         let response = self.client.exchange_blocking(
             reporter,
-            directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
+            &directory::DirectoryRequest::Resolve { name: name.into(), nonce: nonce.into() },
         )?;
         let directory::AuthorityResponse::Resolved { resolve, binding, master_public_key, service } =
             response
@@ -216,7 +216,7 @@ impl HomeService {
         }
         let master = ramflux_crypto::verifying_key_from_base64url(master_public)?;
         let live = self.client.revalidate(&self.directory, root, None)?;
-        Ok(self.directory.prepare_publication(root, live, &master, crate::now_unix_seconds()?, channel, |view| {
+        Ok(self.directory.prepare_publication(directory::HomePublicationTarget { root, channel }, live, &master, crate::now_unix_seconds()?, |view| {
             if view.binding.as_ref() != Some(&request.binding) || view.receipt.body.profile != request.resolve.body.profile {
                 return Err(directory::CheckpointError::Directory(w::DirectoryCode::StaleEpoch));
             }

@@ -42,5 +42,3 @@ mod native;
 pub use native::*;
 #[cfg(test)]
 mod checkpoint_tests;
-#[cfg(test)]
-use redb::ReadableTable;

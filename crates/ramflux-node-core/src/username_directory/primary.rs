@@ -193,7 +193,7 @@ impl PrimaryProjection {
     }
 
     /// Only an unchanged final witness head can publish the projection's first durable head.
-    /// The caller must then notify PrimaryApplied using this same writer identity.
+    /// The caller must then notify `PrimaryApplied` using this same writer identity.
     /// # Errors
     /// Refuses interrupted rebuilds and witness changes; never selects max(primary,witness).
     pub fn finish_rebuild(&mut self, final_witness: &CheckpointHead) -> Result<CheckpointHead> {
@@ -304,6 +304,6 @@ impl PrimaryProjection {
     pub fn root(&self, root: &str) -> Result<Option<w::RootRow>> {
         require(self.complete && self.rebuilding.is_none(), "primary_unpublished")?;
         super::fixed(root)?;
-        ImagePlan::new(&self.db).root(&root.to_owned())
+        ImagePlan::new(&self.db).root(root)
     }
 }

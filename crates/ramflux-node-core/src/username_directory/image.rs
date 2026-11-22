@@ -133,31 +133,31 @@ pub(super) fn update_indexes(
 }
 
 macro_rules! accessors {
-    ($($get:ident, $put:ident, $arm:ident, $key:ty, $row:ty;)*) => {
+    ($($get:ident, $put:ident, $arm:ident, $key:ty => $borrow:ty, $row:ty;)*) => {
         impl ImagePlan<'_> {$ (
-            pub fn $get(&self, key: &$key) -> Result<Option<$row>> {
-                match self.get(&wire::Replacement::$arm { key: key.clone(), old: None, new: None })? {
+            pub fn $get(&self, key: &$borrow) -> Result<Option<$row>> {
+                match self.get(&wire::Replacement::$arm { key: key.to_owned(), old: None, new: None })? {
                     Some(wire::Replacement::$arm { new, .. }) => Ok(new),
                     None => Ok(None),
                     _ => Err(CheckpointError::Refused("image_variant")),
                 }
             }
-            pub fn $put(&mut self, key: &$key, new: Option<$row>) -> Result<()> {
+            pub fn $put(&mut self, key: &$borrow, new: Option<$row>) -> Result<()> {
                 let old = self.$get(key)?;
-                self.put(wire::Replacement::$arm { key: key.clone(), old, new })
+                self.put(wire::Replacement::$arm { key: key.to_owned(), old, new })
             }
         )*}
     };
 }
 accessors! {
-    root, put_root, Root, String, wire::RootRow;
-    name, put_name, Name, String, wire::NameRow;
-    skeleton, put_skeleton, Skeleton, String, wire::SkeletonRow;
-    hold, put_hold, Hold, wire::HoldKey, wire::HoldRow;
-    operation, put_operation, Operation, wire::OperationKey, wire::OperationRow;
-    owner, put_owner, OpOwner, String, wire::OperationOwnerRow;
-    due, put_due, Due, wire::DueKey, wire::DueRow;
-    counter, put_counter, Counter, wire::CounterKey, wire::CounterRow;
+    root, put_root, Root, String => str, wire::RootRow;
+    name, put_name, Name, String => str, wire::NameRow;
+    skeleton, put_skeleton, Skeleton, String => str, wire::SkeletonRow;
+    hold, put_hold, Hold, wire::HoldKey => wire::HoldKey, wire::HoldRow;
+    operation, put_operation, Operation, wire::OperationKey => wire::OperationKey, wire::OperationRow;
+    owner, put_owner, OpOwner, String => str, wire::OperationOwnerRow;
+    due, put_due, Due, wire::DueKey => wire::DueKey, wire::DueRow;
+    counter, put_counter, Counter, wire::CounterKey => wire::CounterKey, wire::CounterRow;
 }
 
 pub(super) fn skeleton(name: &str) -> Result<String> {

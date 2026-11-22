@@ -77,7 +77,7 @@ fn expectation(
     ensure(body.profile.version == 2, Code::InvalidProfile)?;
     match body.action {
         Action::ProfileUpdate => {
-            ensure(body.profile.epoch > root.profile.epoch, Code::StaleProfile)?
+            ensure(body.profile.epoch > root.profile.epoch, Code::StaleProfile)?;
         }
         _ if root.profile.version == 2 => ensure(body.profile == root.profile, Code::StaleProfile)?,
         _ => ensure(body.profile.epoch > 0, Code::InvalidProfile)?,
@@ -205,16 +205,15 @@ pub(super) fn reserve(
     held_skeleton: Option<&w::HoldKey>,
 ) -> Result<()> {
     let key = &reporter.root;
-    let mut root = match plan.root(key)? {
-        Some(root) => root,
-        None => {
-            ensure(
-                matches!(op.body.action, Action::Claim | Action::ProfileUpdate),
-                Code::InvalidUsername,
-            )?;
-            bump(plan, &reporter.home, w::Metric::RootSlots, 1)?;
-            empty_root(&reporter.home)
-        }
+    let mut root = if let Some(root) = plan.root(key)? {
+        root
+    } else {
+        ensure(
+            matches!(op.body.action, Action::Claim | Action::ProfileUpdate),
+            Code::InvalidUsername,
+        )?;
+        bump(plan, &reporter.home, w::Metric::RootSlots, 1)?;
+        empty_root(&reporter.home)
     };
     expectation(&root, op, reporter, now)?;
     ensure(root.pending_operation_id.is_none(), Code::OperationPending)?;
@@ -402,7 +401,7 @@ pub(super) fn commit(
     root.epoch = op.body.next_epoch;
     root.profile = op.body.profile.clone();
     root.name = next_name;
-    root.current_binding = op.body.binding.clone();
+    root.current_binding.clone_from(&op.body.binding);
     root.binding_hash = root.current_binding.as_ref().map(crypto::binding_hash).transpose()?;
     root.receipt_decision = Some(w::ReceiptDecision { committed_at: now });
     root.last_operation_id = Some(op.body.operation_id.clone());

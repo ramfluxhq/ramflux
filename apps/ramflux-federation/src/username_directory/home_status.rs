@@ -30,7 +30,7 @@ impl HomeService {
         }
         let receipt = match self.client.exchange_blocking(
             root,
-            directory::DirectoryRequest::Status { operation_id: operation_id.clone() },
+            &directory::DirectoryRequest::Status { operation_id: operation_id.clone() },
         )? {
             directory::AuthorityResponse::Receipt { receipt } => {
                 let center =

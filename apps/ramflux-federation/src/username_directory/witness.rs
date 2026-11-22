@@ -37,31 +37,7 @@ pub fn run(
     let directory::DirectoryRole::Witness { database, peer: pins, listen } = &config.role else {
         return refuse("witness role");
     };
-    ipc::self_uid(pins.witness_uid)?;
-    ipc::owner(
-        database.parent().ok_or_else(|| error("witness parent"))?,
-        pins.witness_uid,
-        0o700,
-        true,
-    )?;
-    ipc::socket_path(&pins.socket, pins.witness_uid)?;
-    let clock = Arc::new(directory::SystemCheckpointClock::default());
-    let witness = if flag("--username-initialize") {
-        directory::CheckpointWitness::initialize(
-            database,
-            &config.center.id,
-            config.center.generation,
-            clock,
-        )?
-    } else {
-        ipc::owner(database, pins.witness_uid, 0o600, false)?;
-        directory::CheckpointWitness::open(
-            database,
-            &config.center.id,
-            config.center.generation,
-            clock,
-        )?
-    };
+    let witness = open_checkpoint(database, pins, &config.center)?;
     // Only after acquiring the exclusive protected DB lock can this UID replace its stale socket.
     if pins.socket.exists() {
         std::fs::remove_file(&pins.socket)?;
@@ -78,7 +54,7 @@ pub fn run(
     if node.node_id != config.center.id || signer.public_key() != config.center.public_key {
         return refuse("witness signing pin mismatch");
     }
-    let mut authority = directory::DirectoryAuthority::new(witness)?;
+    let authority = directory::DirectoryAuthority::new(witness)?;
     let (sender, receiver) = mpsc::sync_channel(64);
     let slots = Arc::new(tokio::sync::Semaphore::new(16));
     let sources = Arc::new(Sources::new());
@@ -88,27 +64,80 @@ pub fn run(
         node.node_id.clone(),
         secret.with_bytes(|seed| *seed),
         sender.clone(),
-        Arc::clone(&slots),
-        Arc::clone(&sources),
+        quic::Admission { slots: Arc::clone(&slots), sources: Arc::clone(&sources) },
     )?;
-    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    let mut peer: Option<Peer> = None;
-    let mut pending: Vec<Pending> = Vec::new();
+    let mut state =
+        WitnessState { authority, signer, workers: Vec::new(), peer: None, pending: Vec::new() };
     let recovery = flag("--username-initialize") || flag("--username-recovery");
+    let io = WitnessIo {
+        node,
+        config,
+        listener: &listener,
+        public: &public,
+        tls,
+        secret: &secret,
+        sender,
+        receiver,
+        slots,
+        sources,
+        pins,
+        recovery,
+    };
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
-        workers.retain(|worker| !worker.is_finished());
-        if peer.is_none() {
+        state.workers.retain(|worker| !worker.is_finished());
+        state.poll_primary(&io)?;
+        state.accept_public(&io)?;
+        state.serve_pending(&io)?;
+        if !ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
+            break;
+        }
+    }
+    state.authority.disconnect();
+    drop((state.pending, io.receiver));
+    for worker in state.workers {
+        let _ = worker.join();
+    }
+    drop(listener);
+    std::fs::remove_file(&pins.socket)?;
+    Ok(())
+}
+
+struct WitnessState {
+    authority: directory::DirectoryAuthority,
+    signer: directory::DirectorySigner,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    peer: Option<Peer>,
+    pending: Vec<Pending>,
+}
+struct WitnessIo<'a> {
+    node: &'a ramflux_node_core::NodeServiceConfig,
+    config: &'a directory::DirectoryConfig,
+    listener: &'a UnixListener,
+    public: &'a TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    secret: &'a ramflux_node_core::NodeSecret,
+    sender: mpsc::SyncSender<tcp::Incoming>,
+    receiver: mpsc::Receiver<tcp::Incoming>,
+    slots: Arc<tokio::sync::Semaphore>,
+    sources: Arc<Sources>,
+    pins: &'a directory::WitnessPeer,
+    recovery: bool,
+}
+impl WitnessState {
+    fn poll_primary(&mut self, io: &WitnessIo<'_>) -> Result<()> {
+        let WitnessIo { listener, pins, recovery, .. } = io;
+        if self.peer.is_none() {
             match listener.accept() {
                 Ok((stream, _)) => {
                     if ipc::peer(&stream, pins.center_uid).is_ok() {
                         stream.set_nonblocking(true)?;
-                        let writer = authority.acquire()?;
+                        let writer = self.authority.acquire()?;
                         let welcome = wire::encode(&wire::Response::Welcome {
                             writer: writer.clone(),
-                            head: authority.head(),
-                            recovery,
+                            head: self.authority.head(),
+                            recovery: *recovery,
                         })?;
-                        peer = Some(Peer {
+                        self.peer = Some(Peer {
                             stream,
                             writer,
                             reader: wire::Reader::default(),
@@ -123,34 +152,38 @@ pub fn run(
             }
         }
         let mut lost = false;
-        if let Some(current) = &mut peer {
-            // Three seconds is the renewal cadence; authority expires with the ten-second lease.
+        if let Some(current) = &mut self.peer {
+            // Three seconds is the renewal cadence; self.authority expires with the ten-second lease.
             if current.last.elapsed() >= Duration::from_secs(10) {
                 tracing::warn!("username primary heartbeat deadline exceeded");
                 lost = true;
-            } else if let Err(error) = poll_peer(current, &mut authority, recovery) {
+            } else if let Err(error) = poll_peer(current, &mut self.authority, *recovery) {
                 tracing::warn!(%error, "username primary disconnected");
                 lost = true;
             }
         }
         if lost {
-            peer = None;
-            authority.disconnect();
-            pending.clear();
+            self.peer = None;
+            self.authority.disconnect();
+            self.pending.clear();
         }
+        Ok(())
+    }
+    fn accept_public(&mut self, io: &WitnessIo<'_>) -> Result<()> {
+        let WitnessIo { public, tls, sender, node, secret, slots, sources, .. } = io;
         match public.accept() {
             Ok((socket, address)) => {
-                if workers.len() < 16
-                    && pending.len() < 64
+                if self.workers.len() < 16
+                    && self.pending.len() < 64
                     && sources.admit(address.ip())
-                    && peer.is_some()
-                    && let Ok(permit) = Arc::clone(&slots).try_acquire_owned()
+                    && self.peer.is_some()
+                    && let Ok(permit) = Arc::clone(slots).try_acquire_owned()
                 {
-                    let tls = Arc::clone(&tls);
-                    let sender = sender.clone();
+                    let tls = Arc::clone(tls);
+                    let sender = (*sender).clone();
                     let node_id = node.node_id.clone();
                     let seed = secret.with_bytes(|seed| *seed);
-                    workers.push(
+                    self.workers.push(
                         std::thread::Builder::new().name("username-tls-read".into()).spawn(
                             move || {
                                 let _permit = permit;
@@ -165,65 +198,80 @@ pub fn run(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
         }
-        if let Some(current) = &mut peer {
+        Ok(())
+    }
+    fn serve_pending(&mut self, io: &WitnessIo<'_>) -> Result<()> {
+        let WitnessIo { receiver, config, .. } = io;
+        if let Some(current) = &mut self.peer {
             if current.ready
                 && let Ok(incoming) = receiver.try_recv()
+                && self.pending.len() < 64
             {
-                if current.ready && pending.len() < 64 {
-                    match admit(&mut authority, &current.writer, incoming, &config.center) {
-                        Ok(call) => {
-                            current.ready = authority.head() == call.1;
-                            if !current.ready {
-                                pending.clear();
-                            }
-                            pending.push(call.0);
+                match admit(&mut self.authority, &current.writer, incoming, &config.center) {
+                    Ok(call) => {
+                        current.ready = self.authority.head() == call.1;
+                        if !current.ready {
+                            self.pending.clear();
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "username request refused before publication")
-                        }
+                        self.pending.push(call.0);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "username request refused before publication");
                     }
                 }
             }
-            pending.retain_mut(|call| {
+            self.pending.retain_mut(|call| {
                 if Instant::now() < call.incoming.deadline {
                     return true;
                 }
                 if let Some(id) = &call.call_id {
-                    authority.cancel_call(id);
+                    self.authority.cancel_call(id);
                 }
                 false
             });
             if current.ready {
-                pending.retain_mut(|call| {
-                    let result = serve(call, &mut authority, &current.writer, &signer);
+                self.pending.retain_mut(|call| {
+                    let result = serve(call, &mut self.authority, &current.writer, &self.signer);
                     match result {
                         Ok(done) => !done,
                         Err(error) => {
                             if let Some(id) = &call.call_id {
-                                authority.cancel_call(id);
+                                self.authority.cancel_call(id);
                             }
                             tracing::debug!(%error, "username response closed");
                             false
                         }
                     }
                 });
-                if pending.is_empty() && authority.cleanup_next(&current.writer)? {
+                if self.pending.is_empty() && self.authority.cleanup_next(&current.writer)? {
                     current.ready = false;
                 }
             }
         }
-        if !ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
-            break;
-        }
+        Ok(())
     }
-    authority.disconnect();
-    drop((pending, receiver));
-    for worker in workers {
-        let _ = worker.join();
-    }
-    drop(listener);
-    std::fs::remove_file(&pins.socket)?;
-    Ok(())
+}
+fn open_checkpoint(
+    database: &std::path::Path,
+    pins: &directory::WitnessPeer,
+    center: &directory::CenterPin,
+) -> Result<directory::CheckpointWitness> {
+    ipc::self_uid(pins.witness_uid)?;
+    ipc::owner(
+        database.parent().ok_or_else(|| error("witness parent"))?,
+        pins.witness_uid,
+        0o700,
+        true,
+    )?;
+    ipc::socket_path(&pins.socket, pins.witness_uid)?;
+    let clock = Arc::new(directory::SystemCheckpointClock::default());
+    let checkpoint = if flag("--username-initialize") {
+        directory::CheckpointWitness::initialize(database, &center.id, center.generation, clock)?
+    } else {
+        ipc::owner(database, pins.witness_uid, 0o600, false)?;
+        directory::CheckpointWitness::open(database, &center.id, center.generation, clock)?
+    };
+    Ok(checkpoint)
 }
 
 fn poll_peer(

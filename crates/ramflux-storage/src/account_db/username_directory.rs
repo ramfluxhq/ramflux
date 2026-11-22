@@ -130,7 +130,7 @@ impl UsernameFloor {
                 && self.operation.body.next_epoch >= incoming.operation.body.next_epoch
                 && self.operation != incoming.operation;
         if incoming.operation.body.next_epoch > self.operation.body.next_epoch {
-            merged.binding = incoming.binding.clone();
+            merged.binding.clone_from(&incoming.binding);
             merged.operation = incoming.operation.clone();
         }
         if incoming.profile.body.epoch > self.profile.body.epoch {

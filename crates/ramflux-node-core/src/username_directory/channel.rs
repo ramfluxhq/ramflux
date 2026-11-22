@@ -69,6 +69,13 @@ impl DirectoryChannelIdentity {
 /// Closed node-signing adapter; account documents still require their master signatures.
 pub struct DirectorySigner(SigningKey);
 
+pub struct ReportingRequestInput<'a> {
+    pub root: &'a str,
+    pub request: super::DirectoryRequest,
+    pub exporter: &'a [u8; 32],
+    pub now: u64,
+}
+
 impl DirectorySigner {
     /// Build the exact canonical reporting request after authenticating the provisioned centre.
     /// # Errors
@@ -77,11 +84,9 @@ impl DirectorySigner {
         &self,
         pin: &super::CenterPin,
         evidence: super::ReportingEvidence,
-        root: &str,
-        request: super::DirectoryRequest,
-        exporter: &[u8; 32],
-        now: u64,
+        input: ReportingRequestInput<'_>,
     ) -> Result<Vec<u8>> {
+        let ReportingRequestInput { root, request, exporter, now } = input;
         request.validate()?;
         let proof = self.reporting_proof(super::ReportingProofBody {
             version: 1,

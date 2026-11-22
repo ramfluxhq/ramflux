@@ -80,19 +80,7 @@ pub fn prepare_username_draft(
         .receipt
         .as_ref()
         .map_or(w::ProfileRef { version: 0, epoch: 0, hash: None }, |r| r.body.profile.clone());
-    let mut profile = status.profile.as_ref().map_or_else(
-        || w::IdentityProfileV2Body {
-            schema: ramflux_protocol::domain::IDENTITY_PROFILE_V2.into(),
-            principal_id: native.body.principal_id.clone(),
-            principal_commitment: root.clone(),
-            kind: w::ProfileKind::from_principal_kind(native.body.principal_kind),
-            display_name: native.body.profile.display_name.clone(),
-            bio: String::new(),
-            avatar: None,
-            epoch: 1,
-        },
-        |p| p.body.clone(),
-    );
+    let mut profile = profile_body(&native.body, status);
     let mut discoverable = status.receipt.as_ref().is_some_and(|r| r.body.discoverable);
     let mut name = current_name.clone();
     let action = match &change {
@@ -169,4 +157,20 @@ pub fn prepare_username_draft(
         operation,
         profile,
     }))
+}
+
+fn profile_body(native: &DeviceSet, status: &w::NativeUsernameStatus) -> w::IdentityProfileV2Body {
+    status.profile.as_ref().map_or_else(
+        || w::IdentityProfileV2Body {
+            schema: ramflux_protocol::domain::IDENTITY_PROFILE_V2.into(),
+            principal_id: native.principal_id.clone(),
+            principal_commitment: native.account_anchor.clone(),
+            kind: w::ProfileKind::from_principal_kind(native.principal_kind),
+            display_name: native.profile.display_name.clone(),
+            bio: String::new(),
+            avatar: None,
+            epoch: 1,
+        },
+        |p| p.body.clone(),
+    )
 }

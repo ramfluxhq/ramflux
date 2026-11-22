@@ -35,7 +35,7 @@ impl Peer {
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
             .name("username-primary-peer".into())
-            .spawn(move || serve(stream, receiver))?;
+            .spawn(move || serve(stream, &receiver))?;
         Ok((Self { sender, close, worker: Some(worker) }, welcome))
     }
 
@@ -62,7 +62,7 @@ fn heartbeat(stream: &mut UnixStream) -> Result<()> {
     Ok(())
 }
 
-fn serve(mut stream: UnixStream, receiver: Receiver<Query>) {
+fn serve(mut stream: UnixStream, receiver: &Receiver<Query>) {
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(query) => {

@@ -50,7 +50,7 @@ impl CenterClient {
     pub fn exchange_blocking(
         &self,
         root: &str,
-        request: directory::DirectoryRequest,
+        request: &directory::DirectoryRequest,
     ) -> Result<directory::AuthorityResponse> {
         let _slot = Arc::clone(&self.slots)
             .try_acquire_owned()
@@ -61,7 +61,7 @@ impl CenterClient {
     fn exchange_admitted(
         &self,
         root: &str,
-        request: directory::DirectoryRequest,
+        request: &directory::DirectoryRequest,
     ) -> Result<directory::AuthorityResponse> {
         let history = self.history(root)?;
         let now = crate::now_unix_seconds()?;
@@ -98,7 +98,7 @@ impl CenterClient {
         };
         match self.exchange_blocking(
             root,
-            directory::DirectoryRequest::Revalidate { request: request.clone() },
+            &directory::DirectoryRequest::Revalidate { request: request.clone() },
         )? {
             directory::AuthorityResponse::Revalidated { result } => {
                 Ok(directory::LiveHomeRevalidation::from_authenticated_reply(
@@ -133,7 +133,7 @@ impl directory::UsernameCenterClient for CenterClient {
                 // Keep cancellation from releasing the concurrency charge before IO actually ends.
                 let _permit = permit;
                 let mutation = matches!(request, directory::DirectoryRequest::Mutate { .. });
-                let result = owner.exchange_admitted(&root, request).map_err(|error| {
+                let result = owner.exchange_admitted(&root, &request).map_err(|error| {
                     tracing::warn!(%error, "username centre exchange failed");
                     directory::CheckpointError::Directory(
                         ramflux_protocol::username_directory::DirectoryCode::DirectoryUnavailable,

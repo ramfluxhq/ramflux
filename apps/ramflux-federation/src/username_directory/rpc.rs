@@ -12,6 +12,7 @@ use std::{
 };
 
 type Stream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+#[derive(Clone, Copy)]
 struct Peer<'a> {
     origin: &'a str,
     name: &'a str,
@@ -27,7 +28,7 @@ pub fn center(
     signer: &directory::DirectorySigner,
     evidence: directory::ReportingEvidence,
     root: &str,
-    request: directory::DirectoryRequest,
+    request: &directory::DirectoryRequest,
 ) -> Result<directory::AuthorityResponse> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let ca = tls::read_file(&pin.ca_file, 16384)?;
@@ -46,10 +47,12 @@ pub fn center(
     let body = signer.reporting_request(
         pin,
         evidence,
-        root,
-        request.clone(),
-        &exporter,
-        crate::now_unix_seconds()?,
+        directory::ReportingRequestInput {
+            root,
+            request: request.clone(),
+            exporter: &exporter,
+            now: crate::now_unix_seconds()?,
+        },
     )?;
     let (status, response) = post::<directory::AuthorityResponse>(
         &mut stream,

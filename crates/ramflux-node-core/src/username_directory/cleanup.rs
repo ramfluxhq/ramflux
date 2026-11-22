@@ -80,31 +80,7 @@ impl DirectoryAuthority {
                         transitions::abort(&mut plan, root, operation_id, time.wall)?;
                         kind = w::DeltaKind::Expire;
                     }
-                    w::DuePhase::Detail => {
-                        ensure(
-                            row.retain_until == Some(*at) && row.state != w::ReceiptState::Reserved,
-                            Code::DirectoryUnavailable,
-                        )?;
-                        let owner = plan
-                            .owner(operation_id)?
-                            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                        ensure(
-                            owner.root == *root && owner.operation_hash == row.operation_hash,
-                            Code::DirectoryUnavailable,
-                        )?;
-                        let root_row = plan
-                            .root(root)?
-                            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
-                        plan.put_operation(&op_key, None)?;
-                        plan.put_owner(operation_id, None)?;
-                        plan.put_due(&key, None)?;
-                        transitions::bump(
-                            &mut plan,
-                            &root_row.node,
-                            w::Metric::OperationDetails,
-                            -1,
-                        )?;
-                    }
+                    w::DuePhase::Detail => prune_detail(&mut plan, &key, &op_key, &row, *at)?,
                 }
                 root.clone()
             }
@@ -148,4 +124,31 @@ fn debit(plan: &mut ImagePlan<'_>, key: &w::CounterKey, amount: u64) -> Result<(
         .checked_sub(amount)
         .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
     plan.put_counter(key, Some(w::CounterRow { value }))
+}
+
+fn prune_detail(
+    plan: &mut ImagePlan<'_>,
+    key: &w::DueKey,
+    op_key: &w::OperationKey,
+    row: &w::OperationRow,
+    at: u64,
+) -> Result<()> {
+    ensure(
+        row.retain_until == Some(at) && row.state != w::ReceiptState::Reserved,
+        Code::DirectoryUnavailable,
+    )?;
+    let owner = plan
+        .owner(&op_key.operation_id)?
+        .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+    ensure(
+        owner.root == op_key.root && owner.operation_hash == row.operation_hash,
+        Code::DirectoryUnavailable,
+    )?;
+    let root_row =
+        plan.root(&op_key.root)?.ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+    plan.put_operation(op_key, None)?;
+    plan.put_owner(&op_key.operation_id, None)?;
+    plan.put_due(key, None)?;
+    transitions::bump(plan, &root_row.node, w::Metric::OperationDetails, -1)?;
+    Ok(())
 }

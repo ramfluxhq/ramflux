@@ -42,6 +42,7 @@ pub fn authorize_username_draft(
         .map_err(|_| w::DirectoryCode::AuthenticationRequired)?;
     let master = ramflux_crypto::custody::MasterKey::from_phrase(&phrase)
         .map_err(|_| w::DirectoryCode::AuthenticationRequired)?;
+    drop(words);
     if master.public_key() != draft.master_public_key {
         return Err(w::DirectoryCode::KeyChanged.into());
     }

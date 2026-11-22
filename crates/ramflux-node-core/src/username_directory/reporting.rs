@@ -208,23 +208,7 @@ impl DirectoryAuthority {
                     ),
                     service: reporter.service.clone(),
                 };
-                let service_key = format!("auth_home_service:{}", reporter.home);
-                let old_service: Option<super::SignedHomeServiceAddress> =
-                    read(&meta, &service_key)?;
-                if let Some(old) = old_service {
-                    ensure(
-                        old.body.public_key == reporter.service.body.public_key,
-                        Code::KeyChanged,
-                    )?;
-                    ensure(old.body.issued_at <= reporter.service.body.issued_at, Code::Replay)?;
-                    if old.body.issued_at == reporter.service.body.issued_at {
-                        ensure(old == reporter.service, Code::Replay)?;
-                    }
-                } else {
-                    add(&mut meta, "auth_lifetime_services", 1, 1_000_000)?;
-                }
-                meta.insert(service_key.as_str(), canonical(&reporter.service)?.as_slice())
-                    .map_err(storage)?;
+                retain_service(&mut meta, &reporter)?;
                 meta.insert(floor_key.as_str(), canonical(&floor)?.as_slice()).map_err(storage)?;
                 Ok(())
             })();
@@ -241,4 +225,20 @@ impl DirectoryAuthority {
         admitted?;
         Ok((request, reporter))
     }
+}
+
+fn retain_service(meta: &mut redb::Table<&str, &[u8]>, reporter: &VerifiedReporter) -> Result<()> {
+    let service_key = format!("auth_home_service:{}", reporter.home);
+    let old_service: Option<super::SignedHomeServiceAddress> = read(meta, &service_key)?;
+    if let Some(old) = old_service {
+        ensure(old.body.public_key == reporter.service.body.public_key, Code::KeyChanged)?;
+        ensure(old.body.issued_at <= reporter.service.body.issued_at, Code::Replay)?;
+        if old.body.issued_at == reporter.service.body.issued_at {
+            ensure(old == reporter.service, Code::Replay)?;
+        }
+    } else {
+        add(meta, "auth_lifetime_services", 1, 1_000_000)?;
+    }
+    meta.insert(service_key.as_str(), canonical(&reporter.service)?.as_slice()).map_err(storage)?;
+    Ok(())
 }

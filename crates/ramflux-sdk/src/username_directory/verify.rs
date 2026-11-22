@@ -22,15 +22,21 @@ pub struct ResolvedUsername {
     pub(crate) floor: UsernameFloor,
 }
 
+#[derive(Clone, Copy)]
+struct CurrentProfile<'a> {
+    operation: &'a w::UsernameOperation,
+    binding: Option<&'a w::UsernameBinding>,
+    profile: &'a w::SignedIdentityProfileV2,
+    receipt: &'a w::DirectoryReceipt,
+}
+
 fn verify_current(
     pin: &w::NativeDirectoryPin,
     native: &DeviceSet,
-    operation: &w::UsernameOperation,
-    binding: Option<&w::UsernameBinding>,
-    profile: &w::SignedIdentityProfileV2,
-    receipt: &w::DirectoryReceipt,
+    view: CurrentProfile<'_>,
     now: u64,
 ) -> Result<UsernameFloor, SdkError> {
+    let CurrentProfile { operation, binding, profile, receipt } = view;
     let center = ramflux_crypto::verifying_key_from_base64url(&pin.public_key)?;
     let master = ramflux_crypto::verifying_key_from_base64url(
         &native.master_certificate.body.master_public_key,
@@ -131,10 +137,7 @@ pub(crate) fn observe_status(
             let floor = verify_current(
                 pin,
                 &result.own_record.body,
-                operation,
-                status.binding.as_ref(),
-                profile,
-                receipt,
+                CurrentProfile { operation, binding: status.binding.as_ref(), profile, receipt },
                 now,
             )?;
             db.observe_username(&floor)?;
@@ -201,7 +204,17 @@ pub(crate) fn observe_resolution(
     {
         return Err(w::DirectoryCode::ProfileEquivocation.into());
     }
-    let floor = verify_current(pin, native, &operation, Some(&binding), &profile, &receipt, now)?;
+    let floor = verify_current(
+        pin,
+        native,
+        CurrentProfile {
+            operation: &operation,
+            binding: Some(&binding),
+            profile: &profile,
+            receipt: &receipt,
+        },
+        now,
+    )?;
     if let Some(old) = db.username_name_pin(name)?
         && (old.conflicted || old.binding.body.principal_commitment != native.account_anchor)
     {

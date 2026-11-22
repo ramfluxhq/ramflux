@@ -35,12 +35,12 @@ pub fn run(config: &directory::DirectoryConfig) -> Result<()> {
         let mut cursor = None;
         loop {
             let wire::Response::Image { page } =
-                peer.request(wire::Request::Image { head: head.clone(), after: cursor })?
+                peer.request(wire::Request::Image { head: head.clone(), after: cursor.take() })?
             else {
                 return refuse("witness image response");
             };
             let finished = page.rows.is_empty();
-            cursor = page.next.clone();
+            cursor.clone_from(&page.next);
             let batches = projection.copy_image_page(&head, page)?;
             for row in batches {
                 let wire::Response::Batch { group } = peer.request(wire::Request::Batch {

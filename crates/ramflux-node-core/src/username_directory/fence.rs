@@ -17,6 +17,14 @@ pub struct WriterIdentity {
     pub incarnation: String,
 }
 
+/// Exact facts sampled by the witness for this handoff; this is no serving capability.
+#[derive(Clone, Copy)]
+pub struct ServingState<'a> {
+    pub identity: &'a WriterIdentity,
+    pub head: &'a CheckpointHead,
+    pub time: CheckpointTime,
+}
+
 struct Lease {
     identity: WriterIdentity,
     deadline: u64,
@@ -208,13 +216,12 @@ impl ServingFence {
     /// Refuses wrong tuple/call/head/channel correlation, duplicate candidates or excessive size.
     pub(crate) fn queue(
         &mut self,
-        identity: &WriterIdentity,
-        head: &CheckpointHead,
+        state: ServingState<'_>,
         call_id: &str,
         channel: &str,
         bytes: Vec<u8>,
-        time: CheckpointTime,
     ) -> Result<()> {
+        let ServingState { identity, head, time } = state;
         self.check_ready(identity, head, time)?;
         require(bytes.len() <= MAX_RESPONSE_BYTES, "candidate_size")?;
         let call = self.calls.get_mut(call_id).ok_or(CheckpointError::Refused("call_missing"))?;
@@ -236,13 +243,12 @@ impl ServingFence {
     /// Refuses stale/expired calls, newer heads and transport errors; drops the entire context.
     pub fn write_step(
         &mut self,
-        identity: &WriterIdentity,
-        head: &CheckpointHead,
+        state: ServingState<'_>,
         call_id: &str,
         channel: &str,
-        time: CheckpointTime,
         mut try_write: impl FnMut(&[u8]) -> std::io::Result<usize>,
     ) -> Result<bool> {
+        let ServingState { identity, head, time } = state;
         if let Err(error) = self.check_ready(identity, head, time) {
             self.calls.remove(call_id);
             return Err(error);

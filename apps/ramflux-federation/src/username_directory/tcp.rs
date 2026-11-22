@@ -185,7 +185,7 @@ impl Incoming {
         }
     }
     /// Return progress only after encrypted bytes reach this same socket. Pending ciphertext
-    /// remains owned here; every subsequent write_tls call must re-enter the witness fence.
+    /// remains owned here; every subsequent `write_tls` call must re-enter the witness fence.
     pub fn try_write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let Transport::Tcp { stream, staged } = &mut self.transport else {
             if let Transport::Quic(writer) = &mut self.transport {

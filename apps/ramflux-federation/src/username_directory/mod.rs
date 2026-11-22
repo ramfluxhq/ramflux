@@ -44,7 +44,7 @@ pub(crate) fn start(
     match &directory.role {
         directory::DirectoryRole::Center { .. } => primary::run(&directory).map_err(node_error)?,
         directory::DirectoryRole::Witness { .. } => {
-            witness::run(config, &directory).map_err(node_error)?
+            witness::run(config, &directory).map_err(node_error)?;
         }
         directory::DirectoryRole::Home { .. } => return Ok(false),
     }

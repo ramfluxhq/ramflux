@@ -24,17 +24,28 @@ pub(super) struct AppendGroup<'a> {
 }
 
 impl CheckpointWitness {
-    pub(super) fn append_group(&mut self, group: AppendGroup<'_>) -> Result<Vec<w::Checkpoint>> {
-        let AppendGroup { expected, deltas, root, control, time, batch } = group;
-        fixed(root)?;
+    fn validate_group(
+        &self,
+        expected: &CheckpointHead,
+        count: usize,
+        batch: bool,
+        time: CheckpointTime,
+    ) -> Result<()> {
         require(*expected == self.head, "head_cas")?;
-        require(deltas.len() == if batch.is_some() { 2 } else { 1 }, "batch_count")?;
+        require(count == if batch { 2 } else { 1 }, "batch_count")?;
         require(
             time.monotonic >= self.last_monotonic
                 && time.wall >= self.safe_wall
                 && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
             "clock",
         )?;
+        Ok(())
+    }
+
+    pub(super) fn append_group(&mut self, group: AppendGroup<'_>) -> Result<Vec<w::Checkpoint>> {
+        let AppendGroup { expected, deltas, root, control, time, batch } = group;
+        fixed(root)?;
+        self.validate_group(expected, deltas.len(), batch.is_some(), time)?;
         let mut next = self.head.clone();
         let mut records = Vec::new();
         for mut delta in deltas {
@@ -65,7 +76,7 @@ impl CheckpointWitness {
             batch.map(|seed| make_batch(&records, root, &seed.request_hash)).transpose()?;
         require(
             canonical(&(&records, &descriptor))?.len()
-                <= if descriptor.is_some() { 135168 } else { 67584 + 16 },
+                <= if descriptor.is_some() { 135_168 } else { 67_584 + 16 },
             "batch_frame",
         )?;
         let slots =
@@ -116,38 +127,7 @@ impl CheckpointWitness {
             ids.insert(record.delta.tx_id.as_str(), lsn).map_err(storage)?;
         }
         if let Some(row) = &descriptor {
-            let mut meta = tx.open_table(META).map_err(storage)?;
-            let mut image = tx.open_table(IMAGE).map_err(storage)?;
-            let key = super::checkpoint_batch::batch_key(&row.batch_id)?;
-            require(image.get(key.as_slice()).map_err(storage)?.is_none(), "batch_collision")?;
-            let value = w::Replacement::Batch {
-                key: row.batch_id.clone(),
-                old: None,
-                new: Some(row.clone()),
-            };
-            image.insert(key.as_slice(), w::encode(&value)?.as_slice()).map_err(storage)?;
-            for (id, lsn) in [(&row.abort_tx_id, row.lsn_n1), (&row.batch_id, row.lsn_n2)] {
-                meta.insert(
-                    format!("batch_member:{id}").as_str(),
-                    canonical(&row.batch_id)?.as_slice(),
-                )
-                .map_err(storage)?;
-                meta.insert(
-                    format!("batch_lsn:{lsn:020}").as_str(),
-                    canonical(&row.batch_id)?.as_slice(),
-                )
-                .map_err(storage)?;
-            }
-            meta.insert(
-                format!("batch_root:{}:{}", row.root, row.batch_id).as_str(),
-                canonical(&true)?.as_slice(),
-            )
-            .map_err(storage)?;
-            meta.insert(
-                format!("batch_expiry:{:020}:{}", row.retain_until, row.batch_id).as_str(),
-                canonical(&row.batch_id)?.as_slice(),
-            )
-            .map_err(storage)?;
+            write_batch(&tx, row)?;
         }
         drop(redo);
         drop(ids);
@@ -191,4 +171,31 @@ fn make_batch(records: &[w::Checkpoint], root: &str, hash: &str) -> Result<w::Ba
     };
     w::encode(&row)?;
     Ok(row)
+}
+
+fn write_batch(tx: &redb::WriteTransaction, row: &w::BatchRow) -> Result<()> {
+    let mut meta = tx.open_table(META).map_err(storage)?;
+    let mut image = tx.open_table(IMAGE).map_err(storage)?;
+    let key = super::checkpoint_batch::batch_key(&row.batch_id)?;
+    require(image.get(key.as_slice()).map_err(storage)?.is_none(), "batch_collision")?;
+    let value =
+        w::Replacement::Batch { key: row.batch_id.clone(), old: None, new: Some(row.clone()) };
+    image.insert(key.as_slice(), w::encode(&value)?.as_slice()).map_err(storage)?;
+    for (id, lsn) in [(&row.abort_tx_id, row.lsn_n1), (&row.batch_id, row.lsn_n2)] {
+        meta.insert(format!("batch_member:{id}").as_str(), canonical(&row.batch_id)?.as_slice())
+            .map_err(storage)?;
+        meta.insert(format!("batch_lsn:{lsn:020}").as_str(), canonical(&row.batch_id)?.as_slice())
+            .map_err(storage)?;
+    }
+    meta.insert(
+        format!("batch_root:{}:{}", row.root, row.batch_id).as_str(),
+        canonical(&true)?.as_slice(),
+    )
+    .map_err(storage)?;
+    meta.insert(
+        format!("batch_expiry:{:020}:{}", row.retain_until, row.batch_id).as_str(),
+        canonical(&row.batch_id)?.as_slice(),
+    )
+    .map_err(storage)?;
+    Ok(())
 }

@@ -8,15 +8,10 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{Arc, mpsc},
-    task::{Context, Poll, Wake},
+    task::{Context, Poll, Waker},
     time::{Duration, Instant},
 };
 use tokio::{sync::Semaphore, task::JoinSet};
-
-struct WakeActor;
-impl Wake for WakeActor {
-    fn wake(self: Arc<Self>) {}
-}
 
 pub struct Writer {
     send: quinn::SendStream,
@@ -27,8 +22,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn try_write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let waker = Arc::new(WakeActor).into();
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let chunk = bytes
             .get(..bytes.len().min(8192))
             .ok_or_else(|| std::io::Error::other("directory QUIC write bound"))?;
@@ -64,25 +58,29 @@ impl Drop for Writer {
     }
 }
 
+pub struct Admission {
+    pub slots: Arc<Semaphore>,
+    pub sources: Arc<Sources>,
+}
+
 pub fn start(
     address: SocketAddr,
     tls: rustls::ServerConfig,
     node: String,
     seed: [u8; 32],
     sender: mpsc::SyncSender<tcp::Incoming>,
-    slots: Arc<Semaphore>,
-    sources: Arc<Sources>,
+    admission: Admission,
 ) -> Result<()> {
+    let Admission { slots, sources } = admission;
+    let receive_window = u32::try_from(directory::MAX_REPORT_BYTES + 65_536)?;
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut limits = quinn::TransportConfig::default();
     limits
         .max_concurrent_bidi_streams(1u32.into())
         .max_concurrent_uni_streams(0u32.into())
-        .receive_window(quinn::VarInt::from_u32((directory::MAX_REPORT_BYTES + 65536) as u32))
-        .stream_receive_window(quinn::VarInt::from_u32(
-            (directory::MAX_REPORT_BYTES + 65536) as u32,
-        ))
+        .receive_window(quinn::VarInt::from_u32(receive_window))
+        .stream_receive_window(quinn::VarInt::from_u32(receive_window))
         .send_window(16384)
         .max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
     config.transport_config(Arc::new(limits));
@@ -122,7 +120,7 @@ pub fn start(
 async fn accept(
     incoming: quinn::Incoming,
     node: &str,
-    seed: &[u8; 32],
+    signing_material: &[u8; 32],
     deadline: Instant,
 ) -> Result<tcp::Incoming> {
     let connection = incoming.await?;
@@ -148,7 +146,7 @@ async fn accept(
     let (mut send, mut recv) = connection.accept_bi().await?;
     let mut challenge = [0; 32];
     recv.read_exact(&mut challenge).await?;
-    let identity = directory::DirectorySigner::from_seed(seed).channel_identity(
+    let identity = directory::DirectorySigner::from_seed(signing_material).channel_identity(
         node,
         &exporter,
         &ramflux_protocol::encode_base64url(challenge),

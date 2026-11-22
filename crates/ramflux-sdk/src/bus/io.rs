@@ -227,7 +227,6 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     }
     match error {
         SdkError::GeneratedApi(error) => error.name,
-        SdkError::UsernameDirectoryRefused(_) => "UsernameDirectoryRefused",
         SdkError::Search(error) => error.code(),
         SdkError::EditConflict { .. } => "edit_conflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",
@@ -309,6 +308,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
 
 fn custody_unit_code(error: &SdkError) -> Option<&'static str> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(_) => "UsernameDirectoryRefused",
         SdkError::CustodyModeDowngrade => "CustodyModeDowngrade",
         SdkError::AgentCustodyUnsupported => "AgentCustodyUnsupported",
         SdkError::AgentCreationRefused(token) => token,
