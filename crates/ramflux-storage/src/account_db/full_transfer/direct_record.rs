@@ -111,6 +111,41 @@ impl FullDirectRecord {
         Ok(value)
     }
 
+    /// Apply a result reconstructed solely from retained original contributions in the
+    /// caller's private transaction. This can remove a now-absent A-only preferred version.
+    /// # Errors
+    /// Refuses foreign roots, invalid originals, erasure or unclassified B replay state.
+    pub fn project_original_contributions(
+        &self,
+        private: &mut BackupDatabase,
+        source: &DeviceRef,
+    ) -> Result<bool, StorageError> {
+        let own = &source.account_anchor;
+        let projection = self.projection(own)?;
+        let changed = super::direct_install::project_original_contributions(
+            &private.db,
+            source,
+            &self.history,
+            &projection,
+            self.capture.as_ref(),
+        )?;
+        if super::super::deleted_messages::message_is_deleted_on(
+            &private.db,
+            &projection.message_id,
+        )? {
+            return Ok(false);
+        }
+        let actual = read_source(&private.db, own, &projection.message_id)?.ok_or_else(invalid)?;
+        let mut expected_bytes = Zeroizing::new(Vec::new());
+        let mut actual_bytes = Zeroizing::new(Vec::new());
+        self.write(own, &mut *expected_bytes)?;
+        actual.write(own, &mut *actual_bytes)?;
+        if expected_bytes.as_slice() != actual_bytes.as_slice() {
+            return Err(StorageError::PairingField("ManifestMismatch"));
+        }
+        Ok(changed)
+    }
+
     /// Write a bounded private record. The outer owner still authenticates its contribution.
     /// # Errors
     /// Refuses foreign context, invalid parts or output failure.

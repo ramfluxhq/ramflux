@@ -56,12 +56,42 @@ impl crate::AccountDb {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    Merge,
+    OriginalContributions,
+}
 fn merge(
     db: &Connection,
     source: &DeviceRef,
     incoming: &FullDirectHistory,
     projection: &DirectMessageRecord,
     authored: Option<&OwnAuthoredCapture>,
+) -> Result<bool, StorageError> {
+    project(db, source, incoming, projection, authored, Selection::Merge)
+}
+
+/// The caller resolved retained ORIGINAL A/B rows, not the previous normalized maximum.
+/// This replaces only the private content selection; no source is relabeled as original B.
+pub(super) fn project_original_contributions(
+    db: &Connection,
+    source: &DeviceRef,
+    incoming: &FullDirectHistory,
+    projection: &DirectMessageRecord,
+    authored: Option<&OwnAuthoredCapture>,
+) -> Result<bool, StorageError> {
+    if db.is_autocommit() {
+        return Err(StorageError::PairingField("WrongContext"));
+    }
+    project(db, source, incoming, projection, authored, Selection::OriginalContributions)
+}
+fn project(
+    db: &Connection,
+    source: &DeviceRef,
+    incoming: &FullDirectHistory,
+    projection: &DirectMessageRecord,
+    authored: Option<&OwnAuthoredCapture>,
+    selection: Selection,
 ) -> Result<bool, StorageError> {
     super::super::mac_subkeys::full::source_key(source)?;
     let own: String = db.query_row(
@@ -83,14 +113,19 @@ fn merge(
     // Reuse its ordinary exact root-pair check, without importing contact authority.
     direct_source::require_peer(db, &own, &projection.conversation_id, incoming.peer_root())?;
     let previous = direct_source::read(db, &own, &id)?;
-    let chosen = previous.as_ref().map_or(Ok(incoming), |old| old.merge(incoming, &own))?;
+    let resolved = previous.as_ref().map_or(Ok(incoming), |old| old.merge(incoming, &own))?;
+    let chosen = if selection == Selection::OriginalContributions { incoming } else { resolved };
     let changed = previous.as_ref().is_none_or(|old| old.exact_inner() != chosen.exact_inner());
     let old_capture =
         direct_source::actor::<OwnAuthoredCapture>(db, &format!("own-history/capture/{id}"))?;
-    let capture = old_capture
-        .as_ref()
-        .filter(|capture| capture.sent.exact_inner == chosen.exact_inner())
-        .or_else(|| authored.filter(|capture| capture.sent.exact_inner == chosen.exact_inner()));
+    let capture = if selection == Selection::OriginalContributions {
+        authored.filter(|capture| capture.sent.exact_inner == chosen.exact_inner())
+    } else {
+        old_capture
+            .as_ref()
+            .filter(|capture| capture.sent.exact_inner == chosen.exact_inner())
+            .or_else(|| authored.filter(|capture| capture.sent.exact_inner == chosen.exact_inner()))
+    };
     require_capture(chosen, capture, &own)?;
     if changed && previous.is_some() {
         let default = serde_json::to_vec(&MessageMetadata::default())?;
@@ -104,6 +139,21 @@ fn merge(
         retire(db, &id)?;
     }
     write_projection(db, chosen, projection, &own, &id)?;
+    if selection == Selection::OriginalContributions {
+        db.execute(
+            "UPDATE direct_message_projection SET sender_id=?2,created_at=?3 WHERE message_id=?1 AND deleted=0",
+            params![id, projection.sender_id, projection.created_at],
+        )?;
+        if capture.is_none() {
+            let key = format!("own-history/capture/{id}");
+            super::super::message_edit_retirement::retire_actor_for_restore(db, &key)?;
+            db.execute("DELETE FROM message_footprint WHERE kind='actor' AND locator=?1", [&key])?;
+            db.execute(
+                "DELETE FROM message_copy_binding WHERE copy_id=?1",
+                [format!("actor:{key}")],
+            )?;
+        }
+    }
     write_evidence(db, chosen, capture, &own, &id)?;
     let actual = direct_source::read(db, &own, &id)?.ok_or_else(invalid)?;
     let mut expected = Zeroizing::new(Vec::new());
@@ -209,7 +259,12 @@ fn write_evidence(
     let version = history.verify(own)?;
     actor(db, id, &format!("routed/generated-identity/{id}"), version.original())?;
     actor(db, id, &format!("routed/generated-order/{id}"), &version.original().hlc)?;
-    if version.current().id != version.original().id {
+    if version.current().id == version.original().id {
+        let key = format!("routed/edit-revision/{id}");
+        super::super::message_edit_retirement::retire_actor_for_restore(db, &key)?;
+        db.execute("DELETE FROM message_footprint WHERE kind='actor' AND locator=?1", [&key])?;
+        db.execute("DELETE FROM message_copy_binding WHERE copy_id=?1", [format!("actor:{key}")])?;
+    } else {
         #[derive(Serialize)]
         struct Revision<'a> {
             revision: u64,

@@ -397,3 +397,13 @@ target observation succeed. Delta and current-B refresh already use their same
 whole-input transaction. No separate transaction owner or guard exemption was
 introduced. The complete record is business machinery; content/actor activation,
 raw graph closure, B-local journal and the direct native transfer are still open.
+
+A normalized native selection is reconstructed from original A/B contributions,
+not merged with a previous normalized maximum as if it were independent B data.
+The private projector can replace a now-unowned A-only preferred revision, keeps
+original identity constraints, selects the actual chosen capture and restores the
+resolved contributor display values. Returning to the original Message removes
+the obsolete Edit register. It compares the entire native contribution record
+read back from the private file, including display and capture fields. This
+primitive still needs the original-ledger owner to supply the resolved result;
+it creates no provenance or semantic receipt by itself.
