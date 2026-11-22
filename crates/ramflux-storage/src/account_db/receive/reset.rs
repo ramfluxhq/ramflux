@@ -322,7 +322,7 @@ pub(super) fn before_reset_commit() -> Result<(), StorageError> {
     Ok(())
 }
 
-fn freeze_name(target: &str) -> String {
+pub(super) fn freeze_name(target: &str) -> String {
     format!("gateway_receive_freeze:{target}")
 }
 
