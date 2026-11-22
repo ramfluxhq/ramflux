@@ -97,6 +97,9 @@ pub enum ApiCode {
     JobUnknown,
     MessageUnknown,
     MessageDeleted,
+    /// `422 forget_family_too_large`: the run family logged more writes than one forget can
+    /// remove. Nothing was deleted.
+    ForgetFamilyTooLarge,
     Unknown(String),
 }
 
@@ -127,6 +130,7 @@ impl ApiCode {
             "run_active" => Self::RunActive,
             "message_unknown" => Self::MessageUnknown,
             "message_deleted" => Self::MessageDeleted,
+            "forget_family_too_large" => Self::ForgetFamilyTooLarge,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -344,6 +348,7 @@ mod tests {
             ("idempotency_conflict", ApiCode::IdempotencyConflict),
             ("run_unknown", ApiCode::RunUnknown),
             ("job_unknown", ApiCode::JobUnknown),
+            ("forget_family_too_large", ApiCode::ForgetFamilyTooLarge),
         ];
         for (wire, expected) in cases {
             let body = format!(r#"{{"error":{{"code":"{wire}","message":"m"}}}}"#);
