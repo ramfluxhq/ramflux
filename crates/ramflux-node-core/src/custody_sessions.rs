@@ -416,6 +416,19 @@ impl CustodyLeases {
     pub fn close(&mut self, id: &str) {
         self.remove_session(id);
     }
+
+    /// Drop every custody lease whose device belongs to `anchor`.
+    pub fn close_account(&mut self, anchor: &str) {
+        let ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, lease)| lease.session.device_ref.account_anchor == anchor)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.remove_session(&id);
+        }
+    }
 }
 
 #[cfg(test)]

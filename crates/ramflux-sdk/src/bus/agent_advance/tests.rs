@@ -517,12 +517,11 @@ fn delete_frame(anchor: &str, confirmed: bool) -> crate::LocalBusFrame {
 }
 
 /// AGENT-IDENTITY-01 F1 (a), decision r23: `agent.delete` closes the agent's running session before
-/// the local state goes. The close happens only for a confirmed delete of a stored record in `U`; an
-/// unconfirmed delete leaves the session open. Through the routed method the session is closed and
-/// the local account directory is removed. The record retirement that follows needs the owner
-/// device's native enrolment, which this custody-level fixture does not have (it is covered by
-/// `agent_delete_in_u_removes_the_vault_items_and_retires_on_both_roots`), so the reply of the routed
-/// call is not asserted here.
+/// the node retirement. The close happens only for a confirmed delete of a stored record in `U`; an
+/// unconfirmed delete leaves the session open. This fixture has no custody listener, so the node
+/// proof fails and the local account directory stays for a retry. The record retirement that
+/// follows a successful proof is covered by
+/// `agent_delete_in_u_removes_the_vault_items_and_retires_on_both_roots`.
 #[tokio::test(flavor = "current_thread")]
 async fn agent_delete_closes_the_running_session_before_removing_local_state() -> TestResult {
     tokio::task::LocalSet::new()
@@ -562,9 +561,13 @@ async fn agent_delete_closes_the_running_session_before_removing_local_state() -
             assert!(directory.is_dir(), "nothing was removed so far");
 
             let mut confirmed = delete_frame(&anchor, true);
-            let _ = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await?;
+            let reply = crate::bus::agent_methods::respond(&mut confirmed, &supervisor).await;
+            assert!(reply.is_err(), "the node retirement is not reachable from this fixture");
             assert!(!supervisor.account_is_open(&setup.account_id), "the session is closed");
-            assert!(!directory.exists(), "the local account directory is removed after the close");
+            assert!(
+                directory.exists(),
+                "the account directory stays until the node retirement completes"
+            );
             Ok::<(), Box<dyn std::error::Error>>(())
         })
         .await

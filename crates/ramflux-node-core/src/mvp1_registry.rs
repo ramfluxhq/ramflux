@@ -170,6 +170,10 @@ pub struct DeviceManifestResponse {
     pub principal_commitment: String,
     pub root_public_key: String,
     pub devices: Vec<DeviceManifestEntry>,
+    /// `Some("retired")` when the anchor has an agent retirement row. Absent for every
+    /// other account, including a legacy manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_lifecycle: Option<String>,
 }
 
 /// Path prefix for `GET /mvp1/delivery-owner-epoch/{delivery_id}`.
@@ -865,6 +869,7 @@ impl IdentityRegistry {
             principal_commitment: principal_commitment.to_owned(),
             root_public_key: root_public_key.clone(),
             devices,
+            agent_lifecycle: None,
         })
     }
 

@@ -96,12 +96,17 @@ pub enum CustodyProofAction {
         request: Box<super::pairing::full_transfer::lease::LeaseRequest>,
     },
     /// Agent first birth or custodian-primary rebind, admitted only with a current primary
-    /// decision over the exact plan. Appended last; capability `register`.
+    /// decision over the exact plan. Capability `register`.
     AgentPublish {
         publication: Box<Publication>,
         agent_profile: Box<AgentProfileEnvelope>,
         plan: Box<RegisterPlan>,
         authorization: Box<RegisterDecision>,
+    },
+    /// Retire one agent anchor. The current human primary may prove this after the host
+    /// desktop is inactive. The agent device may prove it while that pair is still active.
+    AgentRetire {
+        agent_anchor: String,
     },
 }
 impl CustodyProofAction {
@@ -115,7 +120,8 @@ impl CustodyProofAction {
             | Self::PairingIssue { .. }
             | Self::PairingCreate { .. }
             | Self::PairingDataLease { .. }
-            | Self::AgentPublish { .. } => "register",
+            | Self::AgentPublish { .. }
+            | Self::AgentRetire { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
@@ -244,6 +250,9 @@ pub enum CustodyRefusal {
     FrameLimit,
     /// A headless record's first birth or changed custodian primary needs `AgentPublish`.
     AgentAuthorizationRequired,
+    /// The agent is retired, or its host desktop or approving primary is not an active
+    /// device of the custodian's current record. A missing host binding fails the same way.
+    AgentRetired,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -348,6 +357,11 @@ pub enum CustodyServerFrame {
     AgentPublished {
         receipt: Box<AgentPublishReceipt>,
     },
+    /// Receipt of an admitted `AgentRetire`. A second retire of the same anchor returns this
+    /// frame again. The refusal of a later action is [`CustodyRefusal::AgentRetired`].
+    AgentRetired {
+        agent_anchor: String,
+    },
 }
 /// Authenticated internal mesh request. Direct-exporter evidence is deliberately
 /// absent: only the listener holding the actual TLS connection may supply it.
@@ -407,6 +421,7 @@ impl CustodyRefusal {
             Self::PayloadTooLarge => "PayloadTooLarge",
             Self::FrameLimit => "FrameLimit",
             Self::AgentAuthorizationRequired => "AgentAuthorizationRequired",
+            Self::AgentRetired => "agent_retired",
         }
     }
 }
