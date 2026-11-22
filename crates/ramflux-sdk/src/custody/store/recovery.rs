@@ -475,6 +475,12 @@ pub(crate) fn pending_restore(
         vault.store_branch(&branch_ref, &seeds)?;
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
+        client.bind_device_unlock(
+            root,
+            vault,
+            id,
+            crate::client::device_unlock::DeviceSecret::Create,
+        )?;
         client.seal_new_account_data(id, &stored.record.body.account_anchor, passphrase)?;
         genesis::require_owned_reservation(root, id, &anchor, &dir)?;
         genesis::write_public(
@@ -485,8 +491,10 @@ pub(crate) fn pending_restore(
     })();
     if result.is_err() {
         let deleted = vault.delete(&branch_ref);
+        let device = crate::client::device_unlock::delete_device_secret(vault, id);
         let discarded = genesis::discard_unpublished(root, id, &anchor);
         deleted?;
+        device?;
         discarded?;
     }
     result

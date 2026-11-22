@@ -684,7 +684,7 @@ fn notify_logs_and_metrics_have_no_identifiers() -> Result<(), Box<dyn std::erro
     let _entry = store.queue_wake_for_async_accept("device-sentinel", &wake, now, false)?;
     let in_flight = Arc::new(Mutex::new(BTreeSet::new()));
     let text = capture(|| {
-        let _claimed = super::notify_async_claim_entries(&store, &in_flight, 4);
+        let _claimed = super::delivery_loop::notify_async_claim_entries(&store, &in_flight, 4);
         let push = apns_push(
             NotificationDeliveryClass::UserContentNotification,
             ramflux_node_core::PushProviderKind::Apns,

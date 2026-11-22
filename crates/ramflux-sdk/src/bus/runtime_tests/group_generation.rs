@@ -64,13 +64,17 @@ async fn native_group_isolation() -> crate::client::native_test_support::TestRes
     let prepared = sender.client.prepare_authored_content(&mut message, Some("g"), &content)?;
     let logical = message.message_id.clone();
     let sealed = sender.client.seal_generated_routed_prepared(
-        config,
+        &sender.sealing_config()?,
         &message,
         &prepared.wire,
         crate::client::routed::Route::from_inner(&prepared.wire)?,
         crate::client::routed::SendMaterial { manifest: None, bundle: None },
     )?;
-    let envelope = crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &sender.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     let envelopes = vec![envelope];
     let config = recipient.gateway_config.clone();
     for (sequence, envelope) in envelopes.into_iter().enumerate() {

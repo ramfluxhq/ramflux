@@ -14,7 +14,7 @@ use crate::{
 use serde_json::json;
 use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-pub(super) const LOCAL_SECRET: &str = "independent local data passphrase";
+pub(super) const LOCAL_SECRET: &str = "418306";
 pub(super) const ARCHIVE_SECRET: &str = "independent archive passphrase";
 
 pub(super) fn initialize(

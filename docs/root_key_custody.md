@@ -90,8 +90,16 @@ migration to a new identity while it is still available. There is no support res
 - [Native creation](../crates/ramflux-sdk/src/custody/ceremony.rs) derives the
   master only during the explicit ceremony and persists public authority separately
   from primary/branch vault credentials and the independent wrapped data key.
-- [Ordinary account unlock](../crates/ramflux-sdk/src/bus/native_account.rs) uses
-  the data passphrase. Missing authority credentials do not generate a legacy root.
+- [Ordinary account unlock](../crates/ramflux-sdk/src/bus/native_account.rs) needs no
+  user input on the same device: a random 32-byte device-unlock secret per account is
+  held by the platform vault (`device-unlock:<id>`, C ABI v1 provisioning operations)
+  and, mixed with the data-root file secret, keys a device wrap of the data key. Start,
+  switch and idle use it. An explicit lock removes the device wrap; the six-digit account
+  code then opens the code wrap, whose key also needs the device secret, so the code is
+  never the only barrier against offline guessing. Code checks are counted in the account
+  index: five free failures, then waits of 30 s doubling, and refusal after ten. Without a
+  vault that holds the device secret, native account data neither seals nor opens.
+  Missing authority credentials do not generate a legacy root.
 - [Publication and registration](../crates/ramflux-sdk/src/custody/network.rs)
   verify the exact publication ACK and registered branch before networking is live.
 - [Local recovery](local_bus_account_recovery.md) replaces the primary in a higher
@@ -101,8 +109,10 @@ migration to a new identity while it is still available. There is no support res
   restoration preserves independently installed authority and replay floors.
 - [Native cards](contact_cards.md) carry a master-certified self-signing chain.
   Contacts, groups, calls and ordinary DMs use the ordinary SDK stack.
-- The independent data-password KDF remains Argon2id v19 with 262144 KiB,
-  three passes and one lane; it is separate from phrase/master derivation.
+- The account-code KDF is Argon2id v19 with 262144 KiB, three passes and one lane,
+  salted and keyed by the device-bound vault secret; it is separate from
+  phrase/master derivation. A backup archive never uses the account code: archive
+  passphrases keep their own 15-character rule.
 
 ## Threat model
 

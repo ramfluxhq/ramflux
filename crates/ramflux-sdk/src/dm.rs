@@ -236,8 +236,11 @@ mod tests {
             report_commitment: None,
         })?;
         let franking = SdkDmFrankingMetadata::from_ciphertext(&ciphertext);
+        let sealing = crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+            &test_gateway_config()?,
+        )?;
         let result = gateway_direct_message_envelope(
-            &test_gateway_config(),
+            &sealing,
             &test_message(encrypted_body),
             Some(&franking),
         );
@@ -254,9 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn opaque_untagged_bytes_cannot_produce_a_generation_one_envelope() {
+    fn opaque_untagged_bytes_cannot_produce_a_generation_one_envelope() -> Result<(), SdkError> {
+        let sealing = crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+            &test_gateway_config()?,
+        )?;
         let result = gateway_direct_message_envelope(
-            &test_gateway_config(),
+            &sealing,
             &test_message(b"already-encrypted".to_vec()),
             None,
         );
@@ -267,10 +273,11 @@ mod tests {
             ),
             "an opaque unbound body cannot select the current profile: {result:?}"
         );
+        Ok(())
     }
 
-    fn test_gateway_config() -> GatewaySessionConfig {
-        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+    fn test_gateway_config() -> Result<GatewaySessionConfig, SdkError> {
+        let mut config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             gateway_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 443)),
             server_name: "gateway.test".to_owned(),
@@ -279,7 +286,14 @@ mod tests {
             device_id: "alice_device".to_owned(),
             target_delivery_id: "target_alice".to_owned(),
             prekey_http_url: None,
-        })
+        });
+        let root = ramflux_crypto::create_identity_root("principal_alice", [9; 32]);
+        let branch =
+            ramflux_crypto::create_device_branch("principal_alice", "alice_device", 1, [8; 32]);
+        config.source_identity =
+            Some(ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?);
+        config.device_branch = Some(std::sync::Arc::new(branch));
+        Ok(config)
     }
 
     fn test_message(encrypted_body: Vec<u8>) -> GatewayDirectMessage {
@@ -482,7 +496,7 @@ fn wire_payload(encrypted_body: &[u8]) -> Result<String, SdkError> {
 /// Already-encrypted / no-seal paths. Direct report payloads must use
 /// `gateway_envelope_from_sealed` so committed A0 is drift-checked.
 pub(crate) fn gateway_direct_message_envelope(
-    config: &GatewaySessionConfig,
+    config: &SealingConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
@@ -499,7 +513,7 @@ fn refuse_direct_payload_without_committed_a0(body: &[u8]) -> Result<(), SdkErro
 }
 
 pub(crate) fn gateway_envelope_from_sealed(
-    config: &GatewaySessionConfig,
+    config: &SealingConfig,
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
     franking: Option<&SdkDmFrankingMetadata>,
@@ -514,7 +528,7 @@ pub(crate) fn gateway_envelope_from_sealed(
 
 /// Durable constructor retaining the exact A0 and signed metadata committed by raw-I sealing.
 pub(crate) fn gateway_generated_envelope_from_sealed(
-    config: &GatewaySessionConfig,
+    config: &SealingConfig,
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
@@ -540,7 +554,7 @@ pub(crate) fn gateway_generated_envelope_from_sealed(
 }
 
 pub(crate) fn gateway_ephemeral_envelope_from_sealed(
-    config: &GatewaySessionConfig,
+    config: &SealingConfig,
     message: &mut GatewayDirectMessage,
     sealed: crate::client::routed::SealedRouted,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
@@ -563,7 +577,7 @@ pub(crate) fn gateway_ephemeral_envelope_from_sealed(
 }
 
 pub(crate) fn gateway_direct_message_envelope_sealed(
-    config: &GatewaySessionConfig,
+    config: &SealingConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
@@ -594,12 +608,13 @@ struct GatewayEnvelopePolicy {
 }
 
 fn candidate_direct_message_envelope(
-    config: &GatewaySessionConfig,
+    sealing: &SealingConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
     policy: GatewayEnvelopePolicy,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let config = sealing.config();
     let mode = policy.mode;
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
@@ -655,11 +670,12 @@ fn candidate_direct_message_envelope(
     if let Some(franking) = franking {
         envelope.ext.ext.insert("franking".to_owned(), serde_json::to_value(franking)?);
     }
-    envelope.signed.signature = if let Some(branch) = config.device_branch.as_ref() {
-        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?
-    } else {
-        ramflux_crypto::sign_protocol_object(&envelope)?
-    };
+    let branch = config
+        .device_branch
+        .as_ref()
+        .ok_or_else(|| SdkError::GatewaySessionRejected("sealing config incomplete".into()))?;
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?;
     if let Some(committed) = committed_a0 {
         crate::client::routed::refuse_a0_mismatch(&envelope, committed)?;
     }
@@ -708,7 +724,7 @@ pub(crate) fn dedup_gateway_entries(entries: Vec<GatewayInboxEntry>) -> Vec<Gate
 
 /// Include the audited Message header in the sender signature before publishing the envelope.
 pub(crate) fn add_message_metadata_commitment(
-    config: &GatewaySessionConfig,
+    sealing: &SealingConfig,
     envelope: &mut ramflux_protocol::Envelope,
     commitment: Option<String>,
 ) -> Result<(), SdkError> {
@@ -717,11 +733,12 @@ pub(crate) fn add_message_metadata_commitment(
             ramflux_protocol::message::original_header::EXT_KEY.into(),
             serde_json::Value::String(commitment),
         );
-        envelope.signed.signature = if let Some(branch) = config.device_branch.as_ref() {
-            ramflux_crypto::sign_protocol_object_with_device_branch(branch, envelope)?
-        } else {
-            ramflux_crypto::sign_protocol_object(envelope)?
-        };
+        let branch =
+            sealing.config().device_branch.as_ref().ok_or_else(|| {
+                SdkError::GatewaySessionRejected("sealing config incomplete".into())
+            })?;
+        envelope.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_device_branch(branch, envelope)?;
     }
     Ok(())
 }

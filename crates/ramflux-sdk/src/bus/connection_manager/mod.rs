@@ -95,6 +95,46 @@ pub(crate) struct SessionMetadata {
     pub generation: u64,
 }
 
+impl SessionMetadata {
+    /// Seal with the config this session published. Does not refill from the account.
+    ///
+    /// # Errors
+    /// The published config has no device branch or no source identity.
+    pub(crate) fn sealing_config(&self) -> Result<crate::SealingConfig, SdkError> {
+        crate::SealingConfig::from_session(self)
+    }
+
+    /// Holds `config` so [`Self::sealing_config`] can check it. Sealing reads that
+    /// config only; the other fields are not a worker session.
+    pub(crate) fn for_sealing(config: GatewaySessionConfig) -> Self {
+        Self {
+            ephemeral_negotiated: false,
+            config,
+            session: GatewaySessionState {
+                call_session_generation: None,
+                session_id: String::new(),
+                gateway_id: String::new(),
+                resume_token: String::new(),
+                resume_window_seconds: 1,
+                accepted_inbox_seq: 0,
+            },
+            mode: crate::gateway::session_push::SessionMode::Direct,
+            generation: 0,
+        }
+    }
+
+    /// Test stand-in for an installed session. Production sessions are published by the worker.
+    ///
+    /// # Errors
+    /// `config` has no device branch or no source identity.
+    #[cfg(test)]
+    pub(crate) fn sealing_config_for(
+        config: &GatewaySessionConfig,
+    ) -> Result<crate::SealingConfig, SdkError> {
+        Self::for_sealing(config.clone()).sealing_config()
+    }
+}
+
 struct Shared {
     timeouts: RuntimeTimeouts,
     ephemeral_inbox: std::sync::Mutex<crate::ephemeral::session::SessionInbox>,

@@ -49,7 +49,7 @@ async fn confirm(socket: &std::path::Path, node: &str) -> Result<crate::LocalBus
     let answers = words(&phrase, ceremony.hidden_challenge().await?)?;
     let account = tokio::time::timeout(
         Duration::from_secs(10),
-        ceremony.confirm(&answers, &Zeroizing::new("local first secret".into())),
+        ceremony.confirm(&answers, &Zeroizing::new("385031".into())),
     )
     .await??;
     assert_eq!(account.state, crate::LocalBusCreatedAccountState::Unlocked);

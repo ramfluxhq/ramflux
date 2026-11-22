@@ -8,6 +8,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import tomllib
 import tarfile
 import sys
 import unittest
@@ -794,10 +795,26 @@ class DemoNodeTests(unittest.TestCase):
         with self.env_file.open("a") as output:
             output.write(f"DEMO_VERSION={version}\n")
 
+    def assert_call_authority(self):
+        for service in ("gateway", "router"):
+            config = tomllib.loads((self.state / "config" / f"{service}.toml").read_text())
+            self.assertEqual(config["mesh"]["endpoints"]["notify-authority"],
+                             "ramflux-notify:18085", f"{service} lost call authority")
+        notify = tomllib.loads((self.state / "config/notify.toml").read_text())
+        self.assertEqual(notify["send_authority"]["origins"], {
+            "spiffe://demo.invalid/ramflux-router": "ramflux-router:17444",
+            "spiffe://demo.invalid/ramflux-gateway/ramflux-gateway": "ramflux-gateway:7443",
+        }, "call origins must match the provisioned node and service identities")
+        self.assertEqual(notify["mesh"]["endpoints"]["router-async"], "ramflux-router:17444")
+        runtime = (self.state / "runtime.env").read_text()
+        self.assertIn("RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450\n", runtime)
+        self.assertIn("RAMFLUX_RELAY_VOICE_UDP_PORT=0.0.0.0:59449\n", runtime)
+
     def test_reset_relay_restores_bytes_and_composes_with_applied_voice(self):
         with self.env_file.open("a") as output:
             output.write("RAMFLUX_DEMO_VOICE_UDP_PORT=59449\n")
         relay = self.seed_service_state()
+        self.assert_call_authority()
         expected = (relay / "relay.redb").read_bytes()
         other = {path: path.read_bytes() for path in (self.root / "volume-data").glob("*/stored.bin")
                  if path.parent != relay}
@@ -805,6 +822,7 @@ class DemoNodeTests(unittest.TestCase):
         identity = (self.state / "identity.env").read_bytes()
         self.select_new_version()
         result = self.run_script("upgrade", "--reset-service", "relay", "--voice-udp-port", "59449")
+        self.assert_call_authority()
         self.assertIn("service-state targets: demo-test_relay-redb:/relay.redb, demo-test_relay-redb:/trust-snapshot.json; action: reset", result.stdout)
         self.assertIn("all seven demo services are healthy", result.stdout)
         self.assertFalse((relay / "relay.redb").exists(), "reset must remove only the relay database/cache")
@@ -821,6 +839,7 @@ class DemoNodeTests(unittest.TestCase):
         self.assertEqual(json.loads((self.state / "owner.json").read_text())["state_reset"],
                          owner["state_reset"], "repeated up must keep reset rollback authority")
         self.run_script("rollback")
+        self.assert_call_authority()
         self.assertEqual((relay / "relay.redb").read_bytes(), expected)
         self.assertEqual((relay / "relay.redb").stat().st_mode & 0o777, 0o640)
         self.assertTrue((relay / "empty").is_dir())

@@ -150,6 +150,26 @@ pub trait PrimaryVault: Send + Sync {
     fn load_provisioning_secret(&self, _reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         Err(SdkError::CustodyVaultUnavailable)
     }
+    /// Store the device-unlock secret of one account under `device-unlock:<id>`.
+    ///
+    /// The item must be non-synchronizing, excluded from OS backups, readable after the first
+    /// device unlock without user presence, and kept on app lock. The default uses the
+    /// provisioning store (C ABI v1 `StoreProvisioning`), which carries opaque references.
+    /// # Errors
+    /// Fails closed on unsupported providers, an existing entry, or provider failure.
+    fn store_device_unlock_secret(
+        &self,
+        reference: &str,
+        secret: &Zeroizing<[u8; 32]>,
+    ) -> Result<(), SdkError> {
+        self.store_provisioning_secret(reference, &**secret)
+    }
+    /// Load the device-unlock secret of one account. Removal uses [`Self::delete`].
+    /// # Errors
+    /// Rejects unsupported providers and missing or corrupt entries.
+    fn load_device_unlock_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        self.load_provisioning_secret(reference)
+    }
     /// Store the agent master seed under `agent-master:<id>` once. Refuses an existing entry.
     /// # Errors
     /// The default refuses with `custody_key_unavailable`; providers without the operation keep it.
@@ -186,6 +206,9 @@ pub trait PrimaryVault: Send + Sync {
         Err(agent_key_unavailable())
     }
 }
+
+/// Vault-reference prefix of the per-account device-unlock secret.
+pub const DEVICE_UNLOCK_PREFIX: &str = "device-unlock:";
 
 /// Vault-reference prefix of the agent master item (seed plus last certificate hash).
 pub(crate) const AGENT_MASTER_PREFIX: &str = "agent-master:";

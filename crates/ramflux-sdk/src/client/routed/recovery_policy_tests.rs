@@ -322,7 +322,9 @@ async fn a_reset_and_a_plain_bootstrap_select_the_same_current_at_both_ends_body
                 inbox_seq: 1,
                 target_delivery_id: bob.config()?.target_delivery_id,
                 envelope: crate::dm::gateway_generated_envelope_from_sealed(
-                    &alice.config()?,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &alice.config()?,
+                    )?,
                     &mut message,
                     sealed,
                 )?,

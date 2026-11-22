@@ -196,7 +196,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     };
     let prepared = source.prepare_authored_content(&mut message, None, &content)?;
     let packet = source.seal_generated_routed_prepared(
-        &fixture.source.gateway_config,
+        &fixture.source.sealing_config()?,
         &message,
         &prepared.wire,
         crate::client::routed::Route::direct(),
@@ -208,7 +208,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
         inbox_seq: 1,
         target_delivery_id: remote.storage_key().into(),
         envelope: crate::dm::gateway_generated_envelope_from_sealed(
-            &fixture.source.gateway_config,
+            &fixture.source.sealing_config()?,
             &mut message,
             packet,
         )?,
@@ -223,7 +223,7 @@ fn incoming_reset(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     let bundle = fixture.source.client.load_x3dh_private_state(&identity)?.bundle;
     let envelope = peer
         .seal_pair_control_prepared(
-            config,
+            &fixture.peer.sealing_config()?,
             draft,
             SendMaterial { manifest: None, bundle: Some(bundle) },
         )?

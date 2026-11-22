@@ -50,6 +50,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+const WINNER_CODE: &[u8] = b"530287";
+
 #[derive(Default)]
 struct CountingVault {
     inner: TestVault,
@@ -83,6 +85,8 @@ fn displaced_native_reservation(stage: Stage) -> Result<(), Box<dyn std::error::
     let answers = words(&phrase, ceremony.hidden_challenge()?)?;
     let winner = Rc::new(RefCell::new(None));
     let observed = Rc::clone(&winner);
+    let winner_vault = Rc::new(TestVault::default());
+    let restore_vault = Rc::clone(&winner_vault);
     let _reset = race_hooks::install(move |at, root, id| {
         if at != stage {
             return Ok(());
@@ -91,7 +95,8 @@ fn displaced_native_reservation(stage: Stage) -> Result<(), Box<dyn std::error::
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
         let row = client.create_account(id, "native-restore-anchor")?;
-        client.seal_new_account_data(id, "native-restore-anchor", b"native winner passphrase")?;
+        client.bind_device_unlock(root, restore_vault.as_ref(), id, crate::DeviceSecret::Create)?;
+        client.seal_new_account_data(id, "native-restore-anchor", WINNER_CODE)?;
         let index = AccountIndex::open(root)?;
         let wrapped = index.load_wrapped_db_key(id)?.ok_or(SdkError::CustodySetupInvalid)?;
         *observed.borrow_mut() = Some((row, wrapped));
@@ -107,12 +112,22 @@ fn displaced_native_reservation(stage: Stage) -> Result<(), Box<dyn std::error::
     assert_eq!(index.load_wrapped_db_key("race")?, Some(wrapped));
     assert_eq!(index.known_account_ids()?, ["race"]);
     assert!(!root.0.join("custody_accounts/race").exists());
-    crate::client::account::verify_stored_data_secret(
+    crate::client::account::verify_stored_device_data_secret(
         &root.0,
         "race",
-        b"native winner passphrase",
+        winner_vault.as_ref(),
+        WINNER_CODE,
     )?;
-    assert!(crate::client::account::verify_stored_data_secret(&root.0, "race", b"wrong").is_err());
+    assert!(
+        crate::client::account::verify_stored_device_data_secret(
+            &root.0,
+            "race",
+            winner_vault.as_ref(),
+            b"wrong",
+        )
+        .is_err(),
+        "the admitted restore must reject an incorrect account code"
+    );
     assert_eq!(vault.inner.entry_count()?, 0);
     if stage == Stage::AfterReservation {
         assert_eq!(

@@ -593,9 +593,9 @@ fn pty_pairing_join(socket: &Path, id: &str, invitation: &Path, sas_out: &Path) 
         .env("TERM", "xterm");
     let mut session = PtySession::spawn(&mut command)?;
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut cursor = session.wait_until("New local data passphrase (hidden):", 0, deadline)?;
+    let mut cursor = session.wait_until("New account code, 6 digits (hidden):", 0, deadline)?;
     session.write_line(PASSPHRASE)?;
-    cursor = session.wait_until("Repeat local data passphrase (hidden):", cursor, deadline)?;
+    cursor = session.wait_until("Repeat account code (hidden):", cursor, deadline)?;
     session.write_line(PASSPHRASE)?;
     drop(session.stdin.take());
     let status = session.wait_exit(deadline)?;

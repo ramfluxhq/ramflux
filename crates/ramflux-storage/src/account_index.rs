@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 mod backup;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
+mod device_unlock;
+pub use device_unlock::CodeAttempts;
 mod operations;
 mod search;
 
@@ -56,6 +58,7 @@ impl AccountIndex {
         let index = Self { root: root.as_ref().to_path_buf(), connection };
         index.install_operation_schema()?;
         index.install_backup_schema()?;
+        index.install_device_unlock_schema()?;
         Ok(index)
     }
 
