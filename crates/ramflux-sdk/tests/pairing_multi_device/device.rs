@@ -200,6 +200,12 @@ impl Device {
                 .bind_frontend_writer(slot.as_ref().ok_or("test: frontend actual writer absent")?)?
         };
         self.participant.return_client(&mut self.client)?;
+        self.client.bind_device_unlock(
+            self.root.path(),
+            self.vault.as_ref(),
+            &self.id,
+            ramflux_sdk::DeviceSecret::Load,
+        )?;
         self.actor = actor;
         Ok(service)
     }
