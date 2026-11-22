@@ -100,9 +100,7 @@ impl SourceContext<'_> {
         snapshot_id: &str,
         rules: &'static [super::catalog::FamilyRule],
     ) -> Result<super::inventory::FullTransferSchema, StorageError> {
-        self.with_source_cut(cut, snapshot_id, |input| {
-            super::inventory::inspect(input, rules)
-        })
+        self.with_source_cut(cut, snapshot_id, |input| super::inventory::inspect(input, rules))
     }
     pub(super) fn with_source_cut<T>(
         &self,

@@ -73,16 +73,17 @@ impl FullTransferStage<'_> {
         // verifier bundle. Zero does not advance a max-generation floor; verifier keys
         // alone express no veto when EVERY other restrictive owner is empty. Preserve
         // their actual source_rows in metadata, but emit no reverse records (OVP-23).
-        if !snapshot && erasure_generation != 0
-            || !snapshot && schema.families.iter().any(|family| {
-                family.restrictive
-                    && family.source_rows.0 > 0
-                    && match family.id.as_str() {
-                        "sql/account_erasure_generation" => family.source_rows.0 != 1,
-                        "sql/account_mac_bundle/portable" => false,
-                        _ => true,
-                    }
-            })
+        if !snapshot
+            && (erasure_generation != 0
+                || schema.families.iter().any(|family| {
+                    family.restrictive
+                        && family.source_rows.0 > 0
+                        && match family.id.as_str() {
+                            "sql/account_erasure_generation" => family.source_rows.0 != 1,
+                            "sql/account_mac_bundle/portable" => false,
+                            _ => true,
+                        }
+                }))
         {
             return Err(StorageError::PairingField("UnsupportedRecord"));
         }

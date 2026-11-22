@@ -124,7 +124,10 @@ pub(super) fn union(
 /// Recompute the content root of a private or prepared generation and compare it.
 /// # Errors
 /// Refuses any content difference from the committed root.
-pub(super) fn verify(private: &BackupDatabase, encoding: &FullUnionEncoding) -> Result<(), StorageError> {
+pub(super) fn verify(
+    private: &BackupDatabase,
+    encoding: &FullUnionEncoding,
+) -> Result<(), StorageError> {
     if encoding.records != 1 || snapshot::content_root(&private.db)? != encoding.chunks_root {
         return Err(mismatch());
     }

@@ -25,11 +25,20 @@ const MIN_NEEDLE: usize = 16;
 const COPY_BLOCK: usize = 65_536;
 
 /// Event bodies that hold device private keys or ratchet state.
-const SECRET_EVENTS: &[&str] = &["x3dh.prekey.private", "dm.ratchet_session", "group.sender_key.state"];
+const SECRET_EVENTS: &[&str] =
+    &["x3dh.prekey.private", "dm.ratchet_session", "group.sender_key.state"];
 /// Event type prefixes that are inert account history.
 const CARRY_EVENTS: &[&str] = &[
-    "message.", "call.", "friend.", "object.", "group.", "gateway.", "identity.", "bot.",
-    "contact.", "native.",
+    "message.",
+    "call.",
+    "friend.",
+    "object.",
+    "group.",
+    "gateway.",
+    "identity.",
+    "bot.",
+    "contact.",
+    "native.",
 ];
 /// Actor namespaces that are device-local, credentials, secrets or live authority.
 const STRIP_ACTORS: &[&str] = &[
@@ -229,7 +238,10 @@ pub(super) fn preflight(db: &Connection) -> Result<(), StorageError> {
 pub(super) fn structural_canary(db: &Connection) -> Result<(), StorageError> {
     preflight(db)?;
     let actors: bool = db.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE {})", actor_filter("state_kind")),
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE {})",
+            actor_filter("state_kind")
+        ),
         [],
         |row| row.get(0),
     )?;
@@ -237,7 +249,10 @@ pub(super) fn structural_canary(db: &Connection) -> Result<(), StorageError> {
         return Err(refused("canary", "stripped actor namespace present"));
     }
     let events: bool = db.query_row(
-        &format!("SELECT EXISTS(SELECT 1 FROM local_event_log WHERE event_type IN ({}))", event_list()),
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM local_event_log WHERE event_type IN ({}))",
+            event_list()
+        ),
         [],
         |row| row.get(0),
     )?;
@@ -255,13 +270,19 @@ pub(super) fn structural_canary(db: &Connection) -> Result<(), StorageError> {
         }
         let present: bool = if table == "backup_archived_actor_state" {
             db.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {})", actor_filter("state_kind")),
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE {})",
+                    actor_filter("state_kind")
+                ),
                 [],
                 |row| row.get(0),
             )?
         } else {
             db.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE event_type IN ({}))", event_list()),
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE event_type IN ({}))",
+                    event_list()
+                ),
                 [],
                 |row| row.get(0),
             )?
@@ -325,13 +346,19 @@ fn collect_needles(db: &Connection) -> Result<Needles, StorageError> {
     let mut needles = Needles(BTreeSet::new());
     let mut bodies: Vec<Zeroizing<Vec<u8>>> = Vec::new();
     {
-        let sql = format!("SELECT event_body FROM local_event_log WHERE event_type IN ({})", event_list());
+        let sql = format!(
+            "SELECT event_body FROM local_event_log WHERE event_type IN ({})",
+            event_list()
+        );
         let mut statement = db.prepare(&sql)?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             bodies.push(Zeroizing::new(row.get::<_, Vec<u8>>(0)?));
         }
-        let sql = format!("SELECT state_json FROM runtime_actor_state WHERE {}", actor_filter("state_kind"));
+        let sql = format!(
+            "SELECT state_json FROM runtime_actor_state WHERE {}",
+            actor_filter("state_kind")
+        );
         let mut statement = db.prepare(&sql)?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
@@ -348,7 +375,9 @@ fn collect_needles(db: &Connection) -> Result<Needles, StorageError> {
 }
 /// Search every column of every table for every needle; count hits, print no value.
 fn self_scan(db: &Connection, needles: &Needles) -> Result<(), StorageError> {
-    db.execute_batch("PRAGMA temp_store=MEMORY; CREATE TEMP TABLE transfer_needle(b BLOB NOT NULL);")?;
+    db.execute_batch(
+        "PRAGMA temp_store=MEMORY; CREATE TEMP TABLE transfer_needle(b BLOB NOT NULL);",
+    )?;
     for needle in &needles.0 {
         db.execute("INSERT INTO temp.transfer_needle(b) VALUES(?1)", params![needle.as_slice()])?;
     }
@@ -376,7 +405,12 @@ fn self_scan(db: &Connection, needles: &Needles) -> Result<(), StorageError> {
         }
     }
     db.execute_batch("DROP TABLE temp.transfer_needle;")?;
-    tracing::info!(needles = needles.0.len(), columns = cells, hits, "transfer sanitizer self-scan");
+    tracing::info!(
+        needles = needles.0.len(),
+        columns = cells,
+        hits,
+        "transfer sanitizer self-scan"
+    );
     if hits > 0 {
         return Err(StorageError::PairingField("UnsupportedRecord"));
     }
@@ -569,7 +603,11 @@ pub(super) fn content_root(db: &Connection) -> Result<[u8; 32], StorageError> {
         if width == 0 {
             continue;
         }
-        hash.update(&u32::try_from(table.len()).map_err(|_| StorageError::AuthorizationRejected)?.to_be_bytes());
+        hash.update(
+            &u32::try_from(table.len())
+                .map_err(|_| StorageError::AuthorizationRejected)?
+                .to_be_bytes(),
+        );
         hash.update(table.as_bytes());
         let order = (1..=width).map(|index| index.to_string()).collect::<Vec<_>>().join(",");
         let mut statement =
@@ -589,7 +627,8 @@ pub(super) fn content_root(db: &Connection) -> Result<[u8; 32], StorageError> {
                         hash.update(&[2]);
                         hash.update(&value.to_bits().to_be_bytes());
                     }
-                    rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+                    rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes) => {
                         hash.update(&[3]);
                         hash.update(&(bytes.len() as u64).to_be_bytes());
                         hash.update(bytes);

@@ -239,8 +239,12 @@ impl FullReceiverBaseCopy {
             return Err(wrong());
         }
         let (counts, union, private) = if super::snapshot_receive::active() {
-            let counts =
-                super::snapshot_receive::merge_cut(stage, &self.hash, &self.scratch.path, &self.key)?;
+            let counts = super::snapshot_receive::merge_cut(
+                stage,
+                &self.hash,
+                &self.scratch.path,
+                &self.key,
+            )?;
             let private = BackupDatabase::open_full_receiver_copy(
                 &self.scratch.path.join("private.db"),
                 &self.key,
