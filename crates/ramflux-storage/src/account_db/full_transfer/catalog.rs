@@ -52,6 +52,7 @@ pub struct VariantRule {
 pub enum SqlProjection {
     ContactRequestMetadataV1,
     DirectConversationMetadataV1,
+    MessageDenialV1,
 }
 /// Descriptor only: interpretation is performed by the field's typed owner. `SignedExact`
 /// forbids rewriting a signed document; a present excluded nested value makes it refuse.
@@ -321,6 +322,9 @@ impl FamilyRule {
                         "contact_request_projection",
                         "request_json",
                     ),
+                    SqlProjection::MessageDenialV1 => {
+                        (super::actor_denial::FAMILY, "runtime_actor_state", "state_json")
+                    }
                     SqlProjection::DirectConversationMetadataV1 => {
                         (super::conversation_directory::FAMILY, "runtime_actor_state", "state_json")
                     }
@@ -711,6 +715,7 @@ macro_rules! table_rule {
     };
 }
 
+mod actor_denial;
 mod cleanup_local;
 mod completion_local;
 mod contacts;
@@ -889,6 +894,7 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     receipts::RULE_127,     // sql/runtime_ack
     runtime::RULE_128,      // sql/runtime_actor_state
     direct_directory::RULE,
+    actor_denial::RULE,
     objects::RULE_129,  // sql/runtime_attachment_budget
     objects::RULE_130,  // sql/runtime_attachment_expiry
     objects::RULE_131,  // sql/runtime_attachment_grant

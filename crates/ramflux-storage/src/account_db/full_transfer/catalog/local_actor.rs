@@ -136,5 +136,19 @@ pub(in crate::account_db::full_transfer) fn unprojected_rows(
         .map(|rule| exact(rule, &super::direct_directory::RULE))
         .transpose()?
         .unwrap_or(false);
-    Ok(input.query_row("SELECT count(*) FROM runtime_actor_state WHERE NOT coalesce((?1 AND state_kind=?2) OR (?3 AND state_kind=?4) OR (?5 AND substr(state_kind,1,23)='directory/conversation/'),0)",rusqlite::params![group,GROUP,safety,SAFETY,directory],|row|row.get(0))?)
+    let denials = rules
+        .iter()
+        .find(|rule| rule.id == super::super::actor_denial::FAMILY)
+        .map(|rule| exact(rule, &super::actor_denial::RULE))
+        .transpose()?
+        .unwrap_or(false);
+    let sql = format!(
+        "SELECT count(*) FROM runtime_actor_state WHERE NOT coalesce((?1 AND state_kind=?2) OR (?3 AND state_kind=?4) OR (?5 AND substr(state_kind,1,23)='directory/conversation/') OR (?6 AND ({})),0)",
+        super::super::actor_denial::FILTER
+    );
+    Ok(input.query_row(
+        &sql,
+        rusqlite::params![group, GROUP, safety, SAFETY, directory, denials],
+        |row| row.get(0),
+    )?)
 }

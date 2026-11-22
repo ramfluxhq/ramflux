@@ -146,3 +146,4 @@ crates/ramflux-storage/src/account_db/full_transfer/direct_source.rs | actor | 1
 crates/ramflux-storage/src/account_db/full_transfer/direct_record.rs | parse_capture | 1 | A | strict=parse_i_json_secret; admission=bounded typed original authored capture with exact re-encoding and native account identity verification before private import
 crates/ramflux-storage/src/account_db/full_transfer/conversation_directory.rs | public | 1 | E | excluded=closed root-pair conversation presentation fields are outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/conversation_directory.rs | source | 1 | E | excluded=closed local conversation metadata with no admitted route is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/full_transfer/actor_denial.rs | read | 1 | E | excluded=closed content-free local MAC denial version is outside Envelope/Ack/Nack containment closure

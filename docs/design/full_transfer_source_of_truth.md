@@ -476,3 +476,20 @@ journal, operation, own-copy and remaining actor owners still precede the direct
 populated transfer. Participant rebinding was only an earlier hypothesis: recovery
 branch creation uses the native record's principal id. No SDK participant change
 was made without a reproduced defect.
+
+## Current MAC-denial actor projection
+
+The exact `sql/runtime_actor_state/message_denials` projection retains the current
+message/deleted version2, deleted-envelope version1 and deleted-raw-copy version1
+classes. Their canonical32-byte MAC suffixes and closed bounded version payloads
+are coupled; the historical message version1 shape and unknown actor variants
+still refuse. The source, original B, refresh, actual read and private canonical
+projection use the same compiled predicate. Denials are immutable and survive
+source absence; they are imported before ordinary content.
+
+Ordinary message, envelope and raw-copy denial readers also recompute these three
+MAC domains against validated same-account source-qualified imported verifiers.
+Only an exact current marker can deny. These keys never enter B's current MAC
+bundle or authorize authorship, callbacks or redelivery. This closes the marker
+business path, not the entire raw/staged any-owner erasure graph. Its direct
+runtime proof remains part of the populated-daemon transfer.

@@ -42,6 +42,70 @@ fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
 }
 
+/// Only these current content-free marker classes may use foreign data verifiers.
+/// A successful lookup denies data; it never adds a key to the live MAC owner.
+#[derive(Clone, Copy)]
+pub(in crate::account_db) enum ImportedDenial {
+    Message,
+    Envelope,
+    RawCopy,
+}
+impl ImportedDenial {
+    fn descriptor(self) -> (FullImportedMacDomain, &'static str, &'static [u8]) {
+        match self {
+            Self::Message => {
+                (FullImportedMacDomain::Tombstone, "message/deleted/", b"{\"version\":2}")
+            }
+            Self::Envelope => (
+                FullImportedMacDomain::DeletedEnvelope,
+                "message/deleted-envelope/",
+                b"{\"version\":1}",
+            ),
+            Self::RawCopy => (
+                FullImportedMacDomain::DeletedRawCopy,
+                "message/deleted-raw-copy/",
+                b"{\"version\":1}",
+            ),
+        }
+    }
+}
+pub(in crate::account_db) fn imported_marker_denies(
+    db: &rusqlite::Connection,
+    domain: ImportedDenial,
+    input: &[u8],
+) -> Result<bool, StorageError> {
+    let (domain, prefix, payload) = domain.descriptor();
+    let mut root: Option<String> = None;
+    let mut query = db.prepare("SELECT CASE WHEN length(CAST(source_ref AS BLOB))<=512 THEN source_ref END,CASE WHEN length(bundle_id)=43 THEN bundle_id END,CASE WHEN length(subkeys)=192 THEN subkeys END FROM full_imported_mac_bundle ORDER BY source_ref,bundle_id")?;
+    let mut rows = query.query([])?;
+    while let Some(row) = rows.next()? {
+        if root.is_none() {
+            root = Some(db.query_row("SELECT CASE WHEN length(principal_commitment)=43 THEN principal_commitment END FROM runtime_account_identity WHERE singleton=1", [], |row| row.get(0))?);
+        }
+        let source =
+            decode_source_ref(row.get_ref(0)?.as_str().map_err(|_| invalid())?.as_bytes())?;
+        let id = row.get_ref(1)?.as_str().map_err(|_| invalid())?;
+        let bytes = row.get_ref(2)?.as_blob().map_err(|_| invalid())?;
+        if Some(source.account_anchor.as_str()) != root.as_deref()
+            || bytes.len() != BUNDLE_BYTES
+            || bundle_id(bytes) != id
+        {
+            return Err(invalid());
+        }
+        let mut keys = Zeroizing::new(vec![0; BUNDLE_BYTES].into_boxed_slice());
+        keys.copy_from_slice(bytes);
+        let bundle = Bundle { id: id.to_owned(), keys, current: false };
+        let selector = bundle.mac(domain.label(), input)?;
+        // The exact domain, MAC and current version couple the marker to this
+        // same-account source-qualified verifier. No default key association is made.
+        let denied: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1 AND state_json=?2)", params![format!("{prefix}{selector}"), payload], |row|row.get(0))?;
+        if denied {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Denial-only lookup of a transferred authenticated-input marker. Keys stay in the
 /// imported namespace; this path cannot grant ownership or extend any active MAC set.
 pub(in crate::account_db) fn imported_erased_input_matches(

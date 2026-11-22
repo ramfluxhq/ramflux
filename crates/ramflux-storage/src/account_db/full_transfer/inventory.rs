@@ -150,6 +150,8 @@ pub(in crate::account_db) fn inspect(
                             )
                         },
                     )?
+                } else if rule.id == super::actor_denial::FAMILY {
+                    connection.call(|db| Ok(super::actor_denial::rows(db)))??
                 } else if table == "runtime_actor_state" {
                     super::catalog::local_actor::unprojected_rows(connection, rules)?
                 } else {

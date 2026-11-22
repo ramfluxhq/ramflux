@@ -97,12 +97,14 @@ impl SqlProjection {
     pub(super) const fn max_bytes(self) -> usize {
         match self {
             Self::ContactRequestMetadataV1 => 1024,
+            Self::MessageDenialV1 => super::actor_denial::LIMIT,
             Self::DirectConversationMetadataV1 => super::conversation_directory::LIMIT,
         }
     }
     pub(super) fn require_fields(self, fields: &[FieldRule]) -> Result<(), StorageError> {
         let expected = match self {
             Self::ContactRequestMetadataV1 => CONTACT_REQUEST_FIELDS,
+            Self::MessageDenialV1 => super::actor_denial::FIELDS,
             Self::DirectConversationMetadataV1 => super::conversation_directory::FIELDS,
         };
         if ramflux_protocol::canonical_json_bytes(&fields)?
@@ -117,6 +119,7 @@ impl SqlProjection {
             return Err(invalid());
         }
         match self {
+            Self::MessageDenialV1 => super::actor_denial::source(bytes),
             Self::DirectConversationMetadataV1 => super::conversation_directory::source(bytes),
             Self::ContactRequestMetadataV1 => {
                 let local: LocalContactMetadata =
@@ -142,6 +145,7 @@ impl SqlProjection {
             return Err(invalid());
         }
         match self {
+            Self::MessageDenialV1 => super::actor_denial::portable(bytes)?,
             Self::DirectConversationMetadataV1 => super::conversation_directory::portable(bytes)?,
             Self::ContactRequestMetadataV1 => {
                 read_contact_metadata(bytes)?;

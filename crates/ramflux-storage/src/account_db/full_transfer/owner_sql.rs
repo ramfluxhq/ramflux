@@ -19,6 +19,12 @@ pub(super) fn write(
     account: Option<&str>,
 ) -> Result<u64, StorageError> {
     rule.require_typed_codec()?;
+    if rule.id == super::actor_denial::FAMILY {
+        super::actor_denial::require_key(
+            row.get_ref(0)?.as_str().map_err(|_| invalid())?,
+            row.get_ref(1)?.as_blob().map_err(|_| invalid())?,
+        )?;
+    }
     if rule.id == super::conversation_directory::FAMILY {
         let own: String = source.query_row("SELECT CASE WHEN length(principal_commitment)=43 THEN principal_commitment END FROM runtime_account_identity WHERE singleton=1", [], |row| row.get(0))?;
         if account != Some(own.as_str()) {
@@ -101,6 +107,8 @@ pub(super) fn write(
 pub(super) fn row_filter(rule: &FamilyRule) -> &'static str {
     if rule.id == super::conversation_directory::FAMILY {
         "substr(state_kind,1,23)='directory/conversation/'"
+    } else if rule.id == super::actor_denial::FAMILY {
+        super::actor_denial::FILTER
     } else {
         "1"
     }

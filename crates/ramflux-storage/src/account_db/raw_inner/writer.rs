@@ -229,7 +229,11 @@ pub(crate) fn raw_copy_deleted(db: &Connection, copy_id: &str) -> Result<bool, S
             return Ok(true);
         }
     }
-    Ok(false)
+    super::super::mac_subkeys::full::imported_marker_denies(
+        db,
+        super::super::mac_subkeys::full::ImportedDenial::RawCopy,
+        copy_id.as_bytes(),
+    )
 }
 
 #[cfg(test)]

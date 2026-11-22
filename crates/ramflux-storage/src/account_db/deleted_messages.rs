@@ -176,7 +176,14 @@ impl AccountDb {
                 return Ok(true);
             }
         }
-        Ok(false)
+        let envelope = envelope.to_owned();
+        self.connection.call(move |db| {
+            Ok(super::mac_subkeys::full::imported_marker_denies(
+                db,
+                super::mac_subkeys::full::ImportedDenial::Envelope,
+                envelope.as_bytes(),
+            ))
+        })?
     }
 
     fn persist_deleted_envelope_markers(&self, message: &str) -> Result<(), StorageError> {
@@ -348,6 +355,13 @@ pub(crate) fn message_is_deleted_on(
         if found {
             return Ok(true);
         }
+    }
+    if super::mac_subkeys::full::imported_marker_denies(
+        db,
+        super::mac_subkeys::full::ImportedDenial::Message,
+        message_id.as_bytes(),
+    )? {
+        return Ok(true);
     }
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",

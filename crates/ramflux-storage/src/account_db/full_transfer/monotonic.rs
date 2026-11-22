@@ -70,6 +70,13 @@ pub(super) struct Owner {
 }
 static OWNERS: &[Owner] = &[
     Owner {
+        family: super::actor_denial::FAMILY,
+        names: &["state_kind", "state_json"],
+        keys: &[0],
+        restrictive: true,
+        merge: Merge::Immutable,
+    },
+    Owner {
         family: super::conversation_directory::FAMILY,
         names: &["state_kind", "state_json"],
         keys: &[0],
@@ -305,7 +312,10 @@ struct UnionContext<'a> {
 }
 impl Owner {
     fn table(&self) -> Result<&'static str, StorageError> {
-        if self.family == super::conversation_directory::FAMILY {
+        if matches!(
+            self.family,
+            super::conversation_directory::FAMILY | super::actor_denial::FAMILY
+        ) {
             Ok("runtime_actor_state")
         } else {
             self.family.strip_prefix("sql/").ok_or_else(invalid)
@@ -332,6 +342,9 @@ impl Owner {
         Ok(())
     }
     fn validate(&self, value: &Cells) -> Result<(), StorageError> {
+        if self.family == super::actor_denial::FAMILY {
+            super::actor_denial::validate(value)?;
+        }
         if self.family == super::conversation_directory::FAMILY {
             super::conversation_directory::validate(value)?;
         }
