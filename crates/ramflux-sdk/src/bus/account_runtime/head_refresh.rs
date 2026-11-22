@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Root-specific command demand with the original network admission deadline.
+//! Root-specific command demand. The fetch uses the network admission deadline.
+//! Work already queued for the writer is applied before that deadline refuses.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -160,7 +161,7 @@ impl AccountRuntime {
         command: &AccountCommand,
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
-        let deadline = admitted_at + self.timeouts.network_wait;
+        let network_deadline = admitted_at + self.timeouts.network_wait;
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
@@ -175,7 +176,7 @@ impl AccountRuntime {
             // The actor bind owns receive after start_connection. Standalone run
             // would return AccountWriterBusy. Unbound tests still Resume here.
             if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
-                tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
+                tokio::time::timeout_at(network_deadline, crate::bus::sync_driver::run(account))
                     .await
                     .map_err(|_| pending(account))??;
             }
@@ -195,8 +196,11 @@ impl AccountRuntime {
             }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
-            if Instant::now() >= deadline {
-                return Err(pending(account));
+            // Leave the actor once the fetch budget ends. Staying here to wait for
+            // Apply holds the only reader of `connection_work`, so the refresh task
+            // cannot finish this Apply or start the next fetch.
+            if Instant::now() >= network_deadline {
+                return self.refuse_or_apply_queued(command, since).await;
             }
             for root in roots {
                 if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
@@ -205,15 +209,44 @@ impl AccountRuntime {
             }
             tokio::select! {
                 biased;
-                () = tokio::time::sleep_until(deadline) => {
-                    return Err(pending(self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?));
-                }
+                () = tokio::time::sleep_until(network_deadline) => {}
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
                     self.apply_connection_work(work).await?;
                 }
             }
         }
+    }
+
+    /// The biased sleep above wins when the deadline and a queued item are both
+    /// ready. Apply what is already queued, then refuse if the head is still stale.
+    async fn refuse_or_apply_queued(
+        &mut self,
+        command: &AccountCommand,
+        since: std::time::Instant,
+    ) -> Result<(), SdkError> {
+        self.drain_queued_connection_work().await?;
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return Ok(());
+        };
+        if stale_roots_since(account, &command.request, Some(since))?.is_empty() {
+            let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
+            return Ok(());
+        }
+        Err(pending(account))
+    }
+
+    async fn drain_queued_connection_work(&mut self) -> Result<(), SdkError> {
+        for _ in 0..super::CONNECTION_WORK_QUEUE {
+            match self.connection_work.try_recv() {
+                Ok(work) => self.apply_connection_work(work).await?,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(SdkError::NetworkingPending);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

@@ -181,7 +181,7 @@ impl RamfluxClient {
     /// Returns sealing, authority and storage errors; the transaction rolls back as a whole.
     pub(crate) fn seal_generated_history_delivery(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         mut plan: Plan,
         material: SendMaterial,
     ) -> Result<Option<(Plan, Envelope)>, SdkError> {

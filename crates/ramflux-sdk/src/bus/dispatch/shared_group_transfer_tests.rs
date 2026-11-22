@@ -386,8 +386,11 @@ async fn stale_snapshot() -> TestResult {
             crate::client::routed::Route::from_inner(&body)?,
         )
         .await?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&engine.config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     rig.laptop.install_test_session(engine);
     let error = deliver(&mut rig.phone, envelope).await.err().ok_or("stale transfer accepted")?;
     let sdk = error.downcast_ref::<SdkError>().ok_or("typed SDK error missing")?;

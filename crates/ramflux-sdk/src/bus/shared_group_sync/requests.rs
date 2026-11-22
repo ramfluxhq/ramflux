@@ -136,7 +136,7 @@ async fn seal_and_send(
             root,
             device: device.device_id,
             envelope: crate::dm::gateway_envelope_from_sealed(
-                engine.config(),
+                &engine.sealing_config()?,
                 &mut message,
                 sealed,
                 None,

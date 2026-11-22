@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub const MAX_INNER_BYTES: usize = 524_252;
 pub const MAX_HISTORY_CONTAINER_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const SUPPORTED_OWN_ATTESTATION_KIND: &str = "supported_own_attestation";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RawInnerCopyKind {
@@ -17,6 +18,8 @@ pub enum RawInnerCopyKind {
     NestedGroup,
     HistoryContainer,
     SourceEvidence,
+    /// Supported own Message/Edit proof. Charged on its own quota, erased with the message.
+    SupportedOwnAttestation,
 }
 
 impl RawInnerCopyKind {
@@ -26,6 +29,7 @@ impl RawInnerCopyKind {
             "nested_group" => Ok(Self::NestedGroup),
             "history_container" => Ok(Self::HistoryContainer),
             "source_evidence" => Ok(Self::SourceEvidence),
+            SUPPORTED_OWN_ATTESTATION_KIND => Ok(Self::SupportedOwnAttestation),
             _ => Err(StorageError::AuthorizationRejected),
         }
     }
@@ -36,6 +40,7 @@ impl RawInnerCopyKind {
             Self::NestedGroup => "nested_group",
             Self::HistoryContainer => "history_container",
             Self::SourceEvidence => "source_evidence",
+            Self::SupportedOwnAttestation => SUPPORTED_OWN_ATTESTATION_KIND,
         }
     }
 }
@@ -94,9 +99,9 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     validate_id(source_anchor)?;
     validate_id(copy_id)?;
     let max_bytes = match kind {
-        RawInnerCopyKind::HistoryContainer | RawInnerCopyKind::SourceEvidence => {
-            MAX_HISTORY_CONTAINER_BYTES
-        }
+        RawInnerCopyKind::HistoryContainer
+        | RawInnerCopyKind::SourceEvidence
+        | RawInnerCopyKind::SupportedOwnAttestation => MAX_HISTORY_CONTAINER_BYTES,
         RawInnerCopyKind::OuterInner | RawInnerCopyKind::NestedGroup => MAX_INNER_BYTES,
     };
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
@@ -150,7 +155,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         }
         return Err(StorageError::AuthorizationRejected);
     }
-    quota::reserve(db, owner_id, source_anchor, (bytes.len() + metadata.len()) as u64)?;
+    charge(db, owner_id, source_anchor, kind, bytes.len(), metadata.len())?;
     db.execute(
         "INSERT INTO raw_inner_owner(owner_id,source_anchor,metadata) VALUES(?1,?2,x'')
          ON CONFLICT(owner_id) DO NOTHING",
@@ -175,6 +180,26 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         return Err(StorageError::AuthorizationRejected);
     }
     Ok(())
+}
+
+fn charge(
+    db: &Connection,
+    owner_id: &str,
+    source_anchor: &str,
+    kind: RawInnerCopyKind,
+    bytes: usize,
+    metadata: usize,
+) -> Result<(), StorageError> {
+    let bytes = u64::try_from(bytes).map_err(|_| StorageError::AuthorizationRejected)?;
+    let metadata = u64::try_from(metadata).map_err(|_| StorageError::AuthorizationRejected)?;
+    let additional = bytes.checked_add(metadata).ok_or(StorageError::AuthorizationRejected)?;
+    quota::reserve(
+        db,
+        owner_id,
+        source_anchor,
+        additional,
+        kind == RawInnerCopyKind::SupportedOwnAttestation,
+    )
 }
 
 pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(), StorageError> {
@@ -301,13 +326,7 @@ impl AccountDb {
                     let kind: String = row.get(2)?;
                     let digest: Vec<u8> = row.get(3)?;
                     let digest: [u8; 32] = digest.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?;
-                    let kind = match kind.as_str() {
-                        "outer_inner" => RawInnerCopyKind::OuterInner,
-                        "nested_group" => RawInnerCopyKind::NestedGroup,
-                        "history_container" => RawInnerCopyKind::HistoryContainer,
-                        "source_evidence" => RawInnerCopyKind::SourceEvidence,
-                        _ => return Err(rusqlite::Error::InvalidQuery),
-                    };
+                    let kind = RawInnerCopyKind::from_sql(&kind).map_err(|_| rusqlite::Error::InvalidQuery)?;
                     Ok(RawInnerCopy { copy_id: row.get(0)?, owner_id: row.get(1)?, kind, digest, bytes: row.get(4)? })
                 },
             ).optional()

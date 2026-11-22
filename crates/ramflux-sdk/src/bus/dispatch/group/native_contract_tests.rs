@@ -294,7 +294,7 @@ fn routed_entry(
         &ramflux_protocol::message::Message { text: "after rename".into(), ..Default::default() },
     )?;
     let sealed = bob.client.seal_generated_routed_prepared(
-        &bob.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&bob.config)?,
         &message,
         &prepared.wire,
         route,
@@ -313,7 +313,7 @@ fn routed_entry(
         inbox_seq: sequence,
         target_delivery_id: alice.config.target_delivery_id.clone(),
         envelope: crate::dm::gateway_generated_envelope_from_sealed(
-            &bob.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&bob.config)?,
             &mut message,
             sealed,
         )?,

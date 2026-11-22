@@ -247,7 +247,11 @@ async fn reject_demoted_federated_add(
         .await?;
     let incoming = request_entry(
         2,
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config, &mut message, sealed)?,
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config)?,
+            &mut message,
+            sealed,
+        )?,
     );
     let mut receiver = GatewaySessionEngine::with_test_transport(
         config.clone(),

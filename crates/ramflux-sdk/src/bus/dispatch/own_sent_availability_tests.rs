@@ -245,7 +245,7 @@ async fn an_oversized_copy_payload_cannot_roll_back_primary_storage_or_submissio
     })?;
     engine
         .submit_envelope(crate::dm::gateway_generated_envelope_from_sealed(
-            &engine.config,
+            &engine.sealing_config()?,
             &mut message,
             sealed,
         )?)
