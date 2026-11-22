@@ -306,8 +306,12 @@ async fn first_direct_after_native_contact(
     );
     let sealed =
         sender.client.seal_routed_as(engine, &message, &prepared.wire, Route::direct()).await?;
-    let envelope =
-        crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, sealed, None)?;
+    let envelope = crate::dm::gateway_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config)?,
+        &mut message,
+        sealed,
+        None,
+    )?;
     let entry = GatewayInboxEntry {
         envelope,
         forwarded: false,

@@ -54,7 +54,7 @@ fn redrive(
 ) -> Result<(), SdkError> {
     let envelope =
         reply_outbox_crash_tests::bound_envelope(&fixture.client, &format!("{auth_key}-env"))?;
-    let config = fixture.config()?;
+    let config = fixture.sealing()?;
     let target =
         fixture.peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
     reply_outbox_crash_tests::stage(&fixture.client, sequence)?;

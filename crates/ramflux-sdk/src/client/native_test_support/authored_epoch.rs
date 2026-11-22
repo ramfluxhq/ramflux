@@ -45,14 +45,20 @@ async fn own_authored_history_target_epoch_rechecks_before_cached_exposure_and_r
         source.client.prepare_authored_history(&source.config)?.ok_or("first epoch plan")?;
     let (first, old) = source
         .client
-        .seal_authored_history(&source.config, first, source.material_for(&target)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            first,
+            source.material_for(&target)?,
+        )?
         .ok_or("first epoch sealed")?;
     certify_target_epoch(&mut source, &mut target, 2)?;
     assert!(
         source
             .client
             .seal_authored_history(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config
+                )?,
                 first,
                 SendMaterial { manifest: None, bundle: None }
             )?
@@ -62,7 +68,11 @@ async fn own_authored_history_target_epoch_rechecks_before_cached_exposure_and_r
         source.client.prepare_authored_history(&source.config)?.ok_or("second epoch plan")?;
     let (_, fresh) = source
         .client
-        .seal_authored_history(&source.config, next, source.material_for(&target)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            next,
+            source.material_for(&target)?,
+        )?
         .ok_or("second epoch sealed")?;
     assert_ne!(old.envelope_id, fresh.envelope_id);
     assert_ne!(old.encrypted_payload, fresh.encrypted_payload);

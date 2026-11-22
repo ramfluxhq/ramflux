@@ -75,6 +75,8 @@ pub use passphrase::{
 };
 mod federation;
 mod gateway;
+mod sealing;
+pub(crate) use sealing::SealingConfig;
 mod group;
 #[cfg(feature = "itest-bus-fault")]
 mod itest_bus_fault;

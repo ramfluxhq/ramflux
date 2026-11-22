@@ -385,7 +385,7 @@ impl RamfluxClient {
     /// Prepare + seal the live courier envelope. `admit_in` and the surface courier share this.
     pub(crate) fn seal_surface_resync_reply(
         &self,
-        config: &crate::GatewaySessionConfig,
+        config: &crate::SealingConfig,
         reply: &ResyncReply,
         material: crate::client::routed::SendMaterial,
     ) -> Result<ramflux_protocol::Envelope, SdkError> {
@@ -394,7 +394,7 @@ impl RamfluxClient {
             super::ControlKind::Peer,
             reply.destination.epoch,
         )?;
-        let mut message = self.surface_resync_direct_message(config, reply)?;
+        let mut message = self.surface_resync_direct_message(config.config(), reply)?;
         let surface =
             g::Surface { payload: Some(g::surface::Payload::Delivery(control.to_generated()?)) };
         let body = self.prepare_authored_content(

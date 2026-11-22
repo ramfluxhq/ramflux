@@ -298,7 +298,7 @@ impl RamfluxClient {
 
     pub(crate) fn seal_self_sync_repair(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         mut plan: Plan,
         material: SendMaterial,
     ) -> Result<Option<(Plan, ramflux_protocol::Envelope)>, SdkError> {

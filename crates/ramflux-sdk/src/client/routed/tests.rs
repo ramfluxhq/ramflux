@@ -157,7 +157,7 @@ impl Fixture {
             config.source_identity = Some(self.client.owned_device_identity()?);
             return Ok(config);
         }
-        GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        let mut config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
             bind_addr: "127.0.0.1:0".parse().map_err(|_| invalid("address"))?,
             gateway_addr: "127.0.0.1:1".parse().map_err(|_| invalid("address"))?,
             server_name: "test".to_owned(),
@@ -173,7 +173,12 @@ impl Fixture {
             target_delivery_id: self.id.clone(),
             prekey_http_url: None,
         })
-        .with_account_identity(&self.client)
+        .with_account_identity(&self.client)?;
+        config.device_branch = Some(std::sync::Arc::new(
+            self.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.clone(),
+        ));
+        config.source_identity = Some(self.client.owned_device_identity()?);
+        Ok(config)
     }
 }
 // Resolve the explicit principal convention of each fixture, never a by-name candidate.
@@ -266,7 +271,11 @@ fn generated_delivery(
     let message = request.message_id.clone();
     let (mut request, sealed) =
         seal_native_fixture(sender, receiver, request, &prepared.wire, Route::direct())?;
-    let envelope = crate::dm::gateway_generated_envelope_from_sealed(&own, &mut request, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&own)?,
+        &mut request,
+        sealed,
+    )?;
     sender.client.project_authored_message(&request, &prepared.exact, &[])?;
     Ok(GeneratedDelivery {
         conversation,
@@ -424,13 +433,13 @@ fn seal_as(
     })?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     let mut envelope = gateway_direct_message_envelope_sealed(
-        &sender.config()?,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
         &message,
         None,
         sealed.committed_a0.as_deref(),
     )?;
     crate::dm::add_message_metadata_commitment(
-        &sender.config()?,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
         &mut envelope,
         sealed.metadata_commitment,
     )?;
