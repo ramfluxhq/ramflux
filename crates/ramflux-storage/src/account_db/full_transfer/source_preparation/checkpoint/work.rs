@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Pre-Issue copy and logical encoding with no ordinary database owner retained.
+//! Pre-Issue copy of the pinned cut. The byte stream is the canonical snapshot frame.
 use super::{FullSourcePreparation, PreparedFullSource, StorageError, digest_identity};
 use crate::account_db::full_transfer::{
     keys::FullSourceMetadataKey,
@@ -32,9 +32,10 @@ pub struct FullSourcePreparationWork {
 }
 impl FullSourcePreparation<'_> {
     /// Pin the actual source view and release the frontend's database borrow before
-    /// copying pages or encoding logical records. No invitation or approval exists yet.
+    /// the snapshot export. No invitation or approval exists yet. Typed-owner encoding
+    /// is not consulted: classified exclusions pass, and an unclassified table refuses.
     /// # Errors
-    /// Refuses a reused preparation, unsupported schema, lost unlock or unsafe I/O.
+    /// Refuses a reused preparation, an unclassified table, lost unlock or unsafe I/O.
     pub fn into_encoding_work(self) -> Result<FullSourcePreparationWork, StorageError> {
         self.context()?.require_source_live()?;
         let used: bool =
@@ -44,7 +45,7 @@ impl FullSourcePreparation<'_> {
             return Err(context());
         }
         let rules = crate::account_db::full_transfer::full_transfer_catalog();
-        self.db.inspect_full_transfer_schema(rules)?.require_typed_owners(rules)?;
+        self.db.inspect_full_transfer_schema(rules)?;
         let guard = SourceGuard::new(self.db, Some(self.cancelled.clone()));
         let key = self.key.source_job_key(guard.clone())?;
         let cut = self.db.pin_full_transfer_cut()?;
@@ -65,10 +66,10 @@ impl FullSourcePreparation<'_> {
     }
 }
 impl FullSourcePreparationWork {
-    /// Copy, type-check and encode the pinned view using encrypted bounded spools.
+    /// Copy the pinned view and publish `ramflux.transfer.snapshot.v1` to a private sink.
     /// No ordinary data key/database or signing authority is exposed by the result.
     /// # Errors
-    /// Refuses cancellation, account lock/selection change, unsupported rows or I/O.
+    /// Refuses cancellation, account lock/selection change, an unclassified namespace or I/O.
     pub fn encode(self) -> Result<PreparedFullSource, StorageError> {
         self.guard.require()?;
         let snapshot_id = ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?);
@@ -81,7 +82,7 @@ impl FullSourcePreparationWork {
             directory: &self.directory,
         };
         source.adopt_source_cut(0, &snapshot_id, &pending, snapshot)?;
-        let (_, encoding) = source.encode_fixed_base_source(&snapshot_id, std::io::sink())?;
+        let (_, encoding) = source.publish_account_export(&snapshot_id, std::io::sink())?;
         let digest = digest_identity(
             &self.account,
             &self.principal,

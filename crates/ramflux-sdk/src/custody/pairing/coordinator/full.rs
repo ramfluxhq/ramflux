@@ -367,6 +367,7 @@ impl PairingActor {
                     let source = db.prepare_full_transfer_source()?;
                     let cancel = source.cancel_handle();
                     runtime.register_preparation(cancel.clone())?;
+                    // Pin only. `encode` publishes the snapshot off this frontend loan.
                     Ok((source.into_encoding_work()?, cancel))
                 })
                 .await?;
@@ -374,7 +375,7 @@ impl PairingActor {
                 self.full_runtime.clone().run_blocking(move || Ok(work.encode()?)).await?;
             return Ok((prepared, cancel));
         }
-        // Complete source census/typed encoding before any Issue/Create allocation.
+        // Same snapshot publication as the writer-bound pin, before any Issue/Create allocation.
         let runtime = self.full_runtime.clone();
         let source = self
             .full_runtime
@@ -391,7 +392,8 @@ impl PairingActor {
         }
         Ok(source)
     }
-    /// Explicit full-transfer begin; typed source preflight completes before native Issue.
+    /// Explicit full-transfer begin. The source cut publishes `ramflux.transfer.snapshot.v1`
+    /// before native Issue. The typed-owner encoder is not on this path.
     /// # Errors
     /// Refuses default-off, non-primary, locked/unsupported source or native/SAS setup errors.
     pub async fn begin_full(&mut self, begin: FullTransferBegin) -> Result<LocalResult, SdkError> {

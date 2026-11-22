@@ -407,6 +407,13 @@ pub(crate) const EXCLUDED_TABLES: &[(&str, &str)] = &[
     ("wire_complete", "transfer or stage state, raw copy or key material"),
 ];
 
+/// A table the export classification leaves on A. Schema inspection may see it on the
+/// live account without treating it as an undeclared catalog family.
+#[must_use]
+pub(crate) fn table_excluded(name: &str) -> bool {
+    EXCLUDED_TABLES.iter().any(|(table, _)| *table == name)
+}
+
 /// Live columns of exported tables that are not exported. B installs a neutral value.
 pub(crate) const EXCLUDED_COLUMNS: &[(&str, &str, &str)] = &[(
     "direct_message_projection",

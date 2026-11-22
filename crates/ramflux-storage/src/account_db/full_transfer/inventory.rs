@@ -8,6 +8,10 @@ use ramflux_protocol::custody::pairing::full_transfer::{CellType, Family, U64};
 use rusqlite::params;
 use std::collections::BTreeSet;
 
+/// Upper bound for one connection's ordinary tables. The catalog is smaller; exclusions
+/// sit outside it, so the bound is not the catalog length.
+const MAX_SCHEMA_TABLES: u64 = 4096;
+
 /// Counts and schema commitment, before portable rows/bytes/root have been encoded.
 /// Never use this object as `DataVerified` or a complete source-manifest permission.
 #[derive(Clone)]
@@ -79,15 +83,26 @@ pub(in crate::account_db) fn inspect(
         [],
         |row| row.get(0),
     )?;
-    let long:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND length(CAST(name AS BLOB))>128)",[],|row|row.get(0))?;
-    if long || count > declared.len() as u64 {
+    let long: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND length(CAST(name AS BLOB))>128)",
+        [],
+        |row| row.get(0),
+    )?;
+    // Classified exclusions are not catalog families. Counting them against `declared`
+    // refused every live account before the snapshot export ran.
+    if long || count > MAX_SCHEMA_TABLES {
         return Err(unsupported());
     }
-    let actual:BTreeSet<String>=connection.call(|db| {
+    let actual: BTreeSet<String> = connection.call(|db| {
         db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?
             .query_map([],|row|row.get::<_,String>(0))?.collect()
     })?;
-    if actual.iter().any(|table| !declared.contains(table.as_str())) {
+    let unclassified = unclassified_tables(&actual, &declared);
+    if !unclassified.is_empty() {
+        tracing::warn!(
+            tables = ?unclassified,
+            "transfer schema inspection refused unclassified tables"
+        );
         return Err(unsupported());
     }
     let mut families = Vec::with_capacity(rules.len());
@@ -225,6 +240,24 @@ fn compact_sql(input: &str) -> String {
         }
     }
     output
+}
+fn unclassified_tables<'a>(
+    actual: &'a BTreeSet<String>,
+    declared: &BTreeSet<&str>,
+) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    for table in actual {
+        if declared.contains(table.as_str())
+            || crate::account_db::transfer_export::table_excluded(table)
+        {
+            continue;
+        }
+        if names.len() == 8 {
+            break;
+        }
+        names.push(table.as_str());
+    }
+    names
 }
 fn unsupported() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
