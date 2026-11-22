@@ -10,7 +10,15 @@
 use super::builder::{self, Built, Side};
 use super::contract::{SchemaRow, canonical_schema_rows, schema_rows};
 use super::tables::EXPORT_TABLES;
-use crate::schema::MAX_DECLARED_TRIGGER_STEPS;
+use crate::schema::{
+    ACCOUNT_SCHEMA_ATTACHED_LIMIT, ACCOUNT_SCHEMA_COLUMN_LIMIT,
+    ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT, ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
+    ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT, ACCOUNT_SCHEMA_LENGTH_LIMIT,
+    ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT, ACCOUNT_SCHEMA_OBJECT_LIMIT,
+    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_ROW_CELL_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
+    ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT, ACCOUNT_SCHEMA_VARIABLE_LIMIT,
+    ACCOUNT_SCHEMA_VDBE_OP_LIMIT, ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT, MAX_DECLARED_TRIGGER_STEPS,
+};
 use crate::{AccountDbKey, StorageError};
 use rusqlite::config::DbConfig;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -27,16 +35,6 @@ pub(crate) const RECEIVED_FILE_CAP: u64 =
     ramflux_protocol::custody::pairing::full_transfer::PREPUBLICATION_DELTA_STOP_BYTES;
 /// `SQLCipher` page size this storage keys every database with (`cipher_page_size` default).
 pub(crate) const CIPHER_PAGE_BYTES: u64 = 4096;
-const LIMIT_LENGTH: i32 = 4 * 1024 * 1024;
-const LIMIT_SQL_LENGTH: i32 = 8 * 1024;
-const LIMIT_COLUMN: i32 = 16;
-const LIMIT_EXPR_DEPTH: i32 = 8;
-const LIMIT_COMPOUND_SELECT: i32 = 2;
-const LIMIT_VDBE_OP: i32 = 25_000;
-const LIMIT_FUNCTION_ARG: i32 = 2;
-const LIMIT_LIKE_PATTERN: i32 = 8;
-const LIMIT_VARIABLE_NUMBER: i32 = 1;
-const LIMIT_PARSER_DEPTH: i32 = 64;
 const PROGRESS_PERIOD_OPS: i32 = 1_000;
 /// Progress callbacks allowed per page of input, per phase (open checks, then the copy).
 const PROGRESS_CALLS_PER_PAGE: u64 = 64;
@@ -129,11 +127,7 @@ fn immutable_uri(path: &Path) -> Result<String, StorageError> {
 }
 
 /// Steps 2–6: open, engine pragmas without I/O, `db_config`, limits, progress handler.
-fn harden(
-    path: &Path,
-    schema_objects: usize,
-    budget: &Arc<Budget>,
-) -> Result<Connection, StorageError> {
+fn harden(path: &Path, budget: &Arc<Budget>) -> Result<Connection, StorageError> {
     let mut db = Connection::open_with_flags(
         immutable_uri(path)?,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -157,22 +151,21 @@ fn harden(
             return Err(refused("harden"));
         }
     }
-    let schema = i32::try_from(schema_objects).map_err(|_| refused("harden"))?;
     let limits = [
-        (Limit::SQLITE_LIMIT_LENGTH, LIMIT_LENGTH),
-        (Limit::SQLITE_LIMIT_SQL_LENGTH, LIMIT_SQL_LENGTH),
-        (Limit::SQLITE_LIMIT_COLUMN, LIMIT_COLUMN),
-        (Limit::SQLITE_LIMIT_EXPR_DEPTH, LIMIT_EXPR_DEPTH),
-        (Limit::SQLITE_LIMIT_COMPOUND_SELECT, LIMIT_COMPOUND_SELECT),
-        (Limit::SQLITE_LIMIT_VDBE_OP, LIMIT_VDBE_OP),
-        (Limit::SQLITE_LIMIT_FUNCTION_ARG, LIMIT_FUNCTION_ARG),
-        (Limit::SQLITE_LIMIT_ATTACHED, 0),
-        (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, LIMIT_LIKE_PATTERN),
-        (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, LIMIT_VARIABLE_NUMBER),
-        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, 1),
-        (Limit::SQLITE_LIMIT_WORKER_THREADS, 0),
-        (Limit::SQLITE_LIMIT_PARSER_DEPTH, LIMIT_PARSER_DEPTH),
-        (Limit::SQLITE_LIMIT_SCHEMA, schema),
+        (Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_LENGTH_LIMIT),
+        (Limit::SQLITE_LIMIT_SQL_LENGTH, ACCOUNT_SCHEMA_SQL_LIMIT),
+        (Limit::SQLITE_LIMIT_COLUMN, ACCOUNT_SCHEMA_COLUMN_LIMIT),
+        (Limit::SQLITE_LIMIT_EXPR_DEPTH, ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT),
+        (Limit::SQLITE_LIMIT_COMPOUND_SELECT, ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT),
+        (Limit::SQLITE_LIMIT_VDBE_OP, ACCOUNT_SCHEMA_VDBE_OP_LIMIT),
+        (Limit::SQLITE_LIMIT_FUNCTION_ARG, ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT),
+        (Limit::SQLITE_LIMIT_ATTACHED, ACCOUNT_SCHEMA_ATTACHED_LIMIT),
+        (Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH, ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT),
+        (Limit::SQLITE_LIMIT_VARIABLE_NUMBER, ACCOUNT_SCHEMA_VARIABLE_LIMIT),
+        (Limit::SQLITE_LIMIT_TRIGGER_DEPTH, ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT),
+        (Limit::SQLITE_LIMIT_WORKER_THREADS, ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT),
+        (Limit::SQLITE_LIMIT_PARSER_DEPTH, ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT),
+        (Limit::SQLITE_LIMIT_SCHEMA, ACCOUNT_SCHEMA_OBJECT_LIMIT),
         (Limit::SQLITE_LIMIT_TRIGGER_STEPS, MAX_DECLARED_TRIGGER_STEPS),
     ];
     for (limit, value) in limits {
@@ -230,10 +223,7 @@ impl VerifiedExport {
             PROGRESS_CALLS_BASE.saturating_add(pages.saturating_mul(PROGRESS_CALLS_PER_PAGE)),
             OPEN_DEADLINE,
         );
-        // SQLite's limit counts its in-memory schema objects: its own schema table, every table,
-        // and the primary-key index of every WITHOUT ROWID table besides the stored rows.
-        let objects = reference.len().saturating_add(EXPORT_TABLES.len()).saturating_add(1);
-        let mut db = harden(path, objects, &budget)?;
+        let mut db = harden(path, &budget)?;
         let phase = Arc::new(AtomicU8::new(PHASE_KEY));
         let gate = Arc::clone(&phase);
         db.authorizer(Some(move |context: AuthContext<'_>| authorize(&gate, &context)))
@@ -252,6 +242,9 @@ impl VerifiedExport {
         }
         phase.store(PHASE_QUICK_CHECK, Ordering::SeqCst);
         quick_check(&db)?;
+        // Schema load measured a 24505-byte statement. A restored cell may be larger.
+        db.set_limit(Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_ROW_CELL_LIMIT)
+            .map_err(|error| refused_by("harden", &error))?;
         phase.store(PHASE_ROWS, Ordering::SeqCst);
         let verified = Self { db, phase, budget, pages };
         verified.require_root(expected_root)?;
