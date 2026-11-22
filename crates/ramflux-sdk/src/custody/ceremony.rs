@@ -233,7 +233,7 @@ impl CreationCeremony {
     /// Complete attended creation and seal this device's data with its own local password.
     /// The password is borrowed only for this call and never enters a pairing DTO or native publication.
     /// # Errors
-    /// Rejects empty, non-UTF-8, overlong, too-short and blocklisted passwords,
+    /// Rejects empty, non-UTF-8, overlong and non-six-digit account codes,
     /// plus bad confirmation, expiry or vault/storage failure.
     pub fn confirm_with_passphrase(
         self,
@@ -252,12 +252,10 @@ impl CreationCeremony {
             .map_err(|_| rejected(crate::CustodyConfirmReason::PassphraseNotUtf8))?;
         if let Err(error) = crate::check_new_passphrase(text) {
             let reason = match error {
-                crate::PassphrasePolicyError::TooShort { .. } => {
-                    crate::CustodyConfirmReason::PassphraseTooShort
+                crate::PassphrasePolicyError::TrivialCode => {
+                    crate::CustodyConfirmReason::PassphraseTrivialCode
                 }
-                crate::PassphrasePolicyError::TooCommon => {
-                    crate::CustodyConfirmReason::PassphraseTooCommon
-                }
+                _ => crate::CustodyConfirmReason::PassphraseNotSixDigits,
             };
             return Err(rejected(reason));
         }
@@ -411,14 +409,17 @@ mod tests {
         reject_passphrase(&[255], crate::CustodyConfirmReason::PassphraseNotUtf8)
     }
     #[test]
-    fn fourteen_scalar_passphrase_names_its_rule_and_writes_nothing()
-    -> Result<(), Box<dyn std::error::Error>> {
-        reject_passphrase(&[b'a'; 14], crate::CustodyConfirmReason::PassphraseTooShort)
+    fn five_digit_code_names_its_rule_and_writes_nothing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        reject_passphrase(b"12345", crate::CustodyConfirmReason::PassphraseNotSixDigits)
     }
     #[test]
-    fn blocklisted_passphrase_names_its_rule_and_writes_nothing()
-    -> Result<(), Box<dyn std::error::Error>> {
-        reject_passphrase(b"films+pic+galeries", crate::CustodyConfirmReason::PassphraseTooCommon)
+    fn non_digit_code_names_its_rule_and_writes_nothing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        reject_passphrase(
+            b"films+pic+galeries",
+            crate::CustodyConfirmReason::PassphraseNotSixDigits,
+        )
     }
 
     #[test]
@@ -452,13 +453,19 @@ mod tests {
         let phrase = pending.show_once()?;
         let positions = pending.hidden_challenge()?;
         let answers = crate::custody::tests::words(&phrase, positions)?;
-        let passphrase = Zeroizing::new("creation data passphrase".to_owned());
+        let passphrase = Zeroizing::new("193728".to_owned());
         let account =
             pending.confirm_with_passphrase(&answers, &vault, now, passphrase.as_bytes())?;
         assert!(ramflux_storage::AccountIndex::open(&root.0)?.load_wrapped_db_key(&id)?.is_some());
-        vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(&root.0)?;
+        client.bind_device_unlock(
+            &root.0,
+            &vault,
+            &id,
+            crate::client::device_unlock::DeviceSecret::Load,
+        )?;
+        vault.fail.store(true, std::sync::atomic::Ordering::SeqCst);
         client.unlock_account(&id, passphrase.as_bytes())?;
         assert!(client.device_branch.is_none());
         assert!(client.identity_root.is_none());
@@ -485,7 +492,7 @@ mod tests {
         let expected = answers[1].clone();
         answers[1] = Zeroizing::new("quartz".to_owned());
         let error = pending
-            .confirm_with_passphrase(&answers, &vault, 100, b"discarded secret")
+            .confirm_with_passphrase(&answers, &vault, 100, b"271828")
             .expect_err("second challenge word");
         assert!(
             matches!(

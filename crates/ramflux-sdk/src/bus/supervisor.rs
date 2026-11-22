@@ -10,6 +10,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+#[path = "supervisor_device_unlock.rs"]
+mod device_unlock;
+
 #[derive(Clone)]
 enum RestoreState {
     // Removing or replacing this state wakes reads waiting for startup unlock.
@@ -174,10 +177,7 @@ impl Supervisor {
         Ok(supervisor)
     }
 
-    pub(super) fn hydrate(
-        self: &Rc<Self>,
-        tasks: &mut tokio::task::JoinSet<()>,
-    ) -> Result<(), SdkError> {
+    fn hydrate_paths(&self) -> Result<BTreeMap<std::path::PathBuf, String>, SdkError> {
         let directory = self.config.data_root.join("local_bus_accounts");
         let mut paths = self
             .index
@@ -195,8 +195,18 @@ impl Supervisor {
                 }
             }
         }
-        for (path, account_id) in paths {
+        Ok(paths)
+    }
+
+    pub(super) fn hydrate(
+        self: &Rc<Self>,
+        tasks: &mut tokio::task::JoinSet<()>,
+    ) -> Result<(), SdkError> {
+        for (path, account_id) in self.hydrate_paths()? {
             if crate::custody::account_exists(&self.config.data_root, &account_id)? {
+                if let Err(error) = self.hydrate_native(account_id, tasks) {
+                    tracing::warn!(%error, "native account reopen was not scheduled");
+                }
                 continue;
             }
             let Ok(manifest) = read_local_bus_account_manifest(&path) else {
@@ -393,7 +403,9 @@ impl Supervisor {
             self.accounts.borrow_mut().insert(id.clone(), actor.clone());
             actor
         };
-        let result = actor.unlock_native(secret, None).await?;
+        let result = actor
+            .unlock_native(super::native_account::NativeUnlockSecret::Code(secret), None)
+            .await?;
         self.restore_states.borrow_mut().remove(&id);
         self.set_active(&id).await?;
         self.set_unlocked(&id, true).await?;
@@ -481,7 +493,12 @@ impl Supervisor {
                 let id = request_account_id(&request)?.to_owned();
                 self.require_restore_ready(&id, false)?;
                 if !self.accounts.borrow().contains_key(&id) {
-                    return Err(self.account_unavailable(&id));
+                    // Switching never asks for the code: an account that was not explicitly
+                    // locked opens through its device wrap first.
+                    if !self.silently_unlockable(&id)? {
+                        return Err(self.account_unavailable(&id));
+                    }
+                    self.unlock_native_silently(&id).await?;
                 }
                 self.set_active(&id).await?;
                 return Ok(reply(serde_json::json!({"active_account_id": id})));
@@ -588,6 +605,7 @@ impl Supervisor {
         if locking && response.is_ok() {
             actor.stop().await?;
             self.set_unlocked(&id, false).await?;
+            self.clear_device_wrap(&id).await?;
             self.accounts.borrow_mut().remove(&id);
             self.subscribers.borrow_mut().retain(|_, subscriber| subscriber.account_id != id);
             self.attended.borrow_mut().retain(|_, account| account != &id);
@@ -695,7 +713,12 @@ impl Supervisor {
             self.accounts.borrow_mut().insert(id.into(), actor.clone());
             actor
         };
-        let result = actor.unlock_native(passphrase, home_node_id).await?;
+        let result = actor
+            .unlock_native(
+                super::native_account::NativeUnlockSecret::Code(passphrase),
+                home_node_id,
+            )
+            .await?;
         self.set_active(id).await?;
         self.set_unlocked(id, true).await?;
         Ok(result)

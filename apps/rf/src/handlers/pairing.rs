@@ -392,8 +392,8 @@ impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider
         let read = || -> Result<CredentialOutcome, RfError> {
             let mut terminal = super::account_ceremony::Terminal::open()?;
             let prompt = match request.action.as_str() {
-                "setup" => "New local data passphrase (hidden): ",
-                "unlock" => "Local data passphrase (hidden): ",
+                "setup" => "New account code, 6 digits (hidden): ",
+                "unlock" => "Account code, 6 digits (hidden): ",
                 "phrase" => "Recovery phrase for this primary transfer (hidden): ",
                 _ => return Ok(CredentialOutcome::Refused),
             };
@@ -403,7 +403,7 @@ impl ramflux_sdk::custody::pairing::LocalCredentialProvider for TerminalProvider
                     .map_err(|error| RfError::Sdk(error.into()))?;
             }
             let confirmation = if request.action == "setup" {
-                let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
+                let repeated = terminal.line("Repeat account code (hidden): ", true)?;
                 Some(SecretUtf8::from_bytes(repeated.as_bytes())?)
             } else {
                 None

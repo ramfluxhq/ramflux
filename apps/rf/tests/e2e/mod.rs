@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub(crate) const PASSPHRASE: &str = "cli-e2e-passphrase-ok";
+pub(crate) const PASSPHRASE: &str = "530287";
 const NODE_ID: &str = "localhost";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1608,9 +1608,9 @@ impl PtySession {
             let word = phrase.get(position.wrapping_sub(1)).ok_or("challenge position")?;
             self.write_line(word)?;
         }
-        cursor = self.wait_until("New local data passphrase (hidden):", cursor, deadline)?;
+        cursor = self.wait_until("New account code, 6 digits (hidden):", cursor, deadline)?;
         self.write_line(passphrase)?;
-        cursor = self.wait_until("Repeat local data passphrase (hidden):", cursor, deadline)?;
+        cursor = self.wait_until("Repeat account code (hidden):", cursor, deadline)?;
         self.write_line(passphrase)?;
         let _ = self.wait_until("\"account_id\"", cursor, deadline)?;
         // Closing the ConPTY input while the child is still attached makes conhost

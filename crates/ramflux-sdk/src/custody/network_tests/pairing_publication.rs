@@ -37,6 +37,12 @@ mod tests {
         )?;
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(&account_root)?;
+        client.bind_device_unlock(
+            std::path::Path::new(&account_root),
+            vault.as_ref(),
+            "source",
+            crate::client::device_unlock::DeviceSecret::Create,
+        )?;
         client.seal_new_account_data(
             "source",
             &account.record().body.account_anchor,

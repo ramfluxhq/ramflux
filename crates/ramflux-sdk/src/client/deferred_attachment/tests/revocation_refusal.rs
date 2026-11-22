@@ -3,17 +3,17 @@
 
 //! Handler refusal classification and propagation of a real failed storage write.
 use super::*;
-use ramflux_storage::{FileVaultSecretSource, StorageError, VaultSecretSource};
+use ramflux_storage::StorageError;
 use std::fmt::Write;
 
 pub(super) fn connection(f: &Fixture) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
-    let vault = FileVaultSecretSource::new(&f.root).vault_secret("account")?;
+    let vault = f.client.vault_secret_source()?.vault_secret("account")?;
     let wrapped = f.client.account_index()?.load_wrapped_db_key("account")?.ok_or("key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &crate::client::account::account_db_key_encryption_key(
             &vault,
             b"native fixture data passphrase",
-        ),
+        )?,
         &wrapped,
     )?;
     let db = rusqlite::Connection::open(&f.client.account_db()?.path)?;

@@ -207,6 +207,12 @@ fn initial(local: &Local, primary: bool) -> TestResult<Initial> {
         let (account, recovery) = create_primary(local)?;
         phrase = Some(recovery);
         client.open_account_index(local.root.path())?;
+        client.bind_device_unlock(
+            local.root.path(),
+            local.vault.as_ref(),
+            &local.id,
+            ramflux_sdk::DeviceSecret::Load,
+        )?;
         client.unlock_account(&local.id, PASSWORD)?;
         let reference = account.record().body.master_certificate.body.primary_device_ref.clone();
         PairingIdentity {

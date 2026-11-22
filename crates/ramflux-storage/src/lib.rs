@@ -21,7 +21,7 @@ pub use account_generation::GenerationReclamationLease;
 pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
-pub use account_index::{AccountGenerationSelection, BackupIndexInstall};
+pub use account_index::{AccountGenerationSelection, BackupIndexInstall, CodeAttempts};
 mod clock;
 mod constants;
 mod conversation_helpers;
