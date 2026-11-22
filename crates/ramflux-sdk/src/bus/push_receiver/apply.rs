@@ -214,7 +214,7 @@ pub(crate) fn apply_page(
         entries: trimmed.entries,
         known_losses: &losses,
     };
-    let plan = db.receive_transaction(expected, generation, |tx| tx.reconcile(view))?;
+    let plan = db.reconcile_receive(expected, generation, view)?;
     let (steps, need_stage) = match &plan {
         ReceiveReconcileResult::Plan(steps) => (steps.as_slice(), None),
         ReceiveReconcileResult::NeedStage { sequence, prefix } => {
@@ -268,7 +268,7 @@ pub(crate) fn apply_point(
         entries,
         known_losses: losses,
     };
-    let plan = db.receive_transaction(expected, generation, |tx| tx.reconcile(view))?;
+    let plan = db.reconcile_receive(expected, generation, view)?;
     let mut steps = match plan {
         ReceiveReconcileResult::Plan(steps) => steps,
         ReceiveReconcileResult::NeedStage { sequence, prefix } => {

@@ -23,7 +23,7 @@ pub(crate) fn qualified(root: &str, device_id: &str, device_epoch: u64) -> g::Qu
 impl RamfluxClient {
     pub(crate) fn seal_own_copy_generated(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         draft: OwnCopyDraft,
         materials: Vec<SendMaterial>,
     ) -> Result<Vec<(String, ramflux_protocol::Envelope)>, SdkError> {
@@ -33,7 +33,7 @@ impl RamfluxClient {
 
     fn seal_own_copy_generated_in(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         mut draft: OwnCopyDraft,
         materials: Vec<SendMaterial>,
     ) -> Result<Vec<(String, ramflux_protocol::Envelope)>, SdkError> {

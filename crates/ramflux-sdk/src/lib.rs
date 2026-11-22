@@ -70,11 +70,13 @@ mod error;
 mod error_policy;
 mod passphrase;
 pub use passphrase::{
-    MIN_ACCEPTED_PASSPHRASE_SCALARS, MIN_PASSPHRASE_SCALARS, PassphrasePolicyError,
-    check_new_passphrase,
+    ACCOUNT_CODE_DIGITS, MIN_ACCEPTED_PASSPHRASE_SCALARS, MIN_PASSPHRASE_SCALARS,
+    PassphrasePolicyError, check_new_archive_passphrase, check_new_passphrase,
 };
 mod federation;
 mod gateway;
+mod sealing;
+pub(crate) use sealing::SealingConfig;
 mod group;
 #[cfg(feature = "itest-bus-fault")]
 mod itest_bus_fault;
@@ -142,6 +144,9 @@ pub use client::RamfluxClient;
 pub use client::account::account_db_key_encryption_key;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
+pub use client::device_unlock::DeviceSecret;
+#[cfg(feature = "itest-memory-vault")]
+pub use client::device_unlock::itest_account_vault_secret;
 #[cfg(feature = "itest-fingerprint")]
 pub use client::dm_session::RecvCommitFingerprint;
 pub use client::recovery::{

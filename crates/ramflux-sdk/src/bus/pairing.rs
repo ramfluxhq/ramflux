@@ -539,8 +539,19 @@ pub(super) fn refresh_source_role(
         .as_ref()
         .is_some_and(|cached| cached.record() != current.record())
     {
-        account.gateway_config = account.gateway_config.clone().with_born_v3_account(&current);
+        // Refresh public authority without resetting the installed transport credentials.
+        account.gateway_config.principal_id.clone_from(&current.record().body.principal_id);
         account.client.born_v3_account = Some(Box::new(current));
+    }
+    // A pairing generation restart stores a config with no branch and no source.
+    // Put back the same fields `sealing_config` reads, so the stored copy is not
+    // incomplete for the rest of the session.
+    if account.gateway_config.device_branch.is_none() {
+        account.gateway_config.device_branch =
+            account.client.device_branch.clone().map(std::sync::Arc::new);
+    }
+    if account.gateway_config.source_identity.is_none() {
+        account.gateway_config.source_identity = Some(account.client.owned_device_identity()?);
     }
     Ok(())
 }

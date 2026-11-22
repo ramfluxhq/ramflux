@@ -281,7 +281,6 @@ fn install_received_reference(
     bob: &e2e::Account,
     conversation: &str,
 ) -> e2e::Result<()> {
-    use ramflux_storage::VaultSecretSource as _;
     const OBJECT_ID: &str = "demo-b-b4-object";
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     // A layer install may still be in flight on a slow host; PublicationPending is the typed
@@ -324,8 +323,8 @@ fn install_received_reference(
     let index = ramflux_storage::AccountIndex::open(bob_root)?;
     let wrapped =
         index.load_wrapped_db_key(&bob.id)?.ok_or("bob wrapped account key is missing")?;
-    let vault = ramflux_storage::FileVaultSecretSource::new(bob_root).vault_secret(&bob.id)?;
-    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes());
+    let vault = ramflux_sdk::itest_account_vault_secret(bob_root, &bob.id)?;
+    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes())?;
     let key = ramflux_storage::unwrap_with_vault_secret(&kek, &wrapped)?;
     let db = ramflux_storage::AccountDb::open(&index, &bob.id, &key)?;
     db.persist_client_record(
@@ -483,12 +482,11 @@ fn bob_object_facts(
     bob: &e2e::Account,
 ) -> e2e::Result<String> {
     use ramflux_storage::ProjectionStore as _;
-    use ramflux_storage::VaultSecretSource as _;
     let index = ramflux_storage::AccountIndex::open(bob_root)?;
     let wrapped =
         index.load_wrapped_db_key(&bob.id)?.ok_or("bob wrapped account key is missing")?;
-    let vault = ramflux_storage::FileVaultSecretSource::new(bob_root).vault_secret(&bob.id)?;
-    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes());
+    let vault = ramflux_sdk::itest_account_vault_secret(bob_root, &bob.id)?;
+    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes())?;
     let key = ramflux_storage::unwrap_with_vault_secret(&kek, &wrapped)?;
     let db = ramflux_storage::AccountDb::open(&index, &bob.id, &key)?;
     let record = db.client_record("object", "demo-b-b4-object")?;

@@ -46,7 +46,13 @@ async fn send_text(bus: &mut LocalBusClient, send: ConversationSend) -> Result<(
         json!({"conversation_id": send.conversation, "text": send.text}),
     )
     .await?;
-    print_json(&value)
+    print_json(&value)?;
+    // A send that reached no recipient is not a success: the JSON stays on stdout and the
+    // process fails, so a script cannot mistake a refused or undelivered send for a sent one.
+    if let Some(reason) = output::send_failure(&value) {
+        return Err(RfError::Message(reason));
+    }
+    Ok(())
 }
 
 async fn edit_text(bus: &mut LocalBusClient, edit: ConversationEdit) -> Result<(), RfError> {

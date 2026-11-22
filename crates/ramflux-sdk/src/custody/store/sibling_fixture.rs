@@ -95,6 +95,12 @@ pub(crate) fn install_sibling_fixture(setup: SiblingSetup<'_>) -> Result<(), Sdk
     vault.store_branch(&branch_ref, branch)?;
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(root)?;
+    client.bind_device_unlock(
+        std::path::Path::new(root),
+        vault,
+        id,
+        crate::client::device_unlock::DeviceSecret::Create,
+    )?;
     client.seal_new_account_data(id, &stored.record.body.account_anchor, passphrase)?;
     genesis::require_owned_reservation(root, id, &stored.record.body.account_anchor, &dir)?;
     genesis::write_public(

@@ -409,15 +409,9 @@ fn confirm_reasons_survive_native_error_projection() {
             1,
         ),
         (
-            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooShort),
+            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseNotSixDigits),
             "CustodySetupInvalid",
-            "too_short",
-            1,
-        ),
-        (
-            SdkError::CustodyConfirmRejected(CustodyConfirmReason::PassphraseTooCommon),
-            "CustodySetupInvalid",
-            "too_common",
+            "not_six_digits",
             1,
         ),
         (

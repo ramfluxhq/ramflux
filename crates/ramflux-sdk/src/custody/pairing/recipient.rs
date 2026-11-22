@@ -355,6 +355,12 @@ fn commit_vault_and_db(
             &secrets.branch,
         )?;
         client.open_account_index(request.root)?;
+        client.bind_device_unlock(
+            request.root,
+            request.vault,
+            request.account_id,
+            crate::client::device_unlock::DeviceSecret::Create,
+        )?;
         client.seal_new_account_data(
             request.account_id,
             &staged.recipient_ref.account_anchor,
@@ -498,6 +504,12 @@ fn unlock_existing(
     if client.active_account_db.is_some() {
         client.verify_active_account_secret(request.new.account_id, secret.as_bytes())?;
     } else {
+        client.bind_device_unlock(
+            request.new.root,
+            request.new.vault,
+            request.new.account_id,
+            crate::client::device_unlock::DeviceSecret::Load,
+        )?;
         client.unlock_account(request.new.account_id, secret.as_bytes())?;
     }
     Ok(())

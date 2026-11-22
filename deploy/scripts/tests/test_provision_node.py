@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -30,7 +31,7 @@ class ProvisionNodeTests(unittest.TestCase):
         args = ["sh", str(PROVISION)]
         if check:
             args.append("--check")
-        return subprocess.run(args, env=env, text=True, capture_output=True, check=False)
+        return subprocess.run(args, env=env, text=True, capture_output=True, check=False, timeout=30)
 
     def toml(self, service):
         return (self.root / "config" / f"{service}.toml").read_text()
@@ -55,6 +56,18 @@ class ProvisionNodeTests(unittest.TestCase):
         text = self.toml("federation")
         self.assertIn('"gateway.session_push.v1"', text)
         self.assertNotIn("gateway.ephemeral.v1", text)
+
+    def test_provisioned_call_authority_matches_service_templates(self):
+        result = self.provision()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        templates = SCRIPTS.parent / "config"
+        for service in ("gateway", "router", "notify"):
+            actual = tomllib.loads(self.toml(service))
+            expected = tomllib.loads((templates / f"{service}.toml").read_text())
+            self.assertEqual(actual["mesh"]["endpoints"], expected["mesh"]["endpoints"],
+                             f"{service} provisioning lost a service endpoint")
+            self.assertEqual(actual.get("send_authority"), expected.get("send_authority"),
+                             f"{service} provisioning changed allowed call origins")
 
     def test_unknown_empty_and_ephemeral_only_write_nothing(self):
         for value in ("gateway.session_push.v1,not-a-capability", "", "gateway.ephemeral.v1", ","):

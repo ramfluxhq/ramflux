@@ -20,7 +20,7 @@ pub(crate) struct Plan {
     intent: Intent,
     fingerprint: serde_json::Value,
     own_root: String,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 }
 pub(crate) struct BodyPlan {
     plan: Plan,
@@ -375,7 +375,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             fingerprint: serde_json::to_value(&intent)?,
             intent,
             own_root: client.owned_device_identity()?.root_commitment().into(),
-            config: account.gateway_config.clone(),
+            config: account.sealing_config()?,
         }));
     }
     Ok(None)
@@ -482,8 +482,8 @@ fn recipient(
         conversation_id: conversation(&plan.intent.requester_root, &plan.intent.target_root)?,
         message_id: super::super::generated::message_id(&body, &id)?,
         envelope_id: id,
-        source_principal_id: plan.config.principal_id.clone(),
-        sender_id: plan.config.device_id.clone(),
+        source_principal_id: plan.config.config().principal_id.clone(),
+        sender_id: plan.config.config().device_id.clone(),
         recipient_device_id: Some(device.device_id),
         recipient_principal_commitment: Some(plan.intent.peer_root.clone()),
         target_delivery_id: device.target_delivery_id,

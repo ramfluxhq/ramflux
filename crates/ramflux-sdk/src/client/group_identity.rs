@@ -251,10 +251,25 @@ impl RamfluxClient {
         {
             return Ok(());
         }
-        if db.shared_group_state(group)?.is_some() {
-            let binding = db
-                .group_member_key_binding(group, &identity)?
-                .ok_or(StorageError::GroupPermissionDenied)?;
+        if let Some(state) = db.shared_group_state(group)? {
+            let Some(binding) = db.group_member_key_binding(group, &identity)? else {
+                // Membership belongs to the account: a current device of a member root (a paired
+                // or recovered device) is projected from the verified own-root directory, never
+                // from local key material alone. Excluded devices have no effective role.
+                if state
+                    .view()
+                    .effective_role(identity.root_commitment(), identity.device_id())
+                    .is_none()
+                {
+                    return Err(StorageError::GroupPermissionDenied.into());
+                }
+                return self.materialize_own_group_device(
+                    group,
+                    &identity,
+                    &local.principal_id,
+                    &public,
+                );
+            };
             if binding.principal_id.as_deref() != Some(&local.principal_id)
                 || binding.principal_commitment.as_deref() != Some(&commitment)
             {
@@ -280,6 +295,37 @@ impl RamfluxClient {
             &local.principal_id,
             &commitment,
             &public,
+        )?;
+        Ok(())
+    }
+    /// Projects this device as an implicit sibling of its own member root. The device row comes
+    /// from the verified custody directory of the own root and must carry this branch's key.
+    fn materialize_own_group_device(
+        &self,
+        group: &str,
+        identity: &ramflux_crypto::RootQualifiedDeviceRef,
+        principal: &str,
+        public: &str,
+    ) -> Result<(), SdkError> {
+        let record = self.trusted_device(HeadUse::NewAuthorization, identity)?;
+        if record["signing_public_key"].as_str() != Some(public) {
+            return Err(SdkError::InboundRejected(
+                "safety: own device directory key differs from the local branch".into(),
+            ));
+        }
+        self.account_db()?.materialize_shared_group_member(
+            group,
+            identity,
+            &ramflux_protocol::group_state::GroupMemberIdentity {
+                principal_id: principal.into(),
+                root_commitment: identity.root_commitment().into(),
+                device_id: identity.device_id().into(),
+                signing_public_key: public.into(),
+                target_delivery_id: record["target_delivery_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+            },
         )?;
         Ok(())
     }

@@ -101,6 +101,10 @@ pub(crate) struct LocalBusAccountState {
     /// deliberately not stored inside the `GatewaySessionEngine`). `None` until first use; an rfd
     /// restart cold-rebuilds it.
     pub(crate) relay_quic_pool: Option<std::sync::Arc<ramflux_transport::RelayQuicPool>>,
+    /// Endpoint and authority settings for the next connection. Not a sealing config: a native
+    /// account's copy drops its device branch and source identity whenever its authority changes
+    /// (unlock, pairing, role refresh) and regains them only when a session is installed. Anything
+    /// that seals or signs an envelope outside a live session uses [`Self::sealing_config`].
     pub(crate) gateway_config: GatewaySessionConfig,
     pub(crate) principal_commitment: String,
     pub(crate) target_delivery_id: String,
@@ -379,18 +383,11 @@ impl LocalBusAccountState {
     /// A native account's stored config names neither its device branch (which signs the envelope)
     /// nor a source identity (the envelope's source root, which the receiver's report check
     /// reads); a session fills the branch in the same way (`connection_config`). Fields already
-    /// present are kept.
+    /// present are kept. Only this method and session metadata can mint a [`SealingConfig`].
     /// # Errors
-    /// The account has no owned device identity yet.
-    pub(crate) fn sealing_config(&self) -> Result<GatewaySessionConfig, SdkError> {
-        let mut config = self.gateway_config.clone();
-        if config.device_branch.is_none() {
-            config.device_branch = self.client.device_branch.clone().map(std::sync::Arc::new);
-        }
-        if config.source_identity.is_none() {
-            config.source_identity = Some(self.client.owned_device_identity()?);
-        }
-        Ok(config)
+    /// The account has no owned device identity yet, or the branch is still missing.
+    pub(crate) fn sealing_config(&self) -> Result<crate::SealingConfig, SdkError> {
+        crate::SealingConfig::from_account(self)
     }
 
     pub(crate) fn connection_config(&self) -> Result<GatewaySessionConfig, SdkError> {

@@ -166,6 +166,9 @@ impl Fixture {
         config.source_identity = Some(self.client.owned_device_identity()?);
         Ok(config)
     }
+    pub(super) fn sealing(&self) -> Result<crate::SealingConfig, SdkError> {
+        crate::bus::connection_manager::SessionMetadata::sealing_config_for(&self.config()?)
+    }
     pub(super) async fn new() -> Result<Self, SdkError> {
         Self::native()
             .await
@@ -252,13 +255,17 @@ fn bootstrap_pair(
     message.message_id = ramflux_protocol::encode_base64url(&identity.id);
     let exact = RamfluxClient::encode_generated_inner(identity, &generated)?;
     let sealed = sender.seal_generated_routed_prepared(
-        config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(config)?,
         &message,
         &exact,
         crate::client::routed::Route::direct(),
         SendMaterial { manifest: None, bundle: Some(bundle) },
     )?;
-    let envelope = crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(config)?,
+        &mut message,
+        sealed,
+    )?;
     let local = peer_branch.device_id.clone();
     let _ = peer.open_routed(
         &crate::GatewayInboxEntry {
@@ -390,7 +397,7 @@ fn req<'a>(
     kind: ReplyKind,
     response_key: Option<&'a str>,
     message: Option<&'a str>,
-    config: Option<&'a GatewaySessionConfig>,
+    config: Option<&'a crate::SealingConfig>,
     material: Option<SendMaterial>,
 ) -> AdmitRequest<'a> {
     AdmitRequest {
@@ -413,7 +420,7 @@ fn req<'a>(
 async fn reply_outbox_crash() -> Result<(), SdkError> {
     let _hang = hang_guard();
     let mut fixture = Box::pin(Fixture::new()).await?;
-    let config = fixture.config()?;
+    let config = fixture.sealing()?;
     let surface = envelope("surface-env");
     let second = bound_envelope(&fixture.client, "pair-env")?;
     let target = device_target(&fixture.peer)?;
@@ -723,7 +730,7 @@ fn pair_requires_live_prepare(client: &RamfluxClient) -> Result<(), SdkError> {
 fn join_stage_and_admit(
     client: &mut RamfluxClient,
     peer: &RamfluxClient,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 ) -> Result<(), SdkError> {
     const SEQ: u64 = 3;
     const KEY: &str = "join-auth";
@@ -806,7 +813,7 @@ fn join_stage_and_admit(
 fn fill_and_hold(
     client: &mut RamfluxClient,
     peer: &RamfluxClient,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 ) -> Result<(), SdkError> {
     let cap = bound_envelope(client, "cap-env")?;
     let held_env = bound_envelope(client, "held-env")?;
@@ -898,7 +905,7 @@ fn fill_and_hold(
 fn erase_bound_row(
     client: &RamfluxClient,
     peer: &RamfluxClient,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 ) -> Result<(), SdkError> {
     const SEQ: u64 = 6;
     const KEY: &str = "erase-auth";
@@ -964,7 +971,7 @@ fn hold_keeps_quarantined(client: &RamfluxClient) -> Result<(), SdkError> {
 async fn surface_admit_requires_config_and_material() -> Result<(), SdkError> {
     let _hang = hang_guard();
     let fixture = Box::pin(Fixture::new()).await?;
-    let config = fixture.config()?;
+    let config = fixture.sealing()?;
     let surface = envelope("surface-env");
     stage(&fixture.client, SURFACE_SEQ)?;
     queue_surface(&fixture.client, &fixture.peer)?;

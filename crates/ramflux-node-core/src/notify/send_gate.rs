@@ -25,6 +25,11 @@ fn error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
 
+struct PreparedWorkCharge {
+    units: u64,
+    bytes: u64,
+}
+
 pub(super) type RemoteAuthorityReader = dyn Fn(&AuthorityReadRequest, Instant) -> Result<AuthorityReadReply, NodeCoreError>
     + Send
     + Sync;
@@ -89,6 +94,36 @@ impl NotifyRedbStore {
         key: &str,
         pushes: &[PreparedProviderPush],
     ) -> Result<(), NodeCoreError> {
+        let read = self.db.begin_read().map_err(error)?;
+        let row = {
+            let table = read.open_table(NOTIFY_WAKE_LEDGER).map_err(error)?;
+            ledger_row(&table, key)?
+        };
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let Some(charge) = Self::prepared_work_charge(&row, pushes)? else {
+            return Ok(());
+        };
+        let Some(root) = row.recipient_root.as_deref() else {
+            return Ok(());
+        };
+        let slot = row.start_digest.as_deref().map(|digest| call_slot(root, digest)).transpose()?;
+        let charge_key = format!("work:{key}");
+        if crate::send_authority::charge_matches(
+            &read,
+            &crate::send_authority::ChargeProbe {
+                root,
+                slot: slot.as_deref(),
+                notify: true,
+                key: &charge_key,
+                units: charge.units,
+                bytes: charge.bytes,
+            },
+        )? {
+            return Ok(());
+        }
+        drop(read);
         let tx = self.db.begin_write().map_err(error)?;
         let row = {
             let table = tx.open_table(NOTIFY_WAKE_LEDGER).map_err(error)?;
@@ -98,6 +133,28 @@ impl NotifyRedbStore {
             Self::charge_wake_work(&tx, key, &row, pushes)?;
         }
         tx.commit().map_err(error)
+    }
+
+    fn prepared_work_charge(
+        row: &WakeLedgerRow,
+        pushes: &[PreparedProviderPush],
+    ) -> Result<Option<PreparedWorkCharge>, NodeCoreError> {
+        if row.recipient_root.is_none() || row.work_bytes == 0 {
+            return Ok(None);
+        }
+        let mut bytes = usize::try_from(row.work_bytes).map_err(error)?;
+        for push in pushes {
+            let size = serde_json::to_vec(push).map_err(error)?.len();
+            bytes = bytes
+                .checked_add(size.checked_mul(2).ok_or(SendAuthorityError::Capacity)?)
+                .ok_or(SendAuthorityError::Capacity)?;
+        }
+        Ok(Some(PreparedWorkCharge {
+            units: 2_u64
+                .checked_add(u64::try_from(pushes.len()).map_err(error)?)
+                .ok_or(SendAuthorityError::Capacity)?,
+            bytes: u64::try_from(bytes).map_err(error)?,
+        }))
     }
 
     pub(super) fn charge_provider_diagnostic(

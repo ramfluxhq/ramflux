@@ -204,7 +204,11 @@ async fn import_history(
         .ok_or("historical copy after live delivery")?;
     let (_, envelope) = source
         .client
-        .seal_authored_history(&source.config, plan, source.material_for(target)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            plan,
+            source.material_for(target)?,
+        )?
         .ok_or("historical envelope")?;
     target.receive(envelope.clone(), sequence).await?;
     Ok(envelope)
@@ -240,7 +244,7 @@ fn seal_live_copy(
         )?
         .ok_or("live draft")?;
     let copies = source.client.seal_own_copy_generated(
-        &source.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
         draft,
         vec![source.material_for(sibling)?],
     )?;

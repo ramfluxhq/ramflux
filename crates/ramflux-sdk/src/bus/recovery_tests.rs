@@ -60,6 +60,12 @@ async fn ordinary_phrase_recovery_is_explicit_connection_local_and_refuses_wrong
         create_with_phrase(&root.0, "recoverable", vault.as_ref(), crate::custody::network_now()?)?;
     let mut data = RamfluxClient::new();
     data.open_account_index(&root.0)?;
+    data.bind_device_unlock(
+        std::path::Path::new(&root.0),
+        vault.as_ref(),
+        "recoverable",
+        crate::client::device_unlock::DeviceSecret::Create,
+    )?;
     data.seal_new_account_data(
         "recoverable",
         &account.record().body.account_anchor,
