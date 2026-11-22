@@ -15,10 +15,42 @@ struct AccountMigration {
 }
 
 /// Most SQL statements in one trigger this catalog installs (`object_erase_message`).
-/// SQLite counts each statement in the trigger body and refuses the trigger when
-/// that count is greater than `SQLITE_LIMIT_TRIGGER_STEPS`. A hardened open uses
-/// this value, so a foreign trigger with more statements still fails schema load.
+/// SQLite refuses a trigger when its statement count is greater than
+/// `SQLITE_LIMIT_TRIGGER_STEPS`. Measured minimum on a fresh account (SQLite 3.54.1).
 pub(crate) const MAX_DECLARED_TRIGGER_STEPS: i32 = 65;
+/// Longest `sqlite_schema.sql` text, in bytes. Schema-load `SQLITE_LIMIT_LENGTH`.
+pub(crate) const ACCOUNT_SCHEMA_LENGTH_LIMIT: i32 = 24_505;
+/// Longest schema statement, in bytes. Schema-load `SQLITE_LIMIT_SQL_LENGTH`.
+pub(crate) const ACCOUNT_SCHEMA_SQL_LIMIT: i32 = 24_505;
+/// Widest table in a fresh account (`pragma_table_info` max).
+pub(crate) const ACCOUNT_SCHEMA_COLUMN_LIMIT: i32 = 21;
+/// Deepest expression compiled while loading a fresh account schema.
+pub(crate) const ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT: i32 = 25;
+/// Most terms in one compound SELECT in that schema.
+pub(crate) const ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT: i32 = 2;
+/// Most VDBE opcodes in one statement the hardened opener compiles on a fresh
+/// account. `PRAGMA quick_check` is larger than any `CREATE` in the schema load.
+/// A lower value makes SQLite report "out of memory". Measured on SQLite 3.54.1.
+pub(crate) const ACCOUNT_SCHEMA_VDBE_OP_LIMIT: i32 = 12_800;
+/// Most arguments of one function (`json_object` in `footprint_erase_message`).
+pub(crate) const ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT: i32 = 10;
+/// The account schema does not `ATTACH` another database.
+pub(crate) const ACCOUNT_SCHEMA_ATTACHED_LIMIT: i32 = 0;
+/// No `LIKE` or `GLOB` pattern is evaluated while the opener loads the schema.
+pub(crate) const ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT: i32 = 0;
+/// No host parameter is compiled from the stored schema SQL.
+pub(crate) const ACCOUNT_SCHEMA_VARIABLE_LIMIT: i32 = 0;
+/// Triggers do not run during schema load, so nested firing is not required.
+pub(crate) const ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT: i32 = 0;
+/// Schema load uses this connection's one thread and starts no workers.
+pub(crate) const ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT: i32 = 0;
+/// Deepest LALR parser stack while loading a fresh account schema.
+pub(crate) const ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT: i32 = 54;
+/// In-memory tables, indexes, and triggers, including `sqlite_schema`, that a fresh account loads.
+pub(crate) const ACCOUNT_SCHEMA_OBJECT_LIMIT: i32 = 749;
+/// Row-copy phase after schema load. A fresh account has no large cell.
+/// A restored message or object cell is allowed up to this size.
+pub(crate) const ACCOUNT_SCHEMA_ROW_CELL_LIMIT: i32 = 256 * 1024 * 1024;
 
 const ACCOUNT_MIGRATIONS: &[AccountMigration] = &[
     AccountMigration {

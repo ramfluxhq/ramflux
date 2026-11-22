@@ -5,6 +5,13 @@
 //! The attacker file is read only after `open_verified::harden`. Rows are inserted into a
 //! database this binary migrated. The original path is replaced only after that copy commits.
 use super::transfer_export::open_verified::{self, Budget};
+use crate::schema::{
+    ACCOUNT_SCHEMA_COLUMN_LIMIT, ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT,
+    ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT, ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT,
+    ACCOUNT_SCHEMA_LENGTH_LIMIT, ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT, ACCOUNT_SCHEMA_OBJECT_LIMIT,
+    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_ROW_CELL_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
+    ACCOUNT_SCHEMA_VARIABLE_LIMIT, ACCOUNT_SCHEMA_VDBE_OP_LIMIT,
+};
 use crate::{AccountDbKey, StorageError};
 use rusqlite::Connection;
 use rusqlite::config::DbConfig;
@@ -17,8 +24,6 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 const BACKUP_SQLITE_CAP: u64 = 1 << 30;
-const SCHEMA_CELL_LIMIT: i32 = 1024 * 1024;
-const ROW_CELL_LIMIT: i32 = 256 * 1024 * 1024;
 const OPEN_DEADLINE: Duration = Duration::from_secs(60);
 const COPY_DEADLINE: Duration = Duration::from_secs(300);
 const PROGRESS_CALLS_BASE: u64 = 100_000;
@@ -137,17 +142,17 @@ fn open_source(
 
 fn backup_limits() -> open_verified::EngineLimits {
     open_verified::EngineLimits {
-        length: SCHEMA_CELL_LIMIT,
-        sql_length: 64 * 1024,
-        column: 256,
-        expr_depth: 32,
-        compound_select: 8,
-        vdbe_op: 1_000_000,
-        function_arg: 8,
-        like_pattern: 64,
-        variable_number: 256,
-        parser_depth: 64,
-        schema: 4096,
+        length: ACCOUNT_SCHEMA_LENGTH_LIMIT,
+        sql_length: ACCOUNT_SCHEMA_SQL_LIMIT,
+        column: ACCOUNT_SCHEMA_COLUMN_LIMIT,
+        expr_depth: ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
+        compound_select: ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT,
+        vdbe_op: ACCOUNT_SCHEMA_VDBE_OP_LIMIT,
+        function_arg: ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT,
+        like_pattern: ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT,
+        variable_number: ACCOUNT_SCHEMA_VARIABLE_LIMIT,
+        parser_depth: ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT,
+        schema: ACCOUNT_SCHEMA_OBJECT_LIMIT,
     }
 }
 
@@ -220,7 +225,7 @@ fn copy_tables(source: &Source, dest: &mut Connection) -> Result<(), StorageErro
     source.budget.reset(progress_calls(source.pages), COPY_DEADLINE);
     source
         .db
-        .set_limit(Limit::SQLITE_LIMIT_LENGTH, ROW_CELL_LIMIT)
+        .set_limit(Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_ROW_CELL_LIMIT)
         .map_err(|error| open_verified::refused_by("harden", &error))?;
     let tx = dest.transaction().map_err(|error| open_verified::refused_by("rows", &error))?;
     for table in &source.copy {
