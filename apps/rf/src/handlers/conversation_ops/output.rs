@@ -29,6 +29,33 @@ pub(crate) fn outcome(method: &str, response: &LocalBusFrame) -> Value {
     })
 }
 
+/// Why a `conversation.send` outcome is not a delivered send: a refusal frame, or a reply whose
+/// delivery state is not `submitted` (every target failed or only some were reached).
+#[must_use]
+pub(crate) fn send_failure(value: &Value) -> Option<String> {
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        let code = value.pointer("/error/code").and_then(Value::as_str).unwrap_or("internal");
+        let message = value.pointer("/error/message").and_then(Value::as_str).unwrap_or("");
+        return Some(format!("{code}: {message}"));
+    }
+    let state = value.pointer("/body/delivery_state").and_then(Value::as_str).unwrap_or("unknown");
+    if state == "submitted" {
+        return None;
+    }
+    let failed = value
+        .pointer("/body/deliveries")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row.get("state").and_then(Value::as_str) != Some("submitted"))
+                .filter_map(|row| row.get("error_code").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    Some(format!("delivery {state}: {failed}"))
+}
+
 #[must_use]
 pub(crate) fn local_refusal(method: &str, code: &str, message: &str) -> Value {
     json!({

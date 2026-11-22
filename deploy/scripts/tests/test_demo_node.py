@@ -8,6 +8,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import tarfile
 import sys
 import unittest
 
@@ -773,6 +774,163 @@ class DemoNodeTests(unittest.TestCase):
         self.assertIn("RAMFLUX_FEDERATION_PUBLIC_PORT=0.0.0.0:59482", runtime)
         self.assertNotIn("RAMFLUX_FEDERATION_ADMIN_PORT=", runtime)
         self.assertFalse(any("down" in command or "rm" in command for command in self.commands()))
+
+    def seed_service_state(self):
+        self.run_script("up")
+        volumes = self.root / "volume-data"
+        for service in ("gateway", "router", "notify", "federation", "relay", "signaling", "retention"):
+            directory = volumes / f"demo-test_{service}-redb"
+            (directory / "stored.bin").write_bytes(service.encode() + b"\x00\xff-old-state")
+        relay = volumes / "demo-test_relay-redb"
+        (relay / "stored.bin").rename(relay / "relay.redb")
+        (relay / "attachment-authority.seed").write_bytes(b"private-relay-authority-key" * 2)
+        (relay / "attachment-objects").mkdir()
+        (relay / "attachment-objects/object.bin").write_bytes(b"protected-object")
+        (relay / "empty").mkdir()
+        (relay / "relay.redb").chmod(0o640)
+        return relay
+
+    def select_new_version(self, version="demo-v2"):
+        with self.env_file.open("a") as output:
+            output.write(f"DEMO_VERSION={version}\n")
+
+    def test_reset_relay_restores_bytes_and_composes_with_applied_voice(self):
+        with self.env_file.open("a") as output:
+            output.write("RAMFLUX_DEMO_VOICE_UDP_PORT=59449\n")
+        relay = self.seed_service_state()
+        expected = (relay / "relay.redb").read_bytes()
+        other = {path: path.read_bytes() for path in (self.root / "volume-data").glob("*/stored.bin")
+                 if path.parent != relay}
+        key = (relay / "attachment-authority.seed").read_bytes()
+        identity = (self.state / "identity.env").read_bytes()
+        self.select_new_version()
+        result = self.run_script("upgrade", "--reset-service", "relay", "--voice-udp-port", "59449")
+        self.assertIn("service-state targets: demo-test_relay-redb:/relay.redb, demo-test_relay-redb:/trust-snapshot.json; action: reset", result.stdout)
+        self.assertIn("all seven demo services are healthy", result.stdout)
+        self.assertFalse((relay / "relay.redb").exists(), "reset must remove only the relay database/cache")
+        self.assertEqual((relay / "attachment-authority.seed").read_bytes(), key)
+        self.assertEqual((relay / "attachment-objects/object.bin").read_bytes(), b"protected-object")
+        owner = json.loads((self.state / "owner.json").read_text())
+        backup = self.state / "version-snapshots" / owner["state_reset"]["backup_snapshot"]
+        self.assertTrue((backup / "service-state/relay.tar").is_file())
+        with tarfile.open(backup / "service-state/relay.tar") as archive:
+            self.assertEqual(archive.getnames(), ["relay.redb"],
+                             "backup must exclude the mixed volume's signing key and objects")
+        (relay / "trust-snapshot.json").write_bytes(b"new-format")
+        self.run_script("up")
+        self.assertEqual(json.loads((self.state / "owner.json").read_text())["state_reset"],
+                         owner["state_reset"], "repeated up must keep reset rollback authority")
+        self.run_script("rollback")
+        self.assertEqual((relay / "relay.redb").read_bytes(), expected)
+        self.assertEqual((relay / "relay.redb").stat().st_mode & 0o777, 0o640)
+        self.assertTrue((relay / "empty").is_dir())
+        self.assertFalse((relay / "trust-snapshot.json").exists())
+        self.assertEqual((self.state / "identity.env").read_bytes(), identity)
+        for path, content in other.items():
+            self.assertEqual(path.read_bytes(), content, f"reset touched protected state: {path}")
+        removals = [args for args in self.commands() if args[:2] == ["volume", "rm"]]
+        self.assertEqual(removals, [], "mixed relay volume must never be removed")
+        self.assertEqual((relay / "attachment-authority.seed").read_bytes(), key)
+        owner = json.loads((self.state / "owner.json").read_text())
+        self.assertTrue((self.state / "version-snapshots" / owner["current_snapshot"]).is_dir())
+
+    def test_reset_refuses_nonrelay_repeated_and_nonupgrade_selections_before_tools(self):
+        for target in ("router", "node-privacy", "gateway", "notify", "federation", "signaling",
+                       "retention", "relay-redb", "attachment-authority.seed", "attachment-objects", "*", "../relay", "relay,router"):
+            self.run_script("upgrade", "--reset-service", target, success=False)
+        for command in ("up", "rollback", "recover", "down", "status", "logs"):
+            self.run_script(command, "--reset-service", "relay", success=False)
+        self.run_script("upgrade", "--reset-service", "relay", "--reset-service", "relay", success=False)
+        self.assertFalse(self.state.exists(), "invalid reset must not create managed state")
+        self.assertEqual(self.commands(), [], "invalid reset must not call the runtime")
+
+    def test_reset_refuses_symlinked_database_without_touching_signing_key(self):
+        relay = self.seed_service_state()
+        key = (relay / "attachment-authority.seed").read_bytes()
+        (relay / "relay.redb").unlink()
+        (relay / "relay.redb").symlink_to("attachment-authority.seed")
+        self.select_new_version()
+        result = self.run_script("upgrade", "--reset-service", "relay", success=False)
+        self.assertIn("refusing protected or non-regular relay state target", result.stderr)
+        self.assertTrue((relay / "relay.redb").is_symlink())
+        self.assertEqual((relay / "attachment-authority.seed").read_bytes(), key)
+        self.assertFalse(any(args[:2] == ["volume", "rm"] for args in self.commands()))
+
+    def test_reset_backup_failure_keeps_volume_and_can_recover(self):
+        relay = self.seed_service_state()
+        expected = (relay / "relay.redb").read_bytes()
+        self.select_new_version()
+        self.control.write_text('{"backup_exit": 9}')
+        self.run_script("upgrade", "--reset-service", "relay", success=False)
+        self.assertEqual((relay / "relay.redb").read_bytes(), expected)
+        self.assertFalse(any(args[:2] == ["volume", "rm"] for args in self.commands()))
+        self.assertTrue((self.state / "transaction.pending").is_file())
+        self.control.write_text("{}")
+        self.run_script("recover")
+        self.assertEqual((relay / "relay.redb").read_bytes(), expected)
+        self.assertFalse((self.state / "transaction.pending").exists())
+
+    def test_reset_failed_start_recovery_restores_absent_files_and_retries_restore(self):
+        relay = self.seed_service_state()
+        expected = (relay / "relay.redb").read_bytes()
+        self.select_new_version()
+        self.control.write_text('{"fail_up_versions": ["demo-v2"]}')
+        self.run_script("upgrade", "--reset-service", "relay", success=False)
+        self.assertTrue(relay.exists(), "reset must preserve the mixed-state volume")
+        self.assertFalse((relay / "relay.redb").exists(), "failed start leaves only reset files absent")
+        self.control.write_text('{"restore_exit": 9}')
+        self.run_script("recover", success=False)
+        self.assertTrue((self.state / "transaction.pending").exists())
+        self.control.write_text("{}")
+        self.run_script("rollback")
+        self.assertEqual((relay / "relay.redb").read_bytes(), expected)
+        self.assertFalse((self.state / "transaction.pending").exists())
+
+    def test_reset_failed_rollback_recovery_restores_newer_state(self):
+        relay = self.seed_service_state()
+        self.select_new_version()
+        self.run_script("upgrade", "--reset-service", "relay")
+        (relay / "relay.redb").write_bytes(b"newer-state\x00\xff")
+        self.control.write_text('{"public_unhealthy_versions": ["demo-test"]}')
+        self.run_script("rollback", success=False)
+        self.assertTrue((relay / "relay.redb").exists(), "rollback must have restored the old state")
+        self.assertNotEqual((relay / "relay.redb").read_bytes(), b"newer-state\x00\xff")
+        self.control.write_text("{}")
+        self.run_script("recover")
+        self.assertEqual((relay / "relay.redb").read_bytes(), b"newer-state\x00\xff")
+        self.assertEqual((relay / "attachment-objects/object.bin").read_bytes(), b"protected-object")
+        self.assertEqual(json.loads((self.state / "owner.json").read_text())["settings"]["DEMO_VERSION"],
+                         "demo-v2")
+        self.run_script("rollback")
+        self.assertTrue((relay / "relay.redb").exists(), "recovered upgrade must remain rollbackable")
+
+    def test_reset_corrupt_backup_refuses_rollback_before_writes_or_stop(self):
+        self.seed_service_state()
+        self.select_new_version()
+        self.run_script("upgrade", "--reset-service", "relay")
+        owner = json.loads((self.state / "owner.json").read_text())
+        archive = self.state / "version-snapshots" / owner["state_reset"]["backup_snapshot"] / "service-state/relay.tar"
+        archive.chmod(0o600)
+        archive.write_bytes(b"damaged")
+        managed = self.managed_state()
+        before = len(self.compose_commands())
+        result = self.run_script("rollback", success=False)
+        self.assertIn("checksum mismatch", result.stderr)
+        self.assertEqual(self.managed_state(), managed)
+        self.assertFalse((self.state / "transaction.pending").exists())
+        self.assertEqual(len(self.compose_commands()), before)
+
+    def test_plain_upgrade_never_resets_even_with_inherited_reset_variable(self):
+        relay = self.seed_service_state()
+        expected = (relay / "relay.redb").read_bytes()
+        self.environment["DEMO_RESET_SERVICE"] = "relay"
+        with self.env_file.open("a") as output:
+            output.write("DEMO_RESET_SERVICE=relay\n")
+        self.select_new_version()
+        self.run_script("upgrade")
+        self.assertEqual((relay / "relay.redb").read_bytes(), expected)
+        self.assertFalse(any("down" in args for args in self.compose_commands()))
+        self.assertFalse(any(args[:2] == ["volume", "rm"] for args in self.commands()))
 
     def test_explicit_upgrade_and_rollback_preserve_identity_and_frozen_settings(self):
         self.run_script("up")
