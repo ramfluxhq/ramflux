@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Root-specific command demand. The fetch uses the network admission deadline.
-//! Work already queued for the writer is applied before that deadline refuses.
+//! A head already fetched for that demand is applied before other connection work.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -167,6 +167,7 @@ impl AccountRuntime {
         let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
+        let mut demand = None;
         if command.request.method == "group.read"
             && let Some(account) = self.state.accounts.get_mut(&self.id)
         {
@@ -187,22 +188,29 @@ impl AccountRuntime {
                 account.client.account_db()?.due_inbox_retry_rows(i64::MAX)?.is_empty();
         }
         loop {
-            let Some(account) = self.state.accounts.get_mut(&self.id) else {
-                return Ok(());
+            let roots = {
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(());
+                };
+                stale_roots_since(account, &command.request, Some(since))?
             };
-            let roots = stale_roots_since(account, &command.request, Some(since))?;
             if roots.is_empty() {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
-            // Leave the actor once the fetch budget ends. Staying here to wait for
-            // Apply holds the only reader of `connection_work`, so the refresh task
-            // cannot finish this Apply or start the next fetch.
+            if demand.is_none() {
+                demand = Some(super::head_demand::HeadDemand::arm(&self.command_waiting));
+            }
+            // Leave once the fetch budget ends. Waiting here for a fetch that has
+            // not queued its Apply holds the only reader of `connection_work`.
             if Instant::now() >= network_deadline {
                 return self.refuse_or_apply_queued(command, since).await;
             }
+            let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                return Ok(());
+            };
             for root in roots {
                 if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
                     return Err(pending(account));
@@ -213,20 +221,20 @@ impl AccountRuntime {
                 () = tokio::time::sleep_until(network_deadline) => {}
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
-                    self.apply_connection_work(work).await?;
+                    self.admit_during_head_demand(work).await?;
                 }
             }
         }
     }
 
-    /// The biased sleep above wins when the deadline and a queued item are both
-    /// ready. Apply what is already queued, then refuse if the head is still stale.
+    /// Apply a demanded head that is already queued, or blocked only because the
+    /// queue was full, then refuse if the authority is still stale.
     async fn refuse_or_apply_queued(
         &mut self,
         command: &AccountCommand,
         since: std::time::Instant,
     ) -> Result<(), SdkError> {
-        self.drain_queued_connection_work().await?;
+        self.prefer_demanded_head().await?;
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(());
         };
@@ -235,19 +243,6 @@ impl AccountRuntime {
             return Ok(());
         }
         Err(pending(account))
-    }
-
-    async fn drain_queued_connection_work(&mut self) -> Result<(), SdkError> {
-        for _ in 0..super::CONNECTION_WORK_QUEUE {
-            match self.connection_work.try_recv() {
-                Ok(work) => self.apply_connection_work(work).await?,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(SdkError::NetworkingPending);
-                }
-            }
-        }
-        Ok(())
     }
 
     /// An explicit send whose root is not this account, an accepted contact, or a

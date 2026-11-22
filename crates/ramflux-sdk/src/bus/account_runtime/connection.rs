@@ -553,7 +553,12 @@ impl AccountRuntime {
                 }
             };
             match yielded {
-                None => self.service_waiting_commands().await?,
+                None => {
+                    // The page stays on this attempt. A demanded head already
+                    // queued is applied before the page continues.
+                    self.prefer_demanded_head().await?;
+                    self.service_waiting_commands().await?;
+                }
                 Some(finished) => return Ok(Some((finished, reply))),
             }
         }

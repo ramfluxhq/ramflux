@@ -24,6 +24,7 @@ pub(crate) use connection::apply_ack_flush;
 pub(crate) use connection::settle_retained;
 mod directory;
 pub(super) mod fetches;
+mod head_demand;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
 mod readers;
@@ -76,6 +77,8 @@ struct AccountRuntime {
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
+    /// Generic connection work skipped so a demanded head can be applied first.
+    deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
@@ -159,6 +162,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         transfers: uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
@@ -439,7 +443,7 @@ impl AccountRuntime {
                 _ = self.shutdown.changed() => break,
                 command = self.lifecycle.recv() => {self.preempt.borrow_and_update();command},
                 checkpoint=self.transfers.receive.recv()=>{checkpoints += 1;if let Some(checkpoint)=checkpoint {self.apply_transfer_checkpoint(checkpoint);}continue;},
-                work=self.connection_work.recv()=>{
+                work=head_demand::recv(&mut self.deferred,&mut self.connection_work)=>{
                     checkpoints += 1;
                     if let Some(work)=work {
                         let mut shutdown=self.shutdown.clone();let mut preempt=self.preempt.clone();

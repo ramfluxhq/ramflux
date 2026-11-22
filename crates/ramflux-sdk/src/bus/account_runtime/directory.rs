@@ -4,6 +4,7 @@
 //! Writer-only preparation and conditional application of public directory responses.
 
 use super::AccountRuntime;
+use crate::bus::connection_manager::AccountWork;
 use crate::bus::couriers::directory::{BackfillKind, BackfillPlan, DirectoryWork, SafetyPlan};
 use crate::{SdkError, time::now_unix_timestamp};
 
@@ -31,7 +32,14 @@ impl AccountRuntime {
                 }
             };
             work = saved;
+            self.prefer_demanded_head().await?;
             self.service_waiting_commands().await?;
+            // The demanded head is applied above. Resume this backfill only
+            // after the command that asked for the head has left the writer.
+            if super::head_demand::demand_active() && !is_head_refresh(&work) {
+                self.defer_paused(AccountWork::Directory(Box::new(work)));
+                return Ok(());
+            }
         }
     }
 
@@ -88,6 +96,10 @@ impl AccountRuntime {
         }
         Ok(())
     }
+}
+
+fn is_head_refresh(work: &DirectoryWork) -> bool {
+    matches!(work, DirectoryWork::HeadRefresh(_))
 }
 
 fn stash_if_pause(work: DirectoryWork, error: SdkError) -> SdkError {

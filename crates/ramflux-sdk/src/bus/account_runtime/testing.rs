@@ -183,6 +183,7 @@ impl AccountSessionHarness {
             transfers: uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
             transient: crate::bus::account_runtime::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),

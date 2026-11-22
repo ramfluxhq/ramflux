@@ -278,6 +278,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),

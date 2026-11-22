@@ -285,6 +285,7 @@ fn runtime(
             transfers: crate::bus::account_runtime::uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
             transient: super::super::TransientHost::default(),
             pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),

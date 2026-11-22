@@ -107,6 +107,7 @@ pub(super) fn runtime_for(
         transfers: super::super::uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        deferred: std::collections::VecDeque::new(),
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),

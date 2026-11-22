@@ -50,6 +50,7 @@ fn runtime(
             transfers: uploads::Transfers::start(),
             connection_sender,
             connection_work,
+            deferred: std::collections::VecDeque::new(),
             ledger: None,
             pairing: super::super::pairing_calls::Calls::default(),
             transient: TransientHost::default(),
