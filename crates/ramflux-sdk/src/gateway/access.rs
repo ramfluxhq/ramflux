@@ -24,6 +24,16 @@ mod sealed {
             &mut self,
             envelope: ramflux_protocol::Envelope,
         ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, SubmitRefusal>>;
+
+        /// Like [`Self::submit_classified`], with the recipient home on the submit.
+        ///
+        /// # Errors
+        /// Returns an error when the exchange fails after or while writing (uncertain).
+        fn submit_classified_to(
+            &mut self,
+            envelope: ramflux_protocol::Envelope,
+            target_node: Option<String>,
+        ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, SubmitRefusal>>;
     }
 }
 pub(crate) use sealed::ClassifiedSubmit;
@@ -36,6 +46,15 @@ impl ClassifiedSubmit for GatewaySessionEngine {
     ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
     {
         Box::pin(self.submit_envelope_classified(envelope))
+    }
+
+    fn submit_classified_to(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        target_node: Option<String>,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        Box::pin(self.submit_envelope_classified_to(envelope, target_node))
     }
 }
 
@@ -341,6 +360,15 @@ impl ClassifiedSubmit for CountingGateway {
     ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
     {
         unused("submit_classified")
+    }
+
+    fn submit_classified_to(
+        &mut self,
+        _envelope: ramflux_protocol::Envelope,
+        _target_node: Option<String>,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        unused("submit_classified_to")
     }
 }
 

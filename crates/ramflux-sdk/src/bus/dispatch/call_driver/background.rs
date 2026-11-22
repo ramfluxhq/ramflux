@@ -585,6 +585,7 @@ fn sign_control(
         wake_id: None,
         call_ref: control.call_ref.clone(),
         call_terminal: call::resolution_terminal(control),
+        target_node: None,
     };
     Ok(SignedControl { id, extras, bytes, intent_created_at })
 }

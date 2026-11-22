@@ -35,7 +35,7 @@ an old combined endpoint to work.
 | Admin | GET `/healthz` | Private operator / production peering fixture readiness |
 | Admin | POST `/admin/federation/peer` | `rf admin federation peer`, private operator tooling; token required |
 | Admin | POST `/admin/federation/discover` | Private discovery/pinning tooling; token required |
-| Admin | POST `/s8/federation/forward` | Explicit privileged cross-node CLI forwarding; token required |
+| Admin | POST `/internal/home-submit/forward` | Router home forward of a gateway submit; token required. Not a client route. |
 | Admin | POST `/internal/home-node-migration/forward` | Router local home-node migration forwarding; token required |
 | Admin | POST `/s8/federation/mesh-observability` | Private operator / production peering fixture transport diagnostics; token required |
 
@@ -80,7 +80,7 @@ handler. Production builds do not enable this feature. Legacy fixture
 | POST `/mvp8/federation/handshake` | Admission fixtures |
 | GET `/mvp8/federation/capabilities/{node}` | Capability assertions |
 | POST `/mvp8/federation/friend-request` | Cross-node friend-request fixtures |
-| POST `/s8/federation/forward` | Test forwarding fixtures |
+| POST `/internal/home-submit/forward` | Test home-submit fixtures |
 | POST `/mvp7/federation/tombstone` | Federation deletion fixtures |
 | GET `/mvp7/federation/tombstone/{node}` | Tombstone assertions |
 

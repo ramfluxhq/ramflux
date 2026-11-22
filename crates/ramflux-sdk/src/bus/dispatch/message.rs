@@ -246,7 +246,7 @@ async fn submit_federated(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let recipient_principal_commitment = body.recipient_principal_commitment.clone();
     let message = body.into_gateway_message_with_body(Vec::new());
-    let engine = account.session_client().await?;
+    let mut engine = account.session_client().await?;
     let recipient = resolve_federated_message_recipient_principal_commitment(
         &account.client,
         federation,
@@ -259,7 +259,7 @@ async fn submit_federated(
     let response = account
         .client
         .send_plaintext_federated_message_async(
-            &engine,
+            &mut engine,
             crate::client::federation::PlaintextForward {
                 content,
                 message,

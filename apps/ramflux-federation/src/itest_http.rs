@@ -275,7 +275,7 @@ fn handle_itest_request(
             let response = handle_mvp8_friend_request(&request, state, router)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
-        ("POST", "/s8/federation/forward") => {
+        ("POST", "/internal/home-submit/forward") => {
             let body_len = request.body.len();
             tracing::info!(
                 body_len,
@@ -438,7 +438,7 @@ mod i_json_tests {
         let root = crate::test_certificates::temp_cert_root("federation-ijson-itest")?;
 
         for (path, friend) in
-            [("/mvp8/federation/friend-request", true), ("/s8/federation/forward", false)]
+            [("/mvp8/federation/friend-request", true), ("/internal/home-submit/forward", false)]
         {
             for (created_at, ext, rejected) in [
                 ("9007199254740991", r#""x_probe":"v","x_probe":"v""#, true),
@@ -508,14 +508,14 @@ mod i_json_tests {
         let store = Arc::clone(&base.store);
         let refused = with_admitted_state(&base, source_seed)?;
         let pending_before = store.list_pending_outbound(100)?;
-        let reply = response("/s8/federation/forward", &duplicate_text, refused)?;
+        let reply = response("/internal/home-submit/forward", &duplicate_text, refused)?;
         assert_reply(&reply, "400 Bad Request", Some(FORWARD_BODY))?;
         assert_eq!(store.list_pending_outbound(100)?, pending_before);
 
         // Control: the unmodified signed forward decodes and reaches the handler. The peer
         // endpoint is unreachable in this fixture, so the reply is not the I-JSON refusal.
         let control = with_admitted_state(&base, source_seed)?;
-        let reply = response("/s8/federation/forward", &valid_text, control)?;
+        let reply = response("/internal/home-submit/forward", &valid_text, control)?;
         assert!(
             !reply.contains(std::str::from_utf8(FORWARD_BODY)?),
             "control must not be the I-JSON refusal: {reply}"

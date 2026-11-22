@@ -363,7 +363,7 @@ pub(crate) async fn dispatch_group_send_request(
                 ttl: account.client.content_ttl()?,
             };
             if let Some(federation) = body.federation.as_ref() {
-                let engine = account.session_client().await?;
+                let mut engine = account.session_client().await?;
                 let sealed = account
                     .client
                     .seal_federated_message_async(
@@ -380,7 +380,7 @@ pub(crate) async fn dispatch_group_send_request(
                 let forwarded = account
                     .client
                     .forward_federated_sealed_async(
-                        &engine,
+                        &mut engine,
                         &mut message,
                         sealed?,
                         federation,
@@ -473,11 +473,11 @@ pub(crate) async fn dispatch_group_send_request(
                         )
                         .await;
                     account.apply_session_metadata(engine);
-                    let engine = account.session_client().await?;
+                    let mut engine = account.session_client().await?;
                     let forwarded = account
                         .client
                         .forward_federated_sealed_async(
-                            &engine,
+                            &mut engine,
                             &mut message,
                             sealed?,
                             federation,

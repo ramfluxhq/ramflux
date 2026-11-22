@@ -1408,8 +1408,17 @@ pub(crate) async fn handle_gateway_submit(
             "envelope": &envelope,
         }),
     );
+    let decision = crate::submit_target::route_frame(&context.node_id, submit);
+    if let crate::submit_target::Route::Refused(reason) = decision {
+        write_gateway_handle(
+            send,
+            &ramflux_node_core::GatewayServerFrame::Nack { reason: reason.to_owned() },
+        )
+        .await?;
+        return Ok(());
+    }
     let mesh: serde_json::Value =
-        router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
+        crate::submit_target::post(&context.router, decision, &envelope).await?;
     let response: ramflux_node_core::EnvelopeSubmitResponse = serde_json::from_value(mesh.clone())?;
     if let Err(error) = persist_accepted_intent(
         context,
@@ -1459,6 +1468,11 @@ async fn finish_accepted_submit(
     accepted: AcceptedSubmit<'_>,
 ) -> anyhow::Result<()> {
     if nack_refused_submit(send, &accepted.response.outcome).await? {
+        return Ok(());
+    }
+    if crate::submit_target::ack_home_forward(send, runtime, accepted.response, &accepted.envelope)
+        .await?
+    {
         return Ok(());
     }
     if reply_if_home_migrated(send, runtime, accepted.response, &accepted.envelope).await? {

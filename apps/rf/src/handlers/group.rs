@@ -5,74 +5,6 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
-pub(crate) fn rf_group_create_federation_route(
-    create: &GroupCreate,
-) -> Result<Option<LocalBusFederationRoute>, RfError> {
-    match (
-        &create.federation_url,
-        &create.source_node,
-        &create.target_node,
-        &create.recipient_prekey_url,
-    ) {
-        (None, None, None, None) => Ok(None),
-        (Some(federation_url), Some(source_node), Some(target_node), recipient_prekey_url) => {
-            Ok(Some(LocalBusFederationRoute {
-                federation_url: federation_url.clone(),
-                source_node_id: source_node.clone(),
-                target_node_id: target_node.clone(),
-                required_capability: create.federation_capability.clone(),
-                admin_token: create.federation_admin_token.clone(),
-                recipient_prekey_url: recipient_prekey_url.clone(),
-            }))
-        }
-        _ => Err(RfError::Message(
-            "federated group create requires --federation-url, --source-node, --target-node, and optional --recipient-prekey-url only with that route".to_owned(),
-        )),
-    }
-}
-
-pub(crate) fn rf_group_send_federation_route(
-    send: &GroupSend,
-) -> Result<Option<LocalBusFederationRoute>, RfError> {
-    match (&send.federation_url, &send.source_node, &send.target_node, &send.recipient_prekey_url) {
-        (None, None, None, None) => Ok(None),
-        (Some(federation_url), Some(source_node), Some(target_node), recipient_prekey_url) => {
-            Ok(Some(LocalBusFederationRoute {
-                federation_url: federation_url.clone(),
-                source_node_id: source_node.clone(),
-                target_node_id: target_node.clone(),
-                required_capability: send.federation_capability.clone(),
-                admin_token: send.federation_admin_token.clone(),
-                recipient_prekey_url: recipient_prekey_url.clone(),
-            }))
-        }
-        _ => Err(RfError::Message(
-            "federated group send requires --federation-url, --source-node, --target-node, and optional --recipient-prekey-url only with that route".to_owned(),
-        )),
-    }
-}
-
-pub(crate) fn rf_group_member_add_federation_route(
-    add: &GroupMemberAdd,
-) -> Result<Option<LocalBusFederationRoute>, RfError> {
-    match (&add.federation_url, &add.source_node, &add.target_node, &add.recipient_prekey_url) {
-        (None, None, None, None) => Ok(None),
-        (Some(federation_url), Some(source_node), Some(target_node), recipient_prekey_url) => {
-            Ok(Some(LocalBusFederationRoute {
-                federation_url: federation_url.clone(),
-                source_node_id: source_node.clone(),
-                target_node_id: target_node.clone(),
-                required_capability: add.federation_capability.clone(),
-                admin_token: add.federation_admin_token.clone(),
-                recipient_prekey_url: recipient_prekey_url.clone(),
-            }))
-        }
-        _ => Err(RfError::Message(
-            "federated group member add requires --federation-url, --source-node, --target-node, and optional --recipient-prekey-url only with that route".to_owned(),
-        )),
-    }
-}
-
 pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Result<(), RfError> {
     if let GroupAction::Send(send) = &command.action {
         super::attachment::refuse_retired(
@@ -86,7 +18,6 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         GroupAction::Create(create) => {
-            let federation = rf_group_create_federation_route(&create)?;
             let request = LocalBusGroupCreateRequest {
                 group_id: create.group.clone(),
                 creator_id: create.creator,
@@ -109,7 +40,7 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                     member_signing_public_key: None,
                     member_principal_commitment: None,
                     target_delivery_id: create.member_target_delivery.clone(),
-                    federation: federation.clone(),
+                    federation: None,
                 };
                 value = request_body(
                     &mut bus,
@@ -127,7 +58,6 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
             super::attachment::send_group(&mut bus, send).await
         }
         GroupAction::Send(send) => {
-            let federation = rf_group_send_federation_route(&send)?;
             let content = crate::utils::media_content(&send.body, &send.media_ref)?;
             let request = LocalBusGroupSendRequest {
                 content: Some(content),
@@ -140,7 +70,7 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
                 envelope_id: send.envelope,
                 source_principal_id: send.source_principal,
                 target_delivery_id: send.target,
-                federation,
+                federation: None,
                 ttl: Some(send.ttl),
             };
             print_json(
@@ -186,7 +116,6 @@ async fn handle_group_member(
 ) -> Result<(), RfError> {
     match member.action {
         GroupMemberAction::Add(add) => {
-            let federation = rf_group_member_add_federation_route(&add)?;
             let request = LocalBusGroupMemberAddRequest {
                 group_id: add.group,
                 member_id: add.member_device,
@@ -194,7 +123,7 @@ async fn handle_group_member(
                 member_signing_public_key: add.member_signing_public_key,
                 member_principal_commitment: add.member_principal_commitment,
                 target_delivery_id: add.target_delivery,
-                federation,
+                federation: None,
             };
             print_json(
                 &request_body(bus, Some(add.account), "group", "group.member.add", request).await?,

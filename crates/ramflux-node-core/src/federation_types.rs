@@ -232,3 +232,10 @@ pub struct FederatedEnvelopeForwardResponse {
     pub target_node_id: String,
     pub delivery: EnvelopeSubmitResponse,
 }
+
+/// Gateway submit that this node's federation must forward. Not an inter-node envelope field.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HomeSubmitForward {
+    pub target_node: String,
+    pub envelope: ramflux_protocol::Envelope,
+}

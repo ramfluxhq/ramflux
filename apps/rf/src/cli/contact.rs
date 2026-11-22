@@ -122,18 +122,6 @@ pub(crate) struct ContactFederatedArgs {
     pub(crate) recipient_device: String,
     #[arg(allow_hyphen_values = true, long)]
     pub(crate) target_delivery: String,
-    #[arg(long)]
-    pub(crate) federation_url: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) source_node: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_node: String,
-    #[arg(long)]
-    pub(crate) federation_admin_token: Option<String>,
-    #[arg(long)]
-    pub(crate) recipient_prekey_url: Option<String>,
-    #[arg(long, default_value = "opaque_delivery")]
-    pub(crate) federation_capability: String,
 }
 
 #[derive(Args)]

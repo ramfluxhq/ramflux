@@ -4,7 +4,7 @@
 //! Cancellable counterpart of the explicit HTTP directory and federation transport.
 
 use crate::SdkError;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::{sync::OnceLock, time::Duration};
 
 pub(crate) async fn get<R: DeserializeOwned>(
@@ -13,14 +13,6 @@ pub(crate) async fn get<R: DeserializeOwned>(
     budget: Duration,
 ) -> Result<R, SdkError> {
     request(base, path, None, budget).await
-}
-pub(crate) async fn post<T: Serialize, R: DeserializeOwned>(
-    base: &str,
-    path: &str,
-    value: &T,
-    budget: Duration,
-) -> Result<R, SdkError> {
-    request(base, path, Some(serde_json::to_vec(value)?), budget).await
 }
 async fn request<R: DeserializeOwned>(
     base: &str,

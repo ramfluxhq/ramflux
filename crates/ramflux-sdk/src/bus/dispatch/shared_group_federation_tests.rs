@@ -175,8 +175,8 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
             .is_err()
     );
     assert_eq!(crate::bus::shared_group_sync::flush(&mut source).await?, 2);
-    assert_eq!(local.lock().map_err(|_| "local lock")?.len(), 0);
-    let delivered = federation.delivered.lock().map_err(|_| "remote lock")?.clone();
+    assert_eq!(federation.delivered.lock().map_err(|_| "remote lock")?.len(), 0);
+    let delivered = local.lock().map_err(|_| "local lock")?.clone();
     assert_eq!(delivered.len(), 2);
     let signing = ramflux_protocol::encode_base64url(
         source

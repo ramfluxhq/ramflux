@@ -181,7 +181,7 @@ fn admin_response(
         ("GET", "/healthz") => HttpResponse::json(&serde_json::json!({
             "service": "ramflux-federation-admin", "status": "ok"
         }))?,
-        ("POST", "/s8/federation/forward") => {
+        ("POST", "/internal/home-submit/forward") => {
             handle_admin_forward_request(&request, context, admin_token)?
         }
         ("POST", ramflux_node_core::MIGRATION_LOCAL_PATH) => {

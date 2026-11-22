@@ -168,7 +168,9 @@ async fn submit_inner(
     task_forward: bool,
 ) -> Result<Result<(), SubmitRefusal>, SdkError> {
     let deadline_error = || if task_forward { SdkError::TaskDeliveryTimeout } else { stopped() };
-    if let Some(route) = route {
+    if let Some(target) =
+        route.as_ref().map(|route| route.target_node_id.clone()).filter(|id| !id.is_empty())
+    {
         if deadline <= tokio::time::Instant::now() {
             return Err(deadline_error());
         }
@@ -182,30 +184,36 @@ async fn submit_inner(
         } else {
             None
         };
-        let request = crate::client::federation::federated_forward_request(&route, envelope);
-        let response = tokio::time::timeout_at(
-            deadline,
-            crate::prekey::http_async::post::<_, crate::SdkFederatedEnvelopeForwardResponse>(
-                &route.federation_url,
-                "/s8/federation/forward",
-                &request,
-                deadline.saturating_duration_since(tokio::time::Instant::now()),
-            ),
-        )
-        .await
-        .map_err(|_| deadline_error())?
-        .map_err(|error| match error {
-            SdkError::Io(ref io) if task_forward && io.kind() == std::io::ErrorKind::TimedOut => {
-                SdkError::TaskDeliveryTimeout
-            }
-            other => other,
-        })?;
-        if !response.accepted {
-            return Err(SdkError::InboundPending(
-                "group state federation submission refused".into(),
-            ));
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if priority {
+            context
+                .priority_call(
+                    move |engine| {
+                        Box::pin(async move {
+                            engine
+                                .submit_envelope_classified_to(envelope, Some(target))
+                                .await
+                                .map(|result| result.map(|_| ()))
+                        })
+                    },
+                    remaining,
+                )
+                .await
+        } else {
+            context
+                .call(
+                    move |engine| {
+                        Box::pin(async move {
+                            engine
+                                .submit_envelope_classified_to(envelope, Some(target))
+                                .await
+                                .map(|result| result.map(|_| ()))
+                        })
+                    },
+                    deadline,
+                )
+                .await
         }
-        Ok(Ok(()))
     } else if priority {
         context
             .priority_call(

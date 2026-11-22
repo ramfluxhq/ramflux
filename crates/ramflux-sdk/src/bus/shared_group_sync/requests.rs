@@ -365,8 +365,13 @@ async fn send(
 ) -> Result<usize, SdkError> {
     tokio::time::timeout(Duration::from_secs(3), async {
         if let Some(federation) = &attempt.federation {
-            if !RamfluxClient::forward_federated_envelope(federation, attempt.envelope.clone())?
-                .accepted
+            if !RamfluxClient::forward_federated_envelope(
+                engine,
+                federation,
+                attempt.envelope.clone(),
+            )
+            .await?
+            .accepted
             {
                 return Err(SdkError::InboundPending("group courier federation refused".into()));
             }

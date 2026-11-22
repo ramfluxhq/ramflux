@@ -197,6 +197,8 @@ pub(crate) struct CallSubmitExtras {
     pub(crate) wake_id: Option<String>,
     pub(crate) call_ref: Option<String>,
     pub(crate) call_terminal: Option<String>,
+    /// Recipient home. Absent keeps the submit on this node.
+    pub(crate) target_node: Option<String>,
 }
 
 impl CallSubmitExtras {
@@ -216,6 +218,7 @@ impl CallSubmitExtras {
             wake_id: None,
             call_ref: None,
             call_terminal: None,
+            target_node: None,
         }
     }
 }
@@ -484,8 +487,21 @@ impl GatewaySessionEngine {
         &mut self,
         envelope: ramflux_protocol::Envelope,
     ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
-        self.submit_envelope_classified_with_intent(envelope, CallSubmitExtras::from_intent(None))
-            .await
+        self.submit_envelope_classified_to(envelope, None).await
+    }
+
+    /// Submits to the caller's home, naming another node when the recipient lives there.
+    ///
+    /// # Errors
+    /// Returns an error when the envelope cannot be written or the reply is not a submit reply.
+    pub(crate) async fn submit_envelope_classified_to(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+        target_node: Option<String>,
+    ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
+        let mut extras = CallSubmitExtras::from_intent(None);
+        extras.target_node = target_node;
+        self.submit_envelope_classified_with_intent(envelope, extras).await
     }
 
     /// Like [`Self::submit_envelope_classified`], with a caller-signed call intent beside the envelope.
@@ -566,6 +582,7 @@ impl GatewaySessionEngine {
         Ok(GatewaySubmitFrame {
             signed_request: request,
             envelope,
+            target_node: extras.target_node.map(String::into_boxed_str),
             call_intent: extras.call_intent.map(Box::new),
             wake_id: extras.wake_id,
             call_ref: context.as_ref().map(|c| c.call_ref.clone()),
@@ -1058,6 +1075,7 @@ impl GatewaySessionEngine {
                 call_context: None,
                 signed_request,
                 envelope,
+                target_node: None,
                 call_intent: None,
                 wake_id: None,
                 call_ref: None,

@@ -1241,3 +1241,9 @@ fn submission_response(
     ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
     response
 }
+
+/// A cross-node submit is accepted only from the sender's own gateway.
+#[must_use]
+pub(crate) fn gateway_may_forward_submit(peer_service_id: &str) -> bool {
+    peer_service_id == "ramflux-gateway"
+}

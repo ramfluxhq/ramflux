@@ -122,6 +122,45 @@ impl LocalFederationForwardClient {
         });
         crate::forward_http::post(&self.url, &body, timeout)
     }
+
+    pub(crate) fn forward_submit(
+        &self,
+        target_node: &str,
+        envelope: &ramflux_protocol::Envelope,
+        timeout: Duration,
+    ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError>
+    {
+        let url = submit_url(&self.url)?;
+        let request = ramflux_node_core::FederatedEnvelopeForwardRequest {
+            migration_evidence: None,
+            signed: ramflux_node_core::default_federation_forward_signed_fields(),
+            admin_token: String::new(),
+            source_node_id: self.source_node_id.clone(),
+            target_node_id: target_node.to_owned(),
+            delivery_class: "opaque_event".to_owned(),
+            required_capability: "opaque_delivery".to_owned(),
+            envelope: envelope.clone(),
+        };
+        let mut body = serde_json::to_value(&request)
+            .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "admin_token".to_owned(),
+                serde_json::Value::String(self.admin_token.clone().unwrap_or_default()),
+            );
+        }
+        crate::forward_http::post(&url, &body, timeout)
+    }
+}
+
+fn submit_url(migration_url: &str) -> Result<String, ramflux_node_core::NodeCoreError> {
+    let rest = migration_url.strip_prefix("http://").ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::ItestHttp("unsupported forward URL".into())
+    })?;
+    let host = rest.split('/').next().filter(|host| !host.is_empty()).ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::ItestHttp("forward URL has no host".into())
+    })?;
+    Ok(format!("http://{host}/internal/home-submit/forward"))
 }
 
 impl RouterHandle {
@@ -151,6 +190,12 @@ impl RouterHandle {
     pub(crate) fn node_id(&self) -> &str {
         match self {
             Self::Tokio(runtime) => &runtime.node_id,
+        }
+    }
+
+    pub(crate) fn forward_client(&self) -> Option<&LocalFederationForwardClient> {
+        match self {
+            Self::Tokio(runtime) => runtime.home_node_forward.as_ref(),
         }
     }
 
@@ -273,7 +318,7 @@ impl RouterHandle {
         }
     }
 
-    #[cfg(any(test, feature = "itest-http"))]
+    #[cfg(feature = "itest-http")]
     pub(crate) fn submit_envelope_from_source(
         &self,
         envelope: ramflux_protocol::Envelope,

@@ -166,7 +166,7 @@ fn federation_ijson_ingress_refuses_unsafe_integer() -> TestResult {
     let context = context(&root)?;
 
     for (path, wrap_forward) in
-        [("/s8/federation/forward", false), ("/internal/home-node-migration/forward", true)]
+        [("/internal/home-submit/forward", false), ("/internal/home-node-migration/forward", true)]
     {
         let make_body = |created_at: &str, ext: &str, token: &str| {
             let forward = federation_forward_body(created_at, ext, token);
@@ -232,6 +232,7 @@ fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     };
     for path in [
         "/s8/federation/forward",
+        "/internal/home-submit/forward",
         "/internal/home-node-migration/forward",
         ramflux_node_core::MIGRATION_LOCAL_PATH,
         ramflux_node_core::MIGRATION_PEER_PATH,

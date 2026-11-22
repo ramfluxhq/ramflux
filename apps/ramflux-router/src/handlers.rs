@@ -452,11 +452,11 @@ impl MeshPeerArgument for &str {
 }
 
 impl MeshResponse {
-    fn json(status: &'static str, body: Vec<u8>) -> Self {
+    pub(crate) fn json(status: &'static str, body: Vec<u8>) -> Self {
         Self { status, content_type: "application/json", body, keep_alive: true }
     }
 
-    fn text(status: &'static str, body: &str) -> Self {
+    pub(crate) fn text(status: &'static str, body: &str) -> Self {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
@@ -844,6 +844,9 @@ fn handle_mesh_fast_path_value(
             }))?,
         )
         .into()),
+        ("POST", "/internal/cross-node/submit") => {
+            crate::cross_node_submit::respond(body, router, peer_service_id).map(Some)
+        }
         ("POST", "/mvp0/envelope") => {
             let response = handle_mvp0_envelope_mesh_from(
                 body,
