@@ -26,6 +26,7 @@ pub(super) mod fetches;
 pub(crate) mod head_refresh;
 pub(crate) mod lifecycle_fence;
 mod readers;
+pub(crate) mod session_thread;
 pub(super) mod uploads;
 
 #[cfg(test)]
@@ -83,7 +84,12 @@ pub(super) fn run(bootstrap: Bootstrap) -> Result<(), SdkError> {
         crate::custody::retry::set_thread_budget(budget);
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    LocalSet::new().block_on(&runtime, run_async(bootstrap))
+    // The session host gets its own thread so database work here cannot freeze its timers.
+    let session = session_thread::SessionThread::start()?;
+    let result = session.install(|| LocalSet::new().block_on(&runtime, run_async(bootstrap)));
+    // `run_async` stopped the connection and awaited its worker before returning.
+    drop(session);
+    result
 }
 
 pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
