@@ -74,7 +74,7 @@ intent. Once retention removes a status, the existing legacy explicit path is av
 again. That compatibility path uses client-supplied routing and permits the request only
 from the owned signing device; it does not derive a route from retained attribution.
 
-`message.read` / `message.list` rows and received-message journal rows add:
+`message.read` rows and received-message journal rows add:
 
 - `sender_device_id`: the authenticated sending device identifier.
 - `sender_root_commitment`: its verified root commitment.

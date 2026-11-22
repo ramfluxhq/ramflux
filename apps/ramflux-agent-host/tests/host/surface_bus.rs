@@ -198,7 +198,7 @@ impl AgentBus for SurfaceBus {
         operation: Option<&str>,
     ) -> Result<Value> {
         match method {
-            "message.list" => Ok(super::support::message_detail(
+            "message.read" => Ok(super::support::message_detail(
                 body["conversation_id"].as_str().ok_or(Error::State)?,
                 body["message_id"].as_str().ok_or(Error::State)?,
                 "@agent checklist",

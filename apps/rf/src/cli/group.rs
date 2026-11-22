@@ -20,7 +20,6 @@ pub(crate) enum GroupAction {
     Send(GroupSend),
     Read(GroupRead),
     Message(GroupMessageCommand),
-    Invite(GroupInviteCommand),
     List(AccountSelector),
     Members(GroupMembers),
     Member(GroupMemberCommand),
@@ -88,7 +87,6 @@ pub(crate) struct GroupMemberCommand {
 #[derive(Subcommand)]
 pub(crate) enum GroupMemberAction {
     Add(Box<GroupMemberAdd>),
-    Ban(GroupMemberBan),
     Kick(GroupMemberKick),
     Remove(GroupMemberRemove),
     List(GroupMembers),
@@ -151,20 +149,6 @@ pub(crate) struct GroupMemberKick {
 }
 
 #[derive(Args)]
-pub(crate) struct GroupMemberBan {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) group: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) actor: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) member_device: String,
-    #[arg(long)]
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(Args)]
 pub(crate) struct GroupMessageCommand {
     #[command(subcommand)]
     pub(crate) action: GroupMessageAction,
@@ -188,58 +172,6 @@ pub(crate) struct GroupMessageDelete {
     /// Local retry token; the SDK allocates the generated Delete event.
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) operation_id: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct GroupInviteCommand {
-    #[command(subcommand)]
-    pub(crate) action: GroupInviteAction,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum GroupInviteAction {
-    Create(GroupInviteCreate),
-    Accept(GroupInviteAccept),
-}
-
-#[derive(Args)]
-pub(crate) struct GroupInviteCreate {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) group: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) actor: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) invitee_device: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) invitee_signing_public_key: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) invitee_principal_commitment: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_delivery: String,
-    #[arg(long, default_value = "member")]
-    pub(crate) role: String,
-    #[arg(long)]
-    pub(crate) expires_at: i64,
-    #[arg(long)]
-    pub(crate) reason: Option<String>,
-}
-
-#[derive(Args)]
-pub(crate) struct GroupInviteAccept {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long, allow_hyphen_values = true)]
-    pub(crate) group: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) actor: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) invite_id: String,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) target_delivery: Option<String>,
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) member_principal_commitment: Option<String>,
 }
 
 #[derive(Args)]

@@ -199,7 +199,7 @@ async fn read_group(
     let mut result =
         Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection))
             .await?;
-    if matches!(method, "group.read" | "group.receive") {
+    if method == "group.read" {
         assert_eq!(
             result.response_body["durable_reader"], "message.read",
             "receive must direct callers to the durable generated reader"
@@ -354,7 +354,7 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
     );
     install_gateway(&mut account, vec![entry.clone()]);
     let mut state = daemon(account, &alice.root.0);
-    let received = read_group(&mut state, "group.receive").await?;
+    let received = read_group(&mut state, "group.read").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     let messages = account.client.direct_chat_messages("thread")?;
@@ -388,7 +388,8 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
             .client
             .require_current_device_authorization(&account.client.owned_device_identity()?),
     );
-    for method in ["group.read", "group.receive"] {
+    {
+        let method = "group.read";
         assert_eq!(
             read_group(&mut state, method).await?.response_body["messages"][0]["text"],
             "after rename"
@@ -405,7 +406,8 @@ async fn owner_failure_chain_is_characterised_body() -> TestResult {
         assert_freshness_refusal(
             &account.client.committed_routing(HeadUse::NewAuthorization, &entry),
         );
-        for method in ["group.read", "group.receive"] {
+        {
+            let method = "group.read";
             assert_eq!(
                 read_group(&mut state, method).await?.response_body["messages"][0]["text"],
                 "after rename"
@@ -651,7 +653,8 @@ async fn assert_wait_scope(
     opaque: bool,
     service: &[(String, Vec<u8>)],
 ) -> TestResult {
-    for method in ["group.read", "group.receive"] {
+    {
+        let method = "group.read";
         let result = read_group(state, method).await;
         if opaque {
             // A directory failure precedes private-route decoding. Opaque retries
@@ -785,7 +788,7 @@ async fn assert_admitted_chat(
     at: i64,
     key: &str,
 ) -> TestResult {
-    let received = read_group(state, "group.receive").await?;
+    let received = read_group(state, "group.read").await?;
     assert_eq!(received.response_body["messages"][0]["text"], "after rename");
     assert_eq!(
         state.accounts.get("owner").ok_or("Alice")?.client.direct_chat_messages("thread")?.len(),
@@ -929,7 +932,7 @@ async fn stored_group_history_after_rename_with_expired_head_succeeds_body() -> 
     );
     install_gateway(&mut account, vec![entry]);
     let mut state = daemon(account, &alice.root.0);
-    read_group(&mut state, "group.receive").await?;
+    read_group(&mut state, "group.read").await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     account.engine = None;
     *account.client.native_head_freshness.borrow_mut() =
@@ -969,7 +972,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
     );
     install_gateway(&mut account, vec![entry.clone()]);
     let mut state = daemon(account, &alice.root.0);
-    read_group(&mut state, "group.receive").await?;
+    read_group(&mut state, "group.read").await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     *account.client.native_head_freshness.borrow_mut() =
         crate::client::identity_authority::NativeHeadFreshness::default();
@@ -982,7 +985,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
         account.client.committed_routing(HeadUse::NewAuthorization, &entry).is_err(),
         "revocation must refuse new sender authority even when retained historical content remains readable"
     );
-    for method in ["group.history", "group.read", "group.receive"] {
+    for method in ["group.history", "group.read"] {
         let history = read_group(&mut state, method).await?.response_body;
         let rows = chat_page(&history["messages"])?;
         let [row] = rows.as_slice() else {
@@ -1013,7 +1016,7 @@ async fn historical_read_keeps_admitted_origin_without_reauthorizing_revoked_sen
         "local",
         &ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
     )?;
-    for method in ["group.history", "group.read", "group.receive"] {
+    for method in ["group.history", "group.read"] {
         let body = read_group(&mut state, method).await?.response_body;
         let rows = chat_page(&body["messages"])?;
         let [row] = rows.as_slice() else {
@@ -1049,7 +1052,7 @@ async fn unidentified_group_rows_never_gain_native_origin_or_displace_admitted_h
     );
     install_gateway(&mut account, vec![entry]);
     let mut state = daemon(account, &alice.root.0);
-    read_group(&mut state, "group.receive").await?;
+    read_group(&mut state, "group.read").await?;
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
     account.engine = None;
     for (id, sender, content) in [

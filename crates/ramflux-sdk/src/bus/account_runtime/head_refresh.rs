@@ -24,7 +24,7 @@ pub(crate) fn take_receive_preparation() -> Option<bool> {
     RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).ok()
 }
 
-/// Test fixture: the account actor sets this after a successful `group.receive` prepare.
+/// Test fixture: the account actor sets this after a successful `group.read` prepare.
 #[cfg(test)]
 pub(crate) async fn with_receive_prepared<T>(fut: impl std::future::Future<Output = T>) -> T {
     RECEIVE_PREPARED.scope(std::cell::Cell::new(true), fut).await
@@ -110,7 +110,7 @@ pub(crate) fn stale_roots_since(
 ) -> Result<BTreeSet<String>, SdkError> {
     // Read/receive must retain their existing inline peer fetch and first-pass admission.
     let method = request.method.as_str();
-    if matches!(method, "group.read" | "group.receive") {
+    if method == "group.read" {
         return crate::bus::couriers::head_refresh::inbound::blocked_roots(
             account,
             request.body.get("group_id").and_then(serde_json::Value::as_str).unwrap_or(""),
@@ -122,7 +122,6 @@ pub(crate) fn stale_roots_since(
     let mut roots = if since.is_some() { send_roots(account, request)? } else { BTreeSet::new() };
     if method == "group.send"
         || method.starts_with("group.member.")
-        || method.starts_with("group.invite.")
         || matches!(method, "group.name.set" | "group.owner.transfer" | "group.role.set")
     {
         roots.insert(account.principal_commitment.clone());
@@ -166,7 +165,7 @@ impl AccountRuntime {
         let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
         let mut receive_prepared = false;
-        if matches!(command.request.method.as_str(), "group.read" | "group.receive")
+        if command.request.method == "group.read"
             && let Some(account) = self.state.accounts.get_mut(&self.id)
         {
             // Cancellation is replay-safe: receive persists a committed receipt or

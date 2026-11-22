@@ -306,7 +306,7 @@ fn sibling_rows(client: &RamfluxClient, conversation: &str) -> Result<Value, Sdk
             "rows",
             Some("sender".into()),
             "message",
-            "message.list",
+            "message.read",
             json!({"conversation_id":conversation,"read_model":true}),
         ),
     )

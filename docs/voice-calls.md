@@ -68,7 +68,7 @@ When `end_reason` is `failed`, `failure_reason` identifies the source as
 `media_lease_expired`, `daemon_restarted`, or `signaling_unavailable`.
 
 `call.list` uses the account reader pool and returns at most 128 public records.
-`message.list` contains `kind: "call"` records with duration and missed status.
+`message.read` contains `kind: "call"` records with duration and missed status.
 Public rows, timeline entries and journal bodies never contain media keys, tokens,
 rebind keys or private allocations. Terminal calls delete their control-sequence
 receipts; retained public terminal records prevent resurrection.

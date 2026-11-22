@@ -12,7 +12,7 @@ pub(crate) async fn dispatch_device_bus_request(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     match request.method.as_str() {
         "device.list" => dispatch_device_list(request, state),
-        "device.authorize" | "device.migrate" | "device.refresh" => {
+        "device.refresh" => {
             super::identity_authority::dispatch_identity_authority(request, state).await
         }
         "device.revoke" => {

@@ -617,7 +617,7 @@ async fn slow_gateway_does_not_block_other_account_send_or_socket_reads() -> Res
                 .request_frame(request(
                     "read",
                     "alice",
-                    "message.list",
+                    "message.read",
                     serde_json::json!({"conversation_id":conversation}),
                 ))
                 .await?;
@@ -709,7 +709,7 @@ async fn object_upload_keeps_same_account_reads_live_and_disconnect_cancels_netw
         });
         tokio::time::timeout(Duration::from_secs(2), blocked).await.map_err(|_| failure("upload did not reach gateway"))?.map_err(|_| failure("upload gateway closed"))?;
         for (id, method, body) in [
-            ("messages", "message.list", serde_json::json!({"conversation_id":"conversation"})),
+            ("messages", "message.read", serde_json::json!({"conversation_id":"conversation"})),
             ("conversations", "conversation.list", serde_json::json!({})),
         ] {
             tokio::time::timeout(Duration::from_millis(500), one.request_frame(request(id, "alice", method, body))).await.map_err(|_| failure("upload blocked read"))??;
@@ -788,7 +788,7 @@ async fn mutation_key_applies_once_and_survives_account_actor_restart() -> Resul
                 .request_frame(request(
                     "messages",
                     "bob",
-                    "message.list",
+                    "message.read",
                     serde_json::json!({"conversation_id":conversation}),
                 ))
                 .await?;
@@ -1363,7 +1363,7 @@ async fn group_send_lists_every_missing_member_before_writing_a_message() -> Res
         let response=socket.request_frame(request("send","alice","group.send",serde_json::json!({"group_id":"group","conversation_id":"thread","message_id":"message","sender_id":"device-alice","encrypted_body_base64":"","plaintext_body_base64":ramflux_protocol::encode_base64url(b"group message")}))).await;
         let error=response.err().ok_or_else(||failure("group send silently omitted members"))?.to_string();
         assert!(error.contains("device-bob"));assert!(error.contains("device-charlie"));assert!(error.contains("unreachable_members"));
-        let messages=socket.request_frame(request("read","alice","message.list",serde_json::json!({"conversation_id":"thread"}))).await?;assert_eq!(messages["messages"],serde_json::json!([]));
+        let messages=socket.request_frame(request("read","alice","message.read",serde_json::json!({"conversation_id":"thread"}))).await?;assert_eq!(messages["messages"],serde_json::json!([]));
         drop(socket);let _=server.await;supervisor.shutdown().await?;std::fs::remove_dir_all(root)?;Ok(())
     }).await
 }

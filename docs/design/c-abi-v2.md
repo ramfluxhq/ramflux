@@ -84,7 +84,7 @@ methods are rejected. Operations currently cover:
 | --- | --- |
 | Accounts and recovery | `account.list/status/switch/unlock/lock`, `account.create.begin/show_once/hidden_challenge/confirm/cancel`, `account.recover.begin/confirm/cancel` |
 | Nodes | `node.list/add/probe/confirm/remove/set_default/set_enabled` |
-| Conversations/messages | `conversation.list/directory/mute/disappearing.*`, `message.list/read/submit/delete/receipt.*`, `message.franking_evidence` |
+| Conversations/messages | `conversation.list/directory/mute/disappearing.*`, `message.read/submit/delete/receipt.*`, `message.franking_evidence` |
 | Contacts/requests | `contact.list/add/request/accept/block/unblock/remove`, `contact.requests.*`, `contact.request.*`, verification/card methods |
 | Groups | `group.list/create/history/members/role.set/owner.transfer`, invitations and membership methods |
 | Voice | `call.invite/answer/reject/hangup/list/media.session` |

@@ -57,18 +57,14 @@ async fn dispatch_group_bus_request_inner(
         return Ok(local_bus_ok(response));
     }
     match request.method.as_str() {
+        // Native shared-group sync consumes these; reaching here means no local shared state.
         "group.create"
         | "group.member.add"
         | "group.member.remove"
         | "group.role.set"
-        | "group.member.kick"
-        | "group.member.ban"
-        | "group.invite.create"
-        | "group.invite.accept"
-        | "group.message.delete" => Err(SdkError::GeneratedRefused {
+        | "group.member.kick" => Err(SdkError::GeneratedRefused {
             code: crate::GeneratedRefusalCode::Content,
-            reason: "retired group event carrier; use native group state or generated Delete"
-                .into(),
+            reason: "group has no native shared state on this account".into(),
         }),
         "group.history" => {
             let account = local_bus_account(state, account_id)?;
@@ -109,7 +105,7 @@ async fn dispatch_group_bus_request_inner(
             let account = local_bus_account_mut(state, account_id)?;
             Box::pin(dispatch_group_send_request(request, account)).await
         }
-        "group.read" | "group.receive" => {
+        "group.read" => {
             let account = local_bus_account_mut(state, account_id)?;
             dispatch_group_receive_request(request, account).await
         }

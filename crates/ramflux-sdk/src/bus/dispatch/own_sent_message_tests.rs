@@ -199,7 +199,7 @@ fn assert_owned_group_row(client: &RamfluxClient, canonical: &str) -> TestResult
             "rows",
             Some("sender".into()),
             "message",
-            "message.list",
+            "message.read",
             json!({"conversation_id":"own-group-thread","read_model":true}),
         ),
     )?;

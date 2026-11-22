@@ -707,33 +707,6 @@
       "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
-      "name": "contact.request.accept",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
-      "name": "contact.request.block",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
-      "name": "contact.request.decline",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -874,26 +847,8 @@
       "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
-      "name": "device.authorize",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
       "name": "device.list",
       "secret_input": false,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
-      "name": "device.migrate",
-      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },
@@ -1180,24 +1135,6 @@
       "bridge_allowed": true,
       "capability": "group",
       "key_export": false,
-      "name": "group.invite.accept",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.invite.create",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
       "name": "group.list",
       "secret_input": false,
       "secret_output": true,
@@ -1208,15 +1145,6 @@
       "capability": "group",
       "key_export": false,
       "name": "group.member.add",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.member.ban",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -1252,15 +1180,6 @@
       "bridge_allowed": true,
       "capability": "group",
       "key_export": false,
-      "name": "group.message.delete",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
       "name": "group.name.set",
       "secret_input": true,
       "secret_output": true,
@@ -1280,15 +1199,6 @@
       "capability": "group",
       "key_export": false,
       "name": "group.read",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.receive",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -1460,15 +1370,6 @@
       "capability": "message",
       "key_export": false,
       "name": "message.franking_evidence",
-      "secret_input": false,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "message",
-      "key_export": false,
-      "name": "message.list",
       "secret_input": false,
       "secret_output": true,
       "show_once": false

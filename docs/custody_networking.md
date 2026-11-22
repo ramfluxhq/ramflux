@@ -42,11 +42,11 @@ on the first receive pass. Otherwise, authority-dependent entries remain in the
 durable inbox retry path; verified refresh makes matching retries immediately
 eligible and wakes the existing receive courier for ordered, once-only admission.
 Failed or old refreshes leave them pending; unrelated retry backoff is preserved.
-`group.read` and `group.receive` keep network/admission semantics. Only a decoded,
+`group.read` keeps network/admission semantics. Only a decoded,
 authenticated route for the requested group can hold those RPCs pending; unknown
 routes and unrelated conversations continue background refresh and retry.
 
-Within one account command, `group.read` and `group.receive` reuse a successfully
+Within one account command, `group.read` reuses a successfully
 completed admission sync only when its first freshness check found no stale roots.
 If the command waits for head refresh, dispatch syncs again to admit ready entries.
 The marker belongs to the command future: cancellation, lifecycle preemption,
