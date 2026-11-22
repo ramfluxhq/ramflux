@@ -30,7 +30,7 @@ mod tests {
                 return Ok(CredentialOutcome::Refused);
             }
             Ok(CredentialOutcome::Provided {
-                passphrase: SecretUtf8::from_bytes(b"native-private-data-canary")?,
+                passphrase: SecretUtf8::from_bytes(b"580417")?,
                 confirmation: None,
             })
         }
@@ -48,7 +48,7 @@ mod tests {
             &words(&phrase, positions)?,
             vault.as_ref(),
             now,
-            b"native-private-data-canary",
+            b"580417",
         )?;
         let anchor = born.record().body.account_anchor.clone();
         drop((born, phrase));
@@ -88,7 +88,13 @@ mod tests {
                 assert_eq!(status["state"], "unlocked", "test: private native unlock credential refusal or account lifecycle changed");
                 let mut source = crate::RamfluxClient::new();
                 source.open_account_index(root.path())?;
-                source.unlock_account("private-native", b"native-private-data-canary")?;
+                source.bind_device_unlock(
+                    root.path(),
+                    vault.as_ref(),
+                    "private-native",
+                    crate::client::device_unlock::DeviceSecret::Load,
+                )?;
+                source.unlock_account("private-native", b"580417")?;
                 source.initialize_born_v3_branch("primary", vault.clone()).await?;
                 let refused = source.account_db()?.prepare_full_transfer_source()
                     .and_then(ramflux_storage::FullSourcePreparation::into_encoding_work)
@@ -136,7 +142,7 @@ mod tests {
                 &words(&phrase, positions)?,
                 vault.as_ref(),
                 now,
-                b"native-private-data-canary",
+                b"580417",
             )?;
             let anchor = born.record().body.account_anchor.clone();
             drop((born, phrase));

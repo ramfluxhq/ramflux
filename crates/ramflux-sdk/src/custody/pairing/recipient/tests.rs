@@ -467,10 +467,10 @@ async fn existing_open_leg() -> TestResult {
 }
 
 #[test]
-fn pairing_setup_refuses_short_and_blocklisted_passphrases() -> TestResult {
+fn pairing_setup_refuses_codes_that_are_not_six_digits() -> TestResult {
     for (bytes, expected) in [
-        (b"aaaaaaaaaaaaaa".as_slice(), crate::PassphrasePolicyError::TooShort { scalars: 14 }),
-        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+        (b"12345".as_slice(), crate::PassphrasePolicyError::NotSixDigits),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::NotSixDigits),
     ] {
         let root = tempfile::tempdir()?;
         let vault_dir = root.path().join("disk-vault");

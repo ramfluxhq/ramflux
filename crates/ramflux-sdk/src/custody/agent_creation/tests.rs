@@ -1131,20 +1131,25 @@ fn committed_agent_secret_unlocks_its_sealed_data_and_exports_as_text() -> TestR
     let secret = desk.load_provisioning_secret(reference)?;
     let text = std::str::from_utf8(&secret)?;
     assert_eq!(text.len(), 43, "32 random bytes as unpadded base64url");
-    assert!(crate::passphrase::check_new_passphrase(text).is_ok());
+    assert!(
+        crate::passphrase::check_new_passphrase(text).is_err(),
+        "test: a generated agent secret is not a human six-digit code"
+    );
 
     // The sealed data of the committed account opens with the stored secret, through the same
     // check the recovery path uses. The account is not live yet, so the activation-only unlock
     // (`RamfluxClient::unlock_account`) is not exercised here.
-    crate::client::account::verify_stored_data_secret(
+    crate::client::account::verify_stored_device_data_secret(
         &fixture.root.0,
         &account_id,
+        &desk,
         text.as_bytes(),
     )?;
     assert!(
-        crate::client::account::verify_stored_data_secret(
+        crate::client::account::verify_stored_device_data_secret(
             &fixture.root.0,
             &account_id,
+            &desk,
             b"not the agent secret"
         )
         .is_err()

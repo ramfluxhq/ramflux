@@ -5,19 +5,46 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+use super::device_unlock::{self, DeviceBoundVaultSecret, DeviceSecret};
+
+/// Verifies an account code against the stored code wrap without opening the account. The check
+/// is counted by the code attempt limit.
+pub(crate) fn verify_stored_data_secret_with(
+    root: &Path,
+    id: &str,
+    source: &dyn VaultSecretSource,
+    secret: &[u8],
+) -> Result<(), SdkError> {
+    let index = AccountIndex::open(root)?;
+    let _writer = index.acquire_account_writer(id)?;
+    device_unlock::guard_code_attempt(&index, id)?;
+    let vault_secret = zeroize::Zeroizing::new(source.vault_secret(id)?);
+    let wrapping = zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret)?);
+    let wrapped = index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
+    let _key = unwrap_with_vault_secret(&wrapping, &wrapped)?;
+    device_unlock::code_attempt_succeeded(&index, id)
+}
+
+/// Verifies a code for account data sealed by a plain (file-secret only) client.
+#[cfg(test)]
 pub(crate) fn verify_stored_data_secret(
     root: &Path,
     id: &str,
     secret: &[u8],
 ) -> Result<(), SdkError> {
-    let index = AccountIndex::open(root)?;
-    let _writer = index.acquire_account_writer(id)?;
-    let vault = FileVaultSecretSource::new(root);
-    let vault_secret = zeroize::Zeroizing::new(vault.vault_secret(id)?);
-    let wrapping = zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
-    let wrapped = index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
-    let _key = unwrap_with_vault_secret(&wrapping, &wrapped)?;
-    Ok(())
+    verify_stored_data_secret_with(root, id, &FileVaultSecretSource::new(root), secret)
+}
+
+/// Verifies a code for account data sealed through a vault-held device secret.
+#[cfg(test)]
+pub(crate) fn verify_stored_device_data_secret(
+    root: &Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+    secret: &[u8],
+) -> Result<(), SdkError> {
+    let source = DeviceBoundVaultSecret::bind(root, vault, id, DeviceSecret::Load)?;
+    verify_stored_data_secret_with(root, id, &source, secret)
 }
 
 impl RamfluxClient {
@@ -44,20 +71,40 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let account_index = self.account_index()?;
         let _writer = account_index.acquire_account_writer(account_id)?;
+        device_unlock::guard_code_attempt(account_index, account_id)?;
         let vault_secret =
             zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(account_id)?);
         let wrapping_key =
-            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret)?);
         let wrapped =
             account_index.load_wrapped_db_key(account_id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let key = unwrap_with_vault_secret(&wrapping_key, &wrapped)?;
         self.account_db()?.verify_key(&key)?;
-        Ok(())
+        device_unlock::code_attempt_succeeded(account_index, account_id)
     }
 
     pub fn set_vault_secret_source(&mut self, source: Box<dyn VaultSecretSource>) {
         self.vault_secret_source = Some(source);
         self.vault_secret_source_is_custom = true;
+    }
+
+    /// Binds this client's account data to the platform-held device secret of `account_id`.
+    ///
+    /// Native account data is always sealed and opened through this binding; without the device
+    /// secret neither the device wrap nor the code wrap opens.
+    ///
+    /// # Errors
+    /// `DeviceUnlockUnavailable` when the vault cannot hold or return the device secret.
+    pub fn bind_device_unlock(
+        &mut self,
+        root: &Path,
+        vault: &dyn crate::custody::PrimaryVault,
+        account_id: &str,
+        secret: DeviceSecret,
+    ) -> Result<(), SdkError> {
+        let source = DeviceBoundVaultSecret::bind(root, vault, account_id, secret)?;
+        self.set_vault_secret_source(Box::new(source));
+        Ok(())
     }
 
     /// # Errors
@@ -98,52 +145,29 @@ impl RamfluxClient {
         let local_secret =
             zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
         let wrapping =
-            zeroize::Zeroizing::new(account_db_key_encryption_key(&local_secret, secret));
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&local_secret, secret)?);
         let key = AccountDbKey::generate()?;
         let db = AccountDb::open(index, local_account_id, &key)?;
         let wrapped = db.wrap_current_db_key(&wrapping)?;
         index.store_wrapped_db_key(local_account_id, &wrapped)?;
+        device_unlock::store_device_wrap(index, local_account_id, &local_secret, &key)?;
         drop(db);
         Ok(())
     }
 
+    /// Opens an account with its account code (or, for a plain client, its data secret).
+    ///
+    /// A correct code on native account data also (re)writes the device wrap, so an account
+    /// opened after an explicit lock opens silently again afterwards.
+    ///
     /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
+    /// Returns an error for a wrong code, a refused attempt, or storage and custody failures.
     pub fn unlock_account(
         &mut self,
         local_account_id: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
-        let root = self.account_index()?.root().to_path_buf();
-        let born = if crate::custody::account_exists(&root, local_account_id)? {
-            match crate::custody::load_data_account(
-                &root,
-                local_account_id,
-                crate::custody::network_now()?,
-            ) {
-                Ok(account) => {
-                    if self.account_index()?.account(local_account_id)?.principal_commitment
-                        != account.record().body.account_anchor
-                    {
-                        return Err(SdkError::CustodySetupInvalid);
-                    }
-                    Some(Box::new(account))
-                }
-                Err(SdkError::Io(ref cause)) if cause.kind() == std::io::ErrorKind::NotFound => {
-                    if crate::custody::pairing::recipient::unadmitted_data_unlock(
-                        &root,
-                        local_account_id,
-                    )? {
-                        None
-                    } else {
-                        return Err(SdkError::NetworkingPending);
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            None
-        };
+        let born = self.born_account_for_unlock(local_account_id)?;
         // Custody validation comes first; key wrapping and vault access share writer ownership.
         let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
         let wrapped = self.account_index()?.load_wrapped_db_key(local_account_id)?;
@@ -153,11 +177,16 @@ impl RamfluxClient {
         let account_index = self.account_index()?;
         let vault_secret =
             zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
-        let key_encryption_key =
-            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
         let key = if let Some(wrapped) = wrapped {
-            unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
+            device_unlock::guard_code_attempt(account_index, local_account_id)?;
+            let key_encryption_key =
+                zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret)?);
+            let key = unwrap_with_vault_secret(&key_encryption_key, &wrapped)?;
+            device_unlock::code_attempt_succeeded(account_index, local_account_id)?;
+            key
         } else {
+            let key_encryption_key =
+                zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret)?);
             let generated = AccountDbKey::generate()?;
             let (nonce, wrapped_key) =
                 wrap_with_vault_secret(&key_encryption_key, generated.bytes())?;
@@ -172,7 +201,78 @@ impl RamfluxClient {
             )?;
             generated
         };
-        let mut db = AccountDb::open(account_index, local_account_id, &key)?;
+        if born.is_some() {
+            device_unlock::store_device_wrap(account_index, local_account_id, &vault_secret, &key)?;
+        }
+        self.open_unlocked_account(local_account_id, &key, born)
+    }
+
+    /// Opens native account data without user input through its device wrap.
+    ///
+    /// # Errors
+    /// `AccountCodeRequired` after an explicit lock; `DeviceUnlockUnavailable` or an integrity
+    /// error when the device secret is missing or wrong; storage and custody failures.
+    pub(crate) fn unlock_account_with_device(
+        &mut self,
+        local_account_id: &str,
+    ) -> Result<(), SdkError> {
+        let born = self.born_account_for_unlock(local_account_id)?;
+        if born.is_none() {
+            return Err(device_unlock::device_unlock_unavailable());
+        }
+        let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let key = device_unlock::open_device_wrap(
+            self.account_index()?,
+            local_account_id,
+            &vault_secret,
+        )?;
+        self.open_unlocked_account(local_account_id, &key, born)
+    }
+
+    fn born_account_for_unlock(
+        &self,
+        local_account_id: &str,
+    ) -> Result<Option<Box<crate::custody::BornAccount>>, SdkError> {
+        let root = self.account_index()?.root().to_path_buf();
+        if !crate::custody::account_exists(&root, local_account_id)? {
+            return Ok(None);
+        }
+        match crate::custody::load_data_account(
+            &root,
+            local_account_id,
+            crate::custody::network_now()?,
+        ) {
+            Ok(account) => {
+                if self.account_index()?.account(local_account_id)?.principal_commitment
+                    != account.record().body.account_anchor
+                {
+                    return Err(SdkError::CustodySetupInvalid);
+                }
+                Ok(Some(Box::new(account)))
+            }
+            Err(SdkError::Io(ref cause)) if cause.kind() == std::io::ErrorKind::NotFound => {
+                if crate::custody::pairing::recipient::unadmitted_data_unlock(
+                    &root,
+                    local_account_id,
+                )? {
+                    Ok(None)
+                } else {
+                    Err(SdkError::NetworkingPending)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_unlocked_account(
+        &mut self,
+        local_account_id: &str,
+        key: &AccountDbKey,
+        born: Option<Box<crate::custody::BornAccount>>,
+    ) -> Result<(), SdkError> {
+        let mut db = AccountDb::open(self.account_index()?, local_account_id, key)?;
         self.reader_principal_id = None;
         if born.is_some() {
             crate::bus::group_conversation::repair_on_open(&db)?;
@@ -211,7 +311,7 @@ impl RamfluxClient {
         let vault_secret =
             zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
         let key_encryption_key =
-            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, new_secret));
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, new_secret)?);
         let wrapped = self.account_db()?.wrap_current_db_key(&key_encryption_key)?;
         self.account_index()?.store_wrapped_db_key(local_account_id, &wrapped)?;
         Ok(())
@@ -491,16 +591,46 @@ fn fresh_receive_incarnation() -> Result<String, SdkError> {
     Ok(super::contact::bytes_to_hex(&bytes))
 }
 
-/// Derives the key-encryption key that unwraps an account database key.
+/// Argon2id memory cost of the account-code KDF (262144 KiB, the documented data-password cost).
+#[cfg(not(test))]
+const CODE_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
+/// SDK unit tests only: reduced cost so the suite does not allocate 256 MiB per unlock.
+#[cfg(test)]
+const CODE_ARGON2_MEMORY_KIB: u32 = 64;
+#[cfg(not(test))]
+const CODE_ARGON2_TIME_COST: u32 = 3;
+#[cfg(test)]
+const CODE_ARGON2_TIME_COST: u32 = 1;
+const CODE_ARGON2_PARALLELISM: u32 = 1;
+
+/// Derives the key-encryption key of the code wrap of an account database key.
 ///
-/// The input is `ramflux.account_db_kek.v2`, the file-vault secret, then the passphrase.
-#[must_use]
-pub fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
+/// `KEK = BLAKE3("ramflux.account_db_kek.v3" || V || Argon2id(code, salt = V))`, Argon2id
+/// v0x13, 262144 KiB, three passes, one lane. For native accounts `V` is the device-bound vault
+/// secret, so the code alone never opens the wrap.
+///
+/// # Errors
+/// Returns a crypto error when the Argon2id invocation fails.
+pub fn account_db_key_encryption_key(
+    vault_secret: &[u8; 32],
+    secret: &[u8],
+) -> Result<[u8; 32], SdkError> {
+    let params = argon2::Params::new(
+        CODE_ARGON2_MEMORY_KIB,
+        CODE_ARGON2_TIME_COST,
+        CODE_ARGON2_PARALLELISM,
+        Some(32),
+    )
+    .map_err(|error| ramflux_crypto::CryptoError::Argon2(error.to_string()))?;
+    let mut stretched = zeroize::Zeroizing::new([0_u8; 32]);
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+        .hash_password_into(secret, vault_secret, &mut *stretched)
+        .map_err(|error| ramflux_crypto::CryptoError::Argon2(error.to_string()))?;
     let mut hasher = zeroize::Zeroizing::new(blake3::Hasher::new());
-    hasher.update(b"ramflux.account_db_kek.v2");
+    hasher.update(b"ramflux.account_db_kek.v3");
     hasher.update(vault_secret);
-    hasher.update(secret);
-    *hasher.finalize().as_bytes()
+    hasher.update(&*stretched);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]

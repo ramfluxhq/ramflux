@@ -30,8 +30,34 @@ pub(super) fn existing_key(
         return Err(SdkError::AccountDbNotUnlocked);
     }
     let secret_key = Zeroizing::new(vault.vault_secret(id)?);
+    unwrap_local_key(index, id, &secret_key, secret)
+}
+
+/// Native accounts: the local code wrap is bound to the platform-held device secret.
+pub(super) fn existing_device_key(
+    index: &AccountIndex,
+    root: &Path,
+    id: &str,
+    vault: &dyn crate::custody::PrimaryVault,
+    secret: &[u8],
+) -> Result<AccountDbKey, SdkError> {
+    use crate::client::device_unlock::{DeviceBoundVaultSecret, DeviceSecret};
+    if !FileVaultSecretSource::new(root).vault_secret_path(id).exists() {
+        return Err(SdkError::AccountDbNotUnlocked);
+    }
+    let source = DeviceBoundVaultSecret::bind(root, vault, id, DeviceSecret::Load)?;
+    let secret_key = Zeroizing::new(source.vault_secret(id)?);
+    unwrap_local_key(index, id, &secret_key, secret)
+}
+
+fn unwrap_local_key(
+    index: &AccountIndex,
+    id: &str,
+    secret_key: &[u8; 32],
+    secret: &[u8],
+) -> Result<AccountDbKey, SdkError> {
     let wrapping =
-        Zeroizing::new(crate::client::account::account_db_key_encryption_key(&secret_key, secret));
+        Zeroizing::new(crate::client::account::account_db_key_encryption_key(secret_key, secret)?);
     unwrap_with_vault_secret(
         &wrapping,
         &index.load_wrapped_db_key(id)?.ok_or(SdkError::AccountDbNotUnlocked)?,
@@ -320,7 +346,7 @@ fn wrap_installed_key(
     let kek = Zeroizing::new(crate::client::account::account_db_key_encryption_key(
         &secret,
         manifest.account_secret.as_bytes(),
-    ));
+    )?);
     let (nonce, wrapped_key) = wrap_with_vault_secret(&kek, key.bytes())?;
     Ok(WrappedAccountDbKey {
         key_wrapping_provider: "platform-local-vault".into(),

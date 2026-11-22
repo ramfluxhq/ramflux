@@ -30,7 +30,7 @@ fn wrapped_db_key(
     let wrapped = index
         .load_wrapped_db_key(local_account_id)?
         .ok_or_else(|| SdkError::LocalBus(format!("missing wrapped key for {local_account_id}")))?;
-    Ok(unwrap_with_vault_secret(&account_db_key_encryption_key(&vault_secret, secret), &wrapped)?)
+    Ok(unwrap_with_vault_secret(&account_db_key_encryption_key(&vault_secret, secret)?, &wrapped)?)
 }
 
 struct ChildGuard(Child);
@@ -198,8 +198,8 @@ fn rekey_refuses_short_and_blocklisted_passphrases_without_rewrapping() -> Resul
     client.unlock_account("acct", old)?;
     let before = wrapped_db_key(&root, "acct", old)?;
     for (secret, expected) in [
-        (&[b'a'; 14][..], crate::PassphrasePolicyError::TooShort { scalars: 14 }),
-        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::TooCommon),
+        (&b"12345"[..], crate::PassphrasePolicyError::NotSixDigits),
+        (b"films+pic+galeries".as_slice(), crate::PassphrasePolicyError::NotSixDigits),
     ] {
         let error = client
             .rekey_active_account("acct", secret)

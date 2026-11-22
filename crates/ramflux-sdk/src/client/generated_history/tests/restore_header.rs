@@ -13,7 +13,8 @@ fn merge_into(
     let archive = root.0.join("incoming.db");
     let snapshot = incoming.account_db()?.write_backup_snapshot(&archive)?;
     let vault = FileVaultSecretSource::new(root.0.join("receiver")).vault_secret("receiver")?;
-    let kek = crate::client::account::account_db_key_encryption_key(&vault, b"history-import-test");
+    let kek =
+        crate::client::account::account_db_key_encryption_key(&vault, b"history-import-test")?;
     let wrapped = local.account_index()?.load_wrapped_db_key("receiver")?.ok_or("wrapped key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(&kek, &wrapped)?;
     Ok(BackupDatabase::open(&local.account_db()?.path, &key)?.merge_backup(

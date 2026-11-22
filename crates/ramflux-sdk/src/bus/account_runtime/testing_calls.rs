@@ -109,7 +109,7 @@ impl PrimaryVault for Vault {
     }
 }
 
-const NATIVE_PASSPHRASE: &[u8] = b"native call fixture passphrase";
+const NATIVE_PASSPHRASE: &[u8] = b"864209";
 
 struct Names {
     principal: String,
