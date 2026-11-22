@@ -110,6 +110,8 @@ jobs:
           python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_public_origin.py -v
           python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_node_config.py -v
 
+  # Reserve the pool for measured short guards and default-feature Clippy.
+  # Archives, feature variants and test execution use hosted runners to preserve deadlines.
   # Only main pushes and same-repository PRs use the sandboxed pool.
   # Dependabot, forks, manual runs and RF_CI_FORCE_HOSTED=true use GitHub-hosted runners.
   # Set repository variable RF_CI_FORCE_HOSTED=true for the hosted fallback.
@@ -175,7 +177,7 @@ jobs:
 
   clippy-itest:
     name: Clippy (itest, all features)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -250,7 +252,7 @@ jobs:
 
   sdk-c-abi-v2:
     name: SDK C ABI v2 (${{ matrix.features }})
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -371,7 +373,7 @@ jobs:
 
   doctests:
     name: Doctests
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -415,7 +417,7 @@ jobs:
 
   build-sdk:
     name: Build test archive (sdk)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -464,7 +466,7 @@ jobs:
 
   build-rest:
     name: Build test archive (rest)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -516,7 +518,7 @@ jobs:
   # Serial real-process tests take about 19 minutes of build plus run; 30 leaves room for the cache save.
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -595,7 +597,7 @@ jobs:
   # Independent job: B7 never consumes the smoke job budget.
   cli-e2e-b7:
     name: CLI e2e (Demo B B7, GitHub-hosted)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -854,7 +856,7 @@ jobs:
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/2)
     needs: build-sdk
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -932,7 +934,7 @@ jobs:
   test-rest:
     name: Tests (rest ${{ matrix.shard }}/2)
     needs: build-rest
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -1009,7 +1011,7 @@ jobs:
 
   v-sdk-a:
     name: "SDK variant: memory vault and production absence"
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -1081,7 +1083,7 @@ jobs:
   # serializes behind the memory-vault tests nor shares their cache and timeout.
   v-sdk-crash-guard:
     name: "SDK variant: receive crash seam absence"
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -1126,7 +1128,7 @@ jobs:
 
   v-sdk-b:
     name: "SDK variant: deferred accounts and gateway transport"
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
@@ -1315,7 +1317,7 @@ jobs:
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
-    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
