@@ -107,7 +107,12 @@ jobs:
       - name: Deployment lifecycle and provisioning regressions
         env:
           DEMO_TEST_PODMAN_COMPOSE: ${{ runner.temp }}/deploy-lifecycle/bin/podman-compose
-        run: '"$RUNNER_TEMP/deploy-lifecycle/bin/python" -B deploy/scripts/check-lifecycle.py'
+        run: |
+          # Keep fixture state private and RAM-backed even when the sandbox omits /tmp.
+          lifecycle_tmp=$(mktemp -d /dev/shm/ramflux-deploy-lifecycle.XXXXXX)
+          trap 'rmdir -- "$lifecycle_tmp"' EXIT
+          export TMPDIR="$lifecycle_tmp" TMP="$lifecycle_tmp" TEMP="$lifecycle_tmp"
+          "$RUNNER_TEMP/deploy-lifecycle/bin/python" -B deploy/scripts/check-lifecycle.py
 
   test-timing:
     name: Test timing guard
