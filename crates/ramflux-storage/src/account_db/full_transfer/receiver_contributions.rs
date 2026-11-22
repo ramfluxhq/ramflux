@@ -83,15 +83,20 @@ fn retain(
     }
     Ok(())
 }
+pub(super) struct ContributionCapture<'a> {
+    pub(super) path: &'a Path,
+    pub(super) key: &'a AccountDbKey,
+    pub(super) private: &'a BackupDatabase,
+    pub(super) owners: [&'a DeviceRef; 2],
+    pub(super) cancelled: &'a Arc<AtomicBool>,
+    pub(super) schema: &'a super::FullTransferSchema,
+    pub(super) snapshot: bool,
+}
+
 impl Contributions {
-    pub(super) fn capture(
-        path: &Path,
-        key: &AccountDbKey,
-        private: &BackupDatabase,
-        owners: [&DeviceRef; 2],
-        cancelled: &Arc<AtomicBool>,
-        schema: &super::FullTransferSchema,
-    ) -> Result<Self, StorageError> {
+    pub(super) fn capture(request: &ContributionCapture<'_>) -> Result<Self, StorageError> {
+        let &ContributionCapture { path, key, private, owners, cancelled, schema, snapshot } =
+            request;
         let value = Self {
             nonce: ramflux_crypto::random_32()?,
             owners: [
@@ -103,9 +108,12 @@ impl Contributions {
         let mut db = open(path, key)?;
         db.execute_batch(super::union_encoding::SCHEMA)?;
         let tx = db.transaction()?;
-        schema.require_typed_owners(full_transfer_catalog())?;
+        if !snapshot {
+            schema.require_typed_owners(full_transfer_catalog())?;
+        }
         for (family, rule) in schema.families.iter().zip(full_transfer_catalog()) {
-            if family.source_rows.0 == 0
+            if snapshot
+                || family.source_rows.0 == 0
                 || rule.disposition
                     != ramflux_protocol::custody::pairing::full_transfer::Disposition::Transfer
             {

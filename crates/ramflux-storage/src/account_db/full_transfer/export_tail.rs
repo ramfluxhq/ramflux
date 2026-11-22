@@ -69,7 +69,8 @@ impl SourceContext<'_> {
         }
         let rules = full_transfer_catalog();
         let mut schema = self.source_cut_schema(request.cut, request.snapshot_id, rules)?;
-        schema.require_typed_owners(rules)?;
+        // Same gate as the base frame: an unclassified table already failed inspection.
+        // A nonempty family without a typed codec is not a refusal on this path.
         let current = self.materialize_export(request.cut, request.snapshot_id)?;
         require_current(&current, request.parent)?;
         let trailing =
