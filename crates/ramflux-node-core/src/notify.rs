@@ -22,6 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod bootstrap;
+mod delivery_gate;
 pub(crate) mod retention;
 mod route_authority;
 mod send_gate;
@@ -530,6 +531,7 @@ pub struct NotifyRedbStore {
     commit_writer: NotifyCommitWriter,
     runtime_state: Mutex<NotifyRuntimeState>,
     wal_shards: Option<Vec<NotifyWalShard>>,
+    delivery_gate: delivery_gate::DeliveryGate,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -888,6 +890,7 @@ impl NotifyRedbStore {
             commit_writer,
             runtime_state: Mutex::new(NotifyRuntimeState::default()),
             wal_shards,
+            delivery_gate: delivery_gate::DeliveryGate::new(),
         })
     }
 
@@ -1154,6 +1157,7 @@ impl NotifyRedbStore {
             entry: Box::new(entry.clone()),
             bounded_state: None,
         })?;
+        self.note_delivery_work();
         Ok(entry)
     }
 
@@ -1204,7 +1208,9 @@ impl NotifyRedbStore {
                 }
             }
         }
-        self.cancel_decoded_queue(wake_id)
+        self.cancel_decoded_queue(wake_id)?;
+        self.note_delivery_work();
+        Ok(())
     }
 
     fn cancel_decoded_queue(&self, wake_id: &str) -> Result<(), NodeCoreError> {
@@ -1247,7 +1253,9 @@ impl NotifyRedbStore {
                 .store
                 .tombstone_wake(&signed.body.wake_id)?;
         }
-        self.cancel_decoded_queue(&signed.body.wake_id)
+        self.cancel_decoded_queue(&signed.body.wake_id)?;
+        self.note_delivery_work();
+        Ok(())
     }
 
     /// Drops every pending notification that is not a current `WakeV2`.
@@ -1369,6 +1377,7 @@ impl NotifyRedbStore {
             entry: Box::new(entry.clone()),
             bounded_state: deferred_changed.then_some(Box::new(state)),
         })?;
+        self.note_delivery_work();
         Ok((entry, pushes))
     }
 
@@ -1435,6 +1444,7 @@ impl NotifyRedbStore {
                 bounded_state: None,
             })?;
         }
+        self.note_delivery_work();
         Ok(entry)
     }
 
@@ -1478,6 +1488,7 @@ impl NotifyRedbStore {
                 })
                 .await?;
         }
+        self.note_delivery_work();
         Ok(entry)
     }
 
@@ -1502,6 +1513,7 @@ impl NotifyRedbStore {
         let shard = self.wal_shard(shard_id)?;
         let raw = self.prepare_raw_wake(shard_id, &shard.store, raw_body, queued_at)?;
         if shard.store.enqueue_raw_once_async(raw.clone()).await? {
+            self.note_delivery_work();
             return Ok(raw);
         }
         Ok(raw)
@@ -1894,6 +1906,7 @@ impl NotifyRedbStore {
         }
         if !fresh.is_empty() {
             shard.store.record_raw_wakes_batch(fresh)?;
+            self.note_delivery_work();
         }
         Ok(raws)
     }
@@ -2416,7 +2429,9 @@ impl NotifyRedbStore {
                 .insert(device_delivery_id, routes_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        self.commit_route_transaction(write_txn, device_delivery_id)
+        self.commit_route_transaction(write_txn, device_delivery_id)?;
+        self.note_delivery_work();
+        Ok(())
     }
 
     fn record_notify_credential(
@@ -2441,7 +2456,9 @@ impl NotifyRedbStore {
                 .insert(credential.credential_id(), credential_bytes.as_slice())
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        self.commit_credential_transaction(write_txn, credential.credential_id())
+        self.commit_credential_transaction(write_txn, credential.credential_id())?;
+        self.note_delivery_work();
+        Ok(())
     }
 
     fn load_notify_routes(

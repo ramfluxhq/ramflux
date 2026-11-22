@@ -158,6 +158,8 @@ impl<'db> FullSourcePreparation<'db> {
         if self.cancelled.load(super::Ordering::Acquire) {
             return Err(StorageError::PairingField("Cancelled"));
         }
+        // `matches_encoding` already bound this manifest to the published snapshot.
+        // Retention checks that digest and the pinned cut, not the typed catalog.
         FullTransferStage::finish_prepared_source(
             SourceBindParts {
                 connection,

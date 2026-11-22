@@ -40,7 +40,7 @@ pub(crate) async fn owned_pair_with_vault(
         &words(&phrase, positions)?,
         vault.as_ref(),
         now,
-        b"surface-test-secret",
+        b"662207",
     )?;
     crate::custody::tests::mark_live(root, human, now)?;
     let created = crate::custody::agent_creation::test_agent::create_test_agent(
@@ -69,7 +69,7 @@ pub(crate) async fn owned_pair_with_vault(
     let (human_client, agent_client) =
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             Ok::<_, Box<dyn std::error::Error>>((
-                initialize(human, &format!("{human}-device"), b"surface-test-secret").await?,
+                initialize(human, &format!("{human}-device"), b"662207").await?,
                 initialize(&created.account_id, &created.device_id, created.passphrase.as_bytes())
                     .await?,
             ))
@@ -199,6 +199,24 @@ pub(crate) async fn owned_terminals_with_vault(
     }
     Ok((clients, vault))
 }
+/// Open a sibling's account data through its device-bound code wrap.
+fn open_device_bound(
+    root: &Path,
+    vault: &TestVault,
+    account_id: &str,
+) -> TestResult<RamfluxClient> {
+    let mut client = RamfluxClient::new();
+    client.open_account_index(root)?;
+    client.bind_device_unlock(
+        root,
+        vault,
+        account_id,
+        crate::client::device_unlock::DeviceSecret::Load,
+    )?;
+    client.unlock_account(account_id, b"662207")?;
+    Ok(client)
+}
+
 async fn enroll_surface_sibling(
     root: &Path,
     source: &mut RamfluxClient,
@@ -285,12 +303,10 @@ async fn enroll_surface_sibling(
         record: native.publication.record.clone(),
         branch: &seeds,
         vault: sibling_vault.as_ref(),
-        passphrase: b"surface-test-secret",
+        passphrase: b"662207",
         now,
     })?;
-    let mut client = RamfluxClient::new();
-    client.open_account_index(root)?;
-    client.unlock_account(account_id, b"surface-test-secret")?;
+    let mut client = open_device_bound(root, sibling_vault.as_ref(), account_id)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         client.initialize_born_v3_branch(device, sibling_vault),

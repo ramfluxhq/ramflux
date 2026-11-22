@@ -83,8 +83,8 @@ impl Vault {
             .0
             .lock()
             .map_err(|_| unavailable())?
-            .values()
-            .filter(|value| value.len() == 32)
+            .iter()
+            .filter(|(reference, value)| value.len() == 32 && !is_device_unlock(reference))
             .count())
     }
 }
@@ -112,6 +112,17 @@ impl PrimaryVault for Vault {
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError> {
         self.put(reference, seeds.as_slice())
     }
+    fn store_device_unlock_secret(
+        &self,
+        reference: &str,
+        secret: &Zeroizing<[u8; 32]>,
+    ) -> Result<(), SdkError> {
+        self.put(reference, secret.as_slice())
+    }
+    fn load_device_unlock_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        let entries = self.0.lock().map_err(|_| unavailable())?;
+        entries.get(reference).map(|value| Zeroizing::new(value.to_vec())).ok_or_else(unavailable)
+    }
     fn load_branch(
         &self,
         reference: &str,
@@ -120,4 +131,9 @@ impl PrimaryVault for Vault {
     ) -> Result<BranchCredentials, SdkError> {
         BranchCredentials::from_vault_seeds(principal, device, &self.branch_seeds(reference)?)
     }
+}
+
+/// The device-unlock secret is a 32-byte item that is neither a primary nor a branch credential.
+fn is_device_unlock(reference: &str) -> bool {
+    reference.starts_with("device-unlock:")
 }

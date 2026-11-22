@@ -248,15 +248,15 @@ mod passphrase_policy_tests {
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn restore_install_refuses_short_and_blocklisted_passphrases() -> TestResult {
+    async fn restore_install_refuses_codes_that_are_not_six_digits() -> TestResult {
         LocalSet::new()
             .run_until(async {
                 let root = crate::bus::runtime_tests::root("restore-passphrase-refused");
                 let config = LocalBusConfig::new(root.join("bus.sock"), &root);
                 let supervisor = Supervisor::from_initializers(&config, Vec::new(), None)?;
                 for (passphrase, expected) in [
-                    ("aaaaaaaaaaaaaa", crate::PassphrasePolicyError::TooShort { scalars: 14 }),
-                    ("films+pic+galeries", crate::PassphrasePolicyError::TooCommon),
+                    ("12345", crate::PassphrasePolicyError::NotSixDigits),
+                    ("films+pic+galeries", crate::PassphrasePolicyError::NotSixDigits),
                 ] {
                     let mut request = LocalBusFrame::request(
                         "restore-policy",

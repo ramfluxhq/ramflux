@@ -438,7 +438,7 @@ impl<'db> FullTransferStage<'db> {
             _serial: PhantomData,
         };
         stage.observe_full_native_head(sas_base)?;
-        stage.retain_source_manifest(manifest, super::full_transfer_catalog())?;
+        stage.retain_published_snapshot(manifest)?;
         sync_stage(&stage.directory)?;
         stage.source_context()?.require_source_live()?;
         Ok(stage)

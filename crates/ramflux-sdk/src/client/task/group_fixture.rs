@@ -58,17 +58,16 @@ pub(super) async fn fixture(with_other: bool, name: &str) -> TestResult<GroupFix
 
 /// Corrupt only the unsigned cache to model a stale projection beneath signed native state.
 pub(super) fn skew_projection(client: &RamfluxClient, epoch: u64) -> TestResult {
-    use crate::prelude::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write as _;
-    let material = client.native_bus_fixture.as_ref().ok_or("native fixture")?;
+    let _material = client.native_bus_fixture.as_ref().ok_or("native fixture")?;
     let account = &client.account_db()?.local_account_id;
-    let vault = FileVaultSecretSource::new(&material.root.0).vault_secret(account)?;
+    let vault = client.vault_secret_source()?.vault_secret(account)?;
     let wrapped = client.account_index()?.load_wrapped_db_key(account)?.ok_or("database key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &crate::client::account::account_db_key_encryption_key(
             &vault,
             b"native fixture data passphrase",
-        ),
+        )?,
         &wrapped,
     )?;
     let db = rusqlite::Connection::open(&client.account_db()?.path)?;

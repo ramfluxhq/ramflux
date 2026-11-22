@@ -370,10 +370,12 @@ fn cryptobox_sender_envelope(
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
     }
-    envelope.signed.signature = match client.device_branch.as_ref() {
-        Some(branch) => ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?,
-        None => ramflux_crypto::sign_protocol_object(&envelope)?,
-    };
+    let branch = client
+        .device_branch
+        .as_ref()
+        .ok_or_else(|| SdkError::GatewaySessionRejected("sealing config incomplete".into()))?;
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?;
     Ok(envelope)
 }
 
@@ -425,7 +427,7 @@ impl RamfluxClient {
                 },
             )?;
             let envelope = crate::dm::gateway_envelope_from_sealed(
-                engine.config(),
+                &engine.sealing_config()?,
                 &mut message,
                 sealed,
                 None,

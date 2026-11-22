@@ -46,6 +46,14 @@ impl ClassifiedSubmit for GatewaySessionEngine {
 pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     /// Returns the caller's immutable connection coordinates and signing context.
     fn config(&self) -> &GatewaySessionConfig;
+    /// Complete config for sealing. A live session already carries the device branch
+    /// and source identity; this does not refill a stored account config.
+    ///
+    /// # Errors
+    /// The session config has no device branch or no source identity.
+    fn sealing_config(&self) -> Result<crate::SealingConfig, SdkError> {
+        crate::SealingConfig::from_live_session(self.config())
+    }
     /// Returns the authenticated session metadata captured for this caller's generation.
     fn session(&self) -> &GatewaySessionState;
     /// True only when this session generation received the required transient echo.

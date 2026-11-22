@@ -66,7 +66,10 @@ impl FullTransferStage<'_> {
         }
         let cut = self.db.pin_full_transfer_cut()?;
         let (schema, storage_generation, erasure_generation) = cut.inspect_full_profile_cut()?;
-        schema.require_typed_owners(super::full_transfer_catalog())?;
+        let export = super::export_tail::is_export_census(&forward.manifest.census_hash)?;
+        if !export {
+            schema.require_typed_owners(super::full_transfer_catalog())?;
+        }
         // Fresh stores contain the zero erasure-generation singleton and a local MAC
         // verifier bundle. Zero does not advance a max-generation floor; verifier keys
         // alone express no veto when EVERY other restrictive owner is empty. Preserve
@@ -84,7 +87,11 @@ impl FullTransferStage<'_> {
         {
             return Err(StorageError::PairingField("UnsupportedRecord"));
         }
-        if ramflux_protocol::encode_base64url(schema.census_hash) != forward.manifest.census_hash {
+        // An export forward census is the contract digest, not the typed catalog hash.
+        if !export
+            && ramflux_protocol::encode_base64url(schema.census_hash)
+                != forward.manifest.census_hash
+        {
             return Err(StorageError::PairingField("SchemaMismatch"));
         }
         let families = schema.families.into_iter().filter(|family| family.restrictive).collect();

@@ -63,7 +63,8 @@ impl SourceContext<'_> {
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         let rules = full_transfer_catalog();
         let mut schema = self.source_cut_schema(0, snapshot_id, rules)?;
-        schema.require_typed_owners(rules)?;
+        // The census supplies the manifest family list. Typed-owner refusal stays off
+        // this path: the builder refuses an unknown namespace while it writes the file.
         let target = self.directory.join(format!("account-export-{snapshot_id}.db"));
         let _remove = RemoveFile(target.clone());
         let built = self.build_cut(snapshot_id, &target)?;

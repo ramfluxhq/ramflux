@@ -19,7 +19,7 @@ pub(super) fn finish_after_g2_restart(
         frontend.unlock_account(&rig.participant_b.account_id, b"wrong-original-password").is_err(),
         "test: G2 crash recovery bypassed B's wrapping"
     );
-    frontend.unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")?;
+    frontend.unlock_account(&rig.participant_b.account_id, b"752913")?;
     assert!(
         !crate::custody::pairing::ordinary_session_admitted(
             &frontend,
@@ -152,9 +152,7 @@ mod tests {
             b"{}",
         )?;
         assert!(
-            frontend
-                .unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")
-                .is_err(),
+            frontend.unlock_account(&rig.participant_b.account_id, b"752913").is_err(),
             "test: pending G2 hid malformed native authority"
         );
         std::fs::remove_file(&authority_path)?;
@@ -195,8 +193,7 @@ mod tests {
             )?;
             *rig.participant_b.db.lock().map_err(|_| "test: original B owner")? = Some(db);
         } else {
-            frontend
-                .unlock_account(&rig.participant_b.account_id, b"component-recipient-passphrase")?;
+            frontend.unlock_account(&rig.participant_b.account_id, b"752913")?;
             rig.participant_b.take_client(&mut frontend)?;
         }
         Box::pin(exercise_recovered_actor(
@@ -299,7 +296,7 @@ mod tests {
         );
         actor.lock().await?;
         drop(frontend.active_account_db.take());
-        frontend.unlock_account(&install.account_id, b"component-recipient-passphrase")?;
+        frontend.unlock_account(&install.account_id, b"752913")?;
         rig.participant_b.take_client(&mut frontend)?;
         let mut reopened = cold_installed_actor(rig, &install, &authority, restart_relay)?;
         let status =
@@ -375,7 +372,7 @@ mod tests {
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let mut client = crate::RamfluxClient::new();
         client.open_account_index(root)?;
-        client.unlock_account(account, b"component-recipient-passphrase")?;
+        client.unlock_account(account, b"752913")?;
         client
             .account_db()?
             .pairing_live_rows()?

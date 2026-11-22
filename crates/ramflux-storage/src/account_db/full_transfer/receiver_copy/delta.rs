@@ -108,12 +108,23 @@ impl FullReceiverBaseCopy {
     }
     pub(in crate::account_db::full_transfer) fn project_delta_input(
         &mut self,
-        stage: &impl super::super::receiver_read::ReceiverInput,
+        stage: &(
+             impl super::super::receiver_read::ReceiverInput
+             + super::super::retained_digest::ExportRetain
+         ),
         hash: &str,
     ) -> Result<FullScalarInputCounts, StorageError> {
+        let next = stage.forward_manifest(hash)?;
+        if super::super::export_tail::is_export_census(&next.manifest.census_hash)?
+            && next.manifest.kind == ManifestKind::Delta
+        {
+            if self.export_installed {
+                self.verify_input(stage)?;
+            }
+            return self.install_export_frame(stage, hash);
+        }
         self.verify_input(stage)?;
         let previous = stage.forward_manifest(&self.hash)?;
-        let next = stage.forward_manifest(hash)?;
         if next.manifest.kind != ManifestKind::Delta {
             return Err(wrong());
         }

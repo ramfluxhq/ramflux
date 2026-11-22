@@ -28,7 +28,7 @@ pub(crate) enum PairingAction {
     Begin {
         #[arg(long)]
         display_name: String,
-        #[arg(long, value_delimiter = ',', default_value = "message,register,sync")]
+        #[arg(long, value_delimiter = ',', default_value = "call,group,message,register,sync")]
         capabilities: Vec<String>,
         #[arg(long)]
         lease_not_before: u64,

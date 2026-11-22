@@ -16,7 +16,7 @@ use crate::schema::{
     ACCOUNT_SCHEMA_COMPOUND_SELECT_LIMIT, ACCOUNT_SCHEMA_EXPR_DEPTH_LIMIT,
     ACCOUNT_SCHEMA_FUNCTION_ARG_LIMIT, ACCOUNT_SCHEMA_LENGTH_LIMIT,
     ACCOUNT_SCHEMA_LIKE_PATTERN_LIMIT, ACCOUNT_SCHEMA_OBJECT_LIMIT,
-    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
+    ACCOUNT_SCHEMA_PARSER_DEPTH_LIMIT, ACCOUNT_SCHEMA_ROW_CELL_LIMIT, ACCOUNT_SCHEMA_SQL_LIMIT,
     ACCOUNT_SCHEMA_TRIGGER_DEPTH_LIMIT, ACCOUNT_SCHEMA_VARIABLE_LIMIT,
     ACCOUNT_SCHEMA_VDBE_OP_LIMIT, ACCOUNT_SCHEMA_WORKER_THREADS_LIMIT, MAX_DECLARED_TRIGGER_STEPS,
 };
@@ -298,6 +298,9 @@ impl VerifiedExport {
         }
         phase.store(PHASE_QUICK_CHECK, Ordering::SeqCst);
         quick_check(&db)?;
+        // Schema load measured a 24505-byte statement. A restored cell may be larger.
+        db.set_limit(Limit::SQLITE_LIMIT_LENGTH, ACCOUNT_SCHEMA_ROW_CELL_LIMIT)
+            .map_err(|error| refused_by("harden", &error))?;
         phase.store(PHASE_ROWS, Ordering::SeqCst);
         let verified = Self { db, phase, budget, pages };
         verified.require_root(expected_root)?;

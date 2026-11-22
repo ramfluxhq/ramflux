@@ -33,6 +33,26 @@ impl FullTransferStage<'_> {
         }
         self.retain_own_manifest(manifest, rules, false)
     }
+
+    /// Retain the base that `publish_account_export` just signed.
+    /// The census has to be the export contract digest. The typed catalog is not read.
+    /// # Errors
+    /// `SchemaMismatch` when the census is not that digest. `SnapshotInvalidated`
+    /// when the pinned cut's storage or erasure generation moved. Role and signature
+    /// failures from manifest retention.
+    pub(super) fn retain_published_snapshot(
+        &mut self,
+        manifest: &SourceManifest,
+    ) -> Result<(), StorageError> {
+        if manifest.manifest.kind == ManifestKind::Tail {
+            return Err(mismatch());
+        }
+        if !super::export_tail::is_export_census(&manifest.manifest.census_hash)? {
+            return Err(StorageError::PairingField("SchemaMismatch"));
+        }
+        manifest.validate().map_err(|_| mismatch())?;
+        self.retain_snapshot_manifest(manifest, false)
+    }
     pub(super) fn retain_own_manifest(
         &mut self,
         manifest: &SourceManifest,
@@ -41,6 +61,12 @@ impl FullTransferStage<'_> {
     ) -> Result<(), StorageError> {
         manifest.validate().map_err(|_| mismatch())?;
         let body = &manifest.manifest;
+        // A snapshot frame's census is the export contract digest. Rebuilding it
+        // through the typed catalog disagrees with that digest and refuses families
+        // whose codec has no owner (`sql/contact_link_decision` / `link_id`).
+        if super::export_tail::is_export_census(&body.census_hash)? {
+            return self.retain_snapshot_manifest(manifest, tail);
+        }
         let own = self.source_cut_schema(body.snapshot_cut.0, &body.snapshot_id, rules)?;
         own.require_typed_owners(rules)?;
         body.validate_catalog(&own.families, false)
@@ -57,6 +83,36 @@ impl FullTransferStage<'_> {
         {
             return Err(mismatch());
         }
+        self.require_cut_generations(body)?;
+        if tail {
+            self.retain_tail_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
+        } else {
+            self.retain_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
+        }
+    }
+
+    /// Retain a manifest whose census is the published snapshot digest.
+    /// The signed families are that manifest. The pinned cut still has to match
+    /// its storage and erasure generations.
+    fn retain_snapshot_manifest(
+        &mut self,
+        manifest: &SourceManifest,
+        tail: bool,
+    ) -> Result<(), StorageError> {
+        let body = &manifest.manifest;
+        self.require_cut_generations(body)?;
+        let families = &body.families;
+        if tail {
+            self.retain_tail_manifest_for_role(manifest, families, PairingRole::Initiator)
+        } else {
+            self.retain_manifest_for_role(manifest, families, PairingRole::Initiator)
+        }
+    }
+
+    fn require_cut_generations(
+        &mut self,
+        body: &ramflux_protocol::custody::pairing::full_transfer::Manifest,
+    ) -> Result<(), StorageError> {
         let (schema, erasure): (u64, u64) =
             self.with_source_cut(body.snapshot_cut.0, &body.snapshot_id, |input| {
                 Ok((
@@ -75,11 +131,7 @@ impl FullTransferStage<'_> {
         if schema != body.storage_generation.0 || erasure != body.source_erasure_generation.0 {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
-        if tail {
-            self.retain_tail_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
-        } else {
-            self.retain_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
-        }
+        Ok(())
     }
 
     /// Verify B's receipt against A's OWN retained chain and original SAS branch key,

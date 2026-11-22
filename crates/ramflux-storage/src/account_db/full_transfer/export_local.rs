@@ -4,6 +4,7 @@
 //! Copy B-local pairing rows onto an installed export file.
 //! The rows come from B's open account, never from the export snapshot.
 //! Empty canonical tables are the product schema; this module inserts no stand-in rows.
+//! The off-loan replay path does not use this: its scratch file stays the full snapshot.
 
 use crate::account_db::pairing::schema::TABLES;
 use crate::{AccountDbKey, StorageError};

@@ -15,6 +15,7 @@ pub mod probe;
 mod tables;
 
 use crate::{AccountDb, StorageError};
+pub(crate) use classification::table_excluded;
 use contract::RowFilter;
 pub use contract::export_contract_digest;
 

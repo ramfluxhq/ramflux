@@ -83,7 +83,10 @@ impl FullReceiverBaseCopy {
     }
     pub(in crate::account_db::full_transfer) fn project_chain_input(
         &mut self,
-        stage: &impl super::super::receiver_read::ReceiverInput,
+        stage: &(
+             impl super::super::receiver_read::ReceiverInput
+             + super::super::retained_digest::ExportRetain
+         ),
         hashes: &[String],
     ) -> Result<(), StorageError> {
         let last = hashes.last().ok_or_else(wrong)?;
@@ -96,7 +99,10 @@ impl FullReceiverBaseCopy {
     }
     pub(in crate::account_db::full_transfer) fn project_prefix_input(
         &mut self,
-        stage: &impl super::super::receiver_read::ReceiverInput,
+        stage: &(
+             impl super::super::receiver_read::ReceiverInput
+             + super::super::retained_digest::ExportRetain
+         ),
         hashes: &[String],
     ) -> Result<(), StorageError> {
         let record = stage.resume_record()?;
@@ -107,6 +113,20 @@ impl FullReceiverBaseCopy {
             || hashes.first() != Some(&record.base_manifest_hash)
         {
             return Err(wrong());
+        }
+        let Some(base_hash) = hashes.first() else {
+            return Err(wrong());
+        };
+        let base = stage.forward_manifest(base_hash)?;
+        if super::super::export_tail::is_export_census(&base.manifest.census_hash)? {
+            self.install_export_frame(stage, base_hash)?;
+            for hash in hashes.iter().skip(1) {
+                if stage.forward_manifest(hash)?.manifest.kind != ManifestKind::Delta {
+                    return Err(wrong());
+                }
+                self.install_export_frame(stage, hash)?;
+            }
+            return self.verify_input(stage);
         }
         self.project_input(stage)?;
         for hash in hashes.iter().skip(1) {

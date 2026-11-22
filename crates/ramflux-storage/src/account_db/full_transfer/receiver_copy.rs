@@ -13,6 +13,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 pub(super) mod application;
 mod delta;
+mod export_frame;
 mod generation;
 pub(super) mod rebase;
 pub use application::FullAppliedDataReceipt;
@@ -41,6 +42,10 @@ pub struct FullPinnedReceiverBase {
     cancelled: Arc<AtomicBool>,
     owners: [ramflux_protocol::custody::DeviceRef; 2],
     schema: super::FullTransferSchema,
+    /// The forward base is a snapshot frame. Typed family rows are not copied.
+    snapshot: bool,
+    /// Account erasure generation at pin time. Replay has no live account loan.
+    erasure_generation: i64,
 }
 
 /// Device-local encrypted B copy with its non-forgeable original-cut provenance.
@@ -59,6 +64,8 @@ pub struct FullReceiverBaseCopy {
     attested: std::sync::Mutex<Option<seal::CopySeal>>,
     /// The private file is a clean export copy, not a record projection.
     export_installed: bool,
+    /// Account erasure generation pinned with this copy.
+    erasure_generation: i64,
 }
 
 impl FullTransferStage<'_> {
@@ -80,7 +87,11 @@ impl FullTransferStage<'_> {
         }
         let (cut, observation) = self.db.pin_full_transfer_target()?;
         let (schema, _, _) = cut.inspect_full_profile_cut()?;
-        schema.require_typed_owners(super::full_transfer_catalog())?;
+        let snapshot = super::export_tail::is_export_census(&manifest.manifest.census_hash)?;
+        if !snapshot {
+            schema.require_typed_owners(super::full_transfer_catalog())?;
+        }
+        let erasure_generation = self.db.privacy_erasure_generation()?;
         let scratch =
             Scratch::create(&self.directory, self.retained_receiver_workspace()?.as_deref())?;
         self.require_io()?;
@@ -94,6 +105,8 @@ impl FullTransferStage<'_> {
             cancelled: self.source_cancelled.clone(),
             owners: [record.grant.source_ref, record.grant.destination_ref],
             schema,
+            snapshot,
+            erasure_generation,
         })
     }
 }
@@ -105,13 +118,17 @@ impl FullPinnedReceiverBase {
         let path = self.scratch.path.join("private.db");
         let snapshot = self.cut.write_private_snapshot(&path, self.cancelled.clone())?;
         let private = BackupDatabase::open_full_receiver_copy(&path, &snapshot.key)?;
+        let contributions_path = self.scratch.path.join("contributions.db");
         let contributions = super::receiver_contributions::Contributions::capture(
-            &self.scratch.path.join("contributions.db"),
-            &snapshot.key,
-            &private,
-            [&self.owners[0], &self.owners[1]],
-            &self.cancelled,
-            &self.schema,
+            &super::receiver_contributions::ContributionCapture {
+                path: &contributions_path,
+                key: &snapshot.key,
+                private: &private,
+                owners: [&self.owners[0], &self.owners[1]],
+                cancelled: &self.cancelled,
+                schema: &self.schema,
+                snapshot: self.snapshot,
+            },
         )?;
         drop(private);
         Ok(FullReceiverBaseCopy {
@@ -125,6 +142,7 @@ impl FullPinnedReceiverBase {
             scratch: self.scratch,
             attested: std::sync::Mutex::new(None),
             export_installed: false,
+            erasure_generation: self.erasure_generation,
         })
     }
 }

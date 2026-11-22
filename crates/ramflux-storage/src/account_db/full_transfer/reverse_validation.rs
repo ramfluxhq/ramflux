@@ -63,7 +63,9 @@ fn validate_input(
     let catalog =
         rules.iter().map(super::FamilyRule::manifest_family).collect::<Result<Vec<_>, _>>()?;
     body.validate_catalog(&catalog, true).map_err(|_| mismatch())?;
-    if body.census_hash != ramflux_protocol::encode_base64url(full_census_hash(rules)?) {
+    // A snapshot reverse census is the export contract digest, not the typed catalog hash.
+    let export = super::export_tail::is_export_census(&body.census_hash)?;
+    if !export && body.census_hash != ramflux_protocol::encode_base64url(full_census_hash(rules)?) {
         return Err(StorageError::PairingField("SchemaMismatch"));
     }
     let mut counts = vec![(0_u64, 0_u64); rules.len()];

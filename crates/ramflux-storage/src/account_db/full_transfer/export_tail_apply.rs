@@ -10,8 +10,8 @@ use super::{FullScalarInputCounts, FullTailEndpoint};
 use crate::StorageError;
 use crate::account_db::transfer_export::digest::{self, ExportedRow, RowDigest};
 use ramflux_protocol::custody::pairing::full_transfer::PREPUBLICATION_DELTA_STOP_BYTES;
-use rusqlite::params_from_iter;
 use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
@@ -62,10 +62,10 @@ pub(super) fn validate_export_tail(
     })
 }
 
-/// Apply the tail on a scratch copy of B's current file, fsync that copy, and rename it
-/// onto the account path. The open connection then denies every statement. The keyed set
-/// is destroyed only after that rename and its sync. A retry that finds this hash's marker
-/// destroys any leftover key and returns success.
+/// Apply the tail as one immediate transaction on B's open account. The scratch copy is
+/// only the read cut for the digest plan. The account stays WAL, the file is not renamed,
+/// and the open connection stays usable. The keyed set is destroyed only after that commit.
+/// A retry that finds this hash's marker destroys any leftover key and returns success.
 /// # Errors
 /// `RetainedDigestMissing` when the set is gone and this hash was not marked;
 /// `ManifestMismatch` when the section or a row decision disagrees; `WrongContext`
@@ -101,6 +101,7 @@ pub(super) fn apply_export_tail(
         mac,
         tail,
         retained,
+        ledger: apply_ledger(endpoint, hash, manifest.manifest.total_bytes.0)?,
     };
     endpoint.stage.db.connection.call(move |db| Ok(apply_on_copy(db, &job)))??;
     let parent = endpoint.stage.db.path.parent().ok_or_else(wrong)?;
@@ -118,6 +119,33 @@ struct CopyJob {
     mac: zeroize::Zeroizing<[u8; 32]>,
     tail: Vec<ExportedRow>,
     retained: Digests,
+    ledger: ApplyLedger,
+}
+
+struct ApplyLedger {
+    operation: String,
+    nonce: String,
+    digest: [u8; 32],
+    owner: String,
+    hash: String,
+    total: i64,
+}
+
+fn apply_ledger(
+    endpoint: &FullTailEndpoint<'_>,
+    hash: &str,
+    total_bytes: u64,
+) -> Result<ApplyLedger, StorageError> {
+    let record = endpoint.stage.resume_record()?;
+    let adoption = endpoint.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
+    Ok(ApplyLedger {
+        operation: endpoint.operation.clone(),
+        nonce: adoption.full_generation_nonce.ok_or_else(wrong)?,
+        digest: record.stage_digest()?,
+        owner: super::super::mac_subkeys::full::source_key(&record.grant.source_ref)?,
+        hash: hash.to_owned(),
+        total: i64::try_from(total_bytes).map_err(|_| StorageError::PairingField("NoSpace"))?,
+    })
 }
 
 fn apply_on_copy(live: &mut rusqlite::Connection, job: &CopyJob) -> Result<(), StorageError> {
@@ -126,7 +154,7 @@ fn apply_on_copy(live: &mut rusqlite::Connection, job: &CopyJob) -> Result<(), S
     let current = digest_map(digest::rows(copy.after(), mac_bytes)?)?;
     let tail_keys = key_set(job.tail.iter().map(|row| (row.table.to_owned(), row.key.clone())));
     let (deletes, inserts) = plan(&job.tail, &job.retained, &current, &tail_keys)?;
-    copy.commit_and_replace(live, &job.live_path, |tx| commit(tx, &deletes, &inserts))
+    copy.commit_and_replace(live, &job.live_path, |tx| commit(tx, &deletes, &inserts, &job.ledger))
 }
 
 fn spill(
@@ -290,6 +318,7 @@ fn commit(
     tx: &rusqlite::Transaction<'_>,
     deletes: &[Delete],
     inserts: &[Insert],
+    ledger: &ApplyLedger,
 ) -> Result<(), StorageError> {
     for delete in deletes {
         if tx.execute(&delete.sql, params_from_iter(delete.values.iter()))? != 1 {
@@ -306,5 +335,32 @@ fn commit(
         }
         tx.execute(&insert.sql, params_from_iter(insert.values.iter()))?;
     }
-    Ok(())
+    // Export prepare does not seed this row. The receipt requires phase 2.
+    record_receipt_row(tx, ledger)
+}
+
+fn record_receipt_row(
+    tx: &rusqlite::Transaction<'_>,
+    ledger: &ApplyLedger,
+) -> Result<(), StorageError> {
+    let changed = tx.execute("UPDATE pairing_full_tail_apply SET phase=2,next_record=?1,tail_hash=?2 WHERE operation_id=?3 AND generation_nonce=?4 AND stage_digest=?5 AND tail_status IN('pending','merged') AND (tail_hash IS NULL OR tail_hash=?2)",
+        params![ledger.total, ledger.hash, ledger.operation, ledger.nonce, ledger.digest.as_slice()])?;
+    if changed == 1 || receipt_ready(tx, ledger)? {
+        return Ok(());
+    }
+    tx.execute(
+        "DELETE FROM pairing_full_tail_apply WHERE operation_id=?1 OR generation_nonce=?2",
+        params![ledger.operation, ledger.nonce],
+    )?;
+    tx.execute("INSERT INTO pairing_full_tail_apply(operation_id,generation_nonce,stage_digest,source_owner,tail_hash,phase,next_record,tail_status) VALUES(?1,?2,?3,?4,?5,2,?6,'pending')",
+        params![ledger.operation, ledger.nonce, ledger.digest.as_slice(), ledger.owner, ledger.hash, ledger.total])?;
+    if receipt_ready(tx, ledger)? { Ok(()) } else { Err(wrong()) }
+}
+
+fn receipt_ready(
+    tx: &rusqlite::Transaction<'_>,
+    ledger: &ApplyLedger,
+) -> Result<bool, StorageError> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM pairing_full_tail_apply WHERE operation_id=?1 AND generation_nonce=?2 AND stage_digest=?3 AND tail_hash=?4 AND phase=2 AND next_record=?5 AND tail_status IN('pending','merged'))",
+        params![ledger.operation, ledger.nonce, ledger.digest.as_slice(), ledger.hash, ledger.total], |row| row.get(0))?)
 }

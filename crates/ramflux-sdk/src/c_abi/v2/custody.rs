@@ -39,7 +39,8 @@ pub struct RamfluxV2CustodyProvider {
 }
 
 /// One synchronous storage request. Never write beyond `output_capacity` or retain pointers.
-/// Store inputs are secret bytes: primary=32, branch=64, provisioning<=4096.
+/// Store inputs are secret bytes: primary=32, branch=64, provisioning<=4096 (the
+/// `device-unlock:<id>` item is a 32-byte provisioning entry).
 /// Loads write the same bytes and set `output_len`; other operations return length 0.
 /// SDK-owned output memory is erased after use. Hosts erase their own temporary copies.
 #[repr(C)]
@@ -94,13 +95,21 @@ impl HostVault {
                 crate::custody::require_vault_reference(reference, "branch:")?;
             }
             Op::StoreProvisioning | Op::LoadProvisioning => {
-                crate::custody::require_vault_reference(reference, "agent-provisioning:")?;
+                // The device-unlock secret rides the provisioning operations (no new method).
+                let prefix = if reference.starts_with(crate::custody::DEVICE_UNLOCK_PREFIX) {
+                    crate::custody::DEVICE_UNLOCK_PREFIX
+                } else {
+                    "agent-provisioning:"
+                };
+                crate::custody::require_vault_reference(reference, prefix)?;
             }
             Op::Delete => {
                 let prefix = if reference.starts_with("branch:") {
                     "branch:"
                 } else if reference.starts_with("agent-provisioning:") {
                     "agent-provisioning:"
+                } else if reference.starts_with(crate::custody::DEVICE_UNLOCK_PREFIX) {
+                    crate::custody::DEVICE_UNLOCK_PREFIX
                 } else {
                     ""
                 };

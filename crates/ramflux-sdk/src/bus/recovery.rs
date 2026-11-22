@@ -137,11 +137,19 @@ async fn confirm(
     let secret = input.passphrase;
     let verification_id = id.clone();
     let lease = supervisor.root_lease.borrow().clone();
+    let vault = super::custody_setup::primary_provider(&supervisor.config);
     let secret = tokio::task::spawn_blocking(move || {
         let _root_lease = lease;
-        crate::client::account::verify_stored_data_secret(
+        let source = crate::client::device_unlock::DeviceBoundVaultSecret::bind(
+            &root,
+            vault.as_ref(),
+            &verification_id,
+            crate::client::device_unlock::DeviceSecret::Load,
+        )?;
+        crate::client::account::verify_stored_data_secret_with(
             &root,
             &verification_id,
+            &source,
             secret.as_bytes(),
         )?;
         Ok::<_, SdkError>(secret)

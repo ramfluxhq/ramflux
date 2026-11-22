@@ -12,7 +12,7 @@ use serde_json::Value;
 pub(crate) struct Draft {
     pub target: Target,
     pub request: SendMaterialRequest,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
     message: GatewayDirectMessage,
     route: crate::client::routed::Route,
     body: zeroize::Zeroizing<Vec<u8>>,

@@ -151,6 +151,14 @@ impl FullReverseSourceWork {
         }
         let (_, encoded) = source.encode_fixed_reverse_source(&self.snapshot, std::io::sink())?;
         let base = self.forward.manifest;
+        // A snapshot forward census is the export contract digest. The typed
+        // reverse hash is a different value and must not replace that digest.
+        let export = super::export_tail::is_export_census(&base.census_hash)?;
+        let census_hash = if export {
+            base.census_hash.clone()
+        } else {
+            ramflux_protocol::encode_base64url(encoded.schema.census_hash)
+        };
         let manifest = Manifest {
             schema: "ramflux.pairing.full_transfer.manifest.v1".into(),
             version: 1,
@@ -166,7 +174,7 @@ impl FullReverseSourceWork {
             kind: ManifestKind::Base,
             source_erasure_generation: U64(encoded.source_erasure_generation),
             storage_generation: U64(encoded.storage_generation),
-            census_hash: ramflux_protocol::encode_base64url(encoded.schema.census_hash),
+            census_hash,
             families: encoded.schema.families,
             total_bytes: U64(encoded.total_bytes),
             chunk_bytes: U64(u64::from(CHUNK_BYTES)),

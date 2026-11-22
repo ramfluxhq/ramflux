@@ -326,7 +326,7 @@ impl RamfluxClient {
 
     pub(crate) fn seal_authored_history(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         mut plan: Plan,
         material: SendMaterial,
     ) -> Result<Option<(Plan, ramflux_protocol::Envelope)>, SdkError> {
@@ -349,7 +349,7 @@ impl RamfluxClient {
             let capture = db
                 .load_actor_state::<Captured>(&format!("{CAPTURE}{}", work.owner))?
                 .ok_or_else(|| SdkError::InboundPending("own history capture erased".into()))?;
-            let mut message = self.authored_history_message(config, &work)?;
+            let mut message = self.authored_history_message(config.config(), &work)?;
             let identity = self.allocate_generated_identity(
                 &message.conversation_id,
                 crate::client::generated_identity::now_ms(),

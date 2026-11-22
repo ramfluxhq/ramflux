@@ -172,6 +172,25 @@ impl OwnedReceiverInput {
         &self.connection
     }
 }
+impl super::super::retained_digest::ExportRetain for OwnedReceiverInput {
+    fn retain_export_frame(
+        &self,
+        path: &std::path::Path,
+        key: &crate::AccountDbKey,
+        expected_root: &str,
+        generation: i64,
+    ) -> Result<(), StorageError> {
+        super::super::retained_digest::retain_export_rows(
+            &self.connection,
+            &self.directory,
+            path,
+            key,
+            expected_root,
+            generation,
+        )?;
+        super::super::retained_digest::require_export_rows(&self.connection, &self.directory)
+    }
+}
 impl ReceiverInput for OwnedReceiverInput {
     fn require_io(&self) -> Result<(), StorageError> {
         self.guard.require()
