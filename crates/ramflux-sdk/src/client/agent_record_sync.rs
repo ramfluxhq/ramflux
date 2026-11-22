@@ -268,6 +268,14 @@ impl RamfluxClient {
         metadata: &g::AgentMetadata,
     ) -> Result<bool, SdkError> {
         let owner = self.own_account_anchor()?;
-        apply_metadata(&self.agent_record_store()?, &owner, metadata)
+        let changed = apply_metadata(&self.agent_record_store()?, &owner, metadata)?;
+        if changed {
+            // The file is already stored. Failing this call would skip a later retry that sees
+            // the same record as not newer, so a refused acceptance waits for maintenance.
+            if let Err(error) = self.accept_own_agent_anchor(&metadata.agent_anchor) {
+                tracing::warn!(%error, "own-agent contact acceptance deferred");
+            }
+        }
+        Ok(changed)
     }
 }

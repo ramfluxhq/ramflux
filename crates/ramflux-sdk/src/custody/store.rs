@@ -511,19 +511,30 @@ impl BornAccount {
     pub fn local_account_id(&self) -> &str {
         &self.stored.local_account_id
     }
-    /// Resolve renderer authority from the local creator registry and verified custody records.
+    /// Whether `anchor` is this owner's agent for rendering.
+    ///
+    /// `publication_bound` is the pinned current publication check. Both the hosted-account path
+    /// and the phone path (no local account for `anchor`) require it, plus a non-retired record.
+    /// A hosted account whose anchor matches must still agree; disagreement fails closed.
     pub(crate) fn owns_surface_agent(
         &self,
         author: &str,
         anchor: &str,
         now: u64,
+        publication_bound: bool,
     ) -> Result<bool, SdkError> {
-        if self.authority_blocked
+        if !publication_bound
+            || self.authority_blocked
             || self.record().body.principal_kind != ramflux_protocol::PrincipalKind::Human
+            || !self.records_own_agent(anchor)
         {
             return Ok(false);
         }
+        self.hosted_agent_agrees(author, anchor, now)
+    }
+    fn hosted_agent_agrees(&self, author: &str, anchor: &str, now: u64) -> Result<bool, SdkError> {
         let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        let mut saw_anchor = false;
         for summary in list_accounts(root, now)? {
             let Some(id) = summary.get("local_account_id").and_then(serde_json::Value::as_str)
             else {
@@ -532,31 +543,20 @@ impl BornAccount {
             let Ok(agent) = load_account(root, id, now) else {
                 continue;
             };
-            if !agent.authority_blocked
-                && agent.record().body.principal_id == author
-                && agent.record().body.account_anchor == anchor
-                && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
-                && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
-                    load_account(root, id, now).is_ok_and(|custodian| {
-                        !custodian.authority_blocked
-                            && custodian.record().body.account_anchor
-                                == self.record().body.account_anchor
-                    })
-                })
-                && agent.record().body.profile.custodian.as_ref().is_some_and(|custodian| {
-                    custodian.account_anchor == self.record().body.account_anchor
-                })
-            {
+            if agent.record().body.account_anchor != anchor {
+                continue;
+            }
+            saw_anchor = true;
+            if hosted_account_matches(self, &agent, author, root, now) {
                 return Ok(true);
             }
         }
-        Ok(self.records_own_agent(anchor))
+        Ok(!saw_anchor)
     }
     /// Whether this owner's agent record names `anchor` as one of its live agents. The record is
-    /// written when a creation completes and reaches every own device (`agent_record_sync`), so the
-    /// primary phone, which approves an agent hosted on a paired desktop and holds none of its
-    /// keys, recognises it. `anchor` is the author's verified directory root. A record that cannot
-    /// be read is not an ownership claim.
+    /// a discovery hint written when a creation completes and synced to every own device. It is
+    /// not ownership by itself: rendering and acceptance also require the pinned publication.
+    /// A record that cannot be read is not an ownership claim.
     pub(crate) fn records_own_agent(&self, anchor: &str) -> bool {
         let record = self.agent_creation_store().and_then(|store| {
             crate::agent_record::AgentRecordStore::at(store.agent_record_dir()).load(anchor)
@@ -802,6 +802,31 @@ fn reconcile_marker(
         Err(error) => Err(error.into()),
     }
 }
+fn hosted_account_matches(
+    owner: &BornAccount,
+    agent: &BornAccount,
+    author: &str,
+    root: &Path,
+    now: u64,
+) -> bool {
+    !agent.authority_blocked
+        && agent.record().body.principal_id == author
+        && agent.record().body.principal_kind == ramflux_protocol::PrincipalKind::HeadlessAi
+        && agent.stored.custodian_account_id.as_ref().is_some_and(|id| {
+            load_account(root, id, now).is_ok_and(|custodian| {
+                !custodian.authority_blocked
+                    && custodian.record().body.account_anchor == owner.record().body.account_anchor
+            })
+        })
+        && agent
+            .record()
+            .body
+            .profile
+            .custodian
+            .as_ref()
+            .is_some_and(|custodian| custodian.account_anchor == owner.record().body.account_anchor)
+}
+
 pub(crate) fn list_accounts(root: &Path, now: u64) -> Result<Vec<serde_json::Value>, SdkError> {
     let dir = root.join("custody_accounts");
     if !dir.try_exists()? {

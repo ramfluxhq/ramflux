@@ -3,9 +3,10 @@
 
 //! Creating an agent makes it its owner's contact. The agent's account on the device that hosts
 //! it sends the ordinary contact request to its custodian once (signed with the agent's own key,
-//! `BornAccount::contact_signer`); the owner's primary accepts a request from one of its own live
-//! agents by itself (`contact_requests`), and acceptance creates the direct conversation. The
-//! owner's other devices learn the contact by own-device sync.
+//! `BornAccount::contact_signer`). The owner's primary accepts that request only when the agent's
+//! pinned current publication names this owner and the local record is still live
+//! (`contact_requests`). Acceptance creates the direct conversation. The owner's other devices
+//! learn the contact by own-device sync.
 use super::AccountRuntime;
 use crate::bus::dispatch::contact::dispatch_contact_bus_request;
 use crate::custody::load_account;
