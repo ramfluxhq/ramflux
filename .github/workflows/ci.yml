@@ -1366,7 +1366,7 @@ jobs:
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           repository: openprx/prx
-          ref: 5d92a43a43a6373b063cd67b26dddbe0662fc2de
+          ref: 296a83367e7aecde824974d16c08db3f508b447a
           path: prx
           persist-credentials: false
 
@@ -1385,7 +1385,7 @@ jobs:
       - name: Build prx at the pinned commit
         working-directory: prx
         env:
-          PRX_BUILD_COMMIT: 5d92a43a43a6373b063cd67b26dddbe0662fc2de
+          PRX_BUILD_COMMIT: 296a83367e7aecde824974d16c08db3f508b447a
         run: cargo build --bin prx
 
       - name: Contract tests against the real daemon

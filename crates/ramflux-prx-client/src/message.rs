@@ -13,10 +13,15 @@
 //! Field bounds (ids, message size, names, mentions) are PRX's to enforce: the client sends what
 //! the caller gives and the daemon's `400 field_invalid` is what a caller sees.
 
-use crate::capabilities::{Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_TARGET_V1, require};
+use crate::capabilities::{
+    Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, require,
+};
 use crate::client::PrxClient;
-use crate::error::{ApiCode, PrxError, decode_api_error, decode_ok, local_refusal, rate_limited};
+use crate::error::{
+    ApiCode, PrxError, decode_api_error, decode_ok, local_refusal, present, protocol, rate_limited,
+};
 use crate::name::AgentName;
+use crate::run::{RunCode, RunState, run_state};
 use crate::transport::Raw;
 use reqwest::Method;
 use serde::Deserialize;
@@ -67,24 +72,51 @@ pub struct RfMessage {
     pub reply_to: Option<String>,
 }
 
-/// `202 {"run_id","job_id"}`: a turn was admitted and runs as a job.
+/// What PRX did with a turn post. Only `Admitted` and `Restarted` started a run in this call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnDisposition {
+    /// `202`: the first admission of this key; a new run started.
+    Admitted,
+    /// `202` after PRX stopped mid-turn: a new attempt started. `previous_run_id` names the
+    /// interrupted attempt, which may have executed tools; rf shows "interrupted, retried".
+    Restarted { attempt: u32, previous_run_id: String },
+    /// `200` with `replayed:true`: the same key and body were seen before. No run started.
+    /// `status` is the durable state (`running` while the first attempt still runs).
+    Replayed { status: RunState, code: Option<RunCode> },
+}
+
+/// A turn post that PRX admitted or answered as a replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnAccepted {
     pub run_id: String,
     pub job_id: String,
+    pub disposition: TurnDisposition,
 }
 
 /// `200 {"message_id","status":"recorded"}`: a context input was stored; no run started.
+/// `replayed` is true when the same key and body had been recorded before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextRecorded {
     pub message_id: String,
+    pub replayed: bool,
 }
 
+/// Every turn answer in one strict shape. Which fields are present is checked by `turn_answer`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireTurn {
     run_id: String,
     job_id: String,
+    #[serde(default, deserialize_with = "present")]
+    status: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    code: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    replayed: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    attempt: Option<u32>,
+    #[serde(default, deserialize_with = "present")]
+    previous_run_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +124,29 @@ struct WireTurn {
 struct WireContext {
     message_id: String,
     status: String,
+    #[serde(default, deserialize_with = "present")]
+    replayed: Option<bool>,
+}
+
+/// Checks a turn answer against the documented shapes: `202` is a first admission (no replay
+/// fields) or a restart (`attempt` ≥ 2 with `previous_run_id`); `200` is a replay (`replayed`
+/// true, a durable `status`). Any other combination is not a documented answer.
+fn turn_answer(status: u16, wire: WireTurn) -> Result<TurnAccepted, PrxError> {
+    let WireTurn { run_id, job_id, status: state, code, replayed, attempt, previous_run_id } = wire;
+    let disposition = match (status, state, replayed, attempt, previous_run_id) {
+        (202, None, None, None, None) if code.is_none() => TurnDisposition::Admitted,
+        (202, None, None, Some(attempt), Some(previous_run_id))
+            if attempt >= 2 && code.is_none() && previous_run_id != run_id =>
+        {
+            TurnDisposition::Restarted { attempt, previous_run_id }
+        }
+        (200, Some(state), Some(true), None, None) => {
+            let (status, code) = run_state(&state, code.as_deref())?;
+            TurnDisposition::Replayed { status, code }
+        }
+        _ => return Err(protocol("turn answer is not one of the documented shapes")),
+    };
+    Ok(TurnAccepted { run_id, job_id, disposition })
 }
 
 impl ChatKind {
@@ -202,6 +257,7 @@ impl PrxClient {
     ) -> Result<TurnAccepted, PrxError> {
         require(caps, MESSAGE_TARGET_V1)?;
         require(caps, MESSAGE_CONTEXT_DELIVERY_V1)?;
+        require(caps, MESSAGE_IDEMPOTENCY_V1)?;
         let path = message_path(session_id)?;
         let body = message.to_body("turn");
         let raw = self
@@ -211,11 +267,9 @@ impl PrxClient {
             .map_err(sent_unknown)?;
         let status = raw.status;
         let raw = post_answer(raw)?;
-        if status != 202 {
-            return Err(PrxError::OutcomeUnknown { http_status: Some(status) });
-        }
         let wire: WireTurn = decoded_or_unknown(&raw.body, status)?;
-        Ok(TurnAccepted { run_id: wire.run_id, job_id: wire.job_id })
+        turn_answer(status, wire)
+            .map_err(|_| PrxError::OutcomeUnknown { http_status: Some(status) })
     }
 
     /// Records a context input for the target. No run starts. Sent once; never resent.
@@ -232,6 +286,7 @@ impl PrxClient {
     ) -> Result<ContextRecorded, PrxError> {
         require(caps, MESSAGE_TARGET_V1)?;
         require(caps, MESSAGE_CONTEXT_DELIVERY_V1)?;
+        require(caps, MESSAGE_IDEMPOTENCY_V1)?;
         let path = message_path(session_id)?;
         let body = message.to_body("context");
         let raw = self
@@ -241,14 +296,15 @@ impl PrxClient {
             .map_err(sent_unknown)?;
         let status = raw.status;
         let raw = post_answer(raw)?;
+        let unknown = PrxError::OutcomeUnknown { http_status: Some(status) };
         if status != 200 {
-            return Err(PrxError::OutcomeUnknown { http_status: Some(status) });
+            return Err(unknown);
         }
         let wire: WireContext = decoded_or_unknown(&raw.body, status)?;
-        if wire.status != "recorded" {
-            return Err(PrxError::OutcomeUnknown { http_status: Some(status) });
+        if wire.status != "recorded" || wire.replayed == Some(false) {
+            return Err(unknown);
         }
-        Ok(ContextRecorded { message_id: wire.message_id })
+        Ok(ContextRecorded { message_id: wire.message_id, replayed: wire.replayed == Some(true) })
     }
 }
 
@@ -374,6 +430,79 @@ mod tests {
         assert!(
             decode_ok::<WireTurn>(br#"{"run_id":"r-1","job_id":"j-1","x":1}"#).is_err(),
             "unknown field"
+        );
+    }
+
+    fn turn(text: &str) -> WireTurn {
+        decode_ok(text.as_bytes()).expect("test: wire turn decodes")
+    }
+
+    #[test]
+    fn turn_answers_follow_the_documented_shapes() {
+        let first = turn(r#"{"run_id":"r-1","job_id":"j-1"}"#);
+        assert_eq!(turn_answer(202, first).map(|t| t.disposition), Ok(TurnDisposition::Admitted));
+
+        let restarted =
+            turn(r#"{"run_id":"r-2","job_id":"j-2","attempt":2,"previous_run_id":"r-1"}"#);
+        assert_eq!(
+            turn_answer(202, restarted).map(|t| t.disposition),
+            Ok(TurnDisposition::Restarted { attempt: 2, previous_run_id: "r-1".to_owned() })
+        );
+
+        let running = turn(r#"{"run_id":"r-1","job_id":"j-1","status":"running","replayed":true}"#);
+        assert_eq!(
+            turn_answer(200, running).map(|t| t.disposition),
+            Ok(TurnDisposition::Replayed { status: RunState::Running, code: None })
+        );
+
+        let interrupted = turn(
+            r#"{"run_id":"r-1","job_id":"j-1","status":"failed","code":"interrupted","replayed":true}"#,
+        );
+        assert_eq!(
+            turn_answer(200, interrupted).map(|t| t.disposition),
+            Ok(TurnDisposition::Replayed {
+                status: RunState::Failed,
+                code: Some(RunCode::Interrupted)
+            })
+        );
+    }
+
+    #[test]
+    fn turn_answers_outside_the_documented_shapes_are_refused() {
+        // A 200 replay without replayed:true, a 202 that carries replay fields, attempt 1 as a
+        // restart, and a restart that names its own run are all refused.
+        let cases = [
+            (200, r#"{"run_id":"r-1","job_id":"j-1","status":"running"}"#),
+            (202, r#"{"run_id":"r-1","job_id":"j-1","status":"running","replayed":true}"#),
+            (202, r#"{"run_id":"r-2","job_id":"j-2","attempt":1,"previous_run_id":"r-1"}"#),
+            (202, r#"{"run_id":"r-2","job_id":"j-2","attempt":2}"#),
+            (202, r#"{"run_id":"r-2","job_id":"j-2","attempt":2,"previous_run_id":"r-2"}"#),
+            (200, r#"{"run_id":"r-1","job_id":"j-1","status":"queued","replayed":true}"#),
+            (
+                200,
+                r#"{"run_id":"r-1","job_id":"j-1","status":"running","replayed":true,"code":"interrupted"}"#,
+            ),
+        ];
+        for (status, text) in cases {
+            assert!(turn_answer(status, turn(text)).is_err(), "must be refused: {text}");
+        }
+    }
+
+    #[test]
+    fn context_replay_flag_is_strict() {
+        let first: WireContext =
+            decode_ok(br#"{"message_id":"m-1","status":"recorded"}"#).expect("test: first context");
+        assert_eq!(first.replayed, None);
+        let replay: WireContext =
+            decode_ok(br#"{"message_id":"m-1","status":"recorded","replayed":true}"#)
+                .expect("test: replayed context");
+        assert_eq!(replay.replayed, Some(true));
+        assert!(
+            decode_ok::<WireContext>(
+                br#"{"message_id":"m-1","status":"recorded","replayed":null}"#
+            )
+            .is_err(),
+            "an explicit null replayed is refused"
         );
     }
 
