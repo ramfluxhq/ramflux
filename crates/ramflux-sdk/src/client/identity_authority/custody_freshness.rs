@@ -13,6 +13,9 @@ const FRESH_FOR: Duration = Duration::from_secs(300);
 #[derive(Default)]
 pub(crate) struct NativeHeadFreshness {
     heads: BTreeMap<String, (String, Instant)>,
+    /// A root became current that was not (absent, other head or expired). Work that refused
+    /// with `FreshHeadRequired` can proceed now; the account runtime wakes the couriers once.
+    newly_fresh: bool,
 }
 impl NativeHeadFreshness {
     pub(crate) fn observation(&self, root: &str) -> Option<Instant> {
@@ -28,6 +31,8 @@ impl NativeHeadFreshness {
         if self.heads.get(root).is_some_and(|(seen, observed)| seen == &hash && *observed > at) {
             return;
         }
+        let now = Instant::now();
+        let was_fresh = self.contains(root, &hash, now);
         if !self.heads.contains_key(root) && self.heads.len() >= MAX_HEADS {
             let oldest =
                 self.heads.iter().min_by_key(|(_, (_, at))| *at).map(|(root, _)| root.clone());
@@ -35,7 +40,10 @@ impl NativeHeadFreshness {
                 self.heads.remove(&oldest);
             }
         }
-        self.heads.insert(root.to_owned(), (hash, at));
+        self.heads.insert(root.to_owned(), (hash.clone(), at));
+        if !was_fresh && self.contains(root, &hash, now) {
+            self.newly_fresh = true;
+        }
     }
     fn contains(&self, root: &str, hash: &str, now: Instant) -> bool {
         self.heads.get(root).is_some_and(|(observed, at)| {
@@ -85,6 +93,11 @@ impl RamfluxClient {
             );
         }
         Ok(())
+    }
+
+    /// True once after any root became current since the last call (see `newly_fresh`).
+    pub(crate) fn take_newly_fresh_head(&self) -> bool {
+        std::mem::take(&mut self.native_head_freshness.borrow_mut().newly_fresh)
     }
 
     pub(crate) fn invalidate_changed_custody_head(&self, root: &str, hash: &str) {
