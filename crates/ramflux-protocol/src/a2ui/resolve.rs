@@ -10,6 +10,7 @@
 //! (`SurfaceState::apply`) and `SurfaceState::validate_action` run the same graph, input and
 //! declaration code, so an author and a host cannot disagree about a card.
 use super::graph::{Graph, Input, binding, id, kind, literal, resolve_pointer, validate_input};
+use super::resource::{Bytes, Steps};
 use super::wire::{canonical, validate_identifier};
 use super::{
     ACTION_SCHEMA, Action, ActionFrame, ActionMessage, JsonPointer, MAX_CONTEXT_ENTRIES,
@@ -128,6 +129,7 @@ pub struct ResolvedSurface {
 /// The shared core: graph, owned inputs and declared actions of one snapshot.
 pub(super) struct Resolution<'a> {
     pub(super) graph: Graph<'a>,
+    pub(super) steps: Steps,
     pub(super) inputs: Vec<Input<'a>>,
     /// `(instance index, declaration)` for every Button instance.
     pub(super) actions: Vec<(usize, ResolvedActionKind)>,
@@ -138,7 +140,8 @@ impl<'a> Resolution<'a> {
         for component in &snapshot.components {
             super::schema::component(component)?;
         }
-        let graph = Graph::new(snapshot)?;
+        let steps = Steps::new();
+        let graph = Graph::new(snapshot, &steps)?;
         for instance in &graph.instances {
             if instance.component.get("weight").is_some() {
                 let parent =
@@ -154,11 +157,11 @@ impl<'a> Resolution<'a> {
         let mut actions = Vec::new();
         for (index, instance) in graph.instances.iter().enumerate() {
             if kind(instance.component)? == "Button" {
-                let declared = declaration(instance, &inputs, snapshot)?;
+                let declared = declaration(instance, &inputs, snapshot, &steps)?;
                 actions.push((index, declared));
             }
         }
-        Ok(Self { graph, inputs, actions })
+        Ok(Self { graph, steps, inputs, actions })
     }
 
     /// The declared action of the Button instance `(component_id, source_instance)`.
@@ -194,6 +197,7 @@ fn declaration(
     instance: &super::graph::Instance<'_>,
     inputs: &[Input<'_>],
     snapshot: &SurfaceSnapshot,
+    steps: &Steps,
 ) -> Result<ResolvedActionKind, Reject> {
     let action =
         instance.component.get("action").and_then(Value::as_object).ok_or(Reject::Encoding)?;
@@ -201,7 +205,7 @@ fn declaration(
         return Err(Reject::Encoding);
     }
     if let Some(event) = action.get("event") {
-        return event_declaration(instance, event, inputs, snapshot);
+        return event_declaration(instance, event, inputs, snapshot, steps);
     }
     let call = action.get("functionCall").ok_or(Reject::Encoding)?;
     if call.get("@call").and_then(Value::as_str) != Some("openUrl") {
@@ -226,6 +230,7 @@ fn event_declaration(
     event: &Value,
     inputs: &[Input<'_>],
     snapshot: &SurfaceSnapshot,
+    steps: &Steps,
 ) -> Result<ResolvedActionKind, Reject> {
     let event = event.as_object().ok_or(Reject::Encoding)?;
     if event.keys().any(|k| !["name", "context", "userMessage"].contains(&k.as_str())) {
@@ -266,8 +271,12 @@ fn event_declaration(
     if let Some(checks) = instance.component.get("@checks") {
         let mut reads = Vec::new();
         let owned: Vec<_> = inputs.iter().map(|input| input.pointer.clone()).collect();
-        let check_context =
-            CheckContext { prefix: &instance.prefix, model: &snapshot.data_model, owned: &owned };
+        let check_context = CheckContext {
+            prefix: &instance.prefix,
+            model: &snapshot.data_model,
+            owned: &owned,
+            steps,
+        };
         collect_reads(checks, &check_context, &mut reads, 0)?;
         for pointer in reads {
             for input in inputs {
@@ -292,6 +301,7 @@ struct CheckContext<'a> {
     prefix: &'a str,
     model: &'a Value,
     owned: &'a [JsonPointer],
+    steps: &'a Steps,
 }
 fn collect_reads(
     value: &Value,
@@ -299,6 +309,7 @@ fn collect_reads(
     reads: &mut Vec<JsonPointer>,
     depth: usize,
 ) -> Result<(), Reject> {
+    context.steps.take()?;
     if depth > MAX_DEPTH {
         return Err(Reject::Limit);
     }
@@ -347,7 +358,14 @@ fn collect_program_reads(
         // A draft cannot supply a new check program that reads arbitrary hidden inputs.
         return Err(Reject::Validation("input-controlled check program".into()));
     }
-    let program = super::expression::evaluate(source, context.model, context.prefix, depth + 1)?;
+    let program = super::expression::evaluate_display(
+        source,
+        context.model,
+        context.prefix,
+        depth + 1,
+        None,
+        context.steps,
+    )?;
     for expression in
         super::format_string::expressions(program.as_str().ok_or(Reject::Expression)?)?
     {
@@ -397,18 +415,20 @@ impl SurfaceSnapshot {
         let resolution = Resolution::new(self)?;
         let model = overlay(self, &resolution.inputs, drafts)?;
         let mut nodes = Vec::with_capacity(resolution.graph.instances.len());
-        let mut resolved_bytes = 0usize;
+        let mut bytes = Bytes::new(MAX_RESOLVED_BYTES);
         for instance in &resolution.graph.instances {
-            let properties = properties(instance.component, &model, &instance.prefix, locale)?;
+            let properties = properties(
+                instance.component,
+                &model,
+                &instance.prefix,
+                locale,
+                &resolution.steps,
+                &mut bytes,
+            )?;
             let mut checked = properties.clone();
             checked.insert("id".into(), Value::String(id(instance.component)?.into()));
             checked.insert("component".into(), Value::String(kind(instance.component)?.into()));
             super::schema::component(&Value::Object(checked))?;
-            resolved_bytes =
-                resolved_bytes.checked_add(canonical(&properties)?.len()).ok_or(Reject::Limit)?;
-            if resolved_bytes > MAX_RESOLVED_BYTES {
-                return Err(Reject::Limit);
-            }
             nodes.push(ResolvedNode {
                 id: id(instance.component)?.to_owned(),
                 component: kind(instance.component)?.to_owned(),
@@ -422,6 +442,7 @@ impl SurfaceSnapshot {
                     &model,
                     &instance.prefix,
                     locale,
+                    &resolution.steps,
                 )?,
                 properties,
             });
@@ -481,16 +502,28 @@ fn properties(
     model: &Value,
     prefix: &str,
     locale: Option<super::DisplayLocale>,
+    steps: &Steps,
+    bytes: &mut Bytes,
 ) -> Result<Map<String, Value>, Reject> {
+    let context = DisplayContext { model, prefix, locale, steps };
     let mut out = Map::new();
+    bytes.take(2)?;
     for (key, value) in component.as_object().ok_or(Reject::Encoding)? {
+        if matches!(key.as_str(), "id" | "component") {
+            continue;
+        }
+        if !out.is_empty() {
+            bytes.take(1)?;
+        }
+        bytes.key(key)?;
+        bytes.take(1)?;
         match key.as_str() {
-            "id" | "component" => {}
             "action" | "@checks" => {
+                bytes.value(value)?;
                 out.insert(key.clone(), value.clone());
             }
             _ => {
-                let value = display(value, model, prefix, 0, locale)?;
+                let value = display(value, &context, 0, bytes)?;
                 if locale.is_some() && !matches!(key.as_str(), "@metadata" | "@catalogId") {
                     resolved_data(&value, 0)?;
                 }
@@ -501,13 +534,21 @@ fn properties(
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
+struct DisplayContext<'a> {
+    model: &'a Value,
+    prefix: &'a str,
+    locale: Option<super::DisplayLocale>,
+    steps: &'a Steps,
+}
 fn display(
     value: &Value,
-    model: &Value,
-    prefix: &str,
+    context: &DisplayContext<'_>,
     depth: usize,
-    locale: Option<super::DisplayLocale>,
+    bytes: &mut Bytes,
 ) -> Result<Value, Reject> {
+    let DisplayContext { model, prefix, locale, steps } = *context;
+    steps.take()?;
     if depth > MAX_DEPTH {
         return Err(Reject::Limit);
     }
@@ -515,33 +556,55 @@ fn display(
         Value::Object(map) => {
             if let Some(path) = map.get("@path") {
                 let pointer = resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?;
-                return Ok(pointer.get(model).cloned().unwrap_or(Value::Null));
+                let bound = pointer.get(model).unwrap_or(&Value::Null);
+                bytes.value(bound)?;
+                return Ok(bound.clone());
             }
             if let Some(name) = map.get("@call").and_then(Value::as_str) {
                 if locale.is_some() || !super::expression::locale_sensitive(name) {
-                    return super::expression::evaluate_display(
-                        value, model, prefix, depth, locale,
-                    );
+                    let result = super::expression::evaluate_display(
+                        value, model, prefix, depth, locale, steps,
+                    )?;
+                    bytes.value(&result)?;
+                    return Ok(result);
                 }
-                // Locale formatting belongs to the host; hand it resolved arguments.
-                let mut call = map.clone();
-                if let Some(args) = map.get("args") {
-                    call.insert("args".into(), display(args, model, prefix, depth + 1, locale)?);
+                // Keep locale-dependent calls for the host, resolving only their arguments.
+                bytes.take(2 + map.len().saturating_sub(1))?;
+                let mut call = Map::new();
+                for (key, value) in map {
+                    bytes.key(key)?;
+                    bytes.take(1)?;
+                    let value = if key == "args" {
+                        display(value, context, depth + 1, bytes)?
+                    } else {
+                        bytes.value(value)?;
+                        value.clone()
+                    };
+                    call.insert(key.clone(), value);
                 }
                 return Ok(Value::Object(call));
             }
+            bytes.take(2 + map.len().saturating_sub(1))?;
             let mut out = Map::new();
             for (key, value) in map {
-                out.insert(key.clone(), display(value, model, prefix, depth + 1, locale)?);
+                bytes.key(key)?;
+                bytes.take(1)?;
+                out.insert(key.clone(), display(value, context, depth + 1, bytes)?);
             }
             Ok(Value::Object(out))
         }
-        Value::Array(values) => values
-            .iter()
-            .map(|value| display(value, model, prefix, depth + 1, locale))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        _ => Ok(value.clone()),
+        Value::Array(values) => {
+            bytes.take(2 + values.len().saturating_sub(1))?;
+            values
+                .iter()
+                .map(|value| display(value, context, depth + 1, bytes))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        _ => {
+            bytes.value(value)?;
+            Ok(value.clone())
+        }
     }
 }
 
@@ -570,8 +633,10 @@ fn allowed_actions(
                 instance.component.get("@checks"),
                 model,
                 &instance.prefix,
+                &resolution.steps,
             )
-            .is_ok();
+            .map(|()| true)
+            .or_else(|error| if error == Reject::Limit { Err(error) } else { Ok(false) })?;
         }
         actions.push(ResolvedAction {
             node: *index,
@@ -662,15 +727,20 @@ fn check_messages(
     model: &Value,
     prefix: &str,
     locale: Option<super::DisplayLocale>,
+    steps: &Steps,
 ) -> Result<Vec<String>, Reject> {
+    let context = DisplayContext { model, prefix, locale, steps };
+    let mut bytes = Bytes::new(MAX_RESOLVED_BYTES);
     let mut errors = Vec::new();
     if let Some(checks) = checks {
         for check in checks.as_array().ok_or(Reject::Expression)? {
-            let result = super::expression::evaluate(
+            let result = super::expression::evaluate_display(
                 check.get("condition").ok_or(Reject::Expression)?,
                 model,
                 prefix,
                 0,
+                None,
+                steps,
             )?;
             if result.as_bool().or_else(|| result.get("valid").and_then(Value::as_bool))
                 != Some(true)
@@ -686,7 +756,7 @@ fn check_messages(
                     );
                     continue;
                 };
-                let message = display(message, model, prefix, 0, locale)?;
+                let message = display(message, &context, 0, &mut bytes)?;
                 errors.push(message.as_str().ok_or(Reject::Expression)?.to_owned());
             }
         }

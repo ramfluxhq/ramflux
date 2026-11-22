@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! The bounded component graph: reference resolution, template expansion, pruning and inputs.
-use super::wire::{canonical, validate_identifier};
+use super::resource::{Bytes, Steps};
+use super::wire::validate_identifier;
 use super::{JsonPointer, MAX_DELTA_BYTES, Reject, ResolvedSlot, SurfaceSnapshot};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,6 +13,7 @@ pub(super) const MAX_TEMPLATE_ITEMS: usize = 16;
 pub(super) const MAX_TEMPLATE_SCOPES: usize = 2;
 pub(super) const MAX_INSTANCES: usize = 256;
 const MAX_DEPTH: usize = 16;
+const MAX_REFERENCE_VISITS: usize = 2048;
 const MAX_EXPANDED_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -88,7 +90,7 @@ pub(super) fn literal(value: &Value) -> bool {
     }
 }
 impl<'a> Graph<'a> {
-    pub(super) fn new(snapshot: &'a SurfaceSnapshot) -> Result<Self, Reject> {
+    pub(super) fn new(snapshot: &'a SurfaceSnapshot, steps: &Steps) -> Result<Self, Reject> {
         let mut definitions = BTreeMap::new();
         for component in &snapshot.components {
             let name = id(component)?;
@@ -100,11 +102,12 @@ impl<'a> Graph<'a> {
         }
         let mut graph = Self { instances: Vec::new(), reached: BTreeSet::new() };
         let context = WalkContext { definitions: &definitions, snapshot };
+        let mut references = References::default();
         for name in definitions.keys() {
             // Pruning does not excuse dangling references or cycles in supplied definitions.
-            static_references(name, &definitions, &mut BTreeSet::new(), 0, 0, false)?;
+            references.visit(name, &definitions, &mut BTreeSet::new())?;
         }
-        graph.reached = static_references("root", &definitions, &mut BTreeSet::new(), 0, 0, false)?;
+        graph.reached = references.visit("root", &definitions, &mut BTreeSet::new())?.reached;
         graph.walk(
             WalkFrame {
                 name: "root",
@@ -119,22 +122,16 @@ impl<'a> Graph<'a> {
             &context,
             &mut BTreeSet::new(),
         )?;
-        let mut expanded_bytes = 0usize;
+        let mut bytes = Bytes::new(MAX_EXPANDED_BYTES);
         for instance in &graph.instances {
-            expanded_bytes = expanded_bytes
-                .checked_add(
-                    canonical(&expanded_value(
-                        instance.component,
-                        &snapshot.data_model,
-                        &instance.prefix,
-                        0,
-                    )?)?
-                    .len(),
-                )
-                .ok_or(Reject::Limit)?;
-            if expanded_bytes > MAX_EXPANDED_BYTES {
-                return Err(Reject::Limit);
-            }
+            expanded_value(
+                instance.component,
+                &snapshot.data_model,
+                &instance.prefix,
+                0,
+                steps,
+                &mut bytes,
+            )?;
         }
         let mut controls = BTreeSet::new();
         for instance in &graph.instances {
@@ -321,6 +318,8 @@ pub(super) fn expanded_value(
     model: &Value,
     prefix: &str,
     depth: usize,
+    steps: &Steps,
+    bytes: &mut Bytes,
 ) -> Result<Value, Reject> {
     if depth > MAX_DEPTH {
         return Err(Reject::Limit);
@@ -333,7 +332,7 @@ pub(super) fn expanded_value(
                 }
                 if name == "formatString"
                     && matches!(
-                        super::expression::evaluate(value, model, prefix, 0),
+                        super::expression::evaluate_display(value, model, prefix, 0, None, steps),
                         Err(Reject::Limit)
                     )
                 {
@@ -350,23 +349,35 @@ pub(super) fn expanded_value(
                 }
             }
             if let Some(path) = map.get("@path") {
-                return Ok(resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?
-                    .get(model)
-                    .cloned()
-                    .unwrap_or(Value::Null));
+                let pointer = resolve_pointer(path.as_str().ok_or(Reject::Expression)?, prefix)?;
+                let bound = pointer.get(model).unwrap_or(&Value::Null);
+                bytes.value(bound)?;
+                return Ok(bound.clone());
             }
+            bytes.take(2 + map.len().saturating_sub(1))?;
             let mut expanded = Map::new();
             for (key, value) in map {
-                expanded.insert(key.clone(), expanded_value(value, model, prefix, depth + 1)?);
+                bytes.key(key)?;
+                bytes.take(1)?;
+                expanded.insert(
+                    key.clone(),
+                    expanded_value(value, model, prefix, depth + 1, steps, bytes)?,
+                );
             }
             Ok(Value::Object(expanded))
         }
-        Value::Array(array) => array
-            .iter()
-            .map(|v| expanded_value(v, model, prefix, depth + 1))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        _ => Ok(value.clone()),
+        Value::Array(array) => {
+            bytes.take(2 + array.len().saturating_sub(1))?;
+            array
+                .iter()
+                .map(|v| expanded_value(v, model, prefix, depth + 1, steps, bytes))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        _ => {
+            bytes.value(value)?;
+            Ok(value.clone())
+        }
     }
 }
 
@@ -377,60 +388,87 @@ fn validate_composition(kind: &str, depth: usize, in_modal: bool) -> Result<(), 
     Ok(())
 }
 
-fn static_references(
-    name: &str,
-    definitions: &BTreeMap<&str, &Value>,
-    stack: &mut BTreeSet<String>,
+#[derive(Clone, Default)]
+struct ReferenceSummary {
+    reached: BTreeSet<String>,
     depth: usize,
     templates: usize,
-    in_modal: bool,
-) -> Result<BTreeSet<String>, Reject> {
-    if templates > MAX_TEMPLATE_SCOPES {
-        return Err(Reject::Limit);
-    }
-    if depth >= MAX_DEPTH || !stack.insert(name.into()) {
-        return Err(Reject::Integrity);
-    }
-    let component = definitions.get(name).ok_or(Reject::Integrity)?;
-    let component_kind = kind(component)?;
-    validate_composition(component_kind, depth, in_modal)?;
-    let mut reached = BTreeSet::from([name.into()]);
-    let mut children = Vec::new();
-    for property in ["child", "trigger", "content"] {
-        if let Some(child) = component.get(property) {
-            children.push((child.as_str().ok_or(Reject::Encoding)?, false));
+    has_modal: bool,
+    approval: bool,
+}
+#[derive(Default)]
+struct References {
+    memo: BTreeMap<String, ReferenceSummary>,
+    visits: usize,
+}
+impl References {
+    fn visit(
+        &mut self,
+        name: &str,
+        definitions: &BTreeMap<&str, &Value>,
+        stack: &mut BTreeSet<String>,
+    ) -> Result<ReferenceSummary, Reject> {
+        self.visits += 1;
+        if self.visits > MAX_REFERENCE_VISITS || stack.len() >= MAX_DEPTH {
+            return Err(Reject::Limit);
         }
-    }
-    if let Some(tabs) = component.get("tabs") {
-        for tab in tabs.as_array().ok_or(Reject::Encoding)? {
-            children
-                .push((tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?, false));
+        if let Some(summary) = self.memo.get(name) {
+            return Ok(summary.clone());
         }
-    }
-    if let Some(list) = component.get("children") {
-        if let Some(array) = list.as_array() {
-            for child in array {
+        if !stack.insert(name.into()) {
+            return Err(Reject::Integrity);
+        }
+        let component = definitions.get(name).ok_or(Reject::Integrity)?;
+        let component_kind = kind(component)?;
+        let mut summary = ReferenceSummary {
+            reached: BTreeSet::from([name.into()]),
+            has_modal: component_kind == "Modal",
+            approval: component_kind == "Approval",
+            ..ReferenceSummary::default()
+        };
+        let mut children = Vec::new();
+        for property in ["child", "trigger", "content"] {
+            if let Some(child) = component.get(property) {
                 children.push((child.as_str().ok_or(Reject::Encoding)?, false));
             }
-        } else {
-            children.push((
-                list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?,
-                true,
-            ));
         }
+        if let Some(tabs) = component.get("tabs") {
+            for tab in tabs.as_array().ok_or(Reject::Encoding)? {
+                children.push((
+                    tab.get("child").and_then(Value::as_str).ok_or(Reject::Encoding)?,
+                    false,
+                ));
+            }
+        }
+        if let Some(list) = component.get("children") {
+            if let Some(array) = list.as_array() {
+                for child in array {
+                    children.push((child.as_str().ok_or(Reject::Encoding)?, false));
+                }
+            } else {
+                children.push((
+                    list.get("componentId").and_then(Value::as_str).ok_or(Reject::Encoding)?,
+                    true,
+                ));
+            }
+        }
+        for (child, template) in children {
+            let child = self.visit(child, definitions, stack)?;
+            if child.approval || component_kind == "Modal" && child.has_modal {
+                return Err(Reject::Validation("composition".into()));
+            }
+            summary.depth = summary.depth.max(child.depth + 1);
+            summary.templates = summary.templates.max(child.templates + usize::from(template));
+            summary.has_modal |= child.has_modal;
+            summary.reached.extend(child.reached);
+        }
+        if summary.depth >= MAX_DEPTH || summary.templates > MAX_TEMPLATE_SCOPES {
+            return Err(Reject::Limit);
+        }
+        stack.remove(name);
+        self.memo.insert(name.into(), summary.clone());
+        Ok(summary)
     }
-    for (child, template) in children {
-        reached.extend(static_references(
-            child,
-            definitions,
-            stack,
-            depth + 1,
-            templates + usize::from(template),
-            in_modal || component_kind == "Modal",
-        )?);
-    }
-    stack.remove(name);
-    Ok(reached)
 }
 
 pub(super) fn validate_input(

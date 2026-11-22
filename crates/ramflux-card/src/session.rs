@@ -400,9 +400,16 @@ impl CardSession {
     /// # Errors
     /// Refuses retired/active sessions, limits and execution failures.
     pub fn resume(&mut self) -> Result<MutationBatch, CardError> {
-        if self.retired || self.vm.is_some() {
+        if self.retired || self.is_active() {
             return Err(CardError::Inactive);
         }
+        // Drop the failed VM before reserving a new resident slot. Preserve the shared
+        // execution budget and consumed submits; discard callbacks from its old tree.
+        self.vm = None;
+        self.tree = None;
+        self.queue.clear();
+        self.local.modals.clear();
+        self.local.cancel_link();
         let id = fresh_id()?;
         let mut spec = self.spec.clone();
         spec.render_tree = Some(projection::project(&spec, id, 1, self.edit_seq, &self.local)?);

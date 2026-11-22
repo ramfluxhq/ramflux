@@ -13,6 +13,7 @@ mod locale;
 pub use locale::DisplayLocale;
 mod pointer;
 mod resolve;
+mod resource;
 pub use resolve::*;
 mod rpc;
 pub use rpc::*;

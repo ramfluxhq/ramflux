@@ -34,7 +34,11 @@ host requests. SDK lifecycle/author-retirement wiring belongs to M3.
 The parser bounds the envelope at 32 KiB and uses strict I-JSON. Protocol
 admission separately bounds signed state at 16 KiB, model at 12 KiB, definitions
 at 32, nesting at 16, templates at 16 items/two scopes, expanded instances at
-256 and resolved properties at 64 KiB. The SDK passes presentation separately;
+256 and resolved properties at 64 KiB. Static references share memoized reachability,
+maximum depth/template depth and a 2048-visit cap. Admission, action validation
+and each resolve share a 4096-step expression/read budget, including indirect
+model-supplied formatString programs. Expanded JSON bytes are charged before
+bound values are cloned or inserted. The SDK passes presentation separately;
 peer `theme`, `host`, script and unknown fields are refused.
 
 ## Shared evaluation and drafts
@@ -101,7 +105,15 @@ sheets. Only one sheet may be active, with security sheets taking precedence.
 
 - Approval contains `request_ref` and typed optional `task_binding`. The SDK
   resolves current facts and authority. The host draws facts, Deny and a single
-  tap Confirm outside the tree. No hold gesture; no approval card event.
+  tap Confirm outside the tree. `request_ref`, explanation and every card field
+  are untrusted lookup/display hints, never verified facts. The slot `request_id`
+  serializes a runtime token; it is not an SDK-issued approval-record identity.
+  M3 must look up its own current request record, derive and display verified
+  facts itself, and bind a one-shot reply to both that record and the exact
+  current slot/token. Recheck authority immediately before applying the reply;
+  stale, missing, mismatched or cancelled records must refuse. Card explanation
+  must never appear as verified security-sheet facts. No hold gesture; no
+  approval card event.
 - Modal contains trigger/content keys. The host owns the trigger affordance,
   sheet, scrim, focus and close/back/Escape. Nested trigger actions never dispatch.
 - Link activation yields the canonical ASCII https URL validated by the protocol.
@@ -134,7 +146,9 @@ rollback floors come from the app release, never the received envelope/package.
 Limits remain 32 MiB heap, 256 KiB stack, 50 ms per evaluation, 100 ms/s cumulative,
 128 admissions/s, 32 queued events and two resident VMs. These are engine budgets,
 not OS/RSS isolation. Failed evaluation preserves the last published data but
-makes the VM inactive; hosts must suspend/dispose and cancel requests.
+makes the VM inactive; hosts must cancel requests. Resume drops a failed VM,
+clears old callbacks/sheets, retains consumed submits and drafts, and rebuilds
+with a fresh token identity using the same cumulative execution budget.
 
 The offline `card-pack` tool signs the linted `library/form.js` using an
 operator-provided seed and release metadata. ABI 5 requires fresh artifacts;
@@ -142,7 +156,15 @@ old artifacts fail admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
 loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
 `.policy.json` and prints the actual tree/mount/update batches. It accepts only
 local operator files and performs no authentication on their behalf. Production
-release-key custody/rotation is an owner release-process decision.
+release-key custody/rotation is an owner release-process decision. C/wasm
+callers supply the trust root and policy; this crate cannot establish their
+provenance. The SDK must obtain both independently from its authenticated app
+release, never from card JSON, the accompanying package, or a downloaded key.
+It must pin catalog/engine/ABI and release floors before any unsafe bytecode
+load. A valid signature under an attacker-selected key grants no trust; QuickJS
+does not validate bytecode. Shipping remains conditional on the owner choosing
+production key custody and rotation; fixture/operator keys prove no production
+trust-root provisioning.
 
 Native C calls are synchronous/thread-affine; callback JSON is borrowed for the
 call and must be copied before posting to UI. The header documents status codes.
