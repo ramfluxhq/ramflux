@@ -228,7 +228,8 @@ impl AccountRuntime {
             return Ok(false);
         }
         if super::super::username_directory::handles(&command.request.method) {
-            self.start_username(command, reply).await;
+            // Boxed: the username handler's future would otherwise enlarge every account command future on the stack.
+            Box::pin(self.start_username(command, reply)).await;
             return Ok(false);
         }
         #[cfg(test)]
