@@ -576,7 +576,7 @@ jobs:
     defaults:
       run:
         shell: bash scripts/ci/qa-job.sh {0}
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
