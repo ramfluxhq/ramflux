@@ -630,8 +630,9 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
         let live_seq = live.seq.ok_or("missing live networking sequence")?;
         let status =
             ordinary.request(Some(id.clone()), "account", "account.status", json!({})).await?;
-        assert_eq!(status["networking"], "live");
-        assert!(status["networking_reason"].is_null());
+        assert_eq!(status["networking"], "networking_pending", "invalid node is not live");
+        let cause = &status["networking_snapshot"]["cause"];
+        assert_eq!(&status["networking_reason"], cause, "current session cause");
         ordinary.request(Some(id.clone()), "account", "account.lock", json!({})).await?;
         Ok::<_, Box<dyn std::error::Error>>((id, live_seq))
     };
