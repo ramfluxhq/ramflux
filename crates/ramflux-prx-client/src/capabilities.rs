@@ -132,7 +132,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "4f1a8bc05a76e3873d6d1765cf110a2353c8e86c";
+    const SHA: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(

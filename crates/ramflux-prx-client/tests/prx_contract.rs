@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 4f1a8bc05a76e3873d6d1765cf110a2353c8e86c>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at c5aab92e51dfb17e3d47de09396643e466dd719b>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "4f1a8bc05a76e3873d6d1765cf110a2353c8e86c";
+const PIN: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
