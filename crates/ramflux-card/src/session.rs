@@ -48,7 +48,7 @@ pub enum EventResult {
     Edited {
         batch: MutationBatch,
     },
-    /// The SDK builds/signs an ActionFrame using this resolver-selected action and
+    /// The SDK builds/signs an `ActionFrame` using this resolver-selected action and
     /// the current resolved surface. The runtime performs no network dispatch.
     Submit {
         action: Box<ResolvedAction>,

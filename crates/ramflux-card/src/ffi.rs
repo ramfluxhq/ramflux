@@ -58,14 +58,15 @@ const INVALID_HANDLE: i32 = 7;
 const BUSY: i32 = 8;
 fn code(error: &CardError) -> i32 {
     match error {
-        CardError::Protocol(ramflux_protocol::a2ui::Reject::Limit) => 2,
-        CardError::Protocol(ramflux_protocol::a2ui::Reject::Closed) => 6,
+        CardError::Protocol(ramflux_protocol::a2ui::Reject::Limit)
+        | CardError::Limit(_)
+        | CardError::Memory
+        | CardError::Stack => 2,
+        CardError::Protocol(ramflux_protocol::a2ui::Reject::Closed) | CardError::Inactive => 6,
         CardError::Invalid(_) | CardError::Json(_) | CardError::Protocol(_) => 1,
-        CardError::Limit(_) | CardError::Memory | CardError::Stack => 2,
         CardError::Signature | CardError::Admission(_) => 3,
         CardError::Engine | CardError::Script | CardError::Hardening => 4,
         CardError::Budget => 5,
-        CardError::Inactive => 6,
     }
 }
 fn bytes(input: RamfluxCardBytes, max: usize) -> Result<Vec<u8>, CardError> {
@@ -541,6 +542,32 @@ mod error_tests {
             TEST_OUTPUT_LIMIT.with(|limit| limit.set(MAX_OUTPUT));
         }
     }
+    fn assert_release_floor(input: &mut RamfluxCardOpen) {
+        let original = (input.bytecode, input.signature, input.descriptor);
+        let mut output = Output::default();
+        let user = std::ptr::from_mut(&mut output).cast();
+        let mut id = 99;
+        let mut old_release = release();
+        old_release.version = 1;
+        let old = compile_and_sign(
+            include_bytes!("../library/form.js"),
+            &SigningKey::from_bytes(&[7; 32]),
+            &old_release,
+        )
+        .expect("test: genuine older package");
+        input.bytecode = span(&old.bytecode);
+        input.signature = span(&old.signature);
+        input.descriptor = span(&old.descriptor);
+        // SAFETY: the genuine old package and host policy remain live for this call.
+        let status =
+            unsafe { ramflux_card_open(&raw const *input, Some(callback), user, &raw mut id) };
+        assert_eq!(
+            (status, id, output.count),
+            (3, 0, 0),
+            "C admission must enforce the pinned release floor"
+        );
+        (input.bytecode, input.signature, input.descriptor) = original;
+    }
     #[test]
     fn c_open_policy_submit_and_error_paths_are_fail_closed() {
         let _guard = guard();
@@ -572,25 +599,7 @@ mod error_tests {
             (3, 0, 0),
             "bad signatures must return no handle or callback"
         );
-        let mut old_release = release();
-        old_release.version = 1;
-        let old = compile_and_sign(
-            include_bytes!("../library/form.js"),
-            &SigningKey::from_bytes(&[7; 32]),
-            &old_release,
-        )
-        .expect("test: genuine older package");
-        input.bytecode = span(&old.bytecode);
-        input.signature = span(&old.signature);
-        input.descriptor = span(&old.descriptor);
-        // SAFETY: the genuine old package and host policy remain live for this call.
-        let status =
-            unsafe { ramflux_card_open(&raw const input, Some(callback), user, &raw mut id) };
-        assert_eq!(
-            (status, id, output.count),
-            (3, 0, 0),
-            "C admission must enforce the pinned release floor"
-        );
+        assert_release_floor(&mut input);
         input.bytecode = span(&p.bytecode);
         input.signature = span(&p.signature);
         input.descriptor = span(&p.descriptor);

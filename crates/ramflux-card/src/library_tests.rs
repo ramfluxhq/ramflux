@@ -36,13 +36,13 @@ fn normalized<T: serde::Serialize>(value: T) -> Value {
                     if key == "session" {
                         *value = json!(1);
                     } else if key == "request_id" {
-                        if let Some(s) = value.as_str() {
-                            if let Ok(mut token) = serde_json::from_str::<Value>(s) {
-                                visit(&mut token);
-                                *value = Value::String(
-                                    serde_json::to_string(&token).expect("test: request token"),
-                                );
-                            }
+                        if let Some(s) = value.as_str()
+                            && let Ok(mut token) = serde_json::from_str::<Value>(s)
+                        {
+                            visit(&mut token);
+                            *value = Value::String(
+                                serde_json::to_string(&token).expect("test: request token"),
+                            );
                         }
                     } else {
                         visit(value);
