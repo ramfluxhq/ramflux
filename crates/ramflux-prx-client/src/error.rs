@@ -93,7 +93,10 @@ pub enum ApiCode {
     AgentScopeRefused,
     IdempotencyConflict,
     RunUnknown,
+    RunActive,
     JobUnknown,
+    MessageUnknown,
+    MessageDeleted,
     Unknown(String),
 }
 
@@ -121,6 +124,9 @@ impl ApiCode {
             "idempotency_conflict" => Self::IdempotencyConflict,
             "run_unknown" => Self::RunUnknown,
             "job_unknown" => Self::JobUnknown,
+            "run_active" => Self::RunActive,
+            "message_unknown" => Self::MessageUnknown,
+            "message_deleted" => Self::MessageDeleted,
             other => Self::Unknown(other.to_owned()),
         }
     }

@@ -22,25 +22,46 @@ const MAIN_LABEL: &str = "main";
 pub struct HistoryRow {
     pub message_id: Option<String>,
     pub agent: Target,
-    pub role: String,
-    pub content: String,
     pub timestamp: String,
+    pub body: RowBody,
+}
+
+/// What a row holds: its text, or a tombstone once the message was deleted (`message_delete_v1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowBody {
+    Text { role: String, content: String },
+    Deleted,
+}
+
+impl HistoryRow {
+    /// The row's text, or `None` for a deleted tombstone.
+    #[must_use]
+    pub fn content(&self) -> Option<&str> {
+        match &self.body {
+            RowBody::Text { content, .. } => Some(content),
+            RowBody::Deleted => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireRow {
-    role: String,
-    content: String,
+    #[serde(default, deserialize_with = "crate::error::present")]
+    role: Option<String>,
+    #[serde(default, deserialize_with = "crate::error::present")]
+    content: Option<String>,
     timestamp: String,
     #[serde(default, deserialize_with = "crate::error::present")]
     message_id: Option<String>,
     #[serde(default, deserialize_with = "crate::error::present")]
     agent: Option<String>,
+    #[serde(default, deserialize_with = "crate::error::present")]
+    deleted: Option<bool>,
 }
 
 /// The label of a row's agent: `main` for Main, otherwise a name that passes the name grammar.
-fn target_from_label(label: &str) -> Result<Target, PrxError> {
+pub(crate) fn target_from_label(label: &str) -> Result<Target, PrxError> {
     if label == MAIN_LABEL {
         Ok(Target::Main)
     } else {
@@ -58,14 +79,20 @@ fn session_path(session_id: &str) -> Result<String, PrxError> {
     }
 }
 
+/// A live row carries `role` and `content`; a tombstone carries exactly `deleted: true`, with
+/// neither. Anything else is refused.
 fn decode_row(row: WireRow) -> Result<HistoryRow, PrxError> {
     let label = row.agent.ok_or(protocol("caller-keyed session row carries no agent"))?;
+    let body = match (row.deleted, row.role, row.content) {
+        (Some(true), None, None) => RowBody::Deleted,
+        (None, Some(role), Some(content)) => RowBody::Text { role, content },
+        _ => return Err(protocol("row is neither a live row nor an exact tombstone")),
+    };
     Ok(HistoryRow {
         message_id: row.message_id,
         agent: target_from_label(&label)?,
-        role: row.role,
-        content: row.content,
         timestamp: row.timestamp,
+        body,
     })
 }
 

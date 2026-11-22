@@ -249,7 +249,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
         work,
         message,
         body,
-        config: account.gateway_config.clone(),
+        config: account.sealing_config()?,
         request,
     }))
 }
@@ -284,18 +284,15 @@ fn seal(
         if let Some(packet) = &plan.work.packet {
             return Ok(packet.clone());
         }
+        let config = account.sealing_config()?;
         let sealed = account.client.seal_routed_prepared(
-            &account.gateway_config,
+            &config,
             &plan.message,
             &plan.body,
             crate::client::routed::Route::receipt(),
             material,
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(
-            &account.gateway_config,
-            &mut plan.message,
-            sealed,
-        )
+        crate::dm::gateway_generated_envelope_from_sealed(&config, &mut plan.message, sealed)
     });
     let packet = match prepared {
         Ok(packet) => packet,
