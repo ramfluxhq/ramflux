@@ -132,7 +132,8 @@ pub fn parse_directory_origin(value: &str) -> Result<DirectoryOrigin, super::Cod
 #[serde(deny_unknown_fields)]
 pub struct NativeUsernameRequest {
     pub center: NativeDirectoryPin,
-    pub declaration: Option<crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>>,
+    pub declaration:
+        Option<crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>>,
     pub action: NativeUsernameAction,
 }
 
@@ -185,11 +186,11 @@ impl NativeUsernameRequest {
         need(crate::canonical_json_bytes(self)?.len() <= 16384, "native_request_size")?;
         self.center.validate()?;
         if let Some(declaration) = &self.declaration {
-        let declaration = crate::canonical_json_bytes(declaration)?;
-        crate::home_migration::decode::<
-            crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,
-        >(&declaration, 8192)
-        .map_err(|_| super::CodecError::Field("home_declaration"))?;
+            let declaration = crate::canonical_json_bytes(declaration)?;
+            crate::home_migration::decode::<
+                crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,
+            >(&declaration, 8192)
+            .map_err(|_| super::CodecError::Field("home_declaration"))?;
         }
         match &self.action {
             NativeUsernameAction::Mutate { operation, profile } => {
@@ -198,7 +199,9 @@ impl NativeUsernameRequest {
                 need(profile.body.avatar.is_none(), "avatar_out_of_scope")?;
                 need(
                     operation.body.principal_commitment == profile.body.principal_commitment
-                        && self.declaration.as_ref().is_none_or(|d| d.body.account_anchor == operation.body.principal_commitment),
+                        && self.declaration.as_ref().is_none_or(|d| {
+                            d.body.account_anchor == operation.body.principal_commitment
+                        }),
                     "native_root",
                 )
             }

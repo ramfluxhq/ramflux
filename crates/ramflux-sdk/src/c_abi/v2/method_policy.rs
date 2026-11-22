@@ -252,7 +252,10 @@ policies! {
 
 // Search stays unavailable to native hosts until its separate ABI integration is admitted.
 pub(super) const DENIED_METHODS: &[&str] = &[
-    "username.mutate", "username.status", "username.resolve", "profile.update",
+    "username.mutate",
+    "username.status",
+    "username.resolve",
+    "profile.update",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",

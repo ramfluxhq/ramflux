@@ -187,7 +187,8 @@ fn admin_response(
         #[cfg(unix)]
         ("POST", ramflux_node_core::username_directory::USERNAME_LOCAL_PATH) => {
             let reply = crate::username_directory::local_home(&request.body, context, accepted_at)
-                .map_err(|_| {
+                .map_err(|error| {
+                    tracing::warn!(%error, "username home request failed");
                     ramflux_node_core::NodeCoreError::Unauthorized(
                         "username home unavailable".into(),
                     )

@@ -29,8 +29,8 @@ mod bus;
 pub mod c_abi;
 mod client;
 pub mod diag;
-pub mod username_directory;
 mod platform;
+pub mod username_directory;
 /// Default data root on Windows: `%LOCALAPPDATA%\ramflux\<profile>`, resolved with the Known
 /// Folder API. `None` selects the profile `default`. The roaming folder is never used.
 ///

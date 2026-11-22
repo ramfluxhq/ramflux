@@ -124,7 +124,9 @@ pub fn run(
         }
         let mut lost = false;
         if let Some(current) = &mut peer {
-            if current.last.elapsed() >= Duration::from_secs(3) {
+            // Three seconds is the renewal cadence; authority expires with the ten-second lease.
+            if current.last.elapsed() >= Duration::from_secs(10) {
+                tracing::warn!("username primary heartbeat deadline exceeded");
                 lost = true;
             } else if let Err(error) = poll_peer(current, &mut authority, recovery) {
                 tracing::warn!(%error, "username primary disconnected");
@@ -177,7 +179,7 @@ pub fn run(
                             pending.push(call.0);
                         }
                         Err(error) => {
-                            tracing::debug!(%error, "username request refused before publication")
+                            tracing::warn!(%error, "username request refused before publication")
                         }
                     }
                 }
@@ -210,7 +212,7 @@ pub fn run(
                 }
             }
         }
-        if ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
+        if !ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
             break;
         }
     }
@@ -248,6 +250,7 @@ fn poll_peer(
     authority.renew(&peer.writer)?;
     peer.last = Instant::now();
     let response = match request {
+        wire::Request::Heartbeat => wire::Response::Alive,
         wire::Request::Sync { head } => {
             peer.ready = false;
             wire::Response::Group { group: authority.recovery_group(&peer.writer, &head)? }

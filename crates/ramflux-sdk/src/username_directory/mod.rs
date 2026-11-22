@@ -3,13 +3,15 @@
 
 //! Exact username operations, typed transient master authorization and durable account restrictions.
 mod config;
+mod draft;
 mod errors;
+mod intent;
+mod network;
 mod signing;
 mod verify;
-mod network;
-mod draft;
 pub use config::*;
-pub use signing::*;
 pub use draft::*;
-pub use verify::*;
+pub(crate) use intent::*;
 pub(crate) use network::*;
+pub use signing::*;
+pub use verify::*;

@@ -132,11 +132,17 @@ impl directory::UsernameCenterClient for CenterClient {
             tokio::task::spawn_blocking(move || {
                 // Keep cancellation from releasing the concurrency charge before IO actually ends.
                 let _permit = permit;
-                owner.exchange_admitted(&root, request).map_err(|_| {
+                let mutation = matches!(request, directory::DirectoryRequest::Mutate { .. });
+                let result = owner.exchange_admitted(&root, request).map_err(|error| {
+                    tracing::warn!(%error, "username centre exchange failed");
                     directory::CheckpointError::Directory(
                         ramflux_protocol::username_directory::DirectoryCode::DirectoryUnavailable,
                     )
-                })
+                })?;
+                if mutation && let directory::AuthorityResponse::Refused { failure } = &result {
+                    tracing::info!(code = failure.code.as_str(), "username mutation refused");
+                }
+                Ok(result)
             })
             .await
             .map_err(|_| directory::CheckpointError::Refused("home_exchange_stopped"))?

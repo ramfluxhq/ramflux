@@ -54,7 +54,7 @@ impl HomeCoordinator {
                     let (root, outcome) = joined.map_err(|_| CheckpointError::Refused("home_worker_stopped"))?;
                     active.remove(&root);
                     if let Err(error) = outcome {
-                        tracing::debug!(%error, "username reconciliation retained for retry");
+                        tracing::warn!(%error, "username reconciliation retained for retry");
                         if self.home.intent(&root)?.is_some() {
                             self.home.retry_later(&root, crate::now_unix_seconds(), 5)?;
                         }

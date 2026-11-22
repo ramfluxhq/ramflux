@@ -28,7 +28,7 @@ pub enum Transport {
 
 fn pause(deadline: Instant) -> Result<()> {
     if Instant::now() >= deadline
-        || ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5))
+        || !ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5))
     {
         return refuse("directory connection deadline");
     }

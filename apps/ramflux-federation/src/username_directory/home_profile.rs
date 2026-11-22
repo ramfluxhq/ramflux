@@ -269,7 +269,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                                     )? {
                                         return Ok(());
                                     }
-                                    if ramflux_node_core::service_shutdown_sleep(
+                                    if !ramflux_node_core::service_shutdown_sleep(
                                         Duration::from_millis(5),
                                     ) {
                                         return refuse("username profile shutdown");
@@ -292,7 +292,7 @@ pub(super) fn listen(home: Arc<HomeService>) -> Result<()> {
                     break;
                 }
             }
-            if ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
+            if !ramflux_node_core::service_shutdown_sleep(Duration::from_millis(5)) {
                 break;
             }
         }

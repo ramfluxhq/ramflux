@@ -9,6 +9,7 @@ mod home_profile;
 mod home_status;
 mod ipc;
 mod primary;
+mod primary_peer;
 mod quic;
 mod rpc;
 mod source;

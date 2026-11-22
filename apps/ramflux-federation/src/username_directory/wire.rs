@@ -12,6 +12,7 @@ pub const MAX_FRAME: usize = 2 * 1024 * 1024;
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Heartbeat,
     Sync { head: directory::CheckpointHead },
     Applied { head: directory::CheckpointHead },
     Image { head: directory::CheckpointHead, after: Option<Vec<u8>> },
@@ -21,6 +22,7 @@ pub enum Request {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Response {
+    Alive,
     Welcome { writer: directory::WriterIdentity, head: directory::CheckpointHead, recovery: bool },
     Group { group: Option<directory::RecoveryGroup> },
     Ready,

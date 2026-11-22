@@ -5,7 +5,9 @@ use crate::SdkError;
 use ramflux_protocol::username_directory::DirectoryCode;
 
 impl From<DirectoryCode> for SdkError {
-    fn from(code: DirectoryCode) -> Self { Self::UsernameDirectoryRefused(code) }
+    fn from(code: DirectoryCode) -> Self {
+        Self::UsernameDirectoryRefused(code)
+    }
 }
 impl From<ramflux_storage::UsernameStorageError> for SdkError {
     fn from(error: ramflux_storage::UsernameStorageError) -> Self {
