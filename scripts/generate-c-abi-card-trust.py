@@ -33,8 +33,9 @@ def main():
         raise SystemExit("invalid card ABI or signature/key length")
     if parsed["bytecode_sha256"] != hashlib.sha256(bytecode).hexdigest():
         raise SystemExit("bytecode digest mismatch")
-    if parsed["catalog_sha256"] != hashlib.sha256((CARD / "catalog.json").read_bytes()).hexdigest():
-        raise SystemExit("catalog digest mismatch")
+    # Index the independently pinned SDK release without coupling it to renderer
+    # source files. ABI/catalog compatibility is enforced before bytecode loading
+    # by SignedPackage::verify in crates/ramflux-card/src/package.rs.
     policy = dict(app_id=release["app_id"], package_id=release["package_id"],
                   minimum_epoch=release["security_epoch"], minimum_version=release["version"],
                   exact_descriptor_sha256=digest)
