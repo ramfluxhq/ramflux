@@ -48,8 +48,6 @@ mod pairing;
 mod transfer;
 #[cfg(feature = "itest-memory-vault")]
 mod transfer_export_probe;
-#[cfg(feature = "itest-memory-vault")]
-pub(crate) use transfer_export_probe::*;
 pub(crate) use dm::*;
 pub(crate) use grant::*;
 pub(crate) use group::*;
@@ -58,6 +56,8 @@ pub(crate) use mcp::*;
 pub(crate) use object::*;
 pub(crate) use pairing::*;
 pub(crate) use transfer::*;
+#[cfg(feature = "itest-memory-vault")]
+pub(crate) use transfer_export_probe::*;
 
 #[derive(Parser)]
 #[command(

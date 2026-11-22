@@ -15,10 +15,9 @@ pub(crate) async fn handle(
             "itest.transfer_export.write",
             serde_json::json!({ "account": command.account, "directory": directory }),
         ),
-        TransferExportProbeAction::Fresh => (
-            "itest.transfer_export.fresh",
-            serde_json::json!({ "account": command.account }),
-        ),
+        TransferExportProbeAction::Fresh => {
+            ("itest.transfer_export.fresh", serde_json::json!({ "account": command.account }))
+        }
         TransferExportProbeAction::Open { file, key_file, expected_root, clean_copy } => (
             "itest.transfer_export.open",
             serde_json::json!({

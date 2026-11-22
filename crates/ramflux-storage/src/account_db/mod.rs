@@ -97,12 +97,12 @@ mod shared_group_removals;
 mod shared_group_state;
 pub mod surface;
 mod task;
+#[cfg(test)]
+mod transaction_tests;
 // Until the transfer data family adopts the export path (S13 step 3), only the itest
 // probes reach the builder and the hardened open.
 #[cfg_attr(not(feature = "itest-transfer-probe"), allow(dead_code))]
 pub(crate) mod transfer_export;
-#[cfg(test)]
-mod transaction_tests;
 mod voice;
 
 pub struct AccountDb {

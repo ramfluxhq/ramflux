@@ -132,6 +132,8 @@ pub use account_db::raw_inner::{
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
 pub use account_db::shared_group_denials::{GroupRemovalFloor, PrunedGroupFloor};
+#[cfg(feature = "itest-transfer-probe")]
+pub use account_db::transfer_export::probe::{ProbeExport, ProbeOpen, itest_transfer_open};
 pub use account_db::{
     ResidueHit, ResidueScan, ResidueScanStatus, ResidueTable, ResidueTableStatus, residue_needles,
 };
@@ -146,8 +148,6 @@ pub use encryption::{
 pub use error::StorageError;
 pub use event_store::{EventStore, ProjectionStore};
 pub use records::*;
-#[cfg(feature = "itest-transfer-probe")]
-pub use account_db::transfer_export::probe::{ProbeExport, ProbeOpen, itest_transfer_open};
 
 #[cfg(test)]
 mod contact_request_tests;
