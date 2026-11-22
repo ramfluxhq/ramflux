@@ -156,9 +156,11 @@ impl FullReceiverDatabaseWork {
             }
         }
         if self.copy.export_installed {
-            // The 15-table file has no object_index and no account_key_check, so seed stays off.
+            // The 15-table file has no object_index, so seed stays off.
+            // A's key check is excluded from the export. This row is B's fingerprint.
             // The copied pre-G1 adoption row may have a null nonce. Admission reads the G1 nonce.
             let tx = target.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            install_receiver_key_check(&tx, &self.key.fingerprint())?;
             upsert_adoption(&tx, &self.adoption)?;
             tx.commit()?;
             drop(target);
@@ -180,6 +182,24 @@ impl FullReceiverDatabaseWork {
         crate::sync_path::sync_path(parent)?;
         Ok(())
     }
+}
+
+fn install_receiver_key_check(
+    tx: &rusqlite::Transaction<'_>,
+    fingerprint: &str,
+) -> Result<(), StorageError> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS account_key_check (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            key_fingerprint TEXT NOT NULL
+        );",
+    )?;
+    tx.execute(
+        "INSERT INTO account_key_check (singleton_id, key_fingerprint) VALUES (1, ?1)
+         ON CONFLICT(singleton_id) DO UPDATE SET key_fingerprint=excluded.key_fingerprint",
+        params![fingerprint],
+    )?;
+    Ok(())
 }
 
 fn upsert_adoption(tx: &rusqlite::Transaction<'_>, row: &AdoptionRow) -> Result<(), StorageError> {

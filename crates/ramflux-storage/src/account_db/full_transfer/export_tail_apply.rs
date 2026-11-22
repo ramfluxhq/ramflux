@@ -62,9 +62,10 @@ pub(super) fn validate_export_tail(
     })
 }
 
-/// Apply the tail on a scratch copy of B's current file, then back that copy up over
-/// the open account. The keyed set is destroyed only after that replace and its sync.
-/// A retry that finds this hash's marker destroys any leftover key and returns success.
+/// Apply the tail on a scratch copy of B's current file, fsync that copy, and rename it
+/// onto the account path. The open connection then denies every statement. The keyed set
+/// is destroyed only after that rename and its sync. A retry that finds this hash's marker
+/// destroys any leftover key and returns success.
 /// # Errors
 /// `RetainedDigestMissing` when the set is gone and this hash was not marked;
 /// `ManifestMismatch` when the section or a row decision disagrees; `WrongContext`
@@ -95,6 +96,7 @@ pub(super) fn apply_export_tail(
     require_section(&deletion, &retained_keys(&retained), &tail_keys)?;
     let job = CopyJob {
         directory: endpoint.stage.directory.clone(),
+        live_path: endpoint.stage.db.path.clone(),
         key: endpoint.stage.db.current_key.clone(),
         mac,
         tail,
@@ -111,6 +113,7 @@ pub(super) fn apply_export_tail(
 
 struct CopyJob {
     directory: std::path::PathBuf,
+    live_path: std::path::PathBuf,
     key: crate::AccountDbKey,
     mac: zeroize::Zeroizing<[u8; 32]>,
     tail: Vec<ExportedRow>,
@@ -118,12 +121,12 @@ struct CopyJob {
 }
 
 fn apply_on_copy(live: &mut rusqlite::Connection, job: &CopyJob) -> Result<(), StorageError> {
-    let copies = super::export_tail_swap::stage_copies(live, &job.directory, &job.key)?;
+    let copy = super::export_tail_swap::stage_copy(live, &job.directory, &job.key)?;
     let mac_bytes: &[u8; 32] = &job.mac;
-    let current = digest_map(digest::rows(copies.after(), mac_bytes)?)?;
+    let current = digest_map(digest::rows(copy.after(), mac_bytes)?)?;
     let tail_keys = key_set(job.tail.iter().map(|row| (row.table.to_owned(), row.key.clone())));
     let (deletes, inserts) = plan(&job.tail, &job.retained, &current, &tail_keys)?;
-    copies.commit_and_swap(live, |tx| commit(tx, &deletes, &inserts))
+    copy.commit_and_replace(live, &job.live_path, |tx| commit(tx, &deletes, &inserts))
 }
 
 fn spill(

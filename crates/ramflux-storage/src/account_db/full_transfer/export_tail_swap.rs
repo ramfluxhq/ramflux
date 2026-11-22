@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Replace the open account by backing a scratch copy into it.
-//! The scratch is a copy of B's current file. A failed replace restores that copy.
-//! A crash during the replace can still leave a partial file: the destination is the
-//! open account, not a new path.
+//! Publish an export tail by renaming a finished scratch onto the account path.
+//! Design r2 M1 (lines 65–70; audit r1 M1): the tail uses the same fenced private
+//! copy as the base. The open account is not a backup destination. A crash before
+//! the rename leaves that file unchanged. After the rename, the open connection
+//! denies every statement until a new `AccountDb::open`.
 
 use super::export_local;
 use crate::{AccountDbKey, StorageError};
@@ -12,11 +13,11 @@ use ramflux_protocol::custody::pairing::full_transfer::PREPUBLICATION_DELTA_STOP
 use std::path::{Path, PathBuf};
 
 const COPY_SLACK_BYTES: u64 = 8 * 1024 * 1024;
+const SCRATCH_NAME: &str = "export-tail-after.db";
 
-pub(super) struct StagedCopies {
-    before: rusqlite::Connection,
+pub(super) struct StagedCopy {
     after: rusqlite::Connection,
-    before_remove: RemoveFile,
+    after_path: PathBuf,
     after_remove: RemoveFile,
 }
 
@@ -27,68 +28,97 @@ impl Drop for RemoveFile {
     }
 }
 
-/// Refuse an account whose page bytes exceed 64 MiB plus 8 MiB, then copy it twice.
-/// `before` stays pristine. `after` is the copy the tail may change.
+/// Refuse an account whose page bytes exceed 64 MiB plus 8 MiB, then copy it once.
 /// # Errors
 /// `NoSpace` over the page cap; `Busy` when backup does not finish; I/O and SQL errors.
-pub(super) fn stage_copies(
+pub(super) fn stage_copy(
     live: &rusqlite::Connection,
     directory: &Path,
     key: &AccountDbKey,
-) -> Result<StagedCopies, StorageError> {
+) -> Result<StagedCopy, StorageError> {
     require_page_budget(live)?;
-    let before_path = create_scratch(directory, "export-tail-before.db")?;
-    let before_remove = RemoveFile(before_path.clone());
-    let after_path = create_scratch(directory, "export-tail-after.db")?;
+    let after_path = create_scratch(directory, SCRATCH_NAME)?;
     let after_remove = RemoveFile(after_path.clone());
-    let mut before = export_local::open_keyed(&before_path, key)?;
-    copy_db(live, &mut before)?;
     let mut after = export_local::open_keyed(&after_path, key)?;
-    copy_db(&before, &mut after)?;
-    Ok(StagedCopies { before, after, before_remove, after_remove })
+    copy_db(live, &mut after)?;
+    Ok(StagedCopy { after, after_path, after_remove })
 }
 
-impl StagedCopies {
+impl StagedCopy {
     pub(super) fn after(&self) -> &rusqlite::Connection {
         &self.after
     }
 
-    /// Commit `apply` on the second copy, then back that copy up over the open account.
-    /// On a failed replace, the pristine copy is written back and the original error is
-    /// returned. A failed restore returns the restore error instead.
+    /// Commit `apply` on the scratch, fsync it, and rename it onto `live_path`.
+    /// The open connection is then denied. A failure before the rename leaves `live_path`
+    /// untouched and returns that error.
     /// # Errors
-    /// The apply error, `Busy`, or the restore error when the restore itself fails.
-    pub(super) fn commit_and_swap(
+    /// The apply error, `Busy`, `WrongContext` when the scratch is on another device,
+    /// or the error from denying the open connection.
+    pub(super) fn commit_and_replace(
         self,
         live: &mut rusqlite::Connection,
+        live_path: &Path,
         apply: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        let StagedCopies { mut after, before, before_remove, after_remove } = self;
-        let result = apply_and_replace(&mut after, &before, live, apply);
+        let StagedCopy { mut after, after_path, after_remove } = self;
+        let applied = apply_on_scratch(&mut after, apply);
         drop(after);
-        drop(before);
+        let published = applied.and_then(|()| publish(&after_path, live_path));
         drop(after_remove);
-        drop(before_remove);
-        result
+        published?;
+        refuse_reopen(live)
     }
 }
 
-fn apply_and_replace(
+fn apply_on_scratch(
     after: &mut rusqlite::Connection,
-    before: &rusqlite::Connection,
-    live: &mut rusqlite::Connection,
     apply: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    {
-        let tx = after.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        apply(&tx)?;
-        tx.commit()?;
+    let tx = after.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    apply(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn publish(scratch: &Path, live_path: &Path) -> Result<(), StorageError> {
+    super::stage::sync_regular(scratch)?;
+    require_no_sidecar(scratch)?;
+    require_no_sidecar(live_path)?;
+    let parent = live_path.parent().ok_or_else(|| StorageError::PairingField("WrongContext"))?;
+    if let Err(error) = std::fs::rename(scratch, live_path) {
+        if error.kind() == std::io::ErrorKind::CrossesDevices {
+            return Err(StorageError::PairingField("WrongContext"));
+        }
+        return Err(error.into());
     }
-    if let Err(error) = copy_db(after, live) {
-        copy_db(before, live)?;
-        return Err(error);
+    crate::sync_path::sync_path(parent)?;
+    Ok(())
+}
+
+fn require_no_sidecar(path: &Path) -> Result<(), StorageError> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        match std::fs::symlink_metadata(&sidecar) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(StorageError::PairingField("WrongContext")),
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
+}
+
+fn refuse_reopen(live: &mut rusqlite::Connection) -> Result<(), StorageError> {
+    live.authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+        rusqlite::hooks::Authorization::Deny
+    }))?;
+    Ok(())
+}
+
+/// Remove a crash leftover of the tail scratch. Known names only.
+pub(super) fn sweep_scratches(directory: &Path) {
+    remove_db(&directory.join(SCRATCH_NAME));
+    remove_db(&directory.join("export-tail-before.db"));
 }
 
 fn require_page_budget(db: &rusqlite::Connection) -> Result<(), StorageError> {

@@ -192,6 +192,7 @@ impl AccountDb {
         if record.role != role {
             return Err(context());
         }
+        super::export_tail_swap::sweep_scratches(&stage.directory);
         stage.sweep_retained_digests()?;
         stage.recover_forward_receipts()?;
         stage.recover_reverse_receipts()?;
