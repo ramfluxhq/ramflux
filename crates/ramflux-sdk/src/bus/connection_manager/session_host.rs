@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Priority-first uncorrelated RPC ownership, independent queued expiry, and cancellation retirement.
+//! Priority-first uncorrelated RPC ownership, independent queued expiry, and session retirement.
 
 use super::{
     Call, Child, ConnectionHandle, DisconnectReason, RuntimeTimeouts, expire_calls, expired,
@@ -117,7 +117,7 @@ struct ExchangeIo<'a> {
 ///   budget, so the uncorrelated reply stream is never reused while a reply is still owed, and
 ///   the session retires only if that reply never comes.
 async fn exchange(
-    mut call: Call,
+    call: Call,
     handle: &ConnectionHandle,
     engine: &mut GatewaySessionEngine,
     io: ExchangeIo<'_>,
@@ -150,7 +150,8 @@ async fn exchange(
             expire_calls(handle, queue);
             let queued_deadline = next_deadline(queue);
             let waiting = reply.is_some();
-            let caller_budget = (best_effort && waiting && caller_at < session_at).then_some(caller_at);
+            let caller_budget =
+                (best_effort && waiting && caller_at < session_at).then_some(caller_at);
             tokio::select! {
                 biased;
                 _=stopping.changed()=>{
