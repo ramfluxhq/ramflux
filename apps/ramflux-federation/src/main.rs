@@ -27,6 +27,7 @@ mod mesh;
 mod pairing_full;
 mod pairing_http;
 mod pairing_scratch;
+mod peer_pin;
 mod public_http;
 mod public_source_limits;
 mod state;
@@ -123,6 +124,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             Arc::clone(&state),
             Arc::clone(&router),
             node_signing_seed,
+            &discovery,
         );
         serve_federation_mesh_mtls(
             &config,

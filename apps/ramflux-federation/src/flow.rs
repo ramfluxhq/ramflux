@@ -98,6 +98,15 @@ pub(crate) fn handle_s8_forward_envelope(
             request.target_node_id, discovery.node_id
         )));
     }
+    crate::peer_pin::ensure_forward_pin(
+        &request.target_node_id,
+        state,
+        store,
+        &crate::peer_pin::LocalNode {
+            node_id: discovery.node_id.clone(),
+            capabilities: discovery.node_capabilities.clone(),
+        },
+    )?;
     let peer = resolve_forward_peer(request, state)?;
     tracing::info!(
         target_node_id = %request.target_node_id,
@@ -265,13 +274,18 @@ pub(crate) fn start_outbound_spool_retry_loop(
     state: Arc<crate::SharedFederationTrustState>,
     router: Arc<RouterMeshClient>,
     node_signing_seed: [u8; 32],
+    discovery: &FederationDiscoverySurface,
 ) {
+    let local = crate::peer_pin::LocalNode {
+        node_id: discovery.node_id.clone(),
+        capabilities: discovery.node_capabilities.clone(),
+    };
     let interval = Duration::from_secs(outbound_spool_retry_interval_seconds().max(1));
     if let Err(error) =
         ramflux_node_core::spawn_service_worker("federation-spool-retry", move |_| {
             while ramflux_node_core::service_shutdown_sleep(interval) {
                 if let Err(error) =
-                    retry_outbound_spool_once(&store, &state, &router, node_signing_seed)
+                    retry_outbound_spool_once(&store, &state, &router, node_signing_seed, &local)
                 {
                     tracing::warn!(%error, "federation outbound spool retry pass failed");
                 }
@@ -287,10 +301,12 @@ pub(crate) fn retry_outbound_spool_once(
     state: &crate::SharedFederationTrustState,
     router: &RouterMeshClient,
     node_signing_seed: [u8; 32],
+    local: &crate::peer_pin::LocalNode,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds()?;
     let shutdown = ramflux_node_core::service_shutdown_token();
     retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), &shutdown, |entry| {
+        crate::peer_pin::ensure_forward_pin(&entry.forward.target_node_id, state, store, local)?;
         let peer = resolve_forward_peer(&entry.forward, state)?;
         let forward = refresh_spooled_forward(&entry.forward, node_signing_seed, |envelope| {
             attach_forward_source_authority(envelope, router)

@@ -32,6 +32,7 @@ mod mesh_request_deadline;
 mod mesh_tls;
 mod perf_metrics;
 mod policy;
+mod public_well_known;
 mod quic_errors;
 mod quic_gateway;
 /// Dormant checked QUIC resource policy; constructing a plan starts no runtime.
@@ -105,6 +106,7 @@ pub use mesh_tls::{
     authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
+pub use public_well_known::{fetch_server_well_known, public_mesh_endpoint};
 
 /// Worst-case wall-clock budget for a router post, including QUIC probing and HTTP fallback.
 #[must_use]

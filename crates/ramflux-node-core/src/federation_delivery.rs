@@ -20,6 +20,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FEDERATION_OPAQUE_DELIVERY_CAPABILITY: &str = "opaque_delivery";
 const MAX_ACTIVE_NODE_BLOCKS: usize = 1024;
+const MAX_PEER_PINS: usize = 1024;
+const MAX_NEW_PEER_PINS_PER_HOUR: usize = 32;
 
 impl FederationTrustState {
     /// Record an operator or peer advisory. Cleared rows are dropped. A new active
@@ -70,6 +72,37 @@ impl FederationTrustState {
                 && advisory.expires_at > now
         });
         route_is_active && !locally_blocked
+    }
+
+    /// An operator block refuses a new pin before any network fetch.
+    #[must_use]
+    pub fn peer_pin_blocked(&self, node_id: &str, now: u64) -> bool {
+        self.advisories_by_id.values().any(|advisory| {
+            advisory.subject_node_id == node_id
+                && advisory.reason_code == "block"
+                && advisory.expires_at > now
+        })
+    }
+
+    /// A node that already has a pin is not a new pin. Nothing in the table is removed.
+    ///
+    /// # Errors
+    /// Returns an error when another pin would pass 1024 stored pins or 32 new pins in the
+    /// last hour. Pins of nodes that already have contacts stay because no pin is evicted.
+    pub fn admit_new_peer_pin(&self, node_id: &str, now: u64) -> Result<(), NodeCoreError> {
+        if self.discovery_pins_by_node.contains_key(node_id) {
+            return Ok(());
+        }
+        if self.discovery_pins_by_node.len() >= MAX_PEER_PINS {
+            return Err(NodeCoreError::ItestHttp("federation peer pin table is full".to_owned()));
+        }
+        let window = now.saturating_sub(60 * 60);
+        let recent =
+            self.discovery_pins_by_node.values().filter(|pin| pin.first_seen_at >= window).count();
+        if recent >= MAX_NEW_PEER_PINS_PER_HOUR {
+            return Err(NodeCoreError::ItestHttp("federation peer pin rate is full".to_owned()));
+        }
+        Ok(())
     }
 
     #[must_use]

@@ -708,6 +708,15 @@ pub(crate) fn handle_s8_forward_envelope(
             request.target_node_id, discovery.node_id
         )));
     }
+    crate::peer_pin::ensure_forward_pin(
+        &request.target_node_id,
+        state,
+        store,
+        &crate::peer_pin::LocalNode {
+            node_id: discovery.node_id.clone(),
+            capabilities: discovery.node_capabilities.clone(),
+        },
+    )?;
     let peer = resolve_forward_peer(request, state)?;
     tracing::info!(
         target_node_id = %request.target_node_id,
