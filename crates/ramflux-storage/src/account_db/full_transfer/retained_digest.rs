@@ -285,9 +285,6 @@ pub(super) trait ExportRetain {
         expected_root: &str,
         generation: i64,
     ) -> Result<(), StorageError>;
-    /// # Errors
-    /// SQL and fsync errors.
-    fn discard_retained_export(&self) -> Result<(), StorageError>;
 }
 
 impl ExportRetain for FullTransferStage<'_> {
@@ -299,8 +296,5 @@ impl ExportRetain for FullTransferStage<'_> {
         _generation: i64,
     ) -> Result<(), StorageError> {
         self.retain_installed_export(path, key, expected_root)
-    }
-    fn discard_retained_export(&self) -> Result<(), StorageError> {
-        self.destroy_retained_digests()
     }
 }

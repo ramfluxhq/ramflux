@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Install a framed export into the receiver scratch during off-loan replay.
+//! Record a framed export during off-loan replay.
 //! An existing device already holds rows. This path does not apply the fresh-target gate,
 //! which belongs to the live-account install.
+//! `private.db` stays the full receiver snapshot from `copy`. `prepare` opens that file
+//! with the full-account checks (storage generation, migration rows, copy-key fingerprint).
+//! The clean export is a generation-0 15-table file and cannot pass those checks. Its
+//! keyed digests are retained, then the clean file is removed.
 
 use super::FullReceiverBaseCopy;
 use crate::StorageError;
@@ -15,7 +19,7 @@ use std::io::{Read as _, Seek as _};
 use std::path::Path;
 
 impl FullReceiverBaseCopy {
-    /// Replace the scratch private file with this framed export cut.
+    /// Retain this framed export cut and keep the full snapshot as `private.db`.
     /// # Errors
     /// `WrongContext` for a non-export census, a tail, or a foreign stage.
     /// `ManifestMismatch` when the frame length disagrees. `RecipientNotFresh` is not used.
@@ -26,9 +30,8 @@ impl FullReceiverBaseCopy {
     ) -> Result<super::super::FullScalarInputCounts, StorageError> {
         let manifest = stage.forward_manifest(hash)?;
         self.admit_export_frame(stage, hash, &manifest)?;
-        let copied = self.read_frame_pairing()?;
         let rows = self.write_export_frame(stage, hash, &manifest)?;
-        self.finish_export_frame(stage, hash, &manifest, rows, copied)
+        self.finish_export_frame(stage, hash, &manifest, rows)
     }
 
     fn admit_export_frame(
@@ -64,16 +67,6 @@ impl FullReceiverBaseCopy {
         stage.require_target(&self.observation)
     }
 
-    fn read_frame_pairing(
-        &self,
-    ) -> Result<Option<super::super::export_local::CopiedPairing>, StorageError> {
-        let private = self.scratch.path.join("private.db");
-        if !private.is_file() {
-            return Ok(None);
-        }
-        super::super::export_local::read_copied_pairing(&private, &self.key).map(Some)
-    }
-
     fn write_export_frame(
         &self,
         stage: &impl ReceiverInput,
@@ -92,16 +85,10 @@ impl FullReceiverBaseCopy {
         let trailing = reader.read(&mut extra)?;
         if trailing != 0 || reader.stream_position()? != manifest.manifest.total_bytes.0 {
             drop(reader);
-            let _ = std::fs::remove_file(&clean);
+            discard_database(&clean);
             return Err(StorageError::PairingField("ManifestMismatch"));
         }
         drop(reader);
-        let private = self.scratch.path.join("private.db");
-        if let Err(error) = std::fs::rename(&clean, &private) {
-            let _ = std::fs::remove_file(&clean);
-            return Err(error.into());
-        }
-        super::super::stage::sync_regular(&private)?;
         Ok(built.rows)
     }
 
@@ -111,26 +98,18 @@ impl FullReceiverBaseCopy {
         hash: &str,
         manifest: &SourceManifest,
         rows: u64,
-        copied: Option<super::super::export_local::CopiedPairing>,
     ) -> Result<super::super::FullScalarInputCounts, StorageError> {
-        let private = self.scratch.path.join("private.db");
+        let clean = self.scratch.path.join("private-clean.db");
         if let Err(error) = stage.retain_export_frame(
-            &private,
+            &clean,
             &self.key,
             &manifest.manifest.account_anchor,
             self.erasure_generation,
         ) {
-            discard_private(&private);
+            discard_database(&clean);
             return Err(error);
         }
-        if let Some(copied) = copied
-            && let Err(error) =
-                super::super::export_local::write_copied_pairing(&private, &self.key, &copied)
-        {
-            discard_private(&private);
-            stage.discard_retained_export()?;
-            return Err(error);
-        }
+        discard_database(&clean);
         let chunks_root = super::decode_root(&manifest.manifest.chunks_root)?;
         let counts = super::super::FullScalarInputCounts {
             records: rows,
@@ -155,7 +134,7 @@ impl FullReceiverBaseCopy {
     }
 }
 
-fn discard_private(path: &Path) {
+fn discard_database(path: &Path) {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(path.with_extension("db-journal"));
     let _ = std::fs::remove_file(path.with_extension("db-wal"));

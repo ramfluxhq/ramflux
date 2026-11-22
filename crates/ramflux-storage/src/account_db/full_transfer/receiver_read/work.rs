@@ -190,9 +190,6 @@ impl super::super::retained_digest::ExportRetain for OwnedReceiverInput {
         )?;
         super::super::retained_digest::require_export_rows(&self.connection, &self.directory)
     }
-    fn discard_retained_export(&self) -> Result<(), StorageError> {
-        super::super::retained_digest::destroy_export_rows(&self.connection, &self.directory)
-    }
 }
 impl ReceiverInput for OwnedReceiverInput {
     fn require_io(&self) -> Result<(), StorageError> {
