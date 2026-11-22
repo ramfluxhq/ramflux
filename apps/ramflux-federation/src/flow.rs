@@ -264,12 +264,15 @@ pub(crate) fn start_outbound_spool_retry_loop(
     store: Arc<ramflux_node_core::FederationRedbStore>,
     state: Arc<crate::SharedFederationTrustState>,
     router: Arc<RouterMeshClient>,
+    node_signing_seed: [u8; 32],
 ) {
     let interval = Duration::from_secs(outbound_spool_retry_interval_seconds().max(1));
     if let Err(error) =
         ramflux_node_core::spawn_service_worker("federation-spool-retry", move |_| {
             while ramflux_node_core::service_shutdown_sleep(interval) {
-                if let Err(error) = retry_outbound_spool_once(&store, &state, &router) {
+                if let Err(error) =
+                    retry_outbound_spool_once(&store, &state, &router, node_signing_seed)
+                {
                     tracing::warn!(%error, "federation outbound spool retry pass failed");
                 }
             }
@@ -283,12 +286,13 @@ pub(crate) fn retry_outbound_spool_once(
     store: &ramflux_node_core::FederationRedbStore,
     state: &crate::SharedFederationTrustState,
     router: &RouterMeshClient,
+    node_signing_seed: [u8; 32],
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds()?;
     let shutdown = ramflux_node_core::service_shutdown_token();
     retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), &shutdown, |entry| {
         let peer = resolve_forward_peer(&entry.forward, state)?;
-        let forward = refresh_spooled_forward(&entry.forward, state, |envelope| {
+        let forward = refresh_spooled_forward(&entry.forward, node_signing_seed, |envelope| {
             attach_forward_source_authority(envelope, router)
         })?;
         send_signed_forward_to_peer(router, &peer, &forward)
@@ -344,19 +348,18 @@ fn retry_outbound_spool_with(
     Ok(())
 }
 
+/// Resign with the mounted node key a direct forward uses. Trust state does not store that seed:
+/// startup keeps it on the discovery surface, and `save_state` removes any legacy copy.
 fn refresh_spooled_forward(
     retained: &ramflux_node_core::FederatedEnvelopeForwardRequest,
-    state: &crate::SharedFederationTrustState,
+    node_signing_seed: [u8; 32],
     refresh: impl FnOnce(
         &mut ramflux_protocol::Envelope,
     ) -> Result<(), ramflux_node_core::NodeCoreError>,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, ramflux_node_core::NodeCoreError> {
-    let seed = state.snapshot()?.node_signing_seed().ok_or_else(|| {
-        ramflux_node_core::NodeCoreError::Unauthorized("federation signing key unavailable".into())
-    })?;
     let mut current = retained.clone();
     refresh(&mut current.envelope)?;
-    ramflux_node_core::sign_federated_envelope_forward(&mut current, seed)?;
+    ramflux_node_core::sign_federated_envelope_forward(&mut current, node_signing_seed)?;
     Ok(current)
 }
 
@@ -1048,11 +1051,8 @@ mod tests {
     #[test]
     fn spool_retry_refreshes_authority_before_resigning_and_refuses_revoked_sources()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = ramflux_node_core::FederationTrustState::new();
-        state.set_node_signing_seed([9; 32]);
-        let state = crate::SharedFederationTrustState::new(state);
         let request = retained_forward()?;
-        let refreshed = refresh_spooled_forward(&request, &state, |envelope| {
+        let refreshed = refresh_spooled_forward(&request, [9; 32], |envelope| {
             envelope
                 .ext
                 .ext
@@ -1066,7 +1066,7 @@ mod tests {
             &ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
         )?;
         assert!(
-            refresh_spooled_forward(&request, &state, |_| Err(
+            refresh_spooled_forward(&request, [9; 32], |_| Err(
                 ramflux_node_core::NodeCoreError::Unauthorized("revoked".into())
             ))
             .is_err()

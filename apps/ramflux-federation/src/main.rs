@@ -122,6 +122,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             Arc::clone(&store),
             Arc::clone(&state),
             Arc::clone(&router),
+            node_signing_seed,
         );
         serve_federation_mesh_mtls(
             &config,
