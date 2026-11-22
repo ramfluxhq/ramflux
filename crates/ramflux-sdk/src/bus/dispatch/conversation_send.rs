@@ -210,8 +210,13 @@ async fn send_group(
             "sender_id":sender,"content":content,
             "encrypted_body_base64":""}),
     );
-    let outcome = super::group::dispatch_group_send_request(&request, account).await;
-    Ok(vec![delivery(group, outcome)])
+    // A group send has one outcome for the whole group: a refusal is the command's result, with
+    // its own code, never an ok reply carrying a failed row.
+    let native = account.client.born_v3_account.is_some();
+    let outcome = super::group::dispatch_group_send_request(&request, account)
+        .await
+        .map_err(|error| super::group::group_operation_error("group.send", error, native))?;
+    Ok(vec![delivery(group, Ok(outcome))])
 }
 
 pub(in crate::bus) fn peer_root(
