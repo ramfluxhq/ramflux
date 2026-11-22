@@ -44,6 +44,23 @@ impl RouterCore {
         store: Option<&crate::RouterRedbStore>,
         origin: RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        self.authenticated_envelope_source_with_peer(envelope, store, origin, None)
+    }
+
+    /// Authenticate an envelope and key foreign custody pins by the verified source node.
+    ///
+    /// `verified_source_node_id` is node-internal metadata from the authenticated federation
+    /// peer. It is not an envelope field. Missing or reserved ids fail closed for custody.
+    ///
+    /// # Errors
+    /// Rejects forged, stale, over-capacity or gateway-supplied foreign authority.
+    pub fn authenticated_envelope_source_with_peer(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+        store: Option<&crate::RouterRedbStore>,
+        origin: RouterEnvelopeOrigin,
+        verified_source_node_id: Option<&str>,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
         ramflux_protocol::ephemeral::require_durable(envelope)?;
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
@@ -71,7 +88,7 @@ impl RouterCore {
         }
         let (authority, _) = DeviceAuthKeyResponse::forwarded_envelope_source(envelope)?;
         if authority.custody_authority.is_some() {
-            return self.admit_foreign_custody(envelope, store, root);
+            return self.admit_foreign_custody(envelope, store, root, verified_source_node_id);
         }
         self.admit_foreign_signed_set(envelope, store, root, &authority)
     }
@@ -102,6 +119,7 @@ impl RouterCore {
         envelope: &ramflux_protocol::Envelope,
         store: Option<&crate::RouterRedbStore>,
         root: &str,
+        verified_source_node_id: Option<&str>,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         {
@@ -110,8 +128,7 @@ impl RouterCore {
                 return Err(reject());
             }
         }
-        // The envelope does not carry the peer node id. Message limits use that id
-        // in federation. Pin quota here shares the existing unspecified bucket.
+        let peer = verified_custody_peer(verified_source_node_id)?;
         let Some(store) = store else {
             return Err(NodeCoreError::Unauthorized(
                 "foreign custody admission requires durable pins".into(),
@@ -121,7 +138,7 @@ impl RouterCore {
             .lock()
             .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
         self.authenticated_native_forwarded_source_from_peer(
-            "unspecified",
+            peer,
             envelope,
             &[],
             store,
@@ -155,5 +172,21 @@ impl RouterCore {
         control.foreign_device_heads.apply(record, observation);
         observation.admitted()?;
         Ok(source)
+    }
+}
+
+fn verified_custody_peer(peer: Option<&str>) -> Result<&str, NodeCoreError> {
+    match peer {
+        Some(peer)
+            if !peer.is_empty()
+                && peer.len() <= 256
+                && peer != "unspecified"
+                && peer != "legacy" =>
+        {
+            Ok(peer)
+        }
+        _ => Err(NodeCoreError::Unauthorized(
+            "foreign custody pin requires a verified source node".into(),
+        )),
     }
 }

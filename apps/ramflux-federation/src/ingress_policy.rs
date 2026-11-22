@@ -22,6 +22,7 @@ const DEFAULT_PEER_BYTES_PER_HOUR: u64 = 64 * 1024 * 1024;
 const HOUR: u64 = 3600;
 const MINUTE: u64 = 60;
 const MAX_ID_LEN: usize = 256;
+const MAX_TUPLE_LEN: usize = 2048;
 const MAX_KEYS: usize = 8192;
 
 struct Config {
@@ -46,6 +47,8 @@ struct Tables {
     recipient: HashMap<String, Window>,
     peer_minute: HashMap<String, Window>,
     peer_hour: HashMap<String, Window>,
+    /// Replay tuple → hour window that already paid the delivery quota.
+    reservations: HashMap<String, u64>,
 }
 
 pub(crate) fn is_permanent_outcome(outcome: &str) -> bool {
@@ -107,32 +110,83 @@ pub(crate) fn permanent_outcome(error: &ramflux_node_core::NodeCoreError) -> Opt
     }
 }
 
-/// Count one verified forward. Over the cap the envelope is refused and not counted past it.
+/// Count one new authenticated attempt against the per-minute peer cap only.
+///
+/// Called only after the seen-table lease, and only when this replay tuple has no
+/// delivery reservation for the current hour. A committed receipt, an in-flight
+/// duplicate, a failed device proof, and a retry of a reserved tuple are not counted.
+/// Device authentication has to run before a receipt can be recognized, so a
+/// bad-device flood is not minute-capped here. That gap does not spend delivery quota.
+///
 /// # Errors
-/// Returns `rejected_malformed` for an oversized id and `rejected_limit` over a cap.
-pub(crate) fn admit(peer: &str, recipient: &str, bytes: u64, now: u64) -> Result<(), &'static str> {
-    if peer.is_empty()
-        || recipient.is_empty()
-        || peer.len() > MAX_ID_LEN
-        || recipient.len() > MAX_ID_LEN
-    {
+/// Returns `rejected_malformed` for an empty or oversized peer and `rejected_limit` over the cap.
+pub(crate) fn note_attempt(peer: &str, now: u64) -> Result<(), &'static str> {
+    if peer.is_empty() || peer.len() > MAX_ID_LEN {
         return Err("rejected_malformed");
     }
     let mut tables = tables().lock().map_err(|_| "rejected_limit")?;
     if key_count(&tables) >= MAX_KEYS {
         sweep(&mut tables, now);
     }
-    let peer_recipient_key = (peer.to_owned(), recipient.to_owned());
-    if key_count(&tables) >= MAX_KEYS && !tables.peer_recipient.contains_key(&peer_recipient_key) {
+    if key_count(&tables) >= MAX_KEYS && !tables.peer_minute.contains_key(peer) {
         return Err("rejected_limit");
     }
-    if exceeds(&tables, peer, recipient, now, bytes) {
+    if over(tables.peer_minute.get(peer), now / MINUTE, config().peer_per_minute, u64::MAX, 0) {
         return Err("rejected_limit");
     }
-    add_pair(tables.peer_recipient.entry(peer_recipient_key), now / HOUR, bytes);
-    add_one(tables.recipient.entry(recipient.to_owned()), now / HOUR, bytes);
-    add_one(tables.peer_minute.entry(peer.to_owned()), now / MINUTE, bytes);
-    add_one(tables.peer_hour.entry(peer.to_owned()), now / HOUR, bytes);
+    add_one(tables.peer_minute.entry(peer.to_owned()), now / MINUTE, 0);
+    Ok(())
+}
+
+/// True when this replay tuple already paid the delivery quota for the current hour.
+#[must_use]
+pub(crate) fn delivery_reserved(tuple: &str, now: u64) -> bool {
+    let hour = now / HOUR;
+    tables().lock().is_ok_and(|tables| tables.reservations.get(tuple).copied() == Some(hour))
+}
+
+/// Charge delivery quota once per replay tuple for the current hour.
+///
+/// A tuple already reserved this hour returns without charging again, including when a
+/// later check would be over the cap. A previous-hour reservation charges the new hour.
+/// The reservation is stored only after the charge succeeds.
+///
+/// # Errors
+/// Returns `rejected_malformed` for an empty or oversized id and `rejected_limit` over a cap.
+pub(crate) fn reserve_delivery(
+    tuple: &str,
+    peer: &str,
+    recipient: &str,
+    bytes: u64,
+    now: u64,
+) -> Result<(), &'static str> {
+    if peer.is_empty()
+        || recipient.is_empty()
+        || tuple.is_empty()
+        || peer.len() > MAX_ID_LEN
+        || recipient.len() > MAX_ID_LEN
+        || tuple.len() > MAX_TUPLE_LEN
+    {
+        return Err("rejected_malformed");
+    }
+    let mut tables = tables().lock().map_err(|_| "rejected_limit")?;
+    let hour = now / HOUR;
+    if tables.reservations.get(tuple).copied() == Some(hour) {
+        return Ok(());
+    }
+    if key_count(&tables) >= MAX_KEYS {
+        sweep(&mut tables, now);
+    }
+    if key_count(&tables) >= MAX_KEYS && !tables.reservations.contains_key(tuple) {
+        return Err("rejected_limit");
+    }
+    if delivery_exceeds(&tables, peer, recipient, now, bytes) {
+        return Err("rejected_limit");
+    }
+    add_pair(tables.peer_recipient.entry((peer.to_owned(), recipient.to_owned())), hour, bytes);
+    add_one(tables.recipient.entry(recipient.to_owned()), hour, bytes);
+    add_one(tables.peer_hour.entry(peer.to_owned()), hour, bytes);
+    tables.reservations.insert(tuple.to_owned(), hour);
     Ok(())
 }
 
@@ -141,9 +195,10 @@ fn key_count(tables: &Tables) -> usize {
         + tables.recipient.len()
         + tables.peer_minute.len()
         + tables.peer_hour.len()
+        + tables.reservations.len()
 }
 
-fn exceeds(tables: &Tables, peer: &str, recipient: &str, now: u64, bytes: u64) -> bool {
+fn delivery_exceeds(tables: &Tables, peer: &str, recipient: &str, now: u64, bytes: u64) -> bool {
     let config = config();
     let pair = (peer.to_owned(), recipient.to_owned());
     over(
@@ -158,8 +213,7 @@ fn exceeds(tables: &Tables, peer: &str, recipient: &str, now: u64, bytes: u64) -
         config.recipient_per_hour,
         config.recipient_bytes_per_hour,
         bytes,
-    ) || over(tables.peer_minute.get(peer), now / MINUTE, config.peer_per_minute, u64::MAX, bytes)
-        || over(tables.peer_hour.get(peer), now / HOUR, u64::MAX, config.peer_bytes_per_hour, bytes)
+    ) || over(tables.peer_hour.get(peer), now / HOUR, u64::MAX, config.peer_bytes_per_hour, bytes)
 }
 
 fn over(window: Option<&Window>, start: u64, max_count: u64, max_bytes: u64, bytes: u64) -> bool {
@@ -208,6 +262,7 @@ fn sweep(tables: &mut Tables, now: u64) {
     tables.recipient.retain(|_, window| window.start == hour);
     tables.peer_hour.retain(|_, window| window.start == hour);
     tables.peer_minute.retain(|_, window| window.start == minute);
+    tables.reservations.retain(|_, window| *window == hour);
 }
 
 fn tables() -> &'static Mutex<Tables> {

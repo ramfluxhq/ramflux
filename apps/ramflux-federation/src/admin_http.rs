@@ -515,15 +515,18 @@ fn handle_admin_node_block(
     let blocked = request.blocked;
     tracing::info!(%peer_node_id, blocked, "federation admin node block requested");
     context.state.update_and_save(context.store.as_ref(), |state| {
-        state.apply_bad_node_advisory(ramflux_node_core::BadNodeAdvisory {
-            advisory_id: format!("local-block:{peer_node_id}"),
-            issuer_node_id: context.discovery.node_id.clone(),
-            subject_node_id: peer_node_id.clone(),
-            reason_code: "block".to_owned(),
-            issued_at: now,
-            expires_at: if blocked { u64::MAX } else { 0 },
-            signature_hash: "operator".to_owned(),
-        });
+        state.apply_bad_node_advisory(
+            ramflux_node_core::BadNodeAdvisory {
+                advisory_id: format!("local-block:{peer_node_id}"),
+                issuer_node_id: context.discovery.node_id.clone(),
+                subject_node_id: peer_node_id.clone(),
+                reason_code: "block".to_owned(),
+                issued_at: now,
+                expires_at: if blocked { u64::MAX } else { 0 },
+                signature_hash: "operator".to_owned(),
+            },
+            now,
+        )?;
         Ok(())
     })?;
     tracing::info!(%peer_node_id, blocked, "federation admin node block stored");

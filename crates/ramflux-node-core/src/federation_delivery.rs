@@ -19,10 +19,37 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FEDERATION_OPAQUE_DELIVERY_CAPABILITY: &str = "opaque_delivery";
+const MAX_ACTIVE_NODE_BLOCKS: usize = 1024;
 
 impl FederationTrustState {
-    pub fn apply_bad_node_advisory(&mut self, advisory: BadNodeAdvisory) {
+    /// Record an operator or peer advisory. Cleared rows are dropped. A new active
+    /// block is refused at the cap so a live denial is never evicted to make room.
+    ///
+    /// # Errors
+    /// Returns [`NodeCoreError::Capacity`] when another active block would exceed the cap.
+    pub fn apply_bad_node_advisory(
+        &mut self,
+        advisory: BadNodeAdvisory,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
+        self.advisories_by_id.retain(|_, row| row.expires_at > now);
+        if advisory.reason_code != "block" || advisory.expires_at <= now {
+            if advisory.expires_at <= now {
+                self.advisories_by_id.remove(&advisory.advisory_id);
+            } else {
+                self.advisories_by_id.insert(advisory.advisory_id.clone(), advisory);
+            }
+            return Ok(());
+        }
+        let replacing = self
+            .advisories_by_id
+            .get(&advisory.advisory_id)
+            .is_some_and(|row| row.reason_code == "block" && row.expires_at > now);
+        if !replacing && active_block_count(self, now) >= MAX_ACTIVE_NODE_BLOCKS {
+            return Err(NodeCoreError::Capacity { resource: "federation node blocks" });
+        }
         self.advisories_by_id.insert(advisory.advisory_id.clone(), advisory);
+        Ok(())
     }
 
     pub fn record_lifecycle_tombstone(&mut self, response: FederatedLifecycleTombstoneResponse) {
@@ -135,6 +162,14 @@ impl FederationTrustState {
         }
         Ok(())
     }
+}
+
+fn active_block_count(state: &FederationTrustState, now: u64) -> usize {
+    state
+        .advisories_by_id
+        .values()
+        .filter(|row| row.reason_code == "block" && row.expires_at > now)
+        .count()
 }
 
 fn required_capability_for_federated_envelope(
