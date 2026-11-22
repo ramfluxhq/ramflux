@@ -17,6 +17,8 @@ this shared flow while the phone companion remains outside this release.
 Pairing enrolls a separately generated device branch. Each device keeps its own
 signing and agreement keys, local encrypted store and data passphrase. Pairing
 never copies an existing device's ratchet state or account authority seeds.
+For an owner's added device, `rf pairing begin` defaults to all five capabilities:
+`call,group,message,register,sync`. Use `--capabilities` to select a narrower set.
 Both people using the devices must compare the displayed SAS and confirm locally
 before the primary can approve enrollment. An invitation token is a temporary
 bearer credential: transfer it through the attended pairing flow and keep it out

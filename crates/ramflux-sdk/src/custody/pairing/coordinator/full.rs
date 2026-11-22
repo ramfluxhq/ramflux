@@ -354,6 +354,19 @@ impl PairingActor {
 }
 
 impl PairingActor {
+    fn note_source_preflight_failure(phase: &'static str, error: &SdkError) {
+        let field = match error {
+            SdkError::PairingField(field) => Some(*field),
+            _ => None,
+        };
+        tracing::debug!(
+            phase,
+            error_code = Self::background_error_code(error),
+            field,
+            "full source preflight refused"
+        );
+    }
+
     pub(super) async fn prepare_live_full_source(
         &self,
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
@@ -363,15 +376,34 @@ impl PairingActor {
             let runtime = self.full_runtime.clone();
             let (work, cancel) = writer
                 .request(move |db| {
-                    participant.full_selected_db(db, None)?;
-                    let source = db.prepare_full_transfer_source()?;
+                    participant.full_selected_db(db, None).inspect_err(|error| {
+                        Self::note_source_preflight_failure("selected source", error);
+                    })?;
+                    let source = db
+                        .prepare_full_transfer_source()
+                        .map_err(SdkError::from)
+                        .inspect_err(|error| {
+                            Self::note_source_preflight_failure("private source stage", error);
+                        })?;
                     let cancel = source.cancel_handle();
                     runtime.register_preparation(cancel.clone())?;
-                    Ok((source.into_encoding_work()?, cancel))
+                    let work = source.into_encoding_work().map_err(SdkError::from).inspect_err(
+                        |error| {
+                            Self::note_source_preflight_failure("source cut", error);
+                            Self::note_source_owner_refusals(db);
+                        },
+                    )?;
+                    Ok((work, cancel))
                 })
                 .await?;
-            let prepared =
-                self.full_runtime.clone().run_blocking(move || Ok(work.encode()?)).await?;
+            let prepared = self
+                .full_runtime
+                .clone()
+                .run_blocking(move || Ok(work.encode()?))
+                .await
+                .inspect_err(|error| {
+                    Self::note_source_preflight_failure("source encoding", error);
+                })?;
             return Ok((prepared, cancel));
         }
         // Complete source census/typed encoding before any Issue/Create allocation.
@@ -410,8 +442,7 @@ impl PairingActor {
         if self.ceremony.as_ref().is_some_and(|c| !terminal(&c.phase)) {
             return Err(SdkError::PairingCode("Busy"));
         }
-        self.refresh_generation().await?;
-        let source = self.prepare_refreshed_full_source().await?;
+        let source = self.prepare_full_begin_source().await?;
         let spec = begin
             .create_spec(
                 self.identity.local_ref.clone(),
