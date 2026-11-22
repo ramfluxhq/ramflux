@@ -5,6 +5,12 @@
 //! actual transport writers belong to the service integration; no public route is installed.
 mod checkpoint;
 pub use checkpoint::*;
+mod config;
+pub use config::*;
+mod errors;
+pub use errors::*;
+mod transport;
+pub use transport::*;
 use ramflux_protocol::username_directory as wire;
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};

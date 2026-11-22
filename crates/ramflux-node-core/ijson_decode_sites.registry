@@ -144,3 +144,4 @@ crates/ramflux-node-core/src/username_directory/checkpoint.rs | read_safe_wall |
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/mod.rs | read_head | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/username_directory/transport.rs | decode_reporting_request | 1 | B | strict=parse_i_json; admission=bounded canonical reporting-home request before proof and home-history admission
