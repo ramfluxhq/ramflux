@@ -279,7 +279,6 @@ pub(super) fn waits_for_startup_restore(method: &str) -> bool {
         || matches!(
             method,
             "sync.status.get"
-                | "message.list"
                 | "message.read"
                 | "conversation.list"
                 | "surface.get"
@@ -316,7 +315,7 @@ pub(super) fn read(
         "conversation.list" => {
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
-        "message.list" | "message.read" => generated_page(client, &request.body),
+        "message.read" => generated_page(client, &request.body),
         _ => Err(SdkError::LocalBus("unsupported reader request".to_owned())),
     }
 }
@@ -457,7 +456,7 @@ mod tests {
                 "messages",
                 Some("reader".into()),
                 "client",
-                "message.list",
+                "message.read",
                 serde_json::json!({"conversation_id":"thread", "read_model":true}),
             ))
             .await;

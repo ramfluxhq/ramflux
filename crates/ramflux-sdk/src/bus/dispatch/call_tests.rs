@@ -183,7 +183,7 @@ fn daemon_restart_ends_unrecoverable_calls_and_retains_a_public_timeline_record(
             "timeline",
             Some("alice".into()),
             "test",
-            "message.list",
+            "message.read",
             json!({"conversation_id":"thread"}),
         ),
     )?;

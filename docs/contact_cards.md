@@ -349,8 +349,8 @@ identity or contact. It does not authorize unrelated controls, calls or group ac
 Both peers need the request-aware SDK; older peers reject the new request schema.
 Automatic routing retains the same-home limitation documented above.
 
-The aliases `contact.request.accept`, `contact.request.decline`, and
-`contact.request.block` accept the same selectors and return the same decision row.
+`contact.accept`, `contact.decline` and `contact.block` decide an inbound request by the
+same selectors and return the decision row; the former `contact.request.*` aliases were removed.
 `contact.card.import {card,note?}` aliases `contact.add {card,note?}`. A repeated
 identical decision succeeds; an incompatible terminal decision returns
 `ValidationFailed` with `reason_code:request_closed`. A missing request ID returns

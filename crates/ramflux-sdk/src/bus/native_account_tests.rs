@@ -1171,7 +1171,7 @@ async fn native_fenced_account_opens_data_actor_and_refuses_legacy_proof_after_r
                 "fenced-proof",
                 Some(id.clone()),
                 "account",
-                "device.authorize",
+                "device.refresh",
                 json!({}),
             ))
             .await?;

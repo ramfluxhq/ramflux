@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Root-bound device authorization export, complete legacy migration and explicit refresh.
+//! Explicit device-manifest refresh.
 use crate::prelude::*;
 use serde_json::json;
 pub(super) async fn dispatch_identity_authority(
@@ -10,35 +10,6 @@ pub(super) async fn dispatch_identity_authority(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let id = request_account_id(request)?;
     let account = local_bus_account_mut(state, id)?;
-    if request.method == "device.authorize" {
-        let now = now_unix_timestamp();
-        let proof = account.client.authorize_current_device(
-            "ramflux-node",
-            vec!["device.delivery.bind".into()],
-            now,
-            now.saturating_add(3600),
-        )?;
-        return Ok(local_bus_ok(serde_json::to_value(proof)?));
-    }
-    if request.method == "device.migrate" {
-        let approvals: Vec<BranchProofDocument> = serde_json::from_value(
-            request.body.get("authorizations").cloned().unwrap_or_else(|| json!([])),
-        )?;
-        account.client.import_legacy_device_authorizations(&approvals)?;
-        let root = account.client.account_index()?.root();
-        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(root, id))?;
-        let gateway = account.gateway_config.clone();
-        account
-            .client
-            .initialize_and_publish_prekey_bundle_via_gateway_request(
-                &gateway,
-                &manifest.principal_commitment,
-                &manifest.device_id,
-                &manifest.target_delivery_id,
-                manifest.device_seed,
-            )
-            .await?;
-    }
     let commitment = request.body["principal_commitment"]
         .as_str()
         .unwrap_or(&account.principal_commitment)

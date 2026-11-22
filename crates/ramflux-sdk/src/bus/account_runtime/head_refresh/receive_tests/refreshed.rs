@@ -122,7 +122,7 @@ async fn assert_message(
             "refreshed-read",
             Some("sender".into()),
             "message",
-            "message.list",
+            "message.read",
             json!({"conversation_id":"thread", "read_model":true}),
         ))
         .await;

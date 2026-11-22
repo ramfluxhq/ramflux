@@ -266,7 +266,7 @@ fn default_config_allows_ordinary_methods_and_refuses_every_key_export() {
         0,
         "ordinary account operation works with the actual default config"
     );
-    for method in ["message.list", "conversation.send"] {
+    for method in ["message.read", "conversation.send"] {
         let id = fixture.submit_body(method, &json!({}), deadline());
         let result = fixture.result(id);
         assert_ne!(result["code"], 12, "{method} reaches SDK validation without export permission");

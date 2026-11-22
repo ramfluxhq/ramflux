@@ -154,8 +154,6 @@ fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Resu
     for command in [
         "group create --account -abc --group -abc --creator -abc --creator-signing-public-key -abc --creator-target-delivery -abc --member -abc --member-target-delivery -abc --source-node -abc --target-node -abc",
         "group member add --account -abc --group -abc --member-device -abc --member-signing-public-key -abc --member-principal-commitment -abc --target-delivery -abc",
-        "group invite create --account -abc --group -abc --actor -abc --invitee-device -abc --invitee-signing-public-key -abc --invitee-principal-commitment -abc --target-delivery -abc --expires-at 100",
-        "group invite accept --account -abc --group -abc --actor -abc --invite-id -abc --target-delivery -abc --member-principal-commitment -abc",
         "group role set --account -abc --group -abc --actor -abc --member-device -abc --role member",
         "group send --account -abc --group -abc --conversation -abc --message -abc --sender -abc --body hello --source-principal -abc --envelope -abc --target -abc",
         "group rename --account -abc --group -abc --name title --request-id -abc",
@@ -163,7 +161,7 @@ fn group_selectors_accept_hyphen_values_for_every_membership_operation() -> Resu
     ] {
         parse_both(command)?;
     }
-    for verb in ["remove", "kick", "ban"] {
+    for verb in ["remove", "kick"] {
         parse_both(&format!(
             "group member {verb} --account -abc --group -abc --actor -abc --member-device -abc"
         ))?;
