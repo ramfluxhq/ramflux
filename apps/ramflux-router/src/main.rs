@@ -3,6 +3,7 @@
 
 mod attachment_renew_home;
 mod attachment_source;
+mod cross_node_forward;
 mod cross_node_submit;
 mod custody_listener;
 #[cfg(test)]
@@ -107,6 +108,7 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             home_node_forward,
             config.node_id.clone(),
         ));
+        cross_node_forward::configure(&config, &router)?;
         if let Some(configured) = config.gateway_client_capabilities.as_deref() {
             router.install_gateway_client_capabilities(configured);
         }

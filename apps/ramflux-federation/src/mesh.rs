@@ -396,6 +396,9 @@ pub(crate) fn handle_mesh_request(
             context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
             handle_s8_inbound_envelope_request(stream, peer_service_id, &request.body, context)?;
         }
+        ("POST", ramflux_node_core::HOME_SUBMIT_FORWARD_PATH) => {
+            handle_home_submit_forward(stream, &request.body, peer_spiffe_uri, context)?;
+        }
         ("POST", RETENTION_GC_SWEEP_PATH) => {
             if peer_service_id != Some("ramflux-retention") {
                 ramflux_transport::write_mesh_text_response(
@@ -435,6 +438,44 @@ pub(crate) fn handle_mesh_request(
         }
     }
     Ok(true)
+}
+
+fn handle_home_submit_forward(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    body: &[u8],
+    peer_spiffe_uri: Option<&str>,
+    context: &MeshServerContext,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let expected = format!("spiffe://{}/ramflux-router", context.discovery.node_id);
+    if peer_spiffe_uri != Some(expected.as_str()) {
+        return ramflux_transport::write_mesh_text_response(
+            stream,
+            "403 Forbidden",
+            "same-node router required",
+        )
+        .map_err(|error| mesh_transport_error(&error));
+    }
+    let request: ramflux_node_core::HomeSubmitForward = ramflux_protocol::parse_i_json(body)
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestJson(error.to_string()))?;
+    let forward = ramflux_node_core::FederatedEnvelopeForwardRequest {
+        migration_evidence: None,
+        signed: ramflux_node_core::default_federation_forward_signed_fields(),
+        admin_token: String::new(),
+        source_node_id: context.discovery.node_id.clone(),
+        target_node_id: request.target_node,
+        delivery_class: "opaque_event".into(),
+        required_capability: "opaque_delivery".into(),
+        envelope: request.envelope,
+    };
+    let response = crate::flow::handle_s8_forward_envelope(
+        &forward,
+        &context.state,
+        &context.store,
+        &context.router,
+        &context.discovery,
+    )?;
+    ramflux_transport::write_mesh_json_response(stream, "200 OK", &response)
+        .map_err(|error| mesh_transport_error(&error))
 }
 
 struct MeshQuicRequestContext<'a> {

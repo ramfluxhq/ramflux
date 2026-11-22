@@ -3,14 +3,10 @@
 
 //! Home-node forward of a gateway submit whose recipient lives on another node.
 
-use std::time::Duration;
-
 use ramflux_node_core::{
     EnvelopeSubmitResponse, HomeSubmitForward, NodeCoreError, SessionPushSubmitResponse,
 };
 use ramflux_protocol::DeliveryClass;
-
-const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn respond(
     body: &[u8],
@@ -40,10 +36,7 @@ fn decide(
     if !forwardable(&request.envelope.delivery_class) {
         return refused(&request.envelope, "rejected_malformed");
     }
-    let Some(client) = router.forward_client() else {
-        return refused(&request.envelope, "rejected_federation");
-    };
-    match client.forward_submit(&request.target_node, &request.envelope, FORWARD_TIMEOUT) {
+    match router.forward_cross_node(request) {
         Ok(response) => accepted(&request.envelope, response.delivery),
         Err(error) => refused(&request.envelope, refusal_outcome(&error)),
     }

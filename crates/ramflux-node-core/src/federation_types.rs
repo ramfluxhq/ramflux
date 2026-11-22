@@ -233,6 +233,9 @@ pub struct FederatedEnvelopeForwardResponse {
     pub delivery: EnvelopeSubmitResponse,
 }
 
+/// Same-node router-to-federation mTLS handoff; never served by an admin listener.
+pub const HOME_SUBMIT_FORWARD_PATH: &str = "/internal/cross-node/forward";
+
 /// Gateway submit that this node's federation must forward. Not an inter-node envelope field.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HomeSubmitForward {
