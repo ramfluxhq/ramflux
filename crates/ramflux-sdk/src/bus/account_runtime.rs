@@ -413,7 +413,8 @@ impl AccountRuntime {
         let (mut schedule, mut next) = self.receive_schedule();
         let mut checkpoints = 0_u8;
         loop {
-            let (transient_deadline, username_deadline) = self.prepare_receive_turn().await?;
+            let (transient_deadline, username_deadline) =
+                Box::pin(self.prepare_receive_turn()).await?;
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -447,7 +448,7 @@ impl AccountRuntime {
                     }
                 } => { self.publish_transient_updates(); continue; },
                 completion = self.username.receive() => {
-                    if let Some(completion) = completion && self.finish_username(completion).await? { break; }
+                    if let Some(completion) = completion && Box::pin(self.finish_username(completion)).await? { break; }
                     continue;
                 },
                 () = async {
@@ -477,12 +478,12 @@ impl AccountRuntime {
                 },
                 () = tokio::time::sleep_until(next), if !self.state.accounts.is_empty() => {
                     self.maintain_expired_object_holds();
-                    match self.maintain_until_command().await {
+                    match Box::pin(self.maintain_until_command()).await {
                         Maintenance::Stopped => break,
                         Maintenance::Interrupted => continue,
                         Maintenance::Command(command) => Some(*command),
                         Maintenance::Username(completion) => {
-                            if self.finish_username(*completion).await? { break; }
+                            if Box::pin(self.finish_username(*completion)).await? { break; }
                             continue;
                         }
                         Maintenance::Completed(active) => {
