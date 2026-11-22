@@ -30,6 +30,8 @@ mod recovery;
 pub use recovery::*;
 mod schema;
 pub use schema::*;
+mod home;
+pub use home::*;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
