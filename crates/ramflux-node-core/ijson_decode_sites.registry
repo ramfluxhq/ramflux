@@ -71,6 +71,7 @@ crates/ramflux-node-core/src/router_store.rs | load_incremental_replay_tuples | 
 crates/ramflux-node-core/src/router_store.rs | load_table_values | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store.rs | remove_inbox_entries_for_target | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-node-core/src/router_store/agent_publish.rs | agent_publish_by_request | 1 | D | admitted-before-persist: the stored publication row is written only after the node admitted it; not an ingress decoder
+crates/ramflux-node-core/src/router_store/agent_publish/agent_host.rs | read_json | 1 | D | admitted-before-persist: the stored agent host binding is written only after the node admitted it; not an ingress decoder
 crates/ramflux-node-core/src/router_store/custody.rs | custody_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store/custody.rs | observe_custody_node | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/router_store/custody.rs | observe_custody_node | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
