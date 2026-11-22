@@ -22,7 +22,7 @@ impl RamfluxClient {
             return Ok(false);
         };
         let now = crate::custody::network_now()?;
-        let publication_bound = self.verified_own_agent(author, anchor, now)?;
+        let publication_bound = self.verified_own_agent(anchor, author, now)?;
         owner.owns_surface_agent(author, anchor, now, publication_bound)
     }
 }
