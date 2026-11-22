@@ -11,10 +11,14 @@ use std::collections::BTreeSet;
 
 const MAX_SESSIONS: usize = 32;
 
+const MAX_CONSUMED: usize = 256;
+
 pub(super) struct Held {
     account_id: String,
     surface_ref: String,
     fallback: String,
+    locale: String,
+    dark: bool,
     signed_version: u64,
     signed_hash: String,
     session: CardSession,
@@ -44,6 +48,8 @@ pub(super) fn insert(
             account_id: account.to_owned(),
             surface_ref: surface_ref.to_owned(),
             fallback: fallback.to_owned(),
+            locale: "en".to_owned(),
+            dark: false,
             signed_version,
             signed_hash: signed_hash.to_owned(),
             session,
@@ -109,6 +115,19 @@ impl Held {
         fallback.clone_into(&mut self.fallback);
     }
 
+    pub(super) fn locale(&self) -> &str {
+        &self.locale
+    }
+
+    pub(super) fn dark(&self) -> bool {
+        self.dark
+    }
+
+    pub(super) fn set_presentation(&mut self, locale: &str, dark: bool) {
+        locale.clone_into(&mut self.locale);
+        self.dark = dark;
+    }
+
     pub(super) fn surface_ref(&self) -> &str {
         &self.surface_ref
     }
@@ -121,8 +140,27 @@ impl Held {
         self.pending = pending;
     }
 
-    pub(super) fn consume(&mut self, request_id: &str) -> bool {
-        self.consumed.insert(request_id.to_owned())
+    pub(super) fn clear_consumed(&mut self) {
+        self.consumed.clear();
+    }
+
+    /// One decision for this SDK request, slot and surface revision.
+    pub(super) fn consume_binding(&mut self, record: &str, slot: &str, token: &str) -> bool {
+        if self.consumed.len() >= MAX_CONSUMED
+            || record.len() > 256
+            || slot.len() > 1024
+            || token.len() > 64
+        {
+            return false;
+        }
+        if self
+            .consumed
+            .iter()
+            .any(|item| item.split_once('\n').is_some_and(|(id, _)| id == record))
+        {
+            return false;
+        }
+        self.consumed.insert(format!("{record}\n{slot}\n{token}"))
     }
 
     pub(super) fn matches(&self, state: &ramflux_protocol::SurfaceState) -> bool {
@@ -135,6 +173,7 @@ impl Held {
             hash.clone_into(&mut self.signed_hash);
         }
         fallback.clone_into(&mut self.fallback);
+        self.clear_consumed();
         if self.pending.as_ref().is_some_and(|pending| {
             pending.surface_version != self.signed_version
                 || pending.surface_hash != self.signed_hash

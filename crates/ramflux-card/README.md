@@ -136,9 +136,20 @@ Limits remain 32 MiB heap, 256 KiB stack, 50 ms per evaluation, 100 ms/s cumulat
 not OS/RSS isolation. Failed evaluation preserves the last published data but
 makes the VM inactive; hosts must suspend/dispose and cancel requests.
 
-The offline `card-pack` tool signs the linted `library/form.js` using an
-operator-provided seed and release metadata. ABI 5 requires fresh artifacts;
-old artifacts fail admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
+The offline `card-pack` tool signs the linted `library/form.js` from a 32-byte
+Ed25519 seed (`SigningKey::from_bytes`) plus release metadata. The seed is an
+operator file and is never committed. The ABI 5 development public key bundled
+in the SDK was produced that way; the seed file was not retained with the
+bundle. Do not ship that development key in a release. Production custody is
+an owner decision: an offline seed, used only by `card-pack`.
+
+The ABI 4 development key is retired. Its descriptor pin
+`56436c14b29b5b4f2b2c4672ffd346a3406ed8f2f4a832487b6a9f68d38cafa9`
+(host ABI 4, catalog `rf-card/v1`, release 1:2) is not admitted. SDK
+`include/card/policy.json` `exact_descriptor_sha256` admits only the ABI 5
+descriptor `0b50eae6d66a57455d21b3854e2de6d58da90740bd4303db60d7f427b984792d`.
+ABI 5 requires fresh artifacts; old artifacts fail admission.
+`card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
 loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
 `.policy.json` and prints the actual tree/mount/update batches. It accepts only
 local operator files and performs no authentication on their behalf. Production

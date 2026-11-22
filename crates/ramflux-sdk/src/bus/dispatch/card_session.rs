@@ -41,6 +41,17 @@ pub(crate) async fn dispatch(
     }
 }
 
+fn recheck(
+    state: &LocalBusDaemonState,
+    account: &str,
+    session: u64,
+    version: u64,
+    hash: &str,
+) -> Result<Option<serde_json::Value>, SdkError> {
+    let client = &local_bus_account(state, account)?.client;
+    card_session::admit_send(client, account, session, version, hash)
+}
+
 fn local(
     state: &LocalBusDaemonState,
     account: &str,
@@ -69,8 +80,14 @@ async fn submit(
             surface_hash,
             fallback,
         } => {
+            if let Some(value) = recheck(state, account, session, surface_version, &surface_hash)? {
+                return Ok(local_bus_ok(value));
+            }
             super::surface_transport::send(local_bus_account_mut(state, account)?, &carrier)
                 .await?;
+            if let Some(value) = recheck(state, account, session, surface_version, &surface_hash)? {
+                return Ok(local_bus_ok(value));
+            }
             card_session::commit_submit(account, session, &message_id)?;
             Ok(local_bus_ok(card_session::submitted(
                 session,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Host slot replies. Link completion is local. Approval is not task.accept.
+//! Host slot replies. Link completion is local. Approval ids come from task state.
+use super::approval::{self, Hint};
 use super::body::{self, MAX_BODY};
 use super::gate::card_err;
 use super::guard::{Kept, keep};
@@ -37,49 +38,99 @@ pub(super) fn apply(
     };
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
-        Kept::Ready { state, fallback, .. } => {
+        Kept::Ready { stored, state, fallback } => {
             store::with_session(account, parsed.session, |held| {
-                finish(held, parsed.session, &state, &fallback, &reply)
+                let mut sheet = Sheet {
+                    client,
+                    held,
+                    session: parsed.session,
+                    state: &state,
+                    fallback: &fallback,
+                    author: &stored.author_principal_id,
+                };
+                finish(&mut sheet, &reply)
             })
         }
     }
 }
 
-fn finish(
-    held: &mut store::Held,
+struct Sheet<'a> {
+    client: &'a RamfluxClient,
+    held: &'a mut store::Held,
     session: u64,
-    state: &SurfaceState,
-    fallback: &str,
-    reply: &HostSlotReply,
-) -> Result<Value, SdkError> {
-    if !held.matches(state) {
-        return Ok(stale(session, fallback));
+    state: &'a SurfaceState,
+    fallback: &'a str,
+    author: &'a str,
+}
+
+fn finish(sheet: &mut Sheet<'_>, reply: &HostSlotReply) -> Result<Value, SdkError> {
+    if !sheet.held.matches(sheet.state) {
+        return Ok(stale(sheet.session, sheet.fallback));
     }
-    let kind = slot_kind(held, reply)?;
-    match kind {
-        Kind::Link => finish_link(held, session, fallback, reply),
+    match slot_kind(sheet.held, reply)? {
+        Kind::Link => finish_link(sheet.held, sheet.session, sheet.fallback, reply),
         Kind::Approval { request_ref, task_binding } => {
-            if !held.consume(&reply.request_id) {
-                return Ok(stale(session, fallback));
-            }
-            Ok(shown(Shown {
-                result: "approval_decision",
-                session,
-                fallback,
-                batch: None,
-                host_request: Some(json!({
-                    "kind": "approval_decision",
-                    "outcome": &reply.outcome,
-                    "request_ref": request_ref,
-                    "task_binding": task_binding,
-                })),
-                submit: None,
-                draft_conflict: false,
-            }))
+            decide(sheet, reply, &request_ref, task_binding.as_ref())
         }
         Kind::Image => Err(super::super::invalid("card_session_image_native")),
         Kind::Modal => Err(super::super::invalid("card_session_refused")),
     }
+}
+
+fn decide(
+    sheet: &mut Sheet<'_>,
+    reply: &HostSlotReply,
+    hint_ref: &str,
+    hint_task: Option<&ramflux_protocol::a2ui::TaskBinding>,
+) -> Result<Value, SdkError> {
+    if reply.token.signed_version != sheet.state.version() {
+        return Ok(stale(sheet.session, sheet.fallback));
+    }
+    let Some(conversation) = sheet.state.conversation_id() else {
+        return Ok(refused(sheet));
+    };
+    let found = approval::lookup(
+        sheet.client,
+        &Hint { author: sheet.author, conversation, request_ref: hint_ref, task: hint_task },
+    )?;
+    let Some(found) = found else {
+        return Ok(refused(sheet));
+    };
+    let fence = format!(
+        "{}:{}:{}",
+        reply.token.signed_version, reply.token.edit_seq, reply.token.tree_version
+    );
+    if !sheet.held.consume_binding(&found.request_ref, &reply.slot_id, &fence) {
+        return Ok(stale(sheet.session, sheet.fallback));
+    }
+    Ok(shown(Shown {
+        result: "approval_decision",
+        session: sheet.session,
+        fallback: sheet.fallback,
+        batch: None,
+        host_request: Some(json!({
+            "kind": "approval_decision",
+            "outcome": &reply.outcome,
+            "request_ref": found.request_ref,
+            "task_binding": found.task_binding,
+        })),
+        submit: None,
+        draft_conflict: false,
+    }))
+}
+
+fn refused(sheet: &Sheet<'_>) -> Value {
+    respond::view(respond::View {
+        result: "refused",
+        allowed: true,
+        session: Some(sheet.session),
+        fallback: sheet.fallback,
+        reason: Some("card_session_refused"),
+        batch: None,
+        host_request: None,
+        submit: None,
+        draft_conflict: false,
+    })
 }
 
 enum Kind {

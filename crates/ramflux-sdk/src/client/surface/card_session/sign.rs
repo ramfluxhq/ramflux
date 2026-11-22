@@ -3,7 +3,6 @@
 
 //! Sign one resolver action inside the SDK. The author remains the acceptor.
 use super::super::{Carrier, PayloadKind, invalid};
-use super::gate::card_err;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::a2ui::{ResolvedAction, ResolvedSurface, SurfaceState};
 use ramflux_protocol::{SurfaceAction, domain};
@@ -26,10 +25,10 @@ pub(super) fn sign_action(
     let timestamp = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|_| invalid("card action timestamp"))?;
-    let frame = resolved.action_frame(state, action, &timestamp).map_err(card_err)?;
-    let wire = frame.wire_bytes().map_err(card_err)?;
-    let parsed = SurfaceAction::from_wire_bytes(&wire).map_err(card_err)?;
-    state.validate_action(&parsed).map_err(card_err)?;
+    let frame = resolved.action_frame(state, action, &timestamp)?;
+    let wire = frame.wire_bytes()?;
+    let parsed = SurfaceAction::from_wire_bytes(&wire)?;
+    state.validate_action(&parsed)?;
     let conversation =
         state.conversation_id().ok_or_else(|| invalid("card_session_refused"))?.to_owned();
     let surface_hash = state.hash().ok_or_else(|| invalid("card_session_refused"))?.to_owned();

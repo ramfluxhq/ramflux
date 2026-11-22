@@ -36,7 +36,9 @@ fn refresh(
     state: &SurfaceState,
     fallback: &str,
 ) -> Result<Value, SdkError> {
-    let spec = spec_build::authorized(stored, state, "en", false)?;
+    let (locale, dark) =
+        store::with_session(account, session, |held| Ok((held.locale().to_owned(), held.dark())))?;
+    let spec = spec_build::authorized(stored, state, &locale, dark)?;
     store::with_session(account, session, |held| {
         let batch = held.session().update(spec).map_err(card_err)?;
         let conflict = held.session().draft_conflict();
@@ -63,8 +65,7 @@ pub(super) fn present(
     match keep(client, account, parsed.session)? {
         Kept::Stopped(value) => Ok(value),
         Kept::Ready { state, fallback, .. } => {
-            let presentation = Presentation::bundled(locale, dark).map_err(card_err)?;
-            change(account, parsed.session, &state, &fallback, presentation)
+            change(account, parsed.session, &state, &fallback, locale, dark)
         }
     }
 }
@@ -74,12 +75,15 @@ fn change(
     session: u64,
     state: &SurfaceState,
     fallback: &str,
-    presentation: Presentation,
+    locale: &str,
+    dark: bool,
 ) -> Result<Value, SdkError> {
+    let presentation = Presentation::bundled(locale, dark).map_err(card_err)?;
     store::with_session(account, session, |held| {
         if !held.matches(state) {
             return Ok(stale(session, fallback));
         }
+        held.set_presentation(locale, dark);
         let batch = held.session().present(presentation).map_err(card_err)?;
         Ok(shown(Shown {
             result: "presented",
@@ -134,6 +138,7 @@ fn pause(
         }
         let batch = if suspending {
             held.set_pending(None);
+            held.clear_consumed();
             held.session().suspend().map_err(card_err)?
         } else {
             held.session().resume().map_err(card_err)?

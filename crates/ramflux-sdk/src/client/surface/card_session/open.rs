@@ -34,6 +34,10 @@ pub(super) fn open(client: &RamfluxClient, account: &str, body: &Value) -> Resul
                 state.version(),
                 hash,
             )?;
+            store::with_session(account, id, |held| {
+                held.set_presentation(locale, dark);
+                Ok(())
+            })?;
             let batch = super::respond::batch_value(&batch)?;
             Ok(view(View {
                 result: "opened",

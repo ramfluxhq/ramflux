@@ -13,6 +13,28 @@ use serde_json::Value;
 
 use super::super::Outcome;
 
+pub(super) fn admit_send(
+    client: &RamfluxClient,
+    account: &str,
+    session: u64,
+    version: u64,
+    hash: &str,
+) -> Result<Option<Value>, SdkError> {
+    match keep(client, account, session)? {
+        Kept::Stopped(value) => Ok(Some(value)),
+        Kept::Ready { state, fallback, .. } => {
+            if state.version() == version && state.hash() == Some(hash) {
+                return Ok(None);
+            }
+            let _ = store::with_session(account, session, |held| {
+                held.set_pending(None);
+                Ok(())
+            });
+            Ok(Some(stale(session, &fallback)))
+        }
+    }
+}
+
 pub(super) fn prepare(
     client: &RamfluxClient,
     account: &str,

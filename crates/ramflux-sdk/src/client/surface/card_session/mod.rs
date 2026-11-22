@@ -12,6 +12,8 @@ mod gate;
 mod respond;
 
 #[cfg(feature = "card-runtime")]
+mod approval;
+#[cfg(feature = "card-runtime")]
 mod event;
 #[cfg(feature = "card-runtime")]
 mod guard;
@@ -144,6 +146,24 @@ pub(crate) fn slot(client: &RamfluxClient, account: &str, body: &Value) -> Resul
     }
     #[cfg(not(feature = "card-runtime"))]
     unavailable(client, account, body)
+}
+
+pub(crate) fn admit_send(
+    client: &RamfluxClient,
+    account: &str,
+    session: u64,
+    version: u64,
+    hash: &str,
+) -> Result<Option<Value>, SdkError> {
+    #[cfg(feature = "card-runtime")]
+    {
+        submit::admit_send(client, account, session, version, hash)
+    }
+    #[cfg(not(feature = "card-runtime"))]
+    {
+        let _ = (client, account, session, version, hash);
+        Err(super::invalid("card runtime unavailable"))
+    }
 }
 
 pub(crate) fn prepare_submit(

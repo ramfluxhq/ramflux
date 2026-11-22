@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Verify the SDK-bundled ABI 5 library. The release seed stays outside the repository.
+//! The ABI 4 development key is retired. `policy.json` admits only descriptor
+//! `0b50eae6d66a57455d21b3854e2de6d58da90740bd4303db60d7f427b984792d`.
 use super::super::invalid;
 use super::gate::card_err;
 use crate::SdkError;

@@ -140,11 +140,20 @@ fn submit_result(
 }
 
 fn error_reason(error: &SdkError) -> &'static str {
-    let text = error.to_string();
-    if text.contains("Conflict") || text.contains("stale") {
-        "card_session_stale"
-    } else {
-        "card_session_refused"
+    match error {
+        SdkError::SurfaceProtocol(
+            ramflux_protocol::Reject::Conflict
+            | ramflux_protocol::Reject::Version { .. }
+            | ramflux_protocol::Reject::Closed,
+        )
+        | SdkError::SurfaceRefused {
+            reason:
+                crate::SurfaceRefusalCode::StaleVersion
+                | crate::SurfaceRefusalCode::StaleHash
+                | crate::SurfaceRefusalCode::Closed,
+            ..
+        } => "card_session_stale",
+        _ => "card_session_refused",
     }
 }
 
