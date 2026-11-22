@@ -209,7 +209,7 @@ pub use client::identity_authority::profile_read::VerifiedIdentityProfile;
 #[cfg(test)]
 mod storage_failure_fixture;
 
-pub use object::{SdkObjectRelayCapability, SdkRelayToken};
+pub use object::SdkObjectRelayCapability;
 pub use prekey::SdkDeviceManifestResponse;
 
 #[cfg(feature = "test-support")]

@@ -137,8 +137,6 @@ fn context() -> Result<(ramflux_test_support::TestPath, crate::GatewayQuicContex
             mesh: None,
             wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         },
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key: Vec::new(),
         state: Arc::new(Mutex::new(ramflux_node_core::GatewayState::new())),
         store,
         hub: Arc::new(crate::GatewaySessionHub::default()),

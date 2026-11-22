@@ -595,7 +595,7 @@ fn legacy_rows() -> Vec<(&'static str, Value, String)> {
         json!({"frame_type":"nack","reason":"idempotency_conflict"}),
         "unexpected gateway reply: Nack".into(),
     ));
-    assert_eq!(rows.len(), 15);
+    assert_eq!(rows.len(), 14, "point coverage includes every supported unexpected reply");
     rows
 }
 
@@ -604,7 +604,7 @@ async fn set_rows() {
     assert_eq!(capable.len(), 9);
     let legacy = legacy_rows();
 
-    // (r25)-(r29) fetch_entry: 5 unexpected capable kinds, 15 legacy.
+    // (r25)-(r29) fetch_entry: 5 unexpected capable kinds, 14 legacy.
     let accepted = ["entry", "entry_too_large", "entry_gone", "nack"];
     let mut count = 0;
     for (name, bytes) in &capable {
@@ -621,7 +621,7 @@ async fn set_rows() {
         retired_with(result, &engine, message, &format!("fetch legacy {name}"));
     }
 
-    // (r30)-(r36) ack_batch: 7 unexpected capable kinds, 15 legacy.
+    // (r30)-(r36) ack_batch: 7 unexpected capable kinds, 14 legacy.
     let accepted = ["ack_batch", "nack"];
     let mut count = 0;
     for (name, bytes) in &capable {
@@ -638,7 +638,7 @@ async fn set_rows() {
         retired_with(result, &engine, message, &format!("batch legacy {name}"));
     }
 
-    // (r37)-(r43) Push ack(): 7 unexpected capable kinds, 15 legacy.
+    // (r37)-(r43) Push ack(): 7 unexpected capable kinds, 14 legacy.
     let accepted = ["ack", "nack"];
     let mut count = 0;
     for (name, bytes) in &capable {
@@ -656,7 +656,7 @@ async fn set_rows() {
     }
 
     // (r44)-(r52) Push cursor(): all 9 capable kinds are unexpected (it is a legacy
-    // operation), and 13 legacy kinds (everything but the keyless cursor and nack).
+    // operation), and 12 legacy kinds (everything but the keyless cursor and nack).
     for (name, bytes) in &capable {
         let (mut engine, _) = session(push(), vec![bytes.clone()]);
         let result = engine.cursor().await;
@@ -672,5 +672,5 @@ async fn set_rows() {
         let result = engine.cursor().await;
         retired_with(result, &engine, message, &format!("cursor legacy {name}"));
     }
-    assert_eq!(count, 13);
+    assert_eq!(count, 12, "cursor covers every supported unexpected reply except cursor/nack");
 }

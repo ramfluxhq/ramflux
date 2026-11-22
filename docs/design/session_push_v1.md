@@ -1755,7 +1755,7 @@ The current deliverable is documentation only; Cargo is not a design gate.
 Implementation cards must copy the then-current CI commands and freeze a single
 gate policy in each card. Required product fast gates: license/identity checks,
 cargo fmt --check --all, clippy workspace/all-targets with AND without all-features
-and -D warnings, gateway itest-local-mint clippy, cargo machete, file-size check,
+and -D warnings, gateway clippy, cargo machete, file-size check,
 positive-count targeted tests and the mutations above. Full SDK/gateway/workspace
 suites belong to product CI under the controller's CI-first dispatch policy;
 focused reruns do not clear a red full suite. An unchanged base-reproduced failure

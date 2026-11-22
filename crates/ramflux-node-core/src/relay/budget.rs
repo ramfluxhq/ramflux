@@ -101,7 +101,7 @@ pub(super) fn tombstone_resident_charge(tombstone: &ObjectRelayTombstone) -> Opt
 }
 
 /// Typed outcome of a store-backed relay operation (read-through / persist-before-publish). The relay
-/// HTTP/QUIC layer maps each variant to a status code; the v2 path folds it back into a
+/// HTTP/QUIC layer maps each variant to a status code; pure callers fold it back into a
 /// [`NodeCoreError`] to preserve the existing coarse mesh error taxonomy.
 #[derive(Debug)]
 pub enum RelayStoreOpError {
@@ -166,7 +166,7 @@ impl std::fmt::Display for RelayStoreOpError {
 impl std::error::Error for RelayStoreOpError {}
 
 impl RelayStoreOpError {
-    /// Folds the typed store error back into a [`NodeCoreError`] for the v2 mesh path and the pure
+    /// Folds the typed store error back into a [`NodeCoreError`] for the existing mesh response and pure
     /// state methods, preserving the pre-existing error taxonomy (tombstone/get-miss → `ItestHttp`
     /// / `EnvelopeNotFound`, owner rejections → `Unauthorized`).
     #[must_use]

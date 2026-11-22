@@ -83,25 +83,6 @@ fn overflow_operations() -> anyhow::Result<Vec<GatewayClientFrame>> {
             },
         },
     ];
-    #[cfg(feature = "itest-local-mint")]
-    let operations = {
-        let mut operations = operations;
-        let branch = ramflux_crypto::create_device_branch(
-            "outage-principal-8",
-            "outage-device-8",
-            1,
-            [32; 32],
-        );
-        let body = crate::session::tests::test_relay_token_issue_body(
-            &branch,
-            ramflux_node_core::ObjectRelayCapability::Put,
-        )?;
-        let signed_request = operation_wrapper(template(82)?, "/relay/v1/token/issue", &body)?;
-        operations.push(GatewayClientFrame::RelayTokenIssue {
-            request: ramflux_node_core::RelayTokenIssueRequest { signed_request, body },
-        });
-        operations
-    };
     Ok(operations)
 }
 fn operation_wrapper<T: serde::Serialize>(

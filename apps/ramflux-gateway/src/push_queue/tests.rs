@@ -60,7 +60,6 @@ fn resync_threshold() {
     assert!(matches!(queue.next(), Next::Hint(18, _)));
 }
 
-#[cfg(feature = "itest-local-mint")]
 mod callers;
 
 mod wire;

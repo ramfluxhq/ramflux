@@ -328,9 +328,9 @@ async fn refusal_rows() {
         );
     }
 
-    // (r8)-(r20) the 13 unexpected legacy kinds, each awaited during a Push submit.
+    // The 12 unexpected legacy kinds, each awaited during a Push submit.
     let unexpected = legacy_unexpected_kinds();
-    assert_eq!(unexpected.len(), 13);
+    assert_eq!(unexpected.len(), 12, "all supported unexpected reply kinds remain covered");
     for (name, wire, message) in unexpected {
         let (result, engine) = submit_refused(vec![wire]).await;
         assert!(
@@ -394,15 +394,6 @@ pub(super) fn legacy_unexpected_kinds() -> Vec<(&'static str, Value, String)> {
             json!({"frame_type":"prekey","response":{
                 "device_id":"d","bundle":null,"principal_commitment":"c"}}),
             reply("Prekey"),
-        ),
-        (
-            "relay_token_issued",
-            json!({"frame_type":"relay_token_issued","response":{"relay_token":{
-                "token_id":"t","object_id":"o","manifest_hash":"m","chunk_id":"c",
-                "recipient_device_hash":"h","owner_signing_key_id":"k","owner_public_key":"p",
-                "issuer_service":"s","capabilities":["put"],"delete_after_ack":false,
-                "issued_at":1,"expires_at":2,"nonce":"n","mac":"m"}}}),
-            reply("RelayTokenIssued"),
         ),
         (
             "relay_token_v3_issued",
