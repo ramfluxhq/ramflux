@@ -48,6 +48,7 @@ pub trait UsernameHomeBackend: Send + Sync {
 pub struct NativeUsernameService {
     node: Arc<MigrationNode>,
     backend: Arc<dyn UsernameHomeBackend>,
+    center: super::CenterPin,
 }
 
 impl NativeUsernameService {
@@ -55,15 +56,20 @@ impl NativeUsernameService {
     pub fn from_home_authority(
         service: &crate::HomeMigrationService,
         backend: Arc<dyn UsernameHomeBackend>,
+        center: super::CenterPin,
     ) -> Self {
-        Self::new(Arc::clone(&service.node), backend)
+        Self::new(Arc::clone(&service.node), backend, center)
     }
     pub(crate) fn matches_node(&self, node: &str, key: &str) -> bool {
         self.node.node_id() == node && self.node.public_key() == key
     }
     #[must_use]
-    pub fn new(node: Arc<MigrationNode>, backend: Arc<dyn UsernameHomeBackend>) -> Self {
-        Self { node, backend }
+    pub fn new(
+        node: Arc<MigrationNode>,
+        backend: Arc<dyn UsernameHomeBackend>,
+        center: super::CenterPin,
+    ) -> Self {
+        Self { node, backend, center }
     }
 
     /// # Errors
@@ -78,6 +84,7 @@ impl NativeUsernameService {
     ) -> Result<wire::NativeUsernameReply, NodeCoreError> {
         request.validate().map_err(|e| NodeCoreError::InvalidConfiguration(e.to_string()))?;
         if !wire::enabled()
+            || request.center != self.center.public_identity()
             || request.declaration.body.account_anchor != source.root_commitment()
             || request.declaration.body.home_node != self.node.node_id()
         {

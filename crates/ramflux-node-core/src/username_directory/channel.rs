@@ -70,6 +70,38 @@ impl DirectoryChannelIdentity {
 pub struct DirectorySigner(SigningKey);
 
 impl DirectorySigner {
+    /// Build the exact canonical reporting request after authenticating the provisioned centre.
+    /// # Errors
+    /// Refuses malformed requests, oversized evidence, unsafe time or unavailable randomness.
+    pub fn reporting_request(
+        &self,
+        pin: &super::CenterPin,
+        evidence: super::ReportingEvidence,
+        root: &str,
+        request: super::DirectoryRequest,
+        exporter: &[u8; 32],
+        now: u64,
+    ) -> Result<Vec<u8>> {
+        request.validate()?;
+        let proof = self.reporting_proof(super::ReportingProofBody {
+            version: 1,
+            audience: pin.id.clone(),
+            generation: pin.generation,
+            home: evidence.discovery.node_id.clone(),
+            root: root.into(),
+            method: "POST".into(),
+            path: request.path().into(),
+            body_hash: super::transport::digest(&request)?,
+            evidence_hash: super::transport::digest(&evidence)?,
+            channel_binding: ramflux_protocol::encode_base64url(exporter),
+            nonce: super::fence::random_id()?,
+            issued_at: now,
+            expires_at: now.checked_add(10).ok_or(CheckpointError::Refused("clock"))?,
+        })?;
+        let bytes = canonical(&super::ReportingRequest { proof, evidence, request })?;
+        super::decode_reporting_request(&bytes)?;
+        Ok(bytes)
+    }
     /// # Errors
     /// Refuses stale/missing contexts or an oversized framed candidate.
     pub fn prepare_http_response(

@@ -75,5 +75,6 @@ pub(crate) fn configured(
     Ok(Some(directory::NativeUsernameService::from_home_authority(
         authority,
         Arc::new(Backend { origin, token }),
+        config.center,
     )))
 }

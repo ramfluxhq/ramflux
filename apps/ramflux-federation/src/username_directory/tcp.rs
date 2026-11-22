@@ -194,12 +194,18 @@ impl Incoming {
             return Err(std::io::Error::other("directory transport"));
         };
         if let Some(count) = *staged {
-            if count != bytes.len() {
+            if count > bytes.len() {
                 return Err(std::io::Error::other("directory writer mismatch"));
             }
         } else {
-            stream.conn.writer().write_all(bytes)?;
-            *staged = Some(bytes.len());
+            let chunk = bytes
+                .get(..bytes.len().min(8192))
+                .ok_or_else(|| std::io::Error::other("directory write bound"))?;
+            let count = stream.conn.writer().write(chunk)?;
+            if count == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            *staged = Some(count);
         }
         if stream.conn.wants_write() {
             stream.conn.write_tls(&mut stream.sock)?;
@@ -207,7 +213,8 @@ impl Incoming {
         if stream.conn.wants_write() {
             return Err(std::io::ErrorKind::WouldBlock.into());
         }
-        *staged = None;
-        Ok(bytes.len())
+        let count =
+            staged.take().ok_or_else(|| std::io::Error::other("directory write progress"))?;
+        Ok(count)
     }
 }

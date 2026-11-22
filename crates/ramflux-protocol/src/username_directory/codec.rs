@@ -119,7 +119,7 @@ pub fn normalize_username(value: &str) -> Result<String, CodecError> {
     validate_username(&result)?;
     Ok(result)
 }
-fn node(value: &str) -> Result<(), CodecError> {
+pub(super) fn node(value: &str) -> Result<(), CodecError> {
     need(
         !value.is_empty()
             && value.len() <= 253

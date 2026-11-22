@@ -39,6 +39,15 @@ pub struct CenterPin {
 }
 
 impl CenterPin {
+    #[must_use]
+    pub fn public_identity(&self) -> ramflux_protocol::username_directory::NativeDirectoryPin {
+        ramflux_protocol::username_directory::NativeDirectoryPin {
+            url: self.url.clone(),
+            id: self.id.clone(),
+            public_key: self.public_key.clone(),
+            generation: self.generation,
+        }
+    }
     /// # Errors
     /// Refuses incomplete pins, malformed HTTPS origins, weak keys and invalid generations.
     pub fn validate(&self) -> Result<()> {
@@ -236,48 +245,12 @@ impl DirectoryConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HttpsOrigin {
-    pub host: String,
-    pub port: u16,
-}
+pub type HttpsOrigin = ramflux_protocol::username_directory::DirectoryOrigin;
 
-/// Parse one canonical HTTPS origin, without credentials, path, query or redirect semantics.
 /// # Errors
-/// Refuses unsupported schemes, malformed host/port shapes and noncanonical IP literals.
+/// Refuses noncanonical or unsupported HTTPS origins.
 pub fn parse_https_origin(value: &str) -> Result<HttpsOrigin> {
-    let authority =
-        value.strip_prefix("https://").ok_or(CheckpointError::Refused("origin_https"))?;
-    require(!authority.is_empty() && authority.len() <= 259, "origin")?;
-    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
-        let (host, suffix) = rest.split_once(']').ok_or(CheckpointError::Refused("origin_host"))?;
-        let ip: std::net::Ipv6Addr =
-            host.parse().map_err(|_| CheckpointError::Refused("origin_host"))?;
-        require(ip.to_string() == host, "origin_host")?;
-        let port = if suffix.is_empty() {
-            None
-        } else {
-            Some(suffix.strip_prefix(':').ok_or(CheckpointError::Refused("origin_port"))?)
-        };
-        (host, port)
-    } else {
-        let (host, port) =
-            authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
-        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
-            require(ip.to_string() == host, "origin_host")?;
-        } else {
-            validate_node(host)?;
-        }
-        (host, port)
-    };
-    let port = if let Some(value) = port {
-        let port: u16 = value.parse().map_err(|_| CheckpointError::Refused("origin_port"))?;
-        require(port != 0 && port.to_string() == value, "origin_port")?;
-        port
-    } else {
-        443
-    };
-    Ok(HttpsOrigin { host: host.into(), port })
+    Ok(ramflux_protocol::username_directory::parse_directory_origin(value)?)
 }
 
 pub(super) fn validate_origin(value: &str) -> Result<()> {

@@ -29,7 +29,10 @@ impl Writer {
     pub fn try_write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let waker = Arc::new(WakeActor).into();
         let mut context = Context::from_waker(&waker);
-        match Pin::new(&mut self.send).poll_write(&mut context, bytes) {
+        let chunk = bytes
+            .get(..bytes.len().min(8192))
+            .ok_or_else(|| std::io::Error::other("directory QUIC write bound"))?;
+        match Pin::new(&mut self.send).poll_write(&mut context, chunk) {
             Poll::Ready(Ok(count)) => {
                 if count == bytes.len() {
                     self.send.finish().map_err(std::io::Error::other)?;

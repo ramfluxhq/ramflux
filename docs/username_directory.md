@@ -191,3 +191,38 @@ do not bypass peer credentials, semantic admission or the exact primary fsync ga
 
 The release gate remains false. These components have compilation evidence only;
 no direct service run or complete CLI flow is claimed by this document.
+
+## Home reconciliation and profile publication
+
+The native detached JSON request carries the SDK's independently configured centre
+URL, ID, key and generation. Router and home compare them with their own pin before
+dispatch. This adds no protobuf field or executable C ABI method. The router reuses
+its configured native home authority and the existing
+`RAMFLUX_HOME_MIGRATION_FEDERATION_ADMIN_ORIGIN`/`TOKEN` internal bridge. A username
+home therefore requires that native authority configuration, including its genuine
+node record and existing mounted node signer. No migration destination is fabricated.
+
+`--username-home-initialize` explicitly initializes ordinary home storage. Normal
+startup refuses missing storage. The home starts its durable outbox coordinator and
+renews its signed locator through a real enrolled root. Latest authenticated locator
+metadata is shared by a home; protected service entries have a lifetime cap of one
+million. Read operations use the existing read quotas; mutations retain their separate
+10/minute/root and60/minute/home ceilings. All counters fail closed at capacity.
+
+Profile transport validates the exact centre tuple, master signatures and real native
+home history. Native principal/kind must match the profile; native workflows use the
+public bot category. Target DNS is resolved once and the exact addresses are dialled.
+Private targets require an explicit matching node/key/origin pin (at most64 entries).
+There are no redirects. The resolver has two fixed workers and sixteen queued jobs.
+
+The home retains the master-signed operation with committed profile bytes. Its
+publication context contains no durable permit: every bounded nonblocking write
+checks the current local floors and suppression/deletion under the same mutex used
+by H1/H3 writes. Both wall time and a monotonic deadline bound the fresh wrapper.
+A concurrent restrictive change or expiry closes a partial reply. Current signed
+operations also let account restrictions cover profiles without names and release;
+restore unions independent directory/profile floors, retaining conflicts and delete
+restrictions. Historical records are never sufficient for a positive profile read.
+
+These are implemented components with compilation evidence. SDK/bus/CLI wiring and
+all required direct real runs are still outstanding; the single release gate is false.

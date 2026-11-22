@@ -8,6 +8,18 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
+impl super::ProfileKind {
+    /// Public profile classification follows native authority; workflows use the bot category.
+    #[must_use]
+    pub const fn from_principal_kind(kind: crate::PrincipalKind) -> Self {
+        match kind {
+            crate::PrincipalKind::Human => Self::Human,
+            crate::PrincipalKind::HeadlessAi => Self::HeadlessAi,
+            crate::PrincipalKind::Bot | crate::PrincipalKind::Workflow => Self::Bot,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeUsernameAction {
@@ -18,7 +30,74 @@ pub enum NativeUsernameAction {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct NativeDirectoryPin {
+    pub url: String,
+    pub id: String,
+    pub public_key: String,
+    pub generation: u64,
+}
+
+impl NativeDirectoryPin {
+    /// # Errors
+    /// Refuses noncanonical origins, malformed public identities and unsafe trust generations.
+    pub fn validate(&self) -> Result<(), super::CodecError> {
+        parse_directory_origin(&self.url)?;
+        super::codec::node(&self.id)?;
+        super::codec::fixed(&self.public_key, 32, "native_center_key")?;
+        super::codec::need(
+            self.generation > 0 && self.generation <= crate::MAX_SAFE_JSON_INTEGER,
+            "native_center_generation",
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectoryOrigin {
+    pub host: String,
+    pub port: u16,
+}
+
+/// # Errors
+/// Refuses noncanonical HTTPS origins, credentials, paths, queries and ambiguous IP literals.
+pub fn parse_directory_origin(value: &str) -> Result<DirectoryOrigin, super::CodecError> {
+    use super::{CodecError, codec::need};
+    let authority = value.strip_prefix("https://").ok_or(CodecError::Field("origin_https"))?;
+    need(!authority.is_empty() && authority.len() <= 259, "origin")?;
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']').ok_or(CodecError::Field("origin_host"))?;
+        let ip: std::net::Ipv6Addr = host.parse().map_err(|_| CodecError::Field("origin_host"))?;
+        need(ip.to_string() == host, "origin_host")?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':').ok_or(CodecError::Field("origin_port"))?)
+        };
+        (host, port)
+    } else {
+        let (host, port) =
+            authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            need(ip.to_string() == host, "origin_host")?;
+        } else {
+            need(!host.bytes().all(|b| b.is_ascii_digit() || b == b'.'), "origin_host")?;
+            super::codec::node(host)?;
+        }
+        (host, port)
+    };
+    let port = if let Some(value) = port {
+        let port: u16 = value.parse().map_err(|_| CodecError::Field("origin_port"))?;
+        need(port != 0 && port.to_string() == value, "origin_port")?;
+        port
+    } else {
+        443
+    };
+    Ok(DirectoryOrigin { host: host.into(), port })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeUsernameRequest {
+    pub center: NativeDirectoryPin,
     pub declaration: crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,
     pub action: NativeUsernameAction,
 }
@@ -35,11 +114,13 @@ pub enum NativeUsernameState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeUsernameStatus {
+    pub current_operation: Option<UsernameOperation>,
     pub operation_id: Option<String>,
     pub state: NativeUsernameState,
     pub binding: Option<UsernameBinding>,
     pub profile: Option<SignedIdentityProfileV2>,
     pub receipt: Option<DirectoryReceipt>,
+    pub operation_receipt: Option<DirectoryReceipt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +130,7 @@ pub enum NativeUsernameReply {
         status: Box<NativeUsernameStatus>,
     },
     Resolved {
+        operation: Box<UsernameOperation>,
         resolve: Box<DirectoryResolve>,
         binding: Box<UsernameBinding>,
         profile: Box<SignedIdentityProfileV2>,
@@ -67,6 +149,7 @@ impl NativeUsernameRequest {
     pub fn validate(&self) -> Result<(), super::CodecError> {
         use super::{Wire, codec::need};
         need(crate::canonical_json_bytes(self)?.len() <= 16384, "native_request_size")?;
+        self.center.validate()?;
         let declaration = crate::canonical_json_bytes(&self.declaration)?;
         crate::home_migration::decode::<
             crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,

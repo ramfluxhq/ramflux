@@ -2,14 +2,21 @@
 // Copyright (c) 2026 Span Brain
 
 //! Optional explicitly provisioned username services. Witness owns every public response writer.
+mod client;
+mod dns;
+mod home;
+mod home_profile;
+mod home_status;
 mod ipc;
 mod primary;
 mod quic;
+mod rpc;
 mod source;
 mod tcp;
 mod tls;
 mod wire;
 mod witness;
+pub(crate) use home::{local as local_home, start as start_home};
 
 use ramflux_node_core::username_directory as directory;
 

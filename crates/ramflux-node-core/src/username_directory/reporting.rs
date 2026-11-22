@@ -102,6 +102,14 @@ fn rate(
 }
 
 impl DirectoryAuthority {
+    /// Latest authenticated locator for a home, shared by its independently verified root floors.
+    /// # Errors
+    /// Refuses malformed homes or unavailable/corrupt protected metadata.
+    pub fn reporting_service(&self, home: &str) -> Result<Option<super::SignedHomeServiceAddress>> {
+        super::config::validate_node(home)?;
+        let tx = self.witness.db.begin_read().map_err(storage)?;
+        read(&tx.open_table(META).map_err(storage)?, &format!("auth_home_service:{home}"))
+    }
     /// Retained transport hint and immutable master identity; neither grants lookup permission.
     /// # Errors
     /// Refuses malformed roots or unavailable/corrupt protected state.
@@ -131,7 +139,7 @@ impl DirectoryAuthority {
         let reporter =
             super::verify_reporting_request(&request, channel, pin, retained.as_ref(), time.wall)?;
         let nonce_key = format!("auth_nonce:{}:{}", reporter.home, reporter.nonce);
-        let lookup = matches!(request.request, DirectoryRequest::Resolve { .. });
+        let lookup = !matches!(request.request, DirectoryRequest::Mutate { .. });
         let prefix = match source {
             std::net::IpAddr::V4(ip) => {
                 let [a, b, c, _] = ip.octets();
@@ -200,6 +208,23 @@ impl DirectoryAuthority {
                     ),
                     service: reporter.service.clone(),
                 };
+                let service_key = format!("auth_home_service:{}", reporter.home);
+                let old_service: Option<super::SignedHomeServiceAddress> =
+                    read(&meta, &service_key)?;
+                if let Some(old) = old_service {
+                    ensure(
+                        old.body.public_key == reporter.service.body.public_key,
+                        Code::KeyChanged,
+                    )?;
+                    ensure(old.body.issued_at <= reporter.service.body.issued_at, Code::Replay)?;
+                    if old.body.issued_at == reporter.service.body.issued_at {
+                        ensure(old == reporter.service, Code::Replay)?;
+                    }
+                } else {
+                    add(&mut meta, "auth_lifetime_services", 1, 1_000_000)?;
+                }
+                meta.insert(service_key.as_str(), canonical(&reporter.service)?.as_slice())
+                    .map_err(storage)?;
                 meta.insert(floor_key.as_str(), canonical(&floor)?.as_slice()).map_err(storage)?;
                 Ok(())
             })();

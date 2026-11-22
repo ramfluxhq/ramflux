@@ -12,6 +12,8 @@ use ramflux_protocol::username_directory::{self as w, DirectoryCode as Code};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+mod publication;
+pub use publication::*;
 
 const ROOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("username_home_roots");
 const OUTBOX: TableDefinition<&str, &[u8]> = TableDefinition::new("username_home_outbox");
@@ -29,6 +31,7 @@ pub struct HomeIntent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HomeProfileView {
+    pub operation: w::UsernameOperation,
     pub binding: Option<w::UsernameBinding>,
     pub profile: w::SignedIdentityProfileV2,
     pub receipt: w::DirectoryReceipt,
@@ -112,9 +115,72 @@ pub struct HomeDirectory {
     db: redb::Database,
     home: String,
     center: CenterPin,
+    serving: std::sync::Mutex<()>,
 }
 
 impl HomeDirectory {
+    /// Local metadata only; caller must already have verified current native home authority.
+    /// # Errors
+    /// Refuses malformed roots, capacity exhaustion and unavailable durable storage.
+    pub fn enrol(&self, root: &str) -> Result<()> {
+        fixed(root)?;
+        let _serving = self.publication_guard()?;
+        let mut tx = self.db.begin_write().map_err(storage)?;
+        tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        let mut roots = tx.open_table(ROOTS).map_err(storage)?;
+        if roots.get(root).map_err(storage)?.is_some() {
+            return Ok(());
+        }
+        ensure(roots.len().map_err(storage)? < 100_000, Code::Capacity)?;
+        put_root(&mut roots, root, &HomeRoot::default())?;
+        drop(roots);
+        tx.commit().map_err(storage)?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Refuses corrupt/unavailable local floors; this is never positive currentness evidence.
+    pub fn directory_epoch(&self, root: &str) -> Result<u64> {
+        fixed(root)?;
+        let tx = self.db.begin_read().map_err(storage)?;
+        let table = tx.open_table(ROOTS).map_err(storage)?;
+        Ok(read_root(&table, root)?.map_or(0, |state| state.directory_epoch))
+    }
+
+    /// Bounded local page for locator renewal. Tombstones still advance the scan cursor.
+    /// # Errors
+    /// Refuses malformed cursors/limits and corrupt/unavailable durable metadata.
+    pub fn reporting_roots(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        require((1..=128).contains(&limit), "home_page")?;
+        if let Some(after) = after {
+            fixed(after)?;
+        }
+        let tx = self.db.begin_read().map_err(storage)?;
+        let table = tx.open_table(ROOTS).map_err(storage)?;
+        let mut rows = Vec::new();
+        let mut last = None;
+        let mut scanned = 0;
+        for item in table.range(after.unwrap_or("")..).map_err(storage)? {
+            let (key, value) = item.map_err(storage)?;
+            if after == Some(key.value()) {
+                continue;
+            }
+            let state: HomeRoot = serde_json::from_slice(value.value())?;
+            last = Some(key.value().to_owned());
+            scanned += 1;
+            if !state.deleted {
+                rows.push(key.value().to_owned());
+            }
+            if scanned == limit {
+                break;
+            }
+        }
+        Ok((rows, if scanned == limit { last } else { None }))
+    }
     #[must_use]
     pub fn center_pin(&self) -> &CenterPin {
         &self.center
@@ -140,7 +206,7 @@ impl HomeDirectory {
             .insert("identity", canonical(&(home, &center.id, center.generation))?.as_slice())
             .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        Ok(Self { db, home: home.into(), center })
+        Ok(Self { db, home: home.into(), center, serving: std::sync::Mutex::new(()) })
     }
 
     /// # Errors
@@ -165,7 +231,7 @@ impl HomeDirectory {
                 "home_identity",
             )?;
         }
-        Ok(Self { db, home: home.into(), center })
+        Ok(Self { db, home: home.into(), center, serving: std::sync::Mutex::new(()) })
     }
 
     /// H1 atomically stores the exact intent, candidate bytes, restrictive suppression and outbox.
@@ -179,6 +245,7 @@ impl HomeDirectory {
         profile: Option<w::SignedIdentityProfileV2>,
         now: u64,
     ) -> Result<()> {
+        let _serving = self.publication_guard()?;
         crypto::verify_operation(master, &operation)?;
         ensure(operation.body.issued_at <= now && now < operation.body.expires_at, Code::Replay)?;
         let root = operation.body.principal_commitment.clone();
@@ -272,6 +339,7 @@ impl HomeDirectory {
                     Code::StaleEpoch,
                 )?;
                 let committed = HomeProfileView {
+                    operation: intent.operation.clone(),
                     binding: live.result.current_binding.clone(),
                     profile: intent.profile.clone(),
                     receipt: current.clone(),
@@ -293,7 +361,9 @@ impl HomeDirectory {
                     Code::StaleEpoch,
                 )?;
                 state.suppressed = !live.result.lookup_allowed;
-                result = Some(committed.clone());
+                let mut current_view = committed.clone();
+                current_view.receipt = current.clone();
+                result = Some(current_view);
             }
             Ok(())
         })?;
@@ -311,6 +381,32 @@ impl HomeDirectory {
         master: &VerifyingKey,
         now: u64,
     ) -> Result<HomeProfileView> {
+        self.read_profile(root, live, master, now, true)?
+            .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))
+    }
+
+    /// Authenticated owner view, including hidden or deleted state. No other caller may use it.
+    /// Empty is authoritative only after observing a fresh empty centre wrapper.
+    /// # Errors
+    /// Refuses missing bytes, substitutions, stale wrappers and durable floor conflicts.
+    pub fn owner_profile(
+        &self,
+        root: &str,
+        live: LiveHomeRevalidation,
+        master: &VerifyingKey,
+        now: u64,
+    ) -> Result<Option<HomeProfileView>> {
+        self.read_profile(root, live, master, now, false)
+    }
+
+    fn read_profile(
+        &self,
+        root: &str,
+        live: LiveHomeRevalidation,
+        master: &VerifyingKey,
+        now: u64,
+        require_lookup: bool,
+    ) -> Result<Option<HomeProfileView>> {
         ensure(
             live.result.issued_at <= now && now < live.result.expires_at,
             Code::DirectoryUnavailable,
@@ -320,12 +416,16 @@ impl HomeDirectory {
         let mut refused = None;
         self.update(root, |state| {
             observe(state, &live.result)?;
-            let allowed = live.result.lookup_allowed && !state.deleted && !state.suppressed;
+            let allowed = !require_lookup
+                || live.result.lookup_allowed && !state.deleted && !state.suppressed;
             if !allowed {
                 refused = Some(Code::NotFound);
                 return Ok(());
             }
             let Some(committed) = &state.committed else {
+                if !require_lookup && live.result.current_receipt.is_none() {
+                    return Ok(());
+                }
                 refused = Some(Code::DirectoryUnavailable);
                 return Ok(());
             };
@@ -346,6 +446,17 @@ impl HomeDirectory {
                 refused = Some(Code::SignatureInvalid);
                 return Ok(());
             }
+            if crypto::verify_operation(master, &committed.operation).is_err()
+                || committed.operation.body.principal_commitment != root
+                || committed.operation.body.binding != committed.binding
+                || committed.operation.body.profile != current.body.profile
+                || committed.operation.body.operation_id != current.body.operation_id
+                || crypto::operation_hash(&committed.operation)? != current.body.operation_hash
+            {
+                state.suppressed = true;
+                refused = Some(Code::ProfileEquivocation);
+                return Ok(());
+            }
             if current.body.profile.hash.as_ref()
                 != Some(&crypto::profile_hash_v2(&committed.profile)?)
             {
@@ -364,7 +475,7 @@ impl HomeDirectory {
         if let Some(code) = refused {
             return Err(CheckpointError::Directory(code));
         }
-        view.ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))
+        Ok(view)
     }
 
     /// # Errors
@@ -496,6 +607,7 @@ impl HomeDirectory {
     }
 
     fn update<T>(&self, root: &str, change: impl FnOnce(&mut HomeRoot) -> Result<T>) -> Result<T> {
+        let _serving = self.publication_guard()?;
         fixed(root)?;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;

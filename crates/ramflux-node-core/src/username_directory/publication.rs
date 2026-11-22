@@ -215,7 +215,10 @@ impl DirectoryAuthority {
                     home.home == root.node && home.service.body.node == root.node,
                     Code::DirectoryUnavailable,
                 )?;
-                home.service.verify(&root.node, &home.service.body.public_key, now)?;
+                let service = self
+                    .reporting_service(&root.node)?
+                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+                service.verify(&root.node, &home.service.body.public_key, now)?;
                 let resolve = crypto::sign_resolve(
                     signer,
                     &center,
@@ -238,7 +241,7 @@ impl DirectoryAuthority {
                     resolve: Box::new(resolve),
                     binding: Box::new(binding),
                     master_public_key: home.master_public_key,
-                    service: Box::new(home.service),
+                    service: Box::new(service),
                 })
             }
             DirectoryRequest::Revalidate { request } => {

@@ -107,6 +107,13 @@ impl DirectoryAuthority {
         let current_profile = plan.root(&reporter.root)?.map(|row| row.profile);
         if let Some(profile) = profile {
             crypto::verify_profile(&reporter.master, profile)?;
+            let native = &reporter.history.evidence().authority.record.body;
+            ensure(
+                profile.body.principal_id == native.principal_id
+                    && profile.body.kind
+                        == w::ProfileKind::from_principal_kind(native.principal_kind),
+                Code::InvalidProfile,
+            )?;
             ensure(profile.body.avatar.is_none(), Code::InvalidAvatar)?;
             ensure(
                 profile.body.principal_commitment == reporter.root

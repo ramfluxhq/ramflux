@@ -26,7 +26,8 @@ type Result<T> = std::result::Result<T, UsernameStorageError>;
 #[serde(deny_unknown_fields)]
 pub struct UsernameFloor {
     pub master_public_key: String,
-    pub binding: w::UsernameBinding,
+    pub binding: Option<w::UsernameBinding>,
+    pub operation: w::UsernameOperation,
     pub profile: w::SignedIdentityProfileV2,
     pub quarantined: bool,
 }
@@ -50,11 +51,19 @@ impl UsernameFloor {
     pub fn validate(&self) -> Result<()> {
         let key = ramflux_crypto::verifying_key_from_base64url(&self.master_public_key)
             .map_err(|_| refused(Code::SignatureInvalid))?;
-        ramflux_crypto::username_directory::verify_binding(&key, &self.binding)
+        ramflux_crypto::username_directory::verify_operation(&key, &self.operation)
             .map_err(|_| refused(Code::SignatureInvalid))?;
+        if let Some(binding) = &self.binding {
+            ramflux_crypto::username_directory::verify_binding(&key, binding)
+                .map_err(|_| refused(Code::SignatureInvalid))?;
+        }
         ramflux_crypto::username_directory::verify_profile(&key, &self.profile)
             .map_err(|_| refused(Code::SignatureInvalid))?;
-        if self.binding.body.principal_commitment != self.profile.body.principal_commitment {
+        if self.operation.body.principal_commitment != self.profile.body.principal_commitment
+            || self.operation.body.binding != self.binding
+            || ramflux_crypto::identity_root_commitment(&key)
+                != self.operation.body.principal_commitment
+        {
             return Err(refused(Code::OwnershipMismatch));
         }
         if self.profile.body.avatar.is_some() {
@@ -65,7 +74,7 @@ impl UsernameFloor {
 
     #[must_use]
     pub fn root(&self) -> &str {
-        &self.binding.body.principal_commitment
+        &self.operation.body.principal_commitment
     }
 
     /// # Errors
@@ -79,13 +88,17 @@ impl UsernameFloor {
         {
             return Err(refused(Code::KeyChanged));
         }
-        if candidate.binding.body.epoch < self.binding.body.epoch
+        if self.operation.body.action == w::Action::Delete && candidate.operation != self.operation
+        {
+            return Err(refused(Code::AccountDeleted));
+        }
+        if candidate.operation.body.next_epoch < self.operation.body.next_epoch
             || candidate.profile.body.epoch < self.profile.body.epoch
         {
             return Err(refused(Code::ProfileRollback));
         }
-        if candidate.binding.body.epoch == self.binding.body.epoch
-            && candidate.binding != self.binding
+        if candidate.operation.body.next_epoch == self.operation.body.next_epoch
+            && candidate.operation != self.operation
             || candidate.profile.body.epoch == self.profile.body.epoch
                 && candidate.profile != self.profile
         {
@@ -106,12 +119,19 @@ impl UsernameFloor {
         }
         let mut merged = self.clone();
         merged.quarantined |= incoming.quarantined
-            || self.binding.body.epoch == incoming.binding.body.epoch
-                && self.binding != incoming.binding
+            || self.operation.body.next_epoch == incoming.operation.body.next_epoch
+                && self.operation != incoming.operation
             || self.profile.body.epoch == incoming.profile.body.epoch
                 && self.profile != incoming.profile;
-        if incoming.binding.body.epoch > self.binding.body.epoch {
+        merged.quarantined |= self.operation.body.action == w::Action::Delete
+            && incoming.operation.body.next_epoch >= self.operation.body.next_epoch
+            && incoming.operation != self.operation
+            || incoming.operation.body.action == w::Action::Delete
+                && self.operation.body.next_epoch >= incoming.operation.body.next_epoch
+                && self.operation != incoming.operation;
+        if incoming.operation.body.next_epoch > self.operation.body.next_epoch {
             merged.binding = incoming.binding.clone();
+            merged.operation = incoming.operation.clone();
         }
         if incoming.profile.body.epoch > self.profile.body.epoch {
             merged.profile = incoming.profile.clone();
@@ -127,7 +147,12 @@ impl UsernameNamePin {
         let key = ramflux_crypto::verifying_key_from_base64url(&self.master_public_key)
             .map_err(|_| refused(Code::SignatureInvalid))?;
         ramflux_crypto::username_directory::verify_binding(&key, &self.binding)
-            .map_err(|_| refused(Code::SignatureInvalid))
+            .map_err(|_| refused(Code::SignatureInvalid))?;
+        if ramflux_crypto::identity_root_commitment(&key) != self.binding.body.principal_commitment
+        {
+            return Err(refused(Code::OwnershipMismatch));
+        }
+        Ok(())
     }
 }
 
