@@ -11,6 +11,7 @@
 use super::builder::{self, Built, Side};
 use super::contract::{SchemaRow, canonical_schema_rows, schema_rows};
 use super::tables::EXPORT_TABLES;
+use crate::schema::MAX_DECLARED_TRIGGER_STEPS;
 use crate::{AccountDbKey, StorageError};
 use rusqlite::config::DbConfig;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -214,7 +215,7 @@ pub(crate) fn harden(
         (Limit::SQLITE_LIMIT_WORKER_THREADS, 0),
         (Limit::SQLITE_LIMIT_PARSER_DEPTH, limits.parser_depth),
         (Limit::SQLITE_LIMIT_SCHEMA, limits.schema),
-        (Limit::SQLITE_LIMIT_TRIGGER_STEPS, 1),
+        (Limit::SQLITE_LIMIT_TRIGGER_STEPS, MAX_DECLARED_TRIGGER_STEPS),
     ];
     for (limit, value) in applied {
         db.set_limit(limit, value).map_err(|error| refused_by("harden", &error))?;
