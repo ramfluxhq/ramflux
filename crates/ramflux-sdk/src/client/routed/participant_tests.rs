@@ -99,8 +99,11 @@ fn claimed_scope(
             },
         )
     })?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&source.config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+        &mut message,
+        sealed,
+    )?;
     ramflux_node_core::check_entry_bound(&envelope)?;
     Ok(GatewayInboxEntry {
         forwarded: false,

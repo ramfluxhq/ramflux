@@ -70,7 +70,9 @@ impl Case {
             .source
             .client
             .seal_authored_history(
-                &self.source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &self.source.config,
+                )?,
                 plan,
                 self.source.material_for(&self.target)?,
             )?
@@ -235,7 +237,13 @@ async fn own_device_history_import_skips_group_message_below_joined_epoch() -> T
         let plan = source.client.prepare_authored_history(&source.config)?.ok_or("history plan")?;
         let (_, packet) = source
             .client
-            .seal_authored_history(&source.config, plan, source.material_for(&target)?)?
+            .seal_authored_history(
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config,
+                )?,
+                plan,
+                source.material_for(&target)?,
+            )?
             .ok_or("sealed history")?;
         let mut target = target;
         let refusal = target.receive(packet, 1).await;

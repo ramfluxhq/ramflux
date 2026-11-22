@@ -61,6 +61,12 @@ fn queue(client: &RamfluxClient) -> Result<Vec<Intent>, SdkError> {
     }
     Ok(retained)
 }
+fn claim_send_attempt(intent: &mut Intent, now: i64) {
+    if intent.attempts < 8 {
+        intent.attempts += 1;
+    }
+    intent.next_at = now.saturating_add((1_i64 << intent.attempts).min(60));
+}
 fn enqueue(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {
     let db = client.account_db()?;
     let pending = queue(client)?;
@@ -157,13 +163,10 @@ impl RamfluxClient {
         }
         let mut intent = stored.unwrap_or(selector);
         let now = now_unix_timestamp();
-        if intent.attempts >= 8 || now < intent.next_at {
-            return Err(SdkError::InboundPending(
-                "contact request submission is backed off".into(),
-            ));
-        }
-        intent.attempts += 1;
-        intent.next_at = now.saturating_add((1_i64 << intent.attempts).min(60));
+        // The background actor sets `next_at` before its attempt finishes, and a
+        // conflict pins `attempts` at 8. Neither is a reason to refuse this send:
+        // the message submits the pending request inside the command bound.
+        claim_send_attempt(&mut intent, now);
         self.account_db()?.persist_actor_state(&id, &intent)?;
         match deliver(self, engine, &mut intent).await {
             Ok((_, true)) => {
@@ -371,7 +374,6 @@ impl RamfluxClient {
         }
     }
 }
-#[cfg(test)]
 pub(crate) async fn flush(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {
     account.client.maintain_contact_requests()?;
     let db = account.client.account_db()?;
@@ -542,8 +544,11 @@ async fn send_one(
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())
         .await?;
     // Control carrier; no Direct report payload.
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     if let Some(target) = target_node {
         let submitted = engine.submit_classified_to(envelope, Some(target.to_owned())).await?;
         if let Err(refusal) = submitted {

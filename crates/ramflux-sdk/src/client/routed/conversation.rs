@@ -92,7 +92,11 @@ impl RamfluxClient {
                 },
                 Some((g::outer::CANDIDATE_ENVELOPE_SCHEMA, 2)),
             )?;
-            crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)
+            crate::dm::gateway_generated_envelope_from_sealed(
+                &engine.sealing_config()?,
+                &mut message,
+                sealed,
+            )
         })?;
         let accepted = crate::client::recipient_home::submit_addressed(
             self,

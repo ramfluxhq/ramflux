@@ -400,8 +400,12 @@ pub(in crate::bus) async fn seal_assigned(
         target.identity.root_commitment(),
         target.federation.clone(),
     )?;
-    let envelope =
-        crate::dm::gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
+    let envelope = crate::dm::gateway_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+        None,
+    )?;
     Ok(SealedDelivery {
         envelope,
         federation: route.map(|route| Destination {

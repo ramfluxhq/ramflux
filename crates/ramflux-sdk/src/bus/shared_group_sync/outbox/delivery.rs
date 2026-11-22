@@ -192,7 +192,7 @@ async fn deliver_one(
         root: root.into(),
         device: device.device_id.clone(),
         envelope: crate::dm::gateway_envelope_from_sealed(
-            engine.config(),
+            &engine.sealing_config()?,
             &mut message,
             sealed,
             None,

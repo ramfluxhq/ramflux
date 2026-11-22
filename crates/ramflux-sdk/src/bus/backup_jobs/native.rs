@@ -154,10 +154,11 @@ impl BackupJobs {
                 setup.passphrase.as_bytes(),
                 crate::custody::network_now()?,
             )?;
-            let key = super::install::existing_key(
+            let key = super::install::existing_device_key(
                 &self.index,
                 &self.data_root,
                 &id,
+                setup.vault.as_ref(),
                 setup.passphrase.as_bytes(),
             )?;
             InstallTarget {

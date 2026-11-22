@@ -197,8 +197,11 @@ impl Case {
         request.recipient_principal_commitment = Some(root);
         request.target_delivery_id = b.config()?.target_delivery_id;
         let (mut request, sealed) = seal_native_fixture(&a, &b, request, &exact, Route::control())?;
-        let envelope =
-            crate::dm::gateway_generated_envelope_from_sealed(&a.config()?, &mut request, sealed)?;
+        let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+            &mut request,
+            sealed,
+        )?;
         let entry = GatewayInboxEntry {
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,
@@ -277,15 +280,14 @@ impl Case {
     }
 }
 fn connection(b: &Fixture) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
-    use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write;
-    let vault = FileVaultSecretSource::new(&b.root).vault_secret("bob")?;
+    let vault = b.client.vault_secret_source()?.vault_secret("bob")?;
     let wrapped = b.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &crate::client::account::account_db_key_encryption_key(
             &vault,
             b"native fixture data passphrase",
-        ),
+        )?,
         &wrapped,
     )?;
     let sql = rusqlite::Connection::open(&b.client.account_db()?.path)?;

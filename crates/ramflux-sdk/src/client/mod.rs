@@ -18,6 +18,7 @@ pub(crate) mod contact_verification_cas;
 pub mod conversation;
 pub(crate) mod conversation_projection;
 mod deferred_attachment;
+pub(crate) mod device_unlock;
 pub(crate) mod manifest_demand;
 pub(crate) mod recipient_home;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};

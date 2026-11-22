@@ -25,7 +25,7 @@ struct Plan {
     packet: GroupControlPacket,
     state: ramflux_crypto::VerifiedGroupState,
     fingerprint: serde_json::Value,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 }
 struct Target {
     plan: Plan,
@@ -429,8 +429,8 @@ fn target(
         conversation_id: plan.state.view().conversation_id.clone(),
         message_id: format!("group_control_{}", crate::new_surface_message_id()?),
         envelope_id: format!("group_control_{}", crate::new_surface_message_id()?),
-        source_principal_id: plan.config.principal_id.clone(),
-        sender_id: plan.config.device_id.clone(),
+        source_principal_id: plan.config.config().principal_id.clone(),
+        sender_id: plan.config.config().device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
         recipient_principal_commitment: Some(root.into()),
         target_delivery_id: device.target_delivery_id.clone(),

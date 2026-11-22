@@ -495,12 +495,11 @@ fn outcome(record: &AgentCreationRecord) -> Result<BeginOutcome, SdkError> {
 
 /// The agent's data passphrase: 32 random bytes as unpadded base64url text (43 characters), the
 /// form `creation_confirm` gives agents. It is the sealed data secret and the activation
-/// passphrase of the committed account, so it passes the same policy check as a new passphrase.
+/// passphrase of the committed account. It is generated (256 bits), never chosen by a person,
+/// so the six-digit rule for human account codes does not apply to it.
 fn agent_passphrase() -> Result<Zeroizing<String>, SdkError> {
     let bytes = Zeroizing::new(random_32().map_err(|_| SdkError::CustodyRandomUnavailable)?);
-    let text = Zeroizing::new(encode_base64url(*bytes));
-    crate::passphrase::check_new_passphrase(&text)?;
-    Ok(text)
+    Ok(Zeroizing::new(encode_base64url(*bytes)))
 }
 
 pub(super) fn random_id() -> Result<String, SdkError> {

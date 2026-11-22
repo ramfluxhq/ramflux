@@ -316,40 +316,50 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
 }
 
 #[tokio::test]
-async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Result {
+async fn ordinary_native_restart_reopens_silently_and_explicit_lock_needs_the_code() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
     let now = crate::custody::network_now()?;
     let mut ceremony = CreationCeremony::begin(&root.0, input("ordinary"), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
-    let born = ceremony.confirm_with_passphrase(
-        &words(&phrase, positions)?,
-        &vault,
-        now,
-        b"ordinary data passphrase",
-    )?;
+    let born =
+        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, b"135792")?;
     let anchor = born.record().body.account_anchor.clone();
     drop(born);
     drop(vault);
     drop(phrase);
     let socket = root.0.join("ordinary.sock");
-    // Restart with creation disabled and no test provider, node, legacy manifest or seeds.
-    for passphrase in ["ordinary data passphrase", "rotated data passphrase"] {
+    // Restart with creation disabled and no node, legacy manifest or seeds. The first start
+    // reopens the account through its device wrap; after the explicit lock the code is needed.
+    for (passphrase, at_start) in [("135792", "unlocked"), ("975311", "locked")] {
         let (stop, receiver) = watch::channel(false);
         let flow = async {
             let _stop = Stop(stop);
             let mut bus = connect(&socket).await?;
+            if at_start == "unlocked" {
+                // Reads wait for the startup reopen to finish.
+                let _ = bus
+                    .request(
+                        Some("ordinary".into()),
+                        "conversation",
+                        "conversation.list",
+                        json!({}),
+                    )
+                    .await;
+            }
             let listed = bus.request(None, "account", "account.list", json!({})).await?;
-            assert_eq!(listed["account_details"][0]["state"], "locked");
-            assert_eq!(listed["account_details"][0]["networking"], "networking_pending");
+            assert_eq!(
+                listed["account_details"][0]["state"], at_start,
+                "test: silent reopen or explicit lock state changed"
+            );
             let wrong = bus
                 .request_frame_response(LocalBusFrame::request(
                     "wrong",
                     Some("ordinary".into()),
                     "account",
                     "account.unlock",
-                    json!({"passphrase":"wrong data passphrase"}),
+                    json!({"passphrase":"000001"}),
                 ))
                 .await?;
             assert!(wrong.error.is_some());
@@ -382,7 +392,7 @@ async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Res
                 Some("ordinary".into()),
                 "account",
                 "account.passphrase.rotate",
-                json!({"old_passphrase":passphrase,"new_passphrase":"rotated data passphrase"}),
+                json!({"old_passphrase":passphrase,"new_passphrase":"975311"}),
             )
             .await?;
             bus.request(Some("ordinary".into()), "account", "account.lock", json!({})).await?;
@@ -410,12 +420,8 @@ async fn native_status_reads_persisted_revocation_while_the_actor_is_still_unloc
     let mut ceremony = CreationCeremony::begin(&root.0, input("revoked-status"), now)?;
     let phrase = ceremony.show_once()?;
     let positions = ceremony.hidden_challenge()?;
-    let born = ceremony.confirm_with_passphrase(
-        &words(&phrase, positions)?,
-        &vault,
-        now,
-        b"status data passphrase",
-    )?;
+    let born =
+        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, b"975310")?;
     let primary = vault.primary_for_public_key(
         &born.record().body.master_certificate.body.self_signing_public_key,
     )?;
@@ -429,7 +435,7 @@ async fn native_status_reads_persisted_revocation_while_the_actor_is_still_unloc
             Some("revoked-status".into()),
             "account",
             "account.unlock",
-            json!({"passphrase":"status data passphrase"}),
+            json!({"passphrase":"975310"}),
         )
         .await?;
         let before = bus
@@ -490,8 +496,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         // Ceremonies belong to their connection, never to another same-user client.
         let mut other = LocalBusCreationClient::connect(&socket).await?;
         assert!(other.hidden_challenge().await.is_err());
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("creation data secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("112358".into())).await?;
         assert_eq!(account.state, LocalBusCreatedAccountState::Unlocked);
         assert_eq!(account.networking, CreationState::NetworkingPending);
         assert_eq!(account.display_name, "New Ordinary Human");
@@ -512,7 +517,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
                 Some(account_id.clone()),
                 "account",
                 "account.unlock",
-                json!({"passphrase":"creation data secret"}),
+                json!({"passphrase":"112358"}),
             )
             .await?;
         ordinary
@@ -536,7 +541,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         let failed = ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
         let error = ceremony
-            .confirm(&wrong, &Zeroizing::new("discarded data secret".into()))
+            .confirm(&wrong, &Zeroizing::new("297513".into()))
             .await
             .expect_err("wrong words must be rejected");
         assert!(
@@ -586,8 +591,7 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
         let challenge = ceremony.hidden_challenge().await?;
         let answers = words(&phrase, challenge)?;
         drop(phrase);
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("event data secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("132134".into())).await?;
         let id = account.account_id;
 
         let first = next_networking_event(&socket, &id, 0).await?;
@@ -601,12 +605,7 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
         nodes.save(&root.0)?;
         ordinary.request(Some(id.clone()), "account", "account.lock", json!({})).await?;
         ordinary
-            .request(
-                Some(id.clone()),
-                "account",
-                "account.unlock",
-                json!({"passphrase":"event data secret"}),
-            )
+            .request(Some(id.clone()), "account", "account.unlock", json!({"passphrase":"132134"}))
             .await?;
         let changed = next_networking_event(&socket, &id, first_seq).await?;
         assert_eq!(changed.body["networking_reason"]["kind"], "node_unreachable");
@@ -617,12 +616,7 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
         let mut native = crate::custody::load_account(&root.0, &id, now)?;
         native.mark_live_for_test(&root.0)?;
         ordinary
-            .request(
-                Some(id.clone()),
-                "account",
-                "account.unlock",
-                json!({"passphrase":"event data secret"}),
-            )
+            .request(Some(id.clone()), "account", "account.unlock", json!({"passphrase":"132134"}))
             .await?;
         let live = next_networking_event(&socket, &id, changed_seq).await?;
         assert_eq!(live.body["state"], "live");
@@ -646,12 +640,7 @@ async fn networking_events_cover_change_live_and_restart_without_duplicates() ->
         let _stop = Stop(stop);
         let mut ordinary = connect(&socket).await?;
         ordinary
-            .request(
-                Some(id.clone()),
-                "account",
-                "account.unlock",
-                json!({"passphrase":"event data secret"}),
-            )
+            .request(Some(id.clone()), "account", "account.unlock", json!({"passphrase":"132134"}))
             .await?;
         let mut events = connect(&socket).await?;
         events
@@ -709,8 +698,7 @@ async fn per_account_home_node_does_not_change_daemon_default() -> Result {
         let challenge = ceremony.hidden_challenge().await?;
         let answers = words(&phrase, challenge)?;
         drop(phrase);
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("selected node data secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("385029".into())).await?;
         assert_eq!(account.networking, CreationState::NetworkingPending);
         local_first::wait_for_reason(&socket, &account.account_id, "node_unreachable").await?;
         let status = ordinary
@@ -773,8 +761,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
         let challenge = ceremony.hidden_challenge().await?;
         let answers = words(&phrase, challenge)?;
         drop(phrase);
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("gateway cause secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("385030".into())).await?;
         local_first::wait_for_reason(&socket, &account.account_id, expected_kind).await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))
@@ -905,9 +892,19 @@ fn create_human_account(
         &words(&phrase, positions)?,
         vault,
         now,
-        format!("{id}-data-passphrase").as_bytes(),
+        fixture_code(id).as_bytes(),
     )?;
     Ok(())
+}
+
+/// Six-digit account code of a fixture account created by id.
+fn fixture_code(id: &str) -> &'static str {
+    match id {
+        "owner" => "480101",
+        "other" => "480202",
+        "pending" => "480303",
+        _ => "480404",
+    }
 }
 
 /// An agent account created through the real approved creation flow for the human `owner`
@@ -960,9 +957,9 @@ async fn refuse_open_custodians(
         .await?;
     assert!(locked_export.error.is_some());
     for (id, passphrase) in [
-        ("owner", "owner-data-passphrase".to_owned()),
-        ("other", "other-data-passphrase".to_owned()),
-        ("pending", "pending-data-passphrase".to_owned()),
+        ("owner", "480101".to_owned()),
+        ("other", "480202".to_owned()),
+        ("pending", "480303".to_owned()),
         (agent.id.as_str(), agent.passphrase.clone()),
     ] {
         bus.request(Some(id.into()), "account", "account.unlock", json!({"passphrase":passphrase}))
@@ -1206,7 +1203,7 @@ async fn custody_agent_export_uses_recorded_owner_while_agent_is_active() -> Res
         let _stop = Stop(stop);
         let mut bus = connect(&socket).await?;
         for (id, passphrase) in
-            [("owner", "owner-data-passphrase"), (agent.id.as_str(), agent.passphrase.as_str())]
+            [("owner", "480101"), (agent.id.as_str(), agent.passphrase.as_str())]
         {
             bus.request(
                 Some(id.into()),

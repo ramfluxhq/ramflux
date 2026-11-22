@@ -49,13 +49,17 @@ async fn roundtrip_body(text: &[u8], probe_wrapper: bool) -> TestResult {
     let material = source.material_for(&target)?;
     let envelope = source.client.account_db()?.write_transaction(|| {
         let sealed = source.client.seal_generated_routed_prepared(
-            &source.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             &message,
             &prepared.wire,
             Route::direct(),
             material,
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(&source.config, &mut message, sealed)
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            &mut message,
+            sealed,
+        )
     })?;
     let entry = crate::GatewayInboxEntry {
         envelope: envelope.clone(),
@@ -106,7 +110,9 @@ fn assert_wrapper_refused(
         source
             .client
             .seal_generated_routed_prepared(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config
+                )?,
                 message,
                 raw,
                 Route::attachments(),

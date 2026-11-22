@@ -3,7 +3,7 @@
 
 //! Each endpoint owns its account directory, private provider and credential vault.
 use super::*;
-const PASSWORD: &[u8] = b"independent TLS pairing data password";
+const PASSWORD: &[u8] = b"731906";
 pub(super) struct Local {
     pub(super) root: tempfile::TempDir,
     pub(super) id: String,
@@ -80,6 +80,12 @@ impl Device {
                 &node.redb,
             )?;
             client.open_account_index(local.root.path())?;
+            client.bind_device_unlock(
+                local.root.path(),
+                local.vault.as_ref(),
+                id,
+                ramflux_sdk::DeviceSecret::Load,
+            )?;
             client.unlock_account(id, PASSWORD)?;
             PairingIdentity {
                 account_id: id.into(),
@@ -186,6 +192,12 @@ impl Device {
             actor.bind_frontend_writer(slot.as_ref().ok_or("test: original writer absent")?)?
         };
         self.participant.return_client(&mut self.client)?;
+        self.client.bind_device_unlock(
+            self.local.root.path(),
+            self.local.vault.as_ref(),
+            &self.local.id,
+            ramflux_sdk::DeviceSecret::Load,
+        )?;
         Ok((actor, service))
     }
     pub(super) fn service_data(&mut self, actor: &mut PairingActor) -> TestResult {

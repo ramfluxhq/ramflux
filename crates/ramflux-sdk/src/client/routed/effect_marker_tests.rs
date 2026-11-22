@@ -409,7 +409,8 @@ fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkE
         ),
         &true,
     )?;
-    let config = receiver.config()?;
+    let config =
+        crate::bus::connection_manager::SessionMetadata::sealing_config_for(&receiver.config()?)?;
     let body = opened.body.clone();
     let placeholder =
         crate::client::reply_outbox::reply_outbox_crash_tests::envelope("pair-live-env");
@@ -610,8 +611,11 @@ pub(super) fn generated_control_entry(
     request.recipient_principal_commitment = Some(receiver.client.own_account_anchor()?);
     request.target_delivery_id = receiver.config()?.target_delivery_id;
     let (mut request, sealed) = seal_native_fixture(sender, receiver, request, exact, route)?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut request, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
+        &mut request,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         target_delivery_id: envelope.target_delivery_id.clone(),
         envelope,

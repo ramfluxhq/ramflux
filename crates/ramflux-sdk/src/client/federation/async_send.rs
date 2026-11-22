@@ -114,7 +114,8 @@ impl RamfluxClient {
         federation: &LocalBusFederationRoute,
         timeout: Duration,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope = gateway_envelope_from_sealed(engine.config(), message, sealed, None)?;
+        let envelope =
+            gateway_envelope_from_sealed(&engine.sealing_config()?, message, sealed, None)?;
         trace_forward(federation, &envelope);
         let home = crate::client::recipient_home::pin_choice(
             self,

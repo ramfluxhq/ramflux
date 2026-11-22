@@ -83,13 +83,17 @@ fn seal(
     let material = source.material_for(target)?;
     Ok(source.client.account_db()?.write_transaction(|| {
         let sealed = source.client.seal_generated_routed_prepared(
-            &source.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             message,
             exact,
             Route::direct(),
             material,
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(&source.config, message, sealed)
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            message,
+            sealed,
+        )
     })?)
 }
 

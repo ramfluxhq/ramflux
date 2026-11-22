@@ -29,12 +29,18 @@ A residual freshness refusal from dispatch instead carries
 refresh reason, independent of the session's transport phase.
 
 Native group mutations enqueue refreshes for stale own and group-member authority
-roots and wait against the same five-second budget measured from command admission.
-A successful verified fetch permits the command to continue. Held or unavailable
-fetches return `NetworkingPending` with `retry_after_ms` and `details.networking`,
-including when the session is Live. Legacy freshness refusals are serialized as
-this typed pending outcome. `group.history` reads stored history, name and roster
-through the local reader pool without a session, sync or inbound application.
+roots. New sends do the same for the recipient or member roots. The five-second
+budget measured from command admission bounds the wait, including when the
+session is Live. A held or failed fetch returns `NetworkingPending` with
+`retry_after_ms` and `details.networking`. When that budget ends, the writer
+applies connection work already in its queue (two slots) and reads authority
+again. A head Apply that was already queued is not refused away. A fetch that
+has not queued its Apply still returns `NetworkingPending`. No send uses an
+unapplied head, and a fetch started before the command began does not authorize
+it. A successful verified apply permits the command to continue. Legacy
+freshness refusals are serialized as this typed pending outcome. `group.history`
+reads stored history, name and roster through the local reader pool without a
+session, sync or inbound application.
 Already-admitted projection skips only the 300-second freshness clock; revocation,
 signature/authority and erasure fences remain. New sends, mutations and inbound
 admission still require fresh authority. Existing inline peer refresh can admit
@@ -72,10 +78,13 @@ batches of at most 32 roots and at most four batches (128 roots) per trigger, wi
 pending-demand cap is 512. Repeated failures back off per root from 5 seconds,
 doubling up to 150 seconds.
 
-Fetches run off the account writer; Apply checks generation, session, root and
-current membership and retains the conservative fetch-start time. Lock or session
-loss cancels the pass. Freshness is process-local: backups preserve data and
-authority evidence, never observation clocks. A restored account starts without
+Fetches run off the account writer. Apply runs on the single writer, checks
+generation, session, root and current membership, and retains the conservative
+fetch-start time. The command leaves the writer when the five-second budget
+ends, after applying only the work already queued, so a later fetch is not
+stuck behind this command. Lock or session loss cancels the pass. Freshness is
+process-local: backups preserve data and authority evidence, never observation
+clocks. A restored account starts without
 fresh observations and refreshes on connect; there is no schema or wire migration.
 For recovery, reconnect or restart the daemon to sweep due roots, or use
 `device.refresh` with networking available to refresh the named principal (the

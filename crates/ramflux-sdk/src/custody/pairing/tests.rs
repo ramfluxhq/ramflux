@@ -487,7 +487,7 @@ async fn pairing_join_commitment_uses_staged_identity() -> TestResult {
     let mut fx = Fixture::open()?;
     let root = tempfile::tempdir()?;
     let vault: Arc<dyn PrimaryVault> = Arc::new(DiskVault::open(root.path().join("disk-vault"))?);
-    let provider: Arc<dyn LocalCredentialProvider> = Arc::new(Phrase::setup(b"correct-passphrase"));
+    let provider: Arc<dyn LocalCredentialProvider> = Arc::new(Phrase::setup(b"852147"));
     fx.recipient.set_recipient_staging(Arc::new(RecipientStaging {
         root: root.path().to_path_buf(),
         account_id: "acct-stage-join".into(),

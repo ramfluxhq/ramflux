@@ -34,12 +34,19 @@ creation has no enable/disable option. Vault availability is checked by begin.
    three distinct one-based word positions. Obtain those words from the user's
    saved recovery material; do not derive the answers from a retained UI phrase.
 4. Send `account.create.confirm` with exactly `words` (three strings in the
-   requested order) and `passphrase`. The passphrase seals the independent random
-   account data key under the existing account data-key KDF. It is not a BIP39
+   requested order) and `passphrase`, the six-digit account code (exactly six
+   ASCII digits; anything else is refused with `not_six_digits`). A closed list
+   of trivial codes is refused with `trivial_code`: all six digits equal
+   (000000 ... 999999) and the straight runs 012345, 123456, 234567, 345678,
+   456789, 987654, 876543, 765432, 654321, 543210. Nothing else is refused. The code wraps
+   the independent random account data key together with a device-unlock secret
+   that the platform vault creates for the account; the account then opens without
+   input on this device until it is explicitly locked. It is not a BIP39
    passphrase and does not change identity derivation. There is one word-check
    attempt with no per-word feedback. Wrong words publish no account and discard
    the passphrase. The primary credential is stored separately in the supported
-   non-synchronizing provider; data unlock never requires that credential. The
+   non-synchronizing provider; data unlock never requires that credential, but it
+   does require the device-unlock secret held by the same provider. The
    daemon revalidates a ceremony's selected node immediately before persistence;
    confirmation fails with `NoNodeSelected` if the node was removed or disabled.
 5. Successful confirmation returns

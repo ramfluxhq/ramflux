@@ -109,7 +109,7 @@ impl PrimaryVault for Vault {
     }
 }
 
-const NATIVE_PASSPHRASE: &[u8] = b"native call fixture passphrase";
+const NATIVE_PASSPHRASE: &[u8] = b"864209";
 
 struct Names {
     principal: String,
@@ -235,6 +235,7 @@ impl NativeCallAccount {
         let anchor = record.body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
+        client.bind_device_unlock(root, vault.as_ref(), id, crate::DeviceSecret::Load)?;
         client.unlock_account(id, &passphrase)?;
         client
             .initialize_born_v3_branch(&names.device, Arc::clone(&vault) as Arc<dyn PrimaryVault>)
@@ -410,13 +411,26 @@ impl NativeCallAccount {
         Ok(())
     }
 
+    /// The platform vault of this fixture account; its device secret is needed to reopen the
+    /// account data after the account is closed.
+    #[must_use]
+    pub fn device_vault(&self) -> Arc<dyn PrimaryVault> {
+        self.vault.clone()
+    }
+
     /// Durable journal, outbox and actor-state snapshot of a closed account, reopened the
-    /// ordinary way with the fixture passphrase. Same format as `AccountSessionHarness::snapshot`.
+    /// ordinary way with the fixture code and the account's vault-held device secret. Same
+    /// format as `AccountSessionHarness::snapshot`.
     /// # Errors
     /// Returns open, unlock or storage failures.
-    pub fn reopen_snapshot(root: &Path, id: &str) -> Result<String, SdkError> {
+    pub fn reopen_snapshot(
+        root: &Path,
+        id: &str,
+        vault: &dyn PrimaryVault,
+    ) -> Result<String, SdkError> {
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
+        client.bind_device_unlock(root, vault, id, crate::DeviceSecret::Load)?;
         client.unlock_account(id, NATIVE_PASSPHRASE)?;
         let db = client.account_db()?;
         Ok(format!(

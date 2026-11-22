@@ -28,7 +28,7 @@ const CALL_RESOLUTION_NOT_NEGOTIATED: &str = "call_resolution_not_negotiated";
 struct Plan {
     original: LiveCall,
     thread: serde_json::Value,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 }
 struct Prepared {
     plan: Plan,
@@ -552,8 +552,8 @@ fn prepare_controls(
             conversation_id: plan.original.row.conversation_id.clone(),
             message_id: signed.id.clone(),
             envelope_id: signed.id,
-            source_principal_id: plan.config.principal_id.clone(),
-            sender_id: plan.config.device_id.clone(),
+            source_principal_id: plan.config.config().principal_id.clone(),
+            sender_id: plan.config.config().device_id.clone(),
             recipient_device_id: Some(target.device.clone()),
             recipient_principal_commitment: Some(target.identity.root_commitment().into()),
             target_delivery_id: target.delivery.clone(),
@@ -697,7 +697,7 @@ mod tests {
         let certified = rcgen::generate_simple_self_signed(vec!["retry.test".into()])?;
         let ca = root.join("retry-ca.pem");
         std::fs::write(&ca, certified.cert.pem())?;
-        let mut config = account.gateway_config.clone();
+        let mut config = account.sealing_config()?.config().clone();
         config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
         config.gateway_addr = address;
         config.tcp_gateway_addr = Some(address);
@@ -719,7 +719,13 @@ mod tests {
         assert!(
             prepare_lease(
                 account,
-                Plan { original: original.clone(), thread, config: config.clone() },
+                Plan {
+                    original: original.clone(),
+                    thread,
+                    config: crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &config,
+                    )?,
+                },
                 outcome
             )?
             .is_none()

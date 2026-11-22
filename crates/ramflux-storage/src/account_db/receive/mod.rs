@@ -251,6 +251,53 @@ impl AccountDb {
             .optional()?)
     }
 
+    /// Admits one phase. The caller already holds a deferred or immediate transaction.
+    fn admit_receive<'a>(
+        &'a self,
+        expected: ReceiveExpectation<'a>,
+        current_generation: u64,
+    ) -> Result<ReceiveTransaction<'a>, StorageError> {
+        if current_generation != expected.generation {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        if self.privacy_erasure_generation()? != expected.erasure_generation {
+            return Err(StorageError::ObjectErased);
+        }
+        let (incarnation, retired_blob): (String, Vec<u8>) = self.connection.query_row(
+            "SELECT incarnation_id, retired_incarnations FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+            rusqlite::params![expected.target],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let retired = retired_incarnations(&retired_blob)?;
+        let cursor = self
+            .projection_checkpoint(&format!("gateway_receive_cursor:{}", expected.target))?
+            .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;
+        let named = expected.incarnation == incarnation
+            || retired.iter().any(|was| was == expected.incarnation);
+        if !named || cursor != expected.cursor {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(ReceiveTransaction {
+            db: self,
+            target: expected.target,
+            incarnation: expected.incarnation,
+            retired: expected.incarnation != incarnation,
+            tx_id: RECEIVE_TX_ID.fetch_add(1, Ordering::Relaxed),
+        })
+    }
+
+    fn recheck_receive(
+        &self,
+        expected: ReceiveExpectation<'_>,
+        authority: &ReceiveTransaction<'_>,
+    ) -> Result<(), StorageError> {
+        authority.require_writer()?;
+        if self.privacy_erasure_generation()? != expected.erasure_generation {
+            return Err(StorageError::ObjectErased);
+        }
+        Ok(())
+    }
+
     /// Executes a ledger phase under generation, incarnation, cursor and erasure fences.
     /// The actor supplies its current generation; the closure performs no network I/O.
     /// # Errors
@@ -262,41 +309,30 @@ impl AccountDb {
         write: impl FnOnce(&ReceiveTransaction<'_>) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
         self.write_transaction(|| {
-            if current_generation != expected.generation {
-                return Err(StorageError::AuthorizationRejected);
-            }
-            if self.privacy_erasure_generation()? != expected.erasure_generation {
-                return Err(StorageError::ObjectErased);
-            }
-            let (incarnation, retired_blob): (String, Vec<u8>) = self.connection.query_row(
-                "SELECT incarnation_id, retired_incarnations FROM gateway_receive_epoch WHERE target_delivery_id=?1",
-                rusqlite::params![expected.target],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let retired = retired_incarnations(&retired_blob)?;
-            let cursor = self
-                .projection_checkpoint(&format!("gateway_receive_cursor:{}", expected.target))?
-                .map_or(Ok(0), |s| {
-                    s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected)
-                })?;
-            let named = expected.incarnation == incarnation
-                || retired.iter().any(|was| was == expected.incarnation);
-            if !named || cursor != expected.cursor {
-                return Err(StorageError::AuthorizationRejected);
-            }
-            let authority = ReceiveTransaction {
-                db: self,
-                target: expected.target,
-                incarnation: expected.incarnation,
-                retired: expected.incarnation != incarnation,
-                tx_id: RECEIVE_TX_ID.fetch_add(1, Ordering::Relaxed),
-            };
+            let authority = self.admit_receive(expected, current_generation)?;
             let value = write(&authority)?;
-            authority.require_writer()?;
-            if self.privacy_erasure_generation()? != expected.erasure_generation {
-                return Err(StorageError::ObjectErased);
-            }
+            self.recheck_receive(expected, &authority)?;
             Ok(value)
+        })
+    }
+
+    /// Reconciles a page under the same fences as [`Self::receive_transaction`], without a writer.
+    ///
+    /// An empty plan does not take the write lock. Cover steps stay in [`Self::apply_receive_plan`].
+    ///
+    /// # Errors
+    /// Rejects a stale fence. The read is rolled back on callback failure.
+    pub fn reconcile_receive(
+        &self,
+        expected: ReceiveExpectation<'_>,
+        current_generation: u64,
+        page: page::ReceivePageView<'_>,
+    ) -> Result<page::ReceiveReconcileResult, StorageError> {
+        self.read_snapshot(|| {
+            let authority = self.admit_receive(expected, current_generation)?;
+            let plan = authority.reconcile(page)?;
+            self.recheck_receive(expected, &authority)?;
+            Ok(plan)
         })
     }
 
