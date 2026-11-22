@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 /// B's own hard cap on a received export file, independent of A's signed `total_bytes`.
 pub(crate) const RECEIVED_FILE_CAP: u64 =
     ramflux_protocol::custody::pairing::full_transfer::PREPUBLICATION_DELTA_STOP_BYTES;
-/// SQLCipher page size this storage keys every database with (`cipher_page_size` default).
+/// `SQLCipher` page size this storage keys every database with (`cipher_page_size` default).
 pub(crate) const CIPHER_PAGE_BYTES: u64 = 4096;
 const LIMIT_LENGTH: i32 = 4 * 1024 * 1024;
 const LIMIT_SQL_LENGTH: i32 = 8 * 1024;
@@ -43,6 +43,7 @@ const PROGRESS_CALLS_BASE: u64 = 4_096;
 const OPEN_DEADLINE: Duration = Duration::from_secs(60);
 const COPY_DEADLINE: Duration = Duration::from_secs(300);
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 const PHASE_KEY: u8 = 0;
 const PHASE_SCHEMA: u8 = 1;
 const PHASE_QUICK_CHECK: u8 = 2;
@@ -51,6 +52,12 @@ const PHASE_CLOSED: u8 = 4;
 
 fn refused(step: &'static str) -> StorageError {
     StorageError::TransferExportRefused(step)
+}
+
+/// Refusal with the engine's error code and message logged (they hold no key or row value).
+fn refused_by(step: &'static str, error: &dyn std::fmt::Display) -> StorageError {
+    tracing::warn!(step, %error, "received export refused");
+    refused(step)
 }
 
 /// Step budget of the progress handler: a call count and a wall-clock deadline.
@@ -111,7 +118,9 @@ fn immutable_uri(path: &Path) -> Result<String, StorageError> {
         if byte.is_ascii_alphanumeric() || b"/._-~:".contains(&byte) {
             uri.push(char::from(byte));
         } else {
-            uri.push_str(&format!("%{byte:02X}"));
+            uri.push('%');
+            uri.push(char::from(HEX_DIGITS.get(usize::from(byte >> 4)).copied().unwrap_or(b'0')));
+            uri.push(char::from(HEX_DIGITS.get(usize::from(byte & 0x0f)).copied().unwrap_or(b'0')));
         }
     }
     uri.push_str("?mode=ro&immutable=1");
@@ -134,7 +143,7 @@ fn harden(
     .map_err(|_| refused("open"))?;
     // Flag pragmas without PragFlg_NeedSchema: they set connection state and read no page.
     db.execute_batch("PRAGMA cell_size_check=ON; PRAGMA mmap_size=0; PRAGMA query_only=ON;")
-        .map_err(|_| refused("harden"))?;
+        .map_err(|error| refused_by("harden", &error))?;
     let flags = [
         (DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true),
         (DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false),
@@ -143,7 +152,7 @@ fn harden(
         (DbConfig::SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, false),
     ];
     for (flag, value) in flags {
-        if db.set_db_config(flag, value).map_err(|_| refused("harden"))? != value {
+        if db.set_db_config(flag, value).map_err(|error| refused_by("harden", &error))? != value {
             return Err(refused("harden"));
         }
     }
@@ -166,14 +175,14 @@ fn harden(
         (Limit::SQLITE_LIMIT_TRIGGER_STEPS, 1),
     ];
     for (limit, value) in limits {
-        db.set_limit(limit, value).map_err(|_| refused("harden"))?;
-        if db.limit(limit).map_err(|_| refused("harden"))? > value {
+        db.set_limit(limit, value).map_err(|error| refused_by("harden", &error))?;
+        if db.limit(limit).map_err(|error| refused_by("harden", &error))? > value {
             return Err(refused("harden"));
         }
     }
     let handler = Arc::clone(budget);
     db.progress_handler(PROGRESS_PERIOD_OPS, Some(move || handler.exhausted()))
-        .map_err(|_| refused("harden"))?;
+        .map_err(|error| refused_by("harden", &error))?;
     Ok(db)
 }
 
@@ -220,20 +229,23 @@ impl VerifiedExport {
             PROGRESS_CALLS_BASE.saturating_add(pages.saturating_mul(PROGRESS_CALLS_PER_PAGE)),
             OPEN_DEADLINE,
         );
-        let mut db = harden(path, reference.len(), &budget)?;
+        // SQLite's limit counts its in-memory schema objects: its own schema table, every table,
+        // and the primary-key index of every WITHOUT ROWID table besides the stored rows.
+        let objects = reference.len().saturating_add(EXPORT_TABLES.len()).saturating_add(1);
+        let mut db = harden(path, objects, &budget)?;
         let phase = Arc::new(AtomicU8::new(PHASE_KEY));
         let gate = Arc::clone(&phase);
         db.authorizer(Some(move |context: AuthContext<'_>| authorize(&gate, &context)))
-            .map_err(|_| refused("harden"))?;
+            .map_err(|error| refused_by("harden", &error))?;
         let pragma = Zeroizing::new(format!(
             "PRAGMA key=\"x'{}'\";",
             Zeroizing::new(key.sqlcipher_hex()).as_str()
         ));
-        db.execute_batch(&pragma).map_err(|_| refused("key"))?;
+        db.execute_batch(&pragma).map_err(|error| refused_by("key", &error))?;
         phase.store(PHASE_SCHEMA, Ordering::SeqCst);
         // The first statement that reads the file: the schema loads under the limits and
         // the step budget, and no table is read before this compare passes.
-        let rows = schema_rows(&db).map_err(|_| refused("schema_load"))?;
+        let rows = schema_rows(&db).map_err(|error| refused_by("schema_load", &error))?;
         if rows != reference {
             return Err(refused("schema"));
         }
@@ -266,11 +278,11 @@ impl VerifiedExport {
             .prepare(
                 "SELECT \"singleton\",\"principal_commitment\" FROM \"runtime_account_identity\"",
             )
-            .map_err(|_| refused("root"))?;
+            .map_err(|error| refused_by("root", &error))?;
         let rows: Vec<(i64, String)> = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .and_then(Iterator::collect)
-            .map_err(|_| refused("root"))?;
+            .map_err(|error| refused_by("root", &error))?;
         match rows.as_slice() {
             [(1, root)] if root == expected_root => Ok(()),
             _ => Err(refused("root")),
@@ -285,11 +297,12 @@ impl Drop for VerifiedExport {
 }
 
 fn quick_check(db: &Connection) -> Result<(), StorageError> {
-    let mut statement = db.prepare("PRAGMA quick_check").map_err(|_| refused("quick_check"))?;
+    let mut statement =
+        db.prepare("PRAGMA quick_check").map_err(|error| refused_by("quick_check", &error))?;
     let rows: Vec<String> = statement
         .query_map([], |row| row.get(0))
         .and_then(Iterator::collect)
-        .map_err(|_| refused("quick_check"))?;
+        .map_err(|error| refused_by("quick_check", &error))?;
     if rows.as_slice() != ["ok"] {
         return Err(refused("quick_check"));
     }

@@ -52,7 +52,9 @@ fn private_directory(path: &Path) -> Result<(), SdkError> {
 fn hex(bytes: &[u8]) -> zeroize::Zeroizing<String> {
     let mut text = zeroize::Zeroizing::new(String::with_capacity(bytes.len() * 2));
     for byte in bytes {
-        text.push_str(&format!("{byte:02x}"));
+        for nibble in [byte >> 4, byte & 0x0f] {
+            text.push(char::from_digit(u32::from(nibble), 16).unwrap_or('0'));
+        }
     }
     text
 }
@@ -76,7 +78,19 @@ fn read_key(path: &Path) -> Result<ramflux_storage::AccountDbKey, SdkError> {
     Ok(ramflux_storage::AccountDbKey::from_bytes(*bytes))
 }
 
-pub(crate) fn export(
+pub(crate) fn dispatch(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match request.method.as_str() {
+        "itest.transfer_export.write" => export(request, state),
+        "itest.transfer_export.open" => open(request),
+        "itest.transfer_export.fresh" => fresh(request, state),
+        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
+fn export(
     request: &LocalBusFrame,
     state: &LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
@@ -113,7 +127,7 @@ struct Fresh {
     account: String,
 }
 
-pub(crate) fn fresh(
+fn fresh(
     request: &LocalBusFrame,
     state: &LocalBusDaemonState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
@@ -132,7 +146,7 @@ pub(crate) fn fresh(
     }))
 }
 
-pub(crate) fn open(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
+fn open(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
     let body: Open = serde_json::from_value(request.body.clone())?;
     let parent = body.clean_copy.parent().ok_or_else(|| invalid("clean_copy"))?;
     private_directory(parent)?;

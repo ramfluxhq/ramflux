@@ -288,31 +288,6 @@ pub(crate) async fn dispatch_local_bus_request(
         "itest.agent.approve_once" => {
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
-        #[cfg(all(
-            feature = "itest-memory-vault",
-            ramflux_itest,
-            not(ramflux_release_profile),
-            not(ramflux_production)
-        ))]
-        "itest.transfer_export.write" => {
-            crate::bus::dispatch::itest_transfer_export::export(request, state)
-        }
-        #[cfg(all(
-            feature = "itest-memory-vault",
-            ramflux_itest,
-            not(ramflux_release_profile),
-            not(ramflux_production)
-        ))]
-        "itest.transfer_export.open" => crate::bus::dispatch::itest_transfer_export::open(request),
-        #[cfg(all(
-            feature = "itest-memory-vault",
-            ramflux_itest,
-            not(ramflux_release_profile),
-            not(ramflux_production)
-        ))]
-        "itest.transfer_export.fresh" => {
-            crate::bus::dispatch::itest_transfer_export::fresh(request, state)
-        }
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }
@@ -361,8 +336,27 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }
-        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+        other => dispatch_remaining(other, request, state),
     }
+}
+
+/// Integration-only probe families; everything else is unsupported.
+fn dispatch_remaining(
+    method: &str,
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    #[cfg(all(
+        feature = "itest-memory-vault",
+        ramflux_itest,
+        not(ramflux_release_profile),
+        not(ramflux_production)
+    ))]
+    if method.starts_with("itest.transfer_export.") {
+        return crate::bus::dispatch::itest_transfer_export::dispatch(request, state);
+    }
+    let _ = (request, state);
+    Err(SdkError::LocalBus(format!("unsupported local bus method: {method}")))
 }
 
 #[cfg(all(test, unix))]

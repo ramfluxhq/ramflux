@@ -101,7 +101,7 @@ pub(crate) fn canonical_ddl() -> Vec<String> {
     EXPORT_TABLES.iter().map(create_table_sql).collect()
 }
 
-/// One canonical `sqlite_schema` row: type, name, tbl_name, sql.
+/// One canonical `sqlite_schema` row: `type`, `name`, `tbl_name`, `sql`.
 pub(crate) type SchemaRow = (String, String, String, Option<String>);
 
 /// Reads the `sqlite_schema` rows of a connection in storage order.
