@@ -32,6 +32,10 @@ pub(super) enum AgentPrivate {
             Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError>,
         >,
     },
+    /// Finish or drop an authority-refresh marker that still fences this primary.
+    SettleAdmission {
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
     Call {
         call: super::agent_methods::AgentCall,
         reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
@@ -315,6 +319,14 @@ impl AccountActor {
     ) -> Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Admission { reply })))?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// Settle a leftover authority-refresh marker on this account's runtime, before a proof.
+    pub(super) async fn settle_primary_admission(&self) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::SettleAdmission {
+            reply,
+        })))?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(

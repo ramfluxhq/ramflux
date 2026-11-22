@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Node proof for `agent.retire` (the current primary) and the node half of `agent.delete`
-//! (the agent device, while the host fence still passes). One connect attempt. Local state
-//! changes only after the node accepts.
+//! (the agent device, while the host fence still passes). One connect attempt. The retirement
+//! record changes only after the node accepts. A leftover authority-refresh marker is settled
+//! first, because that marker fences a primary until the next unlock.
 
 use super::actor::AccountActor;
 use super::supervisor::Supervisor;
@@ -29,6 +30,7 @@ pub(super) async fn prove_primary_retire(
     {
         return Err(SdkError::AgentCreationRefused("agent_not_found"));
     }
+    actor.settle_primary_admission().await?;
     require_local_primary(&root, human, now)?;
     let node = home_node(actor).await?;
     let profile = supervisor.node_profile(&node)?;

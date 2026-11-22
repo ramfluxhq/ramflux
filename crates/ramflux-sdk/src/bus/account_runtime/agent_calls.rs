@@ -65,7 +65,7 @@ impl AccountRuntime {
     }
 
     /// Runs one agent command of this runtime; a closed reply channel skips the work.
-    pub(super) fn apply_agent(&self, command: super::super::actor::AgentPrivate) {
+    pub(super) fn apply_agent(&mut self, command: super::super::actor::AgentPrivate) {
         use super::super::actor::AgentPrivate;
         match command {
             AgentPrivate::Creation { step, reply } => {
@@ -81,6 +81,11 @@ impl AccountRuntime {
                 }
             }
             AgentPrivate::Admission { reply } => self.reply_pairing_admission(reply),
+            AgentPrivate::SettleAdmission { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.settle_primary_admission());
+                }
+            }
         }
     }
 
@@ -244,6 +249,41 @@ impl AccountRuntime {
         };
         let reader = std::sync::Arc::new(db.pairing_admission_reader());
         Ok(reader.is_open().then_some(reader))
+    }
+
+    /// Complete or drop an authority-refresh marker left by a device-revoke observation.
+    /// A primary stays fenced until the next unlock unless this runs first.
+    /// # Errors
+    /// Storage or installation errors leave the marker for a retry.
+    fn settle_primary_admission(&mut self) -> Result<(), SdkError> {
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Err(SdkError::AccountDbNotUnlocked);
+        };
+        let Some(custody) = account.gateway_config.custody.as_ref() else {
+            return Ok(());
+        };
+        let root = custody.account_root.clone();
+        let id = custody.account_id.clone();
+        let vault = std::sync::Arc::clone(&custody.vault);
+        let now = crate::custody::network_now()?;
+        let account =
+            self.state.accounts.get_mut(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        let repaired = {
+            let db = account.client.account_db()?;
+            crate::custody::pairing::activate::settle_interrupted_refresh(
+                &root,
+                db,
+                vault.as_ref(),
+                &id,
+                now,
+            )?
+        };
+        if repaired {
+            let index_root = account.client.account_index()?.root().to_path_buf();
+            account.client.born_v3_account =
+                Some(Box::new(crate::custody::load_account(&index_root, &id, now)?));
+        }
+        Ok(())
     }
 }
 
