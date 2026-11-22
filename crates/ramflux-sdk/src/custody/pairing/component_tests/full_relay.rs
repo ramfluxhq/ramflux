@@ -293,6 +293,9 @@ impl PairingClock for ClockBridge {
             .monotonic_ms()
             .saturating_add(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
+    fn activity_ms(&self) -> u64 {
+        self.manual.monotonic_ms()
+    }
 }
 pub(super) fn clock(
     manual: Arc<ramflux_node_core::pairing_relay::TestPairingClock>,
