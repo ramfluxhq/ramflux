@@ -13,7 +13,8 @@ use zeroize::{Zeroize as _, Zeroizing};
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS retained_digest_key(singleton INTEGER PRIMARY KEY CHECK(singleton=1),mac_key BLOB NOT NULL CHECK(length(mac_key)=32),erasure_generation INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS retained_row(table_name TEXT NOT NULL,primary_key BLOB NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),PRIMARY KEY(table_name,primary_key));
-CREATE TABLE IF NOT EXISTS retained_cut(singleton INTEGER PRIMARY KEY CHECK(singleton=1),present INTEGER NOT NULL CHECK(present=1));";
+CREATE TABLE IF NOT EXISTS retained_cut(singleton INTEGER PRIMARY KEY CHECK(singleton=1),present INTEGER NOT NULL CHECK(present=1));
+CREATE TABLE IF NOT EXISTS retained_tail_applied(manifest_hash TEXT PRIMARY KEY,erasure_generation INTEGER NOT NULL);";
 
 fn missing() -> StorageError {
     StorageError::PairingField("RetainedDigestMissing")
@@ -35,13 +36,23 @@ impl FullTransferStage<'_> {
             )
             .optional()?;
         let current = self.db.privacy_erasure_generation()?;
+        let marked: Option<i64> = self
+            .connection
+            .query_row("SELECT erasure_generation FROM retained_tail_applied", [], |row| row.get(0))
+            .optional()?;
         let orphan: bool = self.connection.query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32) AND (EXISTS(SELECT 1 FROM retained_row) OR EXISTS(SELECT 1 FROM retained_cut))",
             [],
             |row| row.get(0),
         )?;
-        if stored.is_some_and(|generation| generation != current) || orphan {
+        let moved = stored.is_some_and(|generation| generation != current)
+            || marked.is_some_and(|generation| generation != current);
+        if moved || orphan {
             self.destroy_retained_digests()?;
+        }
+        if moved {
+            self.connection.execute("DELETE FROM retained_tail_applied", [])?;
+            super::stage::sync_stage(&self.directory)?;
         }
         Ok(())
     }
@@ -108,6 +119,49 @@ impl FullTransferStage<'_> {
             crate::account_db::transfer_export::digest::rows(verified.connection(), mac_bytes)?;
         write_set(self, mac_bytes, generation, rows)?;
         self.require_retained_digests()
+    }
+
+    /// The digest key, without creating one. Apply and the tail check use this.
+    /// # Errors
+    /// `RetainedDigestMissing` when the key row is absent or not 32 bytes.
+    pub(super) fn load_retained_mac(&self) -> Result<Zeroizing<[u8; 32]>, StorageError> {
+        let stored: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT mac_key FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(mut bytes) = stored else {
+            return Err(missing());
+        };
+        let key = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| missing())?;
+        bytes.zeroize();
+        Ok(Zeroizing::new(key))
+    }
+
+    /// Hash already applied for this erasure generation, if the tail committed.
+    /// # Errors
+    /// SQL errors. More than one marker row is an error.
+    pub(super) fn retained_tail_applied_hash(&self) -> Result<Option<String>, StorageError> {
+        self.connection.execute_batch(SCHEMA)?;
+        self.connection
+            .query_row("SELECT manifest_hash FROM retained_tail_applied", [], |row| row.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Record that this tail hash committed, then fsync the stage. The key set is separate.
+    /// # Errors
+    /// SQL and fsync errors. A second marker row fails rather than replacing the first.
+    pub(super) fn mark_retained_tail_applied(&self, hash: &str) -> Result<(), StorageError> {
+        let generation = self.db.privacy_erasure_generation()?;
+        self.connection.execute(
+            "INSERT INTO retained_tail_applied(manifest_hash,erasure_generation) VALUES(?1,?2)",
+            params![hash, generation],
+        )?;
+        super::stage::sync_stage(&self.directory)
     }
 }
 

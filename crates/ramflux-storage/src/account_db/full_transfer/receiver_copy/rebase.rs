@@ -54,7 +54,7 @@ impl FullReceiverBaseCopy {
     ) -> Result<(), StorageError> {
         require_before_selection(stage)?;
         stage.verified_duplex(now)?;
-        let mut hashes = Vec::new();
+        let mut hashes: Vec<String> = Vec::new();
         let (last, _): (u64, String) = stage.connection.query_row(
             "SELECT cut,manifest_hash FROM manifest WHERE direction=0 ORDER BY cut DESC LIMIT 1",
             [],
@@ -69,6 +69,15 @@ impl FullReceiverBaseCopy {
                 params![cut],
                 |row| row.get(0),
             )?);
+        }
+        let last_hash = hashes.last().cloned().ok_or_else(wrong)?;
+        let manifest = stage.forward_manifest(&last_hash)?;
+        if super::super::export_tail::is_export_census(&manifest.manifest.census_hash)? {
+            if !manifest.manifest.is_last_prepublication_delta() {
+                return Err(wrong());
+            }
+            self.install_export_delta(stage, &last_hash)?;
+            return Ok(());
         }
         self.project_chain_input(stage, &hashes)
     }

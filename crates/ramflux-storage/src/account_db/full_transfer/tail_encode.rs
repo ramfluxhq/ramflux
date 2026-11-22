@@ -104,15 +104,31 @@ impl FullSourceTailEncodingWork {
             guard: self.guard.clone(),
             directory: &self.directory,
         };
-        let (_, encoded) = source.encode_fixed_tail_source(
-            self.parent.manifest.snapshot_cut.0 + 1,
-            &self.parent.manifest.snapshot_id,
-            &self.snapshot,
-            std::io::sink(),
-        )?;
-        if encoded.total_bytes > ramflux_protocol::custody::pairing::full_transfer::MAX_TAIL_BYTES {
-            return Err(StorageError::PairingField("NoSpace"));
-        }
+        let encoded = if super::export_tail::is_export_census(&self.parent.manifest.census_hash)? {
+            let (_, encoded) = source.encode_export_cut(
+                &super::export_tail::ExportRequest {
+                    parent: &self.parent,
+                    cut: self.parent.manifest.snapshot_cut.0 + 1,
+                    snapshot_id: &self.snapshot,
+                    deletions: true,
+                },
+                std::io::sink(),
+            )?;
+            encoded
+        } else {
+            let (_, encoded) = source.encode_fixed_tail_source(
+                self.parent.manifest.snapshot_cut.0 + 1,
+                &self.parent.manifest.snapshot_id,
+                &self.snapshot,
+                std::io::sink(),
+            )?;
+            if encoded.total_bytes
+                > ramflux_protocol::custody::pairing::full_transfer::MAX_TAIL_BYTES
+            {
+                return Err(StorageError::PairingField("NoSpace"));
+            }
+            encoded
+        };
         let manifest = super::source_successor::successor_manifest(
             &self.parent,
             self.snapshot,

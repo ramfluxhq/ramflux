@@ -166,6 +166,11 @@ impl OwnedReceiverInput {
     pub(in crate::account_db::full_transfer) fn directory(&self) -> &std::path::Path {
         &self.directory
     }
+    pub(in crate::account_db::full_transfer) fn stage_connection(
+        &self,
+    ) -> &crate::database::Connection {
+        &self.connection
+    }
 }
 impl ReceiverInput for OwnedReceiverInput {
     fn require_io(&self) -> Result<(), StorageError> {

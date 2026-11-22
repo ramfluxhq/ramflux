@@ -65,14 +65,19 @@ impl FullTailEndpoint<'_> {
         if self.stage.connection.execute("UPDATE manifest SET root_verified=1 WHERE direction=0 AND manifest_hash=?1 AND kind='tail'", params![input.hash])? != 1 {
             return Err(wrong());
         }
-        let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
-        let nonce = adoption.full_generation_nonce.ok_or_else(wrong)?;
-        let source = super::super::mac_subkeys::full::source_key(
-            &self.stage.resume_record()?.grant.source_ref,
+        let export = super::export_tail::is_export_census(
+            &self.stage.forward_manifest(&input.hash)?.manifest.census_hash,
         )?;
-        if self.stage.db.connection.execute("UPDATE pairing_full_tail_apply SET tail_hash=?1 WHERE operation_id=?2 AND generation_nonce=?3 AND stage_digest=?4 AND source_owner=?5 AND tail_status IN('pending','merged') AND (tail_hash IS NULL OR tail_hash=?1)",
-            params![input.hash,self.operation,nonce,input.digest.as_slice(),source])? != 1 {
-            return Err(wrong());
+        if !export {
+            let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
+            let nonce = adoption.full_generation_nonce.ok_or_else(wrong)?;
+            let source = super::super::mac_subkeys::full::source_key(
+                &self.stage.resume_record()?.grant.source_ref,
+            )?;
+            if self.stage.db.connection.execute("UPDATE pairing_full_tail_apply SET tail_hash=?1 WHERE operation_id=?2 AND generation_nonce=?3 AND stage_digest=?4 AND source_owner=?5 AND tail_status IN('pending','merged') AND (tail_hash IS NULL OR tail_hash=?1)",
+                params![input.hash,self.operation,nonce,input.digest.as_slice(),source])? != 1 {
+                return Err(wrong());
+            }
         }
         super::stage::sync_stage(&self.stage.directory)?;
         self.require_live(now)
@@ -85,8 +90,12 @@ impl FullTailValidationWork {
     /// Refuses corruption, unsupported owners, malformed input, lock/cancel or stale selection.
     pub fn validate(self) -> Result<FullValidatedTailInput, StorageError> {
         self.input.require_io()?;
-        let counts =
-            self.input.index_forward_scalar_records(&self.hash, full_transfer_catalog())?;
+        let manifest = self.input.forward_manifest(&self.hash)?;
+        let counts = if super::export_tail::is_export_census(&manifest.manifest.census_hash)? {
+            super::export_tail_apply::validate_export_tail(&self.input, &self.hash)?
+        } else {
+            self.input.index_forward_scalar_records(&self.hash, full_transfer_catalog())?
+        };
         self.input.require_io()?;
         Ok(FullValidatedTailInput {
             hash: self.hash,

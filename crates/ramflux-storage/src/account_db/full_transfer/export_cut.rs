@@ -115,7 +115,7 @@ impl SourceContext<'_> {
     }
 }
 
-fn export_snapshot(
+pub(super) fn export_snapshot(
     input: &crate::database::Connection,
     target: &Path,
     key: &AccountDbKey,
@@ -143,7 +143,7 @@ fn export_snapshot(
 /// The signed `total_bytes` must equal the sum of family `encoded_bytes` (existing
 /// manifest rule, no new field). The frame is one blob, so the first transfer family
 /// carries that length and every other family contributes none of the byte stream.
-fn assign_frame_length(
+pub(super) fn assign_frame_length(
     schema: &mut super::inventory::FullTransferSchema,
     framed: u64,
 ) -> Result<(), StorageError> {
@@ -159,7 +159,7 @@ fn assign_frame_length(
     if found { Ok(()) } else { Err(StorageError::PairingField("UnsupportedRecord")) }
 }
 
-fn write_frame<W: Write>(
+pub(super) fn write_frame<W: Write>(
     output: &mut W,
     key: &AccountDbKey,
     path: &Path,

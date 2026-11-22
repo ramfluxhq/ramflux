@@ -59,6 +59,11 @@ impl FullTailEndpoint<'_> {
         if limit == 0 || limit > 32 || record.role != PairingRole::Responder {
             return Err(wrong());
         }
+        if super::export_tail::is_export_census(
+            &self.stage.forward_manifest(hash)?.manifest.census_hash,
+        )? {
+            return super::export_tail_apply::apply_export_tail(self, hash);
+        }
         self.stage.db.require_selected_transfer_source()?;
         let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
         let scope = Scope {

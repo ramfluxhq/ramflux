@@ -197,12 +197,26 @@ impl FullSourceSuccessorWork {
             // later ordinary writes must never substitute for that immutable view.
             source.source_cut_schema(cut, &self.snapshot_id, super::full_transfer_catalog())?;
         }
-        let (_, encoded) = source.encode_fixed_delta_source(
-            cut,
-            &self.parent.manifest.snapshot_id,
-            &self.snapshot_id,
-            std::io::sink(),
-        )?;
+        let encoded = if super::export_tail::is_export_census(&self.parent.manifest.census_hash)? {
+            let (_, encoded) = source.encode_export_cut(
+                &super::export_tail::ExportRequest {
+                    parent: &self.parent,
+                    cut,
+                    snapshot_id: &self.snapshot_id,
+                    deletions: false,
+                },
+                std::io::sink(),
+            )?;
+            encoded
+        } else {
+            let (_, encoded) = source.encode_fixed_delta_source(
+                cut,
+                &self.parent.manifest.snapshot_id,
+                &self.snapshot_id,
+                std::io::sink(),
+            )?;
+            encoded
+        };
         let manifest =
             successor_manifest(&self.parent, self.snapshot_id, encoded, ManifestKind::Delta)?;
         self.guard.require()?;

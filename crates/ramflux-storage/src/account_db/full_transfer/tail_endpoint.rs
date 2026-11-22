@@ -93,6 +93,45 @@ impl FullTailEndpoint<'_> {
         self.stage.require_io()?;
         self.stage.require_full_native_floor(self.current)?;
         let record = self.stage.resume_record()?;
+        if self.export_installed_account()? {
+            return self.require_export_admission(&record, now);
+        }
+        self.require_adopted_live(&record, now)
+    }
+    fn export_installed_account(&self) -> Result<bool, StorageError> {
+        let adoption: bool = self.stage.db.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='pairing_adoption')",
+            [],
+            |row| row.get(0),
+        )?;
+        if adoption {
+            return Ok(false);
+        }
+        self.stage.connection.execute_batch(super::retained_digest::SCHEMA)?;
+        let marked: bool = self.stage.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retained_cut) OR EXISTS(SELECT 1 FROM retained_tail_applied)",
+            [],
+            |row| row.get(0),
+        )?;
+        if marked { Ok(true) } else { Err(StorageError::PairingField("HeadChanged")) }
+    }
+    fn require_export_admission(
+        &self,
+        record: &ramflux_crypto::custody::pairing::FullResumeRecord,
+        now: u64,
+    ) -> Result<(), StorageError> {
+        if record.role != PairingRole::Responder
+            || record.grant.destination_ref.account_anchor != self.stage.db.principal_commitment
+        {
+            return Err(StorageError::PairingField("HeadChanged"));
+        }
+        self.require_tail_time(now)
+    }
+    fn require_adopted_live(
+        &self,
+        record: &ramflux_crypto::custody::pairing::FullResumeRecord,
+        now: u64,
+    ) -> Result<(), StorageError> {
         let adoption = self.stage.db.pairing_adoption()?.ok_or_else(wrong)?;
         let (role, reference) = match record.role {
             PairingRole::Initiator => ("secondary", &record.grant.source_ref),
@@ -103,6 +142,9 @@ impl FullTailEndpoint<'_> {
         {
             return Err(StorageError::PairingField("HeadChanged"));
         }
+        self.require_tail_time(now)
+    }
+    fn require_tail_time(&self, now: u64) -> Result<(), StorageError> {
         if now < self.admitted_at {
             return Err(wrong());
         }
