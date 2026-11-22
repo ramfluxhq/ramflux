@@ -512,3 +512,21 @@ normalization precedes receipt normalization, so observations erased by an Edit
 alias do not survive in the expected or actual ledger. This is business logic;
 raw/staged any-owner edges and derived receive-input denial provenance remain
 open before full materialization and real-daemon acceptance.
+
+## Original raw own-copy proof boundary
+
+`FullRawOwnProof` retains exact original raw JSON and its SHA256 digest alongside
+verified own-copy native context, the original source locator and bounded source
+copy-binding owners. Its variant id hashes this complete bounded frame; different
+valid enclosing proofs at one source locator remain distinct. The original native
+author is never replaced by the enclosing sibling. The verified original/current
+and enclosing event ids, plus observed bindings, determine erasure ownership;
+the provisional event namespace follows `message_footprint/schema.rs`.
+
+The snapshot reader checks the independently supplied account against the stored
+root, raw owner/source/digest, actual empty source-evidence metadata, original
+identity and canonical direct directory. It refuses other raw classes, unknown
+owner bindings and any observed denial. These are current-class boundaries, not
+conversion or fallback. This primitive does not activate the raw families. Their
+inert archive installation, independent expected transformation, source absence
+and every-stage erasure closure remain to be implemented before acceptance.

@@ -112,7 +112,7 @@ fn projection(db: &Connection, message: &str) -> Result<Option<(String, bool)>, 
     }
     Ok(Some((conversation, deleted)))
 }
-fn peer(db: &Connection, own: &str, conversation: &str) -> Result<String, StorageError> {
+pub(super) fn peer(db: &Connection, own: &str, conversation: &str) -> Result<String, StorageError> {
     // This is only the explicit root-pair context. It does not admit the enclosing
     // directory actor variant or any of its other fields into transfer.
     let mut query=db.prepare("SELECT json_extract(CAST(state_json AS TEXT),'$.participant_roots[0]'),json_extract(CAST(state_json AS TEXT),'$.participant_roots[1]') FROM runtime_actor_state WHERE state_kind=?1 AND length(state_json)<=?2 AND CASE WHEN json_valid(CAST(state_json AS TEXT)) THEN json_extract(CAST(state_json AS TEXT),'$.kind')='direct' AND json_extract(CAST(state_json AS TEXT),'$.group_id') IS NULL AND json_array_length(CAST(state_json AS TEXT),'$.participant_roots')=2 AND length(json_extract(CAST(state_json AS TEXT),'$.participant_roots[0]'))=43 AND length(json_extract(CAST(state_json AS TEXT),'$.participant_roots[1]'))=43 ELSE 0 END")?;

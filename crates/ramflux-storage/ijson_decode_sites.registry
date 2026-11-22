@@ -147,3 +147,5 @@ crates/ramflux-storage/src/account_db/full_transfer/direct_record.rs | parse_cap
 crates/ramflux-storage/src/account_db/full_transfer/conversation_directory.rs | public | 1 | E | excluded=closed root-pair conversation presentation fields are outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/conversation_directory.rs | source | 1 | E | excluded=closed local conversation metadata with no admitted route is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/actor_denial.rs | read | 1 | E | excluded=closed content-free local MAC denial version is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/full_transfer/raw_own_proof.rs | validate | 1 | E | excluded=closed original own-copy proof archive is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/full_transfer/raw_own_source.rs | read | 1 | E | excluded=closed original raw own-copy proof is outside Envelope/Ack/Nack containment closure
