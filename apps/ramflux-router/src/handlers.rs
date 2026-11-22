@@ -742,26 +742,34 @@ pub(crate) async fn handle_mesh_quic_request_raw(
         path: request.path.clone(),
         body,
     };
-    let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
-        || request.path == "/mvp0/ack-bound-batch"
-        || request.path == "/mvp0/ack-bound"
-        || request.path == "/mvp0/nack-bound"
-        || request.path == "/s1/session"
-        || request.path == ramflux_node_core::MIGRATION_PEER_PATH
-    {
-        let router = router.clone();
-        let peer = peer.clone();
-        tokio::task::spawn_blocking(move || handle_mesh_request_value(mesh_request, &router, &peer))
-            .await??
-    } else {
-        handle_mesh_request_value(mesh_request, router, peer)?
-    };
+    let response = handle_mesh_blocking(mesh_request, router, peer).await?;
     Ok(ramflux_transport::GatewayQuicResponse {
         status: mesh_response_status_code(response.status),
         body: serde_json::from_slice(&response.body).unwrap_or_else(
             |_| serde_json::json!({ "error": String::from_utf8_lossy(&response.body) }),
         ),
     })
+}
+
+async fn handle_mesh_blocking(
+    request: ramflux_transport::MeshHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer: &ramflux_node_core::MeshPeerIdentity,
+) -> anyhow::Result<MeshResponse> {
+    // Every remaining route uses the synchronous mesh adapter. Forwarding and
+    // publication may drive a runtime, so none may run on the async QUIC worker.
+    // Bound jobs before spawning; cancellation must not release a running job's slot.
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(64);
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return Ok(MeshResponse::text("503 Service Unavailable", "router mesh busy"));
+    };
+    let router = router.clone();
+    let peer = peer.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle_mesh_request_value(request, &router, &peer)
+    })
+    .await?
 }
 
 fn handle_mesh_retention_value(
