@@ -10,7 +10,7 @@ use crate::client::routed::{SendMaterial, SendMaterialRequest};
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
     let prepared = writer
         .apply(|account| {
-            let config = account.gateway_config.clone();
+            let config = account.sealing_config()?;
             Ok(account.client.prepare_self_sync_repair(&config)?.map(|plan| (config, plan)))
         })
         .await?;

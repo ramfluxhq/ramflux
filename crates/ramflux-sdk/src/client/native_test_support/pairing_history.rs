@@ -194,6 +194,14 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
         source.client.prepare_authored_history(&source.config)?.is_none(),
         "test: an authored copy was prepared while the history pages for its target are pending"
     );
+    // A history job that fails (or a transfer that never completes) must not hold the copies for
+    // ever: once the bounded wait has passed the copy is released although the pages are pending.
+    source.client.age_authored_holds_for_test(601, false)?;
+    assert!(
+        source.client.prepare_authored_history(&source.config)?.is_some(),
+        "test: an authored copy stayed held past the bounded wait for the enrollment history"
+    );
+    source.client.age_authored_holds_for_test(0, true)?;
     let pages = deliver_pages(source, target, None, 1).await?;
     assert!(pages > 0, "test: no history page reached the enrolled device");
     assert_eq!(
