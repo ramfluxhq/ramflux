@@ -16,6 +16,7 @@ mod autonomy;
 mod capabilities;
 mod catalog;
 mod client;
+mod delete;
 mod error;
 mod history;
 mod job;
@@ -38,13 +39,14 @@ pub use apply::ApplyOutcome;
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, BuildCommit, CAPABILITIES_V1,
-    Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1,
-    OWNER_ID_STABLE_V1, SESSION_KEY_V1, TARGETED_AGENTS_V1, require,
+    Capabilities, MESSAGE_CONTEXT_DELIVERY_V1, MESSAGE_DELETE_V1, MESSAGE_IDEMPOTENCY_V1,
+    MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, SESSION_KEY_V1, TARGETED_AGENTS_V1, require,
 };
 pub use catalog::{Catalog, CatalogModel, CatalogTool};
 pub use client::PrxClient;
+pub use delete::{AgentRuns, BatchItem, MessageDeleted, ReplyDeleted};
 pub use error::{ApiCode, NotReadyReason, PrxError};
-pub use history::HistoryRow;
+pub use history::{HistoryRow, RowBody};
 pub use job::{JobState, JobStatus};
 pub use message::{
     Chat, ChatKind, ContextRecorded, RfMessage, Sender, Target, TurnAccepted, TurnDisposition,
