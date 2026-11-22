@@ -4,16 +4,21 @@ set -eu
 umask 077
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
-usage() { fail 'usage: demo-node.sh {up|upgrade|rollback|recover|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT]'; }
+usage() { fail 'usage: demo-node.sh {up|upgrade|rollback|recover|down|status|logs} ENV_FILE [--purge|--remote] [--voice-udp-port PORT] [--reset-service relay]'; }
 [ "$#" -ge 2 ] || usage
 command=$1
 env_file=$2
 shift 2
 flag=
 voice_cli=
+reset_cli=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --purge|--remote) [ -z "$flag" ] || usage; flag=$1; shift ;;
+    --reset-service)
+      if [ "$#" -lt 2 ] || [ -n "$reset_cli" ]; then usage; fi
+      if [ "$2" != relay ] || [ "$command" != upgrade ]; then usage; fi
+      reset_cli=$2; shift 2 ;;
     --voice-udp-port)
       [ "$#" -ge 2 ] && [ -z "$voice_cli" ] && [ -n "$2" ] || usage
       voice_cli=$2; shift 2 ;;
@@ -28,6 +33,9 @@ set -a
 # shellcheck disable=SC1090
 . "$env_file"
 set +a
+# Reset is an explicit per-upgrade CLI decision, never a retained operator default.
+DEMO_RESET_SERVICE=$reset_cli
+export DEMO_RESET_SERVICE
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$script_dir/../.." && pwd)
 : "${DEMO_DATA_DIR:?absolute private data directory required}"
@@ -605,6 +613,7 @@ if printf '%s\n' "$network_names" | grep -qx "${DEMO_PROJECT}_default"; then
     fail 'DEMO_NETWORK_LIST_FAILED: cannot inspect the existing compose network'
   export DEMO_EXISTING_NETWORK_INSPECT
 fi
+state_service=$(clean_env env DEMO_RESET_SERVICE="$reset_cli" python3 "$script_dir/demo-node-config.py" "$repo" "$state" state-plan "$command" "$container_engine")
 if [ "$command" = recover ]; then
   [ -f "$state/transaction.pending" ] || fail 'no unfinished demo transaction is available for recovery'
   DEMO_VERSION=$(python3 "$script_dir/demo-node-config.py" "$repo" "$state" recover)
@@ -626,6 +635,11 @@ if [ "$command" = rollback ] || [ "$command" = recover ]; then
   load_applied_overlays
 fi
 check_resources
+if [ -n "$state_service" ]; then
+  printf 'stopping project %s for service-state operation: %s\n' "$DEMO_PROJECT" "$state_service"
+  compose down
+  clean_env python3 "$script_dir/demo-node-config.py" "$repo" "$state" state-apply "$command" "$container_engine"
+fi
 case "$command" in
   up|upgrade|rollback|recover)
     chmod 700 "$state"
