@@ -764,7 +764,7 @@
       "key_export": false,
       "message_descriptor_blake3": "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5",
       "name": "contact.verify",
-      "product_pin": "8ba8ea13c2d63a339527476398b1ed6503709dbe",
+      "product_pin": "5d9281898913f2104e2a077865979059bc3e3c51",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
