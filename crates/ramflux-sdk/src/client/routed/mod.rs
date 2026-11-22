@@ -705,7 +705,16 @@ impl RamfluxClient {
             &bundle,
         )?;
         let decrypted = zeroize::Zeroizing::new(
-            session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
+            session.decrypt_with_franking_keys(&envelope.ciphertext, &aad).inspect_err(
+                |error| {
+                    tracing::warn!(
+                        decrypt_site = "routed_pair",
+                        delivery_class = ?entry.envelope.delivery_class,
+                        %error,
+                        "routed envelope decryption failed"
+                    );
+                },
+            )?,
         );
         let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
         let plaintext = generated_transport::generated_plaintext(&inner)?;

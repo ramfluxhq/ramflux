@@ -120,7 +120,7 @@ const SOURCES: &[(&str, &str, [usize; 4])] = &[
     (
         "client/group_identity.rs",
         include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/client/group_identity.rs")),
-        [2, 0, 0, 0],
+        [3, 0, 0, 0],
     ),
     (
         "client/group_session.rs",

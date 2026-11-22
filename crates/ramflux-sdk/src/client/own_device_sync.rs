@@ -31,10 +31,18 @@ impl RamfluxClient {
             else {
                 return Ok(None);
             };
-            let joined = self
-                .account_db()?
-                .group_member_joined_epoch(id, &source)?
-                .ok_or(StorageError::GroupPermissionDenied)?;
+            let joined =
+                if let Some(joined) = self.account_db()?.group_member_joined_epoch(id, &source)? {
+                    joined
+                } else {
+                    // This device holds its account's role without a projected row yet (it was
+                    // paired or recovered after the group formed): project it from the verified
+                    // own-root directory, then read the account's joined epoch.
+                    self.pin_local_group_member(id)?;
+                    self.account_db()?
+                        .group_member_joined_epoch(id, &source)?
+                        .ok_or(StorageError::GroupPermissionDenied)?
+                };
             return Ok(Some(SdkOwnDeviceGroupSnapshot {
                 shared_state: Some(state.snapshot().clone()),
                 group_id: id.into(),
