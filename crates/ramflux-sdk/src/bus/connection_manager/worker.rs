@@ -243,6 +243,7 @@ async fn run_account(
             super::session_host::HostExit::Retired(reason) => reason,
         };
         retire_resident(handle, &resident, reason, generation);
+        let why = resident.terminal_why.clone();
         drop(resident);
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
@@ -252,10 +253,29 @@ async fn run_account(
             // still enforced inside connect_attempt by the existing retry owner.
             continue;
         }
-        let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
-        retry.record(&error, Instant::now());
-        failed(handle, retry, &error);
+        reconnect_after_retirement(handle, retry, reason, why.as_deref(), generation);
     }
+}
+
+/// A retired resident session reconnects after the retry boundary; the log names the real
+/// retirement reason, not a connect-attempt timeout.
+fn reconnect_after_retirement(
+    handle: &ConnectionHandle,
+    retry: &mut AdmissionRetry,
+    reason: DisconnectReason,
+    why: Option<&str>,
+    generation: u64,
+) {
+    let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
+    retry.record(&error, Instant::now());
+    let delay = backoff(handle, retry, &error);
+    tracing::warn!(
+        ?reason,
+        why = why.unwrap_or(""),
+        generation,
+        retry_after_ms = ?delay,
+        "resident account session retired; reconnecting"
+    );
 }
 
 async fn wait_for_network(
@@ -356,11 +376,16 @@ pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessio
         });
 }
 fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
+    let delay = backoff(handle, retry, error);
+    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
+}
+
+/// Publishes the retry boundary after a failed attempt or a retired session.
+fn backoff(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) -> Option<u64> {
     let delay = retry.not_before().map(|until| {
         u64::try_from(until.saturating_duration_since(Instant::now()).as_millis())
             .unwrap_or(u64::MAX)
     });
-    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
     update(handle, |snapshot| {
         snapshot.phase = ConnectionPhase::Backoff;
         snapshot.gateway_writer_busy = error.gateway_writer_busy();
@@ -391,6 +416,7 @@ fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
         retry_after_ms: delay,
         generation: handle.generation(),
     });
+    delay
 }
 fn wall_ms() -> u64 {
     u64::try_from(
