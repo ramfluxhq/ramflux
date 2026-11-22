@@ -26,7 +26,7 @@ impl RamfluxClient {
         federation: &LocalBusFederationRoute,
         envelope: ramflux_protocol::Envelope,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        async_send::submit_over_session(engine, federation, envelope).await
+        async_send::submit_over_session(engine, federation, None, envelope).await
     }
 
     pub async fn send_plaintext_federated_direct_message(
@@ -86,21 +86,32 @@ impl RamfluxClient {
         options: &FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         Self::normalize_recipient(&mut message)?;
-        let prekey_url = federation
-            .recipient_prekey_url
-            .as_deref()
-            .or(engine.config().prekey_http_url.as_deref());
-        let sealed = self.seal_routed_federated_as(
-            engine,
-            &message,
-            plaintext,
-            prekey_url,
-            options.route.clone(),
+        let pinned = crate::client::recipient_home::pin_choice(
+            self,
+            message.recipient_principal_commitment.as_deref().unwrap_or(""),
+            Some(federation.target_node_id.as_str()),
         )?;
+        let submit_target = pinned.clone();
+        let sealed = match crate::client::recipient_home::fetch_base(pinned, true).await? {
+            Some(base) => self.seal_routed_federated_as(
+                engine,
+                &message,
+                plaintext,
+                Some(&base),
+                options.route.clone(),
+            )?,
+            None => self.seal_routed_as(engine, &message, plaintext, options.route.clone()).await?,
+        };
         let pending =
             self.prepare_federated_packet(engine, &mut message, plaintext, sealed, options)?;
         trace_forward(federation, &pending.envelope);
-        async_send::submit_over_session(engine, federation, pending.envelope).await
+        async_send::submit_over_session(
+            engine,
+            federation,
+            submit_target.as_deref(),
+            pending.envelope,
+        )
+        .await
     }
 
     fn prepare_federated_packet(
@@ -138,7 +149,7 @@ impl RamfluxClient {
             route_decision = "remote_federation_forward",
             "submitting federated gateway message to source node federation surface"
         );
-        async_send::submit_over_session(engine, federation, envelope).await
+        async_send::submit_over_session(engine, federation, None, envelope).await
     }
 
     /// # Errors

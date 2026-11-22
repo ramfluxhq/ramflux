@@ -177,15 +177,15 @@ async fn resolve_federated_group_member_principal_commitment(
     member_id: &str,
     timeout: Duration,
 ) -> Result<String, SdkError> {
-    let manifest_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-        SdkError::LocalBus(
-            "federated group member routes require --recipient-prekey-url to verify the remote device manifest"
-                .to_owned(),
-        )
-    })?;
+    let base = crate::client::recipient_home::required_public_base(
+        client,
+        member_principal_commitment.unwrap_or(""),
+        Some(federation.target_node_id.as_str()),
+    )
+    .await?;
     client
         .resolve_federated_target_principal_commitment_async(
-            crate::client::contact::RemoteManifest { url: manifest_url, timeout },
+            crate::client::contact::RemoteManifest { url: &base, timeout },
             member_principal_commitment,
             member_id,
         )
@@ -587,16 +587,21 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             })));
         }
         let qualified=account.client.root_qualified_device_lookup(recipient.storage_key())?;
-        let prekey = if let Some(federation) = route.federation.as_ref() {
-            let prekey_url = federation.recipient_prekey_url.as_deref().ok_or_else(|| {
-                SdkError::LocalBus(
-                    "recipient_prekey_url is required for federated group sender-key recipients"
-                        .to_owned(),
-                )
-            })?;
+        let prekey = if let Some(federation) = route.federation.as_ref()
+            && let Some(base) = crate::client::recipient_home::directory_base(
+                &account.client,
+                &member_principal_commitment,
+                Some(federation.target_node_id.as_str()),
+                true,
+            )
+            .await?
+        {
             crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
-                prekey_url, &format!("/mvp1/prekey/{qualified}"), account.timeouts.http,
-            ).await?
+                &base,
+                &format!("/mvp1/prekey/{qualified}"),
+                account.timeouts.http,
+            )
+            .await?
         } else {
             engine.fetch_prekey_bundle(&qualified).await?
         };
@@ -1013,10 +1018,10 @@ mod tests {
         .await
         else {
             return Err(SdkError::LocalBus(
-                "missing recipient_prekey_url should fail before local gateway resolve".to_owned(),
+                "missing pinned home should fail before local gateway resolve".to_owned(),
             ));
         };
-        assert!(error.to_string().contains("recipient-prekey-url"));
+        assert!(error.to_string().contains("pinned home"));
         Ok(())
     }
 

@@ -17,7 +17,8 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub(super) enum ManifestSource {
     Gateway(Box<GatewaySessionConfig>),
-    Federation(String),
+    /// Pinned home node id. The public prekey base comes from that node's signed client record.
+    Home(String),
 }
 
 #[derive(Clone, Debug)]
@@ -218,9 +219,13 @@ async fn prepare_manifests(
                 )
                 .await?
             }
-            ManifestSource::Federation(url) => {
-                super::dispatch::task_transport::fetch_federated_manifest(&url, &request.commitment)
-                    .await?
+            ManifestSource::Home(home) => {
+                let base = crate::client::recipient_home::public_prekey_base(&home).await?;
+                super::dispatch::task_transport::fetch_federated_manifest(
+                    &base,
+                    &request.commitment,
+                )
+                .await?
             }
         };
         manifests.push(manifest);
@@ -237,7 +242,7 @@ pub(super) fn manifest_request_keys(requests: &[ManifestRequest]) -> BTreeSet<St
                     .prekey_http_url
                     .clone()
                     .unwrap_or_else(|| format!("gateway://{}", gateway.gateway_addr)),
-                ManifestSource::Federation(url) => url.clone(),
+                ManifestSource::Home(home) => format!("home://{home}"),
             };
             format!("{}/mvp1/device-manifest/{}", source.trim_end_matches('/'), request.commitment)
         })

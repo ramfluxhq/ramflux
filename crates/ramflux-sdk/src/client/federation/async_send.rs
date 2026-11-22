@@ -75,7 +75,12 @@ impl RamfluxClient {
             &FederatedSendOptions { franking, route },
         )?;
         trace_forward(federation, &pending.envelope);
-        bounded_submit(engine, federation, pending.envelope, timeout).await
+        let home = crate::client::recipient_home::pin_choice(
+            self,
+            message.recipient_principal_commitment.as_deref().unwrap_or(""),
+            Some(federation.target_node_id.as_str()),
+        )?;
+        bounded_submit(engine, federation, home.as_deref(), pending.envelope, timeout).await
     }
 
     pub(crate) async fn send_plaintext_federated_contact_event_async(
@@ -111,29 +116,36 @@ impl RamfluxClient {
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         let envelope = gateway_envelope_from_sealed(engine.config(), message, sealed, None)?;
         trace_forward(federation, &envelope);
-        bounded_submit(engine, federation, envelope, timeout).await
+        let home = crate::client::recipient_home::pin_choice(
+            self,
+            message.recipient_principal_commitment.as_deref().unwrap_or(""),
+            Some(federation.target_node_id.as_str()),
+        )?;
+        bounded_submit(engine, federation, home.as_deref(), envelope, timeout).await
     }
 }
 
 async fn bounded_submit(
     engine: &mut impl GatewaySessionAccess,
     route: &LocalBusFederationRoute,
+    submit_target: Option<&str>,
     envelope: ramflux_protocol::Envelope,
     timeout: Duration,
 ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-    tokio::time::timeout(timeout, submit_over_session(engine, route, envelope)).await.map_err(
-        |_| {
+    tokio::time::timeout(timeout, submit_over_session(engine, route, submit_target, envelope))
+        .await
+        .map_err(|_| {
             SdkError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "home submit timed out"))
-        },
-    )?
+        })?
 }
 
 pub(super) async fn submit_over_session(
     engine: &mut impl GatewaySessionAccess,
     route: &LocalBusFederationRoute,
+    submit_target: Option<&str>,
     envelope: ramflux_protocol::Envelope,
 ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-    let target = (!route.target_node_id.is_empty()).then(|| route.target_node_id.clone());
+    let target = submit_target.filter(|id| !id.is_empty()).map(str::to_owned);
     let entry = match engine.submit_classified_to(envelope, target).await? {
         Ok(entry) => entry,
         Err(refusal) => {

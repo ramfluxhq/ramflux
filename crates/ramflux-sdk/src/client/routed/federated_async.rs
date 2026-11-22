@@ -35,14 +35,22 @@ impl RamfluxClient {
         let (mut session, header, bundle) = if let Some(pair) = pair {
             pair
         } else {
-            let url = federation
-                .recipient_prekey_url
-                .as_deref()
-                .or(engine.config().prekey_http_url.as_deref())
-                .ok_or_else(|| invalid("prekey url missing"))?;
+            let pinned = crate::client::recipient_home::pin_choice(
+                self,
+                message.recipient_principal_commitment.as_deref().unwrap_or(""),
+                Some(federation.target_node_id.as_str()),
+            )?;
+            let url = match crate::client::recipient_home::fetch_base(pinned, true).await? {
+                Some(base) => base,
+                None => engine
+                    .config()
+                    .prekey_http_url
+                    .clone()
+                    .ok_or_else(|| invalid("prekey url missing"))?,
+            };
             let lookup = self.root_qualified_device_lookup(&recipient)?;
             let bundle = crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
-                url,
+                &url,
                 &format!("/mvp1/prekey/{lookup}"),
                 timeout,
             )

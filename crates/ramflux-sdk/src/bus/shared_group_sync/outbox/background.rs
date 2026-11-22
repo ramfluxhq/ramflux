@@ -67,7 +67,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
                 account.client.shared_group_federation_route(&group, &root_for_route)
             })
             .await?;
-        let manifest = federation::manifest(&context, &plan.config, &root, route.as_ref()).await;
+        let manifest =
+            federation::manifest_for_route(&context, &writer, &plan.config, &root, route.as_ref())
+                .await;
         let captured = plan.clone();
         let owned_root = root.clone();
         let Some((changed, devices)) = writer
@@ -449,12 +451,13 @@ async fn deliver_target(
 ) -> Result<Option<Plan>, SdkError> {
     let request =
         std::mem::replace(&mut target.request, SendMaterialRequest { root: None, prekey: None });
-    let material = federation::material(
+    let root = target.root.clone();
+    let material = federation::material_for_route(
         context,
         &target.plan.config,
         request,
         crate::bus::connection_manager::CallClass::Bulk,
-        target.route.as_ref(),
+        federation::HomeLookup { writer, commitment: &root, route: target.route.as_ref() },
     )
     .await;
     let captured = target.plan.clone();
@@ -464,12 +467,11 @@ async fn deliver_target(
 
     match sealed {
         Ok(Some(attempt)) => {
-            let outcome = federation::submit_classified(
-                context,
-                attempt.envelope.clone(),
-                attempt.route.clone(),
-            )
-            .await;
+            let root = attempt.root.clone();
+            let stored = attempt.route.clone();
+            let route = federation::pinned_submit_route(writer, &root, stored).await?;
+            let outcome =
+                federation::submit_classified(context, attempt.envelope.clone(), route).await;
             writer.apply(move |account| complete(account, attempt, outcome)).await
         }
         Ok(None) => Ok(None),

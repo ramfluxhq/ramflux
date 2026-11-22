@@ -118,17 +118,18 @@ async fn seal_and_send(
         let route = crate::client::routed::Route::group_control(packet.group());
         let bytes = account.client.generated_group_control_inner(&packet)?;
         message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
-        let sealed = if let Some(federation) = &federation {
-            account.client.seal_routed_federated_as(
-                &engine,
-                &message,
-                &bytes,
-                federation.recipient_prekey_url.as_deref(),
+        let sealed = crate::client::recipient_home::seal_member(
+            &account.client,
+            &mut engine,
+            crate::client::recipient_home::MemberSeal {
+                message: &message,
+                body: &bytes,
+                commitment: &root,
+                federation: federation.as_ref(),
                 route,
-            )?
-        } else {
-            account.client.seal_routed_as(&mut engine, &message, &bytes, route).await?
-        };
+            },
+        )
+        .await?;
         // GroupControl has no Direct report payload; into_parts still carries committed_a0 (None).
         let attempt = Attempt {
             id: id.into(),

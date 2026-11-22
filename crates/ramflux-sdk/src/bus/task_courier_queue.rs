@@ -218,11 +218,7 @@ fn requests_for(
             if let Some(commitment) = route["member_principal_commitment"].as_str()
                 && commitment != account.principal_commitment
             {
-                requests.push(request(
-                    account,
-                    &route["federation"]["recipient_prekey_url"],
-                    commitment,
-                ));
+                requests.push(request(account, commitment)?);
             }
         }
     } else if let Some(participants) = thread["participants"].as_array() {
@@ -233,25 +229,22 @@ fn requests_for(
             if let Some(identity) = db.client_record("identity", principal)?
                 && let Some(commitment) = identity["contact_identity_commitment"].as_str()
             {
-                requests.push(request(
-                    account,
-                    &thread["direct_route"]["federation"]["recipient_prekey_url"],
-                    commitment,
-                ));
+                requests.push(request(account, commitment)?);
             }
         }
     }
     Ok(requests)
 }
 
-fn request(account: &LocalBusAccountState, url: &Value, commitment: &str) -> ManifestRequest {
-    ManifestRequest {
-        source: url.as_str().map_or_else(
-            || ManifestSource::Gateway(Box::new(account.gateway_config.clone())),
-            |url| ManifestSource::Federation(url.into()),
-        ),
+fn request(account: &LocalBusAccountState, commitment: &str) -> Result<ManifestRequest, SdkError> {
+    let home = crate::client::recipient_home::pin_choice(&account.client, commitment, None)?;
+    Ok(ManifestRequest {
+        source: match home {
+            Some(home) => ManifestSource::Home(home),
+            None => ManifestSource::Gateway(Box::new(account.gateway_config.clone())),
+        },
         commitment: commitment.into(),
-    }
+    })
 }
 
 /// Explicit account-stop allowlist. Row decode, network, quota, busy and I/O failures stay local.

@@ -86,8 +86,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
         let manifest = if lease_due {
             match prepared.input {
                 Ok(input) => {
-                    federation::manifest(
+                    federation::manifest_for_route(
                         &context,
+                        &writer,
                         &prepared.plan.config,
                         &input.root,
                         input.federation.as_ref(),
@@ -299,9 +300,14 @@ async fn send_controls(
             return Ok((false, None, Vec::new()));
         }
         let input = prepared.input?;
-        let manifest =
-            federation::manifest(context, &plan.config, &input.root, input.federation.as_ref())
-                .await?;
+        let manifest = federation::manifest_for_route(
+            context,
+            writer,
+            &plan.config,
+            &input.root,
+            input.federation.as_ref(),
+        )
+        .await?;
         let captured = plan.clone();
         let controls =
             writer.apply(move |account| prepare_controls(account, &captured, manifest)).await?;
@@ -313,12 +319,17 @@ async fn send_controls(
                 &mut control.request,
                 SendMaterialRequest { root: None, prekey: None },
             );
-            let material = federation::material(
+            let commitment = input.root.clone();
+            let material = federation::material_for_route(
                 context,
                 &plan.config,
                 request,
                 crate::bus::connection_manager::CallClass::Priority,
-                control.target.federation.as_ref(),
+                federation::HomeLookup {
+                    writer,
+                    commitment: &commitment,
+                    route: control.target.federation.as_ref(),
+                },
             )
             .await?;
             let route = control.target.federation.clone();
@@ -342,6 +353,8 @@ async fn send_controls(
                 resolutions.push(resolved);
             } else {
                 // The destination federation forward admits the envelope only.
+                let root = input.root.clone();
+                let route = federation::pinned_submit_route(writer, &root, route).await?;
                 federation::submit_until(context, envelope, route, context.call_deadline(), true)
                     .await?;
             }

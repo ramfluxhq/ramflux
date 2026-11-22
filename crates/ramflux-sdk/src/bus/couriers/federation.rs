@@ -13,12 +13,9 @@ pub(crate) async fn manifest(
     context: &SessionContext,
     config: &GatewaySessionConfig,
     root: &str,
-    route: Option<&LocalBusFederationRoute>,
+    base: Option<&str>,
 ) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
-    if let Some(route) = route {
-        let base = route.recipient_prekey_url.as_deref().ok_or_else(|| {
-            SdkError::LocalBus("federated group route requires recipient_prekey_url".into())
-        })?;
+    if let Some(base) = base {
         let started = std::time::Instant::now();
         let mut manifest =
             crate::prekey::http_async::get::<Option<crate::SdkDeviceManifestResponse>>(
@@ -45,18 +42,13 @@ pub(crate) async fn material(
     config: &GatewaySessionConfig,
     request: SendMaterialRequest,
     class: crate::bus::connection_manager::CallClass,
-    route: Option<&LocalBusFederationRoute>,
+    base: Option<&str>,
 ) -> Result<SendMaterial, SdkError> {
-    let Some(route) = route else {
+    let Some(base) = base else {
         return pair_material::fetch(context, config, request, class).await;
     };
-    let base = route
-        .recipient_prekey_url
-        .as_deref()
-        .or(config.prekey_http_url.as_deref())
-        .ok_or_else(|| SdkError::LocalBus("prekey url missing".into()))?;
     let manifest = if let Some(root) = request.root {
-        Some((root.clone(), manifest(context, config, &root, Some(route)).await?))
+        Some((root.clone(), manifest(context, config, &root, Some(base)).await?))
     } else {
         None
     };
@@ -168,6 +160,8 @@ async fn submit_inner(
     task_forward: bool,
 ) -> Result<Result<(), SubmitRefusal>, SdkError> {
     let deadline_error = || if task_forward { SdkError::TaskDeliveryTimeout } else { stopped() };
+    // Producers that hold the account replace a caller target with the pinned home
+    // before this point. A stored non-empty id is still the submit target.
     if let Some(target) =
         route.as_ref().map(|route| route.target_node_id.clone()).filter(|id| !id.is_empty())
     {
@@ -240,4 +234,73 @@ async fn submit_inner(
 }
 fn stopped() -> SdkError {
     ramflux_transport::TransportError::ShutdownDraining.into()
+}
+
+/// Directory base for a stored route. `None` is the session directory. A caller URL is ignored.
+pub(crate) async fn manifest_for_route(
+    context: &SessionContext,
+    writer: &super::writer::Writer,
+    config: &GatewaySessionConfig,
+    root: &str,
+    route: Option<&LocalBusFederationRoute>,
+) -> Result<crate::SdkDeviceManifestResponse, SdkError> {
+    let base = route_base(writer, root, route).await?;
+    manifest(context, config, root, base.as_deref()).await
+}
+
+/// Pin lookup for one stored route. A caller URL is not an origin.
+pub(crate) struct HomeLookup<'a> {
+    pub writer: &'a super::writer::Writer,
+    pub commitment: &'a str,
+    pub route: Option<&'a LocalBusFederationRoute>,
+}
+
+/// Pair material for a stored route. An empty request does not open a socket.
+pub(crate) async fn material_for_route(
+    context: &SessionContext,
+    config: &GatewaySessionConfig,
+    request: SendMaterialRequest,
+    class: crate::bus::connection_manager::CallClass,
+    home: HomeLookup<'_>,
+) -> Result<SendMaterial, SdkError> {
+    let base = if request.root.is_none() && request.prekey.is_none() {
+        None
+    } else {
+        route_base(home.writer, home.commitment, home.route).await?
+    };
+    material(context, config, request, class, base.as_deref()).await
+}
+
+/// Submit copy of `route`. The caller node is kept only when it is the pinned home.
+pub(crate) async fn pinned_submit_route(
+    writer: &super::writer::Writer,
+    commitment: &str,
+    route: Option<LocalBusFederationRoute>,
+) -> Result<Option<LocalBusFederationRoute>, SdkError> {
+    let commitment = commitment.to_owned();
+    writer
+        .apply(move |account| {
+            crate::client::recipient_home::submit_copy(&account.client, &commitment, route)
+        })
+        .await
+}
+
+async fn route_base(
+    writer: &super::writer::Writer,
+    commitment: &str,
+    route: Option<&LocalBusFederationRoute>,
+) -> Result<Option<String>, SdkError> {
+    let Some(route) = route else { return Ok(None) };
+    let commitment = commitment.to_owned();
+    let caller = route.target_node_id.clone();
+    let home = writer
+        .apply(move |account| {
+            crate::client::recipient_home::pin_choice(
+                &account.client,
+                &commitment,
+                Some(caller.as_str()),
+            )
+        })
+        .await?;
+    crate::client::recipient_home::fetch_base(home, true).await
 }

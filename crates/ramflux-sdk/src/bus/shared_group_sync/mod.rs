@@ -286,16 +286,32 @@ async fn verified_member(
     let manifest = if let Some(federation) = body.get("federation").filter(|value| !value.is_null())
     {
         let federation: LocalBusFederationRoute = serde_json::from_value(federation.clone())?;
-        let url = federation.recipient_prekey_url.ok_or_else(|| {
-            SdkError::LocalBus("federated group member requires recipient_prekey_url".into())
-        })?;
-        let remote =
-            crate::client::contact::RemoteManifest { url: &url, timeout: account.timeouts.http };
-        let root = account
-            .client
-            .resolve_federated_target_principal_commitment_async(remote, expected, device)
-            .await?;
-        crate::client::contact::fetch_verified_device_manifest_from_url_async(remote, &root).await?
+        let commitment = expected.unwrap_or("");
+        if let Some(base) = crate::client::recipient_home::directory_base(
+            &account.client,
+            commitment,
+            Some(federation.target_node_id.as_str()),
+            true,
+        )
+        .await?
+        {
+            let remote = crate::client::contact::RemoteManifest {
+                url: &base,
+                timeout: account.timeouts.http,
+            };
+            let root = account
+                .client
+                .resolve_federated_target_principal_commitment_async(remote, expected, device)
+                .await?;
+            crate::client::contact::fetch_verified_device_manifest_from_url_async(remote, &root)
+                .await?
+        } else {
+            let root = account
+                .client
+                .resolve_target_principal_commitment(gateway, expected, device)
+                .await?;
+            crate::client::contact::fetch_verified_device_manifest(gateway, &root).await?
+        }
     } else {
         let root =
             account.client.resolve_target_principal_commitment(gateway, expected, device).await?;

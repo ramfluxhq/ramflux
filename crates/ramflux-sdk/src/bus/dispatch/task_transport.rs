@@ -383,25 +383,30 @@ pub(in crate::bus) async fn seal_assigned(
     };
     let prepared = prepare_task_inner(&account.client, &mut message, body, &kind)?;
     let body = prepared.as_slice();
-    let sealed = if let Some(federation) = &target.federation {
-        account.client.seal_routed_federated_as(
-            engine,
-            &message,
+    let sealed = crate::client::recipient_home::seal_member(
+        &account.client,
+        engine,
+        crate::client::recipient_home::MemberSeal {
+            message: &message,
             body,
-            federation.recipient_prekey_url.as_deref(),
-            kind,
-        )?
-    } else {
-        account.client.seal_routed_as(engine, &message, body, kind).await?
-    };
+            commitment: target.identity.root_commitment(),
+            federation: target.federation.as_ref(),
+            route: kind,
+        },
+    )
+    .await?;
+    let route = crate::client::recipient_home::submit_copy(
+        &account.client,
+        target.identity.root_commitment(),
+        target.federation.clone(),
+    )?;
     let envelope =
         crate::dm::gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
     Ok(SealedDelivery {
         envelope,
-        federation: target.federation.clone().map(|route| Destination {
+        federation: route.map(|route| Destination {
             recipient_root: target.identity.root_commitment().into(),
             route,
-
             device_id: target.device.clone(),
         }),
     })
@@ -586,16 +591,23 @@ async fn direct_targets_with_policy(
         prepared.clone()
     } else if account.task_prepared_only {
         return Err(SdkError::TaskManifestWorkerCapacity);
-    } else if let Some(route) = &federation {
-        let url = route
-            .recipient_prekey_url
-            .as_deref()
-            .ok_or_else(|| invalid("task federated peer prekey URL missing"))?;
+    } else if let Some(route) = &federation
+        && let Some(base) = crate::client::recipient_home::directory_base(
+            client,
+            commitment,
+            Some(route.target_node_id.as_str()),
+            true,
+        )
+        .await?
+    {
         let manifest = if bounded_manifest_worker {
-            fetch_federated_manifest(url, commitment).await?
+            fetch_federated_manifest(&base, commitment).await?
         } else {
             crate::client::contact::fetch_verified_device_manifest_from_url_async(
-                crate::client::contact::RemoteManifest { url, timeout: account.timeouts.http },
+                crate::client::contact::RemoteManifest {
+                    url: &base,
+                    timeout: account.timeouts.http,
+                },
                 commitment,
             )
             .await?
