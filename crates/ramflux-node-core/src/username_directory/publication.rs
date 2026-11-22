@@ -143,11 +143,28 @@ impl DirectoryAuthority {
             }
             DirectoryRequest::Revalidate { request } => {
                 ensure(request.root == call.root, Code::OwnershipMismatch)?;
-                let root = self
-                    .current_root(&request.root)?
-                    .ok_or(CheckpointError::Directory(Code::NotFound))?;
+                let Some(root) = self.current_root(&request.root)? else {
+                    ensure(request.known_directory_epoch == 0, Code::StaleEpoch)?;
+                    return Ok(AuthorityResponse::Revalidated {
+                        result: Box::new(w::HomeRevalidateResult {
+                            root: request.root.clone(),
+                            nonce: request.nonce.clone(),
+                            current_binding: None,
+                            current_receipt: None,
+                            pending_receipt: None,
+                            lookup_allowed: false,
+                            issued_at: now,
+                            expires_at: after(now, 10)?,
+                        }),
+                    });
+                };
                 ensure(root.node == call.home, Code::OwnershipMismatch)?;
                 ensure(request.known_directory_epoch <= root.epoch, Code::StaleEpoch)?;
+                if let (Some(requested), Some(pending)) =
+                    (&request.operation_id, &root.pending_operation_id)
+                {
+                    ensure(requested == pending, Code::OperationPending)?;
+                }
                 let lookup_allowed = self.lookup_allowed(&request.root, &root)?;
                 let current_receipt = if root.epoch > 0 {
                     Some(crypto::sign_receipt(

@@ -7,6 +7,7 @@ use super::{
     canonical, cell, image::ImagePlan, put_head, read_head, require, reserve_file, storage,
 };
 use ramflux_protocol::username_directory as w;
+use redb::ReadableTable;
 use std::path::Path;
 
 pub struct PrimaryProjection {
@@ -15,6 +16,7 @@ pub struct PrimaryProjection {
     rebuilding: Option<CheckpointHead>,
     last_key: Option<Vec<u8>>,
     complete: bool,
+    pending_batches: usize,
 }
 
 impl PrimaryProjection {
@@ -33,12 +35,22 @@ impl PrimaryProjection {
         let mut tx = db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
         tx.open_table(IMAGE).map_err(storage)?;
+        tx.open_table(super::REDO).map_err(storage)?;
+        tx.open_table(super::COMPACTED).map_err(storage)?;
+        tx.open_table(super::TX_IDS).map_err(storage)?;
         tx.open_table(META)
             .map_err(storage)?
             .insert("writer", canonical(&writer)?.as_slice())
             .map_err(storage)?;
         tx.commit().map_err(storage)?;
-        Ok(Self { db, writer, rebuilding: None, last_key: None, complete: false })
+        Ok(Self {
+            db,
+            writer,
+            rebuilding: None,
+            last_key: None,
+            complete: false,
+            pending_batches: 0,
+        })
     }
 
     /// # Errors
@@ -58,7 +70,11 @@ impl PrimaryProjection {
     /// Source pages come from the authenticated witness, outside projection DB transactions.
     /// # Errors
     /// Refuses reordered/duplicate pages, malformed image cells, oversized pages or a changed head.
-    pub fn copy_image_page(&mut self, target: &CheckpointHead, page: ImagePage) -> Result<()> {
+    pub fn copy_image_page(
+        &mut self,
+        target: &CheckpointHead,
+        page: ImagePage,
+    ) -> Result<Vec<w::BatchRow>> {
         require(
             self.rebuilding.as_ref() == Some(target) && !self.complete && page.rows.len() <= 128,
             "rebuild_state",
@@ -66,17 +82,19 @@ impl PrimaryProjection {
         if page.rows.is_empty() {
             require(page.next.is_none(), "rebuild_cursor")?;
             self.complete = true;
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut rows = Vec::new();
         let mut batches = Vec::new();
+        let mut required_results = Vec::new();
         let mut previous = self.last_key.clone();
         for (key, value) in page.rows {
             require(previous.as_ref().is_none_or(|last| last < &key), "rebuild_order")?;
             let row: w::Replacement = w::decode(&value)?;
-            if let w::Replacement::Batch { key: id, old: None, new: Some(_) } = &row {
+            if let w::Replacement::Batch { key: id, old: None, new: Some(batch) } = &row {
                 require(super::checkpoint_batch::batch_key(id)? == key, "rebuild_key")?;
                 batches.push((key.clone(), value));
+                required_results.push(batch.clone());
             } else {
                 let (expected, old, new) = cell(&row)?;
                 require(expected == key && old.is_none() && new.is_some(), "rebuild_key")?;
@@ -85,6 +103,11 @@ impl PrimaryProjection {
             previous = Some(key);
         }
         require(page.next == previous, "rebuild_cursor")?;
+        let pending = self
+            .pending_batches
+            .checked_add(required_results.len())
+            .filter(|n| *n <= 8192)
+            .ok_or(CheckpointError::Refused("batch_capacity"))?;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
         // The source image wrappers are already canonical and individually admitted.
@@ -105,6 +128,40 @@ impl PrimaryProjection {
         }
         tx.commit().map_err(storage)?;
         self.last_key = previous;
+        self.pending_batches = pending;
+        Ok(required_results)
+    }
+
+    /// Copy both retained records and their indexes; a descriptor alone cannot finish recovery.
+    /// # Errors
+    /// Refuses duplicate/missing descriptors, corrupt pairs and mismatched snapshot state.
+    pub fn copy_batch_results(
+        &mut self,
+        row: &w::BatchRow,
+        records: &[w::Checkpoint],
+    ) -> Result<()> {
+        require(self.rebuilding.is_some() && self.pending_batches > 0, "rebuild_state")?;
+        let mut tx = self.db.begin_write().map_err(storage)?;
+        tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        {
+            let image = tx.open_table(IMAGE).map_err(storage)?;
+            let key = super::checkpoint_batch::batch_key(&row.batch_id)?;
+            let expected = w::Replacement::Batch {
+                key: row.batch_id.clone(),
+                old: None,
+                new: Some(row.clone()),
+            };
+            require(
+                image
+                    .get(key.as_slice())
+                    .map_err(storage)?
+                    .is_some_and(|v| w::encode(&expected).is_ok_and(|bytes| v.value() == bytes)),
+                "rebuild_batch",
+            )?;
+        }
+        super::checkpoint_batch::install_projection_results(&tx, row, records)?;
+        tx.commit().map_err(storage)?;
+        self.pending_batches -= 1;
         Ok(())
     }
 
@@ -114,7 +171,9 @@ impl PrimaryProjection {
     /// Refuses interrupted rebuilds and witness changes; never selects max(primary,witness).
     pub fn finish_rebuild(&mut self, final_witness: &CheckpointHead) -> Result<CheckpointHead> {
         require(
-            self.complete && self.rebuilding.as_ref() == Some(final_witness),
+            self.complete
+                && self.pending_batches == 0
+                && self.rebuilding.as_ref() == Some(final_witness),
             "rebuild_incomplete",
         )?;
         let mut tx = self.db.begin_write().map_err(storage)?;
@@ -199,6 +258,8 @@ impl PrimaryProjection {
                     w::encode(&value)?.as_slice(),
                 )
                 .map_err(storage)?;
+            super::checkpoint_batch::prune_batches(&tx, next.clock_floor)?;
+            super::checkpoint_batch::install_projection_results(&tx, batch, records)?;
         }
         put_head(&tx, &next)?;
         tx.commit().map_err(storage)?;

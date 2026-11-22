@@ -78,6 +78,11 @@ impl LiveHomeRevalidation {
     ) -> Result<Self> {
         w::encode(&result)?;
         ensure(
+            result.current_receipt.as_ref().map_or(0, |r| r.body.epoch)
+                >= request.known_directory_epoch,
+            Code::ProfileRollback,
+        )?;
+        ensure(
             result.root == request.root
                 && result.nonce == request.nonce
                 && result.issued_at <= now
@@ -110,6 +115,10 @@ pub struct HomeDirectory {
 }
 
 impl HomeDirectory {
+    #[must_use]
+    pub fn center_pin(&self) -> &CenterPin {
+        &self.center
+    }
     /// Explicit operator initialization; normal startup uses open and never recreates anchors.
     /// # Errors
     /// Refuses existing paths, invalid provisioning and unavailable durable storage.
@@ -164,7 +173,7 @@ impl HomeDirectory {
     /// # Errors
     /// Refuses stale floors, concurrent edits, invalid signatures and avatar candidates.
     pub fn begin(
-        &mut self,
+        &self,
         master: &VerifyingKey,
         operation: w::UsernameOperation,
         profile: Option<w::SignedIdentityProfileV2>,
@@ -213,7 +222,7 @@ impl HomeDirectory {
     /// H2 publishes no new profile bytes: it persists exact preparation and matching reservation.
     /// # Errors
     /// Refuses stale/foreign reservations, mismatched operation/profile tuples and late ACKs.
-    pub fn prepare(&mut self, root: &str, receipt: w::DirectoryReceipt, now: u64) -> Result<()> {
+    pub fn prepare(&self, root: &str, receipt: w::DirectoryReceipt, now: u64) -> Result<()> {
         verify_receipt(&self.center, &receipt, now)?;
         ensure(receipt.body.state == w::ReceiptState::Reserved, Code::OperationPending)?;
         self.update(root, |state| {
@@ -234,7 +243,7 @@ impl HomeDirectory {
     /// # Errors
     /// Refuses stale wrappers, superseded operations, missing bytes and profile/directory rollback.
     pub fn finalize(
-        &mut self,
+        &self,
         root: &str,
         live: LiveHomeRevalidation,
         now: u64,
@@ -255,11 +264,9 @@ impl HomeDirectory {
             observe(state, &live.result)?;
             if let Some(intent) = &state.intent {
                 matches_intent(intent, current)?;
-                ensure(
-                    intent.reservation.is_some()
-                        || intent.operation.body.action == w::Action::Delete,
-                    Code::OperationPending,
-                )?;
+                // Normal coordination persists H2 before requesting commit. After home rollback,
+                // this fresh exact committed tuple also authorizes recovery of retained bytes;
+                // it does not replay an expired operation as a new mutation.
                 ensure(
                     live.result.current_binding == intent.operation.body.binding,
                     Code::StaleEpoch,
@@ -298,7 +305,7 @@ impl HomeDirectory {
     /// # Errors
     /// Refuses unavailable/missing current bytes, hidden state and every rollback/substitution.
     pub fn visible_profile(
-        &mut self,
+        &self,
         root: &str,
         live: LiveHomeRevalidation,
         master: &VerifyingKey,
@@ -410,7 +417,7 @@ impl HomeDirectory {
 
     /// # Errors
     /// Refuses missing work, clock overflow and delays beyond the 60-second reconciliation cap.
-    pub fn retry_later(&mut self, root: &str, now: u64, delay_seconds: u64) -> Result<()> {
+    pub fn retry_later(&self, root: &str, now: u64, delay_seconds: u64) -> Result<()> {
         ensure((1..=60).contains(&delay_seconds), Code::RateLimited)?;
         fixed(root)?;
         let next = after(now, delay_seconds)?;
@@ -439,7 +446,7 @@ impl HomeDirectory {
     /// # Errors
     /// Refuses pending/committed operations, stale proofs and mismatched restored bytes/floors.
     pub fn discard_aborted(
-        &mut self,
+        &self,
         root: &str,
         abort: Option<&w::DirectoryReceipt>,
         live: LiveHomeRevalidation,
@@ -488,11 +495,7 @@ impl HomeDirectory {
         })
     }
 
-    fn update<T>(
-        &mut self,
-        root: &str,
-        change: impl FnOnce(&mut HomeRoot) -> Result<T>,
-    ) -> Result<T> {
+    fn update<T>(&self, root: &str, change: impl FnOnce(&mut HomeRoot) -> Result<T>) -> Result<T> {
         fixed(root)?;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;

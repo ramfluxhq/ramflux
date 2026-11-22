@@ -16,6 +16,27 @@ pub struct RecoveryGroup {
 }
 
 impl DirectoryAuthority {
+    /// Snapshot batch metadata is useful only with its complete original retained pair.
+    /// # Errors
+    /// Refuses retired writers, changed snapshots, member retries and corrupt associations.
+    pub fn recovery_batch(
+        &mut self,
+        writer: &WriterIdentity,
+        expected: &CheckpointHead,
+        batch_id: &str,
+    ) -> Result<RecoveryGroup> {
+        super::fixed(batch_id)?;
+        let time = self.witness.sample_time()?;
+        self.fence.check_writer(writer, time)?;
+        ensure(self.head() == *expected, Code::DirectoryUnavailable)?;
+        self.witness.update_aux(time, |tx| {
+            let batch = checkpoint_batch::member_batch(tx, batch_id)?
+                .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+            ensure(batch.batch_id == batch_id, Code::Replay)?;
+            let records = checkpoint_batch::pair(tx, &batch)?.to_vec();
+            Ok(RecoveryGroup { records, batch: Some(batch) })
+        })
+    }
     /// Recovery is private to the authenticated writer; the service must additionally require
     /// controller recovery authority for an image rebuild. No mutation is accepted during rebuild.
     /// # Errors

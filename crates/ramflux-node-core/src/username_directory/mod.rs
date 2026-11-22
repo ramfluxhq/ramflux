@@ -32,6 +32,8 @@ mod schema;
 pub use schema::*;
 mod home;
 pub use home::*;
+mod coordinator;
+pub use coordinator::*;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]

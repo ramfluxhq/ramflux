@@ -9,6 +9,73 @@ use super::{
 use ramflux_protocol::username_directory as w;
 use redb::ReadableTable;
 
+/// Install the exact retained pair in a private projection during replay or image rebuild.
+pub(super) fn install_projection_results(
+    tx: &redb::WriteTransaction,
+    row: &w::BatchRow,
+    records: &[w::Checkpoint],
+) -> Result<()> {
+    use redb::ReadableTableMetadata;
+    require(records.len() == 2, "batch_count")?;
+    {
+        let mut results = tx.open_table(COMPACTED).map_err(storage)?;
+        require(results.len().map_err(storage)? + 2 <= 16384, "result_global")?;
+        let mut ids = tx.open_table(TX_IDS).map_err(storage)?;
+        let mut meta = tx.open_table(META).map_err(storage)?;
+        let count_key = format!("redo_root:{}", row.root);
+        let count: u64 = meta
+            .get(count_key.as_str())
+            .map_err(storage)?
+            .map(|v| serde_json::from_slice(v.value()))
+            .transpose()?
+            .unwrap_or(0);
+        require(count + 2 <= 64, "redo_root")?;
+        for record in records {
+            let id = &record.delta.tx_id;
+            require(
+                ids.get(id.as_str()).map_err(storage)?.is_none()
+                    && results.get(record.lsn).map_err(storage)?.is_none(),
+                "batch_collision",
+            )?;
+            results.insert(record.lsn, w::encode(record)?.as_slice()).map_err(storage)?;
+            ids.insert(id.as_str(), record.lsn).map_err(storage)?;
+            meta.insert(
+                format!("batch_member:{id}").as_str(),
+                canonical(&row.batch_id)?.as_slice(),
+            )
+            .map_err(storage)?;
+            meta.insert(
+                format!("batch_lsn:{:020}", record.lsn).as_str(),
+                canonical(&row.batch_id)?.as_slice(),
+            )
+            .map_err(storage)?;
+            meta.insert(
+                format!("redo_owner:{}", record.lsn).as_str(),
+                canonical(&row.root)?.as_slice(),
+            )
+            .map_err(storage)?;
+            meta.insert(
+                super::checkpoint::owner_index(&row.root, record.lsn).as_str(),
+                canonical(&true)?.as_slice(),
+            )
+            .map_err(storage)?;
+        }
+        meta.insert(count_key.as_str(), canonical(&(count + 2))?.as_slice()).map_err(storage)?;
+        meta.insert(
+            format!("batch_root:{}:{}", row.root, row.batch_id).as_str(),
+            canonical(&true)?.as_slice(),
+        )
+        .map_err(storage)?;
+        meta.insert(
+            format!("batch_expiry:{:020}:{}", row.retain_until, row.batch_id).as_str(),
+            canonical(&row.batch_id)?.as_slice(),
+        )
+        .map_err(storage)?;
+    }
+    pair(tx, row)?;
+    Ok(())
+}
+
 pub(super) fn batch_key(id: &str) -> Result<Vec<u8>> {
     super::fixed(id)?;
     let mut key = b"batch\0".to_vec();
@@ -212,6 +279,11 @@ impl CheckpointWitness {
         let time = self.sample_time()?;
         self.update_aux(time, |tx| {
             let Some(row) = member_batch(tx, &request.tx_id)? else {
+                let ids = tx.open_table(TX_IDS).map_err(storage)?;
+                require(
+                    ids.get(request.tx_id.as_str()).map_err(storage)?.is_none(),
+                    "batch_replay",
+                )?;
                 return Ok(None);
             };
             require(row.batch_id == request.tx_id && row.request_hash == hash, "batch_replay")?;
