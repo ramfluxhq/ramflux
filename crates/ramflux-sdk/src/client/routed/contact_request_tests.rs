@@ -346,6 +346,7 @@ async fn contact02_first_message_drains_its_request_before_loading_the_ordinary_
                     requester_is_peer: false,
                     replace_provisional_root: None,
                     verification: None,
+                    directory_base: None,
                 },
                 &mut engine,
             )

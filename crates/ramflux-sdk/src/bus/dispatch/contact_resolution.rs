@@ -76,14 +76,16 @@ pub(super) async fn add(
         return Err(ContactReason::AlreadyContact.into());
     }
     let mut verified_home = None;
+    let mut directory_base = None;
     let gateway = match card.as_ref() {
         Some(card) => {
-            let home = account_home(state, account_id)?;
-            let gateway = card_gateway(card, &own, &state.config.data_root, &home).await?;
-            // `card_gateway` proved the card's node is this node: same origin, same key
-            // fingerprint, same node id from its signed client record.
-            verified_home = Some(home.node_id.clone());
-            gateway
+            let profile = account_home(state, account_id)?;
+            let verified = card_gateway(card, &own, &state.config.data_root, &profile).await?;
+            // The signed client record names the home. A foreign node keeps this session
+            // and is reached through `target_node` after the pin below.
+            verified_home = Some(verified.node_id);
+            directory_base = verified.directory_base;
+            verified.gateway
         }
         None => own.clone(),
     };
@@ -109,6 +111,7 @@ pub(super) async fn add(
                 requester_is_peer,
                 replace_provisional_root: replace_provisional_root.as_deref(),
                 verification: None,
+                directory_base: directory_base.as_deref(),
             },
             &mut engine,
         )
@@ -164,31 +167,49 @@ fn contact_response(
     Ok(response)
 }
 
+struct CardHome {
+    gateway: GatewaySessionConfig,
+    node_id: String,
+    /// Public prekey base when the card's home is not this node. `None` uses the session directory.
+    directory_base: Option<String>,
+}
+
 async fn card_gateway(
     card: &ContactCardBody,
     own: &GatewaySessionConfig,
     root: &Path,
     home: &crate::NodeProfile,
-) -> Result<GatewaySessionConfig, SdkError> {
-    // A self-signed locator is not authority to contact an arbitrary host.
-    let home_origin = home.discovery_origin().map_err(|_| ContactReason::HomeProfileStale)?;
-    let card_origin =
-        crate::node::discovery_origin(&card.node.url).map_err(|_| ContactReason::InvalidCard)?;
-    if home_origin != card_origin {
-        return Err(SdkError::ContactHomeNodeUnsupported);
-    }
-    if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
-        return Err(ContactReason::NodeFingerprintMismatch.into());
-    }
-    let record = crate::node::fetch_client_record(&card.node.url).await.map_err(|e| match e {
-        SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(e),
-        _ => ContactReason::ManifestInvalid.into(),
-    })?;
+) -> Result<CardHome, SdkError> {
+    // The card URL is the locator the user presented. The signed client record, not the
+    // URL text, names the home. A foreign record's gateway addresses are not dialed.
+    let record =
+        crate::node::fetch_client_record(&card.node.url).await.map_err(|error| match error {
+            SdkError::Transport(_) | SdkError::Io(_) => lookup_failure(error),
+            _ => ContactReason::ManifestInvalid.into(),
+        })?;
     if crate::contact_node_fingerprint(&record.node_public_key)? != card.node.key_fingerprint {
         return Err(ContactReason::NodeFingerprintMismatch.into());
     }
-    if home.node_id != record.node_id {
-        return Err(SdkError::ContactHomeNodeUnsupported);
+    let node_id = crate::client::recipient_home::node_id(Some(record.node_id.as_str()))
+        .ok_or(ContactReason::InvalidCard)?;
+    if node_id == home.node_id {
+        return same_home_gateway(card, own, root, home, record).await;
+    }
+    if record.prekey_http_url.is_empty() {
+        return Err(ContactReason::ManifestInvalid.into());
+    }
+    Ok(CardHome { gateway: own.clone(), node_id, directory_base: Some(record.prekey_http_url) })
+}
+
+async fn same_home_gateway(
+    card: &ContactCardBody,
+    own: &GatewaySessionConfig,
+    root: &Path,
+    home: &crate::NodeProfile,
+    record: ramflux_protocol::WellKnownClientRecord,
+) -> Result<CardHome, SdkError> {
+    if crate::contact_node_fingerprint(&home.node_public_key)? != card.node.key_fingerprint {
+        return Err(ContactReason::NodeFingerprintMismatch.into());
     }
     if home.node_public_key != record.node_public_key {
         return Err(ContactReason::NodeFingerprintMismatch.into());
@@ -198,15 +219,15 @@ async fn card_gateway(
     let mut gateway = own.clone();
     gateway.gateway_addr = crate::node::resolve_node_addr(&profile.gateway.quic_addr)
         .await
-        .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?;
+        .map_err(|error| SdkError::ContactUnavailable(Box::new(error)))?;
     gateway.tcp_gateway_addr = Some(
         crate::node::resolve_node_addr(&profile.gateway.tcp_addr)
             .await
-            .map_err(|e| SdkError::ContactUnavailable(Box::new(e)))?,
+            .map_err(|error| SdkError::ContactUnavailable(Box::new(error)))?,
     );
     gateway.server_name.clone_from(&profile.gateway.server_name);
     gateway.ca_cert = profile.write_ca(&root.join("contact_nodes"))?;
-    Ok(gateway)
+    Ok(CardHome { gateway, node_id: home.node_id.clone(), directory_base: None })
 }
 
 pub(super) async fn export(
@@ -362,7 +383,17 @@ fn parse_selector(
     let requester_is_peer = request.method == "contact.accept"
         && legacy.as_ref().is_none_or(|old| old.requester_id == selector);
     let replace_provisional_root = parsed.and_then(|a| a.replace_provisional_root);
+    // `@name` waits for the username directory (USERNAME-DIR-LIVE, #461). That
+    // directory is not on this branch, so a leading `@` is an invalid card.
+    username_directory_selector(&selector)?;
     Ok(Selection { legacy, card, selector, requester_is_peer, replace_provisional_root })
+}
+
+fn username_directory_selector(selector: &str) -> Result<(), SdkError> {
+    if selector.as_bytes().first() == Some(&b'@') {
+        return Err(ContactReason::InvalidCard.into());
+    }
+    Ok(())
 }
 
 fn account_home(state: &LocalBusDaemonState, id: &str) -> Result<crate::NodeProfile, SdkError> {

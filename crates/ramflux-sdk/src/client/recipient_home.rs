@@ -179,7 +179,7 @@ pub(crate) async fn seal_member(
     }
 }
 
-fn node_id(value: Option<&str>) -> Option<String> {
+pub(crate) fn node_id(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     let bytes = value.as_bytes();
     let edges = bytes.first().is_some_and(|b| *b == b'.' || *b == b'-')

@@ -457,9 +457,8 @@ pub(in crate::client) async fn deliver(
         own.root_commitment(),
     )
     .await?;
-    let peer =
-        crate::client::contact::fetch_verified_device_manifest(engine.config(), &intent.peer_root)
-            .await?;
+    let home = pinned_foreign_home(client, &intent.peer_root)?;
+    let peer = peer_manifest(engine, &intent.peer_root, home.as_deref()).await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
     if own_manifest.custody.is_none() {
@@ -491,7 +490,7 @@ pub(in crate::client) async fn deliver(
             }
             intent.delivered.remove(&recipient);
         }
-        let result = send_one(client, engine, intent, &device, &bytes).await;
+        let result = send_one(client, engine, intent, &device, &bytes, home.as_deref()).await;
         if let Err(error) = result {
             complete = false;
             tracing::debug!(%error,"contact control recipient deferred");
@@ -519,6 +518,7 @@ async fn send_one(
     intent: &Intent,
     device: &crate::prekey::SdkDeviceManifestEntry,
     body: &[u8],
+    target_node: Option<&str>,
 ) -> Result<(), SdkError> {
     let id =
         format!("contact_{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
@@ -542,14 +542,58 @@ async fn send_one(
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())
         .await?;
     // Control carrier; no Direct report payload.
-    engine
-        .submit_envelope(crate::dm::gateway_generated_envelope_from_sealed(
-            engine.config(),
-            &mut message,
-            sealed,
-        )?)
-        .await?;
+    let envelope =
+        crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)?;
+    if let Some(target) = target_node {
+        let submitted = engine.submit_classified_to(envelope, Some(target.to_owned())).await?;
+        if let Err(refusal) = submitted {
+            return Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()));
+        }
+        return Ok(());
+    }
+    engine.submit_envelope(envelope).await?;
     Ok(())
+}
+
+fn pinned_foreign_home(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> Result<Option<String>, SdkError> {
+    let Some(principal) =
+        crate::client::recipient_home::principal_for_commitment(client, commitment)?
+    else {
+        return Ok(None);
+    };
+    let Some(home) = crate::client::recipient_home::pinned_home(client, &principal)? else {
+        return Ok(None);
+    };
+    let own = client.account_db()?.load_actor_state::<String>("account/node-id")?;
+    if own.as_deref() == Some(home.as_str()) { Ok(None) } else { Ok(Some(home)) }
+}
+
+async fn peer_manifest(
+    engine: &impl GatewaySessionAccess,
+    peer_root: &str,
+    home: Option<&str>,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let Some(home) = home else {
+        return crate::client::contact::fetch_verified_device_manifest(engine.config(), peer_root)
+            .await;
+    };
+    let base = crate::client::recipient_home::public_prekey_base(home).await?;
+    let started = std::time::Instant::now();
+    let manifest =
+        crate::prekey::http_async::get::<Option<crate::prekey::SdkDeviceManifestResponse>>(
+            &base,
+            &format!("/mvp1/device-manifest/{peer_root}"),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .ok_or_else(|| SdkError::LocalBus(format!("missing device manifest for {peer_root}")))?;
+    let manifest = manifest.fetched_from(started);
+    crate::client::contact::verify_device_manifest(&manifest, peer_root)
+        .map_err(|_| SdkError::ContactInput(crate::ContactReason::ManifestInvalid))?;
+    Ok(crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
 pub(crate) fn status(client: &RamfluxClient, root: &str) -> Result<&'static str, SdkError> {

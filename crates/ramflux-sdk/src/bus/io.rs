@@ -154,7 +154,6 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyConfirmRejected(reason) => reason.token().to_owned(),
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
-        SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
         _ if local_bus_error_code(error) == "transfer_requires_sync" => {
             "head_or_removal_floor_mismatch".into()
         }

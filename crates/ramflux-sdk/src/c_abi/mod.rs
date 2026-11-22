@@ -991,7 +991,6 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskDeliveryTooLarge { .. }
         | SdkError::SurfaceDeliveryTooLarge { .. }
         | SdkError::ContactConfirmationRequired(_)
-        | SdkError::ContactHomeNodeUnsupported
         | SdkError::ContactInput(_)
         | SdkError::AccountNotOpen(_)
         | SdkError::AccountRestorePending(_)
