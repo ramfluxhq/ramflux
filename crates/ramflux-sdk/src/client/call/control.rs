@@ -109,6 +109,17 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    pub(crate) fn persist_live_call(&self, call: &LiveCall) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        db.join_write(|| {
+            super::history::remember(self, call)?;
+            self.persist_call_row(&call.row)?;
+            if call.row.state == "ended" {
+                super::history::publish(self, &call.row)?;
+            }
+            Ok(())
+        })
+    }
     fn remove_call_control_receipts(&self, id: &str) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let prefix = format!("voice/control/{id}/");
@@ -369,10 +380,13 @@ impl RamfluxClient {
         if db.client_record("conversation", conversation)?.is_none() {
             db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id],"participant_roots":[crate::identity_root_public_key_commitment(&c.caller.root_public_key)?,crate::identity_root_public_key_commitment(&c.callee.root_public_key)?]}))?;
         }
-        self.persist_call_row(&next.row)?;
-        if next.row.state != "ended" {
-            db.persist_actor_state(&receipt, &hash)?;
-        }
+        db.join_write(|| {
+            self.persist_live_call(&next)?;
+            if next.row.state != "ended" {
+                db.persist_actor_state(&receipt, &hash)?;
+            }
+            Ok::<(), SdkError>(())
+        })?;
         self.voice_transition.replace(Some((transition_key(body), Box::new(next))));
         Ok(true)
     }
@@ -386,7 +400,11 @@ impl RamfluxClient {
             row.failure_reason = Some(ramflux_protocol::VoiceCallFailureReason::DaemonRestarted);
             row.ended_at = Some(crate::time::now_unix_timestamp());
             row.seq = row.seq.checked_add(1).ok_or_else(|| invalid("sequence exhausted"))?;
-            db.write_transaction(|| self.persist_call_row(&row))?;
+            db.write_transaction(|| {
+                self.persist_call_row(&row)?;
+                super::history::publish(self, &row)?;
+                Ok::<(), SdkError>(())
+            })?;
         }
         Ok(())
     }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod control;
+pub(crate) mod history;
 pub(crate) mod intent;
 mod lease;
 pub(crate) mod state;

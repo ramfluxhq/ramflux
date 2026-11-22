@@ -12,10 +12,55 @@ pub(crate) mod native;
 /// # Errors
 /// Refuses a missing control, unsigned action, or incomplete lease/key fields.
 pub fn validate_generated_call(call: &g::Call) -> Result<(), SdkError> {
-    let Some(control) = call.control.as_ref() else {
-        return Err(refused("call requires CallControl"));
+    match call.payload.as_ref() {
+        Some(g::call::Payload::Control(control)) => validate_call_control(control),
+        Some(g::call::Payload::Summary(summary)) => validate_call_summary(summary),
+        None => Err(refused("call requires CallControl")),
+    }
+}
+
+fn validate_call_summary(summary: &g::CallSummary) -> Result<(), SdkError> {
+    if summary.call_id.len() != 16 {
+        return Err(refused("call summary requires a 16-byte call id"));
+    }
+    let Some(caller) = summary.caller.as_ref() else {
+        return Err(refused("call summary requires a caller"));
     };
-    validate_call_control(control)
+    if caller.principal_id.is_empty() || summary.callee_principal_id.is_empty() {
+        return Err(refused("call summary requires caller and callee principals"));
+    }
+    if summary.ringing_device_ids.len() > 96
+        || summary.ringing_device_ids.iter().any(String::is_empty)
+    {
+        return Err(refused("call summary ringing set is empty or over 96"));
+    }
+    let completed = summary.outcome == g::CallSummaryOutcome::Completed as i32;
+    let answered = summary.answered_device_id.as_ref().is_some_and(|id| !id.is_empty());
+    if answered && !completed {
+        return Err(refused("only a completed call summary names the answering device"));
+    }
+    let failed = summary.outcome == g::CallSummaryOutcome::Failed as i32;
+    let known_failure = g::CallSummaryFailure::try_from(summary.failure)
+        .is_ok_and(|failure| failure != g::CallSummaryFailure::Unspecified);
+    if failed != known_failure {
+        return Err(refused("call summary failure is set only for a failed outcome"));
+    }
+    if g::CallSummaryOutcome::try_from(summary.outcome)
+        .ok()
+        .is_none_or(|outcome| outcome == g::CallSummaryOutcome::Unspecified)
+    {
+        return Err(refused("call summary outcome is unset"));
+    }
+    let expected = match summary.answered_at {
+        Some(start) if summary.ended_at >= start => {
+            u64::try_from(summary.ended_at - start).unwrap_or(u64::MAX)
+        }
+        _ => 0,
+    };
+    if summary.duration_seconds != expected {
+        return Err(refused("call summary duration does not match its timestamps"));
+    }
+    Ok(())
 }
 
 /// Original Call action signer is the authenticated sender plus signature.

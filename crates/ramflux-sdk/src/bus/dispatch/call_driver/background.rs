@@ -159,7 +159,7 @@ fn install(account: &mut LocalBusAccountState, next: LiveCall) -> Result<(), Sdk
         account
             .client
             .account_db()?
-            .write_transaction(|| account.client.persist_call_row(&next.row))?;
+            .write_transaction(|| account.client.persist_live_call(&next))?;
     }
     account.client.voice_calls.insert(next.row.call_id.clone(), next);
     Ok(())

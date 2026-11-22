@@ -1469,10 +1469,49 @@ message TaskHistoryExport {
   repeated TaskOwnPacket packets = 1;
   TaskExportMetadata metadata = 2;
 }
+message CallSummaryParticipant {
+  string principal_id = 1;
+  string device_id = 2;
+}
+enum CallSummaryOutcome {
+  CALL_SUMMARY_OUTCOME_UNSPECIFIED = 0;
+  CALL_SUMMARY_OUTCOME_COMPLETED = 1;
+  CALL_SUMMARY_OUTCOME_MISSED = 2;
+  CALL_SUMMARY_OUTCOME_DECLINED = 3;
+  CALL_SUMMARY_OUTCOME_CANCELLED = 4;
+  CALL_SUMMARY_OUTCOME_ANSWERED_ELSEWHERE = 5;
+  CALL_SUMMARY_OUTCOME_FAILED = 6;
+}
+enum CallSummaryFailure {
+  CALL_SUMMARY_FAILURE_UNSPECIFIED = 0;
+  CALL_SUMMARY_FAILURE_AUTHORITY_UNAVAILABLE = 1;
+  CALL_SUMMARY_FAILURE_AUTHORITY_REFUSED = 2;
+  CALL_SUMMARY_FAILURE_RELAY_UNAVAILABLE = 3;
+  CALL_SUMMARY_FAILURE_MEDIA_LEASE_EXPIRED = 4;
+  CALL_SUMMARY_FAILURE_DAEMON_RESTARTED = 5;
+  CALL_SUMMARY_FAILURE_SIGNALING_UNAVAILABLE = 6;
+}
+// Public conversation record. No signature, root key, call_start, call_ref, base key, lease or media generation.
+message CallSummary {
+  bytes call_id = 1;
+  CallSummaryParticipant caller = 2;
+  string callee_principal_id = 3;
+  optional string answered_device_id = 4;
+  repeated string ringing_device_ids = 5;
+  CallSummaryOutcome outcome = 6;
+  CallSummaryFailure failure = 7;
+  uint64 duration_seconds = 8;
+  int64 created_at = 9;
+  optional int64 answered_at = 10;
+  int64 ended_at = 11;
+}
 message Call {
   reserved 1, 2;
   reserved "operation", "signal";
-  CallControl control = 16;
+  oneof payload {
+    CallControl control = 16;
+    CallSummary summary = 17;
+  }
 }
 message SelfSync {
   uint32 operation = 1;
