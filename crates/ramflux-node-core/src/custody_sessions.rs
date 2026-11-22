@@ -18,6 +18,8 @@ const SOURCE_LIMIT: usize = 64;
 const HOLDER_LIMIT: usize = 4;
 const REQUEST_LIMIT: usize = 256;
 const CHALLENGE_SECONDS: u64 = 300;
+/// Cap on a native session grant, shared by the original open and every renewal.
+pub const NATIVE_SESSION_GRANT_SECONDS: u64 = 300;
 const RETAIN_SECONDS: u64 = 600;
 
 use crate::custody_budget_log::{CustodyAdmissionRefusal, node_retry, refuse, source_retry};
@@ -76,6 +78,16 @@ pub(crate) struct CustodyLeases {
     by_holder: BTreeMap<String, BTreeSet<String>>,
     by_prefix: BTreeMap<String, BTreeSet<(Instant, String)>>,
 }
+/// Inputs for extending one native lease without minting a new session id.
+pub(crate) struct NativeRenewal<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) holder: &'a str,
+    pub(crate) record_hash: &'a str,
+    pub(crate) expires_at: u64,
+    pub(crate) now: u64,
+    pub(crate) tick: Instant,
+}
+
 impl CustodyLeases {
     pub(crate) fn with_issuance_settings(settings: crate::CustodyIssuanceSettings) -> Self {
         Self {
@@ -323,7 +335,7 @@ impl CustodyLeases {
             self.remove_session(&id);
         }
         session.session_id = random()?;
-        let seconds = session.expires_at.saturating_sub(now).min(CHALLENGE_SECONDS);
+        let seconds = session.expires_at.saturating_sub(now).min(NATIVE_SESSION_GRANT_SECONDS);
         if seconds == 0 {
             return Err(CustodyRefusal::SessionExpired.into());
         }
@@ -361,6 +373,48 @@ impl CustodyLeases {
             return Err(CustodyRefusal::SessionExpired);
         }
         Ok(lease.session.clone())
+    }
+    /// Keep the same session id and holder. A migration grant is not a native session.
+    /// # Errors
+    /// Refuses a missing, foreign, migrated, or already-expired lease, and a zero window.
+    pub fn renew_native(
+        &mut self,
+        renewal: &NativeRenewal<'_>,
+    ) -> Result<CustodySession, CustodyRefusal> {
+        let id = renewal.id;
+        let holder = renewal.holder;
+        let record_hash = renewal.record_hash;
+        let expires_at = renewal.expires_at;
+        let now = renewal.now;
+        let tick = renewal.tick;
+        self.prune(tick);
+        let old_deadline = {
+            let lease = self.sessions.get(id).ok_or(CustodyRefusal::SessionRequired)?;
+            if lease.holder != holder {
+                return Err(CustodyRefusal::BindingRefused);
+            }
+            if lease.migration.is_some() {
+                return Err(CustodyRefusal::Unsupported);
+            }
+            if now > lease.session.expires_at {
+                return Err(CustodyRefusal::SessionExpired);
+            }
+            lease.deadline
+        };
+        let seconds = expires_at.saturating_sub(now).min(NATIVE_SESSION_GRANT_SECONDS);
+        if seconds == 0 {
+            return Err(CustodyRefusal::SessionExpired);
+        }
+        let deadline = tick + Duration::from_secs(seconds);
+        self.session_deadlines.remove(&(old_deadline, id.to_owned()));
+        {
+            let lease = self.sessions.get_mut(id).ok_or(CustodyRefusal::SessionRequired)?;
+            record_hash.clone_into(&mut lease.session.record_hash);
+            lease.session.expires_at = now.saturating_add(seconds);
+            lease.deadline = deadline;
+        }
+        self.session_deadlines.insert((deadline, id.to_owned()));
+        Ok(self.sessions.get(id).ok_or(CustodyRefusal::SessionRequired)?.session.clone())
     }
     pub fn request(&mut self, id: &str, nonce: &str) -> Result<(), CustodyRefusal> {
         if !ramflux_protocol::decode_base64url(nonce).is_ok_and(|bytes| {

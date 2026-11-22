@@ -11,6 +11,7 @@ pub(crate) mod resync;
 pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigger};
 mod account_work;
 mod background_children;
+mod grant_renewal;
 mod metadata_child;
 #[cfg_attr(
     not(test),

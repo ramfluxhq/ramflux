@@ -12,6 +12,8 @@ use super::{
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
+
+mod native_renew;
 pub(super) struct ProofAttempt {
     pub action: CustodyProofAction,
     pub proof: Box<Envelope<BranchProofV3>>,
@@ -380,7 +382,10 @@ impl CustodyService {
             record_hash: proof.body.record_hash.clone(),
             proof_hash: object_hash(proof).map_err(invalid)?,
             binding_mode: proof.body.binding_mode,
-            expires_at: proof.body.expires_at.min(now.saturating_add(300)),
+            expires_at: proof
+                .body
+                .expires_at
+                .min(now.saturating_add(crate::NATIVE_SESSION_GRANT_SECONDS)),
         };
         let session = self.leases().open(session, holder, now, tick)?;
         Ok(CustodyServerFrame::SessionEstablished { session })
