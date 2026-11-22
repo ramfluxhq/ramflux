@@ -23,7 +23,7 @@ pub(crate) enum UsernameAction {
 
 #[derive(Args)]
 pub(crate) struct UsernameAuthorize {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub account: String,
     /// Read recovery words from an owner-only file; otherwise use the private terminal prompt.
     #[arg(long)]
@@ -38,12 +38,12 @@ pub(crate) struct UsernameSet {
 #[derive(Args)]
 pub(crate) struct UsernameResolve {
     pub name: String,
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub account: String,
 }
 #[derive(Args)]
 pub(crate) struct UsernameStatus {
-    #[arg(long)]
+    #[arg(allow_hyphen_values = true, long)]
     pub account: String,
     #[arg(long)]
     pub operation_id: Option<String>,
