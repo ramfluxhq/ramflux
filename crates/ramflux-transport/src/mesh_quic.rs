@@ -522,6 +522,31 @@ impl MeshQuicConnectionPool {
     }
 }
 
+/// Quinn's idle timer is the only producer of `TimedOut` (`Timer::Idle`). A pooled mesh
+/// connection that sits quiet until that timer is closed on purpose. Handshake, reset, and
+/// application closes stay at error.
+fn mesh_bidirectional_accept_failure(
+    remote_address: SocketAddr,
+    error: &quinn::ConnectionError,
+) -> TransportError {
+    if matches!(error, quinn::ConnectionError::TimedOut) {
+        tracing::debug!(
+            %remote_address,
+            %error,
+            "mesh QUIC connection closed by the idle timeout"
+        );
+    } else {
+        tracing::error!(
+            %remote_address,
+            %error,
+            "mesh QUIC bidirectional stream accept failed"
+        );
+    }
+    TransportError::Quic(format!(
+        "mesh QUIC bidirectional stream accept failed from {remote_address}: {error}"
+    ))
+}
+
 impl MeshQuicServer {
     /// # Errors
     /// Returns an error when the UDP socket cannot bind or TLS material cannot be loaded.
@@ -609,12 +634,7 @@ impl MeshQuicServer {
             .connection
             .accept_bi()
             .await
-            .map_err(|error| {
-                tracing::error!(%remote_address, %error, "mesh QUIC bidirectional stream accept failed");
-                TransportError::Quic(format!(
-                    "mesh QUIC bidirectional stream accept failed from {remote_address}: {error}"
-                ))
-            })?;
+            .map_err(|error| mesh_bidirectional_accept_failure(remote_address, &error))?;
         record_mesh_server_quic_stream_accepted(stream_accept_started.elapsed());
         Ok(MeshQuicAcceptedBiStream { send, recv, remote_address })
     }
@@ -744,12 +764,7 @@ impl MeshQuicServer {
             .connection
             .accept_bi()
             .await
-            .map_err(|error| {
-                tracing::error!(%remote_address, %error, "mesh QUIC bidirectional stream accept failed");
-                TransportError::Quic(format!(
-                    "mesh QUIC bidirectional stream accept failed from {remote_address}: {error}"
-                ))
-            })?;
+            .map_err(|error| mesh_bidirectional_accept_failure(remote_address, &error))?;
         record_mesh_server_quic_stream_accepted(stream_accept_started.elapsed());
         let request_read_started = std::time::Instant::now();
         let frame = read_quic_raw_frame(&mut recv).await?;

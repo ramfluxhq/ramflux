@@ -266,32 +266,53 @@ fn wake_verify_batcher_loop(
     window: Duration,
 ) {
     let shutdown = ramflux_node_core::service_shutdown_token();
-    while !shutdown.is_cancelled() {
-        let first = match receiver.try_recv() {
-            Ok(request) => request,
+    // This thread has no runtime of its own. The current-thread runtime only parks on the
+    // queue or on shutdown, so an empty verifier does not wake on a timer.
+    let runtime = match tokio::runtime::Builder::new_current_thread().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!(%error, "notify wake verifier could not wait on its queue");
+            return;
+        }
+    };
+    runtime.block_on(async {
+        loop {
+            let first = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => None,
+                message = receiver.recv() => message,
+            };
+            let Some(first) = first else {
+                break;
+            };
+            let batch = collect_wake_verify_batch(&mut receiver, first, batch_max, window);
+            verify_and_enqueue_wake_batch(wake_auth, store, shard_id, batch);
+        }
+    });
+}
+
+fn collect_wake_verify_batch(
+    receiver: &mut tokio::sync::mpsc::Receiver<WakeVerifyRequest>,
+    first: WakeVerifyRequest,
+    batch_max: usize,
+    window: Duration,
+) -> Vec<WakeVerifyRequest> {
+    let mut batch = Vec::with_capacity(batch_max);
+    batch.push(first);
+    let deadline = std::time::Instant::now() + window;
+    while batch.len() < batch_max {
+        match receiver.try_recv() {
+            Ok(request) => batch.push(request),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_micros(50));
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-        };
-        let mut batch = Vec::with_capacity(batch_max);
-        batch.push(first);
-        let deadline = std::time::Instant::now() + window;
-        while batch.len() < batch_max {
-            match receiver.try_recv() {
-                Ok(request) => batch.push(request),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    if std::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_micros(50));
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
         }
-        verify_and_enqueue_wake_batch(wake_auth, store, shard_id, batch);
     }
+    batch
 }
 
 fn verify_and_enqueue_wake_batch(
