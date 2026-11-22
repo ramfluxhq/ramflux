@@ -234,7 +234,7 @@ impl FullReceiverBaseCopy {
             &self.scratch.path.join("private.db"),
             &self.key,
         )?;
-        let (counts, union) = super::receiver_projection::project_fixed_and(
+        let (counts, union) = super::receiver_projection::project_fixed(
             stage,
             &self.hash,
             &mut private,

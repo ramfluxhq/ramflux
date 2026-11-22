@@ -49,20 +49,11 @@ impl FullTransferStage<'_> {
         private: &mut BackupDatabase,
         observation: &FullTargetObservation,
     ) -> Result<FullScalarInputCounts, StorageError> {
-        project_fixed(self, hash, private, observation)
+        project_fixed(self, hash, private, observation, |_| Ok(())).map(|(counts, ())| counts)
     }
 }
-pub(super) fn project_fixed(
-    stage: &impl super::receiver_read::ReceiverInput,
-    hash: &str,
-    private: &mut BackupDatabase,
-    observation: &FullTargetObservation,
-) -> Result<FullScalarInputCounts, StorageError> {
-    project_fixed_and(stage, hash, private, observation, |_| Ok(())).map(|(counts, ())| counts)
-}
-
 /// Complete contribution normalization under this same whole-input private transaction.
-pub(super) fn project_fixed_and<T>(
+pub(super) fn project_fixed<T>(
     stage: &impl super::receiver_read::ReceiverInput,
     hash: &str,
     private: &mut BackupDatabase,
