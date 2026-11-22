@@ -234,18 +234,20 @@ impl FullReceiverBaseCopy {
             &self.scratch.path.join("private.db"),
             &self.key,
         )?;
-        let counts = super::receiver_projection::project_fixed(
+        let (counts, union) = super::receiver_projection::project_fixed_and(
             stage,
             &self.hash,
             &mut private,
             &self.observation,
-        )?;
-        let union = self.contributions.finish(
-            &self.scratch.path.join("contributions.db"),
-            &self.key,
-            &private,
-            stage,
-            &self.hash,
+            |private| {
+                self.contributions.finish(
+                    &self.scratch.path.join("contributions.db"),
+                    &self.key,
+                    private,
+                    stage,
+                    &self.hash,
+                )
+            },
         )?;
         let sealed = seal::CopySeal::capture(&self.scratch.path)?;
         super::receiver_materialization::Verification {

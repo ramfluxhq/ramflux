@@ -355,11 +355,19 @@ pub(super) fn encode_state(
 }
 impl Write for Limited {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.0.len().checked_add(bytes.len()).is_none_or(|length| length > PART_LIMIT) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "native history part bound",
-            ));
+        let length = self
+            .0
+            .len()
+            .checked_add(bytes.len())
+            .filter(|length| *length <= PART_LIMIT)
+            .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "native history part bound")
+        })?;
+        if length > self.0.capacity() {
+            let capacity = self.0.capacity().saturating_mul(2).max(length).min(PART_LIMIT);
+            let mut next = Zeroizing::new(Vec::with_capacity(capacity));
+            next.extend_from_slice(&self.0);
+            self.0 = next;
         }
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())

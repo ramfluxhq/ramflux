@@ -58,6 +58,17 @@ pub(super) fn project_fixed(
     private: &mut BackupDatabase,
     observation: &FullTargetObservation,
 ) -> Result<FullScalarInputCounts, StorageError> {
+    project_fixed_and(stage, hash, private, observation, |_| Ok(())).map(|(counts, ())| counts)
+}
+
+/// Complete contribution normalization under this same whole-input private transaction.
+pub(super) fn project_fixed_and<T>(
+    stage: &impl super::receiver_read::ReceiverInput,
+    hash: &str,
+    private: &mut BackupDatabase,
+    observation: &FullTargetObservation,
+    finish: impl FnOnce(&mut BackupDatabase) -> Result<T, StorageError>,
+) -> Result<(FullScalarInputCounts, T), StorageError> {
     stage.require_io()?;
     let record = stage.resume_record()?;
     let manifest = stage.forward_manifest(hash)?;
@@ -80,11 +91,12 @@ pub(super) fn project_fixed(
     for restrictive in [true, false] {
         project_pass(stage, hash, &mut pending, restrictive)?;
     }
+    let result = finish(pending.private)?;
     stage.require_io()?;
     stage.require_target(observation)?;
     pending.private.db.execute_batch("COMMIT")?;
     pending.committed = true;
-    Ok(counts)
+    Ok((counts, result))
 }
 
 fn project_pass(

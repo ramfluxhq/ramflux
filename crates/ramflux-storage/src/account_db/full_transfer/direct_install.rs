@@ -135,7 +135,7 @@ fn require_projection(
     Ok(())
 }
 
-fn require_capture(
+pub(super) fn require_capture(
     history: &FullDirectHistory,
     capture: Option<&OwnAuthoredCapture>,
     own: &str,

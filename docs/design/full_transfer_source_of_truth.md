@@ -379,3 +379,21 @@ erased observations are omitted from normalized content while original inputs
 remain separate provenance. The normal receipt-footprint triggers own future
 erasure. This owner does not establish first-hand origin, current permissions,
 watermark ordering or complete native transfer acceptance.
+
+## Complete direct contribution record
+
+FullDirectRecord binds the existing verified native frame to the contributor's
+actual display sender/time and actual OwnAuthoredCapture. It encodes separately
+bounded parts (native frame, 4096-byte sender and 4-MiB capture) in one closed
+private format; the authenticated account remains an independent read parameter.
+Capture re-encoding rejects ignored nested fields. Merging two original records
+keeps B's display values, selects a whole native version and retains an actual
+capture matching that version. It never invents envelope, sender or transport
+metadata. Non-default projection metadata still refuses pending its typed owner.
+
+The base projection now completes original-contribution normalization inside its
+existing whole-input transaction. It commits only after the normalized root and
+target observation succeed. Delta and current-B refresh already use their same
+whole-input transaction. No separate transaction owner or guard exemption was
+introduced. The complete record is business machinery; content/actor activation,
+raw graph closure, B-local journal and the direct native transfer are still open.
