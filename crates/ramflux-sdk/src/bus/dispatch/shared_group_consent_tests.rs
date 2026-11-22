@@ -168,8 +168,11 @@ async fn seal(
         ttl: 3600,
     };
     let sealed = contact.seal_routed_as(engine, &message, body, route).await?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),

@@ -308,7 +308,7 @@ fn own_copy(
         return Err("test: one own-copy material request required".into());
     }
     let envelopes = sibling_client.seal_own_copy_generated(
-        &config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
         draft,
         requests.into_iter().map(|_| SendMaterial { manifest: None, bundle: None }).collect(),
     )?;

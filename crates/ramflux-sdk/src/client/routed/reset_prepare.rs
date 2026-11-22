@@ -36,7 +36,7 @@ pub(crate) struct PairControlDraft {
 impl RamfluxClient {
     pub(crate) fn prepare_received_pair_reply(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         opened: &super::Opened,
         body: &[u8],
     ) -> Result<Option<Envelope>, SdkError> {
@@ -202,7 +202,7 @@ impl RamfluxClient {
     }
     pub(crate) fn seal_pair_control_prepared(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         draft: PairControlDraft,
         material: SendMaterial,
     ) -> Result<Option<Envelope>, SdkError> {
@@ -233,7 +233,7 @@ impl RamfluxClient {
     }
     pub(super) fn finish_pair_control_draft(
         &self,
-        config: &GatewaySessionConfig,
+        config: &crate::SealingConfig,
         mut draft: PairControlDraft,
         sealed: super::SealedRouted,
     ) -> Result<Envelope, SdkError> {

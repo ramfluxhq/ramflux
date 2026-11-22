@@ -7,6 +7,51 @@ use super::{BTreeMap, ReadableTable, SendAuthorityError, TableDefinition, reserv
 const CHARGES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("notification_resource_charges_v1");
 
+pub(crate) struct ChargeProbe<'a> {
+    pub root: &'a str,
+    pub slot: Option<&'a str>,
+    pub notify: bool,
+    pub key: &'a str,
+    pub units: u64,
+    pub bytes: u64,
+}
+
+/// True when this charge is already stored. A missing table is not a match.
+///
+/// # Errors
+/// Returns a storage error when the charge table cannot be read.
+pub(crate) fn charge_matches(
+    tx: &redb::ReadTransaction,
+    probe: &ChargeProbe<'_>,
+) -> Result<bool, SendAuthorityError> {
+    let bucket = charge_bucket(probe.root, probe.slot, probe.notify)?;
+    let table = match tx.open_table(CHARGES) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+        Err(error) => return Err(storage(error)),
+    };
+    let Some(value) = table.get(bucket.as_str()).map_err(storage)? else {
+        return Ok(false);
+    };
+    if value.value().len() > 8 * 1024 * 1024 {
+        return Err(SendAuthorityError::Capacity);
+    }
+    let rows: BTreeMap<String, (u64, u64)> =
+        ramflux_protocol::parse_i_json(value.value()).map_err(storage)?;
+    Ok(rows.get(probe.key) == Some(&(probe.units, probe.bytes)))
+}
+
+fn charge_bucket(
+    root: &str,
+    slot: Option<&str>,
+    notify: bool,
+) -> Result<String, SendAuthorityError> {
+    String::from_utf8(
+        ramflux_protocol::canonical_json_bytes(&(root, slot, notify)).map_err(storage)?,
+    )
+    .map_err(storage)
+}
+
 /// Replace one actual row/mirror charge in the writer's authoritative transaction.
 /// Each call's origin/notify partition is 48/16 units and 192/64 KiB.
 pub(crate) fn charge(
@@ -17,8 +62,7 @@ pub(crate) fn charge(
     key: &str,
     (bytes, units): (usize, u64),
 ) -> Result<(), SendAuthorityError> {
-    let bucket = ramflux_protocol::canonical_json_bytes(&(root, slot, notify)).map_err(storage)?;
-    let bucket = String::from_utf8(bucket).map_err(storage)?;
+    let bucket = charge_bucket(root, slot, notify)?;
     let mut table = tx.open_table(CHARGES).map_err(storage)?;
     let mut rows: BTreeMap<String, (u64, u64)> =
         match table.get(bucket.as_str()).map_err(storage)? {
@@ -78,10 +122,7 @@ pub(crate) fn uncharge(
     notify: bool,
     key: &str,
 ) -> Result<(), SendAuthorityError> {
-    let bucket = String::from_utf8(
-        ramflux_protocol::canonical_json_bytes(&(root, slot, notify)).map_err(storage)?,
-    )
-    .map_err(storage)?;
+    let bucket = charge_bucket(root, slot, notify)?;
     let mut table = tx.open_table(CHARGES).map_err(storage)?;
     let mut rows: BTreeMap<String, (u64, u64)> =
         match table.get(bucket.as_str()).map_err(storage)? {
