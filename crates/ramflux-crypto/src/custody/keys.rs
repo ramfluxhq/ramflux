@@ -59,6 +59,44 @@ impl MasterKey {
     pub fn public_key(&self) -> String {
         encode_base64url(self.0.verifying_key().to_bytes())
     }
+    /// Sign one directory binding during an explicit offline-master ceremony.
+    /// # Errors
+    /// Rejects invalid grammar and a commitment unrelated to this master.
+    pub fn sign_username_binding(
+        &self,
+        body: ramflux_protocol::username_directory::UsernameBindingBody,
+    ) -> Result<
+        ramflux_protocol::username_directory::UsernameBinding,
+        crate::username_directory::Error,
+    > {
+        crate::username_directory::sign_binding(&self.0, body)
+    }
+
+    /// Sign a detached directory profile without exposing master seed material.
+    /// # Errors
+    /// Rejects invalid profile fields and an unrelated root commitment.
+    pub fn sign_username_profile(
+        &self,
+        body: ramflux_protocol::username_directory::IdentityProfileV2Body,
+    ) -> Result<
+        ramflux_protocol::username_directory::SignedIdentityProfileV2,
+        crate::username_directory::Error,
+    > {
+        crate::username_directory::sign_profile(&self.0, body)
+    }
+
+    /// Sign exactly the closed directory operation vocabulary, including its nested binding.
+    /// # Errors
+    /// Rejects invalid fields, a substituted root and an invalid nested binding signature.
+    pub fn sign_username_operation(
+        &self,
+        body: ramflux_protocol::username_directory::UsernameOperationBody,
+    ) -> Result<
+        ramflux_protocol::username_directory::UsernameOperation,
+        crate::username_directory::Error,
+    > {
+        crate::username_directory::sign_operation(&self.0, body)
+    }
     /// Bind one fresh primary signing key to its certified range.
     /// # Errors
     /// Rejects a mismatched master, malformed certificate or serialization failure.

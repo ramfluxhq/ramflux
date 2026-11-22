@@ -76,7 +76,7 @@ Local CLI input alone may trim, lowercase and strip one presentation `@`.
 
 | Request method | Exact path | Remaining request members |
 |---|---|---|
-| `mutate` | `/v1/usernames/mutate` | `operation`, `profile` (explicit signed v2 or null). |
+| `mutate` | `/v1/usernames/mutate` | `phase` (`reserve`, `commit`, `abort`), `operation`, `profile` (explicit signed v2 or null). |
 | `status` | `/v1/usernames/status` | `operation_id` (explicit ID or null for current). |
 | `resolve` | `/v1/usernames/resolve` | Exact `name`, request `nonce`. |
 | `revalidate` | `/v1/usernames/revalidate` | `request`: existing closed HomeRevalidateRequest. |

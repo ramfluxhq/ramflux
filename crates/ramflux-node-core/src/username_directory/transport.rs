@@ -11,14 +11,33 @@ pub const MAX_REPORT_BYTES: usize = 1024 * 1024 + 16 * 1024;
 pub const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
 pub const REPORT_PROOF_DOMAIN: &str = "ramflux.identity.username_reporting_home.v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationPhase {
+    Reserve,
+    Commit,
+    Abort,
+}
+
 /// Exact canonical inner document; transported separately so its hash covers received bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirectoryRequest {
-    Mutate { operation: wire::UsernameOperation, profile: Option<wire::SignedIdentityProfileV2> },
-    Status { operation_id: Option<String> },
-    Resolve { name: String, nonce: String },
-    Revalidate { request: wire::HomeRevalidateRequest },
+    Mutate {
+        phase: MutationPhase,
+        operation: Box<wire::UsernameOperation>,
+        profile: Option<Box<wire::SignedIdentityProfileV2>>,
+    },
+    Status {
+        operation_id: Option<String>,
+    },
+    Resolve {
+        name: String,
+        nonce: String,
+    },
+    Revalidate {
+        request: wire::HomeRevalidateRequest,
+    },
 }
 
 impl DirectoryRequest {
@@ -36,10 +55,10 @@ impl DirectoryRequest {
     /// Refuses malformed inner records, names, IDs and all avatar candidates in this module.
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Mutate { operation, profile } => {
-                wire::encode(operation)?;
+            Self::Mutate { operation, profile, .. } => {
+                wire::encode(operation.as_ref())?;
                 if let Some(profile) = profile {
-                    wire::encode(profile)?;
+                    wire::encode(profile.as_ref())?;
                     require(profile.body.avatar.is_none(), "avatar_out_of_scope")?;
                 }
             }
@@ -101,12 +120,31 @@ pub struct ReportingChannel<'a> {
 }
 
 pub struct VerifiedReporter {
-    pub root: String,
+    pub(crate) root: String,
+    pub(crate) home: String,
+    pub(crate) master: ed25519_dalek::VerifyingKey,
+    pub(crate) history: ramflux_crypto::home_migration::VerifiedHome,
+    pub(crate) nonce: String,
+    pub(crate) expires_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeFloor {
+    pub epoch: u64,
+    pub hash: String,
     pub home: String,
-    pub master: ed25519_dalek::VerifyingKey,
-    pub history: ramflux_crypto::home_migration::VerifiedHome,
-    pub nonce: String,
-    pub expires_at: u64,
+}
+
+impl VerifiedReporter {
+    #[must_use]
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+    #[must_use]
+    pub fn home(&self) -> &str {
+        &self.home
+    }
 }
 
 /// # Errors
@@ -143,7 +181,7 @@ pub fn verify_reporting_request(
     value: &ReportingRequest,
     channel: &ReportingChannel<'_>,
     pin: &super::CenterPin,
-    retained: Option<&ramflux_protocol::home_migration::RecordEvidence>,
+    retained: Option<&HomeFloor>,
     now: u64,
 ) -> Result<VerifiedReporter> {
     let p = &value.proof.body;
@@ -181,15 +219,15 @@ pub fn verify_reporting_request(
     .map_err(|_| CheckpointError::Refused("proof_signature"))?;
     let history = &value.evidence.history;
     let first = history.predecessors.first().unwrap_or(&history.home);
-    if retained.is_none() {
-        require(
-            matches!(first.record, ramflux_protocol::home_migration::HomeRecord::Genesis { .. }),
-            "home_genesis",
-        )?;
+    require(
+        matches!(first.record, ramflux_protocol::home_migration::HomeRecord::Genesis { .. }),
+        "home_genesis",
+    )?;
+    let verified = ramflux_crypto::home_migration::verify_home_chain(history, first, now)
+        .map_err(|_| CheckpointError::Refused("home_history"))?;
+    if let Some(retained) = retained {
+        require(verified.extends(retained.epoch, &retained.hash), "home_floor")?;
     }
-    let verified =
-        ramflux_crypto::home_migration::verify_home_chain(history, retained.unwrap_or(first), now)
-            .map_err(|_| CheckpointError::Refused("home_history"))?;
     require(
         verified.evidence().record.account_anchor() == p.root
             && verified.home() == (channel.node_id, channel.node_key),
@@ -199,11 +237,9 @@ pub fn verify_reporting_request(
         &verified.evidence().authority.record.body.master_certificate.body.master_public_key,
     )
     .map_err(|_| CheckpointError::Refused("master_key"))?;
-    if let DirectoryRequest::Mutate { operation, profile } = &value.request {
+    if let DirectoryRequest::Mutate { operation, profile, .. } = &value.request {
         require(operation.body.principal_commitment == p.root, "operation_root")?;
-        ramflux_crypto::username_directory::verify_operation(&master, operation)?;
         if let Some(profile) = profile {
-            ramflux_crypto::username_directory::verify_profile(&master, profile)?;
             require(profile.body.principal_commitment == p.root, "profile_root")?;
         }
         if let Some(binding) = &operation.body.binding {
