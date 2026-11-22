@@ -9,7 +9,10 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CARD = ROOT / "crates/ramflux-card"
+CATALOG = ROOT / "crates/ramflux-protocol/catalogs/rf-card-v1.json"
 OUT = ROOT / "crates/ramflux-sdk/include/card"
+HOST_ABI = 5
+CATALOG_ID = "urn:ramflux:catalog:rf-card:1.0"
 
 
 def encode(value):
@@ -29,11 +32,13 @@ def main():
     signature = (OUT / "library.sig").read_bytes()
     public = (OUT / "library.pub").read_bytes()
     digest = hashlib.sha256(descriptor).hexdigest()
-    if len(signature) != 64 or len(public) != 32 or parsed["host_abi"] != 4:
+    if len(signature) != 64 or len(public) != 32 or parsed["host_abi"] != HOST_ABI:
         raise SystemExit("invalid card ABI or signature/key length")
+    if parsed.get("catalog") != CATALOG_ID:
+        raise SystemExit("catalog id mismatch")
     if parsed["bytecode_sha256"] != hashlib.sha256(bytecode).hexdigest():
         raise SystemExit("bytecode digest mismatch")
-    if parsed["catalog_sha256"] != hashlib.sha256((CARD / "catalog.json").read_bytes()).hexdigest():
+    if parsed["catalog_sha256"] != hashlib.sha256(CATALOG.read_bytes()).hexdigest():
         raise SystemExit("catalog digest mismatch")
     policy = dict(app_id=release["app_id"], package_id=release["package_id"],
                   minimum_epoch=release["security_epoch"], minimum_version=release["version"],
@@ -59,7 +64,7 @@ def main():
                 raise SystemExit(f"stale SDK card trust file: {name}")
         else:
             target.write_bytes(expected.encode("utf-8"))
-    print(f"CARD_TRUST_OK: ABI 4, {release['package_id']}, descriptor {digest}")
+    print(f"CARD_TRUST_OK: ABI {HOST_ABI}, {release['package_id']}, descriptor {digest}")
 
 
 if __name__ == "__main__":

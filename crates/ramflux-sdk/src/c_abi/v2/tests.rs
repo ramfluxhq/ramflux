@@ -886,7 +886,7 @@ fn bundled_card_trust_verifies_and_renders_all_components() -> Result<(), Box<dy
     let mut buffer = std::ptr::null_mut();
     assert_eq!(ramflux_v2_card_trust_package(&raw mut buffer), 0);
     let index = take_buffer(buffer);
-    assert_eq!(index["card_abi_major"], 4);
+    assert_eq!(index["card_abi_major"], 5);
     assert_eq!(index["release"]["app_id"], "ramflux.native");
     let decode = |name: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Ok(ramflux_protocol::decode_base64url(

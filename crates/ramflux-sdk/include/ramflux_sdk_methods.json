@@ -606,6 +606,87 @@
     },
     {
       "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.dispose",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.event",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.open",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.present",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.resume",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.slot",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.submit",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.suspend",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "card",
+      "key_export": false,
+      "name": "card.session.update",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
       "name": "contact.accept",

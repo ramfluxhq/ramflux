@@ -300,6 +300,9 @@ pub(crate) async fn dispatch_local_bus_request(
         "surface.send" | "surface.action" | "surface.resync" | "surface.request_resync" => {
             crate::bus::dispatch::surface::dispatch_surface(request, state, connection).await
         }
+        method if method.starts_with("card.") => {
+            crate::bus::dispatch::card_session::dispatch(request, state).await
+        }
         method if method.starts_with("message.") => {
             Box::pin(dispatch_message_bus_request(request, state, connection)).await
         }
