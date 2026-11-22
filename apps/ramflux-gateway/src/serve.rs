@@ -28,9 +28,6 @@ pub(crate) struct GatewayListenerContext {
     pub(crate) peers: GatewayPeerDirectory,
     pub(crate) router: RouterMeshClient,
     pub(crate) notify: NotifyHttpClient,
-    // T22-A1 / RQ-04: v2 shared-HMAC relay service key, compiled only under `itest-local-mint`.
-    #[cfg(feature = "itest-local-mint")]
-    pub(crate) relay_service_key: Vec<u8>,
     pub(crate) state: Arc<Mutex<ramflux_node_core::GatewayState>>,
     pub(crate) store: Arc<ramflux_node_core::GatewayRedbStore>,
     pub(crate) hub: Arc<GatewaySessionHub>,
@@ -59,8 +56,6 @@ pub(crate) fn serve_gateway_quic(
     let gateway_id = gateway_instance_id_from_env();
     crate::state::validate_gateway_mesh_identity(config, &gateway_id)?;
     let peers = gateway_peer_directory_from_env(config, &gateway_id)?;
-    #[cfg(feature = "itest-local-mint")]
-    let relay_service_key = gateway_relay_service_key(config)?;
     let context = GatewayListenerContext {
         custody,
         node_id: config.node_id.clone(),
@@ -68,8 +63,6 @@ pub(crate) fn serve_gateway_quic(
         peers,
         router,
         notify,
-        #[cfg(feature = "itest-local-mint")]
-        relay_service_key,
         state,
         store,
         hub: Arc::new(GatewaySessionHub::default()),
@@ -358,8 +351,6 @@ pub(crate) async fn serve_gateway_tcp_listener(
                 peers: context.peers,
                 router: context.router,
                 notify: context.notify,
-                #[cfg(feature = "itest-local-mint")]
-                relay_service_key: context.relay_service_key,
                 state: context.state,
                 store: context.store,
                 hub: context.hub,
@@ -374,36 +365,6 @@ pub(crate) async fn serve_gateway_tcp_listener(
             }
         });
     }
-}
-
-// T22-A1 / RQ-04: v2 shared-HMAC relay service-key loading, compiled only under `itest-local-mint`.
-// Production gateway builds contain neither the `RAMFLUX_RELAY_SERVICE_KEY_REF` lookup nor any
-// secret-ref resolver.
-#[cfg(feature = "itest-local-mint")]
-fn gateway_relay_service_key(
-    config: &ramflux_node_core::NodeServiceConfig,
-) -> anyhow::Result<Vec<u8>> {
-    let Some(secret_ref) = ramflux_node_core::environment::var("RAMFLUX_RELAY_SERVICE_KEY_REF")
-        .ok()
-        .or_else(|| config.relay.as_ref().and_then(|relay| relay.service_key_ref.clone()))
-    else {
-        anyhow::bail!("missing relay service_key_ref")
-    };
-    read_gateway_secret_ref(&secret_ref)
-}
-
-#[cfg(feature = "itest-local-mint")]
-fn read_gateway_secret_ref(secret_ref: &str) -> anyhow::Result<Vec<u8>> {
-    let value = if let Some(literal) = secret_ref.strip_prefix("literal:") {
-        literal.to_owned()
-    } else if let Some(name) = secret_ref.strip_prefix("env:") {
-        ramflux_node_core::environment::var(name)?
-    } else if let Some(path) = secret_ref.strip_prefix("file:") {
-        std::fs::read_to_string(path)?
-    } else {
-        anyhow::bail!("unsupported gateway relay secret ref scheme")
-    };
-    Ok(value.into_bytes())
 }
 
 fn gateway_forward_listen_addr(

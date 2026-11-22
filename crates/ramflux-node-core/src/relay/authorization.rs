@@ -32,10 +32,9 @@ pub struct GatewayRelayTokenV3IssueResponse {
 // ===========================================================================================
 // RQ-03-V3-T1: object relay v3 proof types + pure verification logic.
 //
-// This block is NOT wired into any production handler. It defines the asymmetric issuer-attestation
-// token (v3), the owner-signed access grant, the owner authorization proof and the per-invocation
-// requester proof-of-possession, plus pure verifiers and a capability/proof matrix. The existing v2
-// v3 uses Ed25519 authority; no shared-key token acceptor exists.
+// The production gateway and relay share the asymmetric issuer-attestation token, owner-signed
+// access grant, owner authorization proof and per-invocation requester proof of possession.
+// V3 uses Ed25519 authority; no shared-key token acceptor exists.
 // ===========================================================================================
 
 pub const OBJECT_RELAY_TOKEN_V3_VERSION: u32 = 3;
