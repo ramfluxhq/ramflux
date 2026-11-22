@@ -2,6 +2,8 @@
 """Docker v2 / Podman Compose 1.3-shaped CLI fixtures; never start containers."""
 import argparse
 import json
+import shutil
+import subprocess
 from pathlib import Path
 import sys
 
@@ -120,6 +122,8 @@ if normalized and normalized[0] == "compose":
             (root / "router-loaded-record").write_bytes(record.read_bytes() if record.exists() else b"")
             loaded_version.write_text(version)
         deployed.touch()
+        for service in services:
+            (root / "volume-data" / f"demo-test_{service}-redb").mkdir(parents=True, exist_ok=True)
         token = (state / "owner.token").read_text().strip()
         for service in services:
             resources[f"id-ramflux-{service}"] = {
@@ -170,12 +174,56 @@ if args[:2] in (["rm", "-f"], ["network", "rm"], ["volume", "rm"]):
         sys.exit("container has dependent containers which must be removed before it")
     if target not in resources or resources[target]["project"] != "demo-test":
         sys.exit("refusing removal outside the selected project")
+    if args[:2] == ["volume", "rm"]:
+        if deployed.exists():
+            sys.exit("cannot remove an in-use volume")
+        shutil.rmtree(root / "volume-data" / target, ignore_errors=True)
     del resources[target]
     save_resources()
     if not any(value["kind"] == "container" and value["project"] == "demo-test"
                for value in resources.values()):
         deployed.unlink(missing_ok=True)
     sys.exit(0)
+
+if args[:2] == ["volume", "create"]:
+    target = args[-1]
+    labels = dict(value.split("=", 1) for index, value in enumerate(args)
+                  if index and args[index - 1] == "--label")
+    resources[target] = {"kind": "volume", "project": labels["com.docker.compose.project"],
+                         "owner": labels["org.ramflux.demo.owner"]}
+    (root / "volume-data" / target).mkdir(parents=True, exist_ok=True)
+    save_resources()
+    print(target)
+    sys.exit(0)
+if args[:2] == ["volume", "inspect"] and "--format" not in args:
+    target = args[-1]
+    if target not in resources:
+        sys.exit("no such volume")
+    item = resources[target]
+    print(json.dumps([{"Name": target, "Labels": {
+        "org.ramflux.demo.owner": item["owner"], "com.docker.compose.project": item["project"],
+    }}]))
+    sys.exit(0)
+if args and args[0] == "run":
+    if deployed.exists():
+        sys.exit("state helper must run only after compose down")
+    mount = args[args.index("--mount") + 1]
+    target = next(value[4:] for value in mount.split(",") if value.startswith("src="))
+    if target != "demo-test_relay-redb" or target not in resources:
+        sys.exit("unexpected service-state helper target")
+    script = args[-1]
+    if "--entrypoint=sh" not in args or "-c" not in args:
+        sys.exit("unexpected state helper")
+    operation = next((kind for kind in ("backup", "reset", "restore")
+                      if "# ramflux-state-" + kind in script), None)
+    if operation == "restore" and "--interactive" not in args:
+        sys.exit("restore helper must attach its archive stdin")
+    if control.get("backup_exit") and operation == "backup":
+        sys.exit(control["backup_exit"])
+    if control.get("restore_exit") and operation == "restore":
+        sys.exit(control["restore_exit"])
+    script = script.replace("cd /state", "cd " + str(root / "volume-data" / target))
+    sys.exit(subprocess.run(["sh", "-c", script], check=False, timeout=30).returncode)
 
 service_filter = next((value.split("=", 2)[-1] for value in args
                        if value.startswith("label=com.docker.compose.service=")), None)
