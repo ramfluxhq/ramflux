@@ -260,13 +260,13 @@ crates/ramflux-sdk/src/client/native_test_support/authored_edit_erasure.rs | ret
 crates/ramflux-sdk/src/client/native_test_support/live_own_copy.rs | seal_live_copy | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
 crates/ramflux-sdk/src/client/native_test_support/peer_control_send.rs | send_frame | 1 | E | excluded=test-only scripted gateway fixture decodes locally produced frames; never an ingress admission
 crates/ramflux-sdk/src/client/native_test_support/sibling_erasure.rs | authored | 1 | D | admitted-before-persist; test-support conversion of an in-memory value, not an ingress decoder
-crates/ramflux-sdk/src/client/object.rs | ack_dm_attachment_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/object.rs | ack_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/object.rs | download_object_from_relay_via_gateway | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/object.rs | fetch_dm_attachment_chunk_via_relay_quic | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/object.rs | fetch_dm_attachment_chunk_via_relay_quic | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/object.rs | get_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-sdk/src/client/object.rs | put_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-sdk/src/client/object/relay_transport.rs | ack_dm_attachment_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-sdk/src/client/object/relay_transport.rs | ack_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-sdk/src/client/object/relay_transport.rs | fetch_dm_attachment_chunk_via_relay_quic | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/object/relay_transport.rs | fetch_dm_attachment_chunk_via_relay_quic | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/object/relay_transport.rs | get_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-sdk/src/client/object/relay_transport.rs | put_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/object_history_ownership.rs | from_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_copy.rs | open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_copy.rs | own_copy_target_messages | 1 | E | excluded=typed application, media or own-copy adapter outside Envelope/Ack/Nack containment; native evidence is validated by its dedicated strict verifier
