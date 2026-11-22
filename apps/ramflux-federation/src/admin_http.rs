@@ -181,9 +181,6 @@ fn admin_response(
         ("GET", "/healthz") => HttpResponse::json(&serde_json::json!({
             "service": "ramflux-federation-admin", "status": "ok"
         }))?,
-        ("POST", "/internal/home-submit/forward") => {
-            handle_admin_forward_request(&request, context, admin_token)?
-        }
         ("POST", ramflux_node_core::MIGRATION_LOCAL_PATH) => {
             let local = ramflux_protocol::home_migration::decode(
                 &request.body,
@@ -256,37 +253,6 @@ fn handle_admin_mesh_observability_request(
     HttpResponse::json(&snapshot)
 }
 
-fn handle_admin_forward_request(
-    request: &ramflux_node_core::NodeHttpRequest,
-    context: &FederationAdminHttpContext,
-    admin_token: Option<&str>,
-) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
-    let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
-        match ramflux_protocol::parse_i_json(&request.body) {
-            Ok(request) => request,
-            Err(source) => {
-                tracing::debug!(%source, "federation admin forward rejected by I-JSON");
-                return Ok(HttpResponse::raw_json(
-                    "400 Bad Request",
-                    serde_json::to_vec(&ramflux_protocol::i_json_rejection_body()).map_err(
-                        |source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()),
-                    )?,
-                ));
-            }
-        };
-    require_admin_token(admin_token, &request.admin_token)?;
-    log_admin_forward_request(&request);
-    let response = handle_s8_forward_envelope(
-        &request,
-        context.state.as_ref(),
-        context.store.as_ref(),
-        context.router.as_ref(),
-        &context.discovery,
-    )?;
-    log_admin_forward_response(&response);
-    HttpResponse::json(&response)
-}
-
 fn handle_home_node_forward_request(
     request: &ramflux_node_core::NodeHttpRequest,
     context: &FederationAdminHttpContext,
@@ -330,16 +296,6 @@ fn log_admin_request(
     );
 }
 
-fn log_admin_forward_request(request: &ramflux_node_core::FederatedEnvelopeForwardRequest) {
-    tracing::info!(
-        source_node_id = %request.source_node_id,
-        target_node_id = %request.target_node_id,
-        envelope_id = %request.envelope.envelope_id,
-        target_delivery_id = %request.envelope.target_delivery_id,
-        "federation admin forward request decoded"
-    );
-}
-
 fn log_home_node_forward_request(request: &ramflux_node_core::FederatedEnvelopeForwardRequest) {
     tracing::info!(
         source_node_id = %request.source_node_id,
@@ -347,15 +303,6 @@ fn log_home_node_forward_request(request: &ramflux_node_core::FederatedEnvelopeF
         envelope_id = %request.envelope.envelope_id,
         target_delivery_id = %request.envelope.target_delivery_id,
         "federation local home-node migration forward requested"
-    );
-}
-
-fn log_admin_forward_response(response: &ramflux_node_core::FederatedEnvelopeForwardResponse) {
-    tracing::info!(
-        source_node_id = %response.source_node_id,
-        target_node_id = %response.target_node_id,
-        outcome = %response.delivery.outcome,
-        "federation admin forward returned"
     );
 }
 

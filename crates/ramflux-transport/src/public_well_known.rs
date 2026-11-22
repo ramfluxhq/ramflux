@@ -38,14 +38,37 @@ pub fn fetch_server_well_known(
 /// # Errors
 /// Returns an error when the endpoint is empty, cleartext, or not a public address.
 pub fn public_mesh_endpoint(endpoint: &str, allow_loopback: bool) -> Result<(), TransportError> {
+    checked_mesh_address(endpoint, allow_loopback).map(|_| ())
+}
+
+/// Resolve and classify the addresses, returning the exact socket the caller must dial.
+/// # Errors
+/// Refuses empty resolution, non-public targets, and unauthorized loopback addresses.
+pub fn checked_mesh_address(
+    endpoint: &str,
+    allow_loopback: bool,
+) -> Result<SocketAddr, TransportError> {
+    checked_mesh_address_until(endpoint, allow_loopback, Instant::now() + FETCH_TIMEOUT)
+}
+
+/// Resolve a mesh socket within the caller's existing absolute exchange deadline.
+/// # Errors
+/// Refuses expired deadlines, non-public targets, and unauthorized loopback addresses.
+pub fn checked_mesh_address_until(
+    endpoint: &str,
+    allow_loopback: bool,
+    deadline: Instant,
+) -> Result<SocketAddr, TransportError> {
+    if Instant::now() >= deadline {
+        return Err(discovery_failed());
+    }
     let host_port = mesh_host_port(endpoint)?;
-    let deadline = Instant::now() + FETCH_TIMEOUT;
     let addresses = crate::bounded_http_dns::resolve(host_port, deadline)?;
     if addresses.is_empty() || addresses.iter().any(|addr| !allowed_mesh(addr.ip(), allow_loopback))
     {
         return Err(egress_refused());
     }
-    Ok(())
+    addresses.first().copied().ok_or_else(egress_refused)
 }
 
 fn https_get_public(node_id: &str) -> Result<Vec<u8>, TransportError> {
@@ -63,7 +86,7 @@ fn https_get_public(node_id: &str) -> Result<Vec<u8>, TransportError> {
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .timeout(FETCH_TIMEOUT)
+        .timeout(deadline.checked_duration_since(Instant::now()).ok_or_else(discovery_failed)?)
         .connect_timeout(FETCH_TIMEOUT)
         .resolve(node_id, chosen)
         .build()
@@ -76,11 +99,24 @@ fn https_get_public(node_id: &str) -> Result<Vec<u8>, TransportError> {
     if response.content_length().is_some_and(|len| len > RECORD_LIMIT as u64) {
         return Err(record_too_large());
     }
-    let bytes = response.bytes().map_err(|_| discovery_failed())?;
-    if bytes.len() > RECORD_LIMIT {
-        return Err(record_too_large());
+    read_bounded_record(response)
+}
+
+fn read_bounded_record(mut response: impl Read) -> Result<Vec<u8>, TransportError> {
+    let mut body = Vec::new();
+    let mut scratch = [0; 8192];
+    loop {
+        let limit = (RECORD_LIMIT + 1 - body.len()).min(scratch.len());
+        let buffer = scratch.get_mut(..limit).ok_or_else(discovery_failed)?;
+        let count = response.read(buffer).map_err(|_| discovery_failed())?;
+        if count == 0 {
+            return Ok(body);
+        }
+        if body.len() + count > RECORD_LIMIT {
+            return Err(record_too_large());
+        }
+        body.extend_from_slice(buffer.get(..count).ok_or_else(discovery_failed)?);
     }
-    Ok(bytes.to_vec())
 }
 
 fn http_get_loopback(socket: SocketAddr) -> Result<Vec<u8>, TransportError> {

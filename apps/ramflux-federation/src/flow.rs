@@ -205,7 +205,9 @@ fn resolve_forward_peer(
         peer_ca_len = peer_ca_cert_pem.len(),
         "federation forward pinned peer CA found"
     );
-    Ok(ForwardPeer { endpoint: route.endpoint.clone(), peer_ca_cert_pem })
+    let endpoint =
+        crate::peer_pin::checked_forward_endpoint(&request.target_node_id, &route.endpoint)?;
+    Ok(ForwardPeer { endpoint, peer_ca_cert_pem })
 }
 
 fn send_signed_forward_to_peer(

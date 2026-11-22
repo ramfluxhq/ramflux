@@ -40,6 +40,7 @@ pub mod rawq_budget;
 #[cfg(test)]
 mod rawq_budget_tests;
 mod relay_quic_pool;
+mod test_node_endpoints;
 mod tls_config;
 mod types;
 
@@ -106,7 +107,10 @@ pub use mesh_tls::{
     authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
-pub use public_well_known::{fetch_server_well_known, public_mesh_endpoint};
+pub use public_well_known::{
+    checked_mesh_address, checked_mesh_address_until, fetch_server_well_known, public_mesh_endpoint,
+};
+pub use test_node_endpoints::{TestNodeEndpoints, test_node_discovery_origin, test_node_endpoints};
 
 /// Worst-case wall-clock budget for a router post, including QUIC probing and HTTP fallback.
 #[must_use]

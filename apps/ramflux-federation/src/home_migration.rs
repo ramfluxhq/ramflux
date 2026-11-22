@@ -82,6 +82,11 @@ pub(crate) fn local(
                     return Err(failure(Refusal::PeeringUnavailable));
                 }
                 let peer = admitted(&context.state, call.audience())?;
+                let endpoint = crate::peer_pin::checked_forward_endpoint_until(
+                    call.audience(),
+                    &peer.endpoint,
+                    deadline,
+                )?;
                 let tls = ramflux_transport::BoundedHttpTls::new(
                     &context.router.tls,
                     "ramflux-federation",
@@ -95,7 +100,7 @@ pub(crate) fn local(
                 .map_err(transport)?;
                 let bytes =
                     ramflux_transport::bounded_http_post(ramflux_transport::BoundedHttpPost {
-                        endpoint: &peer.endpoint,
+                        endpoint: &endpoint,
                         path: MIGRATION_PEER_PATH,
                         body: &body,
                         tls: Some(&tls),

@@ -44,21 +44,26 @@ pub(crate) fn ensure_forward_pin(
     if snapshot.can_deliver_to(target, now) && snapshot.pinned_peer_ca_cert_pem(target).is_some() {
         return Ok(());
     }
-    let (record, test_fetch) = fetch_record(target, now)?;
+    snapshot.admit_new_peer_pin(target, now)?;
+    admit_discovery_attempt(now)?;
+    let record = fetch_record(target, now)?;
     if record.node_id != target {
         return Err(invalid("well-known node_id mismatch"));
     }
-    ramflux_transport::public_mesh_endpoint(&record.node_endpoint, test_fetch)
-        .map_err(|error| invalid(&error.to_string()))?;
+    checked_forward_endpoint(target, &record.node_endpoint)?;
     install(state, store, local, &record, now)
 }
 
 fn fetch_record(
     target: &str,
     now: u64,
-) -> Result<(FederationServerRecord, bool), ramflux_node_core::NodeCoreError> {
-    let socket = test_socket()?;
-    let test_fetch = socket.is_some();
+) -> Result<FederationServerRecord, ramflux_node_core::NodeCoreError> {
+    let fixture = ramflux_transport::test_node_endpoints(target)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let socket = match fixture {
+        Some(fixture) => Some(fixture.discovery),
+        None => test_socket()?,
+    };
     let bytes = ramflux_transport::fetch_server_well_known(target, socket)
         .map_err(|error| invalid(&error.to_string()))?;
     if bytes.len() > RECORD_LIMIT {
@@ -67,7 +72,7 @@ fn fetch_record(
     let record: FederationServerRecord =
         ramflux_protocol::parse_i_json(&bytes).map_err(|error| invalid(&error.to_string()))?;
     ramflux_node_core::verify_federation_server_record(&record, now)?;
-    Ok((record, test_fetch))
+    Ok(record)
 }
 
 fn install(
@@ -171,4 +176,49 @@ fn node_id_ok(value: &str) -> bool {
 
 fn invalid(message: &str) -> ramflux_node_core::NodeCoreError {
     ramflux_node_core::NodeCoreError::ItestHttp(message.to_owned())
+}
+
+/// Resolve once per forward and pass only the checked numeric socket to both transports.
+pub(crate) fn checked_forward_endpoint(
+    target: &str,
+    endpoint: &str,
+) -> Result<String, ramflux_node_core::NodeCoreError> {
+    checked_forward_endpoint_until(
+        target,
+        endpoint,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+}
+
+pub(crate) fn checked_forward_endpoint_until(
+    target: &str,
+    endpoint: &str,
+    deadline: std::time::Instant,
+) -> Result<String, ramflux_node_core::NodeCoreError> {
+    let fixture = ramflux_transport::test_node_endpoints(target)
+        .map_err(|error| invalid(&error.to_string()))?;
+    // Only an exact node/socket mapping can authorize loopback mesh egress.
+    let allow_loopback = fixture.is_some();
+    let socket = ramflux_transport::checked_mesh_address_until(endpoint, allow_loopback, deadline)
+        .map_err(|error| invalid(&error.to_string()))?;
+    if socket.ip().is_loopback() && fixture.is_some_and(|node| node.mesh != socket) {
+        return Err(invalid("test mesh socket does not match configured node"));
+    }
+    Ok(socket.to_string())
+}
+
+fn admit_discovery_attempt(now: u64) -> Result<(), ramflux_node_core::NodeCoreError> {
+    // Charge before network IO, including invalid records and failed fetches. Pin caps are
+    // independently checked before the fetch and again in the durable installation transaction.
+    static ATTEMPTS: std::sync::Mutex<std::collections::VecDeque<u64>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    let mut attempts = ATTEMPTS.lock().map_err(|_| invalid("discovery admission unavailable"))?;
+    while attempts.front().is_some_and(|time| now.saturating_sub(*time) >= 3600) {
+        attempts.pop_front();
+    }
+    if attempts.len() >= 32 {
+        return Err(invalid("federation discovery attempt rate is full"));
+    }
+    attempts.push_back(now);
+    Ok(())
 }

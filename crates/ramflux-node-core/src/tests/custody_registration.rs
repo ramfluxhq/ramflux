@@ -538,6 +538,7 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
         &[],
         &b_store,
         crate::RouterEnvelopeOrigin::Federation,
+        "node-a",
     )?;
     assert_eq!(source.root_commitment(), publication.record.body.account_anchor);
     assert_eq!(serde_json::to_vec(&message)?, bytes);
@@ -549,7 +550,8 @@ fn forwarded_unregistered_at_b_v3_sender_is_admitted_via_native_foreign_authorit
             &message,
             &[],
             &b_store,
-            crate::RouterEnvelopeOrigin::Federation
+            crate::RouterEnvelopeOrigin::Federation,
+            "node-a",
         )?,
         source
     );
@@ -588,7 +590,7 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     a.refresh_registered_envelope_authority(&mut message)?;
     let origin = crate::RouterEnvelopeOrigin::Federation;
     // Positive arm: the same signed sender is admitted before observing newer evidence.
-    b.authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)?;
+    b.authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin, "node-a")?;
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
     let verified = ramflux_crypto::custody::verify_record(&publication.record, now, None, None)?;
     let revoked = crate::CustodyPublication {
@@ -600,7 +602,8 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
             &message,
             std::slice::from_ref(&revoked),
             &b_store,
-            origin
+            origin,
+            "node-a",
         )
         .is_err()
     );
@@ -615,7 +618,13 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     );
     assert!(
         reopened
-            .authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)
+            .authenticated_native_forwarded_source_with_floors(
+                &message,
+                &[],
+                &b_store,
+                origin,
+                "node-a",
+            )
             .is_err()
     );
     let mut conflict = revoked.record.body.clone();
@@ -627,7 +636,8 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
             &message,
             &[conflict],
             &b_store,
-            origin
+            origin,
+            "node-a",
         ),
         Err(NodeCoreError::CustodyConflict { .. })
     ));
@@ -648,7 +658,13 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
     );
     assert!(
         reopened
-            .authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin)
+            .authenticated_native_forwarded_source_with_floors(
+                &message,
+                &[],
+                &b_store,
+                origin,
+                "node-a",
+            )
             .is_err()
     );
     drop((a, b, reopened, a_store, b_store));
