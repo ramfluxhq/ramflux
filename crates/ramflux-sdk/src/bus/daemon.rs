@@ -288,6 +288,9 @@ pub(crate) async fn dispatch_local_bus_request(
         "itest.agent.approve_once" => {
             crate::bus::dispatch::itest_agent::approve_once(request, state)
         }
+        "username.mutate" | "username.status" | "username.resolve" | "profile.update" => {
+            super::username_directory::dispatch(request, state).await
+        }
         method if method.starts_with("node.") => {
             crate::bus::dispatch::node::dispatch_node_bus_request(request, state).await
         }

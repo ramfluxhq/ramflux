@@ -147,6 +147,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
+        SdkError::UsernameDirectoryRefused(code) => code.as_str().into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
         SdkError::CustodyVault(reason) => reason.as_str().into(),
@@ -226,6 +227,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     }
     match error {
         SdkError::GeneratedApi(error) => error.name,
+        SdkError::UsernameDirectoryRefused(_) => "UsernameDirectoryRefused",
         SdkError::Search(error) => error.code(),
         SdkError::EditConflict { .. } => "edit_conflict",
         SdkError::OperationReconciliationRequired(_) => "OperationReconciliationRequired",

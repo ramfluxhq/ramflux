@@ -190,6 +190,7 @@ methods! {
         "node.list",
     ];
     NeedsNetwork(Always) => Actor: [
+        "username.mutate", "username.status", "username.resolve", "profile.update",
         "a2i.append",
         "call.answer",
         "call.hangup",

@@ -85,14 +85,21 @@ impl NativeUsernameService {
         request.validate().map_err(|e| NodeCoreError::InvalidConfiguration(e.to_string()))?;
         if !wire::enabled()
             || request.center != self.center.public_identity()
-            || request.declaration.body.account_anchor != source.root_commitment()
-            || request.declaration.body.home_node != self.node.node_id()
         {
             return Ok(wire::NativeUsernameReply::Refused {
                 failure: super::failure(wire::DirectoryCode::OwnershipMismatch),
             });
         }
-        router.ensure_home_genesis(store, &self.node, &request.declaration, now)?;
+        if let Some(declaration) = &request.declaration {
+            if declaration.body.account_anchor != source.root_commitment() || declaration.body.home_node != self.node.node_id() {
+                return Err(NodeCoreError::Unauthorized("username declaration owner mismatch".into()));
+            }
+            router.ensure_home_genesis(store, &self.node, declaration, now)?;
+        }
+        if let wire::NativeUsernameAction::Mutate { operation, .. } = &request.action
+            && operation.body.principal_commitment != source.root_commitment() {
+            return Err(NodeCoreError::Unauthorized("username operation owner mismatch".into()));
+        }
         let _lease = store.acquire_home_operation(source.root_commitment())?;
         let history = self.history(router, store, source.root_commitment(), now)?;
         self.backend.execute(

@@ -213,6 +213,8 @@ pub enum SdkError {
     AttachmentDeleted,
     #[error("home migration refused: {0:?}")]
     HomeMigrationRefused(ramflux_protocol::home_migration::Refusal),
+    #[error("username directory refused: {}", .0.as_str())]
+    UsernameDirectoryRefused(ramflux_protocol::username_directory::DirectoryCode),
     #[error("custody networking refused: {0}")]
     CustodyNetwork(#[from] ramflux_protocol::custody::CustodyRefusal),
     #[error("custody networking refused: Capacity; {}", crate::custody::capacity_hint::message(.capacity))]

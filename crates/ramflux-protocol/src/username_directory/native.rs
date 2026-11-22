@@ -8,6 +8,40 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
+impl super::DirectoryCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationRequired => "authentication_required",
+            Self::InvalidUsername => "invalid_username",
+            Self::InvalidProfile => "invalid_profile",
+            Self::InvalidAvatar => "invalid_avatar",
+            Self::UsernameTaken => "username_taken",
+            Self::UsernameHeld => "username_held",
+            Self::UsernameReserved => "username_reserved",
+            Self::RateLimited => "rate_limited",
+            Self::Capacity => "capacity",
+            Self::DirectoryUnavailable => "directory_unavailable",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::OperationPending => "operation_pending",
+            Self::StaleEpoch => "stale_epoch",
+            Self::Replay => "replay",
+            Self::OwnershipMismatch => "ownership_mismatch",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::NotFound => "not_found",
+            Self::KeyChanged => "key_changed",
+            Self::NameChanged => "name_changed",
+            Self::StaleProfile => "stale_profile",
+            Self::ProfileRollback => "profile_rollback",
+            Self::ProfileEquivocation => "profile_equivocation",
+            Self::ProfileDowngrade => "profile_downgrade",
+            Self::ClockUnsafe => "clock_unsafe",
+            Self::MigrationRequired => "migration_required",
+            Self::AccountDeleted => "account_deleted",
+        }
+    }
+}
+
 impl super::ProfileKind {
     /// Public profile classification follows native authority; workflows use the bot category.
     #[must_use]
@@ -98,7 +132,7 @@ pub fn parse_directory_origin(value: &str) -> Result<DirectoryOrigin, super::Cod
 #[serde(deny_unknown_fields)]
 pub struct NativeUsernameRequest {
     pub center: NativeDirectoryPin,
-    pub declaration: crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,
+    pub declaration: Option<crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>>,
     pub action: NativeUsernameAction,
 }
 
@@ -150,20 +184,21 @@ impl NativeUsernameRequest {
         use super::{Wire, codec::need};
         need(crate::canonical_json_bytes(self)?.len() <= 16384, "native_request_size")?;
         self.center.validate()?;
-        let declaration = crate::canonical_json_bytes(&self.declaration)?;
+        if let Some(declaration) = &self.declaration {
+        let declaration = crate::canonical_json_bytes(declaration)?;
         crate::home_migration::decode::<
             crate::home_migration::Signed<crate::home_migration::HomeDeclarationV1>,
         >(&declaration, 8192)
         .map_err(|_| super::CodecError::Field("home_declaration"))?;
+        }
         match &self.action {
             NativeUsernameAction::Mutate { operation, profile } => {
                 operation.validate()?;
                 profile.validate()?;
                 need(profile.body.avatar.is_none(), "avatar_out_of_scope")?;
                 need(
-                    operation.body.principal_commitment == self.declaration.body.account_anchor
-                        && profile.body.principal_commitment
-                            == self.declaration.body.account_anchor,
+                    operation.body.principal_commitment == profile.body.principal_commitment
+                        && self.declaration.as_ref().is_none_or(|d| d.body.account_anchor == operation.body.principal_commitment),
                     "native_root",
                 )
             }

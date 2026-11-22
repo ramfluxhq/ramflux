@@ -141,7 +141,7 @@ impl HomeService {
         if call.request.center != self.client.pin.public_identity() {
             return refuse("independent username centre pins disagree");
         }
-        let root = &call.request.declaration.body.account_anchor;
+        let root = call.history.home.record.account_anchor();
         let _permit = self.budgets.acquire(root)?;
         self.client.verify_history(root, &call.history)?;
         let master = ramflux_crypto::verifying_key_from_base64url(
