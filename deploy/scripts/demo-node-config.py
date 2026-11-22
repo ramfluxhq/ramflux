@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate, render, snapshot, and restore an isolated production demo project."""
 import hashlib
+import demo_node_state
 import ipaddress
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from urllib.parse import urlsplit
 
 SERVICES = ("gateway", "router", "notify", "federation", "relay", "signaling", "retention")
@@ -761,10 +763,22 @@ def prepare(repo, state, command, validate_only=False):
     verify_existing_network()
     if validate_only:
         return owner
+    service_state = demo_node_state.checkpoint(sys.modules[__name__], state, command, owner)
+    if service_state:
+        previous_snapshot = service_state["backup_snapshot"]
+        if command == "upgrade":
+            target_owner["snapshot_history"][-2] = previous_snapshot
+            target_owner["state_reset"] = {
+                "service": service_state["service"], "backup_snapshot": previous_snapshot,
+            }
+    elif command == "upgrade":
+        target_owner.pop("state_reset", None)
     atomic_json(pending_marker, target_owner)
     transaction = {
         "command": command, "previous_snapshot": previous_snapshot, "target_snapshot": target_snapshot,
     }
+    if service_state:
+        transaction["service_state"] = service_state
     if not previous_snapshot:
         transaction["initial_owner"] = owner
         transaction["initial_mode"] = stat.S_IMODE(state.stat().st_mode)
@@ -1091,6 +1105,10 @@ def main():
             router_admin_settings(state, sys.argv[4])
         elif action == "prepare":
             prepare(repo, state, sys.argv[4])
+        elif action == "state-plan":
+            demo_node_state.plan(sys.modules[__name__], state, sys.argv[4], sys.argv[5])
+        elif action == "state-apply":
+            demo_node_state.apply(sys.modules[__name__], state, sys.argv[5], sys.argv[4])
         elif action == "commit":
             commit(state, sys.argv[4])
         elif action == "recover":
@@ -1122,7 +1140,9 @@ def main():
             merge_runtime_assignments(state, sys.argv[4])
         else:
             sys.exit("invalid demo configuration action")
-    except SnapshotError as error:
+    except subprocess.SubprocessError:
+        sys.exit("service-state runtime command failed; retain the transaction and run recover")
+    except (SnapshotError, OSError, ValueError, tarfile.TarError) as error:
         if action == "recover" or (action in ("image-version", "router-admin-settings") and sys.argv[4] == "recover"):
             sys.exit(f"cannot recover last-good snapshot: {error}; {MANUAL_RECOVERY}")
         sys.exit(str(error))
