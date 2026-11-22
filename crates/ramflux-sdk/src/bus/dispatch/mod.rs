@@ -31,6 +31,13 @@ pub(crate) mod itest_agent;
     not(ramflux_production)
 ))]
 pub(crate) mod itest_migration;
+#[cfg(all(
+    feature = "itest-memory-vault",
+    ramflux_itest,
+    not(ramflux_release_profile),
+    not(ramflux_production)
+))]
+pub(crate) mod itest_transfer_export;
 pub mod message;
 mod message_delete;
 pub mod node;

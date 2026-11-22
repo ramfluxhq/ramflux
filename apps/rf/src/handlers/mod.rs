@@ -43,6 +43,8 @@ mod node_custody {
 pub(crate) mod object;
 pub(crate) mod surface;
 pub(crate) mod task;
+#[cfg(feature = "itest-memory-vault")]
+pub(crate) mod transfer_export_probe;
 
 pub(crate) use crate::cli::*;
 pub(crate) use crate::utils::*;

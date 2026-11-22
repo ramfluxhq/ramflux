@@ -82,5 +82,9 @@ async fn run() -> Result<(), RfError> {
         Command::Admin(command) => handlers::admin::handle_admin(command),
         Command::Diag(command) => handlers::diag::handle(cli.socket, command).await,
         Command::Attachment(command) => handlers::attachment::handle(cli.socket, command).await,
+        #[cfg(feature = "itest-memory-vault")]
+        Command::TransferExportProbe(command) => {
+            handlers::transfer_export_probe::handle(cli.socket, command).await
+        }
     }
 }

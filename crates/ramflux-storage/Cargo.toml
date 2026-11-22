@@ -25,7 +25,7 @@ hmac = { workspace = true, features = ["zeroize"] }
 sha2 = { workspace = true, features = ["zeroize"] }
 subtle = { workspace = true }
 chacha20poly1305 = "0.10.1"
-rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint", "hooks"] }
+rusqlite = { version = "0.42", default-features = false, features = ["backup", "blob", "cache", "fallible_uint", "hooks", "limits"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
@@ -40,6 +40,8 @@ itest-work-budget = []
 default = ["sqlcipher"]
 sqlcipher = ["rusqlite/bundled-sqlcipher"]
 durability-test-hooks = []
+# Integration-only transfer export probes (rf itest builds); never in production graphs.
+itest-transfer-probe = []
 test-instrumentation = ["rusqlite/hooks"]
 insecure-test-sqlite = ["rusqlite/bundled"]
 

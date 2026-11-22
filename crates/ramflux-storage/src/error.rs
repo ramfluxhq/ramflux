@@ -112,6 +112,9 @@ pub enum StorageError {
     InvalidRecoveryState { recovery_id: String, expected: String },
     #[error("invalid pairing field: {0}")]
     PairingField(&'static str),
+    /// A transfer export or received export file was refused; the value names the step.
+    #[error("transfer export refused at step: {0}")]
+    TransferExportRefused(&'static str),
 }
 
 impl StorageError {

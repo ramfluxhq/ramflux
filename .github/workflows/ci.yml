@@ -48,6 +48,9 @@ jobs:
       - name: Envelope TTL inventory
         run: python3 -B scripts/check-content-ttl.py
 
+      - name: Primary-transfer export classification
+        run: python3 -B scripts/check-transfer-export.py
+
       - name: Production feature guard self-tests
         run: python3 -B scripts/test_production_features.py
 

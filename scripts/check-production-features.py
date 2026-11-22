@@ -35,7 +35,7 @@ def check_tree(graph):
             "ramflux-sdk": ("itest-memory-vault", "test-support"),
             "ramflux-node-core": ("durability-test-hooks", "itest-http"),
             "ramflux-gateway": ("itest-http",),
-            "ramflux-storage": ("durability-test-hooks",),
+            "ramflux-storage": ("durability-test-hooks", "itest-transfer-probe"),
         }.get(name, ())
         for feature in forbidden:
             if feature in features:

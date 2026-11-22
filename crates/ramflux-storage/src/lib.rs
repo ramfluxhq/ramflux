@@ -146,6 +146,8 @@ pub use encryption::{
 pub use error::StorageError;
 pub use event_store::{EventStore, ProjectionStore};
 pub use records::*;
+#[cfg(feature = "itest-transfer-probe")]
+pub use account_db::transfer_export::probe::{ProbeExport, ProbeOpen, itest_transfer_open};
 
 #[cfg(test)]
 mod contact_request_tests;
