@@ -61,6 +61,13 @@ impl UsernameFloor {
             .map_err(|_| refused(Code::SignatureInvalid))?;
         if self.operation.body.principal_commitment != self.profile.body.principal_commitment
             || self.operation.body.binding != self.binding
+            || self.operation.body.profile.version != 2
+            || self.operation.body.profile.epoch != self.profile.body.epoch
+            || self.operation.body.profile.hash.as_ref()
+                != Some(
+                    &ramflux_crypto::username_directory::profile_hash_v2(&self.profile)
+                        .map_err(|_| refused(Code::InvalidProfile))?,
+                )
             || ramflux_crypto::identity_root_commitment(&key)
                 != self.operation.body.principal_commitment
         {

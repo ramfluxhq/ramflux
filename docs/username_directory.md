@@ -236,7 +236,8 @@ and final-head CI still gate release.
 performs the master ceremony locally and submits only signed public records. The
 phrase is read from a private owned file or hidden terminal input. Neither recovery
 words nor master material enter the daemon bus or the durable operation journal.
-`rf username status`, `resolve`, `release`, `delete` and `profile` use the same
+`rf username status`, `resolve`, `release`, `delete`, `profile` and
+`visibility --discoverable true|false` use the same
 account identity and explicit centre pin. Bio/profile updates never populate avatar.
 
 `rf contact add @name --account ACCOUNT` resolves the exact name, persists observed
@@ -254,3 +255,28 @@ Retries read fresh home/centre status before resending identical signed bytes, u
 bounded backoff up to sixty seconds, and never extend operation expiry or rebase a
 signed change. Lock and shutdown cancel these jobs before writer teardown. Restored
 bytes and expired uncertain intents do not become autonomous live send work.
+
+
+## Restore and pending deletion
+
+Backup imports and expired uncertain intents retain at most eight inactive public
+candidates per account, with a total encoded bound of128KiB. Their presence never
+retries a mutation. The authenticated native repair action checks the current
+master and terminal home, then consumes a new pinned-centre revalidation. Only an
+exact already-committed operation/binding/profile tuple repairs home bytes; the
+original commit must fall inside the signed operation lifetime. Local restrictions
+and a different pending restrictive intent remain in force throughout the repair.
+
+A newly master-authorized delete can replace another pending change once a
+committed v2 profile exists. The account journal preserves the predecessor as an
+inactive hint, and the home stores deletion and suppression before network I/O.
+If the centre still has a reservation, the witness derives the existing atomic
+abort/delete pair. Retained-pair retries reconstruct the original request head and
+time; they never become a standalone abort or a newly based delete.
+
+Anonymous reporting refusals have a separate bound of sixteen live contexts,
+within the existing sixty-four global contexts. They contain no claimed account
+or home and can carry only authentication, rate, capacity, unavailable or version
+failures. They cannot enter a positive response builder or disclose name conflicts.
+Their encrypted writes use the same primary-application, witness-boot, incarnation,
+lease, head and channel fence as every authenticated response.

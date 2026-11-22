@@ -218,6 +218,7 @@ pub(super) fn verify_profile(
         let native = &reporter.history.evidence().authority.record.body;
         ensure(
             profile.body.principal_id == native.principal_id
+                && profile.body.display_name == native.profile.display_name
                 && profile.body.kind == w::ProfileKind::from_principal_kind(native.principal_kind),
             Code::InvalidProfile,
         )?;

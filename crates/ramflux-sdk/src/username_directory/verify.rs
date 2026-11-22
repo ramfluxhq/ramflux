@@ -50,6 +50,7 @@ fn verify_current(
     }
     if profile.body.avatar.is_some()
         || profile.body.principal_id != native.principal_id
+        || profile.body.display_name != native.profile.display_name
         || profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
         || profile.body.principal_commitment != native.account_anchor
         || receipt.body.principal_commitment != native.account_anchor

@@ -565,9 +565,9 @@ impl HomeDirectory {
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
         if let Some(id) = operation_id {
             let roots = tx.open_table(ROOTS).map_err(storage)?;
-            if !read_root(&roots, root)?
+            if read_root(&roots, root)?
                 .and_then(|state| state.intent)
-                .is_some_and(|intent| intent.operation.body.operation_id == id)
+                .is_none_or(|intent| intent.operation.body.operation_id != id)
             {
                 return Ok(());
             }

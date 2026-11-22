@@ -130,6 +130,9 @@ pub fn prepare_username_draft(
             w::Action::ProfileUpdate
         }
     };
+    if profile.display_name != native.body.profile.display_name {
+        return Err(w::DirectoryCode::InvalidProfile.into());
+    }
     let next_epoch = expected_epoch.checked_add(1).ok_or(w::DirectoryCode::Capacity)?;
     let binding = name.map(|name| w::UsernameBindingBody {
         name,

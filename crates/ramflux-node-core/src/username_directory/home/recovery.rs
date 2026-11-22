@@ -55,7 +55,12 @@ impl HomeDirectory {
             observe(state, &live)?;
             let same =
                 state.intent.as_ref().is_some_and(|intent| intent.operation == candidate.operation);
-            if same || op.action == w::Action::Delete {
+            let expired_predecessor = live.pending_receipt.is_none()
+                && state.intent.as_ref().is_some_and(|intent| {
+                    now >= intent.operation.body.expires_at
+                        && op.next_epoch > intent.operation.body.expected_epoch
+                });
+            if same || expired_predecessor || op.action == w::Action::Delete {
                 state.intent = None;
             }
             state.deleted |= op.action == w::Action::Delete;

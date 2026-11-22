@@ -159,6 +159,7 @@ impl HomeService {
             w::NativeUsernameAction::Recover { operation, profile } => {
                 let native = &call.history.home.authority.record.body;
                 if profile.body.principal_id != native.principal_id
+                    || profile.body.display_name != native.profile.display_name
                     || profile.body.kind
                         != w::ProfileKind::from_principal_kind(native.principal_kind)
                 {
@@ -205,6 +206,7 @@ impl HomeService {
         deadline: Instant,
     ) -> Result<w::NativeUsernameReply> {
         if profile.body.principal_id != native.principal_id
+            || profile.body.display_name != native.profile.display_name
             || profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
         {
             return Err(

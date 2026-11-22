@@ -156,6 +156,7 @@ impl HomeService {
         crypto::verify_operation(&master, &view.operation)?;
         let native = &history.home.authority.record.body;
         if view.profile.body.principal_id != native.principal_id
+            || view.profile.body.display_name != native.profile.display_name
             || view.profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind)
         {
             return refuse("username native profile classification mismatch");
@@ -219,6 +220,12 @@ impl HomeService {
         Ok(self.directory.prepare_publication(directory::HomePublicationTarget { root, channel }, live, &master, crate::now_unix_seconds()?, |view| {
             if view.binding.as_ref() != Some(&request.binding) || view.receipt.body.profile != request.resolve.body.profile {
                 return Err(directory::CheckpointError::Directory(w::DirectoryCode::StaleEpoch));
+            }
+            let native = &history.home.authority.record.body;
+            if view.profile.body.principal_id != native.principal_id
+                || view.profile.body.display_name != native.profile.display_name
+                || view.profile.body.kind != w::ProfileKind::from_principal_kind(native.principal_kind) {
+                return Err(directory::CheckpointError::Directory(w::DirectoryCode::InvalidProfile));
             }
             let reply = FetchReply::Profile { view: Box::new(view.clone()), history: Box::new(history), nonce: request.nonce };
             let body = ramflux_protocol::canonical_json_bytes(&reply).map_err(|_| directory::CheckpointError::Refused("home_response_encoding"))?;
