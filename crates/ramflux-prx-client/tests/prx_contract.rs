@@ -72,6 +72,77 @@ struct Daemon {
     port: u16,
     child: Option<Child>,
     http: reqwest::Client,
+    /// False only for the row that documents what a group-writable state directory does.
+    check_ancestors: bool,
+}
+
+/// The base directory of every daemon state dir: `RAMFLUX_PRX_STATE_ROOT`, else `$HOME/prx-live`.
+/// Never `/tmp` or `/opt/ops`: PRX refuses its recovery key under a group- or other-writable
+/// ancestor, and then every turn's terminal write fails (PRX, 2026-11-22).
+fn state_base() -> PathBuf {
+    match std::env::var_os("RAMFLUX_PRX_STATE_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None => PathBuf::from(
+            std::env::var_os("HOME").expect("test: HOME or RAMFLUX_PRX_STATE_ROOT must be set"),
+        )
+        .join("prx-live"),
+    }
+}
+
+/// G6 budget admission refuses an unpriced model, so the stub's model gets a price row; the
+/// prices are dummies and the stub charges nothing.
+fn priced(provider: &str, extra: &str) -> String {
+    format!(
+        "{extra}\n[cost.prices.\"{provider}/stub-model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 0.0\ncache_write = 0.0\n"
+    )
+}
+
+/// The temporary directory for the daemon and the harness: `RAMFLUX_PRX_TMPDIR`, else
+/// `<state base>/tmp`. Created 0700; the daemon gets it as `TMPDIR`, so nothing it creates with
+/// mktemp lands under `/tmp` or `/opt/ops`.
+fn tmp_base() -> PathBuf {
+    match std::env::var_os("RAMFLUX_PRX_TMPDIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => state_base().join("tmp"),
+    }
+}
+
+/// Creates `dir` (and parents) as 0700 whatever the umask.
+fn ensure_private_dir(dir: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .unwrap_or_else(|error| panic!("test: create {}: {error}", dir.display()));
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+/// Fails fast, naming the directory, when `dir` or any ancestor is group- or other-writable.
+fn check_private_ancestors(dir: &Path) {
+    check_one_chain(dir);
+    check_one_chain(&tmp_base());
+}
+
+fn check_one_chain(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("test: stat {}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert!(
+            mode & 0o022 == 0,
+            "test: state directory ancestor {} has mode {:o} (group- or other-writable). PRX refuses \
+             its recovery key under such an ancestor, and every turn's terminal write then fails. \
+             Set RAMFLUX_PRX_STATE_ROOT to a private path (for example $HOME/prx-live).",
+            path.display(),
+            mode
+        );
+        current = path.parent();
+    }
 }
 
 impl Daemon {
@@ -89,12 +160,7 @@ impl Daemon {
     /// Like `prepare`, but the default provider is `provider` (no credential is stored for it).
     /// Used with a `ModelStub`, so that no request leaves the host.
     fn prepare_with_provider(provider: &str, extra: &str) -> Self {
-        // G6 budget admission refuses an unpriced model (PRX: "unpriced model"), so the stub's
-        // model gets a price row; the prices are dummies, the stub charges nothing.
-        let priced = format!(
-            "{extra}\n[cost.prices.\"{provider}/stub-model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 0.0\ncache_write = 0.0\n"
-        );
-        Self::prepare_config(provider, "stub-model", &priced, false)
+        Self::prepare_config(provider, "stub-model", &priced(provider, extra), false)
     }
 
     fn prepare_state(extra: &str, default_credential: bool) -> Self {
@@ -102,10 +168,44 @@ impl Daemon {
     }
 
     fn prepare_config(provider: &str, model: &str, extra: &str, default_credential: bool) -> Self {
+        Self::prepare_in(&state_base(), provider, model, extra, default_credential, true)
+    }
+
+    /// A daemon whose state dir is under `base`, with the ancestor check off. Used only by the row
+    /// that documents the group-writable case.
+    fn prepare_unchecked_in(base: &Path, provider: &str, extra: &str) -> Self {
+        Self::prepare_in(base, provider, "stub-model", &priced(provider, extra), false, false)
+    }
+
+    fn prepare_in(
+        base: &Path,
+        provider: &str,
+        model: &str,
+        extra: &str,
+        default_credential: bool,
+        check_ancestors: bool,
+    ) -> Self {
         let bin = prx_binary();
-        let dir = TempDir::new().expect("test: temp dir");
-        std::fs::create_dir_all(dir.path().join("cfg")).expect("test: config dir");
-        std::fs::create_dir_all(dir.path().join("workspace")).expect("test: workspace dir");
+        ensure_private_dir(&tmp_base());
+        // Private by construction: the base and the state dir are 0700 whatever the umask.
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(base)
+                .expect("test: state base dir");
+            let _ = std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = TempDir::new_in(base).expect("test: temp dir under the state base");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("test: chmod state dir");
+        }
+        // cfg and workspace are 0700 too: PRX checks every ancestor of its recovery path.
+        ensure_private_dir(&dir.path().join("cfg"));
+        ensure_private_dir(&dir.path().join("workspace"));
         let port = {
             let listener =
                 std::net::TcpListener::bind("127.0.0.1:0").expect("test: free loopback port");
@@ -120,7 +220,10 @@ impl Daemon {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("test: http client");
-        let daemon = Self { bin, dir, port, child: None, http };
+        let daemon = Self { bin, dir, port, child: None, http, check_ancestors };
+        if check_ancestors {
+            check_private_ancestors(daemon.dir.path());
+        }
         if default_credential {
             daemon.credential_set("openrouter", DEFAULT_PROVIDER_KEY);
         }
@@ -140,6 +243,7 @@ impl Daemon {
         command
             .env("OPENPRX_CONFIG_DIR", self.dir.path().join("cfg"))
             .env("OPENPRX_WORKSPACE", self.dir.path().join("workspace"))
+            .env("TMPDIR", tmp_base())
             .env("RUST_LOG", "warn");
         command
     }
@@ -164,6 +268,9 @@ impl Daemon {
     }
 
     fn start(&mut self) {
+        if self.check_ancestors {
+            check_private_ancestors(self.dir.path());
+        }
         let out =
             File::create(self.dir.path().join("daemon.out")).expect("test: daemon stdout file");
         let err =
@@ -208,7 +315,7 @@ impl Daemon {
     fn error_lines(&self) -> Vec<String> {
         let log = std::fs::read_to_string(self.dir.path().join("daemon.out")).unwrap_or_default();
         log.lines()
-            .filter(|line| line.contains("ERROR"))
+            .filter(|line| line.contains("ERROR") || line.contains("recovery"))
             .rev()
             .take(12)
             .map(|line| line.chars().take(400).collect())
@@ -1756,8 +1863,9 @@ async fn k_b2a_turn_replay_conflict_main_key_and_cancel_of_ended_run() {
         assert_eq!(
             job.status,
             JobState::Succeeded,
-            "K-B2-1: the stub completes the turn; job error: {:?}",
-            job.error
+            "K-B2-1: the stub completes the turn; job error: {:?}; daemon: {:?}",
+            job.error,
+            daemon.error_lines()
         );
         report("K-B2-1");
 
@@ -2392,14 +2500,12 @@ async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
     .await;
 }
 
-/// PRX-DEVIATION row (found at the pin, reported to the controller): a turn that ends `failed`
-/// because the provider answered 500 gets no durable terminal row. Its replay therefore reads
-/// `running` (the rule "a job that ended here without a confirmed terminal reads as running")
-/// instead of the documented `failed`. The row asserts what the daemon does, with the daemon's
-/// own ERROR lines, so the deviation is recorded and not hidden.
+/// K-B2-17: a turn that ends `failed` (provider answers 500) replays as `failed`, and a resend
+/// runs nothing. (Was an observed deviation at the first run; it passes with the state directory
+/// and TMPDIR under a private path.)
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
-async fn k_b2a_failed_turn_replay_observed_deviation() {
+async fn k_b2a_failed_turn_replay_is_failed() {
     bounded(async {
         let stub = ModelStub::start(Duration::ZERO).await;
         let mut daemon =
@@ -2426,7 +2532,7 @@ async fn k_b2a_failed_turn_replay_observed_deviation() {
             .post_turn(&caps, RF_SESSION, &rf_message(id, fail1.clone(), "fail me"))
             .await
             .expect("F-2: replay answers");
-        while started.elapsed() < Duration::from_secs(20)
+        while started.elapsed() < WAIT_DEADLINE
             && replay.disposition
                 == (TurnDisposition::Replayed { status: RunState::Running, code: None })
         {
@@ -2436,20 +2542,76 @@ async fn k_b2a_failed_turn_replay_observed_deviation() {
                 .await
                 .expect("F-2: replay answers");
         }
-        eprintln!(
-            "ROW F-2 DEVIATION: documented replay of a failed turn is failed; observed {:?} after {:?}; daemon ERROR lines: {:?}",
+        assert_eq!(
             replay.disposition,
+            TurnDisposition::Replayed { status: RunState::Failed, code: None },
+            "K-B2-17: failed, replayed; waited {:?}; daemon: {:?}",
             started.elapsed(),
             daemon.error_lines()
         );
         assert_eq!(
-            replay.disposition,
-            TurnDisposition::Replayed { status: RunState::Running, code: None },
-            "F-2: observed deviation (documented: failed)"
+            daemon_job_total(&daemon).await,
+            jobs_before,
+            "K-B2-17: the failed key admits no job"
         );
-        assert_eq!(daemon_job_total(&daemon).await, jobs_before, "F-3: the failed key admits no job");
-        report("F-2 (deviation recorded)");
+        report("K-B2-17");
         daemon.stop();
+    })
+    .await;
+}
+
+/// PIN-296A-STATE (documents a requirement; at this pin it asserts what the daemon does). A state
+/// dir under a group-writable ancestor: PRX refuses its recovery key ("unsafe recovery ancestor"),
+/// admission lets the turn in, and the terminal write then fails, so the job ends `failed` with
+/// "terminal cleanup persistence failed". The next PRX repin is expected to flip this to a coded
+/// refusal up front (`storage_unavailable`, reason `recovery_unavailable`): when it does, this row
+/// must change to assert the refusal.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn pin_296a_state_group_writable_ancestor_turn_admitted_terminal_fails() {
+    bounded(async {
+        use std::os::unix::fs::PermissionsExt;
+        let base = state_base().join("gw-probe");
+        std::fs::create_dir_all(&base).expect("test: group-writable probe base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o775))
+            .expect("test: chmod probe base");
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_unchecked_in(&base, &stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "gw1", &stub.provider(), true).await;
+        let gw1 = Target::Named(AgentName::parse("gw1").expect("test: name"));
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-gw-turn-0001", gw1, "probe"))
+            .await
+            .expect("PIN-296A-STATE: admission lets the turn in");
+        assert_eq!(turn.disposition, TurnDisposition::Admitted, "PIN-296A-STATE: admitted");
+        let job = wait_job_terminal(&client, &caps, &turn.job_id).await;
+        let error = job.error.clone().unwrap_or_default();
+        // Observed at this pin (2026-11-22, QA): the job SUCCEEDS with a group-writable ancestor,
+        // and the daemon logs the recovery refusal. PRX's description said the terminal write
+        // fails. The row asserts the observation and prints the daemon's recovery lines.
+        eprintln!(
+            "ROW PIN-296A-STATE observed job {:?} error {:?}; daemon: {:?}",
+            job.status,
+            job.error,
+            daemon.error_lines()
+        );
+        assert_eq!(
+            job.status,
+            JobState::Succeeded,
+            "PIN-296A-STATE: observed Succeeded (PRX described failed); error {error:?}; daemon: {:?}",
+            daemon.error_lines()
+        );
+        report("PIN-296A-STATE (group-writable ancestor: admitted; observed terminal Succeeded)");
+        daemon.stop();
+        drop(daemon);
+        let _ = std::fs::remove_dir_all(&base);
     })
     .await;
 }
