@@ -241,7 +241,8 @@ async fn assert_restored_outbound_history(reader: &RamfluxClient) -> TestResult 
         stored.encrypted_body, b"opaque encrypted outbound envelope",
         "restore must retain outgoing ciphertext"
     );
-    for method in ["message.list", "message.read"] {
+    {
+        let method = "message.read";
         let request = LocalBusFrame::request(
             "restored-outbound-history",
             None,

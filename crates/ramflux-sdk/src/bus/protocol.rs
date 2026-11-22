@@ -582,65 +582,6 @@ pub struct LocalBusGroupMemberKickRequest {
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMemberBanRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub member_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupInviteCreateRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub invitee_id: String,
-    pub invitee_signing_public_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invitee_principal_commitment: Option<String>,
-    pub target_delivery_id: String,
-    #[serde(default = "default_group_invite_role")]
-    pub role: String,
-    pub expires_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub federation: Option<LocalBusFederationRoute>,
-}
-
-fn default_group_invite_role() -> String {
-    "member".to_owned()
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupInviteAcceptRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub invite_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_delivery_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_principal_commitment: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub federation: Option<LocalBusFederationRoute>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-pub struct LocalBusGroupMessageDeleteRequest {
-    pub group_id: String,
-    pub actor_id: String,
-    pub message_id: String,
-    #[serde(default = "default_group_message_delete_scope")]
-    pub delete_scope: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-fn default_group_message_delete_scope() -> String {
-    "group_tombstone".to_owned()
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusGroupSendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<ramflux_protocol::message::Content>,

@@ -137,10 +137,10 @@ pub(super) async fn activated_group_unrouted_replay_refused() -> Result<(), SdkE
         now_unix_timestamp(),
     )?;
     let request = LocalBusFrame::request(
-        "group.receive",
+        "group.read",
         Some("bob".into()),
         "group",
-        "group.receive",
+        "group.read",
         json!({"group_id":"g","conversation_id":"thread","limit":32}),
     );
     let refused = Box::pin(crate::bus::account_runtime::head_refresh::with_receive_prepared(
@@ -157,7 +157,7 @@ pub(super) async fn activated_group_unrouted_replay_refused() -> Result<(), SdkE
     let read = refused?;
     assert_eq!(
         read.response_body["durable_reader"], "message.read",
-        "active group.receive only selects the generated durable reader"
+        "active group.read only selects the generated durable reader"
     );
     assert!(
         receiver.client.direct_messages("thread")?.is_empty(),

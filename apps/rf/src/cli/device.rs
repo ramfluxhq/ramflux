@@ -15,10 +15,6 @@ pub(crate) struct DeviceCommand {
 #[derive(Subcommand)]
 pub(crate) enum DeviceAction {
     Revoke(DeviceRevoke),
-    /// Export the current device's root-bound public authorization for legacy migration.
-    Authorize(AccountSelector),
-    /// Migrate all legacy devices using independently root-signed authorization files.
-    Migrate(DeviceMigrate),
     /// Observe a root-signed device set and apply revocation/key-rotation safety changes.
     Refresh(DeviceRefresh),
     List(AccountSelector),
@@ -56,13 +52,6 @@ pub(crate) struct DeviceSyncExport {
     pub(crate) chunk_size: Option<usize>,
 }
 
-#[derive(Args)]
-pub(crate) struct DeviceMigrate {
-    #[arg(allow_hyphen_values = true, long)]
-    pub(crate) account: String,
-    #[arg(long = "authorization-file")]
-    pub(crate) authorizations: Vec<PathBuf>,
-}
 #[derive(Args)]
 pub(crate) struct DeviceRefresh {
     #[arg(allow_hyphen_values = true, long)]

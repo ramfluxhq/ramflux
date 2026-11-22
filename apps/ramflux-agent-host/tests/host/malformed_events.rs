@@ -42,20 +42,20 @@ impl AgentBus for RowBus {
                 return Err(Error::Bus);
             }
         }
-        let mut value = if method == "message.list" && body["conversation_id"] == "dm" {
+        let mut value = if method == "message.read" && body["conversation_id"] == "dm" {
             let mut value = self.inner.inner.request(method, body, op).await?;
             value["message"]["sender_id"] = json!("human-principal");
             value
         } else {
             self.inner.request(method, body, op).await?
         };
-        if method == "message.list" && self.faults.contains(&Fault::RetiredMessageShape) {
+        if method == "message.read" && self.faults.contains(&Fault::RetiredMessageShape) {
             return Ok(json!({"messages":[{
                 "conversation_id":"dm", "message_id":"m11", "sender_id":"human-device",
                 "body_utf8":"@agent ping"
             }]}));
         }
-        if method == "message.list" && self.faults.contains(&Fault::MissingRoot) {
+        if method == "message.read" && self.faults.contains(&Fault::MissingRoot) {
             value["message"]["author"]["account_anchor"] = Value::Null;
         }
         if method == "identity.directory" && self.faults.contains(&Fault::MissingRoot) {

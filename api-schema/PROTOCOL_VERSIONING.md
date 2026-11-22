@@ -165,7 +165,7 @@ Current request methods include:
 - device: `device.list`
 - message and conversation: `message.submit`, `message.receive`,
   `message.ack`, `message.delete`, `message.receipt.delivered`,
-  `message.receipt.read`, `message.list`, `message.read`,
+  `message.receipt.read`, `message.read`,
   `conversation.disappearing.set`, `conversation.disappearing.expire`,
   `conversation.mute`
 - contacts: `contact.add`, `contact.accept`, `contact.request`,
@@ -174,7 +174,7 @@ Current request methods include:
   `contact.unblock`, `contact.rejected`
 - groups: `group.create`, `group.member.add`, `group.member.remove`,
   `group.members`, `group.list`, `group.send`, `group.read`,
-  `group.receive`, `group.sender_key.export`, `group.sender_key.import`
+  `group.sender_key.export`, `group.sender_key.import`
 - objects: `object.put`, `object.get`, `object.list`, `object.share`,
   `object.import`, `object.delete`
 - calls and bots: `call.invite`, `call.answer`, `call.hangup`,

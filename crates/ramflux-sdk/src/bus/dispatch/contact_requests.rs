@@ -10,12 +10,7 @@ pub(super) async fn dispatch(
     id: &str,
 ) -> Result<Option<LocalBusDispatchResult>, SdkError> {
     let account = local_bus_account_mut(state, id)?;
-    let method = match request.method.as_str() {
-        "contact.request.accept" => "contact.accept",
-        "contact.request.decline" => "contact.decline",
-        "contact.request.block" => "contact.block",
-        other => other,
-    };
+    let method = request.method.as_str();
     match method {
         "contact.requests.list" => {
             return Ok(Some(local_bus_ok(account.client.contact_requests_list()?)));

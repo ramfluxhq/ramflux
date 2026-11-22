@@ -34,8 +34,7 @@ meaning uses a new name.
 
 ## Requests
 
-All three shapes use the local bus reader `message.read` (alias
-`message.list`), domain `message`. The selectors are mutually exclusive.
+All three shapes use the local bus reader `message.read`, domain `message`. The selectors are mutually exclusive.
 
 | Shape | Body | Response |
 |---|---|---|
@@ -46,7 +45,7 @@ All three shapes use the local bus reader `message.read` (alias
 `limit` is 1..=100 and defaults to 100. A response is at most 768 KiB encoded;
 a batch that would exceed it is shortened and reports that more remains.
 
-Agent-host uses the single-message shape through `message.list` for incoming
+Agent-host uses the single-message shape through `message.read` for incoming
 prompts and again before sending an output. It requires this schema, the exact
 conversation and message identifiers, `state = content`, `kind = message`, and
 `is_own = false`. It resolves the sender by `author.account_anchor`; device

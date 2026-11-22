@@ -224,10 +224,8 @@ pub(crate) fn capture_mcp_event(
 fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     let body = &request.body;
-    if matches!(
-        request.method.as_str(),
-        "group.send" | "group.receive" | "group.read" | "group.create"
-    ) && body.get("conversation_id").is_some()
+    if matches!(request.method.as_str(), "group.send" | "group.read" | "group.create")
+        && body.get("conversation_id").is_some()
     {
         ramflux_protocol::message::dm_scope::validate_group(required(body, "conversation_id")?)
             .map_err(|_| SdkError::InboundRejected("reserved DM conversation namespace".into()))?;

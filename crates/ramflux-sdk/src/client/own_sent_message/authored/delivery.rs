@@ -24,7 +24,20 @@ struct Work {
     envelope: Option<ramflux_protocol::Envelope>,
     next_at: i64,
     attempts: u32,
+    /// When this copy was first held for its target's enrollment history; 0 while never held.
+    #[serde(default)]
+    held_since: i64,
 }
+
+/// How long an authored copy waits for the enrollment history of its target. The wait exists so a
+/// copy never arrives ahead of the pages that create its conversation; it must end when those pages
+/// do not come (a failed history job, a transfer that cannot complete), or the copy stays held for
+/// ever. Ten minutes is several times the whole retry schedule of the history courier (page
+/// attempts back off to a minute, a stalled chain restarts every two minutes), so a healthy
+/// transfer is never overtaken. A copy released after the limit can only arrive ahead of its pages
+/// if they are still missing after ten minutes; holding it longer would lose it for good, and that
+/// is no longer the ordering race the hold exists for.
+const HOLD_LIMIT_SECS: i64 = 600;
 
 pub(crate) struct Plan {
     #[cfg(test)]
@@ -130,6 +143,7 @@ impl RamfluxClient {
                         envelope: None,
                         next_at: 0,
                         attempts: 0,
+                        held_since: 0,
                     };
                     let pending = format!("{PENDING}{staging_id}");
                     let (count, bytes) = db.actor_state_usage(PENDING)?;
@@ -172,8 +186,21 @@ impl RamfluxClient {
                 continue;
             }
             let now = crate::time::now_unix_timestamp();
-            if work.next_at > now || self.authored_target_awaits_history(&work)? {
+            if work.next_at > now {
                 continue;
+            }
+            if self.authored_target_awaits_history(&work)? {
+                if work.held_since == 0 {
+                    work.held_since = now;
+                    db.persist_message_actor_state(&work.owner, &key, &work)?;
+                }
+                if now.saturating_sub(work.held_since) < HOLD_LIMIT_SECS {
+                    continue;
+                }
+                tracing::warn!(
+                    held_secs = now.saturating_sub(work.held_since),
+                    "authored copy released: the enrollment history of its target did not finish in time"
+                );
             }
             let message = self.authored_history_message(config, &work)?;
             let request = if work.envelope.is_some() {
@@ -209,6 +236,29 @@ impl RamfluxClient {
             return Ok(false);
         };
         Ok(self.generated_history_transfer_done(&target)? == Some(false))
+    }
+
+    /// Test hook: pretend every held copy has waited `secs` already (`reset` forgets the wait and
+    /// the retry backoff instead).
+    #[cfg(test)]
+    pub(crate) fn age_authored_holds_for_test(
+        &self,
+        secs: i64,
+        reset: bool,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        for key in db.actor_state_keys(PENDING)? {
+            let Some(mut work) = db.load_actor_state::<Work>(&key)? else { continue };
+            if reset {
+                work.held_since = 0;
+                work.next_at = 0;
+                work.attempts = 0;
+            } else {
+                work.held_since = crate::time::now_unix_timestamp().saturating_sub(secs);
+            }
+            db.persist_message_actor_state(&work.owner, &key, &work)?;
+        }
+        Ok(())
     }
 
     fn authored_work_current(&self, work: &Work) -> Result<bool, SdkError> {

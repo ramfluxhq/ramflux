@@ -49,7 +49,7 @@ impl AgentBus for RoutedBus {
             );
         }
         let mut value = self.inner.request(method, body.clone(), operation).await?;
-        if method == "message.list" {
+        if method == "message.read" {
             value["message"]["sender_id"] = json!("human-principal");
         }
         if method == "identity.directory" {

@@ -38,9 +38,8 @@ pub(crate) async fn receive_failure(
 pub(crate) async fn pass(_: SessionContext, writer: Writer) -> Result<bool, SdkError> {
     let prepared = writer
         .apply(|account| {
-            let draft = account
-                .client
-                .prepare_due_pair_reset(&account.gateway_config, now_unix_timestamp())?;
+            let config = account.sealing_config()?;
+            let draft = account.client.prepare_due_pair_reset(&config, now_unix_timestamp())?;
             plan(account, draft)
         })
         .await;

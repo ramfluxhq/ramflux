@@ -11,7 +11,7 @@ pub(crate) async fn read(
     id: &str,
 ) -> Result<Option<Value>> {
     let detail = bus
-        .request("message.list", json!({"conversation_id":conversation,"message_id":id}), None)
+        .request("message.read", json!({"conversation_id":conversation,"message_id":id}), None)
         .await?;
     if detail["schema"] != ramflux_sdk::typed_read_model::READ_MODEL_SCHEMA {
         return Err(Error::MalformedField("message schema"));

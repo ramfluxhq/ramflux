@@ -541,20 +541,19 @@ async fn contact02_desktop_contract_exposes_outgoing_states_and_idempotent_decis
         account(&state, "bob")?.account_db()?.client_record("identity", "alice")?.is_some(),
         "pending peers have directory metadata"
     );
-    let response =
-        contact(&mut state, "bob", "contact.request.decline", json!({"request_id":id})).await?;
+    let response = contact(&mut state, "bob", "contact.decline", json!({"request_id":id})).await?;
     assert_eq!(response["principal_id"], "alice");
     assert_eq!(response["direction"], "inbound");
     assert_eq!(
-        contact(&mut state, "bob", "contact.request.decline", json!({"request_id":id})).await?,
+        contact(&mut state, "bob", "contact.decline", json!({"request_id":id})).await?,
         response
     );
-    let error = contact(&mut state, "bob", "contact.request.accept", json!({"request_id":id}))
+    let error = contact(&mut state, "bob", "contact.accept", json!({"request_id":id}))
         .await
         .err()
         .ok_or_else(|| invalid("expected closed request"))?;
     assert!(matches!(error, SdkError::ContactInput(crate::ContactReason::RequestClosed)));
-    let error = contact(&mut state, "bob", "contact.request.accept", json!({"request_id":"gone"}))
+    let error = contact(&mut state, "bob", "contact.accept", json!({"request_id":"gone"}))
         .await
         .err()
         .ok_or_else(|| invalid("expected missing request"))?;

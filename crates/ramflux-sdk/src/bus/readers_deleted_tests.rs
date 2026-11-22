@@ -53,7 +53,8 @@ async fn list_and_read_project_deleted_peer_and_own_rows_without_private_content
         )?;
     }
 
-    for method in ["message.list", "message.read"] {
+    {
+        let method = "message.read";
         let request = LocalBusFrame::request(
             method,
             Some("account".to_owned()),

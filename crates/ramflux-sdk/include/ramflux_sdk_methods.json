@@ -707,33 +707,6 @@
       "bridge_allowed": true,
       "capability": "contact",
       "key_export": false,
-      "name": "contact.request.accept",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
-      "name": "contact.request.block",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
-      "name": "contact.request.decline",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "contact",
-      "key_export": false,
       "name": "contact.requests.list",
       "secret_input": false,
       "secret_output": true,
@@ -791,7 +764,7 @@
       "key_export": false,
       "message_descriptor_blake3": "d18147ce9e60d3ed594f27edcd4322b0c12dea72914d72eb912005c94cc146d5",
       "name": "contact.verify",
-      "product_pin": "8ba8ea13c2d63a339527476398b1ed6503709dbe",
+      "product_pin": "5d9281898913f2104e2a077865979059bc3e3c51",
       "request_type": "ramflux.message.v1.ContactSafetyVerifyRequest",
       "response_type": "ramflux.message.v1.ContactSafetyVerifyResult",
       "secret_input": true,
@@ -874,26 +847,8 @@
       "bridge_allowed": true,
       "capability": "device",
       "key_export": false,
-      "name": "device.authorize",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
       "name": "device.list",
       "secret_input": false,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "device",
-      "key_export": false,
-      "name": "device.migrate",
-      "secret_input": true,
       "secret_output": true,
       "show_once": false
     },
@@ -1180,24 +1135,6 @@
       "bridge_allowed": true,
       "capability": "group",
       "key_export": false,
-      "name": "group.invite.accept",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.invite.create",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
       "name": "group.list",
       "secret_input": false,
       "secret_output": true,
@@ -1208,15 +1145,6 @@
       "capability": "group",
       "key_export": false,
       "name": "group.member.add",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.member.ban",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -1252,15 +1180,6 @@
       "bridge_allowed": true,
       "capability": "group",
       "key_export": false,
-      "name": "group.message.delete",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
       "name": "group.name.set",
       "secret_input": true,
       "secret_output": true,
@@ -1280,15 +1199,6 @@
       "capability": "group",
       "key_export": false,
       "name": "group.read",
-      "secret_input": true,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "group",
-      "key_export": false,
-      "name": "group.receive",
       "secret_input": true,
       "secret_output": true,
       "show_once": false
@@ -1460,15 +1370,6 @@
       "capability": "message",
       "key_export": false,
       "name": "message.franking_evidence",
-      "secret_input": false,
-      "secret_output": true,
-      "show_once": false
-    },
-    {
-      "bridge_allowed": true,
-      "capability": "message",
-      "key_export": false,
-      "name": "message.list",
       "secret_input": false,
       "secret_output": true,
       "show_once": false

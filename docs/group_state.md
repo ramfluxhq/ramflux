@@ -391,7 +391,7 @@ observe their bounded release rules.
 
 ### Local group history
 
-`group.history` is a reader-pool `LocalRead`. It accepts `group_id`, `conversation_id` and `limit`, like `group.receive`, and returns stored
+`group.history` is a reader-pool `LocalRead`. It accepts `group_id`, `conversation_id` and `limit`, like `group.read`, and returns stored
 `group_id`, `conversation_id`, `metadata` (including `name` and `member_roster`),
 `messages` and `decrypted_messages`. It does not connect, fetch directories,
 receive or apply inbox entries. Deleted or erased content is omitted; cached
@@ -405,6 +405,6 @@ The process-local current-head observation clock is not required to display
 admitted history. `limit` returns the oldest N available messages, ordered by
 creation time and then message ID; zero returns no messages.
 
-`group.read` and `group.receive` retain their network and new-admission behavior.
-Their admitted-message projection also ignores only that observation clock.
+`group.read` retains its network and new-admission behavior.
+Its admitted-message projection also ignores only that observation clock.
 New admission, sending and membership changes still require fresh authority.

@@ -60,7 +60,8 @@ async fn unrelated_case(direct: bool, peer_fresh: bool) -> TestResult {
         direct || !peer_fresh,
         "only a decoded group route can hold its own group RPC",
     );
-    for method in ["group.read", "group.receive"] {
+    {
+        let method = "group.read";
         let frame = LocalBusFrame::request(
             method,
             Some("owner".into()),

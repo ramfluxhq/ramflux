@@ -109,7 +109,6 @@ crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_receive_request | 
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_send_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_sender_key_distribution | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/group/history.rs | read | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/dispatch/identity_authority.rs | dispatch_identity_authority | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/itest_agent.rs | approve_once | 1 | E | excluded=itest hook body {plan_hash} (AGENT-IDENTITY-01 C3c); compiled only with the itest opt-in; no signed envelope
 crates/ramflux-sdk/src/bus/dispatch/itest_migration.rs | approve_once | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/message.rs | dispatch_conversation_disappearing_expire | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

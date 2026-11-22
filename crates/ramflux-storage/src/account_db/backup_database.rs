@@ -50,6 +50,8 @@ pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
     original_input: BackupInputObservation,
     _generation_reader: Option<crate::account_generation::GenerationReadLease>,
+    /// Opened from the installation's own selected generation, not from an archive.
+    live_generation: bool,
 }
 #[derive(Clone, Copy)]
 enum FullInputMode {
@@ -115,7 +117,7 @@ impl BackupDatabase {
         }
         super::backup_native::full_transfer_snapshot_preflight(&db)?;
         let original_input = observation::capture(&db, false)?;
-        Ok(Self { db, original_input, _generation_reader: None })
+        Ok(Self { db, original_input, _generation_reader: None, live_generation: false })
     }
 
     /// Opens a private snapshot or an owner-guarded generation for restore checks.
@@ -252,7 +254,9 @@ impl BackupDatabase {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
         super::attachment_retirement::recount_archive(&db)?;
-        let opened = Self { db, original_input, _generation_reader: generation_reader };
+        let live_generation = matches!(source, MarkerAuthoritySource::LiveAccountKey);
+        let opened =
+            Self { db, original_input, _generation_reader: generation_reader, live_generation };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
         opened.db.execute_batch(crate::schema_contact_requests::CONSENT_DECISIONS)?;
@@ -331,7 +335,12 @@ impl BackupDatabase {
             params![key.fingerprint()],
         )?;
         super::receive::ledger_backup::sanitize_backup(&target)?;
-        super::pairing::sanitize_backup(&target)?;
+        // Pairing ceremony rows never come from an archive. A merge stage copied from the live
+        // generation keeps them: they are this installation's adopted authority, which the
+        // ordinary-session gate checks against the custody install record on every unlock.
+        if !self.live_generation {
+            super::pairing::sanitize_backup(&target)?;
+        }
         if super::local_search::lifecycle::strip(&target)? {
             super::local_search::lifecycle::compact(&target)?;
         }
