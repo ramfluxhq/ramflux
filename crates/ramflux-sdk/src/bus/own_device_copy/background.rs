@@ -272,7 +272,8 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             finish(account, &key, &work, "not_needed")?;
             continue;
         }
-        let manifest = if !sealed(&work) && work.local_manifest {
+        // The cached own manifest is tried once; a retry fetches the node's current one.
+        let manifest = if !sealed(&work) && work.local_manifest && work.attempts <= 1 {
             account.client.prepare_own_copy_manifest_refresh()?
         } else {
             None
@@ -282,7 +283,20 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             work,
             key,
             root: account.client.surface_local_root_commitment()?,
-            config: account.gateway_config.clone(),
+            config: {
+                // A native account's stored config names neither its device branch (which signs
+                // the envelope) nor a source identity (the envelope's source root, which the
+                // receiver's report check reads); a session fills the branch in the same way.
+                let mut config = account.gateway_config.clone();
+                if config.device_branch.is_none() {
+                    config.device_branch =
+                        account.client.device_branch.clone().map(std::sync::Arc::new);
+                }
+                if config.source_identity.is_none() {
+                    config.source_identity = Some(account.client.owned_device_identity()?);
+                }
+                config
+            },
             cached_manifest: manifest.is_some(),
             manifest,
         }));
@@ -350,6 +364,13 @@ fn draft(
         result => result?,
     };
     let Some(mut draft) = prepared else {
+        // A cached manifest can predate a sibling's registration. The root's authority still names
+        // an authorized sibling, so the copy is not unneeded: retry against a fetched manifest.
+        if plan.cached_manifest && account.client.own_sent_has_siblings()? {
+            return Err(SdkError::InboundPending(
+                "own-device cached manifest lists no sibling; refetch".into(),
+            ));
+        }
         finish(account, &plan.key, &plan.work, "not_needed")?;
         return Ok(None);
     };

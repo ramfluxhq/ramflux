@@ -98,17 +98,10 @@ impl Group {
             2,
             "the initial create and delta must finish their own-device submission"
         );
-        if grouped {
-            // Signed group creation also queues state distribution and service work.
-            // Finish setup through the real driver before counting private resync effects.
-            crate::bus::sync_driver::run(&mut source).await?;
-            assert_eq!(
-                crate::bus::sync_driver::run(&mut source).await?,
-                0,
-                "the native group setup must be quiescent before resync",
-            );
-        }
         let peers = clients.into_iter().map(wrap).collect::<TestResult<Vec<_>>>()?;
+        if grouped {
+            Self::settle_group_setup(&mut source, &peers).await?;
+        }
         let baseline = peers
             .get(2)
             .ok_or("unrelated peer missing")?
@@ -116,6 +109,90 @@ impl Group {
             .direct_messages(&create.conversation_id)?
             .len();
         Ok(Self { source, peers, config, directory, create, baseline, _root: root })
+    }
+    async fn settle_group_setup(
+        source: &mut LocalBusAccountState,
+        peers: &[LocalBusAccountState],
+    ) -> TestResult {
+        // Run the production couriers independently; the fixture serves only their
+        // writer checkpoints and observes committed destination completion.
+        let expected = peers
+            .iter()
+            .map(|peer| {
+                let identity = peer.client.owned_device_identity()?;
+                Ok((identity.root_commitment().to_owned(), identity.device_id().to_owned()))
+            })
+            .collect::<Result<BTreeSet<_>, SdkError>>()?;
+        let key = format!("group-beacon/{}", ramflux_protocol::encode_base64url("group"));
+        let session = source.session_client().await?;
+        source.apply_session_metadata(session);
+        let context = source.connection.as_ref().ok_or("setup connection")?.test_context();
+        let generation = context.generation;
+        let (sender, mut receive) = tokio::sync::mpsc::channel(8);
+        let requests = Box::pin(crate::bus::couriers::runner::run(
+            context.clone(),
+            sender.clone(),
+            "group-requests",
+            crate::bus::shared_group_sync::request_pass,
+        ));
+        let deliveries = Box::pin(crate::bus::couriers::runner::run(
+            context.clone(),
+            sender.clone(),
+            "group-delivery",
+            crate::bus::shared_group_sync::deliver_pass,
+        ));
+        let staging = Box::pin(crate::bus::couriers::runner::run(
+            context,
+            sender,
+            "group-stage",
+            |_, writer| async move {
+                writer
+                    .apply(|account| crate::bus::shared_group_sync::stage(account).map(|n| n > 0))
+                    .await
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut couriers = Box::pin(async move {
+                tokio::join!(requests, deliveries, staging);
+            });
+            loop {
+                tokio::select! {
+                    () = &mut couriers => return Err("setup couriers stopped before completion".into()),
+                    work = receive.recv() => match work {
+                        Some(crate::bus::connection_manager::AccountWork::Courier(work))
+                            if work.generation == generation => work.apply(source),
+                        _ => return Err("unexpected setup courier checkpoint".into()),
+                    }
+                }
+                let db = source.client.account_db()?;
+                let Some(beacon) = db
+                    .load_actor_state::<crate::client::shared_group::BeaconRecord>(&key)?
+                else {
+                    continue;
+                };
+                if !beacon.delivered.is_subset(&expected) {
+                    return Err("native group setup served an unexpected destination".into());
+                }
+                if beacon.delivered == expected && db.actor_state_usage("group-state/send/")?.0 == 0 {
+                    break;
+                }
+            }
+            drop(couriers);
+            Self::require_setup_quiescent(source).await
+        })
+        .await
+        .map_err(|_| "native group setup did not serve every destination before resync")?
+    }
+
+    async fn require_setup_quiescent(source: &mut LocalBusAccountState) -> TestResult {
+        let submitted = crate::bus::sync_driver::run(source).await?;
+        if submitted != 0 {
+            return Err(format!(
+                "the native group setup must be quiescent before resync; unexpected driver activity: {submitted}"
+            )
+            .into());
+        }
+        Ok(())
     }
     fn establish_conversation(
         source: &RamfluxClient,
@@ -274,6 +351,38 @@ impl Group {
             .ok_or("request")?;
         Ok(result)
     }
+}
+#[tokio::test]
+async fn setup_quiescence_rejects_an_unexpected_queued_request() -> TestResult {
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        Box::pin(async {
+            let mut group = Box::pin(Group::new(true)).await?;
+            let request = group.request(0).await?;
+            let mut gateway = super::fixture::RecordingGateway::new(Arc::default());
+            gateway.inbox.push(GatewayInboxEntry {
+                forwarded: false,
+                inbox_seq: 1,
+                target_delivery_id: request.target_delivery_id.clone(),
+                envelope: request,
+            });
+            group.source.install_test_session(GatewaySessionEngine::with_test_transport(
+                group.config.clone(),
+                Box::new(gateway),
+            ));
+            let error = Group::require_setup_quiescent(&mut group.source)
+                .await
+                .expect_err("the quiescence check must reject a real queued resync request");
+            assert!(
+                error.to_string().contains("unexpected driver activity: 1"),
+                "the queued packet must fail the zero-activity check: {error}"
+            );
+            group.directory.abort();
+            Ok(())
+        }),
+    )
+    .await
+    .map_err(|_| "negative quiescence check did not finish")?
 }
 #[tokio::test]
 async fn two_group_requesters_receive_two_pair_replies_and_no_other_member_or_author_rows()
