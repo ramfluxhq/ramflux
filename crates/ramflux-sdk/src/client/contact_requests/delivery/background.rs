@@ -375,7 +375,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
             fingerprint: serde_json::to_value(&intent)?,
             intent,
             own_root: client.owned_device_identity()?.root_commitment().into(),
-            config: account.gateway_config.clone(),
+            config: account.sealing_config()?,
         }));
     }
     Ok(None)

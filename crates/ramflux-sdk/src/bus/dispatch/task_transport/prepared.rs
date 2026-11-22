@@ -43,7 +43,7 @@ impl Draft {
             ttl: account.client.content_ttl()?,
         };
         let exact = super::prepare_task_inner(&account.client, &mut message, body, &route)?;
-        let config = account.gateway_config.clone();
+        let config = account.sealing_config()?;
         let request = account.client.routed_send_material_request(&config, &message)?;
         Ok(Self {
             target,
