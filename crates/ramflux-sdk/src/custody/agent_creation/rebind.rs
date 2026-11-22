@@ -154,6 +154,9 @@ pub fn paused_agent_binding(
     agent_account_id: &str,
 ) -> Result<Option<RebindBinding>, SdkError> {
     crate::custody::valid_id(agent_account_id)?;
+    if let Some(binding) = super::reassociate::fenced_agent_binding(root, agent_account_id)? {
+        return Ok(Some(binding));
+    }
     let humans = match std::fs::read_dir(root.join("custody_accounts")) {
         Ok(humans) => humans,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),

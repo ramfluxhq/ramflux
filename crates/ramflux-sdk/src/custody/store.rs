@@ -1016,6 +1016,40 @@ pub(crate) fn stored_record_unverified(
     Ok(read_stored(root, account_id)?.record)
 }
 
+/// Point an agent account at a different local human id.
+///
+/// The signed record, pins and vault references stay. A second call with the same
+/// destination changes nothing. A pointer that names neither account is refused.
+///
+/// # Errors
+/// `CustodySetupInvalid` when the account is not a headless agent, or the stored pointer is a
+/// third account. Storage failures pass through.
+pub(crate) fn retarget_agent_custodian(
+    root: &Path,
+    agent_account_id: &str,
+    from_human: &str,
+    to_human: &str,
+) -> Result<(), SdkError> {
+    valid_id(agent_account_id)?;
+    valid_id(from_human)?;
+    valid_id(to_human)?;
+    if from_human == to_human {
+        return Err(invalid());
+    }
+    let mut stored = read_stored(root, agent_account_id)?;
+    if stored.record.body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi {
+        return Err(invalid());
+    }
+    match stored.custodian_account_id.as_deref() {
+        Some(current) if current == to_human => return Ok(()),
+        Some(current) if current == from_human => {}
+        _ => return Err(invalid()),
+    }
+    stored.custodian_account_id = Some(to_human.to_owned());
+    let path = directory(root, agent_account_id)?.join("authority.json");
+    genesis::replace_public(&path, &ramflux_protocol::canonical_json_bytes(&stored)?)
+}
+
 fn read_stored(root: &Path, account_id: &str) -> Result<StoredAuthority, SdkError> {
     let path = directory(root, account_id)?.join("authority.json");
     let mut bytes = Vec::new();

@@ -32,7 +32,7 @@ pub(crate) use store::{
     PublicAuthorityCache, accept_publication, account_exists, custody_vault_reference,
     export_agent_credentials, failed_setup, failed_setup_error, list_accounts,
     load_account_with_cache, load_data_account, pending_head_fence_blocks,
-    reconcile_incomplete_markers, reserve_pairing_account,
+    reconcile_incomplete_markers, reserve_pairing_account, retarget_agent_custodian,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
 pub(crate) use vault::require_vault_reference;
