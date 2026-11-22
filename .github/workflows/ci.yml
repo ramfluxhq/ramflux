@@ -18,7 +18,8 @@ on:
 # so superseded main runs stop queueing for runner slots. Only the newest main commit is verified.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'dispatch-' || '' }}${{ github.ref }}
-  cancel-in-progress: true
+  # A running main push finishes so its rust-cache saves (pooled runners compile cold otherwise); a pending one is still replaced.
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -26,7 +27,10 @@ permissions:
 jobs:
   provenance:
     name: Provenance gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 5
     outputs:
       deploy_changed: ${{ steps.deploy-changes.outputs.changed }}
@@ -116,7 +120,10 @@ jobs:
 
   test-timing:
     name: Test timing guard
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -157,13 +164,21 @@ jobs:
           python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_public_origin.py -v
           python3 -B -m unittest discover -s deploy/scripts/tests -p test_demo_node_config.py -v
 
+  # Reserve the pool for measured short guards and default-feature Clippy.
+  # Archives, feature variants and test execution use hosted runners to preserve deadlines.
   # Only main pushes and same-repository PRs use the sandboxed pool.
-  # Dependabot, forks, manual runs and RF_CI_RUNNER=github use GitHub-hosted runners.
-  # Set repository variable RF_CI_RUNNER=github to force the hosted fallback.
+  # Dependabot, forks, manual runs and RF_CI_FORCE_HOSTED=true use GitHub-hosted runners.
+  # Set repository variable RF_CI_FORCE_HOSTED=true for the hosted fallback.
+  # This workflow replaces the old RF_CI_RUNNER=github rollout hold.
+  # Three registered runners cap CI job concurrency; qa-job.sh limits each
+  # build to two compiler workers and gives lane work CPU priority.
   # Pool jobs have no secrets and require the host's native build dependencies.
   rust:
     name: Rust checks
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -216,7 +231,10 @@ jobs:
 
   clippy-itest:
     name: Clippy (itest, all features)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -252,7 +270,10 @@ jobs:
 
   clippy-default:
     name: Clippy (default features)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(vars.RF_CI_FORCE_HOSTED == 'true' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -285,7 +306,10 @@ jobs:
 
   sdk-c-abi-v2:
     name: SDK C ABI v2 (${{ matrix.features }})
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -307,16 +331,18 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
           shared-key: sdk-c-abi-${{ matrix.features }}
+      - name: Compile the SDK library test binary (untimed; the timed steps below only run tests)
+        run: bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib --no-run
       - name: Execute real supervisor, event and trust regressions
         env:
           RUST_TEST_THREADS: '1'
         run: |
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-c_abi__v2__.xml -- timeout 600 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib c_abi::v2:: -- --test-threads=1
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__outbound__tests.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::outbound::tests -- --test-threads=1
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation_send_derives_routes_and_seals_for_every_verified_peer_device.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send_derives_routes_and_seals_for_every_verified_peer_device -- --test-threads=1
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation-journal.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send:: -- --test-threads=1
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__dispatch__conversation_mutation__.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::dispatch::conversation_mutation:: -- --test-threads=1
-          python3 -B scripts/ci/run-libtest.py --junit target/abi-native_conversation_.xml -- timeout 300 cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib native_conversation_ -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-c_abi__v2__.xml -- timeout 600 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib c_abi::v2:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__outbound__tests.xml -- timeout 300 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::outbound::tests -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation_send_derives_routes_and_seals_for_every_verified_peer_device.xml -- timeout 300 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send_derives_routes_and_seals_for_every_verified_peer_device -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-conversation-journal.xml -- timeout 300 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib conversation_send:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-bus__dispatch__conversation_mutation__.xml -- timeout 300 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib bus::dispatch::conversation_mutation:: -- --test-threads=1
+          python3 -B scripts/ci/run-libtest.py --junit target/abi-native_conversation_.xml -- timeout 300 bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib native_conversation_ -- --test-threads=1
       - name: Reject generated contract drift
         run: |
           python3 -B scripts/generate-c-abi-methods.py --check
@@ -401,7 +427,10 @@ jobs:
 
   doctests:
     name: Doctests
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -442,7 +471,10 @@ jobs:
 
   build-sdk:
     name: Build test archive (sdk)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -488,7 +520,10 @@ jobs:
 
   build-rest:
     name: Build test archive (rest)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -532,12 +567,15 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # GitHub-hosted CLI jobs. itest-memory-vault is compile-gated and used only for fixtures;
+  # CLI check names stay stable across runner pools. itest-memory-vault is compile-gated and used only for fixtures;
   # production rf default features stay empty. Not a local lane gate.
   # Serial real-process tests take about 19 minutes of build plus run; 30 leaves room for the cache save.
   cli-e2e:
     name: CLI e2e (rf, GitHub-hosted)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -577,26 +615,26 @@ jobs:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway -p ramflux-relay
-          python3 -B scripts/ci/run-nextest.py --label e2e_harness -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_harness -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --test e2e_harness --test-threads=1
           # Pairing remains default-off; this row opts in only in owned child services.
           cargo build -p ramflux-rf --bin rf
-          RAMFLUX_PAIRING_BIN_DIR="$PWD/target/debug" python3 -B scripts/ci/run-nextest.py --label pairing_history -- cargo nextest run --profile ci --no-tests=fail -p ramflux-federation --bin ramflux-federation --run-ignored ignored-only --test-threads=1 -E 'test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay) | test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_approve_after_custody_deadline_enrolls_and_delivers_to_both_devices)'
+          RAMFLUX_PAIRING_BIN_DIR="$PWD/target/debug" python3 -B scripts/ci/run-nextest.py --label pairing_history -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-federation --bin ramflux-federation --run-ignored ignored-only --test-threads=1 -E 'test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_enrollment_delivers_existing_dm_through_ordinary_object_relay) | test(=pairing_http::continuity_tests::native_devices::history::pairing_tls_approve_after_custody_deadline_enrolls_and_delivers_to_both_devices)'
           # Includes b1_same_node_bidirectional_dm_uses_deliver_without_resume and
           # two_nodes_have_separate_identities_cas_and_stores (Demo B).
-          python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_boot_dm -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm --run-ignored ignored-only --test-threads=1
           # Keep f2 here; the b7_* matrix runs in parallel below.
-          python3 -B scripts/ci/run-nextest.py --label e2e_resume -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
-          python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_group -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_contact_verify -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_contact_verify --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_group_service -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group_service --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_media_dm -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_media_dm --run-ignored ignored-only --test-threads=1
-          python3 -B scripts/ci/run-nextest.py --label e2e_attach -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_attach --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_resume -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'not test(b7_)'
+          python3 -B scripts/ci/run-nextest.py --label e2e_push_restart -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_push_restart --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_group -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_contact_verify -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_contact_verify --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_group_service -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_group_service --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_media_dm -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_media_dm --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_attach -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_attach --run-ignored ignored-only --test-threads=1
           # Unified rows explicitly report dormancy until the separately audited activation.
           cargo build -p ramflux-rf --bin rf --features itest-memory-vault,itest-rfd-fault
-          python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_unified_gate -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_unified_gate --run-ignored ignored-only --test-threads=1
           # Conversation actions report schema dormancy until activation, same as the unified gate.
-          python3 -B scripts/ci/run-nextest.py --label e2e_conversation_actions -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_conversation_actions --run-ignored ignored-only --test-threads=1
+          python3 -B scripts/ci/run-nextest.py --label e2e_conversation_actions -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault,itest-rfd-fault --test e2e_conversation_actions --run-ignored ignored-only --test-threads=1
 
       - name: Upload CLI JUnit
         if: always()
@@ -610,10 +648,13 @@ jobs:
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python3 -B scripts/ci/test-tmp.py check
 
-  # Independent hosted runner: B7 never consumes the smoke job budget.
+  # Independent job: B7 never consumes the smoke job budget.
   cli-e2e-b7:
     name: CLI e2e (Demo B B7, GitHub-hosted)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -657,7 +698,7 @@ jobs:
           # b7_offline_twenty_dms_three_group_messages_redb_only,
           # b7_mid_batch_crash_wal, b7_mid_batch_crash_redb_only,
           # b7_group_read_before_setup_ack_keeps_catchup_live.
-          python3 -B scripts/ci/run-nextest.py --label e2e_demo_b_b7 -- cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'test(b7_)'
+          python3 -B scripts/ci/run-nextest.py --label e2e_demo_b_b7 -- bash scripts/ci/qa-test.sh cargo nextest run --profile ci --no-tests=fail -p ramflux-rf --features itest-memory-vault --test e2e_resume --run-ignored ignored-only --test-threads=1 -E 'test(b7_)'
 
       - name: Upload B7 JUnit
         if: always()
@@ -869,7 +910,10 @@ jobs:
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/2)
     needs: build-sdk
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -944,7 +988,10 @@ jobs:
   test-rest:
     name: Tests (rest ${{ matrix.shard }}/2)
     needs: build-rest
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1018,7 +1065,10 @@ jobs:
 
   v-sdk-a:
     name: "SDK variant: memory vault and production absence"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1088,6 +1138,9 @@ jobs:
   v-sdk-crash-guard:
     name: "SDK variant: receive crash seam absence"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1129,7 +1182,10 @@ jobs:
 
   v-sdk-b:
     name: "SDK variant: deferred accounts and gateway transport"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1181,6 +1237,7 @@ jobs:
       - name: Session push real-router gate (explicit, ignored by default)
         if: ${{ !cancelled() }}
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label session-push-real-router -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
 
       - name: Ephemeral activation and persistence (real router, WAL on)
@@ -1189,6 +1246,7 @@ jobs:
           RAMFLUX_ROUTER_WAL: "1"
           RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(activation::)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal1 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(activation::)'
 
       - name: Ephemeral persistence (real router, WAL off)
@@ -1197,6 +1255,7 @@ jobs:
           RAMFLUX_ROUTER_WAL: "0"
           RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(ephemeral_persistence_absence)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal0 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(ephemeral_persistence_absence)'
       - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
         if: ${{ !cancelled() }}
@@ -1309,9 +1368,13 @@ jobs:
         if: always() && env.RF_TEST_TMPDIR != ''
         run: python3 -B scripts/ci/test-tmp.py check
 
+
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash scripts/ci/qa-job.sh {0}
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1351,10 +1414,13 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
+      - name: Compile configured graceful shutdown regressions
+        run: |
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
+
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
         run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/shutdown/junit.xml --label graceful-shutdown -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
 
       - name: Gateway management route regressions
