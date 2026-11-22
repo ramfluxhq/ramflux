@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Close an agent's custody leases and router sessions when its host fence fails.
-//! A gateway connection that has already left this service is not dropped here.
+//! The router session is marked closed so the gateway drops that live channel, and
+//! later submits to or from the agent are refused as unreachable.
 
 use super::CustodyService;
 use crate::{CustodyPublication, NodeCoreError, RouterCore, RouterRedbStore};

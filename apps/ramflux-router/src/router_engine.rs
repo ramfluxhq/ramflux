@@ -94,6 +94,19 @@ fn complete_response(response: ramflux_node_core::EnvelopeSubmitResponse) -> Pre
     complete_mesh_response(response, (None, None))
 }
 
+fn fenced_agent_response(
+    envelope: &ramflux_protocol::Envelope,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: "rejected_security:recipient unreachable".to_owned(),
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }
+}
+
 fn complete_mesh_response(
     delivery: ramflux_node_core::EnvelopeSubmitResponse,
     (incarnation_id, retain_until): (Option<String>, Option<i64>),
@@ -150,6 +163,56 @@ fn entry_bound_refusal(
     }
 }
 
+fn early_submit_refusal(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<Option<PreparedSubmit>> {
+    if state.envelope_reaches_fenced_agent(store, envelope, submission_now())? {
+        return Ok(Some(complete_response(fenced_agent_response(envelope))));
+    }
+    if let Some(refusal) = entry_bound_refusal(
+        &ramflux_node_core::check_entry_bound(envelope),
+        &envelope.target_delivery_id,
+    ) {
+        return Ok(Some(complete_response(refusal)));
+    }
+    Ok(None)
+}
+
+struct ReplayWindow {
+    replay_key: String,
+    sender_root_commitment: String,
+    replay_expires_at: i64,
+}
+
+fn replay_window_or_duplicate(
+    store: &ramflux_node_core::RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &ramflux_protocol::Envelope,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+    now_unix_seconds: i64,
+) -> anyhow::Result<Result<ReplayWindow, PreparedSubmit>> {
+    let replay_key = ramflux_node_core::envelope_replay_tuple_key(source, envelope);
+    let sender_root_commitment = source.root_commitment().to_owned();
+    let replay_expires_at = envelope
+        .created_at
+        .checked_add(i64::from(envelope.ttl))
+        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
+    ramflux_node_core::record_router_submit_lock_wait_us(0);
+    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
+        store,
+        origin,
+        sender_root_commitment: source.root_commitment(),
+        envelope,
+        replay_key: &replay_key,
+        now_unix_seconds,
+    })? {
+        return Ok(Err(complete_response(response)));
+    }
+    Ok(Ok(ReplayWindow { replay_key, sender_root_commitment, replay_expires_at }))
+}
+
 fn prepare_submission(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -158,11 +221,8 @@ fn prepare_submission(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<PreparedSubmit> {
-    if let Some(refusal) = entry_bound_refusal(
-        &ramflux_node_core::check_entry_bound(&envelope),
-        &envelope.target_delivery_id,
-    ) {
-        return Ok(complete_response(refusal));
+    if let Some(done) = early_submit_refusal(state, store, &envelope)? {
+        return Ok(done);
     }
     record_decoded(&envelope);
     let (source, mut source_lease) = match authenticate_submission(state, store, &envelope, origin)?
@@ -200,25 +260,13 @@ fn prepare_submission(
         return submission_refusal(state, store, &envelope, error).map(complete_response);
     }
     state.refresh_registered_envelope_authority(&mut envelope)?;
-    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
-    let sender_root_commitment = source.root_commitment().to_owned();
-    let replay_expires_at = envelope
-        .created_at
-        .checked_add(i64::from(envelope.ttl))
-        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
-    ramflux_node_core::record_router_submit_lock_wait_us(0);
-    let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
-    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
-        store,
-        origin,
-        sender_root_commitment: source.root_commitment(),
-        envelope: &envelope,
-        replay_key: &replay_key,
-        now_unix_seconds,
-    })? {
-        return Ok(complete_response(response));
-    }
+    let replay =
+        match replay_window_or_duplicate(store, &source, &envelope, origin, now_unix_seconds)? {
+            Ok(replay) => replay,
+            Err(done) => return Ok(done),
+        };
+    let dispatch_started = Instant::now();
     let outcome = if forward.client.is_some() {
         let preparation = state.prepare_envelope_with_home_node_forward_at(
             &source,
@@ -239,16 +287,16 @@ fn prepare_submission(
     });
     persist_submission_outcome(
         store,
-        &replay_key,
-        replay_expires_at,
-        &sender_root_commitment,
+        &replay.replay_key,
+        replay.replay_expires_at,
+        &replay.sender_root_commitment,
         submission,
         (&outcome, persistent_entry.as_ref()),
     )?;
     finish_retry_owner(
         retry_owner,
         store,
-        &sender_root_commitment,
+        &replay.sender_root_commitment,
         persistent_entry.as_ref(),
         &outcome,
         now_unix_seconds,

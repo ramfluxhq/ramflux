@@ -29,7 +29,9 @@ pub(super) async fn prove_primary_retire(
     let node = home_node(actor).await?;
     let profile = supervisor.node_profile(&node)?;
     let device = local_device_id(&root, human, now)?;
-    let config = proof_config(&root, &profile, human, &device, binding_mode(supervisor)).await?;
+    let admission = actor.pairing_admission().await?;
+    let config =
+        proof_config(&root, &profile, human, &device, binding_mode(supervisor), admission).await?;
     let vault = super::custody_setup::primary_provider(&supervisor.config);
     Box::pin(CustodyConnection::prove_agent_retirement(config, vault, agent_anchor.to_owned()))
         .await
@@ -50,7 +52,8 @@ pub(super) async fn prove_agent_delete(
     let node = home_node(actor).await?;
     let profile = supervisor.node_profile(&node)?;
     let config =
-        proof_config(&root, &profile, &agent_account, &device, binding_mode(supervisor)).await?;
+        proof_config(&root, &profile, &agent_account, &device, binding_mode(supervisor), None)
+            .await?;
     let vault = super::custody_setup::primary_provider(&supervisor.config);
     Box::pin(CustodyConnection::prove_agent_retirement(config, vault, agent_anchor.to_owned()))
         .await
@@ -134,6 +137,7 @@ async fn proof_config(
     account_id: &str,
     device_id: &str,
     binding_mode: BindingMode,
+    pairing_admission: Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>,
 ) -> Result<CustodyNetworkConfig, SdkError> {
     let unset = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
     let endpoint = profile
@@ -152,7 +156,7 @@ async fn proof_config(
         )
         .await?;
     Ok(CustodyNetworkConfig {
-        pairing_admission: None,
+        pairing_admission,
         account_root: root.to_path_buf(),
         account_id: account_id.to_owned(),
         device_id: device_id.to_owned(),

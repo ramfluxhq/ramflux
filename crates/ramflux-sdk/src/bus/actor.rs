@@ -22,6 +22,12 @@ pub(super) enum AgentPrivate {
     HomeNode {
         reply: oneshot::Sender<Result<Option<String>, SdkError>>,
     },
+    /// The live pairing-admission reader of this unlocked account, if it is still open.
+    Admission {
+        reply: oneshot::Sender<
+            Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError>,
+        >,
+    },
     Call {
         call: super::agent_methods::AgentCall,
         reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
@@ -289,6 +295,14 @@ impl AccountActor {
     pub(super) async fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::HomeNode { reply })))?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// The open pairing-admission reader of this account, read by its runtime.
+    pub(super) async fn pairing_admission(
+        &self,
+    ) -> Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Admission { reply })))?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(

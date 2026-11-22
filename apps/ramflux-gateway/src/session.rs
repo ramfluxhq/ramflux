@@ -960,6 +960,16 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
         }
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {
+            if crate::session_fence::refuse_closed_channel(
+                &send,
+                &context,
+                &frame,
+                &runtime.target_delivery_id,
+            )
+            .await?
+            {
+                return Ok(true);
+            }
             match frame {
                 ramflux_node_core::GatewayClientFrame::Submit { submit } => {
                     handle_gateway_submit(&send, &context, &runtime, &submit).await?;

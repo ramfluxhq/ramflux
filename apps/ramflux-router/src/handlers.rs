@@ -1195,15 +1195,10 @@ fn handle_s1_session_upsert(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::SessionDescriptor> {
-    let descriptor: ramflux_node_core::SessionDescriptor = serde_json::from_slice(body)?;
-    state.clear_ephemeral_capability(&descriptor.target_delivery_id);
-    state.upsert_session(descriptor.clone())?;
-    state.mark_live(&descriptor.target_delivery_id)?;
-    let session = state
-        .session(&descriptor.target_delivery_id)
-        .ok_or_else(|| anyhow::anyhow!("session missing after upsert"))?;
-    store.record_session_entry(&session)?;
-    Ok(descriptor)
+    let descriptor = serde_json::from_slice(body)?;
+    state
+        .open_gateway_session(store, descriptor, ramflux_node_core::now_unix_seconds())
+        .map_err(Into::into)
 }
 
 fn handle_s1_session_get(
