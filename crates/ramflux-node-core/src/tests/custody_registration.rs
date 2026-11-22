@@ -589,24 +589,21 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
         ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &message)?;
     a.refresh_registered_envelope_authority(&mut message)?;
     let origin = crate::RouterEnvelopeOrigin::Federation;
+    let authenticate =
+        |router: &RouterCore, floors: &[crate::CustodyPublication], store: &RouterRedbStore| {
+            router.authenticated_native_forwarded_source_with_floors(
+                &message, floors, store, origin, "node-a",
+            )
+        };
     // Positive arm: the same signed sender is admitted before observing newer evidence.
-    b.authenticated_native_forwarded_source_with_floors(&message, &[], &b_store, origin, "node-a")?;
+    authenticate(&b, &[], &b_store)?;
     let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
     let verified = ramflux_crypto::custody::verify_record(&publication.record, now, None, None)?;
     let revoked = crate::CustodyPublication {
         record: primary.revoke_device(&verified, "primary", now)?,
         compacted_ids: None,
     };
-    assert!(
-        b.authenticated_native_forwarded_source_with_floors(
-            &message,
-            std::slice::from_ref(&revoked),
-            &b_store,
-            origin,
-            "node-a",
-        )
-        .is_err()
-    );
+    assert!(authenticate(&b, std::slice::from_ref(&revoked), &b_store).is_err());
     drop(b_store);
     let b_store = RouterRedbStore::open_without_wal(&b_path)?;
     let reopened = b_store.load_router()?.unwrap_or_else(RouterCore::new);
@@ -616,29 +613,13 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
             .map(|s| s.publication),
         Some(revoked.clone())
     );
-    assert!(
-        reopened
-            .authenticated_native_forwarded_source_with_floors(
-                &message,
-                &[],
-                &b_store,
-                origin,
-                "node-a",
-            )
-            .is_err()
-    );
+    assert!(authenticate(&reopened, &[], &b_store).is_err());
     let mut conflict = revoked.record.body.clone();
     conflict.profile.display_name = "Conflicting name".into();
     let conflict =
         crate::CustodyPublication { record: primary.sign_record(conflict)?, compacted_ids: None };
     assert!(matches!(
-        reopened.authenticated_native_forwarded_source_with_floors(
-            &message,
-            &[conflict],
-            &b_store,
-            origin,
-            "node-a",
-        ),
+        authenticate(&reopened, &[conflict], &b_store),
         Err(NodeCoreError::CustodyConflict { .. })
     ));
     drop(b_store);
@@ -656,17 +637,7 @@ fn forwarded_evidence_with_newer_revocation_or_fork_floor_persists_floor_and_ref
             )
             .is_some()
     );
-    assert!(
-        reopened
-            .authenticated_native_forwarded_source_with_floors(
-                &message,
-                &[],
-                &b_store,
-                origin,
-                "node-a",
-            )
-            .is_err()
-    );
+    assert!(authenticate(&reopened, &[], &b_store).is_err());
     drop((a, b, reopened, a_store, b_store));
     std::fs::remove_file(a_path)?;
     std::fs::remove_file(b_path)?;
