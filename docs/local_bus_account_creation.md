@@ -148,10 +148,16 @@ Only the public account result goes to stdout. There are no seed, phrase, accoun
 identifier or passphrase arguments for creation, and no environment-variable or
 piped-input creation flow. The old `account login` seed-taking alias is removed.
 
-For an agent, run `rf agent create --persona ... --confirm` on the paired desktop,
-then `rf agent decide --request-id <id> --request-hash <hash> --approved true` on the primary
-phone's daemon, and
-follow the operation with `rf agent status`. No agent phrase is ever shown. Once the
+For an agent, run `rf agent --account <owner> create --name ... --responsibility ... --provider ...
+--model ... --confirm` on the paired desktop. The provider and model are part of the public profile
+the primary approves, so a creation without them does not parse. On the primary phone's daemon,
+`rf agent --account <owner> pending` shows the next request that waits for this device with what
+the owner reviews (agent name, responsibility, provider, model, the requesting desktop, the
+expiry) and the `request_id` and `request_hash`; then
+`rf agent --account <owner> decide --request-id <id> --request-hash <hash> --approved true|false`.
+Follow the operation on the desktop with `rf agent --account <owner> status --operation-id <id>`
+(`complete` once the node holds the agent). `rf agent list`, `show`, `edit`, `access` and `delete`
+work on either device. No agent phrase is ever shown. Once the
 agent is `complete`, run
 `rf account export-agent-credentials --account <agent> --out <private-path>`. The export
 resolves the human custodian from the agent's durable custody record, regardless

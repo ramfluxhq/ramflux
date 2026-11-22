@@ -4,7 +4,17 @@
 //! Shared boot for CLI e2e: mesh certs, four node processes, rf daemons, PTY create.
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod agent_flow;
 mod ceremony_screen;
+#[cfg(unix)]
+mod pairing_stack;
+// Shared by several test targets that each use a different part.
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use pairing_stack::{
+    Pair, PairingStack, boot_agent_stack, node_get, pair_devices, start_pairing_daemon,
+};
 #[cfg(windows)]
 mod conpty;
 #[cfg(unix)]
@@ -603,15 +613,29 @@ pub fn create_account(daemon: &Daemon, display_name: &str) -> Result<Account> {
     created_account(daemon, display_name, &created)
 }
 
+/// Creates an agent owned by `pair`'s human through the real flow, with the `rf` commands only:
+/// create on the paired desktop, approve on the primary, wait for the desktop to publish it. The
+/// agent account lives on the desktop daemon; the returned account is read from there.
 #[cfg(unix)]
-pub fn create_owned_agent(daemon: &Daemon, custodian: &Account) -> Result<Account> {
-    let created = pty_account_create_with_args(
-        &daemon.socket,
-        "Surface agent",
-        PASSPHRASE,
-        &["--kind", "headless_ai", "--custodian", &custodian.id],
-    )?;
-    created_account(daemon, "Surface agent", &created)
+pub fn create_owned_agent(pair: &Pair, name: &str) -> Result<Account> {
+    let operation = agent_flow::create(&pair.desktop, &pair.account, name, "owned agent fixture")?;
+    let pending = agent_flow::wait_pending(&pair.primary, &pair.account)?;
+    agent_flow::confirm_presence(&pair.primary, &pair.account, &pending.request_hash)?;
+    agent_flow::decide(&pair.primary, &pair.account, &pending, true)?;
+    agent_flow::wait_state(&pair.desktop, &pair.account, &operation, "complete")?;
+    let listed = rf_json(&pair.desktop.socket, &["account", "list"])?;
+    let id = listed["account_details"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["kind"] == "headless_ai"
+                    && row["custodian_account_id"].as_str() == Some(pair.account.id.as_str())
+            })
+        })
+        .and_then(|row| row["id"].as_str())
+        .ok_or("the desktop lists no agent account of this owner")?
+        .to_owned();
+    created_account(&pair.desktop, name, &serde_json::json!({ "account_id": id }))
 }
 
 fn created_account(daemon: &Daemon, display_name: &str, created: &Value) -> Result<Account> {

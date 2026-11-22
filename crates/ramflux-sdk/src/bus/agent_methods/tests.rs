@@ -211,7 +211,21 @@ fn operation_get_returns_the_stored_status_and_refuses_an_unknown_request() -> T
             laptop.client.agent_operation_status("no-such-operation"),
             "creation_request_unknown",
         )?;
+        // Before the plan arrives nothing waits for the primary's decision; the desktop never
+        // sees its own request as waiting for it.
+        refused_with(phone.client.agent_operation_status(""), "creation_request_unknown")?;
         deliver(&mut laptop, &mut phone, 1).await?;
+        let waiting = phone.client.agent_operation_status("")?;
+        assert_eq!(
+            waiting.request_id, status.request_id,
+            "the primary finds the request by itself"
+        );
+        assert_eq!(waiting.state, "authorization_pending");
+        assert_eq!(
+            waiting.request_json, read.request_json,
+            "it carries the frozen plan to decide on"
+        );
+        refused_with(laptop.client.agent_operation_status(""), "creation_request_unknown")?;
         Ok(())
     })
 }

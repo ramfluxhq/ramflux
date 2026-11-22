@@ -25,6 +25,18 @@ pub(crate) struct AgentPersonaArgs {
     pub(crate) responsibility: String,
 }
 
+/// The model the agent will use (contract 1 `AgentConfigData`). The creation plan freezes both in
+/// the public profile the primary approves, so a creation without them is refused.
+#[derive(Args)]
+pub(crate) struct AgentModelArgs {
+    /// The model provider the agent uses, for example `openai`.
+    #[arg(long)]
+    pub(crate) provider: String,
+    /// The model of that provider.
+    #[arg(long)]
+    pub(crate) model: String,
+}
+
 /// The access policy of an agent (contract 1 `AgentAccessPolicy`).
 #[derive(Args)]
 pub(crate) struct AgentAccessArgs {
@@ -46,6 +58,8 @@ pub(crate) enum AgentAction {
         #[command(flatten)]
         persona: AgentPersonaArgs,
         #[command(flatten)]
+        model: AgentModelArgs,
+        #[command(flatten)]
         access: AgentAccessArgs,
         #[arg(long, default_value = "named")]
         role: String,
@@ -53,6 +67,10 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         confirm: bool,
     },
+    /// On the primary: show the next creation request that waits for this device's decision, with
+    /// what the owner must review (agent name, responsibility, provider, model, the requesting
+    /// desktop, the expiry) and the `request_id` and `request_hash` that `decide` needs.
+    Pending,
     /// Answer the primary phone's creation request. `approved` is required.
     Decide {
         #[arg(long, allow_hyphen_values = true)]

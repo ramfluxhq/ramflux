@@ -46,7 +46,10 @@ async fn externally_custodied_published_revoke_observer_retires_pairs_and_fences
         let primary = owner.vault.primary_for_public_key(
             &native.record().body.master_certificate.body.self_signing_public_key,
         )?;
-        let now = custody::network_now()?;
+        // Agent creation advances its signed fixture head beyond the wall clock.
+        // Revoke at that head's time so fixture speed cannot become a rollback.
+        let now = custody::network_now()?.max(native.record().body.issued_at);
+        let _clock = crate::time::FixedClock::set(i64::try_from(now)?);
         let record = primary.revoke_device(native.verified(), local.device_id(), now)?;
         let published = custody::pairing::PublishedHead {
             record_hash: object_hash(&record)?,
