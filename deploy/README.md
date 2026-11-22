@@ -254,7 +254,9 @@ is installed or configured. Other lifecycle tests always use fake CLIs.
 
 The keyring and signed snapshot use the read-only `secrets/federation` mount; the
 relay creates and persists its verified snapshot cache and anti-rollback state in
-`relay-redb`. The wrapper never seeds or resets that cache. To repair an existing
+`relay-redb`. Ordinary `up` and `upgrade` preserve that cache. Only an explicit
+[`upgrade --reset-service relay`](#resetting-relay-state-for-a-stored-format-break)
+backs up and resets it. To repair generated runtime settings in an existing
 project, run `up` with the original env file: it regenerates `runtime.env` while
 preserving identity, signed trust and named volumes; no purge is needed.
 Demo trust lasts one year; the helper refuses identities within an hour of expiry.
@@ -438,6 +440,111 @@ retains the node identity, CA, seeds, volumes, ports and all other ownership set
 and prints the canonical rollback command. A plain `up` still refuses a version change.
 An upgrade also refuses a missing or newly selected voice/admin overlay, reporting only
 the relevant configuration key.
+
+#### Resetting relay state for a stored-format break
+
+The reset list is closed: **only `relay`**, only on `upgrade`, exactly once per
+invocation. It selects the exact owned `${DEMO_PROJECT}_relay-redb` volume.
+Unknown services, volume names, paths, patterns, repeated flags and reset flags
+on other commands are rejected before running any tools. An env variable cannot
+enable reset. Stores containing identity, keys, accounts or routing are excluded.
+
+This discards the relay's stored object data and authorization metadata, verified
+trust cache and anti-rollback state. Use it only for an explicitly approved
+stored-format break; retain the old images and the complete private snapshot tree.
+A reset interrupts the whole stack and active calls. It does not migrate data.
+Ensure enough free disk space for an uncompressed copy of the whole relay volume.
+For the next incompatible relay store format (such as removal of v2 relay tokens),
+load the selected version's seven images, update only `DEMO_VERSION`, then run:
+
+```sh
+deploy/scripts/demo-node.sh upgrade /absolute/path/to/demo.env --reset-service relay
+```
+
+Before removing anything, the wrapper checks ownership, snapshots the current
+managed files, stops the stack with ordinary Compose `down` (no `--volumes`),
+and archives the relay volume using `tar` from the already-installed relay image.
+The helper runs with no network, never pulls an image, and mounts only the exact
+relay volume read-only. No extra image, package or service dependency is needed.
+The archive is streamed into `version-snapshots/<version>/<id>/service-state/relay.tar`
+(mode 0400 in a private directory), fsynced and SHA-256 checked before removal.
+`relay.json` records its digest and exact volume. `transaction.pending` records
+backup readiness; the committed `owner.json.state_reset` retains the backup
+reference, including across repeated `up`. The wrapper prints the exact reset
+target, removes that one volume without force, and starts the selected images.
+All seven health checks and the signed public probes must pass before commit.
+
+Ordinary `rollback` automatically stops the stack and restores the archived volume,
+including file bytes, ownership, modes and empty directories, before starting the
+old images. Other seven named volumes remain untouched. No reset flag is used:
+
+```sh
+deploy/scripts/demo-node.sh rollback /absolute/path/to/demo.env
+```
+
+If upgrade or rollback fails, retain the marker and run the existing `recover`
+command (or `rollback` while pending). Recovery restores the pre-operation relay
+state as well as files/images: a failed rollback can recover the newer store.
+A backup failure never removes the source volume; a missing/corrupt completed
+backup refuses restoration. Failed restoration keeps the marker for retry. Keep
+old images, including the relay image used as the archive helper, until acceptance.
+Rollback discards relay writes made after reset. This option is not a substitute
+for a complete node backup; other volumes are not versioned by this tool.
+
+To combine reset with call authority and voice configuration in one version upgrade:
+
+1. Use a release that preserves the call-authority sections through
+   `provision-node.sh` and renders their origin identities. The origin renderer
+   alone cannot create missing sections; the current generic provisioner omits
+   these sections, so call signaling cannot yet be claimed from this sequence.
+   With the **old**
+   `DEMO_VERSION` still selected, set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` and run
+   `demo-node.sh up ENV_FILE` first if voice was not already applied. `upgrade`
+   refuses a newly selected voice/admin overlay; setting it for the first time
+   on the reset upgrade will fail before writes. Retain the prior firewall rules.
+2. Allow the selected published UDP port through the operator's existing firewall.
+   Set the new `DEMO_VERSION`, then run the upgrade command above; the existing
+   `--voice-udp-port 59449` override can be supplied in the same invocation.
+3. Verify `mesh.endpoints.notify-authority = "ramflux-notify:18085"` in gateway
+   and router, and the exact router/gateway certificate SPIFFE identities under
+   notify's `send_authority.origins`, rendered with `DEMO_NODE_ID`. Confirm gateway
+   `RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450`, relay UDP/control
+   listeners `0.0.0.0:17449` / `0.0.0.0:17450`, public endpoint `DEMO_HOST:59449`,
+   and host `DEMO_BIND_ADDR:59449/udp` mapping. Authority/control ports stay private.
+4. Run wrapper `status` and verify calls with two authenticated clients. Health and
+   mapping checks alone do not establish call signaling, relay authorization or audio.
+   For rollback, select the target snapshot's overlay settings first. Because the
+   preparatory `up` applied voice to the old version, that immediate rollback target
+   also has voice; remove it with an explicit old-version `up` only after rollback
+   if returning to the earlier no-voice configuration, then undo the recorded rule.
+
+#### Persistent state inventory
+
+Compose prefixes the following literal names with `${DEMO_PROJECT}_`. Each service
+mounts its own store at `/var/lib/ramflux/<service>`. Ordinary upgrades and rollbacks
+preserve all of these volumes; the sole exception is the relay reset described above.
+
+| Named volume | Owner and contents | Resettable |
+| --- | --- | --- |
+| `gateway-redb` | Gateway sessions, replay/admission journals, call intents | No |
+| `router-redb` | Router identity/account authority, routing, inbox and WAL | No |
+| `notify-redb` | Notify encrypted push routes, wakes and send/call authority | No |
+| `federation-redb` | Federation forwarding spool, trust/pins and revocations | No |
+| `relay-redb` | Relay object state, attachment authorization and trust cache | `relay` only |
+| `signaling-redb` | Signaling allocation/service state | No |
+| `retention-redb` | Retention lifecycle, hold and incident state | No |
+| `node-privacy` | Shared privacy and fingerprint keys, mounted by all seven services | No |
+
+Inside `DEMO_DATA_DIR`, `config/` and frozen Compose files are generated deployment
+inputs; `certs/`, `secrets/`, `.env` and `identity.env` contain credentials, identity
+and signed trust material. They are copied byte-for-byte into file snapshots and
+restored on rollback. `owner.token` and `owner.json` bind ownership/settings/history;
+`runtime.env` records the applied runtime and overlay selection. The adjacent `.lock`
+serializes operations; `transaction.pending` prevents maintenance until recovery.
+`version-snapshots/` retains current plus three predecessors, including any relay
+archive needed to cross a retained reset boundary. Snapshots are not runtime mounts.
+`down` preserves data; `down --purge` explicitly removes the project's volumes and
+private data directory. Never use purge to handle an individual format break.
 
 Without custody inputs the node still runs and serves public probes, but accounts
 remain `networking_pending` and cannot use contacts, messaging, groups, or calls.

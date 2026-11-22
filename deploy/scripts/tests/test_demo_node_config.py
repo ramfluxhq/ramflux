@@ -17,7 +17,9 @@ from unittest import mock
 HELPER = Path(__file__).resolve().parents[1] / "demo-node-config.py"
 SPEC = importlib.util.spec_from_file_location("demo_node_config", HELPER)
 CONFIG = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(CONFIG)
+sys.modules[SPEC.name] = CONFIG
+with mock.patch.object(sys, "path", [str(HELPER.parent), *sys.path]):
+    SPEC.loader.exec_module(CONFIG)
 
 
 class DemoNodeConfigTests(unittest.TestCase):
