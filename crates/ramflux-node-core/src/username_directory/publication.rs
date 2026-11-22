@@ -14,10 +14,21 @@ use ramflux_protocol::username_directory::{self as w, DirectoryCode as Code};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthorityResponse {
-    Receipt { receipt: Box<w::DirectoryReceipt> },
-    Resolved { resolve: Box<w::DirectoryResolve>, binding: Box<w::UsernameBinding> },
-    Revalidated { result: Box<w::HomeRevalidateResult> },
-    Refused { failure: w::DirectoryFailure },
+    Receipt {
+        receipt: Box<w::DirectoryReceipt>,
+    },
+    Resolved {
+        resolve: Box<w::DirectoryResolve>,
+        binding: Box<w::UsernameBinding>,
+        master_public_key: String,
+        service: Box<super::SignedHomeServiceAddress>,
+    },
+    Revalidated {
+        result: Box<w::HomeRevalidateResult>,
+    },
+    Refused {
+        failure: w::DirectoryFailure,
+    },
 }
 
 impl DirectoryAuthority {
@@ -50,7 +61,54 @@ impl DirectoryAuthority {
             }
             Err(error) => return Err(error),
         };
-        let bytes = super::canonical(&response)?;
+        self.queue_response(writer, call_id, channel, response, false)
+    }
+
+    /// HTTP framing is part of the same fenced candidate, including its length/status headers.
+    /// # Errors
+    /// Refuses stale contexts, mismatched channels or oversized final responses.
+    pub(crate) fn prepare_http_response(
+        &mut self,
+        writer: &WriterIdentity,
+        call_id: &str,
+        channel: &str,
+        signer: &SigningKey,
+    ) -> Result<()> {
+        let time = self.witness.sample_time()?;
+        self.fence.check_writer(writer, time)?;
+        let call = self.fence.call(call_id)?.clone();
+        let response = match self.build_response(&call, signer, time.wall) {
+            Ok(value) => value,
+            Err(CheckpointError::Directory(code)) => {
+                AuthorityResponse::Refused { failure: super::failure(code) }
+            }
+            Err(error) => return Err(error),
+        };
+        self.queue_response(writer, call_id, channel, response, true)
+    }
+
+    fn queue_response(
+        &mut self,
+        writer: &WriterIdentity,
+        call_id: &str,
+        channel: &str,
+        response: AuthorityResponse,
+        http: bool,
+    ) -> Result<()> {
+        let time = self.witness.sample_time()?;
+        let body = super::canonical(&response)?;
+        let bytes = if http {
+            let status = if let AuthorityResponse::Refused { failure } = &response {
+                super::http_status(failure.code)
+            } else {
+                200
+            };
+            let mut bytes = format!("HTTP/1.1 {status} Directory\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", body.len()).into_bytes();
+            bytes.extend(body);
+            bytes
+        } else {
+            body
+        };
         self.fence.queue(writer, &self.head(), call_id, channel, bytes, time)
     }
 
@@ -75,6 +133,38 @@ impl DirectoryAuthority {
 
     pub fn cancel_call(&mut self, call_id: &str) {
         self.fence.cancel(call_id);
+    }
+
+    /// Queue a typed mutation refusal under the same live fence as a successful response.
+    /// # Errors
+    /// Refuses missing/stale contexts, wrong channels and unavailable clocks.
+    pub fn prepare_refusal(
+        &mut self,
+        writer: &WriterIdentity,
+        call_id: &str,
+        channel: &str,
+        code: Code,
+    ) -> Result<()> {
+        let response = AuthorityResponse::Refused { failure: super::failure(code) };
+        self.queue_response(writer, call_id, channel, response, false)
+    }
+
+    /// # Errors
+    /// Refuses stale contexts or oversized framed refusals.
+    pub fn prepare_http_refusal(
+        &mut self,
+        writer: &WriterIdentity,
+        call_id: &str,
+        channel: &str,
+        code: Code,
+    ) -> Result<()> {
+        self.queue_response(
+            writer,
+            call_id,
+            channel,
+            AuthorityResponse::Refused { failure: super::failure(code) },
+            true,
+        )
     }
 
     fn build_response(
@@ -118,6 +208,14 @@ impl DirectoryAuthority {
                         && Some(crypto::binding_hash(&binding)?) == root.binding_hash,
                     Code::DirectoryUnavailable,
                 )?;
+                let home = self
+                    .reporting_floor(&index.root)?
+                    .ok_or(CheckpointError::Directory(Code::DirectoryUnavailable))?;
+                ensure(
+                    home.home == root.node && home.service.body.node == root.node,
+                    Code::DirectoryUnavailable,
+                )?;
+                home.service.verify(&root.node, &home.service.body.public_key, now)?;
                 let resolve = crypto::sign_resolve(
                     signer,
                     &center,
@@ -139,6 +237,8 @@ impl DirectoryAuthority {
                 Ok(AuthorityResponse::Resolved {
                     resolve: Box::new(resolve),
                     binding: Box::new(binding),
+                    master_public_key: home.master_public_key,
+                    service: Box::new(home.service),
                 })
             }
             DirectoryRequest::Revalidate { request } => {

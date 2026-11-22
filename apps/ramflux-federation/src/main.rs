@@ -33,6 +33,8 @@ mod state;
 mod test_certificates;
 #[cfg(test)]
 mod test_directories;
+#[cfg(unix)]
+mod username_directory;
 
 use std::sync::Arc;
 
@@ -77,6 +79,10 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
     if let Some(config) =
         ramflux_node_core::load_config_from_args_reporting(std::env::args().skip(1), service)?
     {
+        #[cfg(unix)]
+        if username_directory::start(&config)? {
+            return shutdown.wait_and_finalize(|| Ok(()));
+        }
         validate_migration_config(&config)?;
         let redb_path = ramflux_node_core::effective_redb_path(&config);
         let mut store = ramflux_node_core::FederationRedbStore::open(&redb_path)?;

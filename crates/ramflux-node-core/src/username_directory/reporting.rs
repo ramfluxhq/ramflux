@@ -102,6 +102,14 @@ fn rate(
 }
 
 impl DirectoryAuthority {
+    /// Retained transport hint and immutable master identity; neither grants lookup permission.
+    /// # Errors
+    /// Refuses malformed roots or unavailable/corrupt protected state.
+    pub fn reporting_floor(&self, root: &str) -> Result<Option<HomeFloor>> {
+        super::fixed(root)?;
+        let tx = self.witness.db.begin_read().map_err(storage)?;
+        read(&tx.open_table(META).map_err(storage)?, &format!("auth_home_floor:{root}"))
+    }
     /// TLS facts and source address come from the witness-owned transport adapter.
     /// Node proofs consume nonces durably before account signatures/mutations are dispatched.
     /// # Errors
@@ -187,6 +195,10 @@ impl DirectoryAuthority {
                     epoch: reporter.history.epoch(),
                     hash: reporter.history.hash().into(),
                     home: reporter.home.clone(),
+                    master_public_key: ramflux_protocol::encode_base64url(
+                        reporter.master.to_bytes(),
+                    ),
+                    service: reporter.service.clone(),
                 };
                 meta.insert(floor_key.as_str(), canonical(&floor)?.as_slice()).map_err(storage)?;
                 Ok(())

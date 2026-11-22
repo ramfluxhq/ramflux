@@ -147,3 +147,47 @@ Development verification builds real binaries and drives scratch-script runs thr
 rf daemons, real services and product reads: same-node set/resolve/contact add, rename
 hold/exact match, and two-node lookup through one centre. Restart and lost-reply cases
 also require captured direct-run evidence. These runs have not been performed yet.
+
+## Live transport configuration under development
+
+Home provisioning additionally requires `RAMFLUX_USERNAME_HOME_URL`,
+`RAMFLUX_USERNAME_HOME_TLS_SERVER_NAME`, and `RAMFLUX_USERNAME_LISTEN_ADDR`.
+Witness provisioning requires `RAMFLUX_USERNAME_LISTEN_ADDR`; the centre primary
+has no public username listener. The HTTPS origin parser accepts canonical DNS,
+IPv4 and bracketed IPv6 origins with an optional nonzero port, without credentials,
+paths, queries or redirects. `RAMFLUX_USERNAME_PRIVATE_PEERS_FILE` is reserved for
+explicit private-network home pins; it is not an admission substitute.
+
+A signed home service locator contains the already verified terminal home identity,
+HTTPS origin, TLS server name and CA certificate. Its canonical frame is at most
+4096 bytes, including a CA PEM of at most 2048 bytes; its lifetime is at most one day.
+The reporting proof binds this locator as part of its evidence hash. The protected
+home-history floor retains the immutable master public key and locator. An expired
+locator closes resolution; it never authorizes an archival profile or creates a
+centre signing pin. Active home refresh is part of the unfinished service wiring.
+
+The dedicated TLS listener requires client-certificate key possession during the
+handshake. Before account admission, it validates that exact certificate chain
+under the bounded signed discovery CA and requires the federation SPIFFE identity
+of the reporting node. This deferred root selection is local to the username
+listener and does not change mesh trust or enrol federation administrators.
+
+Both clients and servers bind node-key possession to the TLS exporter and a fresh
+client challenge using `ramflux.identity.username_transport.v1`. This identity
+proof contains no account data and grants no publication permission. Canonical
+HTTP response framing, including status and length headers, is queued inside the
+witness fence. Each nonblocking encrypted socket write re-enters the same fence;
+pending ciphertext is dropped when the context, head, incarnation or lease retires.
+
+Protected centre/witness processes currently require Linux peer credentials and
+distinct nonroot UIDs. Private primary and witness DB directories must be owned by
+the corresponding UID with mode0700, files0600, witness socket directory0750 and
+socket0660. Symlinked private paths are refused. Redb's exclusive process lock is
+required before a new writer may reopen the primary; its head must reconcile before
+serving. Missing primary initialization requires explicit `--username-rebuild` at
+the primary and `--username-initialize` or `--username-recovery` at the witness.
+Missing witness state is never silently recreated. These operator recovery actions
+do not bypass peer credentials, semantic admission or the exact primary fsync gate.
+
+The release gate remains false. These components have compilation evidence only;
+no direct service run or complete CLI flow is claimed by this document.

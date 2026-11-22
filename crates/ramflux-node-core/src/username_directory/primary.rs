@@ -20,6 +20,33 @@ pub struct PrimaryProjection {
 }
 
 impl PrimaryProjection {
+    /// Reopen the current private projection under redb's exclusive process lock. No authority
+    /// is implied: the new authenticated incarnation must reconcile its exact head first.
+    /// # Errors
+    /// Refuses missing/corrupt projections, a live predecessor or a foreign generation.
+    pub fn resume(path: &Path, writer: WriterIdentity) -> Result<Self> {
+        require(path.is_file(), "missing_primary")?;
+        super::fixed(&writer.witness_boot)?;
+        super::fixed(&writer.incarnation)?;
+        let db = redb::Database::open(path).map_err(storage)?;
+        let head = read_head(&db)?;
+        require(head.generation == writer.generation, "primary_generation")?;
+        let mut tx = db.begin_write().map_err(storage)?;
+        tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        tx.open_table(META)
+            .map_err(storage)?
+            .insert("writer", canonical(&writer)?.as_slice())
+            .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(Self {
+            db,
+            writer,
+            rebuilding: None,
+            last_key: None,
+            complete: true,
+            pending_batches: 0,
+        })
+    }
     /// Creates only a new private image; it never opens or rewrites a predecessor's file.
     /// # Errors
     /// Refuses existing paths, unsafe writer identity, and unavailable durable storage.

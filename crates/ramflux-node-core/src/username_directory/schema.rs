@@ -187,7 +187,8 @@ pub(crate) fn apply(tx: &redb::WriteTransaction, delta: &wire::CheckpointDelta) 
     Ok(())
 }
 /// A bounded indexed page, never a snapshot of the whole authority image.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImagePage {
     pub rows: Vec<(Vec<u8>, Vec<u8>)>,
     pub next: Option<Vec<u8>>,

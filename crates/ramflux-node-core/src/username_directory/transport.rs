@@ -102,6 +102,7 @@ pub struct ReportingProofBody {
 pub struct ReportingEvidence {
     pub discovery: crate::FederationServerRecord,
     pub history: ResolveResult,
+    pub service: super::SignedHomeServiceAddress,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,6 +127,7 @@ pub struct VerifiedReporter {
     pub(crate) history: ramflux_crypto::home_migration::VerifiedHome,
     pub(crate) nonce: String,
     pub(crate) expires_at: u64,
+    pub(crate) service: super::SignedHomeServiceAddress,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,6 +136,8 @@ pub struct HomeFloor {
     pub epoch: u64,
     pub hash: String,
     pub home: String,
+    pub master_public_key: String,
+    pub service: super::SignedHomeServiceAddress,
 }
 
 impl VerifiedReporter {
@@ -211,6 +215,8 @@ pub fn verify_reporting_request(
     )?;
     crate::verify_federation_server_record(discovery, now)
         .map_err(|_| CheckpointError::Refused("proof_discovery"))?;
+    value.evidence.service.verify(channel.node_id, channel.node_key, now)?;
+    require(value.evidence.service.body.ca_cert_pem == discovery.node_ca_cert_pem, "service_ca")?;
     ramflux_crypto::verify_canonical_signature(
         &proof_bytes(p)?,
         &value.proof.signature,
@@ -256,6 +262,7 @@ pub fn verify_reporting_request(
         history: verified,
         nonce: p.nonce.clone(),
         expires_at: p.expires_at,
+        service: value.evidence.service.clone(),
     })
 }
 

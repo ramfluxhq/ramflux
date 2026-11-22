@@ -34,6 +34,10 @@ mod home;
 pub use home::*;
 mod coordinator;
 pub use coordinator::*;
+mod home_service;
+pub use home_service::*;
+mod channel;
+pub use channel::*;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]

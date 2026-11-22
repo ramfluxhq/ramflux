@@ -7,6 +7,8 @@ use ed25519_dalek::VerifyingKey;
 use std::path::{Component, Path, PathBuf};
 
 const PREFIX: &str = "RAMFLUX_USERNAME_";
+/// Enabled only after the complete CLI/service flow and protected deployment checks are proven.
+pub const USERNAME_DIRECTORY_RELEASE_GATE: bool = false;
 const INPUTS: &[&str] = &[
     "ROLE",
     "CENTER_URL",
@@ -17,6 +19,10 @@ const INPUTS: &[&str] = &[
     "TRUST_GENERATION",
     "PRIMARY_DB",
     "HOME_DB",
+    "HOME_URL",
+    "HOME_TLS_SERVER_NAME",
+    "PRIVATE_PEERS_FILE",
+    "LISTEN_ADDR",
     "WITNESS_DB",
     "WITNESS_SOCKET",
     "CENTER_UID",
@@ -40,19 +46,7 @@ impl CenterPin {
     pub fn validate(&self) -> Result<()> {
         validate_node(&self.id)?;
         validate_node(&self.tls_server_name)?;
-        let authority =
-            self.url.strip_prefix("https://").ok_or(CheckpointError::Refused("center_https"))?;
-        require(!authority.is_empty() && authority.len() <= 259, "center_url")?;
-        let (host, port) =
-            authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
-        if host.parse::<std::net::Ipv4Addr>().is_err() {
-            validate_node(host)?;
-        }
-        if let Some(port) = port {
-            let parsed =
-                port.parse::<u16>().map_err(|_| CheckpointError::Refused("center_port"))?;
-            require(parsed != 0 && parsed.to_string() == port, "center_port")?;
-        }
+        validate_origin(&self.url)?;
         fixed(&self.public_key)?;
         let bytes: [u8; 32] = ramflux_protocol::decode_base64url(&self.public_key)
             .map_err(|_| CheckpointError::Refused("center_key"))?
@@ -71,9 +65,38 @@ impl CenterPin {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectoryRole {
-    Home { database: PathBuf },
+    Home { database: PathBuf, service: HomeServiceConfig },
     Center { primary: PathBuf, witness: WitnessPeer },
-    Witness { database: PathBuf, peer: WitnessPeer },
+    Witness { database: PathBuf, peer: WitnessPeer, listen: std::net::SocketAddr },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeServiceConfig {
+    pub origin: String,
+    pub tls_server_name: String,
+    pub listen: std::net::SocketAddr,
+    pub private_peers_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateHomePin {
+    pub node: String,
+    pub public_key: String,
+    pub origin: String,
+}
+
+impl PrivateHomePin {
+    /// # Errors
+    /// Refuses malformed explicit private-network peer pins.
+    pub fn validate(&self) -> Result<()> {
+        validate_node(&self.node)?;
+        validate_origin(&self.origin)?;
+        fixed(&self.public_key)?;
+        let key = ramflux_crypto::verifying_key_from_base64url(&self.public_key)
+            .map_err(|_| CheckpointError::Refused("home_service_key"))?;
+        require(!key.is_weak(), "home_service_key")
+    }
 }
 
 /// UID pins are checked against socket peer credentials, never a request's claimed UID.
@@ -127,6 +150,10 @@ impl DirectoryConfig {
         if values.is_empty() {
             return Ok(None);
         }
+        let private_peers_file = values.remove("PRIVATE_PEERS_FILE").map(PathBuf::from);
+        if let Some(path) = &private_peers_file {
+            validate_path(path)?;
+        }
         let mut take =
             |key| values.remove(key).ok_or(CheckpointError::Refused("config_incomplete"));
         let role = take("ROLE")?;
@@ -140,7 +167,23 @@ impl DirectoryConfig {
         };
         center.validate()?;
         let role = match role.as_str() {
-            "home" => DirectoryRole::Home { database: PathBuf::from(take("HOME_DB")?) },
+            "home" => {
+                let origin = take("HOME_URL")?;
+                let tls_server_name = take("HOME_TLS_SERVER_NAME")?;
+                validate_origin(&origin)?;
+                validate_node(&tls_server_name)?;
+                let listen =
+                    take("LISTEN_ADDR")?.parse().map_err(|_| CheckpointError::Refused("listen"))?;
+                DirectoryRole::Home {
+                    database: PathBuf::from(take("HOME_DB")?),
+                    service: HomeServiceConfig {
+                        origin,
+                        tls_server_name,
+                        listen,
+                        private_peers_file: private_peers_file.clone(),
+                    },
+                }
+            }
             "center" | "witness" => {
                 let peer = WitnessPeer {
                     socket: PathBuf::from(take("WITNESS_SOCKET")?),
@@ -162,14 +205,26 @@ impl DirectoryConfig {
                         witness: peer,
                     }
                 } else {
-                    DirectoryRole::Witness { database: PathBuf::from(take("WITNESS_DB")?), peer }
+                    DirectoryRole::Witness {
+                        database: PathBuf::from(take("WITNESS_DB")?),
+                        peer,
+                        listen: take("LISTEN_ADDR")?
+                            .parse()
+                            .map_err(|_| CheckpointError::Refused("listen"))?,
+                    }
                 }
             }
             _ => return Err(CheckpointError::Refused("role")),
         };
         require(values.is_empty(), "config_foreign_role")?;
+        require(
+            private_peers_file.is_none() || matches!(role, DirectoryRole::Home { .. }),
+            "config_foreign_role",
+        )?;
         let database = match &role {
-            DirectoryRole::Home { database } | DirectoryRole::Witness { database, .. } => database,
+            DirectoryRole::Home { database, .. } | DirectoryRole::Witness { database, .. } => {
+                database
+            }
             DirectoryRole::Center { primary, .. } => primary,
         };
         validate_path(database)?;
@@ -181,6 +236,54 @@ impl DirectoryConfig {
         }
         Ok(Some(Self { center, role }))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpsOrigin {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Parse one canonical HTTPS origin, without credentials, path, query or redirect semantics.
+/// # Errors
+/// Refuses unsupported schemes, malformed host/port shapes and noncanonical IP literals.
+pub fn parse_https_origin(value: &str) -> Result<HttpsOrigin> {
+    let authority =
+        value.strip_prefix("https://").ok_or(CheckpointError::Refused("origin_https"))?;
+    require(!authority.is_empty() && authority.len() <= 259, "origin")?;
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']').ok_or(CheckpointError::Refused("origin_host"))?;
+        let ip: std::net::Ipv6Addr =
+            host.parse().map_err(|_| CheckpointError::Refused("origin_host"))?;
+        require(ip.to_string() == host, "origin_host")?;
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':').ok_or(CheckpointError::Refused("origin_port"))?)
+        };
+        (host, port)
+    } else {
+        let (host, port) =
+            authority.split_once(':').map_or((authority, None), |(h, p)| (h, Some(p)));
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+            require(ip.to_string() == host, "origin_host")?;
+        } else {
+            validate_node(host)?;
+        }
+        (host, port)
+    };
+    let port = if let Some(value) = port {
+        let port: u16 = value.parse().map_err(|_| CheckpointError::Refused("origin_port"))?;
+        require(port != 0 && port.to_string() == value, "origin_port")?;
+        port
+    } else {
+        443
+    };
+    Ok(HttpsOrigin { host: host.into(), port })
+}
+
+pub(super) fn validate_origin(value: &str) -> Result<()> {
+    parse_https_origin(value).map(|_| ())
 }
 
 pub(crate) fn validate_node(value: &str) -> Result<()> {
