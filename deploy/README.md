@@ -213,6 +213,59 @@ Local `status` checks the actual gateway/relay voice env and published UDP mappi
 alongside service health. This checks configuration, not end-to-end audio delivery;
 `status --remote` retains its existing discovery/QUIC checks and does not probe voice.
 
+#### Call authority and operator change list
+
+Voice also needs call signaling authority. In the generated `config/gateway.toml`
+and `config/router.toml`, `[mesh.endpoints]` must contain
+`notify-authority = "ramflux-notify:18085"`. Notify listens on QUIC/UDP 18085
+inside the Compose network (the default `RAMFLUX_NOTIFY_MESH_LISTEN_ADDR`),
+separately from its TCP mesh listener on 7443. In `config/notify.toml`,
+`[send_authority.origins]` must authorize these exact certificate identities:
+
+```toml
+"spiffe://NODE_ID/ramflux-router" = "ramflux-router:17444"
+"spiffe://NODE_ID/ramflux-gateway/ramflux-gateway" = "ramflux-gateway:7443"
+```
+
+Replace `NODE_ID` with the operator's `DEMO_NODE_ID`; the wrapper renders it
+when initializing or upgrading the deploy tree. Existing state is preserved by
+`up`: use `upgrade` with a new `DEMO_VERSION` to import corrected templates and
+the renderer, following the snapshot procedure below. No public port is needed
+for notify authority or voice lease control.
+
+For a controller-operated test node, prepare the following changes before running
+the wrapper (the node address, env-file path and version are operator inputs):
+
+1. Retain the last-good snapshot/version and the current firewall rules. Update
+   the product deploy tree/images to the selected version with this renderer.
+2. Set `RAMFLUX_DEMO_VOICE_UDP_PORT=59449` in the operator env file, retaining
+   `DEMO_HOST` as the externally reachable hostname and `DEMO_BIND_ADDR` as the
+   intended host interface. Do not advertise loopback for remote clients.
+3. For a host whose nftables input policy is DROP, add
+   `udp dport 59449 counter accept` in the active input chain before its terminal
+   drop/reject, scoped to the intended interface/address. Persist it using the
+   host's existing firewall configuration. If container traffic traverses a
+   forwarding chain with DROP, authorize that published UDP mapping there too;
+   determine the active chain/table names before applying any rule. No TCP 17450
+   or notify UDP 18085 should be opened publicly.
+4. Run `deploy/scripts/demo-node.sh upgrade /absolute/path/to/operator.env` with
+   the chosen new `DEMO_VERSION`. Check the two authority endpoint entries and
+   the two rendered origin identities above. The overlay must set gateway
+   `RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450`; relay must have
+   `RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449`,
+   `RAMFLUX_RELAY_VOICE_CONTROL_ADDR=0.0.0.0:17450`, and
+   `RAMFLUX_RELAY_VOICE_PUBLIC_ENDPOINT=DEMO_HOST:59449`. The wrapper publishes
+   host `DEMO_BIND_ADDR:59449/udp` to container `17449/udp`.
+5. Run local wrapper `status`, then use two authenticated clients to establish
+   ringing, answer and active states, sustain relay authorization beyond 60 s,
+   hang up, and verify old credentials stop forwarding. Health/status alone
+   does not prove this flow; audio additionally requires a client media engine.
+
+Rollback: restore the prior operator voice-port selection, run the documented
+`rollback` command to restore the last-good snapshot/images, remove only the
+newly added firewall rule by its recorded handle, and verify wrapper `status`.
+Do not purge data or regenerate identity keys.
+
 `up` reuses the existing CA, service certificates, random identity seeds, gateway
 v3 issuer certificate, offline-root-signed provider keyring and provider-signed
 snapshot. Signing code is shared with the s71/s72 production acceptance fixtures.
