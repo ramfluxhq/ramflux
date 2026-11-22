@@ -41,6 +41,21 @@ impl RamfluxClient {
             .and_then(|value| value["contact_requests"].as_str().map(str::to_owned))
             .unwrap_or_else(|| "manual".into()))
     }
+    /// An agent is a private participant of its owner, so the two never ask each other: an agent
+    /// accepts a request from the human its own verified record names as custodian, and the human
+    /// accepts a request from an agent its agent record lists as a live agent of its own.
+    fn requester_is_custodian_or_own_agent(&self, requester_root: &str) -> bool {
+        self.born_v3_account.as_ref().is_some_and(|account| {
+            account
+                .record()
+                .body
+                .profile
+                .custodian
+                .as_ref()
+                .is_some_and(|custodian| custodian.account_anchor == requester_root)
+                || account.records_own_agent(requester_root)
+        })
+    }
     pub(crate) fn set_contact_request_policy(&self, policy: &str) -> Result<(), SdkError> {
         if !matches!(policy, "manual" | "auto_accept") {
             return Err(invalid("contact_requests must be manual or auto_accept"));
@@ -222,7 +237,10 @@ impl RamfluxClient {
             return Ok(());
         }
         self.record_pending_friend_link(&request.link_id, root, &body.target_root)?;
-        if reciprocal || self.contact_request_policy()? == "auto_accept" {
+        if reciprocal
+            || self.requester_is_custodian_or_own_agent(root)
+            || self.contact_request_policy()? == "auto_accept"
+        {
             self.decide_inbound_contact(&request, "accepted")?;
         }
         Ok(())

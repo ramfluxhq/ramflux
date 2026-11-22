@@ -417,14 +417,44 @@ impl BornAccount {
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.primary_lease(vault, false)
+    }
+    /// The signer of this account's contact card and contact consent. A human signs on its
+    /// primary device. An agent's record names its custodian's primary phone as primary, and that
+    /// phone never holds agent keys: the agent signs with its own self-signing key on the device
+    /// that hosts it. Verifiers check only the master certificate's self-signing key.
+    fn contact_signer(
+        &self,
+        vault: &dyn PrimaryVault,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
+        self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Whether this is a headless agent custodied by a local human and this device is the agent's
+    /// own device.
+    fn hosts_agent_locally(&self) -> Result<bool, SdkError> {
+        let body = &self.record().body;
+        if body.principal_kind != ramflux_protocol::PrincipalKind::HeadlessAi
+            || self.stored.custodian_account_id.is_none()
+        {
+            return Ok(false);
+        }
+        let local = self.local_device_id()?;
+        Ok(body.devices.iter().any(|entry| entry.device_id == local))
+    }
+    fn primary_lease(
+        &self,
+        vault: &dyn PrimaryVault,
+        hosted_agent: bool,
+    ) -> Result<super::PrimarySigningLease, SdkError> {
         self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
         if self.stored.primary_vault_ref.is_empty()
-            || self.record().body.master_certificate.body.primary_device_ref.device_id
-                != self.local_device_id()?
+            || (!hosted_agent
+                && self.record().body.master_certificate.body.primary_device_ref.device_id
+                    != self.local_device_id()?)
         {
             return Err(SdkError::PairingCode("PrimaryRequired"));
         }
@@ -453,7 +483,7 @@ impl BornAccount {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
-        Ok(self.group_primary(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
+        Ok(self.contact_signer(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
     }
     #[must_use]
     pub(crate) const fn branch_pending(&self) -> bool {
@@ -520,7 +550,28 @@ impl BornAccount {
                 return Ok(true);
             }
         }
-        Ok(false)
+        Ok(self.records_own_agent(anchor))
+    }
+    /// Whether this owner's agent record names `anchor` as one of its live agents. The record is
+    /// written when a creation completes and reaches every own device (`agent_record_sync`), so the
+    /// primary phone, which approves an agent hosted on a paired desktop and holds none of its
+    /// keys, recognises it. `anchor` is the author's verified directory root. A record that cannot
+    /// be read is not an ownership claim.
+    pub(crate) fn records_own_agent(&self, anchor: &str) -> bool {
+        let record = self.agent_creation_store().and_then(|store| {
+            crate::agent_record::AgentRecordStore::at(store.agent_record_dir()).load(anchor)
+        });
+        match record {
+            Ok(Some(record)) => {
+                record.lifecycle == crate::agent_record::LIFECYCLE_ACTIVE
+                    && record.custodian_anchor == self.record().body.account_anchor
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "agent record unreadable; surface author not treated as own");
+                false
+            }
+        }
     }
     /// The human account that custodies this headless account on this root, if any.
     #[must_use]
@@ -1261,7 +1312,7 @@ impl BornAccount {
         {
             return Err(invalid());
         }
-        let primary = self.group_primary(vault)?;
+        let primary = self.contact_signer(vault)?;
         if primary.public_key()
             != current.envelope().body.master_certificate.body.self_signing_public_key
         {
