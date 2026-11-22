@@ -5,7 +5,7 @@
 use super::wire::validate_identifier;
 use super::{CATALOG_ID, JsonPointer, Reject};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::OnceLock};
+use std::{cell::OnceCell, collections::BTreeMap};
 const PROFILE: &str = include_str!("../../catalogs/rf-card-v1.json");
 const COMMON: &str = include_str!("../../vendor/a2ui/specification/v1_0/json/common_types.json");
 const BASE: &str = "https://a2ui.org/specification/v1_0/catalog.json";
@@ -13,7 +13,10 @@ struct Schemas {
     components: BTreeMap<String, jsonschema::Validator>,
     functions: BTreeMap<String, jsonschema::Validator>,
 }
-static SCHEMAS: OnceLock<Result<Schemas, Reject>> = OnceLock::new();
+thread_local! {
+    // jsonschema uses Rc on WASM. Keep validators on their owning thread on every target.
+    static SCHEMAS: OnceCell<Result<Schemas, Reject>> = const { OnceCell::new() };
+}
 fn build(schema: &Value, common: &Value) -> Result<jsonschema::Validator, Reject> {
     // HTTP and filesystem resolution features are disabled. Only these embedded resources exist.
     let mut catalog: Value = serde_json::from_str(PROFILE).map_err(|_| Reject::Encoding)?;
@@ -40,30 +43,37 @@ fn build(schema: &Value, common: &Value) -> Result<jsonschema::Validator, Reject
             Reject::Encoding
         })
 }
-fn schemas() -> Result<&'static Schemas, Reject> {
-    SCHEMAS.get_or_init(|| {
-        let basic: Value = serde_json::from_str(PROFILE).map_err(|_| Reject::Encoding)?;
-        let common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
-        let mut components = BTreeMap::new();
-        for (name, schema) in basic.get("components").and_then(Value::as_object).ok_or(Reject::Encoding)? {
-
-            let full = json!({"$defs":basic.get("$defs"),"allOf":[{"$ref":"common_types.json#/$defs/ComponentCommon"},schema],"unevaluatedProperties":false});
-            components.insert(name.clone(),build(&full,&common)?);
-        }
-        let mut functions = BTreeMap::new();
-        for (name,schema) in basic.get("functions").and_then(Value::as_object).ok_or(Reject::Encoding)? {
-            let full = json!({"$defs":basic.get("$defs"),"allOf":[schema,{"type":"object","properties":{"catalogId":{"const":CATALOG_ID}}}],"unevaluatedProperties":false});
-            functions.insert(name.clone(),build(&full,&common)?);
-        }
-        Ok(Schemas { components, functions })
-    }).as_ref().map_err(Clone::clone)
+fn with_schemas<T>(validate: impl FnOnce(&Schemas) -> Result<T, Reject>) -> Result<T, Reject> {
+    SCHEMAS.with(|cache| {
+        cache.get_or_init(build_schemas).as_ref().map_err(Clone::clone).and_then(validate)
+    })
+}
+fn build_schemas() -> Result<Schemas, Reject> {
+    let basic: Value = serde_json::from_str(PROFILE).map_err(|_| Reject::Encoding)?;
+    let common: Value = serde_json::from_str(COMMON).map_err(|_| Reject::Encoding)?;
+    let mut components = BTreeMap::new();
+    for (name, schema) in
+        basic.get("components").and_then(Value::as_object).ok_or(Reject::Encoding)?
+    {
+        let full = json!({"$defs":basic.get("$defs"),"allOf":[{"$ref":"common_types.json#/$defs/ComponentCommon"},schema],"unevaluatedProperties":false});
+        components.insert(name.clone(), build(&full, &common)?);
+    }
+    let mut functions = BTreeMap::new();
+    for (name, schema) in
+        basic.get("functions").and_then(Value::as_object).ok_or(Reject::Encoding)?
+    {
+        let full = json!({"$defs":basic.get("$defs"),"allOf":[schema,{"type":"object","properties":{"catalogId":{"const":CATALOG_ID}}}],"unevaluatedProperties":false});
+        functions.insert(name.clone(), build(&full, &common)?);
+    }
+    Ok(Schemas { components, functions })
 }
 pub(super) fn component(value: &Value) -> Result<(), Reject> {
     let name = value.get("component").and_then(Value::as_str).ok_or(Reject::Encoding)?;
-    let schemas = schemas()?;
-    let validator =
-        schemas.components.get(name).ok_or_else(|| Reject::Validation("component".into()))?;
-    validator.validate(value).map_err(|_| Reject::Validation("component schema".into()))?;
+    with_schemas(|schemas| {
+        let validator =
+            schemas.components.get(name).ok_or_else(|| Reject::Validation("component".into()))?;
+        validator.validate(value).map_err(|_| Reject::Validation("component schema".into()))
+    })?;
     if value.get("@catalogId").is_some_and(|v| v.as_str() != Some(CATALOG_ID)) {
         return Err(Reject::Expression);
     }
@@ -327,12 +337,14 @@ pub(super) fn function(value: &Value) -> Result<(), Reject> {
             .validate(value)
             .map_err(|_| Reject::Expression);
     }
-    schemas()?
-        .functions
-        .get(name)
-        .ok_or(Reject::Expression)?
-        .validate(value)
-        .map_err(|_| Reject::Expression)
+    with_schemas(|schemas| {
+        schemas
+            .functions
+            .get(name)
+            .ok_or(Reject::Expression)?
+            .validate(value)
+            .map_err(|_| Reject::Expression)
+    })
 }
 
 fn validate_table(value: &Value) -> Result<(), Reject> {
