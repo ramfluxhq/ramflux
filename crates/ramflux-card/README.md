@@ -36,8 +36,14 @@ admission separately bounds signed state at 16 KiB, model at 12 KiB, definitions
 at 32, nesting at 16, templates at 16 items/two scopes, expanded instances at
 256 and resolved properties at 64 KiB. Static references share memoized reachability,
 maximum depth/template depth and a 2048-visit cap. Admission, action validation
-and each resolve share a 4096-step expression/read budget, including indirect
-model-supplied formatString programs. Expanded JSON bytes are charged before
+and each resolve bound literal expression/read work from the 64 KiB expanded
+source cap and depth 16: at most eight walks, 17 recursive levels and 17 enclosing
+program evaluations per source byte. Model-computed `formatString` programs also
+share a separate 4096-step allowance per expanded instance across admission,
+read-closure collection, display and checks; nested programs never renew it.
+The aggregate step ceiling is `8 * 17 * 17 * 65536 + 256 * 4096 = 152567808`.
+Independent cells therefore do not spend one another's indirect-program allowance.
+Expanded JSON bytes are charged before
 bound values are cloned or inserted. The SDK passes presentation separately;
 peer `theme`, `host`, script and unknown fields are refused.
 

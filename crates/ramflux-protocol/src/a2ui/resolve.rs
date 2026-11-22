@@ -157,6 +157,7 @@ impl<'a> Resolution<'a> {
         let mut actions = Vec::new();
         for (index, instance) in graph.instances.iter().enumerate() {
             if kind(instance.component)? == "Button" {
+                steps.instance(index)?;
                 let declared = declaration(instance, &inputs, snapshot, &steps)?;
                 actions.push((index, declared));
             }
@@ -182,6 +183,7 @@ impl<'a> Resolution<'a> {
             .ok_or(Reject::Expression)?;
         let (_, declared) =
             self.actions.iter().find(|(at, _)| *at == index).ok_or(Reject::Expression)?;
+        self.steps.instance(index)?;
         Ok((instance, declared))
     }
 
@@ -352,6 +354,15 @@ fn collect_program_reads(
     depth: usize,
 ) -> Result<(), Reject> {
     let source = value.pointer("/args/value").ok_or(Reject::Expression)?;
+    context.steps.program(source, || program_reads(source, context, reads, depth))
+}
+
+fn program_reads(
+    source: &Value,
+    context: &CheckContext<'_>,
+    reads: &mut Vec<JsonPointer>,
+    depth: usize,
+) -> Result<(), Reject> {
     let mut source_reads = Vec::new();
     collect_reads(source, context, &mut source_reads, depth + 1)?;
     if source_reads.iter().any(|read| context.owned.iter().any(|owner| read.overlaps(owner))) {
@@ -416,7 +427,8 @@ impl SurfaceSnapshot {
         let model = overlay(self, &resolution.inputs, drafts)?;
         let mut nodes = Vec::with_capacity(resolution.graph.instances.len());
         let mut bytes = Bytes::new(MAX_RESOLVED_BYTES);
-        for instance in &resolution.graph.instances {
+        for (index, instance) in resolution.graph.instances.iter().enumerate() {
+            resolution.steps.instance(index)?;
             let properties = properties(
                 instance.component,
                 &model,
@@ -626,6 +638,7 @@ fn allowed_actions(
 ) -> Result<Vec<ResolvedAction>, Reject> {
     let mut actions = Vec::with_capacity(resolution.actions.len());
     for (index, declared) in &resolution.actions {
+        resolution.steps.instance(*index)?;
         let instance = resolution.graph.instances.get(*index).ok_or(Reject::Integrity)?;
         let mut kind_out = declared.clone();
         if let ResolvedActionKind::Event { checks_pass, .. } = &mut kind_out {

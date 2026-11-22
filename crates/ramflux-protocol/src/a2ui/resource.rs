@@ -9,15 +9,57 @@ use std::{
     io::{self, Write},
 };
 
-const MAX_EXPRESSION_STEPS: usize = 4096;
+const MAX_INDIRECT_STEPS: usize = 4096;
+// Eight walks cover expansion, declarations, display, messages and action checks.
+// A source byte can be revisited at each of 17 expression levels, and each of
+// 17 enclosing formatString evaluations. Indirect programs have a separate cap.
+const MAX_EXPRESSION_STEPS: usize = 8 * 17 * 17 * super::graph::MAX_EXPANDED_BYTES
+    + super::graph::MAX_INSTANCES * MAX_INDIRECT_STEPS;
 
-pub(super) struct Steps(Cell<usize>);
+pub(super) struct Steps {
+    remaining: Cell<usize>,
+    indirect: [Cell<usize>; super::graph::MAX_INSTANCES],
+    instance: Cell<usize>,
+    program_depth: Cell<usize>,
+}
 impl Steps {
-    pub(super) const fn new() -> Self {
-        Self(Cell::new(MAX_EXPRESSION_STEPS))
+    pub(super) fn new() -> Self {
+        Self {
+            remaining: Cell::new(MAX_EXPRESSION_STEPS),
+            indirect: std::array::from_fn(|_| Cell::new(MAX_INDIRECT_STEPS)),
+            instance: Cell::new(0),
+            program_depth: Cell::new(0),
+        }
+    }
+    pub(super) fn instance(&self, index: usize) -> Result<(), Reject> {
+        if index >= super::graph::MAX_INSTANCES || self.program_depth.get() != 0 {
+            return Err(Reject::Limit);
+        }
+        self.instance.set(index);
+        Ok(())
+    }
+    // Literal programs are bounded by signed/expanded source bytes. Programs
+    // computed from model data may amplify those bytes, so all their recursive
+    // work shares the instance's non-renewable allowance across every phase.
+    pub(super) fn program<T>(
+        &self,
+        source: &Value,
+        evaluate: impl FnOnce() -> Result<T, Reject>,
+    ) -> Result<T, Reject> {
+        let depth = self.program_depth.get();
+        if !source.is_string() {
+            self.program_depth.set(depth.checked_add(1).ok_or(Reject::Limit)?);
+        }
+        let result = evaluate();
+        self.program_depth.set(depth);
+        result
     }
     pub(super) fn take(&self) -> Result<(), Reject> {
-        self.0.set(self.0.get().checked_sub(1).ok_or(Reject::Limit)?);
+        self.remaining.set(self.remaining.get().checked_sub(1).ok_or(Reject::Limit)?);
+        if self.program_depth.get() != 0 {
+            let remaining = self.indirect.get(self.instance.get()).ok_or(Reject::Limit)?;
+            remaining.set(remaining.get().checked_sub(1).ok_or(Reject::Limit)?);
+        }
         Ok(())
     }
 }

@@ -94,17 +94,18 @@ pub(super) fn evaluate_display(
     };
     match name {
         "@index" => evaluate_index(args, model, prefix, depth, locale, steps),
-        "formatString" => {
+        "formatString" => steps.program(args.get("value").ok_or(Reject::Expression)?, || {
             let value = get("value")?;
-            Ok(serde_json::json!(super::format_string::render_display(
+            super::format_string::render_display(
                 value.as_str().ok_or(Reject::Expression)?,
                 model,
                 prefix,
                 depth + 1,
                 locale,
-                steps
-            )?))
-        }
+                steps,
+            )
+            .map(Value::String)
+        }),
         "required" => Ok(required(&get("value")?)),
         "length" => {
             let value = get("value")?;

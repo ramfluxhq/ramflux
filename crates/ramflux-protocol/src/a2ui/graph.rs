@@ -14,7 +14,7 @@ pub(super) const MAX_TEMPLATE_SCOPES: usize = 2;
 pub(super) const MAX_INSTANCES: usize = 256;
 const MAX_DEPTH: usize = 16;
 const MAX_REFERENCE_VISITS: usize = 2048;
-const MAX_EXPANDED_BYTES: usize = 64 * 1024;
+pub(super) const MAX_EXPANDED_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub(super) struct Instance<'a> {
@@ -123,7 +123,8 @@ impl<'a> Graph<'a> {
             &mut BTreeSet::new(),
         )?;
         let mut bytes = Bytes::new(MAX_EXPANDED_BYTES);
-        for instance in &graph.instances {
+        for (index, instance) in graph.instances.iter().enumerate() {
+            steps.instance(index)?;
             expanded_value(
                 instance.component,
                 &snapshot.data_model,
