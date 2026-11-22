@@ -19,6 +19,7 @@ mod http_request_limits_tests;
 mod http_response;
 #[cfg(test)]
 mod http_worker_tests;
+mod ingress_policy;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod key_migration;

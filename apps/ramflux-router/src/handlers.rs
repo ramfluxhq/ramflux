@@ -6,7 +6,6 @@ mod session_push;
 
 use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
-use std::time::Instant;
 
 use crate::lifecycle::{
     handle_mvp7_abuse_report, handle_mvp7_abuse_report_get, handle_mvp7_federated_tombstone,
@@ -1068,55 +1067,13 @@ pub(crate) fn envelope_origin_for_peer(
         _ => anyhow::bail!("mesh peer cannot submit envelopes"),
     }
 }
-pub(crate) fn handle_mvp0_envelope_mesh_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
-    let started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
-    }
-    router.submit_envelope_mesh_from(envelope, started, origin)
-}
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_async_from;
 #[cfg(feature = "itest-http")]
-pub(crate) fn handle_mvp0_envelope_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    let total_started = Instant::now();
-    let decode_started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security(&envelope));
-    }
-    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_from(envelope, total_started, origin)
-}
-
-pub(crate) async fn handle_mvp0_envelope_async_from(
-    body: &[u8],
-    router: &crate::router_runtime::RouterHandle,
-    origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
-    let total_started = Instant::now();
-    let decode_started = Instant::now();
-    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
-    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
-        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
-    }
-    ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
-}
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_from;
+pub(crate) use crate::ingress_decode::handle_mvp0_envelope_mesh_from;
 
 fn mesh_response_status_code(status: &str) -> u16 {
     status.split_ascii_whitespace().next().and_then(|code| code.parse::<u16>().ok()).unwrap_or(500)
-}
-
-fn elapsed_us(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn i_json_rejection(error: &anyhow::Error) -> Option<serde_json::Value> {

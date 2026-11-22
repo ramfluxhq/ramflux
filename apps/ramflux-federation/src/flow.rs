@@ -126,7 +126,10 @@ pub(crate) fn handle_s8_forward_envelope(
     );
     match send_signed_forward_to_peer(router, &peer, &signed_request) {
         Ok(response) => Ok(response),
-        Err(error) => spool_failed_forward(store, &signed_request, &error),
+        Err(error) => match crate::ingress_policy::permanent_outcome(&error) {
+            Some(outcome) => Ok(permanent_forward_response(&signed_request, outcome)),
+            None => spool_failed_forward(store, &signed_request, &error),
+        },
     }
 }
 
@@ -315,6 +318,9 @@ fn retry_outbound_spool_with(
             continue;
         }
         match send(&entry) {
+            Ok(outcome) if crate::ingress_policy::is_permanent_outcome(&outcome) => {
+                dead_letter_permanent(store, &entry.peer_node_id, entry.seq, &outcome, now)?;
+            }
             Ok(outcome) => {
                 store.mark_outbound_delivered(&entry.peer_node_id, entry.seq)?;
                 tracing::info!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %outcome, "delivered federation outbound spool entry");
@@ -325,9 +331,13 @@ fn retry_outbound_spool_with(
                 tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, ?reason_code, dead_letters, "dead-lettered federation outbound spool entry");
             }
             Err(error) => {
-                store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
-                tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %error, "federation outbound spool retry deferred");
-                blocked_peers.insert(entry.peer_node_id);
+                if let Some(outcome) = crate::ingress_policy::permanent_outcome(&error) {
+                    dead_letter_permanent(store, &entry.peer_node_id, entry.seq, outcome, now)?;
+                } else {
+                    store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
+                    tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %error, "federation outbound spool retry deferred");
+                    blocked_peers.insert(entry.peer_node_id);
+                }
             }
         }
     }
@@ -387,6 +397,93 @@ fn spooled_forward_response(
             inbox_seq: None,
             cursor: None,
             nack: None,
+        },
+    }
+}
+
+fn permanent_forward_response(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    outcome: &str,
+) -> ramflux_node_core::FederatedEnvelopeForwardResponse {
+    ramflux_node_core::FederatedEnvelopeForwardResponse {
+        accepted: false,
+        source_node_id: request.source_node_id.clone(),
+        target_node_id: request.target_node_id.clone(),
+        delivery: refused_submit(&request.envelope.target_delivery_id, outcome),
+    }
+}
+
+fn refused_submit(
+    target_delivery_id: &str,
+    outcome: &str,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: outcome.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }
+}
+
+fn dead_letter_permanent(
+    store: &ramflux_node_core::FederationRedbStore,
+    peer_node_id: &str,
+    seq: u64,
+    outcome: &str,
+    now: u64,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    // The stored reason set has no limit or block variant. The log keeps the real outcome.
+    store.dead_letter_outbound(
+        peer_node_id,
+        seq,
+        ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch,
+        now,
+    )?;
+    let dead_letters = store.outbound_dead_letter_count()?;
+    tracing::warn!(
+        peer_node_id,
+        seq,
+        outcome,
+        dead_letters,
+        "dead-lettered federation outbound spool entry after a permanent refusal"
+    );
+    Ok(())
+}
+
+fn inbound_json_len(envelope: &ramflux_protocol::Envelope) -> Result<u64, &'static str> {
+    let bytes = serde_json::to_vec(envelope).map_err(|_| "rejected_malformed")?;
+    u64::try_from(bytes.len()).map_err(|_| "rejected_malformed")
+}
+
+/// Policy and proof failures on an inbound forward are permanent. A poisoned lock is not.
+fn receive_verify_refusal(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    error: ramflux_node_core::NodeCoreError,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    let text = error.to_string();
+    if text.contains("lock poisoned") {
+        return Err(error);
+    }
+    if text.contains("federation delivery paused") {
+        return Ok(permanent_forward_response(request, "rejected_blocked"));
+    }
+    match crate::ingress_policy::permanent_outcome(&error) {
+        Some(outcome) => Ok(permanent_forward_response(request, outcome)),
+        None => Ok(permanent_forward_response(request, "rejected_authority")),
+    }
+}
+
+fn classify_router_delivery(
+    target_delivery_id: &str,
+    delivery: Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError>,
+) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError> {
+    match delivery {
+        Ok(delivery) => Ok(delivery),
+        Err(error) => match crate::ingress_policy::permanent_outcome(&error) {
+            Some(outcome) => Ok(refused_submit(target_delivery_id, outcome)),
+            None => Err(error),
         },
     }
 }
@@ -462,7 +559,21 @@ pub(crate) fn handle_s8_receive_envelope(
         observability.record_receive_target_check(step_started.elapsed());
     }
     let now = now_unix_seconds()?;
-    verify_inbound_federated_forward(request, state, now, observability)?;
+    if let Err(error) = verify_inbound_federated_forward(request, state, now, observability) {
+        return receive_verify_refusal(request, error);
+    }
+    let bytes = match inbound_json_len(&request.envelope) {
+        Ok(bytes) => bytes,
+        Err(outcome) => return Ok(permanent_forward_response(request, outcome)),
+    };
+    if let Err(outcome) = crate::ingress_policy::admit(
+        &request.source_node_id,
+        &request.envelope.target_delivery_id,
+        bytes,
+        now,
+    ) {
+        return Ok(permanent_forward_response(request, outcome));
+    }
     let attempt_lease_seconds =
         ramflux_transport::router_post_worst_case_timeout().as_secs().saturating_mul(2).max(1);
     handle_verified_s8_receive_envelope(
@@ -471,10 +582,13 @@ pub(crate) fn handle_s8_receive_envelope(
         observability,
         InboundForwardTiming { now, total_started, attempt_lease_seconds },
         || {
-            post_inbound_to_router(
-                request,
-                ramflux_node_core::home_migration_enabled()?,
-                |path, body| router_post_json(router, path, body),
+            classify_router_delivery(
+                &request.envelope.target_delivery_id,
+                post_inbound_to_router(
+                    request,
+                    ramflux_node_core::home_migration_enabled()?,
+                    |path, body| router_post_json(router, path, body),
+                ),
             )
         },
     )

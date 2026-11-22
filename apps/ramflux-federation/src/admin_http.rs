@@ -206,6 +206,9 @@ fn admin_response(
         ("POST", "/s8/federation/mesh-observability") => {
             handle_admin_mesh_observability_request(&request, context, admin_token)?
         }
+        ("POST", "/admin/federation/node-block") => {
+            handle_admin_node_block(&request.body, context)?
+        }
         ("POST", "/admin/federation/peer") => {
             let request: FederationAdminPeerRequest = serde_json::from_slice(&request.body)
                 .map_err(|source| {
@@ -480,6 +483,51 @@ pub(crate) fn handle_admin_peer(
         state.can_deliver_to(&discovered.node_id, now)
     };
     Ok(FederationAdminPeerResponse { discovered, admitted, can_deliver })
+}
+
+#[derive(serde::Deserialize)]
+struct FederationAdminNodeBlockRequest {
+    admin_token: String,
+    peer_node_id: String,
+    blocked: bool,
+}
+
+#[derive(serde::Serialize)]
+struct FederationAdminNodeBlockResponse {
+    peer_node_id: String,
+    blocked: bool,
+}
+
+fn handle_admin_node_block(
+    body: &[u8],
+    context: &FederationAdminHttpContext,
+) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
+    let request: FederationAdminNodeBlockRequest = serde_json::from_slice(body)
+        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    require_admin_token(context.admin_token.as_deref(), &request.admin_token)?;
+    if request.peer_node_id.is_empty() || request.peer_node_id.len() > 256 {
+        return Err(ramflux_node_core::NodeCoreError::ItestHttp(
+            "federation node block peer id rejected".to_owned(),
+        ));
+    }
+    let now = now_unix_seconds()?;
+    let peer_node_id = request.peer_node_id;
+    let blocked = request.blocked;
+    tracing::info!(%peer_node_id, blocked, "federation admin node block requested");
+    context.state.update_and_save(context.store.as_ref(), |state| {
+        state.apply_bad_node_advisory(ramflux_node_core::BadNodeAdvisory {
+            advisory_id: format!("local-block:{peer_node_id}"),
+            issuer_node_id: context.discovery.node_id.clone(),
+            subject_node_id: peer_node_id.clone(),
+            reason_code: "block".to_owned(),
+            issued_at: now,
+            expires_at: if blocked { u64::MAX } else { 0 },
+            signature_hash: "operator".to_owned(),
+        });
+        Ok(())
+    })?;
+    tracing::info!(%peer_node_id, blocked, "federation admin node block stored");
+    HttpResponse::json(&FederationAdminNodeBlockResponse { peer_node_id, blocked })
 }
 
 pub(crate) fn require_admin_token(

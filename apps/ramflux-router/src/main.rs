@@ -14,6 +14,7 @@ mod handlers;
 mod home_migration;
 mod identity_authority;
 mod inbox_maintenance;
+mod ingress_decode;
 mod lifecycle;
 mod migration_courier;
 mod migration_drain;

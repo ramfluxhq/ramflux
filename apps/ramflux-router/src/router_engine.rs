@@ -273,16 +273,19 @@ fn authenticate_submission(
     let source = match state.authenticated_envelope_source_from(envelope, Some(store), origin) {
         Ok(source) => source,
         Err(ramflux_node_core::NodeCoreError::Capacity { .. }) => {
-            return Ok(SourceAdmission::Refused(Box::new(
-                ramflux_node_core::EnvelopeSubmitResponse {
-                    migration_refusal: None,
-                    outcome: "rejected_capacity".into(),
-                    target_delivery_id: envelope.target_delivery_id.clone(),
-                    inbox_seq: None,
-                    cursor: None,
-                    nack: None,
-                },
-            )));
+            return Ok(SourceAdmission::Refused(Box::new(refused_outcome(
+                &envelope.target_delivery_id,
+                "rejected_capacity",
+            ))));
+        }
+        Err(error)
+            if origin == ramflux_node_core::RouterEnvelopeOrigin::Federation
+                && federation_authority_refusal(&error) =>
+        {
+            return Ok(SourceAdmission::Refused(Box::new(refused_outcome(
+                &envelope.target_delivery_id,
+                "rejected_authority",
+            ))));
         }
         Err(error) => return Err(error.into()),
     };
@@ -308,6 +311,35 @@ fn authenticate_submission(
         None
     };
     Ok(SourceAdmission::Admitted(source, source_lease))
+}
+
+fn refused_outcome(
+    target_delivery_id: &str,
+    outcome: &str,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: outcome.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }
+}
+
+fn federation_authority_refusal(error: &ramflux_node_core::NodeCoreError) -> bool {
+    match error {
+        ramflux_node_core::NodeCoreError::SourceAuthorityRefused { .. }
+        | ramflux_node_core::NodeCoreError::CustodyConflict { .. }
+        | ramflux_node_core::NodeCoreError::Unauthorized(_) => true,
+        ramflux_node_core::NodeCoreError::ItestHttp(message) => {
+            message.contains("envelope root authority mismatch")
+                || message.contains("foreign custody")
+                || message.contains("native forwarded")
+                || message.contains("stale native")
+        }
+        _ => false,
+    }
 }
 
 fn complete_sync_forward(
