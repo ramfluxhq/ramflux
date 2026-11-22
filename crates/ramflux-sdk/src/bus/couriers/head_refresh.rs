@@ -100,7 +100,7 @@ pub(crate) enum Work {
     },
 }
 
-fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
+pub(crate) fn eligible_roots(account: &LocalBusAccountState) -> Result<BTreeSet<String>, SdkError> {
     let mut roots = BTreeSet::from([account.principal_commitment.clone()]);
     for link in account.client.friend_links()? {
         if link.state == "accepted" {
@@ -223,6 +223,10 @@ fn apply(
     outcome: Result<SdkDeviceManifestResponse, SdkError>,
 ) -> Result<bool, SdkError> {
     let result = apply_verified(account, plan, root, fetched_after, outcome);
+    // A pause is not a failed fetch. Counting it would back off a root that was not applied.
+    if matches!(&result, Err(SdkError::WriterPause)) {
+        return result;
+    }
     if plan.fence.current(account)
         && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
         && plan.roots.iter().any(|candidate| candidate == root)
@@ -287,29 +291,57 @@ fn apply_verified(
 }
 
 /// Invoked only on the account writer. All network inputs are owned values.
-pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) {
+/// `WriterPause` is returned with the same work stashed, and the reply is not sent.
+pub(crate) fn apply_work(account: &mut LocalBusAccountState, work: Work) -> Result<(), SdkError> {
     match work {
         Work::Subscribe { reply } => {
             // Client-side demand and the queue's own enqueues wake the same refresh task.
             account.head_refresh.wake = account.client.manifest_demand.wake.clone();
             let _ = reply.send(account.head_refresh.wake.clone());
+            Ok(())
         }
         Work::Prepare { fence, periodic, retry_budget, attempted, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(prepare_due_limit(
-                    account,
-                    fence,
-                    periodic,
-                    &attempted,
-                    1,
-                    retry_budget,
-                ));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let result =
+                prepare_due_limit(account, fence.clone(), periodic, &attempted, 1, retry_budget);
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Prepare { fence, periodic, retry_budget, attempted, reply },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
         Work::Apply { plan, root, fetched_after, outcome, reply } => {
-            if !reply.is_closed() {
-                let _ = reply.send(apply(account, &plan, &root, fetched_after, *outcome));
+            if reply.is_closed() {
+                return Ok(());
             }
+            let manifest = match *outcome {
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(());
+                }
+                Ok(manifest) => manifest,
+            };
+            // The clone is this attempt. The original stays so a pause retries the same apply.
+            let result = apply(account, &plan, &root, fetched_after, Ok(manifest.clone()));
+            if matches!(&result, Err(SdkError::WriterPause)) {
+                super::directory::stash_paused(super::directory::DirectoryWork::HeadRefresh(
+                    Work::Apply {
+                        plan,
+                        root,
+                        fetched_after,
+                        outcome: Box::new(Ok(manifest)),
+                        reply,
+                    },
+                ));
+                return Err(SdkError::WriterPause);
+            }
+            let _ = reply.send(result);
+            Ok(())
         }
     }
 }

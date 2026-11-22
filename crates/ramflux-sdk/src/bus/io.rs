@@ -127,7 +127,8 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 Some(u64::from(retry.clamped().retry_after_ms))
             }
             SdkError::NetworkingPendingContext { retry_after_ms, .. } => *retry_after_ms,
-            SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
+            SdkError::AccountCommandBackpressure
+            | SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some(1_000),
             SdkError::CustodyCapacity { capacity } => {
                 Some(crate::custody::capacity_hint::retry_after_ms(
                     *capacity,
@@ -147,6 +148,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
 
 fn bus_reason_code(error: &SdkError) -> Option<String> {
     Some(match error {
+        SdkError::AccountCommandBackpressure => "account_command_backpressure".into(),
         SdkError::Storage(StorageError::AccountWriterBusy(_)) => "account_busy".into(),
         SdkError::ContactInput(reason) => reason.to_string(),
         SdkError::CustodyVault(reason) => reason.as_str().into(),
@@ -202,26 +204,27 @@ fn vault_reason_details(reason: crate::custody::CustodyVaultReason) -> serde_jso
     details
 }
 
-pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+fn redirected_bus_code(error: &SdkError) -> Option<&'static str> {
     if let SdkError::DirectoryAuthorityUnavailable { source, .. } = error {
-        return local_bus_error_code(source);
+        return Some(local_bus_error_code(source));
     }
     if super::account_runtime::head_refresh::is_freshness_refusal(error) {
-        return "NetworkingPending";
+        return Some("NetworkingPending");
     }
     if let SdkError::LifecycleShared(source) = error {
-        return local_bus_error_code(source);
+        return Some(local_bus_error_code(source));
     }
-    if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
-        return "transfer_requires_sync";
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "transfer_requires_sync") {
+        return Some("transfer_requires_sync");
     }
     if let SdkError::GroupRefused { operation, .. } = error {
-        return operation.error_code();
+        return Some(operation.error_code());
     }
-    if let Some(code) = crate::error_policy::security_code(error) {
-        return code;
-    }
-    if let Some(code) = custody_unit_code(error) {
+    crate::error_policy::security_code(error).or_else(|| custody_unit_code(error))
+}
+
+pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
+    if let Some(code) = redirected_bus_code(error) {
         return code;
     }
     match error {
@@ -243,6 +246,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::AttachmentDeleted => "AttachmentDeleted",
         SdkError::Crypto(CryptoError::GroupLeaseUnavailable) => "GroupLeaseUnavailable",
         SdkError::ContactInput(crate::ContactReason::AnchorMismatch) => "AnchorMismatch",
+        SdkError::AccountCommandBackpressure => "account_command_backpressure",
         SdkError::NetworkingPending
         | SdkError::NetworkingPendingContext { .. }
         | SdkError::NodeUnreachable { .. }
@@ -368,6 +372,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. }
+        | E::WriterPause
         | E::PairingField(_) => "ValidationFailed",
     }
 }

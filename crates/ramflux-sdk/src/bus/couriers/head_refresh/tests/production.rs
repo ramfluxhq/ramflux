@@ -75,7 +75,7 @@ async fn production_cycle_decrements_retry_budget_across_fetch_passes() -> TestR
                         }
                         Work::Subscribe { .. } => return Err("cycle must not subscribe".into()),
                     }
-                    apply_work(&mut account, work);
+                    let _ = apply_work(&mut account, work);
                 }
             }
         }

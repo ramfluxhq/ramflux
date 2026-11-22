@@ -161,6 +161,7 @@ impl AccountRuntime {
         command: &AccountCommand,
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
+        self.refuse_ineligible_explicit_send(command)?;
         let network_deadline = admitted_at + self.timeouts.network_wait;
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
@@ -245,6 +246,31 @@ impl AccountRuntime {
                     return Err(SdkError::NetworkingPending);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// An explicit send whose root is not this account, an accepted contact, or a
+    /// shared-group member fails before any fetch. A failed contact setup must not
+    /// wait out the head deadline.
+    fn refuse_ineligible_explicit_send(&self, command: &AccountCommand) -> Result<(), SdkError> {
+        let method = command.request.method.as_str();
+        if method != "message.submit" && method != "conversation.send" {
+            return Ok(());
+        }
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        if account.client.born_v3_account.is_none() {
+            return Ok(());
+        }
+        let roots = send_roots(account, &command.request)?;
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let eligible = crate::bus::couriers::head_refresh::eligible_roots(account)?;
+        if roots.iter().any(|root| !eligible.contains(root)) {
+            return Err(crate::ContactReason::UnknownPrincipal.into());
         }
         Ok(())
     }

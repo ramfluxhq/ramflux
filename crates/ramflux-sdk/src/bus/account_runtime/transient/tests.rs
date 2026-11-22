@@ -39,6 +39,7 @@ fn runtime(
             receiver,
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             events,
             shutdown,
             readers: Arc::new(Mutex::new(None)),

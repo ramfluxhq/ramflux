@@ -94,6 +94,7 @@ impl Harness {
             timeouts: super::super::runtime_limits::RuntimeTimeouts::default(),
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             connection_sender,
             connection_work,
             ledger: None,

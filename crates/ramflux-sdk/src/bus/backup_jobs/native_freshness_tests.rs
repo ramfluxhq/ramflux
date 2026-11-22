@@ -159,7 +159,7 @@ async fn refresh_on_connect(
             assert!(outcome.is_ok(), "connect must fetch verified directory over TLS");
             assert!(fetched.insert(root.clone()), "connect fetches each root once");
         }
-        head_refresh::apply_work(restored, work);
+        let _ = head_refresh::apply_work(restored, work);
     }
     assert_eq!(fetched, expected, "restored contact must participate in connect sweep");
     for manifest in manifests {

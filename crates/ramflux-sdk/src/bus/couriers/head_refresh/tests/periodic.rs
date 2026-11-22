@@ -34,7 +34,7 @@ async fn drain(
             }
             Work::Subscribe { .. } => {}
         }
-        apply_work(account, work);
+        let _ = apply_work(account, work);
         assert!(account.head_refresh.pending.len() <= MAX_PENDING);
     }
     Ok(fetched)
@@ -90,7 +90,7 @@ async fn refresh_runs_at_connect_and_half_bound() -> TestResult {
     let child = tokio::spawn(run_with_triggers(handle.test_context(), writer, false, true));
     let subscribe = next_work(&mut receiver).await?;
     assert!(matches!(subscribe, Work::Subscribe { .. }));
-    apply_work(&mut account, subscribe);
+    let _ = apply_work(&mut account, subscribe);
     tokio::task::yield_now().await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(149)).await;

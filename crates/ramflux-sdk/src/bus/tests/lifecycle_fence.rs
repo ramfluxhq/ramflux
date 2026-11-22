@@ -96,6 +96,7 @@ pub(super) fn runtime_for(
         receiver,
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         readers: Arc::new(std::sync::Mutex::new(None)),
         events,
         shutdown,

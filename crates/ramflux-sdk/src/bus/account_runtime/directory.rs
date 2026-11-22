@@ -8,7 +8,34 @@ use crate::bus::couriers::directory::{BackfillKind, BackfillPlan, DirectoryWork,
 use crate::{SdkError, time::now_unix_timestamp};
 
 impl AccountRuntime {
-    pub(super) fn apply_directory_work(&mut self, work: DirectoryWork) -> Result<(), SdkError> {
+    pub(super) async fn apply_directory_pausing(
+        &mut self,
+        mut work: DirectoryWork,
+    ) -> Result<(), SdkError> {
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let saved = {
+                let _scope = ramflux_storage::writer_budget::PauseScope::enter();
+                match self.apply_directory_work(work) {
+                    Err(SdkError::WriterPause) => {
+                        let Some(saved) = crate::bus::couriers::directory::take_paused() else {
+                            tracing::warn!(
+                                account_id = %self.id,
+                                "directory writer pause dropped an unstashed attempt"
+                            );
+                            return Ok(());
+                        };
+                        saved
+                    }
+                    other => return other,
+                }
+            };
+            work = saved;
+            self.service_waiting_commands().await?;
+        }
+    }
+
+    fn apply_directory_work(&mut self, work: DirectoryWork) -> Result<(), SdkError> {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(());
         };
@@ -18,92 +45,280 @@ impl AccountRuntime {
         let generation = connection.generation();
         match work {
             DirectoryWork::HeadRefresh(work) => {
-                crate::bus::couriers::head_refresh::apply_work(account, work);
+                crate::bus::couriers::head_refresh::apply_work(account, work)?;
             }
             DirectoryWork::PrepareBackfill { generation: requested, reply } => {
                 if requested != generation || reply.is_closed() {
                     return Ok(());
                 }
-                let result = prepare_backfill(account);
-                let _ = reply.send(result);
+                match prepare_backfill(account) {
+                    Err(error @ SdkError::WriterPause) => {
+                        return Err(stash_if_pause(
+                            DirectoryWork::PrepareBackfill { generation: requested, reply },
+                            error,
+                        ));
+                    }
+                    result => {
+                        let _ = reply.send(result);
+                    }
+                }
             }
             DirectoryWork::ApplyBackfill { generation: requested, plan, outcome, reply } => {
-                if requested != generation || reply.is_closed() {
-                    return Ok(());
-                }
-                let current = account
-                    .client
-                    .account_db()?
-                    .load_actor_state::<serde_json::Value>(plan.checkpoint_key)?
-                    .unwrap_or(serde_json::Value::Null);
-                let accepted = matches!(plan.kind, BackfillKind::Own)
-                    || account.client.friend_links()?.iter().any(|link| {
-                        link.state == "accepted"
-                            && (link.requester_id == plan.root || link.target_id == plan.root)
-                    });
-                if current != plan.checkpoint || !accepted {
-                    let _ = reply.send(Err(crate::ContactReason::UnknownPrincipal.into()));
-                    return Ok(());
-                }
-                let source = match plan.kind {
-                    BackfillKind::Own => "own-contact-backfill",
-                    BackfillKind::Peer => "own-contact-peer-backfill",
-                };
-                let result = outcome.and_then(|manifest| {
-                    account
-                        .client
-                        .accept_fetched_device_manifest(manifest, &plan.root, source)
-                        .map(|_| ())
-                });
-                // Peer refresh failure still permits staging from already-verified local data.
-                let result = match result {
-                    Err(error) if matches!(plan.kind, BackfillKind::Own) => Err(error),
-                    result => {
-                        if let Err(error) = result {
-                            tracing::debug!(%error, "peer backfill refresh deferred; using verified local material");
-                        }
-                        account.client.stage_contact_backfill_batch().map(|_| ())
-                    }
-                };
-                let _ = reply.send(result);
+                apply_backfill(account, generation, requested, plan, outcome, reply)?;
             }
             DirectoryWork::PrepareSafety { generation: requested, root, reply } => {
                 if requested != generation || reply.is_closed() {
                     return Ok(());
                 }
-                let result = prepare_safety(account, root);
-                let _ = reply.send(result);
-            }
-            DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply } => {
-                if requested != generation || reply.is_closed() {
-                    return Ok(());
+                match prepare_safety(account, root.clone()) {
+                    Err(error @ SdkError::WriterPause) => {
+                        return Err(stash_if_pause(
+                            DirectoryWork::PrepareSafety { generation: requested, root, reply },
+                            error,
+                        ));
+                    }
+                    result => {
+                        let _ = reply.send(result);
+                    }
                 }
-                // A removal while the task was fetching cannot resurrect a contact cache.
-                let accepted = account.client.friend_links()?.iter().any(|link| {
-                    link.state == "accepted"
-                        && (link.requester_id == plan.peer || link.target_id == plan.peer)
-                        && serde_json::to_value(link).ok().as_ref() == Some(&plan.link)
-                });
-                let result = if accepted {
-                    account
-                        .client
-                        .accept_fetched_device_manifest(*own, &plan.own, "contact.safety_number")
-                        .and_then(|_| {
-                            account.client.accept_fetched_device_manifest(
-                                peer,
-                                &plan.peer,
-                                "contact.safety_number",
-                            )
-                        })
-                        .and_then(|_| account.client.contact_safety_number(&plan.peer))
-                        .map(|_| ())
-                } else {
-                    Err(crate::ContactReason::UnknownPrincipal.into())
-                };
-                let _ = reply.send(result);
+            }
+            work @ DirectoryWork::ApplySafety { .. } => {
+                apply_safety(account, generation, work)?;
             }
         }
         Ok(())
+    }
+}
+
+fn stash_if_pause(work: DirectoryWork, error: SdkError) -> SdkError {
+    if matches!(error, SdkError::WriterPause) {
+        crate::bus::couriers::directory::stash_paused(work);
+    }
+    error
+}
+
+fn load_checkpoint(
+    account: &crate::bus::state::LocalBusAccountState,
+    key: &str,
+) -> Result<serde_json::Value, SdkError> {
+    Ok(account
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(key)?
+        .unwrap_or(serde_json::Value::Null))
+}
+
+fn apply_backfill(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    generation: u64,
+    requested: u64,
+    plan: Box<BackfillPlan>,
+    outcome: Result<crate::SdkDeviceManifestResponse, SdkError>,
+    reply: tokio::sync::oneshot::Sender<Result<(), SdkError>>,
+) -> Result<(), SdkError> {
+    if requested != generation || reply.is_closed() {
+        return Ok(());
+    }
+    let current = match load_checkpoint(account, plan.checkpoint_key) {
+        Ok(current) => current,
+        Err(error) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplyBackfill { generation: requested, plan, outcome, reply },
+                error,
+            ));
+        }
+    };
+    let links = match account.client.friend_links() {
+        Ok(links) => links,
+        Err(error) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplyBackfill { generation: requested, plan, outcome, reply },
+                error,
+            ));
+        }
+    };
+    let accepted = matches!(plan.kind, BackfillKind::Own)
+        || links.iter().any(|link| {
+            link.state == "accepted"
+                && (link.requester_id == plan.root || link.target_id == plan.root)
+        });
+    if current != plan.checkpoint || !accepted {
+        let _ = reply.send(Err(crate::ContactReason::UnknownPrincipal.into()));
+        return Ok(());
+    }
+    match plan.kind {
+        BackfillKind::Own => finish_own_backfill(account, requested, plan, outcome, reply),
+        BackfillKind::Peer => finish_peer_backfill(account, requested, plan, outcome, reply),
+    }
+}
+
+fn finish_own_backfill(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    requested: u64,
+    plan: Box<BackfillPlan>,
+    outcome: Result<crate::SdkDeviceManifestResponse, SdkError>,
+    reply: tokio::sync::oneshot::Sender<Result<(), SdkError>>,
+) -> Result<(), SdkError> {
+    let manifest = match outcome {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return Ok(());
+        }
+    };
+    // The clone is the attempt. The original stays so a pause can retry this apply.
+    match account.client.accept_fetched_device_manifest(
+        manifest.clone(),
+        &plan.root,
+        "own-contact-backfill",
+    ) {
+        Err(error @ SdkError::WriterPause) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplyBackfill {
+                    generation: requested,
+                    plan,
+                    outcome: Ok(manifest),
+                    reply,
+                },
+                error,
+            ));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
+    reply_staged(account, requested, plan, Ok(manifest), reply)
+}
+
+fn finish_peer_backfill(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    requested: u64,
+    plan: Box<BackfillPlan>,
+    outcome: Result<crate::SdkDeviceManifestResponse, SdkError>,
+    reply: tokio::sync::oneshot::Sender<Result<(), SdkError>>,
+) -> Result<(), SdkError> {
+    if let Ok(manifest) = &outcome {
+        match account.client.accept_fetched_device_manifest(
+            manifest.clone(),
+            &plan.root,
+            "own-contact-peer-backfill",
+        ) {
+            Err(error @ SdkError::WriterPause) => {
+                return Err(stash_if_pause(
+                    DirectoryWork::ApplyBackfill { generation: requested, plan, outcome, reply },
+                    error,
+                ));
+            }
+            Err(error) => {
+                tracing::debug!(%error, "peer backfill refresh deferred; using verified local material");
+            }
+            Ok(_) => {}
+        }
+    } else if let Err(error) = &outcome {
+        tracing::debug!(%error, "peer backfill refresh deferred; using verified local material");
+    }
+    reply_staged(account, requested, plan, outcome, reply)
+}
+
+fn reply_staged(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    requested: u64,
+    plan: Box<BackfillPlan>,
+    outcome: Result<crate::SdkDeviceManifestResponse, SdkError>,
+    reply: tokio::sync::oneshot::Sender<Result<(), SdkError>>,
+) -> Result<(), SdkError> {
+    match account.client.stage_contact_backfill_batch() {
+        Err(error @ SdkError::WriterPause) => Err(stash_if_pause(
+            DirectoryWork::ApplyBackfill { generation: requested, plan, outcome, reply },
+            error,
+        )),
+        other => {
+            let _ = reply.send(other.map(|_| ()));
+            Ok(())
+        }
+    }
+}
+
+fn apply_safety(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    generation: u64,
+    work: DirectoryWork,
+) -> Result<(), SdkError> {
+    let DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply } = work else {
+        return Ok(());
+    };
+    if requested != generation || reply.is_closed() {
+        return Ok(());
+    }
+    let links = match account.client.friend_links() {
+        Ok(links) => links,
+        Err(error) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply },
+                error,
+            ));
+        }
+    };
+    // A removal while the task was fetching cannot resurrect a contact cache.
+    let accepted = links.iter().any(|link| {
+        link.state == "accepted"
+            && (link.requester_id == plan.peer || link.target_id == plan.peer)
+            && serde_json::to_value(link).ok().as_ref() == Some(&plan.link)
+    });
+    if !accepted {
+        let _ = reply.send(Err(crate::ContactReason::UnknownPrincipal.into()));
+        return Ok(());
+    }
+    let own_root = plan.own.clone();
+    let peer_root = plan.peer.clone();
+    // Clones are this attempt. The originals stay so a pause can retry the same apply.
+    let own_attempt = (*own).clone();
+    let peer_attempt = peer.clone();
+    match account.client.accept_fetched_device_manifest(
+        own_attempt,
+        &own_root,
+        "contact.safety_number",
+    ) {
+        Err(error @ SdkError::WriterPause) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply },
+                error,
+            ));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
+    match account.client.accept_fetched_device_manifest(
+        peer_attempt,
+        &peer_root,
+        "contact.safety_number",
+    ) {
+        Err(error @ SdkError::WriterPause) => {
+            return Err(stash_if_pause(
+                DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply },
+                error,
+            ));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
+    match account.client.contact_safety_number(&peer_root) {
+        Err(error @ SdkError::WriterPause) => Err(stash_if_pause(
+            DirectoryWork::ApplySafety { generation: requested, plan, own, peer, reply },
+            error,
+        )),
+        other => {
+            let _ = reply.send(other.map(|_| ()));
+            Ok(())
+        }
     }
 }
 

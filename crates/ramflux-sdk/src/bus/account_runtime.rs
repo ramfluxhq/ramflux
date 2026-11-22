@@ -7,6 +7,7 @@ use super::actor::{AccountCommand, AccountInitializer};
 use super::events::EventBatch;
 use super::readers::AccountReaders;
 use crate::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
@@ -28,6 +29,7 @@ pub(crate) mod lifecycle_fence;
 mod readers;
 pub(crate) mod session_thread;
 pub(super) mod uploads;
+pub(super) mod writer_slice;
 
 #[cfg(test)]
 type ReceiveGateHook = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>);
@@ -51,6 +53,7 @@ pub(super) struct Bootstrap {
     pub lifecycle: mpsc::Receiver<AccountCommand>,
     pub preempt: watch::Receiver<u64>,
     pub readers: ReaderSlot,
+    pub command_waiting: Arc<AtomicUsize>,
     pub shutdown: watch::Receiver<bool>,
     pub ready: std::sync::mpsc::SyncSender<()>,
 }
@@ -63,6 +66,7 @@ struct AccountRuntime {
     lifecycle: mpsc::Receiver<AccountCommand>,
     preempt: watch::Receiver<u64>,
     readers: ReaderSlot,
+    command_waiting: Arc<AtomicUsize>,
     events: mpsc::Sender<EventBatch>,
     shutdown: watch::Receiver<bool>,
     courier: Option<super::task_courier::TaskCourier>,
@@ -108,6 +112,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         lifecycle,
         preempt,
         readers,
+        command_waiting,
         shutdown,
         ready,
     } = bootstrap;
@@ -144,6 +149,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         lifecycle,
         preempt,
         readers,
+        command_waiting,
         events,
         shutdown,
         courier: None,
@@ -311,17 +317,27 @@ impl AccountRuntime {
     }
 
     fn queued_command(&mut self, checkpoints: &mut u8) -> Option<AccountCommand> {
-        if *checkpoints < 8 {
-            return None;
+        // A waiting command skips the eight-checkpoint gate. Its residence
+        // budget is five seconds; a page can wait.
+        let waiting = self.command_waiting.load(Ordering::Acquire) > 0;
+        if !waiting {
+            if *checkpoints < 8 {
+                return None;
+            }
+            *checkpoints = 0;
         }
-        *checkpoints = 0;
-        self.lifecycle
+        let command = self
+            .lifecycle
             .try_recv()
             .inspect(|_| {
                 self.preempt.borrow_and_update();
             })
             .or_else(|_| self.receiver.try_recv())
-            .ok()
+            .ok();
+        if command.is_some() {
+            self.note_command_taken();
+        }
+        command
     }
 
     async fn initialize_actor(
@@ -382,10 +398,21 @@ impl AccountRuntime {
         }
     }
 
+    /// Unlock writes in `initialize_actor` finish before a queued command can pause the writer.
+    #[cfg(not(test))]
+    fn arm_writer_budget(&self) -> ramflux_storage::writer_budget::Armed {
+        ramflux_storage::writer_budget::Armed::arm(
+            Arc::clone(&self.command_waiting),
+            super::runtime_limits::WRITER_SLICE,
+        )
+    }
+
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
         }
+        #[cfg(not(test))]
+        let _writer_budget = self.arm_writer_budget();
         let mut schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
             max: self.timeouts.receive_max,
@@ -473,6 +500,7 @@ impl AccountRuntime {
             let Some(command) = command else {
                 break;
             };
+            self.note_command_taken();
             if Box::pin(self.apply(command)).await? {
                 break;
             }
@@ -489,21 +517,12 @@ impl AccountRuntime {
 
     async fn sync_pass(&mut self) -> Result<bool, SdkError> {
         self.refresh_networking_expiry().await;
+        self.service_waiting_commands().await?;
         self.maintain_pairing_own_sync().await;
+        self.service_waiting_commands().await?;
         self.maintain_agent_record_broadcast();
-        let Some(account) = self.state.accounts.get_mut(&self.id) else {
-            return Ok(false);
-        };
-        let result = super::sync_driver::maintain_local(account);
-        let reason = result.as_ref().err().map(local_bus_error_code);
-        let (state, activity) = match result {
-            Ok(count) => (if count == 0 { "idle" } else { "running" }, count > 0),
-            Err(error) => {
-                tracing::debug!(%error,"account local maintenance failed");
-                ("error", false)
-            }
-        };
-        super::sync_status::record_with_reason(account, state, now_unix_timestamp(), reason)?;
+        self.service_waiting_commands().await?;
+        let activity = self.record_local_maintenance().await?;
         // Native admission may have completed on this sync pass after a local-only unlock.
         self.start_courier();
         let request = LocalBusFrame::request(
@@ -518,6 +537,46 @@ impl AccountRuntime {
         let fetched = self.start_next_fetch()?;
         self.publish(&request).await?;
         Ok(activity || fetched)
+    }
+
+    async fn record_local_maintenance(&mut self) -> Result<bool, SdkError> {
+        loop {
+            ramflux_storage::writer_budget::begin_attempt();
+            let activity = {
+                let _scope = ramflux_storage::writer_budget::PauseScope::enter();
+                let Some(account) = self.state.accounts.get_mut(&self.id) else {
+                    return Ok(false);
+                };
+                let result = super::sync_driver::maintain_local(account);
+                let paused = matches!(&result, Err(error) if writer_slice::is_writer_pause(error));
+                if paused {
+                    None
+                } else {
+                    let reason = result.as_ref().err().map(local_bus_error_code);
+                    let (state, activity) = match result {
+                        Ok(count) => (if count == 0 { "idle" } else { "running" }, count > 0),
+                        Err(error) => {
+                            tracing::debug!(%error, "account local maintenance failed");
+                            ("error", false)
+                        }
+                    };
+                    match super::sync_status::record_with_reason(
+                        account,
+                        state,
+                        now_unix_timestamp(),
+                        reason,
+                    ) {
+                        Err(error) if writer_slice::is_writer_pause(&error) => None,
+                        Err(error) => return Err(error),
+                        Ok(()) => Some(activity),
+                    }
+                }
+            };
+            match activity {
+                Some(activity) => return Ok(activity),
+                None => self.service_waiting_commands().await?,
+            }
+        }
     }
 }
 

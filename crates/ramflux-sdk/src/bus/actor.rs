@@ -6,6 +6,7 @@
 use super::events::EventBatch;
 use super::readers::{AccountReaders, is_reader_request};
 use crate::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as RoutingMutex};
 use tokio::sync::oneshot;
 
@@ -92,6 +93,7 @@ pub(super) struct AccountActor {
     shutdown_signal: watch::Sender<bool>,
     done: watch::Receiver<ActorExit>,
     readers: Arc<RoutingMutex<Option<AccountReaders>>>,
+    command_waiting: Arc<AtomicUsize>,
     #[cfg(test)]
     expired_replies: Option<Arc<super::command_admission::ExpiredReplies>>,
     #[cfg(test)]
@@ -178,6 +180,7 @@ impl AccountActor {
         let (lifetime, shutdown) = watch::channel(false);
         let (finished, done) = watch::channel(ActorExit::Running);
         let readers = Arc::new(RoutingMutex::new(None));
+        let command_waiting = Arc::new(AtomicUsize::new(0));
         let bootstrap = super::account_runtime::Bootstrap {
             timeouts: timeouts.clone(),
             account_id,
@@ -190,6 +193,7 @@ impl AccountActor {
             lifecycle: lifecycle_receiver,
             preempt: preempt_receiver,
             readers: Arc::clone(&readers),
+            command_waiting: Arc::clone(&command_waiting),
             shutdown,
             ready,
         };
@@ -199,6 +203,7 @@ impl AccountActor {
             lifecycle,
             preempt,
             readers,
+            command_waiting,
             shutdown_signal: lifetime,
             done,
             #[cfg(test)]
@@ -306,7 +311,9 @@ impl AccountActor {
     pub(super) fn authorize_backup_publication(&self, generation: i64) -> Result<(), SdkError> {
         let (reply, response) = oneshot::channel();
         let (outbound, _events) = mpsc::channel(1);
-        self.sender
+        self.mark_command_waiting();
+        if self
+            .sender
             .try_send(AccountCommand {
                 admission: None,
                 private: Some(PrivateCommand::AuthorizeBackup { generation, reply }),
@@ -324,7 +331,11 @@ impl AccountActor {
                 outbound: outbound.into(),
                 reply: None,
             })
-            .map_err(|_| stopped())?;
+            .is_err()
+        {
+            self.unmark_command_waiting();
+            return Err(stopped());
+        }
         response.blocking_recv().map_err(|_| stopped())?
     }
     pub(super) async fn backup_missing_references(
@@ -405,16 +416,6 @@ impl AccountActor {
         let method = super::method_table::classify(&command.request.method);
         let lifecycle = method
             .is_some_and(|method| method.route == super::method_table::MethodRoute::Lifecycle);
-        let needs_network =
-            !super::generated_typing::is_request(&command.request.method, &command.request.body)
-                && self.reader_pool().map_or_else(
-                    |_| {
-                        method.is_some_and(|method| {
-                            method.class == super::method_table::MethodClass::NeedsNetwork
-                        })
-                    },
-                    |pool| pool.requires_network(&command.request),
-                );
         let admission = super::command_admission::CommandAdmission::new(
             tokio::time::Instant::now(),
             &self.timeouts,
@@ -432,12 +433,7 @@ impl AccountActor {
             ..command
         };
         self.enqueue(command, lifecycle)?;
-        admission
-            .response(receiver, needs_network, || {
-                self.reader_pool()
-                    .map_or(SdkError::NetworkingPending, |pool| pool.networking_pending())
-            })
-            .await
+        admission.response(receiver).await
     }
 
     fn enqueue(&self, command: AccountCommand, lifecycle: bool) -> Result<(), SdkError> {
@@ -446,13 +442,27 @@ impl AccountActor {
                 super::command_admission::unavailable("account lifecycle queue full")
             })?;
             self.preempt.send_modify(|version| *version = version.wrapping_add(1));
+            self.mark_command_waiting();
             permit.send(command);
             Ok(())
         } else {
-            self.sender
-                .try_send(command)
-                .map_err(|_| super::command_admission::unavailable("account command queue full"))
+            self.mark_command_waiting();
+            if self.sender.try_send(command).is_err() {
+                self.unmark_command_waiting();
+                return Err(super::command_admission::unavailable("account command queue full"));
+            }
+            Ok(())
         }
+    }
+
+    fn mark_command_waiting(&self) {
+        self.command_waiting.fetch_add(1, Ordering::Release);
+    }
+
+    fn unmark_command_waiting(&self) {
+        let _ = self
+            .command_waiting
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| queued.checked_sub(1));
     }
 }
 

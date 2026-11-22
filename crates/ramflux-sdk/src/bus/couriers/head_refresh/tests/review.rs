@@ -57,7 +57,7 @@ async fn demand_during_large_connect_sweep_refreshes_before_network_wait() -> Te
             assert!(outcome.is_ok());
             fetched.insert(root.clone());
         }
-        apply_work(&mut account, work);
+        let _ = apply_work(&mut account, work);
     }
     assert!(!fetched.contains(&target), "target must still be behind the sweep");
     let admitted = tokio::time::Instant::now();
@@ -67,10 +67,10 @@ async fn demand_during_large_connect_sweep_refreshes_before_network_wait() -> Te
         if let Work::Apply { root, outcome, .. } = &work {
             assert_eq!(root, &target, "a demand must precede the next sweep fetch");
             assert!(outcome.is_ok());
-            apply_work(&mut account, work);
+            let _ = apply_work(&mut account, work);
             break;
         }
-        apply_work(&mut account, work);
+        let _ = apply_work(&mut account, work);
     }
     assert!(admitted.elapsed() < Duration::from_secs(5));
     assert!(!account.head_refresh.pending.contains(&target));

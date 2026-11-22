@@ -68,8 +68,8 @@ async fn case() -> Case {
         let result = reply.await?;
         if index < 2 {
             assert!(
-                matches!(result, Err(SdkError::NetworkingPendingContext { .. })),
-                "network requests must expire as NetworkingPending"
+                matches!(result, Err(SdkError::AccountCommandBackpressure)),
+                "an unclaimed queue expiry is account command backpressure"
             );
         } else {
             assert!(result.is_err());

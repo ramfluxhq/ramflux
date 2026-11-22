@@ -172,6 +172,7 @@ impl AccountSessionHarness {
             receiver,
             lifecycle,
             preempt,
+            command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             readers: Arc::new(RoutingMutex::new(None)),
             events,
             shutdown,

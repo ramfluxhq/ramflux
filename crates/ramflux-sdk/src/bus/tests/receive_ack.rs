@@ -275,6 +275,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         timeouts: limits(),
         lifecycle,
         preempt,
+        command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         connection_sender,
         connection_work,
         ledger: None,

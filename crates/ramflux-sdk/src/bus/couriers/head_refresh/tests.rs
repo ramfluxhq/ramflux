@@ -116,7 +116,7 @@ async fn refresh_stops_on_lock() -> TestResult {
     let super::super::directory::DirectoryWork::HeadRefresh(message) = *message else {
         return Err("wrong directory work".into());
     };
-    apply_work(&mut account, message);
+    let _ = apply_work(&mut account, message);
     let (_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await??;
     assert!(account.head_refresh.active.upgrade().is_some(), "fetch is in flight");
     handle.request_stop(crate::bus::connection_manager::DisconnectReason::Lock);
@@ -306,7 +306,7 @@ async fn refresh_session_loss_cancels_registered_child() -> TestResult {
         let super::super::directory::DirectoryWork::HeadRefresh(message) = *message else {
             return Err("wrong directory work".into());
         };
-        apply_work(&mut account, message);
+        let _ = apply_work(&mut account, message);
     }
     let (_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await??;
     assert!(account.head_refresh.active.upgrade().is_some(), "fetch holds the lease");

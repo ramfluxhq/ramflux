@@ -50,6 +50,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 receiver,
                 lifecycle,
                 preempt,
+                command_waiting: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 connection_sender,
                 connection_work,
                 ledger: None,
