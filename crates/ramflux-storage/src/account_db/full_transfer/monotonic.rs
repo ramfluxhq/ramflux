@@ -70,6 +70,13 @@ pub(super) struct Owner {
 }
 static OWNERS: &[Owner] = &[
     Owner {
+        family: super::native_erasure::FAMILY,
+        names: &["original_id", "current_id", "conversation_id"],
+        keys: &[0, 1],
+        restrictive: true,
+        merge: Merge::Immutable,
+    },
+    Owner {
         family: super::actor_denial::FAMILY,
         names: &["state_kind", "state_json"],
         keys: &[0],
@@ -342,6 +349,9 @@ impl Owner {
         Ok(())
     }
     fn validate(&self, value: &Cells) -> Result<(), StorageError> {
+        if self.family == super::native_erasure::FAMILY {
+            super::native_erasure::validate(value)?;
+        }
         if self.family == super::actor_denial::FAMILY {
             super::actor_denial::validate(value)?;
         }
@@ -551,6 +561,10 @@ impl Owner {
         };
         super::contact_request_history::derive(db, self.family, &mut merged)?;
         self.store(db, &merged)?;
+        if self.family == super::native_erasure::FAMILY {
+            super::message_denial::erase_if_denied(db, merged.text(2)?, merged.text(0)?)?;
+            super::message_denial::erase_if_denied(db, merged.text(2)?, merged.text(1)?)?;
+        }
         if self.family == "sql/contact_link_decision" {
             super::contact_projection::apply_decision(db, &merged)?;
         }
@@ -735,6 +749,7 @@ pub(super) fn normalize(
     nonce: &[u8; 32],
     private: &BackupDatabase,
     owners: &[String; 2],
+    native: impl FnOnce() -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     db.execute("INSERT OR IGNORE INTO full_union_input SELECT * FROM full_union_record WHERE generation_nonce=?1",[nonce.as_slice()])?;
     // A fence with no retained deadline must not acquire another device's expiry.
@@ -750,7 +765,7 @@ pub(super) fn normalize(
     }
     // DeviceRef byte order must never decide which user's existing B preferences win.
     let context = UnionContext { db, nonce, preferred_owner: owners.get(1).ok_or_else(invalid)? };
-    for owner in OWNERS {
+    let normalize_owner = |owner: &Owner| -> Result<(), StorageError> {
         let rule = full_transfer_catalog()
             .iter()
             .find(|rule| rule.id == owner.family)
@@ -766,7 +781,13 @@ pub(super) fn normalize(
                 row.get_ref(0)?.as_str().map_err(|_| invalid())?,
             )?;
         }
+        Ok(())
+    };
+    for owner in OWNERS.iter().filter(|owner| owner.family != super::receipt_history::FAMILY) {
+        normalize_owner(owner)?;
     }
+    native()?;
+    normalize_owner(owner(super::receipt_history::FAMILY).ok_or_else(invalid)?)?;
     Ok(())
 }
 

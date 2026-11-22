@@ -106,7 +106,12 @@ fn project(
     let id = ramflux_protocol::encode_base64url(&version.original().id);
     require_projection(incoming, projection, &id, version.original())?;
     require_capture(incoming, authored, &own)?;
-    if super::message_denial::erase_if_denied(db, &projection.conversation_id, &id)? {
+    if super::message_denial::erase_native_if_denied(
+        db,
+        &projection.conversation_id,
+        &id,
+        &ramflux_protocol::encode_base64url(&version.current().id),
+    )? {
         return Ok(false);
     }
     // Existing directory context must be admitted by its own owner before content.
@@ -257,6 +262,18 @@ fn write_evidence(
     id: &str,
 ) -> Result<(), StorageError> {
     let version = history.verify(own)?;
+    if version.current().id != version.original().id {
+        actor(
+            db,
+            id,
+            &format!(
+                "routed/report-event/{}",
+                ramflux_protocol::encode_base64url(&version.current().id)
+            ),
+            &id,
+        )?;
+    }
+
     actor(db, id, &format!("routed/generated-identity/{id}"), version.original())?;
     actor(db, id, &format!("routed/generated-order/{id}"), &version.original().hlc)?;
     if version.current().id == version.original().id {

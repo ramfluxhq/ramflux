@@ -244,7 +244,6 @@ pub(super) fn apply(
     }
     // Capture before the existing erasure triggers retire the message's copy bindings.
     super::super::receive::erased_capture::capture_for(db, &[message.as_str()], crate::unix_now())?;
-    super::super::deleted_messages::retain_deletion_marker_on(db, message.as_str())?;
     db.execute("INSERT INTO message_tombstone_projection(tombstone_id,conversation_id,message_id,delete_scope,created_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(tombstone_id) DO NOTHING",
         params![id.as_str(),conversation.as_str(),message.as_str(),scope.as_str(),value.created_at])?;
     db.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE conversation_id=?1 AND message_id=?2",
@@ -271,12 +270,42 @@ pub(super) fn erase_if_denied(
         return Ok(false);
     }
     super::super::receive::erased_capture::capture_for(db, &[message], crate::unix_now())?;
-    super::super::deleted_messages::retain_deletion_marker_on(db, message)?;
     db.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE conversation_id=?1 AND message_id=?2", params![conversation, message])?;
     db.execute(
         "DELETE FROM runtime_message_content WHERE conversation_id=?1 AND message_id=?2",
         params![conversation, message],
     )?;
+    Ok(true)
+}
+
+/// A verified native Edit couples its current event to the logical original.
+/// Either sticky denial erases both identities; no public tombstone is fabricated.
+pub(super) fn erase_native_if_denied(
+    db: &rusqlite::Connection,
+    conversation: &str,
+    original: &str,
+    current: &str,
+) -> Result<bool, StorageError> {
+    if db.is_autocommit() {
+        return Err(StorageError::PairingField("WrongContext"));
+    }
+    if !super::super::deleted_messages::message_is_deleted_on(db, original)?
+        && !super::super::deleted_messages::message_is_deleted_on(db, current)?
+    {
+        return Ok(false);
+    }
+    // Capture every existing authenticated input edge before either erasure can
+    // retire shared bindings. Only already-verified native identities reach here.
+    super::super::receive::erased_capture::capture_for(
+        db,
+        &[original, current],
+        crate::unix_now(),
+    )?;
+    super::native_erasure::retain(db, original, current, conversation)?;
+    erase_if_denied(db, conversation, original)?;
+    if current != original {
+        erase_if_denied(db, conversation, current)?;
+    }
     Ok(true)
 }
 

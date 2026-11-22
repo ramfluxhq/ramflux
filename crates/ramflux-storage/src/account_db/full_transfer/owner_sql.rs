@@ -19,6 +19,14 @@ pub(super) fn write(
     account: Option<&str>,
 ) -> Result<u64, StorageError> {
     rule.require_typed_codec()?;
+    if rule.id == super::native_erasure::FAMILY {
+        super::native_erasure::check(
+            row.get_ref(0)?.as_str().map_err(|_| invalid())?,
+            row.get_ref(1)?.as_str().map_err(|_| invalid())?,
+            row.get_ref(2)?.as_str().map_err(|_| invalid())?,
+        )?;
+    }
+
     if rule.id == super::actor_denial::FAMILY {
         super::actor_denial::require_key(
             row.get_ref(0)?.as_str().map_err(|_| invalid())?,

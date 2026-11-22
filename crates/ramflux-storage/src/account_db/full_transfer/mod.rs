@@ -22,6 +22,7 @@ mod receipt_history;
 pub use direct_record::{FULL_DIRECT_RECORD_LIMIT, FullDirectRecord};
 mod direct_source;
 mod direct_union;
+pub(in crate::account_db) mod native_erasure;
 mod native_floor;
 mod native_payload;
 pub(in crate::account_db) mod native_selection;

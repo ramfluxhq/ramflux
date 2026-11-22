@@ -115,6 +115,34 @@ impl FullDirectRecord {
         self.history.exact_inner()
     }
 
+    pub(super) fn erase_if_denied(&self, db: &Connection, own: &str) -> Result<bool, StorageError> {
+        let version = self.history.verify(own)?;
+        super::message_denial::erase_native_if_denied(
+            db,
+            &version.original().conversation_id,
+            &ramflux_protocol::encode_base64url(&version.original().id),
+            &ramflux_protocol::encode_base64url(&version.current().id),
+        )
+    }
+
+    pub(super) fn retain_expected_erasure(
+        &self,
+        db: &Connection,
+        nonce: &[u8; 32],
+        owner: &str,
+        own: &str,
+    ) -> Result<(), StorageError> {
+        let version = self.history.verify(own)?;
+        super::native_erasure::retain_expected(
+            db,
+            nonce,
+            owner,
+            &ramflux_protocol::encode_base64url(&version.original().id),
+            &ramflux_protocol::encode_base64url(&version.current().id),
+            &version.original().conversation_id,
+        )
+    }
+
     pub(super) fn merge_on(
         &self,
         db: &Connection,

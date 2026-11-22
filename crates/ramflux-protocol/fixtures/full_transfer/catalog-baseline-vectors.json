@@ -1,5 +1,5 @@
 {
-  "census_hash": "EoWT_pvGWGBnxJY1ND4_tjLGTqRvNyA-vFmqYVnJ0Pw",
+  "census_hash": "luz4I04SMEkyJZM2AkS7LTBaEwHMqWSv3J34MtR5Abc",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -645,6 +645,10 @@
     {
       "hash": "seugUiz70ErWy0XTbQ44fOrZxwGmSYe6TXfDZV9sbXE",
       "id": "sql/runtime_message_sequence"
+    },
+    {
+      "hash": "wNFzifZsA90y8bZGyO6MJLBlXIFXjXtpaxRAhKoGM5E",
+      "id": "sql/runtime_native_erasure"
     },
     {
       "hash": "3ULWMFJT7esm6fHIofIHHEPxWAe1woai6cEf4hilQy4",

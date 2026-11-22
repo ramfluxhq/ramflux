@@ -59,6 +59,7 @@ impl AccountDb {
         CREATE TABLE IF NOT EXISTS runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_message_content_conversation ON runtime_message_content(conversation_id,message_id);")?;
         self.connection.execute_batch(super::full_transfer::native_selection::SCHEMA)?;
+        self.connection.execute_batch(super::full_transfer::native_erasure::SCHEMA)?;
         self.connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;
             CREATE TRIGGER IF NOT EXISTS runtime_content_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_content WHERE message_id=OLD.message_id; END;
             CREATE TRIGGER IF NOT EXISTS runtime_message_sequence_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_sequence WHERE message_id=OLD.message_id; END;")?;

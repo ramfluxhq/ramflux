@@ -493,3 +493,22 @@ Only an exact current marker can deny. These keys never enter B's current MAC
 bundle or authorize authorship, callbacks or redelivery. This closes the marker
 business path, not the entire raw/staged any-owner erasure graph. Its direct
 runtime proof remains part of the populated-daemon transfer.
+
+## Restrictive native identity erasure
+
+`runtime_native_erasure` retains only original/current canonical ids and their
+direct-conversation id after a verified native contribution meets an existing
+denial. Either identity denies both. Every original contributor is inspected,
+including an Edit that loses the preferred-version merge. Expected restrictive
+records are encoded directly from that verified contributor under its original
+Ref, then its erased body/capture inputs are retired. A retry/conflicting binding
+cannot change a retained pair. Source absence cannot remove this restriction.
+
+Ordinary deletion reads public tombstone and native-erasure projections directly.
+Transfer does not mint new B-local MAC markers absent from B's original inputs.
+The private native projection also restores the product's current-event report
+alias under the logical original's ordinary erasure footprint. Native union
+normalization precedes receipt normalization, so observations erased by an Edit
+alias do not survive in the expected or actual ledger. This is business logic;
+raw/staged any-owner edges and derived receive-input denial provenance remain
+open before full materialization and real-daemon acceptance.

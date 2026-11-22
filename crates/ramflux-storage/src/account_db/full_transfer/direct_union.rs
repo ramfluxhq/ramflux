@@ -120,6 +120,7 @@ fn normalize_key(
     let mut rows =
         query.query(params![nonce.as_slice(), FAMILY, key, owners.get(1).ok_or_else(invalid)?])?;
     let mut expected: Option<FullDirectRecord> = None;
+    let mut denied = false;
     while let Some(row) = rows.next()? {
         guard.require()?;
         let contributor = row.get_ref(0)?.as_str().map_err(|_| invalid())?;
@@ -138,6 +139,13 @@ fn normalize_key(
             read_record_header(&mut blob).map_err(|_| invalid())?.ok_or_else(invalid)?,
         );
         let value = read_row(&header.0, &mut blob, &source.account_anchor)?;
+        // Check every original contributor's event, including a superseded event
+        // that would disappear from the preferred normalized native version.
+        let erased = value.erase_if_denied(&private.db, &source.account_anchor)?;
+        if erased {
+            value.retain_expected_erasure(db, nonce, contributor, &source.account_anchor)?;
+        }
+        denied |= erased;
         expected = Some(match expected {
             Some(old) => old.merge(&value, &source.account_anchor)?,
             None => value,
@@ -145,11 +153,7 @@ fn normalize_key(
     }
     let expected = expected.ok_or_else(invalid)?;
     let projection = expected.projection(&source.account_anchor)?;
-    if super::message_denial::erase_if_denied(
-        &private.db,
-        &projection.conversation_id,
-        &projection.message_id,
-    )? {
+    if denied || expected.erase_if_denied(&private.db, &source.account_anchor)? {
         if private.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_message_content WHERE message_id=?1)",
             [&projection.message_id],

@@ -306,8 +306,8 @@ impl AccountDb {
 }
 
 /// Retain a content-free sticky denial under this database's own current MAC owner.
-/// The full-transfer importer uses the same marker as ordinary local erasure, including
-/// when the destination never held the deleted message. No source marker is adopted.
+/// Ordinary local erasure uses this marker. Full transfer retains public tombstones
+/// and content-free native denials directly, without inventing a destination MAC row.
 pub(in crate::account_db) fn retain_deletion_marker_on(
     db: &rusqlite::Connection,
     message: &str,
@@ -337,6 +337,10 @@ pub(crate) fn message_is_deleted_on(
     db: &rusqlite::Connection,
     message_id: &str,
 ) -> Result<bool, StorageError> {
+    let retained: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM message_tombstone_projection WHERE message_id=?1) OR EXISTS(SELECT 1 FROM runtime_native_erasure WHERE original_id=?1 OR current_id=?1)", [message_id], |row|row.get(0))?;
+    if retained {
+        return Ok(true);
+    }
     let projection: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=1)",
         [message_id],

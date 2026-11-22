@@ -168,9 +168,10 @@ impl Contributions {
         private: &BackupDatabase,
         stage: &impl super::receiver_read::ReceiverInput,
     ) -> Result<FullUnionEncoding, StorageError> {
-        super::monotonic::normalize(tx, &self.nonce, private, &self.owners)?;
         let guard = stage.source_guard();
-        super::direct_union::normalize(tx, &self.nonce, private, &self.owners, &guard)?;
+        super::monotonic::normalize(tx, &self.nonce, private, &self.owners, || {
+            super::direct_union::normalize(tx, &self.nonce, private, &self.owners, &guard)
+        })?;
         let (records, total) = super::union_encoding::visit(
             tx,
             &self.nonce,
