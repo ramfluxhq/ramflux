@@ -26,7 +26,7 @@ struct Resolve {
 }
 
 pub(super) struct Prepared {
-    pub(super) gateway: crate::gateway::GatewaySessionConfig,
+    pub(super) gateway: crate::sealing::SealingConfig,
     pub(super) pin: w::NativeDirectoryPin,
     pub(super) root: String,
     pub(super) action: w::NativeUsernameAction,
