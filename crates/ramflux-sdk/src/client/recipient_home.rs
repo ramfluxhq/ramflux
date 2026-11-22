@@ -33,14 +33,18 @@ pub(crate) fn pin_choice(
 /// Public prekey base for `home`, or `None` when the session directory is the origin.
 ///
 /// # Errors
-/// Returns an error when a remote pin has no signed public endpoint, or when a
-/// federation route has neither a pin nor a session directory.
+/// Returns an error when a remote pin has no card fingerprint or signed public
+/// endpoint, or when a federation route has neither a pin nor a session directory.
 pub(crate) async fn fetch_base(
     home: Option<String>,
+    pinned_fingerprint: Option<&str>,
     session_directory: bool,
 ) -> Result<Option<String>, SdkError> {
     match home {
-        Some(home) => Ok(Some(public_prekey_base(&home).await?)),
+        Some(home) => {
+            let fingerprint = pinned_fingerprint.ok_or_else(fingerprint_required)?;
+            Ok(Some(public_prekey_base(&home, fingerprint).await?))
+        }
         None if session_directory => Ok(None),
         None => Err(SdkError::LocalBus(UNPINNED.into())),
     }
@@ -70,14 +74,51 @@ pub(crate) fn principal_for_commitment(
         .map(str::to_owned))
 }
 
-/// `prekey_http_url` from the pinned home's signed client record.
+/// Card node-key fingerprint stored at import (`identity.node.key_fingerprint`).
 ///
 /// # Errors
-/// Returns an error when `home` is not a node id, the signed record names a
-/// different node, or the record has no public prekey endpoint.
-pub(crate) async fn public_prekey_base(home: &str) -> Result<String, SdkError> {
+/// Returns an error when the contact has no stored card fingerprint.
+pub(crate) fn pinned_node_fingerprint(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> Result<String, SdkError> {
+    let principal =
+        principal_for_commitment(client, commitment)?.ok_or_else(fingerprint_required)?;
+    let identity = client
+        .account_db()?
+        .client_record("identity", &principal)?
+        .ok_or_else(fingerprint_required)?;
+    identity
+        .get("node")
+        .and_then(|node| node.get("key_fingerprint"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(fingerprint_required)
+}
+
+fn fingerprint_required() -> SdkError {
+    SdkError::LocalBus("pinned node fingerprint is required".into())
+}
+
+/// `prekey_http_url` from the pinned home's signed client record.
+///
+/// The discovered node key must equal `pinned_fingerprint`. The endpoint is
+/// returned only after that check.
+///
+/// # Errors
+/// Returns an error when `home` is not a node id, the fingerprint is empty, the
+/// signed record names a different node or key, or the record has no public
+/// prekey endpoint.
+pub(crate) async fn public_prekey_base(
+    home: &str,
+    pinned_fingerprint: &str,
+) -> Result<String, SdkError> {
     let home = node_id(Some(home))
         .ok_or_else(|| SdkError::LocalBus("pinned home is not a node id".into()))?;
+    if pinned_fingerprint.is_empty() {
+        return Err(fingerprint_required());
+    }
     #[cfg(test)]
     if let Some(base) = test_public_base(&home) {
         return Ok(base);
@@ -87,6 +128,9 @@ pub(crate) async fn public_prekey_base(home: &str) -> Result<String, SdkError> {
         return Err(SdkError::LocalBus(
             "pinned home does not match the signed client record".into(),
         ));
+    }
+    if crate::contact_node_fingerprint(&record.node_public_key)? != pinned_fingerprint {
+        return Err(crate::ContactReason::NodeFingerprintMismatch.into());
     }
     if record.prekey_http_url.is_empty() {
         return Err(SdkError::LocalBus("pinned home has no public prekey endpoint".into()));
@@ -105,7 +149,12 @@ pub(crate) async fn directory_base(
     caller_target: Option<&str>,
     session_directory: bool,
 ) -> Result<Option<String>, SdkError> {
-    fetch_base(pin_choice(client, commitment, caller_target)?, session_directory).await
+    let home = pin_choice(client, commitment, caller_target)?;
+    let fingerprint = match &home {
+        Some(_) => Some(pinned_node_fingerprint(client, commitment)?),
+        None => None,
+    };
+    fetch_base(home, fingerprint.as_deref(), session_directory).await
 }
 
 /// Signed public prekey base. A missing pin fails before any socket.
@@ -149,9 +198,10 @@ pub(crate) fn foreign_target(
 /// Returns an error when the signed record or the manifest response is refused.
 pub(crate) async fn public_device_manifest(
     home: &str,
+    pinned_fingerprint: &str,
     commitment: &str,
 ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-    let base = public_prekey_base(home).await?;
+    let base = public_prekey_base(home, pinned_fingerprint).await?;
     let started = std::time::Instant::now();
     let manifest =
         crate::prekey::http_async::get::<Option<crate::prekey::SdkDeviceManifestResponse>>(

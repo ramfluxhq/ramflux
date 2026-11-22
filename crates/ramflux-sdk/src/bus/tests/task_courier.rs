@@ -529,6 +529,10 @@ async fn stall(
     let db = account.client.account_db()?;
     let mut identity = db.client_record("identity", "stalled-peer")?.ok_or("stalled identity")?;
     identity["home_node_id"] = json!("stall-node");
+    identity["node"] = json!({
+        "url": "https://stall-node",
+        "key_fingerprint": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    });
     db.persist_client_record("identity", "stalled-peer", &identity)?;
     let scope: String =
         db.load_actor_state("fixture/stalled-conversation")?.ok_or("stalled scope")?;

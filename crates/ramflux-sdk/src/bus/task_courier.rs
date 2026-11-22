@@ -17,8 +17,11 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub(super) enum ManifestSource {
     Gateway(Box<GatewaySessionConfig>),
-    /// Pinned home node id. The public prekey base comes from that node's signed client record.
-    Home(String),
+    /// Pinned home and the card node-key fingerprint that must match its signed record.
+    Home {
+        node_id: String,
+        fingerprint: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -219,8 +222,10 @@ async fn prepare_manifests(
                 )
                 .await?
             }
-            ManifestSource::Home(home) => {
-                let base = crate::client::recipient_home::public_prekey_base(&home).await?;
+            ManifestSource::Home { node_id, fingerprint } => {
+                let base =
+                    crate::client::recipient_home::public_prekey_base(&node_id, &fingerprint)
+                        .await?;
                 super::dispatch::task_transport::fetch_federated_manifest(
                     &base,
                     &request.commitment,
@@ -242,7 +247,7 @@ pub(super) fn manifest_request_keys(requests: &[ManifestRequest]) -> BTreeSet<St
                     .prekey_http_url
                     .clone()
                     .unwrap_or_else(|| format!("gateway://{}", gateway.gateway_addr)),
-                ManifestSource::Home(home) => format!("home://{home}"),
+                ManifestSource::Home { node_id, .. } => format!("home://{node_id}"),
             };
             format!("{}/mvp1/device-manifest/{}", source.trim_end_matches('/'), request.commitment)
         })

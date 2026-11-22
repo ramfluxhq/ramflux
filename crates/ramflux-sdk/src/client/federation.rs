@@ -86,22 +86,34 @@ impl RamfluxClient {
         options: &FederatedSendOptions,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
         Self::normalize_recipient(&mut message)?;
+        let commitment = message.recipient_principal_commitment.as_deref().unwrap_or("");
         let pinned = crate::client::recipient_home::pin_choice(
             self,
-            message.recipient_principal_commitment.as_deref().unwrap_or(""),
+            commitment,
             Some(federation.target_node_id.as_str()),
         )?;
-        let submit_target = pinned.clone();
-        let sealed = match crate::client::recipient_home::fetch_base(pinned, true).await? {
-            Some(base) => self.seal_routed_federated_as(
-                engine,
-                &message,
-                plaintext,
-                Some(&base),
-                options.route.clone(),
-            )?,
-            None => self.seal_routed_as(engine, &message, plaintext, options.route.clone()).await?,
+        let fingerprint = match &pinned {
+            Some(_) => {
+                Some(crate::client::recipient_home::pinned_node_fingerprint(self, commitment)?)
+            }
+            None => None,
         };
+        let submit_target = pinned.clone();
+        let sealed =
+            match crate::client::recipient_home::fetch_base(pinned, fingerprint.as_deref(), true)
+                .await?
+            {
+                Some(base) => self.seal_routed_federated_as(
+                    engine,
+                    &message,
+                    plaintext,
+                    Some(&base),
+                    options.route.clone(),
+                )?,
+                None => {
+                    self.seal_routed_as(engine, &message, plaintext, options.route.clone()).await?
+                }
+            };
         let pending =
             self.prepare_federated_packet(engine, &mut message, plaintext, sealed, options)?;
         trace_forward(federation, &pending.envelope);

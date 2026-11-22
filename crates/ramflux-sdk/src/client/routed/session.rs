@@ -339,7 +339,9 @@ async fn recipient_prekey_bundle(
     if let Some(commitment) = message.recipient_principal_commitment.as_deref()
         && let Some(home) = crate::client::recipient_home::foreign_target(client, commitment)?
     {
-        let base = crate::client::recipient_home::public_prekey_base(&home).await?;
+        let fingerprint =
+            crate::client::recipient_home::pinned_node_fingerprint(client, commitment)?;
+        let base = crate::client::recipient_home::public_prekey_base(&home, &fingerprint).await?;
         let lookup = client.root_qualified_device_lookup(recipient)?;
         return crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
             &base,

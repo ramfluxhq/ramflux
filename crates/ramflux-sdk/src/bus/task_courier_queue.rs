@@ -238,13 +238,17 @@ fn requests_for(
 
 fn request(account: &LocalBusAccountState, commitment: &str) -> Result<ManifestRequest, SdkError> {
     let home = crate::client::recipient_home::pin_choice(&account.client, commitment, None)?;
-    Ok(ManifestRequest {
-        source: match home {
-            Some(home) => ManifestSource::Home(home),
-            None => ManifestSource::Gateway(Box::new(account.gateway_config.clone())),
+    let source = match home {
+        Some(node_id) => ManifestSource::Home {
+            fingerprint: crate::client::recipient_home::pinned_node_fingerprint(
+                &account.client,
+                commitment,
+            )?,
+            node_id,
         },
-        commitment: commitment.into(),
-    })
+        None => ManifestSource::Gateway(Box::new(account.gateway_config.clone())),
+    };
+    Ok(ManifestRequest { source, commitment: commitment.into() })
 }
 
 /// Explicit account-stop allowlist. Row decode, network, quota, busy and I/O failures stay local.

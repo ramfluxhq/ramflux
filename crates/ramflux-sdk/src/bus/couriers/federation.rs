@@ -293,14 +293,22 @@ async fn route_base(
     let Some(route) = route else { return Ok(None) };
     let commitment = commitment.to_owned();
     let caller = route.target_node_id.clone();
-    let home = writer
+    let (home, fingerprint) = writer
         .apply(move |account| {
-            crate::client::recipient_home::pin_choice(
+            let home = crate::client::recipient_home::pin_choice(
                 &account.client,
                 &commitment,
                 Some(caller.as_str()),
-            )
+            )?;
+            let fingerprint = match &home {
+                Some(_) => Some(crate::client::recipient_home::pinned_node_fingerprint(
+                    &account.client,
+                    &commitment,
+                )?),
+                None => None,
+            };
+            Ok((home, fingerprint))
         })
         .await?;
-    crate::client::recipient_home::fetch_base(home, true).await
+    crate::client::recipient_home::fetch_base(home, fingerprint.as_deref(), true).await
 }

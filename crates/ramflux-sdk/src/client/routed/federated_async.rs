@@ -35,12 +35,25 @@ impl RamfluxClient {
         let (mut session, header, bundle) = if let Some(pair) = pair {
             pair
         } else {
+            let commitment = message.recipient_principal_commitment.as_deref().unwrap_or("");
             let pinned = crate::client::recipient_home::pin_choice(
                 self,
-                message.recipient_principal_commitment.as_deref().unwrap_or(""),
+                commitment,
                 Some(federation.target_node_id.as_str()),
             )?;
-            let url = match crate::client::recipient_home::fetch_base(pinned, true).await? {
+            let fingerprint = match &pinned {
+                Some(_) => {
+                    Some(crate::client::recipient_home::pinned_node_fingerprint(self, commitment)?)
+                }
+                None => None,
+            };
+            let url = match crate::client::recipient_home::fetch_base(
+                pinned,
+                fingerprint.as_deref(),
+                true,
+            )
+            .await?
+            {
                 Some(base) => base,
                 None => engine
                     .config()

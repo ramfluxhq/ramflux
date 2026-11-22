@@ -13,6 +13,8 @@ pub(crate) struct GroupDirectoryRequest {
     pub root: String,
     /// Pinned home node id. `None` uses the session directory.
     pub home: Option<String>,
+    /// Card node-key fingerprint. Required when `home` is set.
+    pub node_fingerprint: Option<String>,
 }
 pub(crate) struct GroupDirectoryPlan {
     pub actor_root: String,
@@ -29,7 +31,11 @@ impl GroupDirectoryRequest {
         gateway: &GatewaySessionConfig,
     ) -> Result<(Self, SdkDeviceManifestResponse), SdkError> {
         let manifest = if let Some(home) = &self.home {
-            let url = crate::client::recipient_home::public_prekey_base(home).await?;
+            let fingerprint =
+                self.node_fingerprint.as_deref().filter(|value| !value.is_empty()).ok_or_else(
+                    || SdkError::LocalBus("pinned node fingerprint is required".into()),
+                )?;
+            let url = crate::client::recipient_home::public_prekey_base(home, fingerprint).await?;
             let started = std::time::Instant::now();
             let manifest = crate::prekey::http_async::get::<Option<SdkDeviceManifestResponse>>(
                 &url,
@@ -181,7 +187,11 @@ impl RamfluxClient {
             )?,
             None => None,
         };
-        Ok(GroupDirectoryRequest { root: root.to_owned(), home })
+        let node_fingerprint = match &home {
+            Some(_) => Some(crate::client::recipient_home::pinned_node_fingerprint(self, root)?),
+            None => None,
+        };
+        Ok(GroupDirectoryRequest { root: root.to_owned(), home, node_fingerprint })
     }
     pub(super) fn prepared_group_addition_manifest(
         lookup: &GroupDirectoryRequest,
