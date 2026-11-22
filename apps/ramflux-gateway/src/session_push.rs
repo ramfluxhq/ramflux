@@ -403,7 +403,7 @@ async fn router_refusal(send: &GatewaySendHandle, id: &str, value: &Value) -> an
     if value.get("incarnation_id").is_some_and(|v| v != id) {
         return Err(Retired.into());
     }
-    if reason == "incarnation_mismatch" {
+    if reason == "incarnation_mismatch" || reason == "recipient_unreachable" {
         return Err(Retired.into());
     }
     let reason = serde_json::from_value::<Reason>(reason.clone()).map_err(|_| Retired)?;
@@ -494,6 +494,9 @@ async fn handle_bound(
     }
     if let Some(reason) = input_refusal(&frame, runtime) {
         return nack(send, id, reason).await;
+    }
+    if crate::session_fence::channel_closed(context, &runtime.target_delivery_id).await {
+        return Err(Retired.into());
     }
     match frame {
         Client::Resume { resume, .. } => resume_page(send, context, runtime, id, &resume).await,

@@ -80,6 +80,7 @@ impl AccountRuntime {
                     let _ = reply.send(self.agent_gateway());
                 }
             }
+            AgentPrivate::Admission { reply } => self.reply_pairing_admission(reply),
         }
     }
 
@@ -214,6 +215,35 @@ impl AccountRuntime {
     pub(super) fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
         let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
         Ok(account.client.account_db()?.load_actor_state::<String>("account/node-id")?)
+    }
+
+    /// Answer the admission-reader read by private command; a closed reply channel skips it.
+    pub(super) fn reply_pairing_admission(
+        &self,
+        reply: tokio::sync::oneshot::Sender<
+            Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError>,
+        >,
+    ) {
+        if !reply.is_closed() {
+            let _ = reply.send(self.pairing_admission());
+        }
+    }
+
+    /// The still-open reader of this account's unlocked DB. A closed reader is `None`.
+    pub(super) fn pairing_admission(
+        &self,
+    ) -> Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError> {
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        if let Some(reader) = account.gateway_config.pairing_admission.clone()
+            && reader.is_open()
+        {
+            return Ok(Some(reader));
+        }
+        let Some(db) = account.client.active_account_db.as_ref() else {
+            return Ok(None);
+        };
+        let reader = std::sync::Arc::new(db.pairing_admission_reader());
+        Ok(reader.is_open().then_some(reader))
     }
 }
 
