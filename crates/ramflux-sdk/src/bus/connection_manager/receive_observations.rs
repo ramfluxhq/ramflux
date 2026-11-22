@@ -16,6 +16,9 @@ pub(crate) struct Observation {
     pub page_fetches: u64,
     /// Catch-up passes started, including a pass later interrupted by process death.
     pub catch_up_passes: u64,
+    /// Resident sessions announced Live in this process. Each one owes exactly one
+    /// Connected catch-up, so a retired and re-established session legitimately adds a pass.
+    pub live_sessions: u64,
     /// Largest successful ACK sequence for the observed inbox incarnation in this process.
     pub last_acked_seq: u64,
 }
@@ -26,6 +29,7 @@ pub(crate) struct Counters {
     resume_requests: AtomicU64,
     page_fetches: AtomicU64,
     catch_up_passes: AtomicU64,
+    live_sessions: AtomicU64,
     last_ack: Mutex<(String, u64)>,
     #[cfg(any(test, feature = "itest-memory-vault"))]
     committed_items: AtomicU64,
@@ -48,6 +52,10 @@ impl Counters {
         self.catch_up_passes.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn session_live(&self) {
+        self.live_sessions.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn acked(&self, incarnation: &str, sequence: u64) {
         let mut ack = self.last_ack.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if ack.0 != incarnation {
@@ -68,6 +76,7 @@ impl Counters {
             resume_requests: self.resume_requests.load(Ordering::Relaxed),
             page_fetches: self.page_fetches.load(Ordering::Relaxed),
             catch_up_passes: self.catch_up_passes.load(Ordering::Relaxed),
+            live_sessions: self.live_sessions.load(Ordering::Relaxed),
             last_acked_seq: self
                 .last_ack
                 .lock()

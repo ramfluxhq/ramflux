@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant compatibility executor (S6b P18). No production caller reaches these
-//! entry points: live receive still uses the legacy Resume/ACK path. P20/P21 wire
-//! `admit_in` onto the actor W1/W2 and WA. Sequence equality alone never authorizes
-//! a legacy ACK. Clock values are injected; tests never wait on the wall clock.
+//! Compatibility executor (S6b P18) for a session-push account whose session is not
+//! in push mode (`SweepMode::Compat`). Sequence equality alone never authorizes a
+//! legacy ACK. Clock values are injected; tests never wait on the wall clock.
 #![allow(dead_code)]
 
 use crate::prelude::*;

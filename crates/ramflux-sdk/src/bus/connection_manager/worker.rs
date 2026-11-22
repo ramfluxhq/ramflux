@@ -513,6 +513,8 @@ fn announce_live(
         dispatch_count: Arc::default(),
     });
     publish_metadata(handle, resident);
+    // Counted before Live is published so a reader never sees the Connected pass first.
+    handle.receive_observations().session_live();
     update(handle, |snapshot| {
         snapshot.state = NetworkingState::Live;
         snapshot.phase = ConnectionPhase::Live;

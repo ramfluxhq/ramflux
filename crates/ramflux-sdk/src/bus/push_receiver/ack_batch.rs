@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT WA executor (S6b P21). Live `Writer::apply` / per-entry ACK is unchanged
-//! until P24/P25. P20e/P20g wire the actor flush. One sorted positive max-64 batch
+//! WA executor (S6b P21), driven by the actor ACK flush of the anchored receive
+//! loop. One sorted positive max-64 batch
 //! with an exact result set; uncertainty retains. On a terminal router result the
 //! settlement transaction also marks the existing own-copy replay marker and receipt
 //! (through the W1 locator's stored binding) and the locator flag.
