@@ -47,7 +47,7 @@ impl From<&CustodyNetworkConfig> for Key {
 }
 struct Live {
     key: Key,
-    connection: CustodyConnection,
+    connection: Box<CustodyConnection>,
 }
 #[derive(Clone, Default)]
 pub(crate) struct UsernameConnection(Arc<Mutex<Option<Live>>>);
@@ -62,7 +62,7 @@ impl UsernameConnection {
         &self,
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
-    ) -> Result<CustodyConnection, SdkError> {
+    ) -> Result<Box<CustodyConnection>, SdkError> {
         // Take ownership before any await. Cancellation or any failed request closes this
         // stream instead of leaving a partially consumed frame for a later command.
         let saved = self.0.lock().map_err(|_| unavailable())?.take();
@@ -81,13 +81,13 @@ impl UsernameConnection {
             }
         }
         tracing::debug!("username native transport opening");
-        CustodyConnection::connect(config, vault).await
+        Box::pin(CustodyConnection::connect(config, vault)).await.map(Box::new)
     }
 
     pub(crate) fn retain(
         &self,
         config: &CustodyNetworkConfig,
-        connection: CustodyConnection,
+        connection: Box<CustodyConnection>,
     ) -> Result<(), SdkError> {
         let mut slot = self.0.lock().map_err(|_| unavailable())?;
         if slot.is_some() {
