@@ -17,6 +17,7 @@ mod connection;
 mod pairing_calls;
 mod pairing_data;
 mod pairing_own_sync;
+mod username_calls;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
 #[cfg(test)]
@@ -71,6 +72,7 @@ struct AccountRuntime {
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
+    username: username_calls::Calls,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -147,12 +149,14 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         ledger: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
+        username: username_calls::Calls::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.username.stop().await;
     account.pairing.stop().await;
     account.ledger = None;
     account.transfers.stop().await;
@@ -373,22 +377,35 @@ impl AccountRuntime {
         }
     }
 
-    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
-        if !self.initialize_actor(ready).await? {
-            return Ok(());
-        }
-        let mut schedule = super::sync_driver::Schedule {
+    fn receive_schedule(&self) -> (super::sync_driver::Schedule, tokio::time::Instant) {
+        let schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
             max: self.timeouts.receive_max,
             interval: self.timeouts.receive_min,
         };
-        let mut next = tokio::time::Instant::now() + schedule.min;
+        let next = tokio::time::Instant::now() + schedule.min;
+        (schedule, next)
+    }
+
+    async fn prepare_receive_turn(
+        &mut self,
+    ) -> Result<(Option<tokio::time::Instant>, Option<tokio::time::Instant>), SdkError> {
+        self.refresh_transient_host().await;
+        self.publish_transient_updates();
+        let transient = self.transient_deadline();
+        let username = self.username.deadline();
+        Box::pin(self.refresh_pairing_reader_generation()).await?;
+        Ok((transient, username))
+    }
+
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        if !self.initialize_actor(ready).await? {
+            return Ok(());
+        }
+        let (mut schedule, mut next) = self.receive_schedule();
         let mut checkpoints = 0_u8;
         loop {
-            self.refresh_transient_host().await;
-            self.publish_transient_updates();
-            let transient_deadline = self.transient_deadline();
-            Box::pin(self.refresh_pairing_reader_generation()).await?;
+            let (transient_deadline, username_deadline) = self.prepare_receive_turn().await?;
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -421,6 +438,16 @@ impl AccountRuntime {
                         None => std::future::pending().await,
                     }
                 } => { self.publish_transient_updates(); continue; },
+                completion = self.username.receive() => {
+                    if let Some(completion) = completion && self.finish_username(completion).await? { break; }
+                    continue;
+                },
+                () = async {
+                    match username_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => { self.start_username_delivery(); continue; },
                 completion = self.pairing.receive() => {
                     if let Some(completion) = completion
                         && self.finish_pairing_begin(completion).await? { break; }

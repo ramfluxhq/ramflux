@@ -235,6 +235,20 @@ pub(crate) fn observe_resolution(
 }
 
 impl ResolvedUsername {
+    pub(crate) fn validate_for_add(&self, now: u64) -> Result<(), SdkError> {
+        if self.name != self.binding.body.name
+            || self.node != self.binding.body.node
+            || self.root_commitment != self.floor.root()
+            || self.principal_id != self.floor.profile.body.principal_id
+            || Some(&self.binding) != self.floor.binding.as_ref()
+            || self.profile != self.floor.profile
+            || now >= self.receipt.body.expires_at
+        {
+            return Err(w::DirectoryCode::StaleProfile.into());
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Refuses a changed explicit name pin or unavailable durable storage.
     pub fn pin_for_add(&self, db: &AccountDb) -> Result<(), SdkError> {

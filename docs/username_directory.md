@@ -138,15 +138,17 @@ This module includes username and bio. A v2 sidecar's avatar is always null; a n
 avatar candidate refuses before publication. Native Profile/DeviceSet bytes do not
 change. Bio uses the existing trim/NFC/140-scalar/560-byte limits.
 
-The local bus surface is `username.mutate`, `username.status`, `username.resolve` and
-`profile.update`. New methods receive explicit denied native policy rows and generated
+The local bus surface is `username.mutate`, `username.status`, `username.resolve`,
+`username.contact.add` and `profile.update`. New methods receive explicit denied native policy rows and generated
 manifest entries. They never enter executable C ABI discovery or native execution.
 The descriptor, executable native method set and CAS product pin remain unchanged.
 
 Development verification builds real binaries and drives scratch-script runs through
 rf daemons, real services and product reads: same-node set/resolve/contact add, rename
 hold/exact match, and two-node lookup through one centre. Restart and lost-reply cases
-also require captured direct-run evidence. These runs have not been performed yet.
+also require captured direct-run evidence. An unpublished candidate has completed the
+shortest set/resolve flow; contact acceptance, rename and foreign-home acceptance
+remain outstanding. This is not complete release evidence.
 
 ## Live transport configuration under development
 
@@ -164,7 +166,7 @@ HTTPS origin, TLS server name and CA certificate. Its canonical frame is at most
 The reporting proof binds this locator as part of its evidence hash. The protected
 home-history floor retains the immutable master public key and locator. An expired
 locator closes resolution; it never authorizes an archival profile or creates a
-centre signing pin. Active home refresh is part of the unfinished service wiring.
+centre signing pin. A home refreshes the locator autonomously through a genuinely enrolled native root.
 
 The dedicated TLS listener requires client-certificate key possession during the
 handshake. Before account admission, it validates that exact certificate chain
@@ -189,8 +191,8 @@ the primary and `--username-initialize` or `--username-recovery` at the witness.
 Missing witness state is never silently recreated. These operator recovery actions
 do not bypass peer credentials, semantic admission or the exact primary fsync gate.
 
-The release gate remains false. These components have compilation evidence only;
-no direct service run or complete CLI flow is claimed by this document.
+The release gate remains false. A private candidate has completed a real set and
+second-account exact resolve. The complete acceptance flow remains unfinished.
 
 ## Home reconciliation and profile publication
 
@@ -224,5 +226,31 @@ operations also let account restrictions cover profiles without names and releas
 restore unions independent directory/profile floors, retaining conflicts and delete
 restrictions. Historical records are never sufficient for a positive profile read.
 
-These are implemented components with compilation evidence. SDK/bus/CLI wiring and
-all required direct real runs are still outstanding; the single release gate is false.
+SDK/bus/CLI signing, status and exact resolution are wired. Contact-by-name and
+account-owned asynchronous delivery are under verification; the remaining real runs
+and final-head CI still gate release.
+
+## CLI and account jobs under verification
+
+`rf username set @name --account ACCOUNT` requests a fresh unsigned draft, then
+performs the master ceremony locally and submits only signed public records. The
+phrase is read from a private owned file or hidden terminal input. Neither recovery
+words nor master material enter the daemon bus or the durable operation journal.
+`rf username status`, `resolve`, `release`, `delete` and `profile` use the same
+account identity and explicit centre pin. Bio/profile updates never populate avatar.
+
+`rf contact add @name --account ACCOUNT` resolves the exact name, persists observed
+signed floors, and refuses a foreign home before staging a contact request. On the
+configured home it pins the name on explicit Add and reuses the existing native
+current-authority, consent, request delivery and recipient acceptance path. The
+username is never resolved again to choose a recipient at send time. A historical
+name pin can survive a failed transport attempt; reuse by another root requires
+explicit review and cannot silently redirect an existing contact.
+
+One account-owned network job carries captured connection inputs and public signed
+documents. The account writer prepares the journal before I/O and applies verified
+results afterwards. It remains available for receive work during network waits.
+Retries read fresh home/centre status before resending identical signed bytes, use
+bounded backoff up to sixty seconds, and never extend operation expiry or rebase a
+signed change. Lock and shutdown cancel these jobs before writer teardown. Restored
+bytes and expired uncertain intents do not become autonomous live send work.

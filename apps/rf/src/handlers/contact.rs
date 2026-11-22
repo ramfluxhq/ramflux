@@ -12,6 +12,18 @@ pub(crate) async fn handle_contact(
     let mut bus = LocalBusClient::connect(socket).await?;
     match command.action {
         ContactAction::Add(add) => {
+            if let Some(name) = &add.username {
+                let name = ramflux_sdk::username_directory::normalize_name(name)?;
+                return print_json(
+                    &bus.request(
+                        Some(add.account),
+                        "username",
+                        "username.contact.add",
+                        serde_json::json!({"name":name}),
+                    )
+                    .await?,
+                );
+            }
             let body = contact_add_body(&add);
             contact_add_response(&bus, add.account, body).await
         }
@@ -71,6 +83,9 @@ pub(crate) async fn handle_contact(
         ContactAction::List(selector) => print_json(
             &bus.request(Some(selector.account), "contact", "contact.list", serde_json::json!({}))
                 .await?,
+        ),
+        ContactAction::Requests(selector) => print_json(
+            &bus.request(Some(selector.account), "contact", "contact.requests.list", serde_json::json!({})).await?,
         ),
         ContactAction::Verify(verify) => handle_contact_verify(&mut bus, verify).await,
         ContactAction::SafetyNumber(selector) => {

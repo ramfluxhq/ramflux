@@ -55,6 +55,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 ledger: None,
                 transient: crate::bus::account_runtime::TransientHost::default(),
                 pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+                username: crate::bus::account_runtime::username_calls::Calls::default(),
                 transfers: crate::bus::account_runtime::uploads::Transfers::start(),
                 readers: Arc::new(Mutex::new(None)),
                 events,

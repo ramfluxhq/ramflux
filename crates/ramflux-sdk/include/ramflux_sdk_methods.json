@@ -1961,6 +1961,15 @@
     },
     {
       "bridge_allowed": false,
+      "capability": "username",
+      "key_export": false,
+      "name": "username.contact.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
       "capability": "profile",
       "key_export": false,
       "name": "profile.update",

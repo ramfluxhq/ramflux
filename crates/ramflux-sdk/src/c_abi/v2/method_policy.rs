@@ -247,6 +247,7 @@ policies! {
     "username.mutate" => ("username", true, true, false, false),
     "username.status" => ("username", false, true, false, false),
     "username.resolve" => ("username", false, true, false, false),
+    "username.contact.add" => ("username", true, true, false, false),
     "profile.update" => ("profile", true, true, false, false),
 }
 
@@ -255,6 +256,7 @@ pub(super) const DENIED_METHODS: &[&str] = &[
     "username.mutate",
     "username.status",
     "username.resolve",
+    "username.contact.add",
     "profile.update",
     "daemon.stop",
     "search.cancel",
