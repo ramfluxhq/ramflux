@@ -63,3 +63,12 @@ mod schema_generation_tests;
 
 #[cfg(test)]
 mod selector_publication_tests;
+
+#[cfg(test)]
+pub(super) const TEST_ARCHIVE_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+#[cfg(test)]
+pub(super) fn test_archive_phrase() -> ramflux_crypto::custody::RecoveryPhrase {
+    ramflux_crypto::custody::RecoveryPhrase::parse(TEST_ARCHIVE_PHRASE)
+        .expect("test: zero-entropy recovery phrase")
+}

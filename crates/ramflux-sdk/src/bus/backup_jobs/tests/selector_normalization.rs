@@ -631,12 +631,12 @@ fn worker_staging(
         created_at: crate::bus::backup_jobs::service::now(),
         totals,
     };
-    let secret = "staged-upgrade-recovery-secret";
+    let secret = super::super::TEST_ARCHIVE_PHRASE;
     let mut output = std::fs::File::create(&job.path)?;
     encrypt_backup_stream(
         &mut format::payload(metadata, &path)?,
         &mut output,
-        secret.as_bytes(),
+        &super::super::test_archive_phrase(),
         context,
     )?;
     drop(output);

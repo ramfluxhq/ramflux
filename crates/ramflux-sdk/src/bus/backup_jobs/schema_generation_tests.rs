@@ -27,14 +27,14 @@ fn schema_generation_refuses_mismatched_database_and_archive() -> TestResult {
     encrypt_backup_stream(
         &mut &b"invalid application payload"[..],
         &mut output,
-        b"schema-generation-test-recovery-secret",
+        &super::test_archive_phrase(),
         context,
     )?;
     drop(output);
     let original = std::fs::read(&path)?;
     let job = jobs.start(BackupJobKind::Restore, path.to_string_lossy().into_owned())?;
     let failure = jobs
-        .verify_archive(&job, Zeroizing::new("schema-generation-test-recovery-secret".into()))
+        .verify_archive(&job, Zeroizing::new(super::TEST_ARCHIVE_PHRASE.into()))
         .err()
         .ok_or("refusal")?;
     assert_eq!(failure.code, BackupFailureCode::SchemaResetRequired);

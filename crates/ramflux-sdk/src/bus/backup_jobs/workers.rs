@@ -93,6 +93,11 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
 
 // Restore admission failures retain their typed job code; export keeps its existing policy.
 pub(super) fn restore_storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
+    if let ramflux_storage::StorageError::TransferExportRefused(step) = error {
+        let mut failure = failure(BackupFailureCode::Tampered);
+        failure.message = Some((*step).into());
+        return failure;
+    }
     if matches!(error, ramflux_storage::StorageError::AuthorizationRejected) {
         failure(BackupFailureCode::AuthorizationRejected)
     } else {
@@ -116,7 +121,12 @@ fn stream_error(error: BackupStreamError, header: bool) -> BackupFailure {
         }),
         BackupStreamError::Invalid(_) => failure(BackupFailureCode::UnsupportedVersion),
         BackupStreamError::Derivation(_) => failure(BackupFailureCode::WrongPassphrase),
+        BackupStreamError::OldFormat => failure(BackupFailureCode::OldArchiveFormat),
     }
+}
+fn archive_phrase(secret: &str) -> Result<ramflux_crypto::custody::RecoveryPhrase, BackupFailure> {
+    ramflux_crypto::custody::RecoveryPhrase::parse(secret)
+        .map_err(|_| failure(BackupFailureCode::WrongPassphrase))
 }
 pub(super) fn require_archive_generation(context: &BackupContext) -> Result<(), BackupFailure> {
     use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, ARCHIVE_GENERATION_KEY};
@@ -289,7 +299,7 @@ impl BackupJobs {
         };
         let mut input = format::payload(&metadata, &database)
             .map_err(|_| failure(BackupFailureCode::Unreadable))?;
-        encrypt_backup_stream(&mut input, &mut output_io, secret.as_bytes(), context)
+        encrypt_backup_stream(&mut input, &mut output_io, &archive_phrase(&secret)?, context)
             .map_err(|error| stream_error(error, false))?;
         drop(secret);
         output_io.inner.sync_all().map_err(|_| failure(BackupFailureCode::NotWritable))?;
@@ -408,7 +418,7 @@ impl BackupJobs {
         let archive_bytes =
             file.metadata().map_err(|_| failure(BackupFailureCode::Unreadable))?.len();
         let mut input = BufReader::new(file);
-        let decoder = BackupStreamDecoder::open(&mut input, secret.as_bytes())
+        let decoder = BackupStreamDecoder::open(&mut input, &archive_phrase(&secret)?)
             .map_err(|error| stream_error(error, true))?;
         drop(secret);
         let context = decoder.context().clone();

@@ -15,7 +15,7 @@ use serde_json::json;
 use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 pub(super) const LOCAL_SECRET: &str = "independent local data passphrase";
-pub(super) const ARCHIVE_SECRET: &str = "independent archive passphrase";
+pub(super) const ARCHIVE_SECRET: &str = super::TEST_ARCHIVE_PHRASE;
 
 pub(super) fn initialize(
     root: &Path,
@@ -81,7 +81,8 @@ pub(super) async fn verify(supervisor: &Supervisor, path: &Path) -> TestResult<S
 fn archive_with_different_local_origin(source: &Path, output: &Path) -> TestResult {
     use ramflux_crypto::backup_stream::{BackupStreamDecoder, encrypt_backup_stream};
     let mut file = std::io::BufReader::new(std::fs::File::open(source)?);
-    let decoder = BackupStreamDecoder::open(&mut file, ARCHIVE_SECRET.as_bytes())?;
+    let phrase = super::test_archive_phrase();
+    let decoder = BackupStreamDecoder::open(&mut file, &phrase)?;
     let mut context = decoder.context().clone();
     let snapshot = source.with_extension("origin-snapshot.db");
     let mut unpack = format::Unpack::new(std::fs::File::create(&snapshot)?);
@@ -93,12 +94,7 @@ fn archive_with_different_local_origin(source: &Path, output: &Path) -> TestResu
     native.local_account_id = "previous-installation-local-id".into();
     context.account_id.clone_from(&native.local_account_id);
     let mut payload = format::payload(&metadata, &snapshot)?;
-    encrypt_backup_stream(
-        &mut payload,
-        &mut std::fs::File::create(output)?,
-        ARCHIVE_SECRET.as_bytes(),
-        context,
-    )?;
+    encrypt_backup_stream(&mut payload, &mut std::fs::File::create(output)?, &phrase, context)?;
     drop(payload);
     std::fs::remove_file(snapshot)?;
     Ok(())

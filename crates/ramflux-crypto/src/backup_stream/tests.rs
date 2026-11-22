@@ -50,14 +50,14 @@ fn stream_round_trips_empty_partial_exact_and_multiple_chunks() -> TestResult {
 fn passphrase_kdf_and_random_file_key_round_trip_without_reusing_an_archive() -> TestResult {
     let mut archive = Vec::new();
     let plaintext = b"private root, contacts, history and attachment data";
-    let passphrase = b"generated recovery material has at least sixteen bytes";
+    let phrase = crate::custody::RecoveryPhrase::parse(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+    )
+    .expect("test: zero-entropy recovery phrase");
     let summary =
-        encrypt_backup_stream(&mut Cursor::new(plaintext), &mut archive, passphrase, context())?;
+        encrypt_backup_stream(&mut Cursor::new(plaintext), &mut archive, &phrase, context())?;
     let mut restored = Vec::new();
-    assert_eq!(
-        decrypt_backup_stream(&mut Cursor::new(&archive), &mut restored, passphrase)?,
-        summary
-    );
+    assert_eq!(decrypt_backup_stream(&mut Cursor::new(&archive), &mut restored, &phrase)?, summary);
     assert_eq!(restored, plaintext);
     let first = seal(plaintext)?;
     let second = seal(plaintext)?;

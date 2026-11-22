@@ -26,6 +26,10 @@ fn normalized(input: &str, limit: usize) -> Result<Zeroizing<String>, CryptoErro
     normalized.make_ascii_lowercase();
     Ok(normalized)
 }
+/// Domain label mixed into the backup-archive wrapping key. It is not the
+/// custody master-seed label, and the six-digit account code is not an input.
+pub const BACKUP_ARCHIVE_KEY_DOMAIN: &str = "ramflux.backup.archive-key.v1";
+
 /// A checked 256-bit recovery phrase whose buffers are erased on drop.
 /// Debug deliberately reveals no words or entropy.
 pub struct RecoveryPhrase(Zeroizing<Mnemonic>);
@@ -101,6 +105,32 @@ impl RecoveryPhrase {
     pub(super) fn entropy(&self) -> (Zeroizing<[u8; 33]>, usize) {
         let (entropy, len) = self.0.to_entropy_array();
         (Zeroizing::new(entropy), len)
+    }
+    /// Derives the backup-archive wrapping key from this phrase and `salt`.
+    ///
+    /// The Argon2id password is [`BACKUP_ARCHIVE_KEY_DOMAIN`], a NUL byte, then the
+    /// 32-byte phrase entropy. Parameters match the recovery set: Argon2id version
+    /// 0x13, 262144 KiB, time cost 3, parallelism 1, 32-byte output. The six-digit
+    /// account code is not an input.
+    ///
+    /// # Errors
+    /// Returns an error when phrase entropy is not 32 bytes or Argon2id fails.
+    pub fn derive_backup_archive_key(
+        &self,
+        salt: &[u8; 32],
+    ) -> Result<crate::RecoverySecret, CryptoError> {
+        let (entropy, len) = self.entropy();
+        if len != 32 {
+            return Err(CryptoError::IdentityAuthority("recovery entropy length"));
+        }
+        let mut password =
+            Zeroizing::new(Vec::with_capacity(BACKUP_ARCHIVE_KEY_DOMAIN.len().saturating_add(33)));
+        password.extend_from_slice(BACKUP_ARCHIVE_KEY_DOMAIN.as_bytes());
+        password.push(0);
+        password.extend_from_slice(
+            entropy.get(..len).ok_or(CryptoError::IdentityAuthority("recovery entropy length"))?,
+        );
+        Ok(crate::RecoverySecret::new(crate::kdf::argon2id_recovery(&password, salt)?))
     }
     /// Compare a saved word against one one-based challenge position, using the same normalization.
     /// # Errors

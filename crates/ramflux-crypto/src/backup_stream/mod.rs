@@ -15,7 +15,10 @@ use zeroize::Zeroizing;
 
 /// Plaintext bytes per independently authenticated archive chunk.
 pub const CHUNK_SIZE: usize = 64 * 1024;
-const MAGIC: &[u8; 8] = b"RFLXBA02";
+const MAGIC: &[u8; 8] = b"RFLXBA03";
+const RETIRED_MAGIC: &[u8; 8] = b"RFLXBA02";
+const SCHEMA: &str = "ramflux.account.backup.stream.v3";
+const RETIRED_SCHEMA: &str = "ramflux.account.backup.stream.v2";
 const MAX_HEADER_SIZE: usize = 4096;
 const TAG_SIZE: usize = 16;
 
@@ -47,6 +50,8 @@ pub enum BackupStreamError {
     Invalid(&'static str),
     #[error("backup authentication failed")]
     Authentication,
+    #[error("backup archive uses a retired format")]
+    OldFormat,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -54,6 +59,7 @@ pub enum BackupStreamError {
 struct Header {
     schema: String,
     version: u32,
+    domain: String,
     context: BackupContext,
     chunk_size: usize,
     kdf: String,
@@ -69,8 +75,9 @@ struct Header {
 impl Header {
     fn fresh(context: BackupContext) -> Result<Self, BackupStreamError> {
         Ok(Self {
-            schema: "ramflux.account.backup.stream.v2".into(),
-            version: 2,
+            schema: SCHEMA.into(),
+            version: 3,
+            domain: crate::custody::BACKUP_ARCHIVE_KEY_DOMAIN.into(),
             context,
             chunk_size: CHUNK_SIZE,
             kdf: "argon2id-v19".into(),
@@ -84,8 +91,12 @@ impl Header {
         })
     }
     fn validate(&self) -> Result<(), BackupStreamError> {
-        if self.schema != "ramflux.account.backup.stream.v2"
-            || self.version != 2
+        if self.schema == RETIRED_SCHEMA || self.version == 2 {
+            return Err(BackupStreamError::OldFormat);
+        }
+        if self.schema != SCHEMA
+            || self.version != 3
+            || self.domain != crate::custody::BACKUP_ARCHIVE_KEY_DOMAIN
             || self.chunk_size != CHUNK_SIZE
             || self.kdf != "argon2id-v19"
             || self.memory_kib != 262_144
@@ -111,12 +122,12 @@ impl Header {
 pub fn encrypt_backup_stream(
     input: &mut impl Read,
     output: &mut impl Write,
-    passphrase: &[u8],
+    phrase: &crate::custody::RecoveryPhrase,
     context: BackupContext,
 ) -> Result<BackupStreamSummary, BackupStreamError> {
     let header = Header::fresh(context)?;
     header.validate()?;
-    let wrapping_key = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
+    let wrapping_key = phrase.derive_backup_archive_key(&header.salt)?;
     encrypt_with_key(input, output, &header, wrapping_key.expose())
 }
 
@@ -161,9 +172,12 @@ impl BackupStreamDecoder {
     /// Authenticates the header before any archive content or totals are trusted.
     /// # Errors
     /// Returns framing, key derivation or authentication errors.
-    pub fn open(input: &mut impl Read, passphrase: &[u8]) -> Result<Self, BackupStreamError> {
+    pub fn open(
+        input: &mut impl Read,
+        phrase: &crate::custody::RecoveryPhrase,
+    ) -> Result<Self, BackupStreamError> {
         let (header, mut authenticated, wrapped) = read_header(input)?;
-        let wrapping = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
+        let wrapping = phrase.derive_backup_archive_key(&header.salt)?;
         let cipher = XChaCha20Poly1305::new(wrapping.expose().into());
         let bytes = Zeroizing::new(
             cipher
@@ -212,16 +226,19 @@ impl BackupStreamDecoder {
 pub fn decrypt_backup_stream(
     input: &mut impl Read,
     output: &mut impl Write,
-    passphrase: &[u8],
+    phrase: &crate::custody::RecoveryPhrase,
 ) -> Result<BackupStreamSummary, BackupStreamError> {
     let (header, authenticated, wrapped) = read_header(input)?;
-    let wrapping_key = crate::derive_backup_passphrase_key(passphrase, &header.salt)?;
+    let wrapping_key = phrase.derive_backup_archive_key(&header.salt)?;
     decrypt_with_key(input, output, header, authenticated, &wrapped, wrapping_key.expose())
 }
 
 fn read_header(input: &mut impl Read) -> Result<(Header, Vec<u8>, [u8; 48]), BackupStreamError> {
     let mut prefix = [0; 12];
     input.read_exact(&mut prefix)?;
+    if &prefix[..8] == RETIRED_MAGIC {
+        return Err(BackupStreamError::OldFormat);
+    }
     if &prefix[..8] != MAGIC {
         return Err(BackupStreamError::Invalid("magic"));
     }

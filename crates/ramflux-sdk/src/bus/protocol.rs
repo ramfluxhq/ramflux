@@ -296,13 +296,13 @@ pub struct LocalBusDeviceSyncExportRequest {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountBackupExportRequest {
     pub output_path: String,
-    pub passphrase: String,
+    pub recovery_phrase: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusAccountBackupImportRequest {
     pub input_path: String,
-    pub passphrase: String,
+    pub recovery_phrase: String,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

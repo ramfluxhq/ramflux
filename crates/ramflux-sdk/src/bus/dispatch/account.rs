@@ -8,8 +8,9 @@ use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use zeroize::{Zeroize, Zeroizing};
 
-const ACCOUNT_BACKUP_SCHEMA: &str = "ramflux.local_bus.account_backup.v1";
-const ACCOUNT_BACKUP_VERSION: u32 = 1;
+const ACCOUNT_BACKUP_SCHEMA: &str = "ramflux.local_bus.account_backup.v2";
+const ACCOUNT_BACKUP_VERSION: u32 = 2;
+const RETIRED_ACCOUNT_BACKUP_SCHEMA: &str = "ramflux.local_bus.account_backup.v1";
 const ACCOUNT_BACKUP_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
 const ACCOUNT_BACKUP_ARGON2_TIME_COST: u32 = 3;
 const ACCOUNT_BACKUP_ARGON2_PARALLELISM: u32 = 1;
@@ -224,8 +225,11 @@ fn local_bus_account_backup_export(
     let account = local_bus_account(state, account_id)?;
     let manifest_path = local_bus_account_manifest_path(&state.config.data_root, account_id);
     let manifest = read_local_bus_account_manifest(&manifest_path)?;
-    let backup =
-        encrypt_account_backup(&manifest, account.client.backup_contacts()?, &mut body.passphrase)?;
+    let backup = encrypt_account_backup(
+        &manifest,
+        account.client.backup_contacts()?,
+        &mut body.recovery_phrase,
+    )?;
     let output_path = PathBuf::from(&body.output_path);
     if let Some(parent) = output_path.parent()
         && !parent.as_os_str().is_empty()
@@ -255,7 +259,7 @@ async fn local_bus_account_backup_import(
 ) -> Result<LocalBusAccountCreateResponse, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
     let backup = decode_account_backup_file(&bytes)?;
-    let restored = decrypt_account_backup_state(&backup, &mut body.passphrase)?;
+    let restored = decrypt_account_backup_state(&backup, &mut body.recovery_phrase)?;
     if crate::custody::account_exists(&state.config.data_root, &restored.manifest.local_account_id)?
     {
         return Err(SdkError::CustodyModeDowngrade);
@@ -339,7 +343,7 @@ pub(crate) fn local_bus_backup_account_id(
 ) -> Result<String, SdkError> {
     let bytes = std::fs::read(&body.input_path)?;
     let backup = decode_account_backup_file(&bytes)?;
-    let manifest = decrypt_account_backup(&backup, &mut body.passphrase)?;
+    let manifest = decrypt_account_backup(&backup, &mut body.recovery_phrase)?;
     Ok(manifest.local_account_id)
 }
 
@@ -347,6 +351,8 @@ pub(crate) fn local_bus_backup_account_id(
 struct LocalBusAccountBackupFile {
     schema: String,
     version: u32,
+    #[serde(default)]
+    domain: String,
     kdf: LocalBusAccountBackupKdf,
     aead: LocalBusAccountBackupAead,
     ciphertext_base64url: String,
@@ -379,17 +385,31 @@ struct LocalBusAccountBackupPlaintext {
     contacts: Vec<String>,
 }
 
+fn archive_wrapping_key(
+    phrase_text: &mut String,
+    salt: &[u8; 32],
+) -> Result<ramflux_crypto::RecoverySecret, SdkError> {
+    let parsed = ramflux_crypto::custody::RecoveryPhrase::parse(phrase_text);
+    phrase_text.zeroize();
+    let phrase = parsed.map_err(|_| {
+        SdkError::LocalBus(
+            "account backup decrypt failed; passphrase or file is invalid".to_owned(),
+        )
+    })?;
+    phrase.derive_backup_archive_key(salt).map_err(|error| {
+        SdkError::LocalBus(format!("account backup key derivation failed: {error}"))
+    })
+}
+
 fn encrypt_account_backup(
     manifest: &LocalBusPersistedAccount,
     contacts: Vec<String>,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupFile, SdkError> {
-    crate::passphrase::admit_new_passphrase(passphrase.as_bytes())?;
     let salt = ramflux_crypto::random_32()?;
     let nonce_seed = ramflux_crypto::random_32()?;
     let nonce = &nonce_seed[..12];
-    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
-    passphrase.zeroize();
+    let key = archive_wrapping_key(passphrase, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
     let plaintext = LocalBusAccountBackupPlaintext { manifest: manifest.clone(), contacts };
@@ -403,6 +423,7 @@ fn encrypt_account_backup(
     Ok(LocalBusAccountBackupFile {
         schema: ACCOUNT_BACKUP_SCHEMA.to_owned(),
         version: ACCOUNT_BACKUP_VERSION,
+        domain: ramflux_crypto::custody::BACKUP_ARCHIVE_KEY_DOMAIN.to_owned(),
         kdf: LocalBusAccountBackupKdf {
             alg: "argon2id".to_owned(),
             memory_kib: ACCOUNT_BACKUP_ARGON2_MEMORY_KIB,
@@ -429,25 +450,51 @@ fn decrypt_account_backup_state(
     backup: &LocalBusAccountBackupFile,
     passphrase: &mut String,
 ) -> Result<LocalBusAccountBackupPlaintext, SdkError> {
-    if backup.schema != ACCOUNT_BACKUP_SCHEMA || backup.version != ACCOUNT_BACKUP_VERSION {
+    if backup.schema == RETIRED_ACCOUNT_BACKUP_SCHEMA || backup.version == 1 {
+        passphrase.zeroize();
+        return Err(SdkError::LocalBus("old_archive_format".to_owned()));
+    }
+    if backup.schema != ACCOUNT_BACKUP_SCHEMA
+        || backup.version != ACCOUNT_BACKUP_VERSION
+        || backup.domain != ramflux_crypto::custody::BACKUP_ARCHIVE_KEY_DOMAIN
+    {
+        passphrase.zeroize();
         return Err(SdkError::LocalBus("unsupported account backup format".to_owned()));
     }
     if backup.kdf.alg != "argon2id" || backup.aead.alg != "aes-256-gcm" {
+        passphrase.zeroize();
         return Err(SdkError::LocalBus("unsupported account backup crypto suite".to_owned()));
     }
-    let salt = ramflux_protocol::decode_base64url(&backup.kdf.salt_base64url)
-        .map_err(|error| SdkError::LocalBus(format!("invalid account backup salt: {error}")))?;
-    let nonce = ramflux_protocol::decode_base64url(&backup.aead.nonce_base64url)
-        .map_err(|error| SdkError::LocalBus(format!("invalid account backup nonce: {error}")))?;
+    let salt = match ramflux_protocol::decode_base64url(&backup.kdf.salt_base64url) {
+        Ok(salt) => salt,
+        Err(error) => {
+            passphrase.zeroize();
+            return Err(SdkError::LocalBus(format!("invalid account backup salt: {error}")));
+        }
+    };
+    let nonce = match ramflux_protocol::decode_base64url(&backup.aead.nonce_base64url) {
+        Ok(nonce) => nonce,
+        Err(error) => {
+            passphrase.zeroize();
+            return Err(SdkError::LocalBus(format!("invalid account backup nonce: {error}")));
+        }
+    };
     if nonce.len() != 12 {
+        passphrase.zeroize();
         return Err(SdkError::LocalBus("invalid account backup nonce length".to_owned()));
     }
-    let ciphertext =
-        ramflux_protocol::decode_base64url(&backup.ciphertext_base64url).map_err(|error| {
-            SdkError::LocalBus(format!("invalid account backup ciphertext: {error}"))
-        })?;
-    let key = ramflux_crypto::derive_backup_passphrase_key(passphrase.as_bytes(), &salt)?;
-    passphrase.zeroize();
+    let ciphertext = match ramflux_protocol::decode_base64url(&backup.ciphertext_base64url) {
+        Ok(ciphertext) => ciphertext,
+        Err(error) => {
+            passphrase.zeroize();
+            return Err(SdkError::LocalBus(format!("invalid account backup ciphertext: {error}")));
+        }
+    };
+    let Ok(salt_bytes) = <[u8; 32]>::try_from(salt.as_slice()) else {
+        passphrase.zeroize();
+        return Err(SdkError::LocalBus("invalid account backup salt".to_owned()));
+    };
+    let key = archive_wrapping_key(passphrase, &salt_bytes)?;
     let cipher = Aes256Gcm::new_from_slice(key.expose())
         .map_err(|_error| SdkError::LocalBus("account backup AEAD key init failed".to_owned()))?;
     let plaintext = cipher
@@ -510,7 +557,7 @@ mod tests {
     #[test]
     fn account_backup_encrypts_manifest_and_decrypts_with_passphrase() -> Result<(), SdkError> {
         let manifest = backup_manifest();
-        let mut passphrase = "backup-passphrase-at-least-128-bit".to_owned();
+        let mut passphrase = crate::bus::backup_jobs::TEST_ARCHIVE_PHRASE.to_owned();
 
         let backup = encrypt_account_backup(&manifest, Vec::new(), &mut passphrase)?;
         let encoded = serde_json::to_string(&backup)?;
@@ -520,7 +567,7 @@ mod tests {
         assert!(!encoded.contains("root_seed"));
         assert_eq!(passphrase, "");
 
-        let mut decrypt_passphrase = "backup-passphrase-at-least-128-bit".to_owned();
+        let mut decrypt_passphrase = crate::bus::backup_jobs::TEST_ARCHIVE_PHRASE.to_owned();
         let restored = decrypt_account_backup(&backup, &mut decrypt_passphrase)?;
 
         assert_eq!(restored.local_account_id, manifest.local_account_id);
@@ -609,7 +656,7 @@ mod tests {
         let backup = encrypt_account_backup(
             &backup_manifest(),
             Vec::new(),
-            &mut "backup-passphrase-at-least-128-bit".to_owned(),
+            &mut crate::bus::backup_jobs::TEST_ARCHIVE_PHRASE.to_owned(),
         )?;
         let input = root.0.join("legacy-backup.json");
         std::fs::write(&input, serde_json::to_vec(&backup)?)?;
@@ -624,7 +671,7 @@ mod tests {
         };
         let mut request = LocalBusAccountBackupImportRequest {
             input_path: input.to_string_lossy().into_owned(),
-            passphrase: "backup-passphrase-at-least-128-bit".into(),
+            recovery_phrase: crate::bus::backup_jobs::TEST_ARCHIVE_PHRASE.into(),
         };
         assert!(matches!(
             local_bus_account_backup_import(&mut state, &mut request, None).await,
@@ -639,7 +686,7 @@ mod tests {
     #[test]
     fn account_backup_rejects_wrong_passphrase() -> Result<(), SdkError> {
         let manifest = backup_manifest();
-        let mut passphrase = "backup-passphrase-at-least-128-bit".to_owned();
+        let mut passphrase = crate::bus::backup_jobs::TEST_ARCHIVE_PHRASE.to_owned();
         let backup = encrypt_account_backup(&manifest, Vec::new(), &mut passphrase)?;
         let mut wrong = "wrong-passphrase-at-least-128bit".to_owned();
 

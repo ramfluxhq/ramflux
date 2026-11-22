@@ -118,6 +118,7 @@ pub enum BackupFailureCode {
     ObjectIdentityConflict,
     ObjectOwnershipUnverified,
     WrongPassphrase,
+    OldArchiveFormat,
     RestoreSetupRequired,
     AuthorizationRejected,
     NetworkingPending,

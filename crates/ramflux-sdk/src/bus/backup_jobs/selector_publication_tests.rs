@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LOCAL_SECRET: &str = "independent local data passphrase";
-const ARCHIVE_SECRET: &str = "independent archive passphrase";
+const ARCHIVE_SECRET: &str = super::TEST_ARCHIVE_PHRASE;
 const ALIAS: &str = "private-publication-alias";
 
 fn guard<T, E>(result: Result<T, E>, message: &str) -> Result<T, std::io::Error> {
@@ -143,7 +143,7 @@ impl Fixture {
 fn archive_counts(path: &Path, alias_present: bool) -> TestResult<ramflux_storage::BackupCounts> {
     use ramflux_crypto::backup_stream::BackupStreamDecoder;
     let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
-    let decoder = BackupStreamDecoder::open(&mut file, ARCHIVE_SECRET.as_bytes())?;
+    let decoder = BackupStreamDecoder::open(&mut file, &super::test_archive_phrase())?;
     let snapshot = path.with_extension("snapshot");
     let mut unpack = super::format::Unpack::new(std::fs::File::create(&snapshot)?);
     decoder.decrypt(&mut file, &mut unpack)?;

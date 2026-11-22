@@ -38,7 +38,6 @@ impl Supervisor {
                     .ok_or_else(|| refused("not_writable"))?
                     .to_owned();
                 let secret = take_secret(&mut request)?;
-                crate::passphrase::admit_new_passphrase(secret.as_bytes())?;
                 let allow = request
                     .body
                     .get("allow_missing_attachments")

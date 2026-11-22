@@ -14,7 +14,7 @@ async fn archive_and_verify(
     root: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let archive = root.join("complete.rfb");
-    let secret = "review restore regression";
+    let secret = super::super::TEST_ARCHIVE_PHRASE;
     archive_while_reading(supervisor, &archive, secret).await?;
     let row = call(
         supervisor,

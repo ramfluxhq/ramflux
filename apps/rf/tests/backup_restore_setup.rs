@@ -46,7 +46,7 @@ async fn fresh_import_without_local_passphrase_refuses_before_verifying_archive(
         .arg(&socket)
         .args(["account", "backup", "import", "--in"])
         .arg(root.join("does-not-exist.rfb"))
-        .env_remove("RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE")
+        .env_remove("RAMFLUX_RECOVERY_PHRASE")
         .output()?;
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr)?;

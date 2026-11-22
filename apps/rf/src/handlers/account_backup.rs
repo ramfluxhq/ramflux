@@ -31,8 +31,8 @@ pub(crate) async fn handle(
     let response = match command.action {
         AccountBackupAction::Export(export) => {
             let passphrase = super::account::rf_required_env(
-                export.passphrase_env.as_deref(),
-                "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
+                export.phrase_env.as_deref(),
+                "RAMFLUX_RECOVERY_PHRASE",
             )?;
             let started = bus
                 .request(
@@ -54,8 +54,8 @@ pub(crate) async fn handle(
                 }
             }
             let passphrase = super::account::rf_required_env(
-                import.passphrase_env.as_deref(),
-                "RAMFLUX_ACCOUNT_BACKUP_PASSPHRASE",
+                import.phrase_env.as_deref(),
+                "RAMFLUX_RECOVERY_PHRASE",
             )?;
             let new_passphrase = import
                 .new_passphrase_env

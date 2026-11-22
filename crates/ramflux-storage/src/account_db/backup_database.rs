@@ -186,6 +186,12 @@ impl BackupDatabase {
         mode: BackupOpenMode,
         source: MarkerAuthoritySource,
     ) -> Result<Self, StorageError> {
+        if matches!(
+            source,
+            MarkerAuthoritySource::ArchiveInput | MarkerAuthoritySource::FreshArchiveInput
+        ) {
+            super::backup_hardened::replace_with_clean_copy(path, key)?;
+        }
         let generation_reader = if matches!(source, MarkerAuthoritySource::LiveAccountKey) {
             Some(crate::account_generation::GenerationReadLease::acquire(path)?)
         } else {

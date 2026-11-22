@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! A native archive never reinstalls contact-safety evidence or its origin bytes.
-use super::native_tests::{self, ARCHIVE_SECRET, LOCAL_SECRET};
+use super::native_tests::{self, LOCAL_SECRET};
 use super::tests::{call, finished};
 use crate::client::native_test_support::Fixture;
 use crate::custody::tests::{Root, TestVault, create};
@@ -37,7 +37,7 @@ fn unpack_archive(
     snapshot: &std::path::Path,
 ) -> TestResult<ramflux_storage::AccountDbKey> {
     let mut file = std::io::BufReader::new(std::fs::File::open(archive)?);
-    let decoder = BackupStreamDecoder::open(&mut file, ARCHIVE_SECRET.as_bytes())?;
+    let decoder = BackupStreamDecoder::open(&mut file, &super::test_archive_phrase())?;
     let mut unpack = super::format::Unpack::new(std::fs::File::create(snapshot)?);
     decoder.decrypt(&mut file, &mut unpack)?;
     let metadata = unpack.finish()?;

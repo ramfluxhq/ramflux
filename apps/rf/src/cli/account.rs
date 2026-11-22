@@ -86,17 +86,19 @@ pub(crate) struct AccountBackupExport {
     pub(crate) account: String,
     #[arg(long)]
     pub(crate) out: PathBuf,
+    /// Recovery phrase that wraps the archive. The six-digit account code is not accepted.
     #[arg(long)]
-    pub(crate) passphrase_env: Option<String>,
+    pub(crate) phrase_env: Option<String>,
 }
 
 #[derive(Args)]
 pub(crate) struct AccountBackupImport {
     #[arg(long = "in")]
     pub(crate) input: PathBuf,
+    /// Recovery phrase that unwraps the archive. The six-digit account code is not accepted.
     #[arg(long)]
-    pub(crate) passphrase_env: Option<String>,
-    /// Independent local data passphrase for a new installation, never the archive password.
+    pub(crate) phrase_env: Option<String>,
+    /// Independent local data passphrase for a new installation, never the archive phrase.
     #[arg(long)]
     pub(crate) new_passphrase_env: Option<String>,
 }

@@ -30,7 +30,7 @@ pub use agent_master::{
     sign_register_decision, sign_register_decision_request, verify_register_decision,
 };
 pub use keys::{MasterKey, SelfSigningKey};
-pub use phrase::RecoveryPhrase;
+pub use phrase::{BACKUP_ARCHIVE_KEY_DOMAIN, RecoveryPhrase};
 pub(crate) use verify::verify_group_native_authority;
 pub use verify::{
     CapacityLimit, CapacityPressure, VerifiedRecord, verify_publication, verify_record,

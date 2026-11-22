@@ -267,7 +267,7 @@ async fn round_trip(scale: Scale) -> TestResult {
             let mut connection = LocalBusConnectionState::new(7, outbound);
             connection.attended_account_id = Some("alice".into());
             let archive = source_root.join("account.rfb");
-            let secret = "generated-backup-recovery-secret";
+            let secret = super::TEST_ARCHIVE_PHRASE;
             let response = source
                 .request(
                     LocalBusFrame::request(
@@ -391,7 +391,7 @@ async fn backup_archive_corrupted_mac_is_tampered() -> TestResult {
             let root = crate::bus::runtime_tests::root("backup-archive-mac");
             let supervisor = source_supervisor(&root, SMALL)?;
             let archive = root.join("archive.rfb");
-            let secret = "test archive secret";
+            let secret = super::TEST_ARCHIVE_PHRASE;
             let mut bytes = archive_while_reading(&supervisor, &archive, secret).await?;
             let last = bytes.last_mut().ok_or("empty archive")?;
             *last ^= 1;
@@ -421,7 +421,7 @@ async fn failed_verification_and_cancellation_leave_existing_accounts_and_output
         let root = crate::bus::runtime_tests::root("backup-failures");
         let supervisor = source_supervisor(&root, SMALL)?;
         let archive = root.join("archive.rfb");
-        let secret = "test archive secret";
+        let secret = super::TEST_ARCHIVE_PHRASE;
         let original = archive_while_reading(&supervisor, &archive, secret).await?;
         let mut tampered = original.clone();
         let last = tampered.len() - 1;
@@ -637,7 +637,7 @@ async fn r2_older_epoch_archive_merges_without_rolling_back_live_identity() -> T
             let root = crate::bus::runtime_tests::root("backup-older-merge");
             let supervisor = source_supervisor(&root, SMALL)?;
             let archive = root.join("old.rfb");
-            let secret = "archive regression secret";
+            let secret = super::TEST_ARCHIVE_PHRASE;
             archive_while_reading(&supervisor, &archive, secret).await?;
             let mut local =
                 read_local_bus_account_manifest(&local_bus_account_manifest_path(&root, "alice"))?;
@@ -680,7 +680,7 @@ async fn failed_install_with_a_healthy_reopen_clears_stale_restore_state() -> Te
             let root = crate::bus::runtime_tests::root("backup-failed-install-reopen");
             let supervisor = source_supervisor(&root, SMALL)?;
             let archive = root.join("failed-install.rfb");
-            let secret = "failed install reopen regression";
+            let secret = super::TEST_ARCHIVE_PHRASE;
             archive_while_reading(&supervisor, &archive, secret).await?;
             let row = call(
                 &supervisor,
@@ -717,7 +717,7 @@ async fn r2_successful_merge_reclaims_the_replaced_database_generation() -> Test
             let root = crate::bus::runtime_tests::root("backup-reclaim");
             let supervisor = source_supervisor(&root, SMALL)?;
             let archive = root.join("all.rfb");
-            let secret = "archive cleanup regression";
+            let secret = super::TEST_ARCHIVE_PHRASE;
             archive_while_reading(&supervisor, &archive, secret).await?;
             for _ in 0..2 {
                 let old = root.join(supervisor.index.account("alice")?.db_relative_path);
@@ -878,7 +878,7 @@ async fn backup_erasure_discards_retained_diagnostic_snapshot_and_key() -> TestR
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult {
+async fn backup_create_refuses_a_non_phrase_without_publishing() -> TestResult {
     LocalSet::new()
         .run_until(async {
             let root = crate::bus::runtime_tests::root("backup-create-refused");
@@ -887,32 +887,23 @@ async fn backup_create_refuses_short_and_blocklisted_passphrases() -> TestResult
                 Scale { messages: 0, contacts: 0, groups: 0, file_bytes: None },
             )?;
             let archive = root.join("refused.rfb");
-            for (passphrase, code) in
-                [("aaaaaaaaaaaaaa", "too_short"), ("films+pic+galeries", "too_common")]
-            {
-                let Err(error) = call(
+            for passphrase in ["123456", "aaaaaaaaaaaaaa"] {
+                let started = call(
                     &supervisor,
                     "account.backup.create",
                     Some("alice"),
                     json!({"output_path": &archive, "passphrase": passphrase}),
                 )
-                .await
-                else {
-                    return Err("test: refused backup passphrase was accepted".into());
-                };
-                let body = crate::bus::io::local_bus_error_body(&error);
-                assert_eq!(body.code, code, "test: backup create refusal code was {}", body.code);
-                assert!(
-                    body.reason_code.is_none(),
-                    "test: backup create refusal carried a reason code"
+                .await?;
+                let id = started["job"]["job_id"].as_str().ok_or("job")?;
+                let failed = finished(&supervisor, id, BackupJobState::Failed).await?;
+                assert_eq!(
+                    serde_json::to_value(failed.error)?["code"],
+                    "wrong_passphrase",
+                    "test: a non-phrase archive secret was not refused"
                 );
                 assert!(!archive.exists(), "test: a refused backup created an archive");
             }
-            assert_eq!(
-                supervisor.backup_jobs.jobs()?["jobs"],
-                json!([]),
-                "test: a refused backup wrote a job row"
-            );
             supervisor.shutdown().await?;
             drop(supervisor);
             std::fs::remove_dir_all(root)?;

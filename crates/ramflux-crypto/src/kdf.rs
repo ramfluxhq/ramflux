@@ -157,7 +157,7 @@ pub fn derive_backup_passphrase_key(
     Ok(RecoverySecret::new(argon2id_recovery(passphrase, salt)?))
 }
 
-fn argon2id_recovery(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], CryptoError> {
+pub(crate) fn argon2id_recovery(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], CryptoError> {
     // Recovery and backup wrapping share this memory-hard cost. 256 MiB keeps
     // local use practical while materially raising brute-force cost.
     let params = Params::new(
