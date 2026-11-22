@@ -242,10 +242,6 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["local_device_authorized"] = json!(authorized);
         status["node_id"] =
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
-        if let Some(root) = &view.account_root {
-            let id = client.account_db()?.local_account_id.clone();
-            super::super::host_branch::overlay_status(&mut status, root, &id);
-        }
     }
     if let Some(connection) = &view.connection {
         let mut snapshot = connection.snapshot();
@@ -271,6 +267,14 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["networking_snapshot"] = json!(snapshot);
         status["active_transport_kind"] = json!(snapshot.active_transport_kind);
         status["session_id"] = json!(snapshot.session_id);
+    }
+    // After the snapshot copy. That copy is what put pending and a null reason
+    // back over the revoked-branch overlay.
+    if view.native.is_some()
+        && let Some(root) = view.account_root.as_deref()
+    {
+        let id = client.account_db()?.local_account_id.clone();
+        super::super::host_branch::overlay_status(&mut status, root, &id);
     }
     Ok(status)
 }

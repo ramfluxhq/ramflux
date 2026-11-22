@@ -11,6 +11,8 @@ use tokio::time::Instant;
 pub(crate) enum NetworkingState {
     Live,
     NetworkingPending,
+    /// This device's branch is revoked. The worker is not live and is not retrying.
+    Suspended,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
