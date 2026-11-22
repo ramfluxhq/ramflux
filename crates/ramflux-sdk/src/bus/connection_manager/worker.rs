@@ -253,17 +253,29 @@ async fn run_account(
             // still enforced inside connect_attempt by the existing retry owner.
             continue;
         }
-        let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
-        retry.record(&error, Instant::now());
-        let delay = backoff(handle, retry, &error);
-        tracing::warn!(
-            ?reason,
-            why = why.as_deref().unwrap_or(""),
-            generation,
-            retry_after_ms = ?delay,
-            "resident account session retired; reconnecting"
-        );
+        reconnect_after_retirement(handle, retry, reason, why.as_deref(), generation);
     }
+}
+
+/// A retired resident session reconnects after the retry boundary; the log names the real
+/// retirement reason, not a connect-attempt timeout.
+fn reconnect_after_retirement(
+    handle: &ConnectionHandle,
+    retry: &mut AdmissionRetry,
+    reason: DisconnectReason,
+    why: Option<&str>,
+    generation: u64,
+) {
+    let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
+    retry.record(&error, Instant::now());
+    let delay = backoff(handle, retry, &error);
+    tracing::warn!(
+        ?reason,
+        why = why.unwrap_or(""),
+        generation,
+        retry_after_ms = ?delay,
+        "resident account session retired; reconnecting"
+    );
 }
 
 async fn wait_for_network(
