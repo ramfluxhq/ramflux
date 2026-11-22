@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Retained cut state (design r3 M2 / audit A6). The stage database holds only
+//! `(table, primary key, keyed digest)` and the digest key. The key is destroyed with
+//! the stage. A missing set refuses; it is never treated as an empty account.
+use super::FullTransferStage;
+use crate::{AccountDbKey, StorageError};
+use rusqlite::{OptionalExtension as _, params};
+use std::path::Path;
+use zeroize::{Zeroize as _, Zeroizing};
+
+pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS retained_digest_key(singleton INTEGER PRIMARY KEY CHECK(singleton=1),mac_key BLOB NOT NULL CHECK(length(mac_key)=32),erasure_generation INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS retained_row(table_name TEXT NOT NULL,primary_key BLOB NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),PRIMARY KEY(table_name,primary_key));
+CREATE TABLE IF NOT EXISTS retained_cut(singleton INTEGER PRIMARY KEY CHECK(singleton=1),present INTEGER NOT NULL CHECK(present=1));";
+
+fn missing() -> StorageError {
+    StorageError::PairingField("RetainedDigestMissing")
+}
+
+impl FullTransferStage<'_> {
+    /// Drop the retained set when the account erasure generation has moved, and drop a
+    /// partial set that has rows or a marker but no key.
+    /// # Errors
+    /// SQL errors. A stale set is removed and this returns `Ok`.
+    pub(super) fn sweep_retained_digests(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch(SCHEMA)?;
+        let stored: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT erasure_generation FROM retained_digest_key WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = self.db.privacy_erasure_generation()?;
+        let orphan: bool = self.connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32) AND (EXISTS(SELECT 1 FROM retained_row) OR EXISTS(SELECT 1 FROM retained_cut))",
+            [],
+            |row| row.get(0),
+        )?;
+        if stored.is_some_and(|generation| generation != current) || orphan {
+            self.destroy_retained_digests()?;
+        }
+        Ok(())
+    }
+
+    /// Overwrite the digest key, then delete the set. The stage directory removal is the
+    /// other half of destruction.
+    /// # Errors
+    /// SQL and fsync errors.
+    pub(super) fn destroy_retained_digests(&self) -> Result<(), StorageError> {
+        self.connection.execute_batch(SCHEMA)?;
+        self.connection.call_immediate(|tx| {
+            tx.execute(
+                "UPDATE retained_digest_key SET mac_key=zeroblob(32) WHERE singleton=1",
+                [],
+            )?;
+            tx.execute("DELETE FROM retained_digest_key", [])?;
+            tx.execute("DELETE FROM retained_row", [])?;
+            tx.execute("DELETE FROM retained_cut", [])?;
+            Ok(())
+        })?;
+        super::stage::sync_stage(&self.directory)
+    }
+
+    /// The tail calls this. Absence, a wiped key, or a generation sweep is a refusal.
+    /// # Errors
+    /// `PairingField("RetainedDigestMissing")` when the set is not present; SQL errors.
+    pub(super) fn require_retained_digests(&self) -> Result<(), StorageError> {
+        self.sweep_retained_digests()?;
+        let ready: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retained_cut WHERE singleton=1) AND EXISTS(SELECT 1 FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32)",
+            [],
+            |row| row.get(0),
+        )?;
+        if ready {
+            Ok(())
+        } else {
+            self.destroy_retained_digests()?;
+            Err(missing())
+        }
+    }
+
+    /// Replace the retained set with the keyed digests of this installed clean copy.
+    /// Only the last installed cut stays.
+    /// # Errors
+    /// `RetainedDigestMissing` when the write does not leave a readable set; open and
+    /// size refusals from the export; SQL errors.
+    pub(super) fn retain_installed_export(
+        &self,
+        path: &Path,
+        key: &AccountDbKey,
+        expected_root: &str,
+    ) -> Result<(), StorageError> {
+        self.sweep_retained_digests()?;
+        let verified = crate::account_db::transfer_export::open_verified::VerifiedExport::open(
+            path,
+            key,
+            expected_root,
+        )?;
+        verified.allow_row_read();
+        let mac = load_or_create_key(self)?;
+        let generation = self.db.privacy_erasure_generation()?;
+        let mac_bytes: &[u8; 32] = &mac;
+        let rows =
+            crate::account_db::transfer_export::digest::rows(verified.connection(), mac_bytes)?;
+        write_set(self, mac_bytes, generation, rows)?;
+        self.require_retained_digests()
+    }
+}
+
+fn load_or_create_key(stage: &FullTransferStage<'_>) -> Result<Zeroizing<[u8; 32]>, StorageError> {
+    let stored: Option<Vec<u8>> = stage
+        .connection
+        .query_row(
+            "SELECT mac_key FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(mut bytes) => {
+            let key = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| missing())?;
+            bytes.zeroize();
+            Ok(Zeroizing::new(key))
+        }
+        None => Ok(Zeroizing::new(ramflux_crypto::random_32()?)),
+    }
+}
+
+fn write_set(
+    stage: &FullTransferStage<'_>,
+    mac: &[u8; 32],
+    generation: i64,
+    rows: Vec<crate::account_db::transfer_export::digest::RowDigest>,
+) -> Result<(), StorageError> {
+    let mac = Zeroizing::new(mac.to_vec());
+    stage.connection.call_immediate(move |tx| {
+        tx.execute("DELETE FROM retained_row", [])?;
+        tx.execute("DELETE FROM retained_cut", [])?;
+        tx.execute(
+            "INSERT INTO retained_digest_key(singleton,mac_key,erasure_generation) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET erasure_generation=excluded.erasure_generation",
+            params![mac.as_slice(), generation],
+        )?;
+        for row in &rows {
+            tx.execute(
+                "INSERT INTO retained_row(table_name,primary_key,digest) VALUES(?1,?2,?3)",
+                params![row.table, &row.key, row.digest.as_slice()],
+            )?;
+        }
+        tx.execute("INSERT INTO retained_cut(singleton,present) VALUES(1,1)", [])?;
+        Ok(())
+    })?;
+    super::stage::sync_stage(&stage.directory)
+}

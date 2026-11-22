@@ -272,6 +272,20 @@ impl VerifiedExport {
         builder::build(&self.db, Side::Received, target, key)
     }
 
+    /// Reset the step budget for a full row walk after the open checks.
+    pub(crate) fn allow_row_read(&self) {
+        self.budget.reset(
+            PROGRESS_CALLS_BASE.saturating_add(self.pages.saturating_mul(PROGRESS_CALLS_PER_PAGE)),
+            COPY_DEADLINE,
+        );
+    }
+
+    /// The hardened connection, still under the row-phase authorizer.
+    #[must_use]
+    pub(crate) fn connection(&self) -> &rusqlite::Connection {
+        &self.db
+    }
+
     fn require_root(&self, expected_root: &str) -> Result<(), StorageError> {
         let mut statement = self
             .db

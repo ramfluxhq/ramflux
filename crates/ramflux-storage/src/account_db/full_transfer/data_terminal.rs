@@ -82,6 +82,7 @@ impl AccountDb {
         if !terminal {
             return Err(StorageError::PairingField("WrongContext"));
         }
+        stage.destroy_retained_digests()?;
         // Keep the exclusive lock after SQLite and the private stage key have closed.
         let lock = stage.lock.clone();
         drop(stage);

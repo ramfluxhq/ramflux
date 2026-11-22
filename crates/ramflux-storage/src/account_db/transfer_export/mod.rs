@@ -8,6 +8,7 @@ mod bodies;
 pub(super) mod builder;
 mod classification;
 mod contract;
+pub(super) mod digest;
 pub(super) mod open_verified;
 #[cfg(feature = "itest-transfer-probe")]
 pub mod probe;

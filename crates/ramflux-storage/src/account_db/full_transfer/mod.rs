@@ -42,6 +42,7 @@ mod reverse_merge;
 mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
 mod export_cut;
+mod retained_digest;
 mod scalar;
 mod scalar_sql;
 mod source_base;

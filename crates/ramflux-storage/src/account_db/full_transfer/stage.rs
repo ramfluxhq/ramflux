@@ -170,6 +170,7 @@ impl AccountDb {
         connection.execute_batch(super::preservation::SCHEMA)?;
         connection.execute_batch(super::source_primary_owner::SCHEMA)?;
         connection.execute_batch(super::data_terminal::SCHEMA)?;
+        connection.execute_batch(super::retained_digest::SCHEMA)?;
         if !reconciliation
             && connection.query_row("SELECT EXISTS(SELECT 1 FROM data_terminal)", [], |row| {
                 row.get::<_, bool>(0)
@@ -191,6 +192,7 @@ impl AccountDb {
         if record.role != role {
             return Err(context());
         }
+        stage.sweep_retained_digests()?;
         stage.recover_forward_receipts()?;
         stage.recover_reverse_receipts()?;
         Ok(stage)
@@ -391,6 +393,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::preservation::SCHEMA)?;
         tx.execute_batch(super::source_primary_owner::SCHEMA)?;
         tx.execute_batch(super::data_terminal::SCHEMA)?;
+        tx.execute_batch(super::retained_digest::SCHEMA)?;
         tx.execute(
             "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
             params![local, role, expires_at, digest.as_slice()],

@@ -288,6 +288,12 @@ impl FullReceiverBaseCopy {
             return Err(error.into());
         }
         super::stage::sync_regular(&private)?;
+        if let Err(error) =
+            stage.retain_installed_export(&private, &self.key, &manifest.manifest.account_anchor)
+        {
+            let _ = std::fs::remove_file(&private);
+            return Err(error);
+        }
         let chunks_root = decode_root(&manifest.manifest.chunks_root)?;
         let counts = FullScalarInputCounts {
             records: built.rows,
