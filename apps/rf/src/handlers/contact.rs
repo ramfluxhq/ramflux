@@ -85,7 +85,13 @@ pub(crate) async fn handle_contact(
                 .await?,
         ),
         ContactAction::Requests(selector) => print_json(
-            &bus.request(Some(selector.account), "contact", "contact.requests.list", serde_json::json!({})).await?,
+            &bus.request(
+                Some(selector.account),
+                "contact",
+                "contact.requests.list",
+                serde_json::json!({}),
+            )
+            .await?,
         ),
         ContactAction::Verify(verify) => handle_contact_verify(&mut bus, verify).await,
         ContactAction::SafetyNumber(selector) => {

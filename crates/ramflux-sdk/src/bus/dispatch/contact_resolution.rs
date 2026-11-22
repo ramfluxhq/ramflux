@@ -27,7 +27,9 @@ pub(in crate::bus) async fn add_username(
         return Err(SdkError::LocalBusRefused {
             code: "contact_home_node_unsupported".into(),
             message: "Contact requests to a different home node are not available yet".into(),
-            body: Box::new(json!({"node": &resolved.node, "root_commitment": &resolved.root_commitment})),
+            body: Box::new(
+                json!({"node": &resolved.node, "root_commitment": &resolved.root_commitment}),
+            ),
         });
     }
     let account = local_bus_account_mut(state, account_id)?;
