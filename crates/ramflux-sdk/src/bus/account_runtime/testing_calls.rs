@@ -235,6 +235,7 @@ impl NativeCallAccount {
         let anchor = record.body.account_anchor.clone();
         let mut client = RamfluxClient::new();
         client.open_account_index(root)?;
+        client.bind_device_unlock(root, vault.as_ref(), id, crate::DeviceSecret::Load)?;
         client.unlock_account(id, &passphrase)?;
         client
             .initialize_born_v3_branch(&names.device, Arc::clone(&vault) as Arc<dyn PrimaryVault>)
