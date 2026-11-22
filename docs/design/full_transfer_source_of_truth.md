@@ -366,3 +366,16 @@ The same original-contributor resolver handles absence and independent B refresh
 This closes one business owner in the native dependency graph; direct populated
 transfer remains blocked by the other unimplemented families. The changed codec
 and census intentionally refuse mixed-build transfer with SchemaMismatch.
+
+## Receipt observation owner
+
+Qualified receipt observations are immutable whole historical rows. The portable
+codec accepts only canonical receipt/v3 hashes, a bounded conversation, a native
+message id, delivered/read state, qualified actor and nonnegative original time.
+It neither executes the receipt nor advances a watermark from a different row.
+A duplicate id with changed fields refuses instead of combining separate maxima.
+Ordinary message-erasure lookup runs before import and normalized reconstruction;
+erased observations are omitted from normalized content while original inputs
+remain separate provenance. The normal receipt-footprint triggers own future
+erasure. This owner does not establish first-hand origin, current permissions,
+watermark ordering or complete native transfer acceptance.

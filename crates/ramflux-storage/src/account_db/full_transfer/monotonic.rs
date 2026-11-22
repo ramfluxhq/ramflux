@@ -69,6 +69,20 @@ pub(super) struct Owner {
 }
 static OWNERS: &[Owner] = &[
     Owner {
+        family: super::receipt_history::FAMILY,
+        names: &[
+            "receipt_id",
+            "conversation_id",
+            "message_id",
+            "receipt_type",
+            "actor_device_id",
+            "created_at",
+        ],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Immutable,
+    },
+    Owner {
         family: "sql/device_directory",
         names: &["device_id", "principal_commitment", "source", "verified_at", "raw_device_id"],
         restrictive: false,
@@ -303,6 +317,9 @@ impl Owner {
         Ok(())
     }
     fn validate(&self, value: &Cells) -> Result<(), StorageError> {
+        if self.family == super::receipt_history::FAMILY {
+            super::receipt_history::validate(value.text(0)?)?;
+        }
         if self.family == "sql/device_directory" {
             super::device_directory::validate(value.text(0)?, value.text(1)?, value.text(4)?)?;
         }
@@ -485,6 +502,11 @@ impl Owner {
     ) -> Result<(), StorageError> {
         self.check(rule)?;
         self.validate(incoming)?;
+        if self.family == super::receipt_history::FAMILY
+            && super::receipt_history::erased(db, incoming)?
+        {
+            return Ok(());
+        }
         if self.family == super::input_denial::FAMILY {
             super::input_denial::require_bundle(db, incoming.text(1)?)?;
         }
@@ -556,6 +578,18 @@ impl Owner {
             });
         }
         let mut expected = expected.ok_or_else(invalid)?;
+        if self.family == super::receipt_history::FAMILY
+            && super::receipt_history::erased(&private.db, &expected)?
+        {
+            self.remove(&private.db, &expected)?;
+            // Original inputs remain provenance; an erased observation cannot become
+            // normalized content on either contributor's behalf or revive on refresh.
+            db.execute(
+                "DELETE FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3",
+                params![nonce.as_slice(), self.family, key],
+            )?;
+            return Ok(());
+        }
         super::contact_projection::derive(&private.db, self.family, &mut expected)?;
         super::contact_request_history::derive(&private.db, self.family, &mut expected)?;
         // Nonrestrictive rows are reconstructed from the retained original contributors.

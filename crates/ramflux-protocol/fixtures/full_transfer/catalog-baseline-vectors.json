@@ -1,5 +1,5 @@
 {
-  "census_hash": "J34mQJhmKcP_1JbC3SN9c3uZupXpAVG3UmnlRPtRbD4",
+  "census_hash": "T4mEj08wa1POfAaWsrq1xbG5Cf3QQUYs_SodBIZkjQ8",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -535,7 +535,7 @@
       "id": "sql/receipt_identity_upgrade"
     },
     {
-      "hash": "CKzYY5bubBZo2a1Z0-l6POQm35ETioj8sMOVKnWyQek",
+      "hash": "8vW8TWIEMI7JoD_Ys1tio5HUPjWV0xkm5oNPhSYOFH0",
       "id": "sql/receipt_projection"
     },
     {

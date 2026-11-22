@@ -200,7 +200,7 @@ pub(super) const RULE_119: FamilyRule = table_rule!(
     "sql/receipt_projection",
     "receipt_projection",
     Transfer,
-    CursorMax,
+    Immutable,
     false,
     ["receipt_id"],
     [
@@ -210,47 +210,40 @@ pub(super) const RULE_119: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "receipt_projection", cell_type: CellType::Utf8 }
+            CodecRule::SqlText { min_bytes: U64(54), max_bytes: U64(54), nullable: false }
         ),
         (
             "conversation_id",
             Utf8,
             false,
             Transfer,
-            CursorMax,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            Immutable,
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(256), nullable: false }
         ),
         (
             "message_id",
             Utf8,
             true,
             Transfer,
-            CursorMax,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            Immutable,
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "receipt_type",
             Utf8,
             false,
             Transfer,
-            CursorMax,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            Immutable,
+            CodecRule::SqlEnum { values: &["delivered", "read"], nullable: false }
         ),
-        (
-            "actor_device_id",
-            Utf8,
-            false,
-            Transfer,
-            CursorMax,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
-        ),
+        ("actor_device_id", Utf8, false, Transfer, Immutable, CodecRule::SqlQualifiedDeviceKey),
         (
             "created_at",
             I64,
             false,
             Transfer,
-            CursorMax,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            Immutable,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

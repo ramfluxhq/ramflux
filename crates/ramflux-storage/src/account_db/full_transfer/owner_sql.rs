@@ -19,6 +19,9 @@ pub(super) fn write(
     account: Option<&str>,
 ) -> Result<u64, StorageError> {
     rule.require_typed_codec()?;
+    if rule.id == super::receipt_history::FAMILY {
+        super::receipt_history::validate(row.get_ref(0)?.as_str().map_err(|_| invalid())?)?;
+    }
     if rule.id == "sql/device_directory" {
         super::device_directory::validate(
             row.get_ref(0)?.as_str().map_err(|_| invalid())?,
