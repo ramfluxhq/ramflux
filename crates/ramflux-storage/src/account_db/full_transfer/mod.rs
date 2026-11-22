@@ -56,6 +56,7 @@ mod reverse_validation;
 pub use reverse_validation::{FullReverseValidationWork, FullValidatedReverseInput};
 mod contact_projection;
 mod contact_request_history;
+mod conversation_directory;
 mod input_denial;
 mod message_denial;
 mod monotonic;

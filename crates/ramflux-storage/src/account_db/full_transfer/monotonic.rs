@@ -15,6 +15,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 enum Merge {
     Columns(&'static [Column]),
     Immutable,
+    DirectDirectory,
     History(History),
     Decision { state: usize, stamp: usize },
     Denial { state: usize, until: usize },
@@ -68,6 +69,13 @@ pub(super) struct Owner {
     merge: Merge,
 }
 static OWNERS: &[Owner] = &[
+    Owner {
+        family: super::conversation_directory::FAMILY,
+        names: &["state_kind", "state_json"],
+        keys: &[0],
+        restrictive: false,
+        merge: Merge::DirectDirectory,
+    },
     Owner {
         family: super::receipt_history::FAMILY,
         names: &[
@@ -296,9 +304,16 @@ struct UnionContext<'a> {
     preferred_owner: &'a str,
 }
 impl Owner {
+    fn table(&self) -> Result<&'static str, StorageError> {
+        if self.family == super::conversation_directory::FAMILY {
+            Ok("runtime_actor_state")
+        } else {
+            self.family.strip_prefix("sql/").ok_or_else(invalid)
+        }
+    }
     fn check(&self, rule: &FamilyRule) -> Result<(), StorageError> {
         rule.require_typed_codec()?;
-        let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
+        let table = self.table()?;
         if rule.id != self.family
             || rule.restrictive != self.restrictive
             || rule.cells.len() != self.names.len()
@@ -317,6 +332,9 @@ impl Owner {
         Ok(())
     }
     fn validate(&self, value: &Cells) -> Result<(), StorageError> {
+        if self.family == super::conversation_directory::FAMILY {
+            super::conversation_directory::validate(value)?;
+        }
         if self.family == super::receipt_history::FAMILY {
             super::receipt_history::validate(value.text(0)?)?;
         }
@@ -335,6 +353,7 @@ impl Owner {
             }
         }
         match self.merge {
+            Merge::DirectDirectory => return super::conversation_directory::resolve(left, right),
             Merge::Columns(columns) => return merge_columns(columns, left, right),
             Merge::Immutable => {
                 for index in 0..self.names.len() {
@@ -443,7 +462,7 @@ impl Owner {
         if !self.removable() {
             return Err(invalid());
         }
-        let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
+        let table = self.table()?;
         let predicate = self
             .keys
             .iter()
@@ -470,7 +489,7 @@ impl Owner {
         rule: &FamilyRule,
         key: &Cells,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
-        let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
+        let table = self.table()?;
         let predicate = self
             .keys
             .iter()
@@ -502,6 +521,9 @@ impl Owner {
     ) -> Result<(), StorageError> {
         self.check(rule)?;
         self.validate(incoming)?;
+        if self.family == super::conversation_directory::FAMILY {
+            super::conversation_directory::require_account(db, incoming)?;
+        }
         if self.family == super::receipt_history::FAMILY
             && super::receipt_history::erased(db, incoming)?
         {
@@ -522,7 +544,7 @@ impl Owner {
         Ok(())
     }
     fn store(&self, db: &Connection, merged: &Cells) -> Result<(), StorageError> {
-        let table = self.family.strip_prefix("sql/").ok_or_else(invalid)?;
+        let table = self.table()?;
         let keys = self
             .keys
             .iter()
@@ -578,6 +600,9 @@ impl Owner {
             });
         }
         let mut expected = expected.ok_or_else(invalid)?;
+        if self.family == super::conversation_directory::FAMILY {
+            super::conversation_directory::require_account(&private.db, &expected)?;
+        }
         if self.family == super::receipt_history::FAMILY
             && super::receipt_history::erased(&private.db, &expected)?
         {

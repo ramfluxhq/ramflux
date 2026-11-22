@@ -1,5 +1,5 @@
 {
-  "census_hash": "qJBEj9r5k2v5pO6jLvfBGh-6fUBe5y3sKatCuq4sfXs",
+  "census_hash": "0aci_2qGEB4g-23O6a2l8MF3xQW_P1yA0tvdXPnq9_I",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -573,6 +573,10 @@
     {
       "hash": "nDBucivX0RYKfaZP7tC22r7caeLbnp1NTcb_ISgLOkA",
       "id": "sql/runtime_actor_state"
+    },
+    {
+      "hash": "kh7qlPywMaw2gE5M8EHvVI5JdTZxMl14prHHCtbrKoM",
+      "id": "sql/runtime_actor_state/direct_conversations"
     },
     {
       "hash": "bZM4xsBIx0WcTF7XpWqIo5gs_WJ49dxTw9vMZxe9iLk",

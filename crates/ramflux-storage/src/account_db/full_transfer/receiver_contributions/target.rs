@@ -87,7 +87,10 @@ impl Contributions {
                 .map(|cell| format!("\"{}\"", cell.name))
                 .collect::<Vec<_>>()
                 .join(",");
-            let mut query = current.db.prepare(&format!("SELECT {columns} FROM \"{table}\""))?;
+            let mut query = current.db.prepare(&format!(
+                "SELECT {columns} FROM \"{table}\" WHERE {}",
+                super::super::owner_sql::row_filter(rule)
+            ))?;
             let mut rows = query.query([])?;
             let mut count = 0_u64;
             while let Some(row) = rows.next()? {

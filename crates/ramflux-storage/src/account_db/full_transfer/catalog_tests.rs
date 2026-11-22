@@ -214,8 +214,8 @@ fn primary_transfer_full_census_every_family() -> TestResult {
     let rules = full_transfer_catalog();
     assert_eq!(
         rules.len(),
-        175,
-        "test: census includes native receive tables and local proof selection; excludes cleanup ledger"
+        176,
+        "test: census includes the direct-directory projection, receive tables and local proof selection; excludes cleanup ledger"
     );
     let census = match db.inspect_full_transfer_schema(rules) {
         Ok(census) => census,

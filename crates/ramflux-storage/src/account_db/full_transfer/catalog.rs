@@ -51,6 +51,7 @@ pub struct VariantRule {
 #[serde(rename_all = "snake_case")]
 pub enum SqlProjection {
     ContactRequestMetadataV1,
+    DirectConversationMetadataV1,
 }
 /// Descriptor only: interpretation is performed by the field's typed owner. `SignedExact`
 /// forbids rewriting a signed document; a present excluded nested value makes it refuse.
@@ -313,15 +314,23 @@ impl FamilyRule {
             {
                 return Err(unsupported());
             }
-            if matches!(field.codec, CodecRule::SqlJsonProjection { .. })
-                && (self.id != super::contact_request_history::FAMILY
-                    || !matches!(
-                        self.selector,
-                        FamilySelector::Table("contact_request_projection")
-                    )
-                    || field.name != "request_json")
-            {
-                return Err(unsupported());
+            if let CodecRule::SqlJsonProjection { projection, .. } = field.codec {
+                let (family, table, name) = match projection {
+                    SqlProjection::ContactRequestMetadataV1 => (
+                        super::contact_request_history::FAMILY,
+                        "contact_request_projection",
+                        "request_json",
+                    ),
+                    SqlProjection::DirectConversationMetadataV1 => {
+                        (super::conversation_directory::FAMILY, "runtime_actor_state", "state_json")
+                    }
+                };
+                if self.id != family
+                    || !matches!(self.selector, FamilySelector::Table(actual) if actual == table)
+                    || field.name != name
+                {
+                    return Err(unsupported());
+                }
             }
         }
         Ok(())
@@ -706,6 +715,7 @@ mod cleanup_local;
 mod completion_local;
 mod contacts;
 mod conversations;
+mod direct_directory;
 mod events;
 mod groups;
 mod identity;
@@ -878,21 +888,22 @@ static TABLE_CATALOG: &[FamilyRule] = &[
     identity::RULE_126,     // sql/runtime_account_identity
     receipts::RULE_127,     // sql/runtime_ack
     runtime::RULE_128,      // sql/runtime_actor_state
-    objects::RULE_129,      // sql/runtime_attachment_budget
-    objects::RULE_130,      // sql/runtime_attachment_expiry
-    objects::RULE_131,      // sql/runtime_attachment_grant
-    objects::RULE_132,      // sql/runtime_attachment_reference
-    objects::RULE_133,      // sql/runtime_attachment_retirement
-    routing::RULE_134,      // sql/runtime_home_migration_job
-    routing::RULE_135,      // sql/runtime_home_migration_transition
-    receive::RULE_136,      // sql/runtime_inbox_changes
-    receive::RULE_137,      // sql/runtime_inbox_dead_letter
-    receive::RULE_138,      // sql/runtime_inbox_policy
-    receive::RULE_139,      // sql/runtime_inbox_recovery
-    receive::RULE_140,      // sql/runtime_inbox_retry
-    runtime::RULE_141,      // sql/runtime_journal
-    runtime::RULE_142,      // sql/runtime_journal_bounds
-    messages::RULE_143,     // sql/runtime_message_content
+    direct_directory::RULE,
+    objects::RULE_129,  // sql/runtime_attachment_budget
+    objects::RULE_130,  // sql/runtime_attachment_expiry
+    objects::RULE_131,  // sql/runtime_attachment_grant
+    objects::RULE_132,  // sql/runtime_attachment_reference
+    objects::RULE_133,  // sql/runtime_attachment_retirement
+    routing::RULE_134,  // sql/runtime_home_migration_job
+    routing::RULE_135,  // sql/runtime_home_migration_transition
+    receive::RULE_136,  // sql/runtime_inbox_changes
+    receive::RULE_137,  // sql/runtime_inbox_dead_letter
+    receive::RULE_138,  // sql/runtime_inbox_policy
+    receive::RULE_139,  // sql/runtime_inbox_recovery
+    receive::RULE_140,  // sql/runtime_inbox_retry
+    runtime::RULE_141,  // sql/runtime_journal
+    runtime::RULE_142,  // sql/runtime_journal_bounds
+    messages::RULE_143, // sql/runtime_message_content
     message_sequence::RULE,
     native_selection_local::RULE,
     runtime::RULE_144,  // sql/runtime_operation

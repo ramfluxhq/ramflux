@@ -97,11 +97,13 @@ impl SqlProjection {
     pub(super) const fn max_bytes(self) -> usize {
         match self {
             Self::ContactRequestMetadataV1 => 1024,
+            Self::DirectConversationMetadataV1 => super::conversation_directory::LIMIT,
         }
     }
     pub(super) fn require_fields(self, fields: &[FieldRule]) -> Result<(), StorageError> {
         let expected = match self {
             Self::ContactRequestMetadataV1 => CONTACT_REQUEST_FIELDS,
+            Self::DirectConversationMetadataV1 => super::conversation_directory::FIELDS,
         };
         if ramflux_protocol::canonical_json_bytes(&fields)?
             != ramflux_protocol::canonical_json_bytes(&expected)?
@@ -115,6 +117,7 @@ impl SqlProjection {
             return Err(invalid());
         }
         match self {
+            Self::DirectConversationMetadataV1 => super::conversation_directory::source(bytes),
             Self::ContactRequestMetadataV1 => {
                 let local: LocalContactMetadata =
                     ramflux_protocol::parse_i_json(bytes).map_err(|_| invalid())?;
@@ -139,6 +142,7 @@ impl SqlProjection {
             return Err(invalid());
         }
         match self {
+            Self::DirectConversationMetadataV1 => super::conversation_directory::portable(bytes)?,
             Self::ContactRequestMetadataV1 => {
                 read_contact_metadata(bytes)?;
             }
@@ -185,7 +189,7 @@ fn visit_private(db: &Connection, rules: &[FamilyRule], rewrite: bool) -> Result
             let FamilySelector::Table(table) = rule.selector else {
                 return Err(invalid());
             };
-            let mut query = db.prepare(&format!("SELECT rowid,CASE WHEN length(\"{}\")<=?1 THEN \"{}\" ELSE NULL END FROM \"{table}\" ORDER BY rowid",field.name,field.name))?;
+            let mut query = db.prepare(&format!("SELECT rowid,CASE WHEN length(\"{}\")<=?1 THEN \"{}\" ELSE NULL END FROM \"{table}\" WHERE {} ORDER BY rowid",field.name,field.name,super::owner_sql::row_filter(rule)))?;
             let mut rows = query.query([projection.max_bytes()])?;
             while let Some(row) = rows.next()? {
                 let bytes = row.get_ref(1)?.as_blob().map_err(|_| invalid())?;

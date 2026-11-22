@@ -133,8 +133,10 @@ impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
                 .map(|cell| format!("\"{}\"", cell.name))
                 .collect::<Vec<_>>()
                 .join(",");
-            let mut statement =
-                self.private.db.prepare(&format!("SELECT {columns} FROM \"{table}\""))?;
+            let mut statement = self.private.db.prepare(&format!(
+                "SELECT {columns} FROM \"{table}\" WHERE {}",
+                super::owner_sql::row_filter(rule)
+            ))?;
             let mut rows = statement.query([])?;
             let mut count = 0_u64;
             while let Some(row) = rows.next()? {

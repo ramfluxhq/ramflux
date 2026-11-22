@@ -444,3 +444,35 @@ the actor/raw/directory/journal dependency graph still need their owners. Requir
 family completion stays 17/72 until that broader content contract is closed. The
 full populated-account transfer, installation, reverse restrictions and live B
 consumer still require a direct real-binary run.
+
+## Canonical direct-conversation directory
+
+A separate logical projection selects only directory/conversation/ rows and
+validates every selected row. The closed 8-KiB shape binds the complete locator
+and conversation id to exactly two canonical roots, including the authenticated
+account, with two bounded presentation principals and an optional title. The
+normal optional local title/group fields follow their existing null read
+semantics; the portable record has a closed canonical shape. Rootless data,
+unknown fields, conflicting bindings, groups and non-null routes refuse.
+
+Source export, original-B capture, B refresh, independent materialization and
+private execution-field canonicalization share the same compiled SQL predicate.
+The public projection omits the null direct_route execution slot; independent
+actual-file validation refuses even a leftover null slot. B's whole metadata wins
+for equal immutable bindings. No device pin, contact permission or route is
+adopted from the row. The ordinary metadata reader already treats an omitted
+route as null; no SDK read or authorization fallback was added.
+
+Only this exact compiled declaration is subtracted from unclassified actor
+counts, after all selected data validates. Unknown actor rows remain nonempty and
+unsupported; null actor keys also remain in that count. The catalog now has176
+logical declarations over the same169 physical tables. The existing declaration
+count assertion and independent vectors were updated; its unknown-owner and169
+table assertions remain. No new test case or local test run was added.
+
+This closes one additional directory actor projection, not the generic actor
+family or the native vertical. Required family completion remains17/72; raw,
+journal, operation, own-copy and remaining actor owners still precede the direct
+populated transfer. Participant rebinding was only an earlier hypothesis: recovery
+branch creation uses the native record's principal id. No SDK participant change
+was made without a reproduced defect.

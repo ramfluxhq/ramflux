@@ -140,7 +140,17 @@ pub(in crate::account_db) fn inspect(
                 // Identifier comes only from the validated compiled declaration. No peer SQL,
                 // names, filters or rowid are interpreted here.
                 let sql = format!("SELECT count(*) FROM \"{table}\"");
-                family.source_rows = U64(if table == "runtime_actor_state" {
+                family.source_rows = U64(if rule.id == super::conversation_directory::FAMILY {
+                    connection.call(|db| Ok(super::conversation_directory::rows(db)))?.inspect_err(
+                        |_| {
+                            tracing::warn!(
+                                category = rule.id,
+                                reason = "typed_actor_projection",
+                                "full transfer local schema inspection refused"
+                            )
+                        },
+                    )?
+                } else if table == "runtime_actor_state" {
                     super::catalog::local_actor::unprojected_rows(connection, rules)?
                 } else {
                     connection.query_row(&sql, [], |row| row.get(0))?

@@ -212,7 +212,10 @@ fn build(
     let columns =
         rule.cells.iter().map(|cell| format!("\"{}\"", cell.name)).collect::<Vec<_>>().join(",");
     // All identifiers were validated from the local compiled catalog, never peer SQL.
-    let mut query = source.prepare(&format!("SELECT {columns} FROM \"{table}\""))?;
+    let mut query = source.prepare(&format!(
+        "SELECT {columns} FROM \"{table}\" WHERE {}",
+        super::owner_sql::row_filter(rule)
+    ))?;
     let mut rows = query.query([])?;
     let mut total = FullScalarSourceCounts { records: 0, encoded_bytes: 0 };
     while let Some(row) = rows.next()? {
