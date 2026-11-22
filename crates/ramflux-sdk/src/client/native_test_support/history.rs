@@ -55,13 +55,17 @@ impl Fixture {
         let material = self.material_for(target)?;
         Ok(self.client.account_db()?.write_transaction(|| {
             let sealed = self.client.seal_generated_routed_prepared(
-                &self.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&self.config)?,
                 &message,
                 exact,
                 route,
                 material,
             )?;
-            crate::dm::gateway_generated_envelope_from_sealed(&self.config, &mut message, sealed)
+            crate::dm::gateway_generated_envelope_from_sealed(
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&self.config)?,
+                &mut message,
+                sealed,
+            )
         })?)
     }
 }
@@ -92,7 +96,11 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
         source.client.prepare_generated_history_delivery(&source.config)?.ok_or("history plan")?;
     let (first_plan, page) = source
         .client
-        .seal_generated_history_delivery(&source.config, prepared, source.material_for(&sibling)?)?
+        .seal_generated_history_delivery(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            prepared,
+            source.material_for(&sibling)?,
+        )?
         .ok_or("history page")?;
     let mut forged = page.clone();
     forged.report_commitment = Some(ramflux_protocol::encode_base64url([0; 32]));
@@ -123,7 +131,7 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
     let (retry, resent) = source
         .client
         .seal_generated_history_delivery(
-            &source.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             retry,
             SendMaterial { manifest: None, bundle: None },
         )?
@@ -151,7 +159,9 @@ async fn native_sibling_history_preserves_first_hand_origin_resends_and_revokes_
         source
             .client
             .seal_generated_history_delivery(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config
+                )?,
                 retry,
                 SendMaterial { manifest: None, bundle: None }
             )?
@@ -178,7 +188,11 @@ async fn history_preserves_created_at() -> TestResult {
         source.client.prepare_generated_history_delivery(&source.config)?.ok_or("history plan")?;
     let (_, page) = source
         .client
-        .seal_generated_history_delivery(&source.config, prepared, source.material_for(&sibling)?)?
+        .seal_generated_history_delivery(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            prepared,
+            source.material_for(&sibling)?,
+        )?
         .ok_or("history page")?;
     sibling.receive(page, 1).await?;
     let imported = sibling.client.direct_message_by_id(&id)?.ok_or("imported row")?;

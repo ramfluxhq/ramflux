@@ -255,7 +255,12 @@ impl SurfaceState {
         if canonical(&witness)?.len() > MAX_DELTA_BYTES {
             return Err(Reject::Limit);
         }
-        super::expression::checks(source.component.get("@checks"), &overlay, &source.prefix)?;
+        super::expression::checks(
+            source.component.get("@checks"),
+            &overlay,
+            &source.prefix,
+            &resolution.steps,
+        )?;
         if frame.arguments_hash()? != frame.args_hash {
             return Err(Reject::Integrity);
         }

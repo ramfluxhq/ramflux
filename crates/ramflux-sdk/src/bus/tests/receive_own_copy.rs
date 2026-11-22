@@ -142,7 +142,7 @@ pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
     assert_eq!(requests.len(), 1);
     assert!(requests.iter().all(|request| request.root.is_none() && request.prekey.is_none()));
     let envelopes = sibling.seal_own_copy_generated(
-        &config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
         draft,
         requests.into_iter().map(|_| SendMaterial { manifest: None, bundle: None }).collect(),
     )?;

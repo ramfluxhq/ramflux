@@ -12,9 +12,19 @@ impl AccountDb {
         verified_at: i64,
     ) -> Result<DeviceDirectoryRecord, StorageError> {
         let address = ramflux_protocol::qualified_device_id(principal_commitment, device_id)?;
-        self.connection.execute("INSERT INTO device_directory(device_id,principal_commitment,source,verified_at,raw_device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(device_id) DO UPDATE SET source=excluded.source,verified_at=excluded.verified_at,raw_device_id=excluded.raw_device_id",params![address,principal_commitment,source,verified_at,device_id])?;
-        self.connection.execute("DELETE FROM device_directory WHERE device_id=?1 AND principal_commitment=?2 AND device_id<>?3 AND COALESCE(raw_device_id,device_id)=?1",params![device_id,principal_commitment,address])?;
-        self.device_directory_entry(&address)?.ok_or(StorageError::AuthorizationRejected)
+        // One commit when the caller is in autocommit. An open receive fence absorbs both
+        // writes and pays no extra fsync.
+        self.join_write(|| {
+            self.connection.execute(
+                "INSERT INTO device_directory(device_id,principal_commitment,source,verified_at,raw_device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(device_id) DO UPDATE SET source=excluded.source,verified_at=excluded.verified_at,raw_device_id=excluded.raw_device_id",
+                params![address, principal_commitment, source, verified_at, device_id],
+            )?;
+            self.connection.execute(
+                "DELETE FROM device_directory WHERE device_id=?1 AND principal_commitment=?2 AND device_id<>?3 AND COALESCE(raw_device_id,device_id)=?1",
+                params![device_id, principal_commitment, address],
+            )?;
+            self.device_directory_entry(&address)?.ok_or(StorageError::AuthorizationRejected)
+        })
     }
     pub fn device_directory_entry(
         &self,

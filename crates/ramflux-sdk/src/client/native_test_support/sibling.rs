@@ -149,7 +149,11 @@ async fn native_sibling_self_sync_defers_without_authenticated_floor_bootstrap()
     let mut source = Fixture::new("native-sync-source").await?;
     let sibling = source.enroll_sibling("native-sync-sibling", "sibling").await?;
     assert!(sibling.client.identity_root.is_none());
-    assert_eq!(sibling.vault.entry_count()?, 1, "the sibling has only its branch seeds");
+    assert_eq!(
+        sibling.vault.entry_count()?,
+        2,
+        "the sibling has only its branch seeds and its device-unlock secret"
+    );
     assert_eq!(
         sibling.client.born_v3_account.as_ref().ok_or("native sibling")?.primary_vault_ref(),
         ""

@@ -207,6 +207,8 @@ impl RamfluxClient {
             "routed/own-sent-attestation/{owner}/{}",
             ramflux_protocol::encode_base64url(&identity.id)
         );
+        // A supported proof must not consume the Unsupported raw pool. An unsupported
+        // proof stays SourceEvidence so a later decoder can still reparse it there.
         // Independent live and history couriers may attest the same exact revision.
         // Keep the first verified proof: enclosing controls and transport metadata
         // differ, while the private owner and exact nested bytes remain identical.
@@ -214,11 +216,18 @@ impl RamfluxClient {
             existing.verify(&sent.exact_inner, &self.own_account_anchor()?)?;
             return Ok(());
         }
+        let kind = if g::validation::scan_inner(sent.exact_inner.as_slice())
+            .is_ok_and(|scanned| scanned.outcome == g::validation::ScanOutcome::Supported)
+        {
+            ramflux_storage::RawInnerCopyKind::SupportedOwnAttestation
+        } else {
+            ramflux_storage::RawInnerCopyKind::SourceEvidence
+        };
         db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
             owner_id: owner,
             verified_source_anchor: &self.own_account_anchor()?,
             copy_id: &key,
-            kind: ramflux_storage::RawInnerCopyKind::SourceEvidence,
+            kind,
             bytes: &encoded,
             bounded_metadata: &[],
         })?;
@@ -383,9 +392,16 @@ mod tests {
         let keys = db.message_actor_keys(owner, "routed/own-sent-attestation/")?;
         assert_eq!(keys.len(), 1);
         assert!(db.raw_inner_copy(&keys[0])?.is_some());
-        let quota = db.unsupported_raw_quota(Some(&own.client.own_account_anchor()?))?;
-        assert_eq!(quota.owners, 1);
-        assert!(quota.raw_bytes >= u64::try_from(serde_json::to_vec(&proof)?.len())?);
+        let anchor = own.client.own_account_anchor()?;
+        let shared = db.unsupported_raw_quota(Some(&anchor))?;
+        assert_eq!(shared.owners, 0, "supported proof must not take an unsupported owner");
+        assert_eq!(shared.raw_bytes, 0, "supported proof must not take unsupported bytes");
+        let quota = db.supported_own_attestation_quota(Some(&anchor))?;
+        assert_eq!(quota.owners, 1, "supported proof charges its own owner pool");
+        assert!(
+            quota.raw_bytes >= u64::try_from(serde_json::to_vec(&proof)?.len())?,
+            "supported proof charges its retained bytes"
+        );
         assert!(
             db.write_transaction(|| own.client.persist_own_sent_attestation("wrong-owner", &proof))
                 .is_err()

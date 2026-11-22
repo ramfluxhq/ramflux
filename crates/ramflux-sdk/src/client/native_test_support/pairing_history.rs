@@ -162,8 +162,11 @@ pub(crate) async fn deliver_pages(
         } else {
             source.material_for(target)?
         };
-        let Some((plan, envelope)) =
-            source.client.seal_generated_history_delivery(&source.config, plan, material)?
+        let Some((plan, envelope)) = source.client.seal_generated_history_delivery(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            plan,
+            material,
+        )?
         else {
             continue;
         };
@@ -233,7 +236,7 @@ pub(crate) async fn verify(source: &Fixture, target: &mut Fixture, seeded: &Seed
     for _ in 0..MAX_STEPS {
         let Some(plan) = source.client.prepare_authored_history(&source.config)? else { break };
         let Some((plan, packet)) = source.client.seal_authored_history(
-            &source.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             plan,
             source.material_for(target)?,
         )?

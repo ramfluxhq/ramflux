@@ -4,9 +4,9 @@
 //! Receipt outbox reads, network-only steps, and unchanged-row actor checkpoints.
 
 use super::{
-    ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, GatewaySessionConfig, LIFETIME,
-    LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with,
-    mpsc, now_unix_timestamp, postpone, receipt_message,
+    ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, LIFETIME, LocalBusAccountState,
+    PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with, mpsc,
+    now_unix_timestamp, postpone, receipt_message,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
@@ -19,7 +19,7 @@ pub(crate) struct Plan {
     work: Work,
     message: GatewayDirectMessage,
     body: Vec<u8>,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
     request: Option<SendMaterialRequest>,
 }
 
@@ -249,7 +249,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
         work,
         message,
         body,
-        config: account.gateway_config.clone(),
+        config: account.sealing_config()?,
         request,
     }))
 }
@@ -284,18 +284,15 @@ fn seal(
         if let Some(packet) = &plan.work.packet {
             return Ok(packet.clone());
         }
+        let config = account.sealing_config()?;
         let sealed = account.client.seal_routed_prepared(
-            &account.gateway_config,
+            &config,
             &plan.message,
             &plan.body,
             crate::client::routed::Route::receipt(),
             material,
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(
-            &account.gateway_config,
-            &mut plan.message,
-            sealed,
-        )
+        crate::dm::gateway_generated_envelope_from_sealed(&config, &mut plan.message, sealed)
     });
     let packet = match prepared {
         Ok(packet) => packet,
@@ -472,7 +469,7 @@ mod retention_tests {
 #[cfg(test)]
 pub(crate) async fn test_fetch_material(
     context: &SessionContext,
-    config: GatewaySessionConfig,
+    config: crate::GatewaySessionConfig,
 ) -> Result<SendMaterial, SdkError> {
     let work = Work {
         status_id: String::new(),
@@ -508,7 +505,7 @@ pub(crate) async fn test_fetch_material(
         work,
         message,
         body: Vec::new(),
-        config,
+        config: crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
         request: Some(SendMaterialRequest { root: None, prekey: Some("receipt-peer".into()) }),
     };
     fetch_material(context, &mut plan).await

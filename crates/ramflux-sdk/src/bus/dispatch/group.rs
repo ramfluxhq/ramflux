@@ -23,7 +23,7 @@ pub(crate) async fn dispatch_group_bus_request(
     result.map_err(|error| group_operation_error(&request.method, error, native))
 }
 
-fn group_operation_error(method: &str, error: SdkError, native: bool) -> SdkError {
+pub(super) fn group_operation_error(method: &str, error: SdkError, native: bool) -> SdkError {
     let Some(operation) = crate::GroupOperation::for_method(method) else { return error };
     if !native
         || matches!(&error, SdkError::GroupRefused { .. })
@@ -205,6 +205,13 @@ pub(crate) async fn dispatch_group_send_request(
         normalize_native_group_request(&mut body, &account.gateway_config, &account.client)?;
     }
     account.client.assert_shared_group_send_capacity(&body.group_id, &body.sender_id)?;
+    if !directed_transport
+        && account.client.account_db()?.shared_group_state(&body.group_id)?.is_some()
+    {
+        // A current device of the member account (paired or recovered) holds the account's role;
+        // project it before any per-device lookup (own copies, sender keys) reads it.
+        account.client.pin_local_group_member(&body.group_id)?;
+    }
     let mut fanout_routes = if directed_transport {
         None
     } else {
@@ -397,7 +404,7 @@ pub(crate) async fn dispatch_group_send_request(
                     // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
                     engine
                         .submit_envelope(gateway_envelope_from_sealed(
-                            engine.config(),
+                            &engine.sealing_config()?,
                             &mut message,
                             sealed,
                             None,
@@ -494,7 +501,7 @@ pub(crate) async fn dispatch_group_send_request(
                         Ok(sealed) => {
                             engine
                                 .submit_envelope(gateway_envelope_from_sealed(
-                                    engine.config(),
+                                    &engine.sealing_config()?,
                                     &mut message,
                                     sealed,
                                     None,

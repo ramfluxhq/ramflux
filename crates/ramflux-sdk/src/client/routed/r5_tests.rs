@@ -52,8 +52,11 @@ pub(super) fn fresh(
             bundle,
         },
     )?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut msg, encrypted)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
+        &mut msg,
+        encrypted,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,
@@ -442,7 +445,7 @@ async fn an_authenticated_reset_keeps_both_candidates_and_chooses_the_lower_id_b
         inbox_seq: 1,
         target_delivery_id: bob.config()?.target_delivery_id,
         envelope: crate::dm::gateway_generated_envelope_from_sealed(
-            &alice.config()?,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&alice.config()?)?,
             &mut message,
             sealed,
         )?,
@@ -520,8 +523,11 @@ pub(super) fn seal(
         ramflux_protocol::encode_base64url(RamfluxClient::decode_generated_inner(&exact)?.0.id);
     let (mut message, sealed) =
         seal_native_fixture(sender, receiver, message, &exact, Route::direct())?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config()?, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config()?)?,
+        &mut message,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

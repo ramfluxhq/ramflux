@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Bounded exact-byte storage for Unsupported messages and private known-content evidence.
+//! Bounded exact-byte storage for Unsupported messages, private known-content evidence,
+//! and supported own-message attestation (its own quota, same erasure linkage).
 
 pub mod evidence;
 pub mod quota;

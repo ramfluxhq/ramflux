@@ -2,19 +2,31 @@
 // Copyright (c) 2026 Span Brain
 
 //! Deterministic author-side validation expressions and the bounded A2UI regex dialect.
+use super::resource::Steps;
 use super::{JsonPointer, Reject};
 use regex_syntax::ast::{Ast, RepetitionKind as R, RepetitionRange as Range};
 use serde_json::{Value, json};
 
-pub(super) fn checks(checks: Option<&Value>, model: &Value, prefix: &str) -> Result<(), Reject> {
+pub(super) fn checks(
+    checks: Option<&Value>,
+    model: &Value,
+    prefix: &str,
+    steps: &Steps,
+) -> Result<(), Reject> {
     if let Some(checks) = checks {
         let checks = checks.as_array().ok_or(Reject::Expression)?;
         if checks.len() > 8 {
             return Err(Reject::Limit);
         }
         for check in checks {
-            let result =
-                evaluate(check.get("condition").ok_or(Reject::Expression)?, model, prefix, 0)?;
+            let result = evaluate_display(
+                check.get("condition").ok_or(Reject::Expression)?,
+                model,
+                prefix,
+                0,
+                None,
+                steps,
+            )?;
             if result.as_bool().or_else(|| result.get("valid").and_then(Value::as_bool))
                 != Some(true)
             {
@@ -24,13 +36,14 @@ pub(super) fn checks(checks: Option<&Value>, model: &Value, prefix: &str) -> Res
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn evaluate(
     expression: &Value,
     model: &Value,
     prefix: &str,
     depth: usize,
 ) -> Result<Value, Reject> {
-    evaluate_display(expression, model, prefix, depth, None)
+    evaluate_display(expression, model, prefix, depth, None, &Steps::new())
 }
 
 pub(super) fn evaluate_display(
@@ -39,7 +52,9 @@ pub(super) fn evaluate_display(
     prefix: &str,
     depth: usize,
     locale: Option<super::DisplayLocale>,
+    steps: &Steps,
 ) -> Result<Value, Reject> {
+    steps.take()?;
     if depth > 16 {
         return Err(Reject::Limit);
     }
@@ -68,20 +83,29 @@ pub(super) fn evaluate_display(
         None => return Err(Reject::Expression),
     };
     let get = |key: &str| {
-        evaluate_display(args.get(key).ok_or(Reject::Expression)?, model, prefix, depth + 1, locale)
+        evaluate_display(
+            args.get(key).ok_or(Reject::Expression)?,
+            model,
+            prefix,
+            depth + 1,
+            locale,
+            steps,
+        )
     };
     match name {
-        "@index" => evaluate_index(args, model, prefix, depth),
-        "formatString" => {
+        "@index" => evaluate_index(args, model, prefix, depth, locale, steps),
+        "formatString" => steps.program(args.get("value").ok_or(Reject::Expression)?, || {
             let value = get("value")?;
-            Ok(serde_json::json!(super::format_string::render_display(
+            super::format_string::render_display(
                 value.as_str().ok_or(Reject::Expression)?,
                 model,
                 prefix,
                 depth + 1,
-                locale
-            )?))
-        }
+                locale,
+                steps,
+            )
+            .map(Value::String)
+        }),
         "required" => Ok(required(&get("value")?)),
         "length" => {
             let value = get("value")?;
@@ -99,21 +123,13 @@ pub(super) fn evaluate_display(
             let max = args.get("max").and_then(Value::as_f64).unwrap_or(f64::INFINITY);
             Ok(json!({"valid":n >= min && n <= max}))
         }
-        "regex" => {
-            let value = get("value")?;
-            let text = value.as_str().ok_or(Reject::Expression)?;
-            let pattern = args.get("pattern").and_then(Value::as_str).ok_or(Reject::Expression)?;
-            let translated = translated_regex(pattern)?;
-            let matched = text.chars().take(4097).count() <= 4096
-                && regex::Regex::new(&translated).map_err(|_| Reject::Expression)?.is_match(text);
-            Ok(json!({"valid":matched}))
-        }
+        "regex" => regex_check(&get("value")?, args),
         "email" => email_check(&get("value")?),
         "and" | "or" => {
             let values = args.get("values").and_then(Value::as_array).ok_or(Reject::Expression)?;
             let mut result = name == "and";
             for value in values {
-                let v = evaluate_display(value, model, prefix, depth + 1, locale)?;
+                let v = evaluate_display(value, model, prefix, depth + 1, locale, steps)?;
                 let v = v.as_bool().ok_or(Reject::Expression)?;
                 if name == "and" {
                     result &= v;
@@ -130,7 +146,7 @@ pub(super) fn evaluate_display(
             for (key, value) in args {
                 resolved.insert(
                     key.clone(),
-                    evaluate_display(value, model, prefix, depth + 1, Some(locale))?,
+                    evaluate_display(value, model, prefix, depth + 1, Some(locale), steps)?,
                 );
             }
             super::locale::format(name, &resolved, locale).map(Value::String)
@@ -139,6 +155,14 @@ pub(super) fn evaluate_display(
         // formatting belongs to the card runtime; it never becomes an action witness.
         _ => Err(Reject::Expression),
     }
+}
+fn regex_check(value: &Value, args: &serde_json::Map<String, Value>) -> Result<Value, Reject> {
+    let text = value.as_str().ok_or(Reject::Expression)?;
+    let pattern = args.get("pattern").and_then(Value::as_str).ok_or(Reject::Expression)?;
+    let translated = translated_regex(pattern)?;
+    let matched = text.chars().take(4097).count() <= 4096
+        && regex::Regex::new(&translated).map_err(|_| Reject::Expression)?.is_match(text);
+    Ok(json!({"valid":matched}))
 }
 fn required(value: &Value) -> Value {
     let valid = match value {
@@ -164,6 +188,8 @@ fn evaluate_index(
     model: &Value,
     prefix: &str,
     depth: usize,
+    locale: Option<super::DisplayLocale>,
+    steps: &Steps,
 ) -> Result<Value, Reject> {
     if prefix.is_empty() {
         return Err(Reject::Expression);
@@ -176,7 +202,7 @@ fn evaluate_index(
         .map_err(|_| Reject::Expression)?;
     let offset = args
         .get("offset")
-        .map(|v| evaluate(v, model, prefix, depth + 1))
+        .map(|v| evaluate_display(v, model, prefix, depth + 1, locale, steps))
         .transpose()?
         .map(|v| v.as_i64().ok_or(Reject::Expression))
         .transpose()?

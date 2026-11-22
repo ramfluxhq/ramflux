@@ -28,7 +28,8 @@ pub struct RamfluxCardOpen {
     pub spec: RamfluxCardBytes,
     pub bytecode: RamfluxCardBytes,
     pub signature: RamfluxCardBytes,
-    /// Application-pinned release key; must never be populated from peer JSON.
+    /// Independently app-pinned release key; never take a key from the peer package.
+    /// Signature checks cannot make attacker-selected bytecode safe for `QuickJS`.
     pub trusted_key: RamfluxCardBytes,
     pub descriptor: RamfluxCardBytes,
     /// Pinned by the embedding release; never derived from the received package.

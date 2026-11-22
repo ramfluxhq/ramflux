@@ -775,12 +775,7 @@ fn custody_cancel_during_persistence_removes_new_primary_and_branch_credentials(
     *vault.cancel_commit.lock().map_err(|_| "vault lock")? = Some(gate);
     assert!(
         pending
-            .confirm_with_passphrase(
-                &words(&phrase, positions)?,
-                &vault,
-                100,
-                b"discarded passphrase"
-            )
+            .confirm_with_passphrase(&words(&phrase, positions)?, &vault, 100, b"314159")
             .is_err()
     );
     assert_eq!(vault.secrets.lock().map_err(|_| "vault lock")?.len(), 0);

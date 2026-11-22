@@ -201,9 +201,12 @@ pub(super) fn render_display(
     prefix: &str,
     depth: usize,
     locale: Option<super::DisplayLocale>,
+    steps: &super::resource::Steps,
 ) -> Result<String, Reject> {
+    steps.take()?;
     let mut out = String::new();
     for part in parse(program)? {
+        steps.take()?;
         let text = match part {
             Part::Text(text) => text,
             Part::Expression(expression) => {
@@ -213,6 +216,7 @@ pub(super) fn render_display(
                     prefix,
                     depth + 1,
                     locale,
+                    steps,
                 )?;
                 match value {
                     Value::Null => String::new(),

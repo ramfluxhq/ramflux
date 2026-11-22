@@ -7,8 +7,9 @@
 //!
 //! The client sends each post exactly once and never retries it. A post whose answer is lost,
 //! or whose storage outcome PRX reports as unknown, comes back as `PrxError::OutcomeUnknown`;
-//! the caller decides what to do next. PRX does not deduplicate yet (`message_idempotency_v1`
-//! is not advertised at this pin), so a deliberate resend would run again.
+//! the caller decides what to do next. A deliberate resend of the same key is answered by PRX
+//! (`message_idempotency_v1`): a replay, a restart attempt, or `409 message_deleted`. The
+//! client itself never resends.
 //!
 //! Field bounds (ids, message size, names, mentions) are PRX's to enforce: the client sends what
 //! the caller gives and the daemon's `400 field_invalid` is what a caller sees.

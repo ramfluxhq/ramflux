@@ -822,14 +822,8 @@ mod tests {
             true,
         )
         .await?;
-        *target_service = reopen_actor(
-            &mut rig.secondary,
-            &rig.participant_b,
-            target,
-            b"component-recipient-passphrase",
-            false,
-        )
-        .await?;
+        *target_service =
+            reopen_actor(&mut rig.secondary, &rig.participant_b, target, b"752913", false).await?;
         // The cold owners discarded their bearer tokens; wait for the specified
         // ten-second native epoch idle expiry before requesting fresh A3 keys.
         tokio::time::advance(std::time::Duration::from_secs(10)).await;

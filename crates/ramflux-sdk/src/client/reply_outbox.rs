@@ -73,14 +73,14 @@ pub(crate) struct AdmitRequest<'a> {
     pub client: &'a RamfluxClient,
     pub pair: Option<PairLive<'a>>,
     /// Surface BUILD signs through this session; pair prepare uses [`PairLive::config`].
-    pub config: Option<&'a GatewaySessionConfig>,
+    pub config: Option<&'a crate::SealingConfig>,
     /// Fetched before W1; `admit_in` seals with it inside the transaction.
     pub material: Option<SendMaterial>,
 }
 
 /// Inputs so pair admission calls `prepare_received_pair_reply` rather than trusting the envelope.
 pub(crate) struct PairLive<'a> {
-    pub config: &'a GatewaySessionConfig,
+    pub config: &'a crate::SealingConfig,
     pub opened: &'a Opened,
     pub body: &'a [u8],
 }

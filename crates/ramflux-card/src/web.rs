@@ -31,7 +31,8 @@ impl CardWorker {
 }
 #[wasm_bindgen]
 impl CardWorker {
-    /// Public release material must come from the app bundle, never a peer message.
+    /// Trust key and policy must be independently pinned by the app release.
+    /// A key bundled with a peer package is untrusted; `QuickJS` cannot validate bytecode.
     /// # Errors
     /// Rejects invalid signature, descriptor bindings and independently pinned policy.
     #[wasm_bindgen(constructor)]

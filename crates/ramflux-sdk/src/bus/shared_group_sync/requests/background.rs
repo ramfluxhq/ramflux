@@ -25,7 +25,7 @@ struct Plan {
     packet: GroupControlPacket,
     state: ramflux_crypto::VerifiedGroupState,
     fingerprint: serde_json::Value,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
 }
 struct Target {
     plan: Plan,
@@ -246,7 +246,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     let Some(state) = db.shared_group_state(packet.group())? else { return Ok(None) };
     defer(client, &id, &packet, now.saturating_add(DEFER_SECS))?;
     let Some(fingerprint) = fingerprint(client, &id, &packet)? else { return Ok(None) };
-    Ok(Some(Plan { id, packet, state, fingerprint, config: account.gateway_config.clone() }))
+    Ok(Some(Plan { id, packet, state, fingerprint, config: account.sealing_config()? }))
 }
 fn fingerprint(
     client: &RamfluxClient,
@@ -422,8 +422,8 @@ fn target(
         conversation_id: plan.state.view().conversation_id.clone(),
         message_id: format!("group_control_{}", crate::new_surface_message_id()?),
         envelope_id: format!("group_control_{}", crate::new_surface_message_id()?),
-        source_principal_id: plan.config.principal_id.clone(),
-        sender_id: plan.config.device_id.clone(),
+        source_principal_id: plan.config.config().principal_id.clone(),
+        sender_id: plan.config.config().device_id.clone(),
         recipient_device_id: Some(device.device_id.clone()),
         recipient_principal_commitment: Some(root.into()),
         target_delivery_id: device.target_delivery_id.clone(),
