@@ -199,6 +199,7 @@ impl IdentityRegistry {
             signed_device_set: None,
             devices,
             agent_lifecycle: None,
+            hosted_agents: Vec::new(),
         })
     }
     pub(crate) fn record_is_revoked(&self, device: &IdentityDeviceRecord) -> bool {

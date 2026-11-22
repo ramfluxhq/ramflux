@@ -22,6 +22,10 @@ pub(super) enum AgentPrivate {
     HomeNode {
         reply: oneshot::Sender<Result<Option<String>, SdkError>>,
     },
+    /// The account's gateway config, for a public directory read outside this actor.
+    Gateway {
+        reply: oneshot::Sender<Result<Option<crate::gateway::GatewaySessionConfig>, SdkError>>,
+    },
     Call {
         call: super::agent_methods::AgentCall,
         reply: oneshot::Sender<Result<ramflux_protocol::message::AgentConfigResult, SdkError>>,
@@ -283,6 +287,14 @@ impl AccountActor {
     ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Call { call, reply })))?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// The gateway this account already uses, so a directory read does not build a second one.
+    pub(super) async fn agent_gateway(
+        &self,
+    ) -> Result<Option<crate::gateway::GatewaySessionConfig>, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Gateway { reply })))?;
         response.await.map_err(|_| stopped())?
     }
     /// The stored home node of this human account (`account/node-id`), read by its runtime.

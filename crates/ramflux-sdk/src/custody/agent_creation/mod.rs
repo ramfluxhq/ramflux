@@ -7,6 +7,7 @@ mod advance;
 mod capability;
 mod commit;
 mod delete;
+mod host_revoked;
 mod machine;
 mod publish;
 mod rebind;
@@ -39,6 +40,9 @@ pub use capability::require_agent_custody_authorization;
 pub use commit::commit_approved;
 pub(crate) use commit::desktop_is_enrolled;
 pub(crate) use delete::{agent_account_id, is_retired_agent_account, retire_agent_material};
+pub(crate) use host_revoked::{
+    host_branch_marked, note_host_branch_revoked, suspend_hosted_agents,
+};
 pub use machine::{
     BeginInput, BeginOutcome, PrimarySigning, apply_decision, begin, cancel, primary_sign_decision,
     receive_plan, resume_request,

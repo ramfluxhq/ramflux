@@ -163,6 +163,9 @@ async fn run_account(
         if *stopping.borrow() {
             break;
         }
+        if stop_marked_host(config, handle) {
+            break;
+        }
         if !wait_for_network(&mut networks, stopping).await {
             break;
         }
@@ -255,6 +258,15 @@ async fn run_account(
         }
         reconnect_after_retirement(handle, retry, reason, why.as_deref(), generation);
     }
+}
+
+fn stop_marked_host(config: &GatewaySessionConfig, handle: &ConnectionHandle) -> bool {
+    if !super::super::host_branch::marked_on(config) {
+        return false;
+    }
+    super::super::host_branch::suspend_marked(config);
+    handle.signal_stop();
+    true
 }
 
 /// A retired resident session reconnects after the retry boundary; the log names the real

@@ -186,6 +186,7 @@ impl super::RouterCore {
         store: &super::RouterRedbStore,
     ) -> Result<Option<crate::DeviceManifestResponse>, NodeCoreError> {
         let agent_lifecycle = store.agent_lifecycle_label(anchor)?;
+        let hosted_agents = hosted_directory(store, anchor)?;
         if let Some(native) = self.custody_manifest(anchor, now, store)? {
             return Ok(Some(crate::DeviceManifestResponse {
                 signed_device_set: None,
@@ -202,6 +203,7 @@ impl super::RouterCore {
                 devices: Vec::new(),
                 custody: Some(Box::new(native)),
                 agent_lifecycle,
+                hosted_agents,
             }));
         }
         let native = self
@@ -215,6 +217,7 @@ impl super::RouterCore {
         }
         Ok(self.mvp1_device_manifest(anchor).map(|mut manifest| {
             manifest.agent_lifecycle = agent_lifecycle;
+            manifest.hosted_agents = hosted_agents;
             manifest
         }))
     }
@@ -359,4 +362,28 @@ impl super::RouterCore {
             bundle: Some(request.bundle.clone()),
         }))
     }
+}
+
+/// Host rows for one owner. More than 256 refuses rather than returning a partial list.
+fn hosted_directory(
+    store: &super::RouterRedbStore,
+    owner: &str,
+) -> Result<Vec<crate::HostedAgentDirectoryEntry>, NodeCoreError> {
+    const LIMIT: usize = 256;
+    let rows = store.agent_hosts_of(owner)?;
+    if rows.len() > LIMIT {
+        return Err(NodeCoreError::Capacity { resource: "hosted agents" });
+    }
+    let mut listed = Vec::with_capacity(rows.len());
+    for (anchor, binding) in rows {
+        let retired = store.agent_retirement(&anchor)?.is_some();
+        listed.push(crate::HostedAgentDirectoryEntry {
+            agent_anchor: anchor,
+            desktop_device_id: binding.desktop.device_id,
+            primary_device_id: binding.primary.device_id,
+            retired,
+        });
+    }
+    listed.sort_by_key(|entry| entry.agent_anchor.clone());
+    Ok(listed)
 }

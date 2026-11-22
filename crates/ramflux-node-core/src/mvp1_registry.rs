@@ -174,6 +174,20 @@ pub struct DeviceManifestResponse {
     /// other account, including a legacy manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_lifecycle: Option<String>,
+    /// Agents whose host row names this anchor as owner. Empty for every other account.
+    /// The fence scan `agent_hosts_of` is the source. Absent on a legacy manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_agents: Vec<HostedAgentDirectoryEntry>,
+}
+
+/// One agent the node still hosts for the account that owns this manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HostedAgentDirectoryEntry {
+    pub agent_anchor: String,
+    pub desktop_device_id: String,
+    pub primary_device_id: String,
+    #[serde(default)]
+    pub retired: bool,
 }
 
 /// Path prefix for `GET /mvp1/delivery-owner-epoch/{delivery_id}`.
@@ -870,6 +884,7 @@ impl IdentityRegistry {
             root_public_key: root_public_key.clone(),
             devices,
             agent_lifecycle: None,
+            hosted_agents: Vec::new(),
         })
     }
 

@@ -242,6 +242,10 @@ fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError>
         status["local_device_authorized"] = json!(authorized);
         status["node_id"] =
             json!(client.account_db()?.load_actor_state::<String>("account/node-id")?);
+        if let Some(root) = &view.account_root {
+            let id = client.account_db()?.local_account_id.clone();
+            super::super::host_branch::overlay_status(&mut status, root, &id);
+        }
     }
     if let Some(connection) = &view.connection {
         let mut snapshot = connection.snapshot();

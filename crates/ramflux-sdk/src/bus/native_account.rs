@@ -143,6 +143,7 @@ pub(super) fn locked_status(
     status["account_id"] = id.into();
     status["state"] = "locked".into();
     status["networking"] = serde_json::to_value(native.state())?;
+    super::host_branch::overlay_status(&mut status, root, id);
     Ok(status)
 }
 
@@ -159,8 +160,8 @@ pub(super) fn status_at(
     now: u64,
 ) -> Result<serde_json::Value, SdkError> {
     let native = account.client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
-    let current =
-        crate::custody::load_data_account(account.client.account_index()?.root(), account_id, now)?;
+    let root = account.client.account_index()?.root().to_path_buf();
+    let current = crate::custody::load_data_account(&root, account_id, now)?;
     let authorized = !current.authority_blocked()
         && !current.branch_pending()
         && current
@@ -204,6 +205,7 @@ pub(super) fn status_at(
     {
         status["networking_hint"] = crate::custody::capacity_hint::message(hint).into();
     }
+    super::host_branch::overlay_status(&mut status, &root, account_id);
     Ok(status)
 }
 

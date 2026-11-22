@@ -75,6 +75,11 @@ impl AccountRuntime {
             }
             AgentPrivate::Call { call, reply } => self.reply_agent_call(call, reply),
             AgentPrivate::HomeNode { reply } => self.reply_agent_home_node(reply),
+            AgentPrivate::Gateway { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.agent_gateway());
+                }
+            }
         }
     }
 
@@ -195,6 +200,15 @@ impl AccountRuntime {
         Ok(result)
     }
 
+    /// Gateway config of this unlocked account. `None` before a native account is loaded.
+    fn agent_gateway(&self) -> Result<Option<crate::gateway::GatewaySessionConfig>, SdkError> {
+        let account = self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        if account.client.born_v3_account.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(account.gateway_config.clone()))
+    }
+
     /// The home node of this human account: the value `native_account::unlock` persists as
     /// `account/node-id`. `None` when the account has none yet.
     pub(super) fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
@@ -220,10 +234,46 @@ fn retired_record(
     mutation: &ramflux_protocol::message::AgentMutation,
     now: u64,
 ) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
-    let current = client.agent_record_get(&mutation.agent_anchor)?;
-    let record =
-        client.agent_retire(&mutation.agent_anchor, &current.identity, mutation.confirmed, now)?;
-    Ok(record_result(&record))
+    match client.agent_record_get(&mutation.agent_anchor) {
+        Ok(current) => {
+            let record = client.agent_retire(
+                &mutation.agent_anchor,
+                &current.identity,
+                mutation.confirmed,
+                now,
+            )?;
+            Ok(record_result(&record))
+        }
+        Err(SdkError::AgentCreationRefused("agent_not_found")) => {
+            node_only_retired(client, mutation)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The node already accepted retirement and this phone has no local file to rewrite.
+fn node_only_retired(
+    client: &crate::RamfluxClient,
+    mutation: &ramflux_protocol::message::AgentMutation,
+) -> Result<ramflux_protocol::message::AgentConfigResult, SdkError> {
+    use ramflux_protocol::message as g;
+    if mutation.confirmed != Some(true) {
+        return Err(SdkError::AgentCreationRefused("agent_not_found"));
+    }
+    let record = g::AgentRecord {
+        agent_anchor: mutation.agent_anchor.clone(),
+        custodian_anchor: client.own_account_anchor()?,
+        persona: None,
+        host: None,
+        config: None,
+        revision: None,
+        lifecycle: crate::agent_record::LIFECYCLE_RETIRED.to_owned(),
+        observation: String::new(),
+        cleanup: NODE_RETIRED.to_owned(),
+        access: None,
+        role: String::new(),
+    };
+    Ok(g::AgentConfigResult { value: Some(g::agent_config_result::Value::Record(record)) })
 }
 
 fn record_result(

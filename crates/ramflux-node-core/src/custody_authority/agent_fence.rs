@@ -15,6 +15,18 @@ fn refused(code: CustodyRefusal) -> NodeCoreError {
     NodeCoreError::AgentPublishRefused(code)
 }
 
+/// A rebind's new desktop must be an active branch of the current human record.
+pub(super) fn require_active_desktop(
+    human: &VerifiedRecord,
+    desktop: &DeviceRef,
+) -> Result<(), NodeCoreError> {
+    if device_active(human, desktop) {
+        Ok(())
+    } else {
+        Err(refused(CustodyRefusal::BindingRefused))
+    }
+}
+
 fn device_active(record: &VerifiedRecord, reference: &DeviceRef) -> bool {
     let body = &record.envelope().body;
     if reference.account_anchor != body.account_anchor
