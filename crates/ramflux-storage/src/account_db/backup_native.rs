@@ -106,6 +106,26 @@ impl BackupDatabase {
         )
     }
 
+    /// Merge one sanitized primary-transfer snapshot into a private copy of B's generation.
+    /// Native data-only rules apply; contact directory records are added as inert display
+    /// data only where B has none, so B's own evidence always wins.
+    /// # Errors
+    /// Rejects conflicting pins, invalid schemas and SQL/I/O errors.
+    pub fn merge_transfer_snapshot(
+        &mut self,
+        path: &Path,
+        key: &AccountDbKey,
+    ) -> Result<BackupMergeReport, StorageError> {
+        let report = self.merge_native_backup(path, key, || Ok(()))?;
+        self.attach(path, key)?;
+        let added = self.db.execute_batch(
+            "INSERT OR IGNORE INTO main.runtime_actor_state(state_kind,state_json) SELECT state_kind,state_json FROM incoming.runtime_actor_state WHERE state_kind LIKE 'directory/identity/%'",
+        );
+        self.db.execute_batch("DETACH DATABASE incoming")?;
+        added?;
+        Ok(report)
+    }
+
     /// Merges data while leaving live authority, key pins, permissions and replay state intact.
     /// Imported DM sessions are receive-only and outbound sessions bootstrap independently.
     /// # Errors

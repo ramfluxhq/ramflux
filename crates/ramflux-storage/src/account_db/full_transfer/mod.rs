@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Device-local full-transfer staging owners. They grant no native authority.
+// Interim only (TRANSFER-ARCHIVE-01): the typed-owner engine below is unreachable once the
+// snapshot family is the catalog, and is deleted before this branch lands.
+#![allow(dead_code)]
 mod attachment_availability;
 mod catalog;
 mod duplex;
@@ -61,6 +64,9 @@ mod source_owner;
 mod source_preparation;
 mod source_receipt;
 mod source_scalar;
+mod snapshot;
+mod snapshot_receive;
+mod snapshot_source;
 mod source_wire;
 mod stage;
 mod stage_chunks;

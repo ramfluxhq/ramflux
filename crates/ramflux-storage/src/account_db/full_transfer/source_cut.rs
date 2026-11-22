@@ -101,9 +101,7 @@ impl SourceContext<'_> {
         rules: &'static [super::catalog::FamilyRule],
     ) -> Result<super::inventory::FullTransferSchema, StorageError> {
         self.with_source_cut(cut, snapshot_id, |input| {
-            let schema = super::inventory::inspect(input, rules)?;
-            self.guard.require_remote_attachments(input)?;
-            Ok(schema)
+            super::inventory::inspect(input, rules)
         })
     }
     pub(super) fn with_source_cut<T>(

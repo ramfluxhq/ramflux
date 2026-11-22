@@ -53,8 +53,6 @@ impl AccountDb {
     ) -> Result<FullTransferSchema, StorageError> {
         self.require_full_stage_unlock()?;
         let output = inspect(&self.connection, rules)?;
-        super::source_scalar::SourceGuard::new(self, None)
-            .require_remote_attachments(&self.connection)?;
         self.require_full_stage_unlock()?;
         Ok(output)
     }
@@ -67,6 +65,15 @@ pub(in crate::account_db) fn inspect(
         return Err(unsupported());
     }
     let census_hash = full_census_hash(rules)?;
+    if let [rule] = rules
+        && rule.id == super::catalog::SNAPSHOT_FAMILY
+    {
+        // The sanitizer allowlist, not a per-table owner, decides what may cross.
+        connection.call(|db| Ok(super::snapshot::preflight(db)))??;
+        let mut family = rule.manifest_family()?;
+        family.source_rows = U64(1);
+        return Ok(FullTransferSchema { census_hash, families: vec![family] });
+    }
     let declared: BTreeSet<&str> = rules
         .iter()
         .filter_map(|rule| match rule.selector {

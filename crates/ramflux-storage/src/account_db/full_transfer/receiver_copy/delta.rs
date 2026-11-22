@@ -30,22 +30,48 @@ impl FullReceiverBaseCopy {
             return Err(wrong());
         }
         next.verify_predecessor(&previous).map_err(|_| wrong())?;
-        let counts =
-            stage.index_forward_scalar_records(hash, super::super::full_transfer_catalog())?;
+        let snapshot = super::super::snapshot_receive::active();
+        let counts = if snapshot {
+            None
+        } else {
+            Some(stage.index_forward_scalar_records(hash, super::super::full_transfer_catalog())?)
+        };
         self.projected = None;
         self.union = None;
         self.attested.lock().map_err(|_| wrong())?.take();
-        let mut private = BackupDatabase::open_full_receiver_copy(
-            &self.scratch.path.join("private.db"),
-            &self.key,
-        )?;
-        let encoding = self.contributions.advance(
-            &self.scratch.path.join("contributions.db"),
-            &self.key,
-            &mut private,
-            stage,
-            hash,
-        )?;
+        let (counts, encoding, private) = if let Some(counts) = counts {
+            let mut private = BackupDatabase::open_full_receiver_copy(
+                &self.scratch.path.join("private.db"),
+                &self.key,
+            )?;
+            let encoding = self.contributions.advance(
+                &self.scratch.path.join("contributions.db"),
+                &self.key,
+                &mut private,
+                stage,
+                hash,
+            )?;
+            (counts, encoding, private)
+        } else {
+            // A later cut is a complete snapshot; the monotonic merge subsumes the earlier one.
+            let counts = super::super::snapshot_receive::merge_cut(
+                stage,
+                hash,
+                &self.scratch.path,
+                &self.key,
+            )?;
+            let private = BackupDatabase::open_full_receiver_copy(
+                &self.scratch.path.join("private.db"),
+                &self.key,
+            )?;
+            let encoding = super::super::snapshot_receive::union(
+                &self.scratch.path.join("contributions.db"),
+                &self.key,
+                self.contributions.nonce,
+                &private,
+            )?;
+            (counts, encoding, private)
+        };
         let sealed = super::seal::CopySeal::capture(&self.scratch.path)?;
         super::super::receiver_materialization::Verification {
             directory: &self.scratch.path,

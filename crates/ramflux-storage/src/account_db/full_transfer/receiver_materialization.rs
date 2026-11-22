@@ -37,6 +37,9 @@ pub(super) struct Verification<'a, I: super::receiver_read::ReceiverInput> {
 impl<I: super::receiver_read::ReceiverInput> Verification<'_, I> {
     pub(super) fn run(&self) -> Result<(), StorageError> {
         self.stage.require_io()?;
+        if super::snapshot_receive::active() {
+            return super::snapshot_receive::verify(self.private, self.encoding);
+        }
         let comparison = verification_file::VerificationFile::create(self.directory)?;
         let path = self.directory.join("contributions.db");
         let mut db = super::receiver_contributions::open(&path, self.key)?;

@@ -93,7 +93,6 @@ struct FullStreamWork {
     relay: Arc<dyn FullPairingTransport>,
     origin: String,
     anchor: String,
-    linked_target: bool,
     new_target: Option<(String, ramflux_protocol::custody::DeviceRef)>,
 }
 impl FullStreamWork {
@@ -240,7 +239,6 @@ impl PairingActor {
             origin: c.origin.clone(),
             anchor,
             new_target,
-            linked_target,
         };
         let job = tokio::spawn(async move {
             match role {

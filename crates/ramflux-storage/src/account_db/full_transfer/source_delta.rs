@@ -80,6 +80,19 @@ impl SourceContext<'_> {
             return Err(StorageError::PairingField("WrongContext"));
         }
         let source = self;
+        if let [rule] = full_transfer_catalog()
+            && rule.id == super::catalog::SNAPSHOT_FAMILY
+        {
+            // Every later cut is a complete snapshot; B's monotonic merge subsumes earlier ones.
+            let encoded = source.encode_snapshot_cut(cut, current_snapshot, writer, true)?;
+            if tail
+                && encoded.1.total_bytes
+                    > ramflux_protocol::custody::pairing::full_transfer::MAX_TAIL_BYTES
+            {
+                return Err(StorageError::PairingField("NoSpace"));
+            }
+            return Ok(encoded);
+        }
         // The compiled preflight walks BOTH actual cuts, not peer-provided family counts.
         // Existing source-family rows are immutable and idempotent for an exact cut/rule.
         let (_, previous) =

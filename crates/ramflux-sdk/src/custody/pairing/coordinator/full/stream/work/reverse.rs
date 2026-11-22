@@ -11,14 +11,8 @@ impl FullStreamWork {
         if let Some(manifest) = self.io.retained_reverse_manifest().await? {
             return Ok(manifest);
         }
-        let draft = if self.linked_target {
-            let work = self.io.reverse_source_work().await?;
-            let encoded = self.runtime.clone().run_blocking(move || Ok(work.encode()?)).await?;
-            self.fresh().await?;
-            self.io.reverse_source_draft(encoded).await?
-        } else {
-            self.io.prepare_empty_reverse().await?
-        };
+        // Snapshot transfers carry no B data back; a linked B keeps its rows through the merge.
+        let draft = self.io.prepare_empty_reverse().await?;
         let participant = self.participant.clone();
         self.runtime.clone().run_blocking(move || participant.sign_reverse_manifest(&draft)).await
     }

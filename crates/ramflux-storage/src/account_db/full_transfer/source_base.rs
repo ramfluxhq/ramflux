@@ -64,6 +64,15 @@ impl SourceContext<'_> {
         restrictive_only: bool,
     ) -> Result<(W, FullBaseSourceEncoding), StorageError> {
         let rules = full_transfer_catalog();
+        if let [rule] = rules
+            && rule.id == super::catalog::SNAPSHOT_FAMILY
+        {
+            // B never sends data back: its own rows stay in its own generation.
+            if restrictive_only {
+                return Err(StorageError::PairingField("WrongContext"));
+            }
+            return self.encode_snapshot_cut(cut, snapshot_id, writer, cut == 0);
+        }
         let mut schema = self.source_cut_schema(cut, snapshot_id, rules)?;
         schema.require_typed_owners(rules)?;
         // Reverse metadata retains the full census, while only compiled restrictive

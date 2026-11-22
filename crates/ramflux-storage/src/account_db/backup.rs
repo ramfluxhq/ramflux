@@ -258,24 +258,8 @@ impl AccountDb {
                 target.close().map_err(|(_, error)| error)?;
                 return Ok(Ok(counts));
             }
-            super::backup_selector_admission::drop_scratch(&target)?;
-            super::home_migration::strip_from_backup(&target)?;
-            if let Err(error) = super::receive::ledger_backup::sanitize_backup(&target) {
+            if let Err(error) = sanitize_backup_copy(&target) {
                 return Ok(Err(error));
-            }
-            if let Err(error) = super::pairing::sanitize_backup(&target) {
-                return Ok(Err(error));
-            }
-            if super::local_search::lifecycle::strip(&target)? {
-                super::local_search::lifecycle::compact(&target)?;
-            }
-            super::backup_retirement::strip_own_copy_locators(&target)?;
-            target.execute("DELETE FROM object_segment_resource", [])?;
-            // Historical archives have no native physical progress to clear.
-            let native:bool=target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;
-            if native {
-                target.execute("UPDATE object_segment_file SET received_bitmap=0,chunk_digests=zeroblob(256),cipher_verified=0",[])?;
-                target.execute("UPDATE object_transfer_state SET done_bytes=0,segment_sequence=0 WHERE segment_generation IS NOT NULL",[])?;
             }
             // Domain history, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
@@ -285,6 +269,32 @@ impl AccountDb {
         crate::sync_path::sync_path(destination)?;
         Ok(AccountBackupSnapshot { key, counts })
     }
+}
+
+/// Device-local runtime removal applied to every backup-policy copy, archive or transfer.
+/// # Errors
+/// Returns SQL errors; the caller discards the private copy on any failure.
+pub(super) fn sanitize_backup_copy(target: &rusqlite::Connection) -> Result<(), StorageError> {
+    super::backup_selector_admission::drop_scratch(target)?;
+    super::home_migration::strip_from_backup(target)?;
+    super::receive::ledger_backup::sanitize_backup(target)?;
+    super::pairing::sanitize_backup(target)?;
+    if super::local_search::lifecycle::strip(target)? {
+        super::local_search::lifecycle::compact(target)?;
+    }
+    super::backup_retirement::strip_own_copy_locators(target)?;
+    target.execute("DELETE FROM object_segment_resource", [])?;
+    // Historical archives have no native physical progress to clear.
+    let native: bool = target.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",
+        [],
+        |r| r.get(0),
+    )?;
+    if native {
+        target.execute("UPDATE object_segment_file SET received_bitmap=0,chunk_digests=zeroblob(256),cipher_verified=0",[])?;
+        target.execute("UPDATE object_transfer_state SET done_bytes=0,segment_sequence=0 WHERE segment_generation IS NOT NULL",[])?;
+    }
+    Ok(())
 }
 
 pub(super) fn read_counts(db: &rusqlite::Connection) -> rusqlite::Result<BackupCounts> {

@@ -593,13 +593,42 @@ mod runtime;
 mod surfaces;
 mod tail_application_local;
 mod tail_local;
+#[cfg(test)]
 use tail_application_local::{APPLY as TAIL_APPLICATION, DEPENDENCY as TAIL_DEPENDENCIES};
 /// Fresh migrated baseline schema declarations. No row with `RequiresOwner` can be
 /// exported. Optional/history schemas and actor projections must be added explicitly.
 #[must_use]
 pub const fn full_transfer_catalog() -> &'static [FamilyRule] {
+    SNAPSHOT_CATALOG
+}
+/// The one transferred family: a sanitized snapshot of the whole account database.
+pub(super) const SNAPSHOT_FAMILY: &str = "sql/account_snapshot_v1";
+static SNAPSHOT_CATALOG: &[FamilyRule] = &[FamilyRule {
+    cells: &[CellRule { name: "snapshot", nullable: false, cell_type: CellType::Bytes }],
+    codec_version: U64(1),
+    disposition: Disposition::Transfer,
+    excluded: &[],
+    id: SNAPSHOT_FAMILY,
+    key: &["snapshot"],
+    merge: MergeRule::Revision,
+    restrictive: true,
+    selector: FamilySelector::Table("account_snapshot_v1"),
+    codec: &[FieldRule {
+        name: "snapshot",
+        nullable: false,
+        disposition: Disposition::Transfer,
+        merge: MergeRule::Revision,
+        codec: CodecRule::Scalar { cell_type: CellType::Bytes },
+    }],
+    key_grammar_version: U64(1),
+    restrictive_projection: &[],
+}];
+/// Typed per-table declarations of the engine this snapshot family replaces.
+#[cfg(test)]
+pub(super) const fn typed_catalog() -> &'static [FamilyRule] {
     TABLE_CATALOG
 }
+#[cfg(test)]
 static TABLE_CATALOG: &[FamilyRule] = &[
     local_actor::GROUP_RULE,
     local_actor::SAFETY_RULE,

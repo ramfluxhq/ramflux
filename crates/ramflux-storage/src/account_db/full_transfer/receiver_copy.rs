@@ -100,14 +100,22 @@ impl FullPinnedReceiverBase {
         let path = self.scratch.path.join("private.db");
         let snapshot = self.cut.write_private_snapshot(&path, self.cancelled.clone())?;
         let private = BackupDatabase::open_full_receiver_copy(&path, &snapshot.key)?;
-        let contributions = super::receiver_contributions::Contributions::capture(
-            &self.scratch.path.join("contributions.db"),
-            &snapshot.key,
-            &private,
-            [&self.owners[0], &self.owners[1]],
-            &self.cancelled,
-            &self.schema,
-        )?;
+        let contributions = if super::snapshot_receive::active() {
+            super::receiver_contributions::Contributions::snapshot(
+                &self.scratch.path.join("contributions.db"),
+                &snapshot.key,
+                [&self.owners[0], &self.owners[1]],
+            )?
+        } else {
+            super::receiver_contributions::Contributions::capture(
+                &self.scratch.path.join("contributions.db"),
+                &snapshot.key,
+                &private,
+                [&self.owners[0], &self.owners[1]],
+                &self.cancelled,
+                &self.schema,
+            )?
+        };
         drop(private);
         Ok(FullReceiverBaseCopy {
             projected: None,
@@ -230,23 +238,40 @@ impl FullReceiverBaseCopy {
         if stage.resume_record()?.stage_digest()? != self.stage_digest {
             return Err(wrong());
         }
-        let mut private = BackupDatabase::open_full_receiver_copy(
-            &self.scratch.path.join("private.db"),
-            &self.key,
-        )?;
-        let counts = super::receiver_projection::project_fixed(
-            stage,
-            &self.hash,
-            &mut private,
-            &self.observation,
-        )?;
-        let union = self.contributions.finish(
-            &self.scratch.path.join("contributions.db"),
-            &self.key,
-            &private,
-            stage,
-            &self.hash,
-        )?;
+        let (counts, union, private) = if super::snapshot_receive::active() {
+            let counts =
+                super::snapshot_receive::merge_cut(stage, &self.hash, &self.scratch.path, &self.key)?;
+            let private = BackupDatabase::open_full_receiver_copy(
+                &self.scratch.path.join("private.db"),
+                &self.key,
+            )?;
+            let union = super::snapshot_receive::union(
+                &self.scratch.path.join("contributions.db"),
+                &self.key,
+                self.contributions.nonce,
+                &private,
+            )?;
+            (counts, union, private)
+        } else {
+            let mut private = BackupDatabase::open_full_receiver_copy(
+                &self.scratch.path.join("private.db"),
+                &self.key,
+            )?;
+            let counts = super::receiver_projection::project_fixed(
+                stage,
+                &self.hash,
+                &mut private,
+                &self.observation,
+            )?;
+            let union = self.contributions.finish(
+                &self.scratch.path.join("contributions.db"),
+                &self.key,
+                &private,
+                stage,
+                &self.hash,
+            )?;
+            (counts, union, private)
+        };
         let sealed = seal::CopySeal::capture(&self.scratch.path)?;
         super::receiver_materialization::Verification {
             directory: &self.scratch.path,

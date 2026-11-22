@@ -48,7 +48,9 @@ impl FullTransferStage<'_> {
         self.require_io()?;
         let record = self.resume_record()?;
         let context = TranscriptV3::from_wire_bytes(&record.transcript).map_err(|_| mismatch())?;
-        if record.role != PairingRole::Responder || context.initiator.common.recipient_mode != "new"
+        let snapshot = super::snapshot_receive::active();
+        if record.role != PairingRole::Responder
+            || (!snapshot && context.initiator.common.recipient_mode != "new")
         {
             return Err(StorageError::PairingField("WrongContext"));
         }
@@ -71,8 +73,8 @@ impl FullTransferStage<'_> {
         // verifier bundle. Zero does not advance a max-generation floor; verifier keys
         // alone express no veto when EVERY other restrictive owner is empty. Preserve
         // their actual source_rows in metadata, but emit no reverse records (OVP-23).
-        if erasure_generation != 0
-            || schema.families.iter().any(|family| {
+        if !snapshot && erasure_generation != 0
+            || !snapshot && schema.families.iter().any(|family| {
                 family.restrictive
                     && family.source_rows.0 > 0
                     && match family.id.as_str() {
@@ -87,7 +89,18 @@ impl FullTransferStage<'_> {
         if ramflux_protocol::encode_base64url(schema.census_hash) != forward.manifest.census_hash {
             return Err(StorageError::PairingField("SchemaMismatch"));
         }
-        let families = schema.families.into_iter().filter(|family| family.restrictive).collect();
+        // A snapshot transfer never streams B's data back: the reverse carries no rows.
+        let families = schema
+            .families
+            .into_iter()
+            .filter(|family| family.restrictive)
+            .map(|mut family| {
+                if snapshot {
+                    family.source_rows = U64(0);
+                }
+                family
+            })
+            .collect();
         let manifest = Manifest {
             schema: "ramflux.pairing.full_transfer.manifest.v1".into(),
             version: 1,
@@ -157,7 +170,7 @@ impl FullTransferStage<'_> {
             return Err(mismatch());
         }
         let context = TranscriptV3::from_wire_bytes(&record.transcript).map_err(|_| mismatch())?;
-        if context.initiator.common.recipient_mode == "new"
+        if (super::snapshot_receive::active() || context.initiator.common.recipient_mode == "new")
             && (body.total_bytes.0 != 0
                 || body
                     .families
