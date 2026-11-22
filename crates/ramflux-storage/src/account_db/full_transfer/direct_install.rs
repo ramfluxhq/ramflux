@@ -61,7 +61,7 @@ enum Selection {
     Merge,
     OriginalContributions,
 }
-fn merge(
+pub(super) fn merge(
     db: &Connection,
     source: &DeviceRef,
     incoming: &FullDirectHistory,
@@ -106,7 +106,7 @@ fn project(
     let id = ramflux_protocol::encode_base64url(&version.original().id);
     require_projection(incoming, projection, &id, version.original())?;
     require_capture(incoming, authored, &own)?;
-    if super::super::deleted_messages::message_is_deleted_on(db, &id)? {
+    if super::message_denial::erase_if_denied(db, &projection.conversation_id, &id)? {
         return Ok(false);
     }
     // Existing directory context must be admitted by its own owner before content.
@@ -206,7 +206,7 @@ pub(super) fn require_capture(
     Ok(())
 }
 
-fn retire(db: &Connection, id: &str) -> Result<(), StorageError> {
+pub(super) fn retire(db: &Connection, id: &str) -> Result<(), StorageError> {
     // Existing B replay receipts need their typed sanitizer before a replacement.
     // Never discard that independent restriction merely to accept a newer body.
     if db.query_row(

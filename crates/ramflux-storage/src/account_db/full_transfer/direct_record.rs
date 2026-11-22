@@ -111,13 +111,34 @@ impl FullDirectRecord {
         Ok(value)
     }
 
+    pub(super) fn exact_inner(&self) -> &[u8] {
+        self.history.exact_inner()
+    }
+
+    pub(super) fn merge_on(
+        &self,
+        db: &Connection,
+        source: &DeviceRef,
+    ) -> Result<bool, StorageError> {
+        if db.is_autocommit() {
+            return Err(StorageError::PairingField("WrongContext"));
+        }
+        super::direct_install::merge(
+            db,
+            source,
+            &self.history,
+            &self.projection(&source.account_anchor)?,
+            self.capture.as_ref(),
+        )
+    }
+
     /// Apply a result reconstructed solely from retained original contributions in the
     /// caller's private transaction. This can remove a now-absent A-only preferred version.
     /// # Errors
     /// Refuses foreign roots, invalid originals, erasure or unclassified B replay state.
     pub fn project_original_contributions(
         &self,
-        private: &mut BackupDatabase,
+        private: &BackupDatabase,
         source: &DeviceRef,
     ) -> Result<bool, StorageError> {
         let own = &source.account_anchor;
@@ -279,4 +300,15 @@ fn write_part(output: &mut impl Write, bytes: &[u8], limit: usize) -> Result<(),
     output.write_all(&u32::try_from(bytes.len()).map_err(|_| invalid())?.to_be_bytes())?;
     output.write_all(bytes)?;
     Ok(())
+}
+
+// Physical validation extracts only a claim. The semantic owner still supplies the
+// authenticated transfer account independently to FullDirectRecord::read.
+pub(super) fn payload_account(mut bytes: &[u8]) -> Result<&str, StorageError> {
+    if bytes.len() > FULL_DIRECT_RECORD_LIMIT || take(&mut bytes, MAGIC.len())? != MAGIC {
+        return Err(invalid());
+    }
+    take(&mut bytes, 8)?;
+    read_part(&mut bytes, SENDER_LIMIT)?;
+    direct_history::payload_account(read_part(&mut bytes, super::FULL_DIRECT_HISTORY_LIMIT)?)
 }

@@ -28,7 +28,7 @@ fn record_profile_metadata_does_not_borrow_the_native_allowance() -> TestResult 
     assert!(db.execute("INSERT INTO source_scalar_row VALUES('cut','sql/object_payload_dependency','key',zeroblob(?1))",[METADATA_LIMIT + 1]).is_err(),
         "metadata SQL constraint accepted an oversized record");
     db.execute("INSERT INTO source_scalar_row VALUES('cut','sql/runtime_message_content','key',zeroblob(?1))",[METADATA_LIMIT + 1])?;
-    assert!(db.execute("INSERT INTO source_scalar_row VALUES('cut','sql/runtime_message_content','too-big',zeroblob(?1))",[limit(&native)? + 1]).is_err(),
+    assert!(db.execute("INSERT INTO source_scalar_row VALUES('cut','sql/runtime_message_content','too-big',zeroblob(?1))",[METADATA_LIMIT + super::super::FULL_DIRECT_RECORD_LIMIT + 1]).is_err(),
         "native SQL constraint exceeded its compiled format bound");
     Ok(())
 }

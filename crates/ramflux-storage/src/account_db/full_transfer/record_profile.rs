@@ -50,7 +50,7 @@ pub(super) fn require_header(rule: &FamilyRule, header: &RecordHeader) -> Result
 /// Only a compiled native family gets its named native byte budget. The SQL bound
 /// complements, and never replaces, exact field/header/native semantic validation.
 pub(super) fn sql_constraint() -> String {
-    let payload = NativePayload::DirectHistoryV1;
+    let payload = NativePayload::DirectRecordV1;
     format!(
         "CHECK(length(record) BETWEEN 1 AND CASE family WHEN '{}' THEN {} ELSE {} END)",
         payload.family(),

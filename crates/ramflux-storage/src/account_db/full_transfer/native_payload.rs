@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 #[serde(rename_all = "snake_case")]
 pub enum NativePayload {
     DirectHistoryV1,
+    DirectRecordV1,
 }
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
@@ -23,12 +24,13 @@ fn invalid() -> StorageError {
 impl NativePayload {
     pub(super) const fn family(self) -> &'static str {
         match self {
-            Self::DirectHistoryV1 => "sql/runtime_message_content",
+            Self::DirectHistoryV1 | Self::DirectRecordV1 => "sql/runtime_message_content",
         }
     }
     pub(super) const fn max_bytes(self) -> usize {
         match self {
             Self::DirectHistoryV1 => super::FULL_DIRECT_HISTORY_LIMIT,
+            Self::DirectRecordV1 => super::FULL_DIRECT_RECORD_LIMIT,
         }
     }
     pub(super) fn validate(self, bytes: &[u8]) -> Result<(), StorageError> {
@@ -36,6 +38,10 @@ impl NativePayload {
             return Err(invalid());
         }
         match self {
+            Self::DirectRecordV1 => {
+                let own = super::direct_record::payload_account(bytes)?;
+                super::FullDirectRecord::read(bytes, own).map(|_| ())
+            }
             Self::DirectHistoryV1 => {
                 let own = super::direct_history::payload_account(bytes)?;
                 super::FullDirectHistory::read(bytes, own).map(|_| ())

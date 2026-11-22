@@ -582,10 +582,14 @@ impl Owner {
             && super::receipt_history::erased(&private.db, &expected)?
         {
             self.remove(&private.db, &expected)?;
-            // Original inputs remain provenance; an erased observation cannot become
-            // normalized content on either contributor's behalf or revive on refresh.
+            // Permanent erasure dominates the original observation too; retained
+            // denial provenance must not keep an extra erased receipt copy alive.
             db.execute(
                 "DELETE FROM full_union_record WHERE generation_nonce=?1 AND family=?2 AND key=?3",
+                params![nonce.as_slice(), self.family, key],
+            )?;
+            db.execute(
+                "DELETE FROM full_union_input WHERE generation_nonce=?1 AND family=?2 AND key=?3",
                 params![nonce.as_slice(), self.family, key],
             )?;
             return Ok(());

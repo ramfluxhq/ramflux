@@ -256,5 +256,29 @@ pub(super) fn apply(
     Ok(())
 }
 
+/// A source-qualified deletion marker may already deny a B row without a public
+/// tombstone projection. Apply that existing denial through the same erasure graph
+/// before any native content is imported or normalized; synthesize no tombstone.
+pub(super) fn erase_if_denied(
+    db: &rusqlite::Connection,
+    conversation: &str,
+    message: &str,
+) -> Result<bool, StorageError> {
+    if db.is_autocommit() {
+        return Err(StorageError::PairingField("WrongContext"));
+    }
+    if !super::super::deleted_messages::message_is_deleted_on(db, message)? {
+        return Ok(false);
+    }
+    super::super::receive::erased_capture::capture_for(db, &[message], crate::unix_now())?;
+    super::super::deleted_messages::retain_deletion_marker_on(db, message)?;
+    db.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1 WHERE conversation_id=?1 AND message_id=?2", params![conversation, message])?;
+    db.execute(
+        "DELETE FROM runtime_message_content WHERE conversation_id=?1 AND message_id=?2",
+        params![conversation, message],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests;

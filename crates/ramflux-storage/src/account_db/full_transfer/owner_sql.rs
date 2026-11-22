@@ -46,6 +46,28 @@ pub(super) fn write(
     if account != Some(own.as_str()) {
         return Err(invalid());
     }
+    if rule.codec.iter().any(|field| {
+        matches!(
+            field.codec,
+            CodecRule::SqlNativePayload { payload: super::NativePayload::DirectRecordV1 }
+        )
+    }) {
+        let record =
+            super::direct_record::read_source(source, &own, message)?.ok_or_else(invalid)?;
+        let projection = record.projection(&own)?;
+        if projection.conversation_id != conversation
+            || record.exact_inner() != row.get_ref(2)?.as_blob().map_err(|_| invalid())?
+        {
+            return Err(invalid());
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        record.write(&own, &mut *bytes)?;
+        return source.query_row(
+            "SELECT ?1 AS message_id,?2 AS conversation_id,?3 AS body",
+            params![message, conversation, bytes.as_slice()],
+            |projected| Ok(write_full_scalar_sql_row(rule, projected, output)),
+        )?;
+    }
     let native = super::direct_source::read(source, &own, message)?.ok_or_else(invalid)?;
     if native.verify(&own)?.original().conversation_id != conversation
         || native.exact_inner() != row.get_ref(2)?.as_blob().map_err(|_| invalid())?

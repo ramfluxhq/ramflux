@@ -93,7 +93,8 @@ impl Contributions {
             candidate.retain_union(
                 &self.nonce,
                 &self.owners[0],
-                super::super::monotonic::owner(rule.id).is_some(),
+                super::super::monotonic::owner(rule.id).is_some()
+                    || rule.id == super::super::direct_union::FAMILY,
             )?;
         }
         Ok(())
@@ -114,6 +115,17 @@ impl Contributions {
         let mut input = old.as_slice();
         let original =
             Header(read_record_header(&mut input).map_err(|_| invalid())?.ok_or_else(invalid)?);
+        if header.family == super::super::direct_union::FAMILY {
+            return super::super::direct_union::absent(
+                tx,
+                private,
+                &self.nonce,
+                &self.owners,
+                self.owners.first().ok_or_else(invalid)?,
+                &original.0,
+                &mut input,
+            );
+        }
         let cells = super::super::fixed_union::Cells::read(
             compiled(&header.family)?,
             &original.0,

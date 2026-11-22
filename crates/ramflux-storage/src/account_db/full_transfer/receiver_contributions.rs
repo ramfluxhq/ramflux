@@ -168,6 +168,7 @@ impl Contributions {
     ) -> Result<FullUnionEncoding, StorageError> {
         super::monotonic::normalize(tx, &self.nonce, private, &self.owners)?;
         let guard = stage.source_guard();
+        super::direct_union::normalize(tx, &self.nonce, private, &self.owners, &guard)?;
         let (records, total) = super::union_encoding::visit(
             tx,
             &self.nonce,
@@ -196,7 +197,8 @@ impl Contributions {
 // Only explicitly registered content owners can remove an absent contribution. Excluded
 // local execution, imported MAC denial capabilities and restrictions are never deleted here.
 fn removable(family: &str) -> bool {
-    family == "sql/object_payload_dependency"
+    family == super::direct_union::FAMILY
+        || family == "sql/object_payload_dependency"
         || super::monotonic::owner(family).is_some_and(super::monotonic::Owner::removable)
 }
 fn remove_materialized(

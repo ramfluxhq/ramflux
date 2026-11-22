@@ -349,7 +349,7 @@ pub(super) const RULE_143: FamilyRule = table_rule!(
     "sql/runtime_message_content",
     "runtime_message_content",
     Transfer,
-    Immutable,
+    Revision,
     false,
     ["message_id"],
     [
@@ -359,10 +359,7 @@ pub(super) const RULE_143: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "runtime_message_content",
-                cell_type: CellType::Utf8
-            }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "conversation_id",
@@ -370,15 +367,15 @@ pub(super) const RULE_143: FamilyRule = table_rule!(
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(256), nullable: false }
         ),
         (
             "body",
             Bytes,
             false,
             Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::Bytes }
+            Revision,
+            CodecRule::SqlNativePayload { payload: super::super::NativePayload::DirectRecordV1 }
         ),
     ]
 );

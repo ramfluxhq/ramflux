@@ -133,6 +133,18 @@ impl Contributions {
             if !super::removable(&header.0.family) {
                 continue;
             }
+            if header.0.family == super::super::direct_union::FAMILY {
+                super::super::direct_union::absent(
+                    tx,
+                    private,
+                    &self.nonce,
+                    &self.owners,
+                    self.owners.get(1).ok_or_else(invalid)?,
+                    &header.0,
+                    &mut bytes,
+                )?;
+                continue;
+            }
             let cells = super::super::fixed_union::Cells::read(
                 super::super::source_scalar::compiled(&header.0.family)?,
                 &header.0,

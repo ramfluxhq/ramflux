@@ -375,9 +375,9 @@ message id, delivered/read state, qualified actor and nonnegative original time.
 It neither executes the receipt nor advances a watermark from a different row.
 A duplicate id with changed fields refuses instead of combining separate maxima.
 Ordinary message-erasure lookup runs before import and normalized reconstruction;
-erased observations are omitted from normalized content while original inputs
-remain separate provenance. The normal receipt-footprint triggers own future
-erasure. This owner does not establish first-hand origin, current permissions,
+erased observations are omitted from normalized content and original receipt
+copies are retired; the source-qualified denial retains its separate provenance.
+The normal receipt-footprint triggers own future erasure. This owner does not establish first-hand origin, current permissions,
 watermark ordering or complete native transfer acceptance.
 
 ## Complete direct contribution record
@@ -407,3 +407,40 @@ the obsolete Edit register. It compares the entire native contribution record
 read back from the private file, including display and capture fields. This
 primitive still needs the original-ledger owner to supply the resolved result;
 it creates no provenance or semantic receipt by itself.
+
+
+## Native DM content ledger
+
+The active runtime_message_content codec now carries the complete DirectRecordV1
+contribution. The NDH1 verifier frame is its native-history subrecord, not a
+mixed-build fallback. Source preparation encodes actual snapshot rows before
+Issue. Independent receiver admission binds scalar message/conversation cells to
+the verified record and the separately authenticated transfer account.
+
+The native resolver reconstructs each preferred record from retained original A
+and B rows, B first, then compares the entire actual private record. Source delta
+and current-B absence remove only the corresponding original contributor. If a
+remaining B version is older than a removed A-only maximum, that actual B version
+and capture replace the previous normalized selection. No prior normalized result
+becomes an independent B input. The last content contribution retires its indexed
+payload copies; erased narrow projections remain.
+
+Source-qualified erasure checks precede import and normalization, including a MAC
+denial without a public tombstone row. Existing erasure capture and projection
+triggers own the cleanup; no tombstone id/time is invented. Permanently erased
+native bodies/captures and receipt observations are also removed from the extra
+original-input ledger copies. Restrictive provenance stays monotonic. This does
+not claim a complete staged/raw-copy erasure witness; that ownership graph is open.
+
+The compiled SQL allowance adds the separately bounded actual capture (4 MiB),
+4096-byte display label and fixed framing to the existing native-history bound.
+Metadata remains capped at 262144 bytes; Inner, native-part and stream deadlines
+are unchanged. The existing SQL-overflow fixture now uses the complete-record cap;
+no new test case or local test run was added. Different codec/census builds refuse
+SchemaMismatch; no old stage is converted.
+
+This is the native DM business path. Non-default projection metadata, groups and
+the actor/raw/directory/journal dependency graph still need their owners. Required
+family completion stays 17/72 until that broader content contract is closed. The
+full populated-account transfer, installation, reverse restrictions and live B
+consumer still require a direct real-binary run.

@@ -66,8 +66,8 @@ pub(in crate::account_db::full_transfer) fn rule() -> Result<FamilyRule, Box<dyn
             codec: CodecRule::SqlNativePayload { payload: NativePayload::DirectHistoryV1 },
         },
     ];
-    // A test descriptor only: the live compiled family remains RequiresOwner until
-    // evidence, erasure and contribution/materialization owners are implemented.
+    // A narrow physical subrecord descriptor only. The live family uses the complete
+    // DirectRecordV1 shape; this descriptor grants no source/import authority.
     let mut rule = *full_transfer_catalog()
         .iter()
         .find(|rule| rule.id == "sql/runtime_message_content")

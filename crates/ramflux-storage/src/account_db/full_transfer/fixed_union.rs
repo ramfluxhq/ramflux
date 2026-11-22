@@ -211,6 +211,9 @@ pub(super) fn apply_fixed_base_in_transaction(
         .iter()
         .find(|rule| rule.id == header.family)
         .ok_or_else(unsupported)?;
+    if rule.id == super::direct_union::FAMILY {
+        return super::direct_union::apply(db, source, header, input);
+    }
     let cells = Cells::read(rule, header, input)?;
     if let Some(owner) = super::monotonic::owner(rule.id) {
         return owner.apply(db, rule, &cells);

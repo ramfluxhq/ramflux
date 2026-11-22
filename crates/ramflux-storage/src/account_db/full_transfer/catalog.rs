@@ -657,6 +657,7 @@ macro_rules! table_rule {
             key_grammar_version:U64(1), restrictive_projection:&[],
         }
     };
+    (@version "runtime_message_content",$mode:ident) => { U64(2) };
     (@version "receipt_projection",$mode:ident) => { U64(2) };
     (@version "device_directory",$mode:ident) => { U64(2) };
     (@version "account_erasure_generation",$mode:ident) => { U64(2) };
