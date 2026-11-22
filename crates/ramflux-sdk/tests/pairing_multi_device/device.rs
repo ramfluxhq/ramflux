@@ -15,7 +15,7 @@ use ramflux_sdk::{
 };
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
-const PASSWORD: &[u8] = b"pairing fixture data password";
+const PASSWORD: &[u8] = b"731905";
 pub struct Device {
     pub id: String,
     pub client: RamfluxClient,
@@ -80,6 +80,12 @@ impl Device {
                 now()?,
             )?;
             client.open_account_index(root.path())?;
+            client.bind_device_unlock(
+                root.path(),
+                vault.as_ref(),
+                id,
+                ramflux_sdk::DeviceSecret::Load,
+            )?;
             client.unlock_account(id, PASSWORD)?;
             if ordinary {
                 client.initialize_born_v3_branch("primary", vault.clone()).await?;
@@ -194,6 +200,12 @@ impl Device {
                 .bind_frontend_writer(slot.as_ref().ok_or("test: frontend actual writer absent")?)?
         };
         self.participant.return_client(&mut self.client)?;
+        self.client.bind_device_unlock(
+            self.root.path(),
+            self.vault.as_ref(),
+            &self.id,
+            ramflux_sdk::DeviceSecret::Load,
+        )?;
         self.actor = actor;
         Ok(service)
     }

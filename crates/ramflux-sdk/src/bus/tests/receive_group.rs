@@ -119,13 +119,17 @@ pub(super) fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
         ttl: 600,
     };
     let sealed = fixture.peer.client.seal_generated_routed_prepared(
-        config,
+        &fixture.peer.sealing_config()?,
         &message,
         &body,
         crate::client::routed::Route::from_inner(&body)?,
         crate::client::routed::SendMaterial { manifest: None, bundle: None },
     )?;
-    let envelope = crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &fixture.peer.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

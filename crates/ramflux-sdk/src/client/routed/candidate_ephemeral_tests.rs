@@ -71,13 +71,13 @@ async fn establish(a: &Native, b: &mut Native, id: &str) -> TestResult {
     )?;
     message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
     let mut envelope = gateway_direct_message_envelope_sealed(
-        &a.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config)?,
         &message,
         None,
         sealed.committed_a0.as_deref(),
     )?;
     crate::dm::add_message_metadata_commitment(
-        &a.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config)?,
         &mut envelope,
         sealed.metadata_commitment,
     )?;

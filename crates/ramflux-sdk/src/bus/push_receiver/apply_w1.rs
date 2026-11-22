@@ -505,6 +505,7 @@ async fn join_routed_w1(
         .apply_routed_entry_joining(engine, pool, entry, source.map(Ok), |client, write| {
             run_fenced(client.account_db()?, generation, turn, |tx, expected| match write {
                 crate::client::routed::JoinedW1::Project(ctx) => {
+                    client.record_inbound_device_observation(entry)?;
                     let (projected, admitted, held) =
                         client.commit_routed_w1_in(tx, sequence, ctx)?;
                     project_if_committed(tx, client, entry, sequence, expected)?;
@@ -512,6 +513,7 @@ async fn join_routed_w1(
                     Ok((projected, admitted))
                 }
                 crate::client::routed::JoinedW1::Cover => {
+                    client.record_inbound_device_observation(entry)?;
                     project_if_committed(tx, client, entry, sequence, expected)?;
                     cover_or_retire_retry(tx, sequence, false, turn, cover)?;
                     Ok((None, Vec::new()))
@@ -1046,11 +1048,19 @@ fn stage_open(
     prepared: &mut ReceiveEntry,
 ) -> Result<Opened, SdkError> {
     let json = serde_json::to_vec(&prepared.entry)?;
+    let sequence = prepared.entry.inbox_seq;
+    if account.client.account_db()?.receive_staged_matches(
+        &turn.target,
+        &turn.incarnation,
+        sequence,
+        &json,
+    )? {
+        return Ok(Opened { cover: true, retained: false });
+    }
     let key = match &prepared.retry_key {
         Some(key) => key.clone(),
         None => account.client.inbox_admission_key(&prepared.entry)?,
     };
-    let sequence = prepared.entry.inbox_seq;
     let incoming = prepared.entry.clone();
     let retain_until = now_unix_timestamp() + 300;
     let first_seen = now_unix_timestamp();

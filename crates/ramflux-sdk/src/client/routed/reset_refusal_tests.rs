@@ -358,7 +358,7 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
     let kek = crate::client::account::account_db_key_encryption_key(
         &vault,
         b"native fixture data passphrase",
-    );
+    )?;
     let wrapped =
         bob.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped database key")?;
     let db_key = crate::prelude::unwrap_with_vault_secret(&kek, &wrapped)?;

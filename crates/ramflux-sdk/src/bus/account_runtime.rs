@@ -37,6 +37,9 @@ type ReceiveGateHook = (tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::
 
 type ReaderSlot = Arc<RoutingMutex<Option<AccountReaders>>>;
 
+/// Depth of the account writer's connection-work queue.
+const CONNECTION_WORK_QUEUE: usize = 2;
+
 // Two five-second directory attempts plus local backfill staging.
 
 pub(super) struct Bootstrap {
@@ -136,7 +139,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         attended_accounts: BTreeSet::new(),
         subscribers: BTreeMap::new(),
     };
-    let (connection_sender, connection_work) = mpsc::channel(2);
+    let (connection_sender, connection_work) = mpsc::channel(CONNECTION_WORK_QUEUE);
     let mut account = AccountRuntime {
         timeouts,
         id: account_id,

@@ -125,6 +125,7 @@ crates/ramflux-node-core/src/router_wal/identity/recovery.rs | cursors | 2 | D |
 crates/ramflux-node-core/src/router_wal/identity/recovery.rs | load_metadata | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-node-core/src/send_authority.rs | read_scope | 1 | E | excluded=bounded notification authority metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
 crates/ramflux-node-core/src/send_authority/budget.rs | charge | 1 | E | excluded=bounded durable notification authority metadata; outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/send_authority/budget.rs | charge_matches | 1 | E | excluded=bounded durable notification authority metadata; outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/send_authority/budget.rs | uncharge | 1 | E | excluded=bounded durable notification authority metadata; outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/send_authority/origin.rs | closed_shared_due | 1 | E | excluded=bounded durable notification authority metadata; outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/send_authority/origin.rs | dependent_owner_scopes | 1 | E | excluded=bounded durable notification authority metadata; outside Envelope/Ack/Nack containment closure

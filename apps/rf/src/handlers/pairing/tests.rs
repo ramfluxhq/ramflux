@@ -237,13 +237,9 @@ fn pairing_failure_class_is_allow_listed_and_never_echoes_received_text() {
         (RfError::Message("never display this input SECRET-TOKEN".into()), "unknown"),
         (
             RfError::Sdk(SdkError::PassphrasePolicy(
-                ramflux_sdk::PassphrasePolicyError::TooShort { scalars: 14 },
+                ramflux_sdk::PassphrasePolicyError::NotSixDigits,
             )),
-            "1 more characters needed. The data passphrase must be at least 15 characters.",
-        ),
-        (
-            RfError::Sdk(SdkError::PassphrasePolicy(ramflux_sdk::PassphrasePolicyError::TooCommon)),
-            "This passphrase is too common or has appeared in a data breach. Choose a different one.",
+            "The account code must be exactly 6 digits (0-9).",
         ),
     ] {
         let class = output::class(&error);

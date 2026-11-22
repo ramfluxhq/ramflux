@@ -3,7 +3,7 @@
 
 //! W0 admission. A durable receipt reserves one terminal slot until settlement.
 use super::ReceiveTransaction;
-use crate::{ProjectionStore, StorageError};
+use crate::{AccountDb, ProjectionStore, StorageError};
 use rusqlite::{OptionalExtension, params};
 
 pub(super) const WORK_LIMIT: i64 = 1024;
@@ -215,6 +215,65 @@ pub(super) fn bind_receive_entry(
         return Err(StorageError::Integrity("receive entry binding"));
     }
     Ok(entry.envelope)
+}
+
+impl AccountDb {
+    /// True when a second stage of these bytes would only return [`ReceiveStageResult::Existing`].
+    ///
+    /// Erased, missing, conflicting, frozen, and retired inputs return false so the writer
+    /// path still decides them.
+    ///
+    /// # Errors
+    /// Returns storage errors from the snapshot read.
+    pub fn receive_staged_matches(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+        entry_json: &[u8],
+    ) -> Result<bool, StorageError> {
+        self.read_snapshot(|| self.staged_bytes_match(target, incarnation, sequence, entry_json))
+    }
+
+    fn staged_bytes_match(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+        entry_json: &[u8],
+    ) -> Result<bool, StorageError> {
+        let live: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT incarnation_id FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if live.as_deref() != Some(incarnation) {
+            return Ok(false);
+        }
+        if self.projection_checkpoint(&super::reset::freeze_name(target))?.as_deref()
+            == Some(super::reset::CURSOR_AHEAD)
+        {
+            return Ok(false);
+        }
+        let seq = sequence.to_be_bytes();
+        let disposition: Option<String> = self.connection.query_row(
+            "SELECT disposition FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+            params![target, incarnation, seq.as_slice()],
+            |row| row.get(0),
+        ).optional()?;
+        if disposition.as_deref() == Some("erased") {
+            return Ok(false);
+        }
+        let previous: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT entry_json FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+            params![target, incarnation, seq.as_slice()],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(previous.is_some_and(|bytes| bytes == entry_json))
+    }
 }
 
 /// Work/byte/intent caps counted across every incarnation of `target`.

@@ -248,8 +248,10 @@ the wrapper (the node address, env-file path and version are operator inputs):
    forwarding chain with DROP, authorize that published UDP mapping there too;
    determine the active chain/table names before applying any rule. No TCP 17450
    or notify UDP 18085 should be opened publicly.
-4. Run `deploy/scripts/demo-node.sh upgrade /absolute/path/to/operator.env` with
-   the chosen new `DEMO_VERSION`. Check the two authority endpoint entries and
+4. Apply voice with `up` while the operator file still selects the current image
+   version. Only then change `DEMO_VERSION` and run `upgrade --reset-service relay`,
+   using the sequence below. A newly selected voice overlay is refused by `upgrade`.
+   Check the two authority endpoint entries and
    the two rendered origin identities above. The overlay must set gateway
    `RAMFLUX_RELAY_VOICE_CONTROL_ENDPOINT=ramflux-relay:17450`; relay must have
    `RAMFLUX_RELAY_VOICE_UDP_ADDR=0.0.0.0:17449`,
@@ -261,10 +263,55 @@ the wrapper (the node address, env-file path and version are operator inputs):
    hang up, and verify old credentials stop forwarding. Health/status alone
    does not prove this flow; audio additionally requires a client media engine.
 
-Rollback: restore the prior operator voice-port selection, run the documented
-`rollback` command to restore the last-good snapshot/images, remove only the
-newly added firewall rule by its recorded handle, and verify wrapper `status`.
-Do not purge data or regenerate identity keys.
+### Operator sequence: version upgrade, relay reset and calls
+
+Use the corrected deploy tree with both old and new images available. Back up the
+private operator file and data before starting; keep the existing custody fragment,
+node ID, public origin, ports, bind address and identity keys. The selected image
+tag is an operator input; a release number alone is not an image tag.
+
+```sh
+operator_env=/absolute/path/to/operator.env
+new_version=REPLACE_WITH_SELECTED_IMAGE_TAG
+voice_port=59449
+old_version=$(sh -c '. "$1"; printf "%s" "${DEMO_VERSION:-$DEMO_PROJECT}"' sh "$operator_env")
+
+# Retain the current image version while enabling voice in the saved selection.
+printf '\nRAMFLUX_DEMO_VOICE_UDP_PORT=%s\n' "$voice_port" >> "$operator_env"
+deploy/scripts/demo-node.sh up "$operator_env"
+deploy/scripts/demo-node.sh status "$operator_env"
+
+# The last assignment wins in this trusted shell file. Change only the image tag.
+printf '\nDEMO_VERSION=%s\n' "$new_version" >> "$operator_env"
+deploy/scripts/demo-node.sh upgrade "$operator_env" --reset-service relay
+deploy/scripts/demo-node.sh status "$operator_env"
+```
+
+Inspect generated `config/gateway.toml`, `config/router.toml` and
+`config/notify.toml` for the authority endpoints and exact node origins above.
+Verify the voice listener/control/public endpoints and host UDP mapping with
+`status`, then establish a call between two authenticated clients: both must reach
+ACTIVE and receive media authorization for the published relay endpoint. Public
+health and signed discovery alone do not prove calls.
+
+The reset backs up and removes only `relay.redb` and `trust-snapshot.json`;
+it preserves the relay signing key, object bytes, unlisted entries and all volumes.
+The immediate rollback target is the old image version **with voice already
+applied**. Keep that voice selection for rollback; do not restore a pre-voice
+operator file first. If the upgrade fails with a pending transaction, use `recover`
+instead of starting another upgrade. After a successful upgrade, rollback is:
+
+```sh
+deploy/scripts/demo-node.sh rollback "$operator_env"
+printf '\nDEMO_VERSION=%s\n' "$old_version" >> "$operator_env"
+deploy/scripts/demo-node.sh status "$operator_env"
+```
+
+Rollback restores the selected relay database/cache backup and the old configs,
+images and overlay selection. To disable voice afterward, remove every
+`RAMFLUX_DEMO_VOICE_UDP_PORT` assignment from the operator file, run `up` with the
+restored old version, verify `status`, then remove only the newly added firewall
+rule by its retained handle. Never purge volumes or regenerate identity keys.
 
 `up` reuses the existing CA, service certificates, random identity seeds, gateway
 v3 issuer certificate, offline-root-signed provider keyring and provider-signed

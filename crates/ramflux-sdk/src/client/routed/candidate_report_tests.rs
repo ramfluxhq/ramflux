@@ -459,7 +459,9 @@ async fn active_sender_refuses_legacy_bytes_before_projection() -> Result<(), Sd
         assert!(
             a.client
                 .seal_generated_routed_prepared(
-                    &a.config()?,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &a.config()?
+                    )?,
                     &draft,
                     b"legacy-body",
                     Route::direct(),
@@ -546,7 +548,12 @@ async fn retired_opaque_own_device_body_cannot_build_envelope() -> Result<(), Sd
         let mut message = message("report-opaque", "c");
         message.encrypted_body = packet.clone();
         assert!(
-            gateway_direct_message_envelope(&a.config()?, &message, None).is_err(),
+            gateway_direct_message_envelope(
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+                &message,
+                None
+            )
+            .is_err(),
             "retired opaque own-copy is refused before envelope construction"
         );
         Ok(())
@@ -578,8 +585,12 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
                 .map_err(|error| invalid(&error.to_string()))?,
         )
         .map_err(|error| invalid(&error.to_string()))?;
-        let mut envelope =
-            gateway_direct_message_envelope_sealed(&a.config()?, &message, None, Some(&committed))?;
+        let mut envelope = gateway_direct_message_envelope_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+            &message,
+            None,
+            Some(&committed),
+        )?;
         envelope.ext = entry.envelope.ext.clone();
         resign(&a, &mut envelope)?;
         let nested = decode(&envelope)?;
@@ -630,7 +641,7 @@ async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
         message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
         message.ttl = message.ttl.saturating_add(1);
         match gateway_direct_message_envelope_sealed(
-            &a.config()?,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
             &message,
             None,
             sealed.committed_a0.as_deref(),
@@ -648,7 +659,12 @@ async fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
     let (a, b) = pair(alice, bob).await?;
     let (mut message, sealed) = nested_text(&a, &b, message(id, "c"), b"drift", Route::direct())?;
     message.ttl = message.ttl.saturating_add(1);
-    match gateway_envelope_from_sealed(&a.config()?, &mut message, sealed, None) {
+    match gateway_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+        &mut message,
+        sealed,
+        None,
+    ) {
         Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
         Err(error) => Err(invalid(&format!("exact a0 drift, got {error}"))),
         Ok(_) => Err(invalid("exact a0 drift, got Ok")),
@@ -689,7 +705,11 @@ async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
         let (mut message, sealed) =
             nested_text(&a, &b, message("report-wrapper-direct", "c"), b"direct", Route::direct())?;
         message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
-        match gateway_direct_message_envelope(&a.config()?, &message, None) {
+        match gateway_direct_message_envelope(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+            &message,
+            None,
+        ) {
             Err(SdkError::InboundRejected(text))
                 if text.contains("direct payload requires committed a0") =>
             {

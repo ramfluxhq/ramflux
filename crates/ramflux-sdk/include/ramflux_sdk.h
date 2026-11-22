@@ -163,7 +163,8 @@ struct RamfluxEventQueue {
 
 /*
  One synchronous storage request. Never write beyond `output_capacity` or retain pointers.
- Store inputs are secret bytes: primary=32, branch=64, provisioning<=4096.
+ Store inputs are secret bytes: primary=32, branch=64, provisioning<=4096 (the
+ `device-unlock:<id>` item is a 32-byte provisioning entry).
  Loads write the same bytes and set `output_len`; other operations return length 0.
  SDK-owned output memory is erased after use. Hosts erase their own temporary copies.
  */

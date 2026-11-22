@@ -419,7 +419,7 @@ async fn exact_protocol_bytes_and_current_projection_survive_account_reopen() ->
     assert_eq!(retained.to_generated()?, signed.to_generated()?, "history retains typed fields");
     f.human = RamfluxClient::new();
     f.human.open_account_index(&f.root)?;
-    f.human.unlock_account("human", b"surface-test-secret")?;
+    f.human.unlock_account("human", b"662207")?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
@@ -622,7 +622,7 @@ async fn hostile_surface_fallback_is_quoted_on_receive_read_and_restart() -> Tes
     assert_eq!(view["fallback_text"], expected);
     f.human = RamfluxClient::new();
     f.human.open_account_index(&f.root)?;
-    f.human.unlock_account("human", b"surface-test-secret")?;
+    f.human.unlock_account("human", b"662207")?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
@@ -875,7 +875,7 @@ async fn signed_self_consistent_resync_cannot_erase_finality_live_or_after_nativ
         if reopened {
             f.human = RamfluxClient::new();
             f.human.open_account_index(&f.root)?;
-            f.human.unlock_account("human", b"surface-test-secret")?;
+            f.human.unlock_account("human", b"662207")?;
             tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 f.human.initialize_born_v3_branch("human-device", f.vault.clone()),

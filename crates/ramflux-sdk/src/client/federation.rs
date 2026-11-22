@@ -109,8 +109,12 @@ impl RamfluxClient {
         options: &FederatedSendOptions,
     ) -> Result<PendingForward, SdkError> {
         let _ = options.franking;
-        let envelope =
-            crate::dm::gateway_envelope_from_sealed(engine.config(), message, sealed, None)?;
+        let envelope = crate::dm::gateway_envelope_from_sealed(
+            &engine.sealing_config()?,
+            message,
+            sealed,
+            None,
+        )?;
         if options.route.kind == crate::client::routed::Kind::Direct {
             self.project_authored_message(message, plaintext, &message.encrypted_body)?;
         }
@@ -125,7 +129,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         federation: &LocalBusFederationRoute,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope = gateway_direct_message_envelope(engine.config(), message, None)?;
+        let envelope = gateway_direct_message_envelope(&engine.sealing_config()?, message, None)?;
         tracing::info!(
             source_node_id = %federation.source_node_id,
             target_node_id = %federation.target_node_id,

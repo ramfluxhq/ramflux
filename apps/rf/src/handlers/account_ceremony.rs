@@ -254,7 +254,7 @@ async fn recover_with(
         return Err(RfError::Message("Account fingerprint confirmation did not match.".into()));
     }
     let phrase = terminal.line("Recovery phrase (hidden): ", true)?;
-    let passphrase = terminal.line("Local data passphrase (hidden): ", true)?;
+    let passphrase = terminal.line("Account code, 6 digits (hidden): ", true)?;
     let result = client.confirm(&phrase, &passphrase, &pending.account_anchor).await?;
     crate::utils::print_json(&serde_json::to_value(result)?)
 }
@@ -285,10 +285,10 @@ async fn create_human_confirm(
     client: &mut ramflux_sdk::LocalBusCreationClient,
 ) -> Result<ramflux_sdk::LocalBusCreatedAccount, RfError> {
     let words = recovery_challenge(terminal, client).await?;
-    let passphrase = terminal.line("New local data passphrase (hidden): ", true)?;
-    let repeated = terminal.line("Repeat local data passphrase (hidden): ", true)?;
+    let passphrase = terminal.line("New account code, 6 digits (hidden): ", true)?;
+    let repeated = terminal.line("Repeat account code (hidden): ", true)?;
     if *passphrase != *repeated {
-        return Err(RfError::Message("Local data passphrases did not match.".into()));
+        return Err(RfError::Message("Account codes did not match.".into()));
     }
     drop(repeated);
     ramflux_sdk::check_new_passphrase(&passphrase)

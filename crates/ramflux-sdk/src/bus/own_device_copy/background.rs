@@ -13,7 +13,7 @@ use crate::client::{
     routed::{SendMaterial, SendMaterialRequest},
 };
 use crate::prelude::{LocalBusAccountState, now_unix_timestamp};
-use crate::{GatewaySessionConfig, SdkDeviceManifestResponse, SdkError};
+use crate::{SdkDeviceManifestResponse, SdkError};
 use ramflux_protocol::Envelope;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
@@ -22,7 +22,7 @@ pub(crate) struct Plan {
     key: String,
     work: Work,
     fingerprint: serde_json::Value,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
     root: String,
     manifest: Option<SdkDeviceManifestResponse>,
     cached_manifest: bool,

@@ -86,8 +86,10 @@ pub enum CustodyConfirmReason {
     PassphraseEmpty,
     PassphraseTooLong,
     PassphraseNotUtf8,
-    PassphraseTooShort,
-    PassphraseTooCommon,
+    /// The new account code is not exactly six ASCII digits.
+    PassphraseNotSixDigits,
+    /// The new account code is on the closed trivial list.
+    PassphraseTrivialCode,
     /// 1-based recovery-phrase position. The expected word is not part of the reason.
     WordMismatch {
         position: u8,
@@ -105,8 +107,8 @@ impl CustodyConfirmReason {
             Self::PassphraseEmpty
             | Self::PassphraseTooLong
             | Self::PassphraseNotUtf8
-            | Self::PassphraseTooShort
-            | Self::PassphraseTooCommon
+            | Self::PassphraseNotSixDigits
+            | Self::PassphraseTrivialCode
             | Self::DisplayName
             | Self::OperationId => "CustodySetupInvalid",
         }
@@ -119,8 +121,8 @@ impl CustodyConfirmReason {
             Self::PassphraseEmpty => "passphrase_empty",
             Self::PassphraseTooLong => "passphrase_too_long",
             Self::PassphraseNotUtf8 => "passphrase_not_utf8",
-            Self::PassphraseTooShort => "too_short",
-            Self::PassphraseTooCommon => "too_common",
+            Self::PassphraseNotSixDigits => "not_six_digits",
+            Self::PassphraseTrivialCode => "trivial_code",
             Self::DisplayName => "display_name",
             Self::OperationId => "operation_id",
             Self::WordMismatch { position } => word_reason(position),
@@ -134,8 +136,8 @@ impl CustodyConfirmReason {
             "passphrase_empty" => Self::PassphraseEmpty,
             "passphrase_too_long" => Self::PassphraseTooLong,
             "passphrase_not_utf8" => Self::PassphraseNotUtf8,
-            "too_short" => Self::PassphraseTooShort,
-            "too_common" => Self::PassphraseTooCommon,
+            "not_six_digits" => Self::PassphraseNotSixDigits,
+            "trivial_code" => Self::PassphraseTrivialCode,
             "display_name" => Self::DisplayName,
             "operation_id" => Self::OperationId,
             _ => return word_from_token(token),

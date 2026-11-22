@@ -109,7 +109,7 @@ fn publication_permission_denied_names_the_check_and_removes_the_sealed_account(
         }
     });
     let error = ceremony
-        .confirm_with_passphrase(&answers, &vault, 100, b"discarded passphrase")
+        .confirm_with_passphrase(&answers, &vault, 100, b"314159")
         .expect_err("permission denied while publishing authority");
     assert!(matches!(error, SdkError::CustodyPublicationFailed), "{error}");
     let rendered = error.to_string();
@@ -233,10 +233,11 @@ fn custody_restore_publishes_through_the_no_replace_helper_with_marker_first() -
             let loaded = super::super::load_account(&root.0, "restored", 100)?;
             assert_eq!(loaded.publication(), authority.publication);
             assert!(loaded.branch_pending());
-            assert_eq!(vault.entry_count()?, 1);
-            crate::client::account::verify_stored_data_secret(
+            assert_eq!(vault.entry_count()?, 2, "branch seeds and the device-unlock secret");
+            crate::client::account::verify_stored_device_data_secret(
                 &root.0,
                 "restored",
+                &vault,
                 b"restore data secret",
             )?;
             assert_eq!(temporaries(&dir)?, Vec::<PathBuf>::new());

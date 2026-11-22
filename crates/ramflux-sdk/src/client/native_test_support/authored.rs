@@ -94,7 +94,9 @@ async fn own_authored_history_stages_for_a_new_third_sibling_and_erases_cached_b
         source
             .client
             .seal_authored_history(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config
+                )?,
                 plan,
                 SendMaterial { manifest: None, bundle: None }
             )?
@@ -159,7 +161,13 @@ async fn deliver_to_third(
         let material = source.material_for(target)?;
         let (plan, attestation) = source
             .client
-            .seal_authored_history(&source.config, plan, material)
+            .seal_authored_history(
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config,
+                )?,
+                plan,
+                material,
+            )
             .map_err(|error| format!("seal authored: {error:?}"))?
             .ok_or("sealed attestation")?;
         target
@@ -221,7 +229,11 @@ async fn retry_after_restart(
     source.restart_authored_source().await?;
     let (plan, cached) = source
         .client
-        .seal_authored_history(&source.config, plan, SendMaterial { manifest: None, bundle: None })?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            plan,
+            SendMaterial { manifest: None, bundle: None },
+        )?
         .ok_or("cached plan after reopen")?;
     assert_eq!(cached, expected, "reopen reuses the exact sealed bytes and staging id");
     third.receive(cached, 3).await?;

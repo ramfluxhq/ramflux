@@ -20,7 +20,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 &words(&phrase, positions)?,
                 vault.as_ref(),
                 now,
-                b"courier data passphrase",
+                b"246813",
             )?;
             let (_commands, receiver) = mpsc::channel(1);
             let (_stop, shutdown) = watch::channel(false);
@@ -113,7 +113,9 @@ async fn private_unlock(runtime: &mut AccountRuntime) -> Case {
     let command = AccountCommand {
         admission: None,
         private: Some(crate::bus::actor::PrivateCommand::NativeUnlock {
-            passphrase: zeroize::Zeroizing::new("courier data passphrase".into()),
+            secret: crate::bus::native_account::NativeUnlockSecret::Code(zeroize::Zeroizing::new(
+                "246813".into(),
+            )),
             home_node_id: None,
             reply,
         }),

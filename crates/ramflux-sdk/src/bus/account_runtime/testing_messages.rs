@@ -129,7 +129,7 @@ impl NativeCallAccount {
             &g::Content { value: Some(g::content::Value::Message(content.clone())) },
         )?;
         let sealed = source.seal_generated_routed_prepared(
-            source_config,
+            &crate::SealingConfig::from_live_session(source_config)?,
             &message,
             &prepared.wire,
             Route::direct(),
@@ -138,8 +138,11 @@ impl NativeCallAccount {
                 bundle: Some(self.client.load_x3dh_private_state(&reference)?.bundle),
             },
         )?;
-        let envelope =
-            crate::dm::gateway_generated_envelope_from_sealed(source_config, &mut message, sealed)?;
+        let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::SealingConfig::from_live_session(source_config)?,
+            &mut message,
+            sealed,
+        )?;
         source.project_authored_message(&message, &prepared.exact, &[])?;
         let entry = crate::GatewayInboxEntry {
             forwarded: false,
@@ -188,7 +191,7 @@ impl NativeCallAccount {
             &g::Content { value: Some(g::content::Value::Message(content.clone())) },
         )?;
         let sealed = self.client.seal_generated_routed_prepared(
-            &self.config,
+            &crate::SealingConfig::from_live_session(&self.config)?,
             &message,
             &prepared.wire,
             Route::direct(),
@@ -197,8 +200,11 @@ impl NativeCallAccount {
                 bundle: Some(target_client.load_x3dh_private_state(&reference)?.bundle),
             },
         )?;
-        let envelope =
-            crate::dm::gateway_generated_envelope_from_sealed(&self.config, &mut message, sealed)?;
+        let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::SealingConfig::from_live_session(&self.config)?,
+            &mut message,
+            sealed,
+        )?;
         self.client.project_authored_message(&message, &prepared.exact, &[])?;
         let entry = crate::GatewayInboxEntry {
             forwarded: false,

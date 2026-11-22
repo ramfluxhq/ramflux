@@ -64,7 +64,13 @@ async fn own_authored_group_history_preserves_plaintext_nonce_for_a_later_third_
             if plan.target.device_id == second.config.device_id { &mut second } else { &mut third };
         let (plan, envelope) = source
             .client
-            .seal_authored_history(&source.config, plan, source.material_for(target)?)?
+            .seal_authored_history(
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config,
+                )?,
+                plan,
+                source.material_for(target)?,
+            )?
             .ok_or("group sealed")?;
         target.receive(envelope, 1).await?;
         assert_eq!(
