@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant Connected catch-up and anchored safety sweep (S6b P23).
-//!
-//! Live `connection_manager::receive::run` keeps the 250 ms–5 s tick until P24
-//! activation. Tests drive this planner with a logical millisecond clock.
+//! Connected catch-up and anchored safety sweep (S6b P23), the planner of
+//! `connection_manager::receive::run_anchored`. Accounts without session push keep
+//! the 250 ms–5 s tick of `connection_manager::receive::run`. Tests drive this
+//! planner with a logical millisecond clock.
 
 use std::num::IntErrorKind;
 use std::sync::OnceLock;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant session-push receive executor. P20 wires `ApplyPage` into the actor.
+//! Session-push receive executor. `connection_manager::background_children` runs it
+//! (anchored catch-up plus intake) for every session that advertises session push.
 #![allow(dead_code)]
 
 pub(crate) mod ack_batch;

@@ -126,13 +126,21 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
         "pre-restart group history remains visible exactly once"
     );
     let receive = e2e::wait_receive_settled(&bob_d, &bob)?;
+    // A resident session the product retires (for example a short priority exchange that
+    // outlives its budget) is re-established and owes its own Connected catch-up; a later
+    // poll on a live session is a pass with no new session behind it.
+    let sessions = e2e::receive_counter(&receive, "live_sessions")?;
+    assert!(sessions >= 1, "{receive}");
     assert_eq!(
-        receive["catch_up_passes"],
-        1,
-        "one Connected catch-up, no later poll: {receive}; logs={}",
+        e2e::receive_counter(&receive, "catch_up_passes")?,
+        sessions,
+        "one Connected catch-up per live session, no later poll: {receive}; logs={}",
         dump_logs(&stack, &[&alice_d, &bob_d])
     );
-    eprintln!("B7_EVIDENCE catch_up_passes = {}", receive["catch_up_passes"]);
+    eprintln!(
+        "B7_EVIDENCE catch_up_passes = {} live_sessions = {sessions}",
+        receive["catch_up_passes"]
+    );
     assert!(
         e2e::receive_counter(&receive, "last_acked_seq")?
             <= e2e::receive_counter(&receive, "committed_cursor")?,
@@ -147,7 +155,12 @@ fn offline_demo_b(wal: bool, crash_after: Option<u64>, read_before_ack: bool) ->
     }
     let status = e2e::rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id])?;
     assert_eq!(status["session_delivery_mode"], "push", "{status}");
-    assert_eq!(status["networking_snapshot"]["receive"]["catch_ups_total"], 1, "{status}");
+    let settled = &status["networking_snapshot"]["receive"];
+    let completed = e2e::receive_counter(settled, "catch_ups_total")?;
+    assert!(
+        (1..=e2e::receive_counter(settled, "live_sessions")?).contains(&completed),
+        "completed catch-ups are bounded by live sessions: {status}"
+    );
     eprintln!(
         "B7 storage_wal={wal} crash_after={crash_after:?}: 20 DMs + 3 group messages once in order; status={status}"
     );

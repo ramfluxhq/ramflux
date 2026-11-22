@@ -109,7 +109,7 @@ pub(crate) enum AccountWork {
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
         reply: oneshot::Sender<Result<super::receive::ReceiveApplied, SdkError>>,
     },
-    #[allow(dead_code, reason = "P20a dormant; live senders arrive in later P20 parts")]
+    #[allow(dead_code, reason = "no production sender; only the actor test seam constructs it")]
     SettleRetained {
         generation: u64,
         turn: Box<ReceiveTurn>,
