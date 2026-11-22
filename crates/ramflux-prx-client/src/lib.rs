@@ -24,6 +24,7 @@ mod job;
 mod message;
 mod name;
 mod owner;
+mod publish;
 mod purge;
 mod revision;
 mod run;
@@ -53,7 +54,7 @@ pub use delete::{
     Forgotten, MessageDeleted, ReplyDeleted,
 };
 pub use erase::{EraseHistory, HistoryErased, HistoryForgotten, HistoryScope};
-pub use error::{ApiCode, NotReadyReason, PrxError};
+pub use error::{ApiCode, NotReadyReason, PrxError, limit_or_rate};
 pub use history::{HistoryRow, RowBody};
 pub use job::{JobState, JobStatus};
 pub use message::{
@@ -61,6 +62,7 @@ pub use message::{
 };
 pub use name::AgentName;
 pub use owner::OwnerId;
+pub use publish::{NamedLimits, publish_named_limits};
 pub use purge::{PURGE_STORES, PurgeReceipt};
 pub use revision::{CatalogRevision, ConfigRevision};
 pub use run::{JobCancel, RunCancel, RunCode, RunState};

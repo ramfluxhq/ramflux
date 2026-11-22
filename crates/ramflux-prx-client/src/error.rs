@@ -239,7 +239,8 @@ pub(crate) fn rate_limited(header_seconds: Option<u64>, body: &[u8]) -> PrxError
 /// Maps an HTTP 429. `agent_busy` and `agent_budget_exhausted` are admission refusals with the
 /// `Retry-After` header in seconds. Every other 429, including `rate_limited`, stays the shared
 /// rate limit.
-pub(crate) fn limit_or_rate(header_seconds: Option<u64>, body: &[u8]) -> PrxError {
+#[must_use]
+pub fn limit_or_rate(header_seconds: Option<u64>, body: &[u8]) -> PrxError {
     let code = ramflux_protocol::parse_i_json::<Value>(body)
         .ok()
         .and_then(|value| value.pointer("/error/code").and_then(Value::as_str).map(str::to_owned));

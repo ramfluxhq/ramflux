@@ -60,9 +60,21 @@ pub(crate) fn review_of(status: &Value) -> Option<Value> {
 pub(crate) fn request_of(action: AgentAction) -> Result<(&'static str, Value), RfError> {
     Ok(match action {
         AgentAction::Create { persona, model, access, role, confirm } => {
+            let mut config = serde_json::Map::new();
+            config.insert("provider".into(), json!(model.provider));
+            config.insert("model".into(), json!(model.model));
+            if model.max_concurrent_turns.is_some() || model.max_cost_per_day_cents.is_some() {
+                config.insert(
+                    "limits".into(),
+                    json!({
+                        "max_concurrent_turns": model.max_concurrent_turns,
+                        "max_cost_per_day_cents": model.max_cost_per_day_cents,
+                    }),
+                );
+            }
             let mut body = json!({
                 "persona": persona_value(&persona),
-                "config": {"provider": model.provider, "model": model.model},
+                "config": serde_json::Value::Object(config),
                 "access": access_value(&access),
                 "role": role,
             });

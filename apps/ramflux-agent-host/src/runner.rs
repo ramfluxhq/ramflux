@@ -79,6 +79,7 @@ impl<E: EngineProvider> AgentHost<E> {
     /// Rejects revoked/human accounts, unavailable snapshots, stream gaps and state I/O failures.
     pub async fn start(&mut self, bus: &mut impl AgentBus) -> Result<()> {
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
+        self.engine.publish_limits().await?;
         self.normalize_deferred()?;
         let topics = json!([
             "message.received",
@@ -192,6 +193,8 @@ impl<E: EngineProvider> AgentHost<E> {
         let conversation_id = participant::field(metadata, "conversation_id")?;
         let message_id = participant::field(metadata, "message_id")?;
         if metadata["deleted"] == true {
+            // One everyone-delete clears the whole PRX session, every agent included.
+            self.engine.erase_history(conversation_id).await?;
             return Ok(());
         }
         participant::identity(bus, &mut self.state, &self.config.account_id).await?;
@@ -386,6 +389,7 @@ impl<E: EngineProvider> AgentHost<E> {
             .await?
             .is_none()
             {
+                self.engine.erase_history(&conversation_id).await?;
                 self.engine.cancel(&conversation_id).await?;
                 self.state.approvals.remove(&conversation_id);
             }

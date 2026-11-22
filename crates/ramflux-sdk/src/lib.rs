@@ -49,6 +49,7 @@ mod attachment_send;
 pub use attachment_send::PlaintextDigester;
 mod agent_record;
 pub mod custody;
+mod prx_owner;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
 mod constants;

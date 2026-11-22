@@ -14,6 +14,9 @@ use std::{collections::BTreeMap, io::Read, path::Path, time::Instant};
 const MAX_TOKEN_BYTES: u64 = 8192;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const UNAVAILABLE_LOG_WINDOW_SECONDS: u64 = 60;
+const MAX_ERASE_RECEIPTS: usize = 128;
+
+mod flows;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +60,25 @@ struct PrxState {
     completed: BTreeMap<String, PrxCompleted>,
     #[serde(default)]
     pending: BTreeMap<String, String>,
+    /// Receipts of a session erase, keyed by the ramflux conversation id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    history_erased: BTreeMap<String, Vec<StoredHistory>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHistory {
+    erase_id: String,
+    generation: u64,
+    remaining: u64,
+    incarnation: String,
+    session: String,
+    agent: String,
+    scope_incarnation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forgotten_created: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forgotten_touched: Option<u64>,
 }
 
 enum HttpFailure {
@@ -64,6 +86,8 @@ enum HttpFailure {
     Timeout,
     Rejected,
     Invalid,
+    /// HTTP 429 `agent_busy` or `agent_budget_exhausted`. Not retried.
+    Admission(EngineFailure),
 }
 
 struct HttpResponse {
@@ -82,6 +106,12 @@ pub struct PrxEngine {
     turn_timeout_ms: u64,
     approval_timeout_ms: u64,
     mismatch_logged: bool,
+    typed: Option<ramflux_prx_client::PrxClient>,
+    limit_turns: Option<u32>,
+    limit_cost: Option<u64>,
+    prx_agent: Option<String>,
+    prx_provider: Option<String>,
+    prx_model: Option<String>,
 }
 
 impl PrxEngine {
@@ -115,6 +145,10 @@ impl PrxEngine {
             .timeout(std::time::Duration::from_secs(config.request_timeout_s))
             .build()
             .map_err(|_| Error::Config)?;
+        let wants_typed = config.erase_session_on_delete
+            || config.max_concurrent_turns.is_some()
+            || config.max_cost_per_day_cents.is_some();
+        let typed = if wants_typed { Some(typed_client(config)?) } else { None };
         Ok(Self {
             client,
             base_url,
@@ -126,6 +160,12 @@ impl PrxEngine {
             turn_timeout_ms: config.turn_timeout_s.saturating_mul(1000),
             approval_timeout_ms: config.approval_timeout_s.saturating_mul(1000),
             mismatch_logged: false,
+            typed,
+            limit_turns: config.max_concurrent_turns,
+            limit_cost: config.max_cost_per_day_cents,
+            prx_agent: config.agent_name.clone(),
+            prx_provider: config.provider.clone(),
+            prx_model: config.model.clone(),
         })
     }
 
@@ -147,6 +187,7 @@ impl PrxEngine {
             if error.is_timeout() { HttpFailure::Timeout } else { HttpFailure::Unavailable }
         })?;
         let status = response.status();
+        let retry_after = retry_after_seconds(response.headers());
         if response
             .content_length()
             .is_some_and(|length| length > u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX))
@@ -158,6 +199,9 @@ impl PrxEngine {
         })?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(HttpFailure::Invalid);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return classify_too_many(retry_after, &bytes);
         }
         let body = if bytes.is_empty() {
             Value::Null
@@ -357,9 +401,12 @@ impl PrxEngine {
             return Err(HttpFailure::Rejected);
         }
         // Approval is single-use: retry only resume after the approval POST has succeeded.
-        let Ok(response) = self.resume_approved(&approval_path).await else {
-            self.revoke_pending(conversation_id).await;
-            return Err(HttpFailure::Rejected);
+        let response = match self.resume_approved(&approval_path).await {
+            Ok(response) => response,
+            Err(error) => {
+                self.revoke_pending(conversation_id).await;
+                return Err(error);
+            }
         };
         self.state.pending.remove(conversation_id);
         self.state.jobs.insert(
@@ -390,6 +437,7 @@ impl PrxEngine {
                     if response.status.is_server_error()
                         || matches!(response.status.as_u16(), 408 | 429) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => {}
+                Err(HttpFailure::Admission(reason)) => return Err(HttpFailure::Admission(reason)),
                 Ok(_) | Err(HttpFailure::Invalid | HttpFailure::Rejected) => {
                     return Err(HttpFailure::Rejected);
                 }
@@ -497,6 +545,11 @@ impl EngineProvider for PrxEngine {
                 self.note_unavailable();
                 Ok(Vec::new())
             }
+            Err(HttpFailure::Admission(reason)) => Ok(vec![EngineEvent::VisibleFailure {
+                conversation_id: input.conversation.conversation_id.to_owned(),
+                message_id: input.conversation.message_id.to_owned(),
+                reason,
+            }]),
             Err(error @ (HttpFailure::Timeout | HttpFailure::Rejected | HttpFailure::Invalid)) => {
                 Ok(vec![EngineEvent::VisibleFailure {
                     conversation_id: input.conversation.conversation_id.to_owned(),
@@ -541,6 +594,16 @@ impl EngineProvider for PrxEngine {
                 }
                 Ok(None) => {}
                 Err(HttpFailure::Unavailable | HttpFailure::Timeout) => self.note_unavailable(),
+                Err(HttpFailure::Admission(reason)) => {
+                    self.state.jobs.remove(&conversation);
+                    let event = EngineEvent::VisibleFailure {
+                        conversation_id: conversation.clone(),
+                        message_id: job.message_id.clone(),
+                        reason,
+                    };
+                    self.state.completed.insert(conversation, PrxCompleted::from_event(&event)?);
+                    events.push(event);
+                }
                 Err(HttpFailure::Rejected | HttpFailure::Invalid) => {
                     self.state.jobs.remove(&conversation);
                     let event = EngineEvent::VisibleFailure {
@@ -572,8 +635,18 @@ impl EngineProvider for PrxEngine {
                 Err(Error::EngineUnavailable)
             }
             Err(HttpFailure::Timeout) => Err(Error::EngineTimeout),
-            Err(HttpFailure::Rejected | HttpFailure::Invalid) => Err(Error::EngineRejected),
+            Err(HttpFailure::Admission(_) | HttpFailure::Rejected | HttpFailure::Invalid) => {
+                Err(Error::EngineRejected)
+            }
         }
+    }
+
+    async fn publish_limits(&mut self) -> Result<()> {
+        self.publish_configured().await
+    }
+
+    async fn erase_history<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
+        self.erase_mapped(conversation_id).await
     }
 
     async fn cancel<'a>(&'a mut self, conversation_id: &'a str) -> Result<()> {
@@ -607,6 +680,10 @@ impl EngineProvider for PrxEngine {
             || self.state.jobs.len() > self.max_conversations
             || self.state.completed.len() > self.max_conversations
             || self.state.pending.len() > self.max_conversations
+            || self.state.history_erased.len() > MAX_ERASE_RECEIPTS
+            || self.state.history_erased.iter().any(|(id, rows)| {
+                !valid_id(id) || rows.len() > 64 || rows.iter().any(|row| !stored_history_ok(row))
+            })
             || self.state.pending.iter().any(|(c, d)| !valid_id(c) || !valid_segment(d))
             || self
                 .state
@@ -861,6 +938,55 @@ fn strip_image_markers(reply: &str) -> String {
     }
     output.push_str(tail);
     output.trim().to_owned()
+}
+
+fn typed_client(config: &PrxConfig) -> Result<ramflux_prx_client::PrxClient> {
+    let settings = ramflux_prx_client::ClientConfig::new(&config.base_url, &config.token_file)
+        .with_request_timeout(std::time::Duration::from_secs(config.request_timeout_s));
+    ramflux_prx_client::PrxClient::new(&settings).map_err(|_| Error::Config)
+}
+
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    if !raw.is_empty() && raw.len() <= 20 && raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        raw.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn classify_too_many(
+    header_seconds: Option<u64>,
+    bytes: &[u8],
+) -> std::result::Result<HttpResponse, HttpFailure> {
+    match ramflux_prx_client::limit_or_rate(header_seconds, bytes) {
+        ramflux_prx_client::PrxError::AgentBusy { retry_after_secs } => {
+            Err(HttpFailure::Admission(EngineFailure::AgentBusy { retry_after_secs }))
+        }
+        ramflux_prx_client::PrxError::AgentBudgetExhausted { retry_after_secs } => {
+            Err(HttpFailure::Admission(EngineFailure::AgentBudgetExhausted { retry_after_secs }))
+        }
+        _ => {
+            let body = if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(bytes).unwrap_or(Value::Null)
+            };
+            Ok(HttpResponse { status: StatusCode::TOO_MANY_REQUESTS, body })
+        }
+    }
+}
+
+fn stored_history_ok(row: &StoredHistory) -> bool {
+    row.remaining == 0
+        && !row.erase_id.is_empty()
+        && row.erase_id.len() <= 128
+        && valid_segment(&row.session)
+        && valid_segment(&row.agent)
+        && row.incarnation.len() <= 64
+        && row.scope_incarnation.len() <= 64
+        && !row.incarnation.chars().any(char::is_control)
+        && !row.scope_incarnation.chars().any(char::is_control)
 }
 
 fn valid_id(value: &str) -> bool {

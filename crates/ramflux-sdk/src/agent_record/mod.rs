@@ -41,6 +41,28 @@ pub(crate) const ROLE_NAMED: &str = "named";
 pub(crate) struct AgentIntent {
     pub(crate) persona: AgentPersona,
     pub(crate) access: AgentAccessPolicy,
+    /// Set only when a limit bound is set, so an intent with no limits serializes as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_concurrent_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_cost_per_day_cents: Option<u64>,
+}
+
+impl AgentIntent {
+    pub(crate) fn new(persona: AgentPersona, access: AgentAccessPolicy) -> Self {
+        Self {
+            persona,
+            access,
+            provider: None,
+            model: None,
+            max_concurrent_turns: None,
+            max_cost_per_day_cents: None,
+        }
+    }
 }
 
 /// The stored agent record. `identity` is the `EventIdentity` of the latest accepted change.
@@ -57,6 +79,15 @@ pub(crate) struct StoredAgentRecord {
     /// Change sequence of the last write of this record (AGENT-IDENTITY-01 E4, `agent.watch`). Set by
     /// `AgentRecordStore::save`; strictly increasing across the records of one owner.
     pub(crate) change_seq: u64,
+    /// Present only on the desktop that created the agent with a limit bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_concurrent_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_cost_per_day_cents: Option<u64>,
 }
 
 /// Refuses a record whose fields are outside the closed shapes of this module.
@@ -71,5 +102,9 @@ pub(crate) fn check_record(record: &StoredAgentRecord) -> Result<(), SdkError> {
     ramflux_protocol::message::identity::order_key(&record.identity)
         .map_err(|_| SdkError::CustodySetupInvalid)?;
     check_persona(&record.persona)?;
-    check_access(&record.access)
+    check_access(&record.access)?;
+    let turns_ok = record.max_concurrent_turns.is_none_or(|value| (1..=1024).contains(&value));
+    let cost_ok =
+        record.max_cost_per_day_cents.is_none_or(|value| (1..=1_000_000_000).contains(&value));
+    if turns_ok && cost_ok { Ok(()) } else { Err(SdkError::CustodySetupInvalid) }
 }
