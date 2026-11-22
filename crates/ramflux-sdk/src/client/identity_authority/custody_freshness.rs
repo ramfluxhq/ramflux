@@ -32,7 +32,8 @@ impl NativeHeadFreshness {
             return;
         }
         let now = Instant::now();
-        let was_fresh = self.contains(root, &hash, now);
+        let became_fresh = !self.contains(root, &hash, now)
+            && now.checked_duration_since(at).is_some_and(|age| age <= FRESH_FOR);
         if !self.heads.contains_key(root) && self.heads.len() >= MAX_HEADS {
             let oldest =
                 self.heads.iter().min_by_key(|(_, (_, at))| *at).map(|(root, _)| root.clone());
@@ -40,10 +41,8 @@ impl NativeHeadFreshness {
                 self.heads.remove(&oldest);
             }
         }
-        self.heads.insert(root.to_owned(), (hash.clone(), at));
-        if !was_fresh && self.contains(root, &hash, now) {
-            self.newly_fresh = true;
-        }
+        self.heads.insert(root.to_owned(), (hash, at));
+        self.newly_fresh |= became_fresh;
     }
     fn contains(&self, root: &str, hash: &str, now: Instant) -> bool {
         self.heads.get(root).is_some_and(|(observed, at)| {
