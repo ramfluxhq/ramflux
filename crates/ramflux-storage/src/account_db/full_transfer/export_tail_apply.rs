@@ -62,10 +62,10 @@ pub(super) fn validate_export_tail(
     })
 }
 
-/// Apply the tail on a scratch copy of B's current file, fsync that copy, and rename it
-/// onto the account path. The open connection then denies every statement. The keyed set
-/// is destroyed only after that rename and its sync. A retry that finds this hash's marker
-/// destroys any leftover key and returns success.
+/// Apply the tail as one immediate transaction on B's open account. The scratch copy is
+/// only the read cut for the digest plan. The account stays WAL, the file is not renamed,
+/// and the open connection stays usable. The keyed set is destroyed only after that commit.
+/// A retry that finds this hash's marker destroys any leftover key and returns success.
 /// # Errors
 /// `RetainedDigestMissing` when the set is gone and this hash was not marked;
 /// `ManifestMismatch` when the section or a row decision disagrees; `WrongContext`
