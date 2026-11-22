@@ -94,7 +94,13 @@ impl RamfluxClient {
             )?;
             crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)
         })?;
-        let accepted = engine.submit_envelope(envelope).await?;
+        let accepted = crate::client::recipient_home::submit_addressed(
+            self,
+            engine,
+            envelope,
+            message.recipient_principal_commitment.as_deref(),
+        )
+        .await?;
         self.account_db()?.write_transaction(|| {
             self.project_authored_conversation_event(AuthoredProjection {
                 message: &message,

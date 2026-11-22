@@ -143,7 +143,6 @@ impl RamfluxClient {
         tracing::info!(
             source_node_id = %federation.source_node_id,
             target_node_id = %federation.target_node_id,
-            federation_url = %federation.federation_url,
             envelope_id = %envelope.envelope_id,
             target_delivery_id = %envelope.target_delivery_id,
             route_decision = "remote_federation_forward",
@@ -169,38 +168,6 @@ impl RamfluxClient {
             crate::client::routed::Route::control(),
         )
         .await
-    }
-
-    /// # Errors
-    pub fn register_node(&mut self, node_id: &str, endpoint: &str) -> ramflux_sync::FederationNode {
-        self.federation_mesh.register_node(node_id, endpoint)
-    }
-
-    /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn establish_trusted_link(&mut self, left: &str, right: &str) -> Result<(), SdkError> {
-        Ok(self.federation_mesh.establish_trusted_link(left, right)?)
-    }
-
-    /// # Errors
-    /// Returns an error when the node is not active or cannot be bound.
-    pub fn bind_identity_home(&mut self, identity: &str, node_id: &str) -> Result<(), SdkError> {
-        Ok(self.federation_mesh.bind_identity_home(identity, node_id)?)
-    }
-
-    /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
-    pub fn send_cross_node_message(
-        &mut self,
-        from_identity: &str,
-        to_identity: &str,
-        body_ciphertext: &[u8],
-    ) -> Result<FederationMessage, SdkError> {
-        Ok(self.federation_mesh.send_cross_node_message(
-            from_identity,
-            to_identity,
-            body_ciphertext,
-        )?)
     }
 }
 
@@ -261,7 +228,6 @@ fn trace_forward(route: &LocalBusFederationRoute, envelope: &ramflux_protocol::E
     tracing::info!(
         source_node_id = %route.source_node_id,
         target_node_id = %route.target_node_id,
-        federation_url = %route.federation_url,
         envelope_id = %envelope.envelope_id,
         target_delivery_id = %envelope.target_delivery_id,
         route_decision = "remote_federation_forward",

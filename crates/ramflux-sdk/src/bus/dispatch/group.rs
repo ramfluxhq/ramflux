@@ -957,14 +957,11 @@ mod tests {
         }
     }
 
-    fn federation_route(recipient_prekey_url: Option<String>) -> LocalBusFederationRoute {
+    fn federation_route() -> LocalBusFederationRoute {
         LocalBusFederationRoute {
-            federation_url: "http://node-a.test".to_owned(),
             source_node_id: "node-a".to_owned(),
             target_node_id: "node-b".to_owned(),
             required_capability: "opaque_delivery".to_owned(),
-            admin_token: None,
-            recipient_prekey_url,
         }
     }
 
@@ -1010,7 +1007,7 @@ mod tests {
         )?;
         let Err(error) = resolve_federated_group_member_principal_commitment(
             &account.client,
-            &federation_route(None),
+            &federation_route(),
             Some("bob_commitment"),
             "bob_device",
             Duration::from_secs(600),

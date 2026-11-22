@@ -123,6 +123,71 @@ pub(crate) async fn required_public_base(
         .ok_or_else(|| SdkError::LocalBus(UNPINNED.into()))
 }
 
+/// Pinned home when it names a different node from this account.
+///
+/// `None` keeps the session directory and a local gateway submit.
+///
+/// # Errors
+/// Returns an error when the account record cannot be read.
+pub(crate) fn foreign_target(
+    client: &RamfluxClient,
+    commitment: &str,
+) -> Result<Option<String>, SdkError> {
+    let Some(principal) = principal_for_commitment(client, commitment)? else {
+        return Ok(None);
+    };
+    let Some(home) = pinned_home(client, &principal)? else {
+        return Ok(None);
+    };
+    let own = client.account_db()?.load_actor_state::<String>("account/node-id")?;
+    if own.as_deref() == Some(home.as_str()) { Ok(None) } else { Ok(Some(home)) }
+}
+
+/// Device manifest from the pinned home's signed public prekey endpoint.
+///
+/// # Errors
+/// Returns an error when the signed record or the manifest response is refused.
+pub(crate) async fn public_device_manifest(
+    home: &str,
+    commitment: &str,
+) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
+    let base = public_prekey_base(home).await?;
+    let started = std::time::Instant::now();
+    let manifest =
+        crate::prekey::http_async::get::<Option<crate::prekey::SdkDeviceManifestResponse>>(
+            &base,
+            &format!("/mvp1/device-manifest/{commitment}"),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .ok_or_else(|| SdkError::InboundRejected("device manifest unavailable".into()))?
+        .fetched_from(started);
+    Ok(manifest)
+}
+
+/// Own-gateway submit. A foreign pinned home is carried as `target_node`.
+///
+/// # Errors
+/// Returns an error when the pin cannot be read or the gateway refuses the envelope.
+pub(crate) async fn submit_addressed(
+    client: &RamfluxClient,
+    engine: &mut impl GatewaySessionAccess,
+    envelope: ramflux_protocol::Envelope,
+    commitment: Option<&str>,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let target = match commitment {
+        Some(commitment) => foreign_target(client, commitment)?,
+        None => None,
+    };
+    if target.is_none() {
+        return engine.submit_envelope(envelope).await;
+    }
+    match engine.submit_classified_to(envelope, target).await? {
+        Ok(entry) => Ok(entry),
+        Err(refusal) => Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned())),
+    }
+}
+
 /// Submit target copied from the pin. An unpinned caller target is dropped.
 pub(crate) fn submit_route(
     route: &crate::LocalBusFederationRoute,
@@ -130,7 +195,6 @@ pub(crate) fn submit_route(
 ) -> crate::LocalBusFederationRoute {
     let mut route = route.clone();
     submit_target.unwrap_or("").clone_into(&mut route.target_node_id);
-    route.recipient_prekey_url = None;
     route
 }
 

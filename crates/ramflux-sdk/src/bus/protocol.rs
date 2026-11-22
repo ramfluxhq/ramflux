@@ -400,14 +400,9 @@ pub struct LocalBusMessageAttachmentInput {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LocalBusFederationRoute {
-    pub federation_url: String,
     pub source_node_id: String,
     pub target_node_id: String,
     pub required_capability: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recipient_prekey_url: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

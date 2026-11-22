@@ -100,6 +100,14 @@ impl RamfluxClient {
         principal_commitment: &str,
         source: &str,
     ) -> Result<SdkDeviceManifestResponse, SdkError> {
+        if let Some(home) =
+            crate::client::recipient_home::foreign_target(self, principal_commitment)?
+        {
+            let manifest =
+                crate::client::recipient_home::public_device_manifest(&home, principal_commitment)
+                    .await?;
+            return self.accept_fetched_device_manifest(manifest, principal_commitment, source);
+        }
         let started = std::time::Instant::now();
         let manifest: SdkDeviceManifestResponse =
             sdk_gateway_get_json::<Option<SdkDeviceManifestResponse>>(

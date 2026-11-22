@@ -14,7 +14,6 @@ use std::{
 };
 type Case<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(super) struct Forwarder {
-    endpoint: String,
     calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 }
@@ -26,7 +25,6 @@ impl Drop for Forwarder {
 pub(super) fn forwarder() -> Case<Forwarder> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
-    let endpoint = format!("http://{}", listener.local_addr()?);
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let stop = Arc::new(AtomicBool::new(false));
@@ -45,7 +43,7 @@ pub(super) fn forwarder() -> Case<Forwarder> {
             }
         }
     });
-    Ok(Forwarder { endpoint, calls, stop })
+    Ok(Forwarder { calls, stop })
 }
 fn serve(stream: std::net::TcpStream, count: &AtomicUsize) -> Case {
     stream.set_read_timeout(Some(Duration::from_secs(600)))?;
@@ -96,7 +94,6 @@ pub(super) fn contact(
     conversation: &str,
     own: &crate::prekey::SdkDeviceManifestResponse,
     peer: &crate::client::native_test_support::Fixture,
-    forward: &Forwarder,
 ) -> Case<LocalBusFrame> {
     let target = peer.client.owned_device_identity()?;
     let body = crate::bus::protocol::LocalBusContactFederatedRequest {
@@ -111,12 +108,9 @@ pub(super) fn contact(
         recipient_device_id: target.device_id().into(),
         target_delivery_id: target.storage_key().into(),
         federation: LocalBusFederationRoute {
-            federation_url: forward.endpoint.clone(),
             source_node_id: "node-a".into(),
             target_node_id: "node-b".into(),
             required_capability: "ramflux.federation.envelope_forward".into(),
-            admin_token: None,
-            recipient_prekey_url: None,
         },
     };
     let mut frame = LocalBusFrame::request(
@@ -165,7 +159,7 @@ async fn case() -> Case {
         });
     }
     let forward = forwarder()?;
-    let request = contact(&conversation(&client, &peer)?, &own, &peer, &forward)?;
+    let request = contact(&conversation(&client, &peer)?, &own, &peer)?;
     let fingerprint = ramflux_crypto::blake3_256_base64url(
         "ramflux.operation.v1",
         &ramflux_protocol::canonical_json_bytes(&(&request.method, &request.body))?,

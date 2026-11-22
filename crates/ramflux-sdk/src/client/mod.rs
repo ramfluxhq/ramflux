@@ -150,7 +150,6 @@ pub struct RamfluxClient {
     /// Set only while one attachment message is being authored; binds its grants to the id.
     pub(crate) attachment_binding: Option<crate::attachment_send::Binding>,
     pub(crate) mcp_registry: McpRegistry,
-    pub(crate) federation_mesh: FederationMesh,
     #[cfg(test)]
     pub(crate) native_bus_fixture: Option<Box<native_test_support::bus::Material>>,
 }
@@ -190,7 +189,6 @@ impl Default for RamfluxClient {
             attachment_plane: None,
             attachment_binding: None,
             mcp_registry: McpRegistry::new(),
-            federation_mesh: FederationMesh::new(),
         }
     }
 }

@@ -17,7 +17,7 @@ pub(crate) fn discovery_origin(input: &str) -> Result<String, SdkError> {
 }
 
 pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRecord, SdkError> {
-    let mut url = reqwest::Url::parse(&discovery_origin(input)?)
+    let mut url = reqwest::Url::parse(&record_origin(input)?)
         .map_err(|_| node_error("invalid discovery origin"))?;
     url.set_path("/.well-known/ramflux/client");
     url.set_query(None);
@@ -48,6 +48,16 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
     }
     ramflux_protocol::message::outer::admit_discovered_profile(&verified)?;
     Ok(verified.record().clone())
+}
+
+/// Harness `.test` names use the explicit loopback map. Any other name stays on HTTPS.
+fn record_origin(input: &str) -> Result<String, SdkError> {
+    if !input.contains("://")
+        && let Some(origin) = ramflux_transport::test_node_discovery_origin(input)?
+    {
+        return Ok(origin);
+    }
+    discovery_origin(input)
 }
 
 fn discovery_error(error: reqwest::Error) -> SdkError {

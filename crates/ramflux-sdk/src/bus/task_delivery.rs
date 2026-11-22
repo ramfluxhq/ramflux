@@ -188,7 +188,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
         let (arrived, mut observed) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || -> std::io::Result<()> {
@@ -231,12 +230,9 @@ mod tests {
         )?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: url,
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote-device".into(),
@@ -313,12 +309,9 @@ mod tests {
         }))?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: "http://127.0.0.1:1".into(),
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote".into(),

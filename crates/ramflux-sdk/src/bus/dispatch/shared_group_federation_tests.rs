@@ -12,7 +12,6 @@ use std::sync::{
 };
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Federation {
-    url: String,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
     delivered: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
@@ -23,7 +22,6 @@ impl Federation {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
-        let url = format!("http://{}", listener.local_addr()?);
         let stop = Arc::new(AtomicBool::new(false));
         let delivered = Arc::new(Mutex::new(Vec::new()));
         let alive = stop.clone();
@@ -43,16 +41,13 @@ impl Federation {
                 }
             }
         });
-        Ok(Self { url, stop, worker: Some(worker), delivered })
+        Ok(Self { stop, worker: Some(worker), delivered })
     }
-    fn route(&self) -> LocalBusFederationRoute {
+    fn route() -> LocalBusFederationRoute {
         LocalBusFederationRoute {
-            federation_url: self.url.clone(),
             source_node_id: "source-node".into(),
             target_node_id: "peer-node".into(),
             required_capability: "opaque_event".into(),
-            admin_token: None,
-            recipient_prekey_url: Some(self.url.clone()),
         }
     }
 }
@@ -155,7 +150,7 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
         Some("sender".into()),
         "group",
         "group.member.add",
-        json!({"group_id":"group","actor_id":"device-sender","member_id":"device-peer-one","member_principal_commitment":peer_root,"role":"member","federation":federation.route()}),
+        json!({"group_id":"group","actor_id":"device-sender","member_id":"device-peer-one","member_principal_commitment":peer_root,"role":"member","federation":Federation::route()}),
     );
     assert!(crate::bus::shared_group_sync::dispatch(&request, &mut source).await?.is_some());
     let routes = source.client.group_member_routes("group")?;
@@ -165,13 +160,13 @@ async fn shared_group_member_add_keeps_federation_hints_and_forwards_state_to_cu
         .collect::<Vec<_>>();
     assert_eq!(remote.len(), 2);
     assert!(remote.iter().all(|route| {
-        route.federation.as_ref().is_some_and(|hint| hint.federation_url == federation.url)
+        route.federation.as_ref().is_some_and(|hint| hint.target_node_id == "peer-node")
     }));
     let unknown = ramflux_protocol::encode_base64url([9; 32]);
     assert!(
         source
             .client
-            .persist_shared_group_federation_route("group", &unknown, &federation.route())
+            .persist_shared_group_federation_route("group", &unknown, &Federation::route())
             .is_err()
     );
     assert_eq!(crate::bus::shared_group_sync::flush(&mut source).await?, 2);

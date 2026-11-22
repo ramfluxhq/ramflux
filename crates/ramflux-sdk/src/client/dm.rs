@@ -224,7 +224,13 @@ impl RamfluxClient {
         }
         #[cfg(feature = "itest-rfd-fault")]
         crate::itest_rfd_fault::barrier(crate::itest_rfd_fault::Mode::DmSend).await?;
-        engine.submit_envelope(envelope).await
+        crate::client::recipient_home::submit_addressed(
+            self,
+            engine,
+            envelope,
+            message.recipient_principal_commitment.as_deref(),
+        )
+        .await
     }
 
     /// # Errors
@@ -268,7 +274,13 @@ impl RamfluxClient {
             &mut message,
             sealed,
         )?;
-        engine.submit_envelope(envelope).await
+        crate::client::recipient_home::submit_addressed(
+            self,
+            engine,
+            envelope,
+            message.recipient_principal_commitment.as_deref(),
+        )
+        .await
     }
 
     /// # Errors

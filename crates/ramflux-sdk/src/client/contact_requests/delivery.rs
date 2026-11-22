@@ -457,7 +457,7 @@ pub(in crate::client) async fn deliver(
         own.root_commitment(),
     )
     .await?;
-    let home = pinned_foreign_home(client, &intent.peer_root)?;
+    let home = crate::client::recipient_home::foreign_target(client, &intent.peer_root)?;
     let peer = peer_manifest(engine, &intent.peer_root, home.as_deref()).await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
@@ -553,22 +553,6 @@ async fn send_one(
     }
     engine.submit_envelope(envelope).await?;
     Ok(())
-}
-
-fn pinned_foreign_home(
-    client: &RamfluxClient,
-    commitment: &str,
-) -> Result<Option<String>, SdkError> {
-    let Some(principal) =
-        crate::client::recipient_home::principal_for_commitment(client, commitment)?
-    else {
-        return Ok(None);
-    };
-    let Some(home) = crate::client::recipient_home::pinned_home(client, &principal)? else {
-        return Ok(None);
-    };
-    let own = client.account_db()?.load_actor_state::<String>("account/node-id")?;
-    if own.as_deref() == Some(home.as_str()) { Ok(None) } else { Ok(Some(home)) }
 }
 
 async fn peer_manifest(

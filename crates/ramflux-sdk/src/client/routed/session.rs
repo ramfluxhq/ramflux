@@ -230,12 +230,7 @@ impl RamfluxClient {
             )
             .await?;
         }
-        let lookup = self.root_qualified_device_lookup(recipient)?;
-        let bundle = engine
-            .fetch_prekey_bundle(&lookup)
-            .await?
-            .bundle
-            .ok_or_else(|| invalid("recipient prekey missing"))?;
+        let bundle = recipient_prekey_bundle(self, engine, message, recipient).await?;
         self.new_send_pair(&local, message, bundle)
     }
     pub(crate) fn send_pair_session_from_url(
@@ -334,6 +329,34 @@ impl RamfluxClient {
         Ok((session, header.prekey_bundle_hash))
     }
 }
+
+async fn recipient_prekey_bundle(
+    client: &RamfluxClient,
+    engine: &mut impl GatewaySessionAccess,
+    message: &GatewayDirectMessage,
+    recipient: &str,
+) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
+    if let Some(commitment) = message.recipient_principal_commitment.as_deref()
+        && let Some(home) = crate::client::recipient_home::foreign_target(client, commitment)?
+    {
+        let base = crate::client::recipient_home::public_prekey_base(&home).await?;
+        let lookup = client.root_qualified_device_lookup(recipient)?;
+        return crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
+            &base,
+            &format!("/mvp1/prekey/{lookup}"),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .bundle
+        .ok_or_else(|| invalid("recipient prekey missing"));
+    }
+    engine
+        .fetch_prekey_bundle(&client.root_qualified_device_lookup(recipient)?)
+        .await?
+        .bundle
+        .ok_or_else(|| invalid("recipient prekey missing"))
+}
+
 pub(super) fn pair_key(
     local: &ramflux_crypto::RootQualifiedDeviceRef,
     remote: &ramflux_crypto::RootQualifiedDeviceRef,
