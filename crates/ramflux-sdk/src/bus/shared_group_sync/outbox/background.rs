@@ -187,7 +187,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
         fingerprint: serde_json::to_value(&intent)?,
         intent,
         state,
-        config: account.gateway_config.clone(),
+        config: account.sealing_config()?,
     }))
 }
 fn current(account: &LocalBusAccountState, plan: &Plan) -> Result<bool, SdkError> {
