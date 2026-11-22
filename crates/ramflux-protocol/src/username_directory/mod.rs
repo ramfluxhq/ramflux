@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 mod codec;
 pub use codec::*;
+mod native;
+pub use native::*;
 
 /// Frozen schema and comparison data identity; changing it needs an audited migration.
 pub const SCHEMA_POLICY: &str = "username-ascii-uts39-us0.1.2-v1";

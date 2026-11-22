@@ -4,6 +4,8 @@
 //! Optional explicitly provisioned username services. Witness owns every public response writer.
 mod ipc;
 mod primary;
+mod quic;
+mod source;
 mod tcp;
 mod tls;
 mod wire;
@@ -28,7 +30,7 @@ pub(crate) fn start(
     let Some(directory) = directory else {
         return Ok(false);
     };
-    if !directory::USERNAME_DIRECTORY_RELEASE_GATE {
+    if !ramflux_protocol::username_directory::enabled() {
         return Err(node_error("complete username path is not released"));
     }
     match &directory.role {

@@ -38,6 +38,8 @@ mod home_service;
 pub use home_service::*;
 mod channel;
 pub use channel::*;
+mod native;
+pub use native::*;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]

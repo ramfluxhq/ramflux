@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Single protected authority actor. No positive bytes leave via the private primary daemon.
-use super::{Result, directory, error, flag, ipc, refuse, tcp, tls, wire};
+use super::{Result, directory, error, flag, ipc, quic, refuse, source::Sources, tcp, tls, wire};
 use std::{
     io::Write,
     net::TcpListener,
@@ -80,12 +80,21 @@ pub fn run(
     }
     let mut authority = directory::DirectoryAuthority::new(witness)?;
     let (sender, receiver) = mpsc::sync_channel(64);
+    let slots = Arc::new(tokio::sync::Semaphore::new(16));
+    let sources = Arc::new(Sources::new());
+    quic::start(
+        *listen,
+        (*tls).clone(),
+        node.node_id.clone(),
+        secret.with_bytes(|seed| *seed),
+        sender.clone(),
+        Arc::clone(&slots),
+        Arc::clone(&sources),
+    )?;
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut peer: Option<Peer> = None;
     let mut pending: Vec<Pending> = Vec::new();
     let recovery = flag("--username-initialize") || flag("--username-recovery");
-    let mut source_rates = std::collections::BTreeMap::new();
-    let started = Instant::now();
     while !ramflux_node_core::service_shutdown_token().is_cancelled() {
         workers.retain(|worker| !worker.is_finished());
         if peer.is_none() {
@@ -129,17 +138,12 @@ pub fn run(
         }
         match public.accept() {
             Ok((socket, address)) => {
-                let window = started.elapsed().as_secs() / 60;
-                source_rates.retain(|_, (old, _)| *old == window);
-                let source = address.ip();
-                let rate = if source_rates.contains_key(&source) || source_rates.len() < 4096 {
-                    let entry = source_rates.entry(source).or_insert((window, 0u32));
-                    entry.1 += 1;
-                    entry.1 <= 60
-                } else {
-                    false
-                };
-                if workers.len() < 16 && pending.len() < 64 && rate && peer.is_some() {
+                if workers.len() < 16
+                    && pending.len() < 64
+                    && sources.admit(address.ip())
+                    && peer.is_some()
+                    && let Ok(permit) = Arc::clone(&slots).try_acquire_owned()
+                {
                     let tls = Arc::clone(&tls);
                     let sender = sender.clone();
                     let node_id = node.node_id.clone();
@@ -147,6 +151,7 @@ pub fn run(
                     workers.push(
                         std::thread::Builder::new().name("username-tls-read".into()).spawn(
                             move || {
+                                let _permit = permit;
                                 if let Ok(incoming) = tcp::accept(socket, tls, &node_id, &seed) {
                                     let _ = sender.try_send(incoming);
                                 }
@@ -281,11 +286,7 @@ fn admit(
     if report.request.path() != incoming.path {
         return refuse("reporting HTTP path mismatch");
     }
-    let chain = incoming
-        .stream
-        .conn
-        .peer_certificates()
-        .ok_or_else(|| error("reporting TLS certificate"))?;
+    let chain = incoming.certificates().ok_or_else(|| error("reporting TLS certificate"))?;
     tls::verify_reporter(chain, &report.evidence, crate::now_unix_seconds()?)?;
     let channel = directory::ReportingChannel {
         node_id: &report.evidence.discovery.node_id,
@@ -326,6 +327,7 @@ fn serve(
     }
     if pending.call_id.is_none() {
         let id = authority.admit_call(writer, pending.call.clone())?;
+        pending.call_id = Some(id.clone());
         if let Some(code) = pending.refusal {
             authority.prepare_http_refusal(writer, &id, &pending.call.channel, code)?;
         } else {

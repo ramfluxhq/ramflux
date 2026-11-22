@@ -7,8 +7,6 @@ use ed25519_dalek::VerifyingKey;
 use std::path::{Component, Path, PathBuf};
 
 const PREFIX: &str = "RAMFLUX_USERNAME_";
-/// Enabled only after the complete CLI/service flow and protected deployment checks are proven.
-pub const USERNAME_DIRECTORY_RELEASE_GATE: bool = false;
 const INPUTS: &[&str] = &[
     "ROLE",
     "CENTER_URL",

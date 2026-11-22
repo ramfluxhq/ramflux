@@ -13,13 +13,17 @@ use std::{
 pub type Stream = rustls::StreamOwned<rustls::ServerConnection, TcpStream>;
 
 pub struct Incoming {
-    pub stream: Stream,
+    pub transport: Transport,
     pub source: IpAddr,
     pub exporter: [u8; 32],
     pub path: String,
     pub body: Vec<u8>,
     pub deadline: Instant,
-    pub staged: Option<usize>,
+}
+
+pub enum Transport {
+    Tcp { stream: Box<Stream>, staged: Option<usize> },
+    Quic(Box<super::quic::Writer>),
 }
 
 fn pause(deadline: Instant) -> Result<()> {
@@ -163,28 +167,47 @@ pub fn accept(
     let length = length.ok_or_else(|| error("directory length required"))?;
     let mut body = vec![0; length];
     read_exact(&mut stream, &mut body, deadline)?;
-    Ok(Incoming { stream, source, exporter, path, body, deadline, staged: None })
+    Ok(Incoming {
+        transport: Transport::Tcp { stream: Box::new(stream), staged: None },
+        source,
+        exporter,
+        path,
+        body,
+        deadline,
+    })
 }
 
 impl Incoming {
+    pub fn certificates(&self) -> Option<&[rustls::pki_types::CertificateDer<'static>]> {
+        match &self.transport {
+            Transport::Tcp { stream, .. } => stream.conn.peer_certificates(),
+            Transport::Quic(writer) => Some(&writer.chain),
+        }
+    }
     /// Return progress only after encrypted bytes reach this same socket. Pending ciphertext
     /// remains owned here; every subsequent write_tls call must re-enter the witness fence.
     pub fn try_write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if let Some(count) = self.staged {
+        let Transport::Tcp { stream, staged } = &mut self.transport else {
+            if let Transport::Quic(writer) = &mut self.transport {
+                return writer.try_write(bytes);
+            }
+            return Err(std::io::Error::other("directory transport"));
+        };
+        if let Some(count) = *staged {
             if count != bytes.len() {
                 return Err(std::io::Error::other("directory writer mismatch"));
             }
         } else {
-            self.stream.conn.writer().write_all(bytes)?;
-            self.staged = Some(bytes.len());
+            stream.conn.writer().write_all(bytes)?;
+            *staged = Some(bytes.len());
         }
-        if self.stream.conn.wants_write() {
-            self.stream.conn.write_tls(&mut self.stream.sock)?;
+        if stream.conn.wants_write() {
+            stream.conn.write_tls(&mut stream.sock)?;
         }
-        if self.stream.conn.wants_write() {
+        if stream.conn.wants_write() {
             return Err(std::io::ErrorKind::WouldBlock.into());
         }
-        self.staged = None;
+        *staged = None;
         Ok(bytes.len())
     }
 }
