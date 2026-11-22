@@ -221,7 +221,7 @@ impl FullDirectHistory {
         Ok(if b > a { other } else { self })
     }
 
-    fn original_header(&self) -> Result<Option<OriginalHeader>, StorageError> {
+    pub(super) fn original_header(&self) -> Result<Option<OriginalHeader>, StorageError> {
         if !matches!(self.class, Class::Received) {
             return Ok(None);
         }
@@ -245,6 +245,23 @@ impl FullDirectHistory {
                 ..Default::default()
             },
         }))
+    }
+
+    pub(super) fn history_item(&self) -> &g::HistoryItem {
+        &self.item
+    }
+
+    pub(super) fn own_attestation(&self) -> Option<&OwnSentAttestation> {
+        self.attestation.as_ref()
+    }
+
+    pub(super) fn evidence_class(&self) -> super::native_selection::Selected {
+        use super::native_selection::Selected;
+        match self.class {
+            Class::Received => Selected::Received,
+            Class::Authored => Selected::Authored,
+            Class::OwnCopy => Selected::OwnCopy,
+        }
     }
 
     /// Encode a private versioned record; callers own encrypted spooling and rollback.
@@ -329,6 +346,13 @@ fn write_part(output: &mut impl Write, bytes: &[u8]) -> Result<(), StorageError>
 }
 #[derive(Default)]
 struct Limited(Zeroizing<Vec<u8>>);
+pub(super) fn encode_state(
+    value: &impl serde::Serialize,
+) -> Result<Zeroizing<Vec<u8>>, StorageError> {
+    let mut output = Limited::default();
+    serde_json::to_writer(&mut output, value).map_err(|_| invalid())?;
+    Ok(output.0)
+}
 impl Write for Limited {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if self.0.len().checked_add(bytes.len()).is_none_or(|length| length > PART_LIMIT) {

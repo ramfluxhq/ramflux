@@ -4,7 +4,7 @@
 //! Actual SDK/native storage reads, independently assembled portable evidence and erasure.
 use super::*;
 
-fn installed_edit(root: &Root) -> TestResult<(RamfluxClient, g::HistoryItem)> {
+pub(super) fn installed_edit(root: &Root) -> TestResult<(RamfluxClient, g::HistoryItem)> {
     let client = empty_import_receiver(root)?;
     let own = client.own_account_anchor()?;
     let now = crate::custody::network_now()?;
@@ -53,7 +53,10 @@ fn installed_edit(root: &Root) -> TestResult<(RamfluxClient, g::HistoryItem)> {
     assert!(apply_claim(&client, &item)?, "native history setup failed to apply");
     Ok((client, item))
 }
-fn assert_product_body(client: &RamfluxClient, original: &g::EventIdentity) -> TestResult {
+pub(super) fn assert_product_body(
+    client: &RamfluxClient,
+    original: &g::EventIdentity,
+) -> TestResult {
     let page = client.generated_message_page(&original.conversation_id, None, 10)?;
     let [update] = page.messages.as_slice() else {
         return Err("native reader must expose one original row".into());

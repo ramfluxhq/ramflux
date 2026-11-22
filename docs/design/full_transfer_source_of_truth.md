@@ -324,3 +324,30 @@ SDK's saved `routed/generated-identity` value. A valid proof cannot conceal a
 corrupt saved identity. Selection does not restore historical capture metadata;
 the future typed actor owner must preserve that separately without adopting
 execution state. Native SQL import and semantic materialization remain pending.
+
+
+## Native private projection and current business-code gate
+
+`BackupDatabase::merge_full_direct_history` projects a verified complete native
+version into an already admitted private context. Its caller authenticates the
+original contributor and owns the complete transaction and rollback. The method
+opens no independent transaction and grants no application or native receipt.
+Original authored captures are separate actual inputs: the narrow body frame
+cannot fabricate or discard their historical transport metadata. Equal versions
+keep B's selected proof and actual capture; newer versions follow the shared
+whole-version resolver. Original identity/order and exact content stay coupled.
+
+The projection registers per-message actor ownership, preserves B's existing
+projection metadata, and checks ordinary deletion before content. It records the
+selected proof against the exact current event id/body hash, then re-reads and
+compares the native record. Replacements with unclassified B replay receipts or
+non-default projection metadata refuse until their dedicated owners are complete.
+The directory context must already exist; no contact permission is inferred.
+
+This business primitive does not activate runtime_message_content or the actor,
+raw-copy, journal and contribution owners. Those dependencies still block the
+populated transfer before invitation. There is no new family-coverage claim.
+Owner2026-11-22 replaces the local test/clippy loop with cargo check only while
+coding, followed by direct populated-account transfer through rf daemons and
+real services with a scratch driver and captured output. Earlier passing tests
+remain historical scoped evidence; new suites are not the implementation plan.

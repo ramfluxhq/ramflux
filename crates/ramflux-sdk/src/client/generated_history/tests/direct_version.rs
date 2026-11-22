@@ -249,3 +249,6 @@ mod source;
 
 #[path = "direct_version/merge.rs"]
 mod merge;
+
+#[path = "direct_version/install.rs"]
+mod install;

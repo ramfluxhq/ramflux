@@ -135,6 +135,17 @@ fn peer(db: &Connection, own: &str, conversation: &str) -> Result<String, Storag
     }
     Ok(peer)
 }
+pub(super) fn require_peer(
+    db: &Connection,
+    own: &str,
+    conversation: &str,
+    expected: &str,
+) -> Result<(), StorageError> {
+    if peer(db, own, conversation)? != expected {
+        return Err(invalid());
+    }
+    Ok(())
+}
 fn body(
     db: &Connection,
     message: &str,
@@ -147,7 +158,10 @@ fn body(
         Some(None) => Err(invalid()),
     }
 }
-fn actor<T: DeserializeOwned>(db: &Connection, key: &str) -> Result<Option<T>, StorageError> {
+pub(super) fn actor<T: DeserializeOwned>(
+    db: &Connection,
+    key: &str,
+) -> Result<Option<T>, StorageError> {
     let value:Option<Option<Vec<u8>>>=db.query_row("SELECT CASE WHEN typeof(state_json)='blob' AND length(state_json)<=?2 THEN state_json END FROM runtime_actor_state WHERE state_kind=?1",params![key,HISTORY_LIMIT],|row|row.get(0)).optional()?;
     match value {
         None => Ok(None),
