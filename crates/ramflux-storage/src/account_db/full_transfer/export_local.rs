@@ -43,6 +43,36 @@ pub(super) fn carry_local_pairing(
     super::stage::sync_regular(scratch)
 }
 
+/// Pairing rows read from a pinned private copy before that file is replaced.
+pub(super) struct CopiedPairing {
+    dumps: Vec<TableDump>,
+}
+
+/// Read pairing rows from an already keyed private copy.
+/// # Errors
+/// `HeadChanged` when `pairing_live` is missing or empty; `NoSpace` over the local caps;
+/// SQL and cipher errors.
+pub(super) fn read_copied_pairing(
+    source: &Path,
+    key: &AccountDbKey,
+) -> Result<CopiedPairing, StorageError> {
+    let db = open_keyed(source, key)?;
+    Ok(CopiedPairing { dumps: read_dumps(&db)? })
+}
+
+/// Write pairing rows previously read from B's copy onto the installed export.
+/// # Errors
+/// `ManifestMismatch` for a real cell, an unsafe name, or a foreign-key violation;
+/// SQL and cipher errors.
+pub(super) fn write_copied_pairing(
+    dest: &Path,
+    key: &AccountDbKey,
+    copied: &CopiedPairing,
+) -> Result<(), StorageError> {
+    write_carried(dest, key, &copied.dumps)?;
+    super::stage::sync_regular(dest)
+}
+
 fn dump_local(source: &crate::database::Connection) -> Result<Vec<TableDump>, StorageError> {
     source.call(|db| Ok(read_dumps(db)))?
 }

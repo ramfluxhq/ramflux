@@ -106,18 +106,15 @@ impl FullTransferStage<'_> {
         expected_root: &str,
     ) -> Result<(), StorageError> {
         self.sweep_retained_digests()?;
-        let verified = crate::account_db::transfer_export::open_verified::VerifiedExport::open(
+        let generation = self.db.privacy_erasure_generation()?;
+        retain_export_rows(
+            &self.connection,
+            &self.directory,
             path,
             key,
             expected_root,
+            generation,
         )?;
-        verified.allow_row_read();
-        let mac = load_or_create_key(self)?;
-        let generation = self.db.privacy_erasure_generation()?;
-        let mac_bytes: &[u8; 32] = &mac;
-        let rows =
-            crate::account_db::transfer_export::digest::rows(verified.connection(), mac_bytes)?;
-        write_set(self, mac_bytes, generation, rows)?;
         self.require_retained_digests()
     }
 
@@ -165,9 +162,10 @@ impl FullTransferStage<'_> {
     }
 }
 
-fn load_or_create_key(stage: &FullTransferStage<'_>) -> Result<Zeroizing<[u8; 32]>, StorageError> {
-    let stored: Option<Vec<u8>> = stage
-        .connection
+fn load_or_create_key(
+    connection: &crate::database::Connection,
+) -> Result<Zeroizing<[u8; 32]>, StorageError> {
+    let stored: Option<Vec<u8>> = connection
         .query_row(
             "SELECT mac_key FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32",
             [],
@@ -185,13 +183,14 @@ fn load_or_create_key(stage: &FullTransferStage<'_>) -> Result<Zeroizing<[u8; 32
 }
 
 fn write_set(
-    stage: &FullTransferStage<'_>,
+    connection: &crate::database::Connection,
+    directory: &Path,
     mac: &[u8; 32],
     generation: i64,
     rows: Vec<crate::account_db::transfer_export::digest::RowDigest>,
 ) -> Result<(), StorageError> {
     let mac = Zeroizing::new(mac.to_vec());
-    stage.connection.call_immediate(move |tx| {
+    connection.call_immediate(move |tx| {
         tx.execute("DELETE FROM retained_row", [])?;
         tx.execute("DELETE FROM retained_cut", [])?;
         tx.execute(
@@ -207,5 +206,101 @@ fn write_set(
         tx.execute("INSERT INTO retained_cut(singleton,present) VALUES(1,1)", [])?;
         Ok(())
     })?;
-    super::stage::sync_stage(&stage.directory)
+    super::stage::sync_stage(directory)
+}
+
+/// Write the keyed digests of an installed clean copy. The caller supplies the erasure
+/// generation. A live stage still sweeps before calling this.
+/// # Errors
+/// Open and size refusals from the export; SQL errors.
+pub(super) fn retain_export_rows(
+    connection: &crate::database::Connection,
+    directory: &Path,
+    path: &Path,
+    key: &AccountDbKey,
+    expected_root: &str,
+    generation: i64,
+) -> Result<(), StorageError> {
+    connection.execute_batch(SCHEMA)?;
+    let verified = crate::account_db::transfer_export::open_verified::VerifiedExport::open(
+        path,
+        key,
+        expected_root,
+    )?;
+    verified.allow_row_read();
+    let mac = load_or_create_key(connection)?;
+    let mac_bytes: &[u8; 32] = &mac;
+    let rows = crate::account_db::transfer_export::digest::rows(verified.connection(), mac_bytes)?;
+    write_set(connection, directory, mac_bytes, generation, rows)
+}
+
+/// The digest set must be readable after a replay install. No live sweep: the generation
+/// was pinned with the copy.
+/// # Errors
+/// `RetainedDigestMissing` when the set is absent. SQL errors.
+pub(super) fn require_export_rows(
+    connection: &crate::database::Connection,
+    directory: &Path,
+) -> Result<(), StorageError> {
+    connection.execute_batch(SCHEMA)?;
+    let ready: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM retained_cut WHERE singleton=1) AND EXISTS(SELECT 1 FROM retained_digest_key WHERE singleton=1 AND length(mac_key)=32)",
+        [],
+        |row| row.get(0),
+    )?;
+    if ready {
+        Ok(())
+    } else {
+        destroy_export_rows(connection, directory)?;
+        Err(missing())
+    }
+}
+
+/// Overwrite and delete the digest set on this stage connection.
+/// # Errors
+/// SQL and fsync errors.
+pub(super) fn destroy_export_rows(
+    connection: &crate::database::Connection,
+    directory: &Path,
+) -> Result<(), StorageError> {
+    connection.execute_batch(SCHEMA)?;
+    connection.call_immediate(|tx| {
+        tx.execute("UPDATE retained_digest_key SET mac_key=zeroblob(32) WHERE singleton=1", [])?;
+        tx.execute("DELETE FROM retained_digest_key", [])?;
+        tx.execute("DELETE FROM retained_row", [])?;
+        tx.execute("DELETE FROM retained_cut", [])?;
+        Ok(())
+    })?;
+    super::stage::sync_stage(directory)
+}
+
+/// Off-loan replay can retain an installed export without the live account loan.
+pub(super) trait ExportRetain {
+    /// # Errors
+    /// `RetainedDigestMissing` when the set does not stay readable; open and SQL errors.
+    fn retain_export_frame(
+        &self,
+        path: &Path,
+        key: &AccountDbKey,
+        expected_root: &str,
+        generation: i64,
+    ) -> Result<(), StorageError>;
+    /// # Errors
+    /// SQL and fsync errors.
+    fn discard_retained_export(&self) -> Result<(), StorageError>;
+}
+
+impl ExportRetain for FullTransferStage<'_> {
+    fn retain_export_frame(
+        &self,
+        path: &Path,
+        key: &AccountDbKey,
+        expected_root: &str,
+        _generation: i64,
+    ) -> Result<(), StorageError> {
+        self.retain_installed_export(path, key, expected_root)
+    }
+    fn discard_retained_export(&self) -> Result<(), StorageError> {
+        self.destroy_retained_digests()
+    }
 }

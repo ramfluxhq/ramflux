@@ -13,6 +13,7 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 pub(super) mod application;
 mod delta;
+mod export_frame;
 mod generation;
 pub(super) mod rebase;
 pub use application::FullAppliedDataReceipt;
@@ -43,6 +44,8 @@ pub struct FullPinnedReceiverBase {
     schema: super::FullTransferSchema,
     /// The forward base is a snapshot frame. Typed family rows are not copied.
     snapshot: bool,
+    /// Account erasure generation at pin time. Replay has no live account loan.
+    erasure_generation: i64,
 }
 
 /// Device-local encrypted B copy with its non-forgeable original-cut provenance.
@@ -61,6 +64,8 @@ pub struct FullReceiverBaseCopy {
     attested: std::sync::Mutex<Option<seal::CopySeal>>,
     /// The private file is a clean export copy, not a record projection.
     export_installed: bool,
+    /// Account erasure generation pinned with this copy.
+    erasure_generation: i64,
 }
 
 impl FullTransferStage<'_> {
@@ -86,6 +91,7 @@ impl FullTransferStage<'_> {
         if !snapshot {
             schema.require_typed_owners(super::full_transfer_catalog())?;
         }
+        let erasure_generation = self.db.privacy_erasure_generation()?;
         let scratch =
             Scratch::create(&self.directory, self.retained_receiver_workspace()?.as_deref())?;
         self.require_io()?;
@@ -100,6 +106,7 @@ impl FullTransferStage<'_> {
             owners: [record.grant.source_ref, record.grant.destination_ref],
             schema,
             snapshot,
+            erasure_generation,
         })
     }
 }
@@ -135,6 +142,7 @@ impl FullPinnedReceiverBase {
             scratch: self.scratch,
             attested: std::sync::Mutex::new(None),
             export_installed: false,
+            erasure_generation: self.erasure_generation,
         })
     }
 }
