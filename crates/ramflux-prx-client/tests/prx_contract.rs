@@ -541,7 +541,20 @@ async fn bounded<F: std::future::Future<Output = ()>>(body: F) {
         .expect("test: contract test exceeded its deadline");
 }
 
-#[allow(clippy::too_many_lines)]
+/// The tokens K-AC2-1 accepts at the pin: the AC-2 cards plus the B1, B2a, B2b and HOST-1a tokens.
+const LANDED_AT_PIN: [&str; 10] = [
+    CAPABILITIES_V1,
+    AGENT_CATALOG_V1,
+    AGENT_CRUD_V1,
+    AGENT_MAIN_READBACK_V1,
+    SESSION_KEY_V1,
+    MESSAGE_TARGET_V1,
+    MESSAGE_CONTEXT_DELIVERY_V1,
+    OWNER_ID_STABLE_V1,
+    MESSAGE_IDEMPOTENCY_V1,
+    MESSAGE_DELETE_V1,
+];
+
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn k_ac2_capabilities_and_catalog() {
@@ -559,21 +572,8 @@ async fn k_ac2_capabilities_and_catalog() {
             caps.has(CAPABILITIES_V1) && caps.has(AGENT_CATALOG_V1),
             "K-AC2-1: documented tokens advertised"
         );
-        // Landed at the pin: the AC-2 cards plus the B1 and HOST-1a tokens (see K-B1-16).
-        let known = [
-            CAPABILITIES_V1,
-            AGENT_CATALOG_V1,
-            AGENT_CRUD_V1,
-            AGENT_MAIN_READBACK_V1,
-            SESSION_KEY_V1,
-            MESSAGE_TARGET_V1,
-            MESSAGE_CONTEXT_DELIVERY_V1,
-            OWNER_ID_STABLE_V1,
-            MESSAGE_IDEMPOTENCY_V1,
-            MESSAGE_DELETE_V1,
-        ];
         assert!(
-            caps.capabilities.iter().all(|t| known.contains(&t.as_str())),
+            caps.capabilities.iter().all(|t| LANDED_AT_PIN.contains(&t.as_str())),
             "K-AC2-1: no token beyond the landed cards: {:?}",
             caps.capabilities
         );
@@ -2626,6 +2626,12 @@ async fn rec_ancestor_group_writable_refuses_turns_context_still_answers() {
         let stub = ModelStub::start_completing(Duration::ZERO).await;
         let mut daemon =
             Daemon::prepare_unchecked_in(&base, &stub.provider(), "targeted_agents = true\n");
+        // prepare_in sets the base to 0700 ("private by construction"), which made the earlier
+        // version of this row a private ancestor, not a group-writable one. Set 0775 again.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o775))
+            .expect("test: chmod probe base after the harness set it private");
+        let mode = std::fs::metadata(&base).expect("test: stat probe base").permissions().mode();
+        assert_eq!(mode & 0o777, 0o775, "REC-ANCESTOR-1: the probe base is group-writable");
         daemon.start();
         daemon.wait_ready().await;
         daemon.pair().await;
@@ -2634,23 +2640,32 @@ async fn rec_ancestor_group_writable_refuses_turns_context_still_answers() {
         client.create_session(&caps, RF_SESSION).await.expect("test: session");
         let jobs = daemon_job_total(&daemon).await;
 
-        // REC-ANCESTOR-1 (observed, differs from the card): at 4f1a8bc05 a turn whose state
-        // dir sits under a group-writable directory is ADMITTED, not refused with
-        // recovery_unavailable. The job then reaches its own end; the row asserts that.
+        // REC-ANCESTOR-1: <state>/gw-probe (0775) is on the physical path to <cfg>/workspace/memory.
+        // PRX refuses the recovery key: a turn is 500 storage_unavailable with reason
+        // recovery_unavailable, no job starts and no model request is made.
         let turn = client
             .post_turn(&caps, RF_SESSION, &rf_message("rf-gw-turn-0001", Target::Main, "probe"))
-            .await
-            .expect("REC-ANCESTOR-1: observed admission at this pin");
-        assert_eq!(turn.disposition, TurnDisposition::Admitted, "REC-ANCESTOR-1: admitted");
-        assert_eq!(daemon_job_total(&daemon).await, jobs + 1, "REC-ANCESTOR-1: one job");
-        let job = wait_job_terminal(&client, &caps, &turn.job_id).await;
-        eprintln!(
-            "ROW REC-ANCESTOR-1 observed job {:?} error {:?}; daemon: {:?}",
-            job.status,
-            job.error,
-            daemon.error_lines()
+            .await;
+        eprintln!("ROW REC-ANCESTOR-1 turn: {turn:?}");
+        assert!(
+            matches!(turn, Err(PrxError::OutcomeUnknown { http_status: Some(500) })),
+            "REC-ANCESTOR-1: refused 500, got {turn:?}"
         );
-        report("REC-ANCESTOR-1 (observed: admitted)");
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(rf_body("turn", Some("rf-gw-turn-0002"))),
+            )
+            .await;
+        eprintln!("ROW REC-ANCESTOR-1 raw: {status} {text}");
+        assert_eq!(status, 500, "REC-ANCESTOR-1 raw status");
+        assert_eq!(error_code(&text).as_deref(), Some("storage_unavailable"), "REC-ANCESTOR-1");
+        assert_eq!(error_reason(&text).as_deref(), Some("recovery_unavailable"), "REC-ANCESTOR-1");
+        assert_eq!(daemon_job_total(&daemon).await, jobs, "REC-ANCESTOR-1: no job");
+        assert_eq!(stub.count(), 0, "REC-ANCESTOR-1: no model request");
+        report("REC-ANCESTOR-1");
 
         // REC-ANCESTOR-2: a context answers 200 and its replay is replayed:true with the same id.
         let context = client
@@ -2714,9 +2729,79 @@ async fn rec_cfg_workspace_group_writable_refuses_turns() {
     .await;
 }
 
+/// K-DEL-6..10: the reply of one run, an unknown run, a batch, an empty batch and a context
+/// delete, on the rf session. Split out of the K-DEL row to keep it within the lint limit.
+async fn del_reply_and_batches(client: &PrxClient, caps: &Capabilities) {
+    // K-DEL-6: the reply of one run goes; its input stays; a repeat answers the same.
+    let two = client
+        .post_turn(caps, RF_SESSION, &rf_message("rf-del-2", Target::Main, "del marker two"))
+        .await
+        .expect("test: turn two admitted");
+    let two_job = wait_job_terminal(client, caps, &two.job_id).await;
+    assert_eq!(two_job.status, JobState::Succeeded, "K-DEL-6 precondition: {:?}", two_job.error);
+    assert!(assistant_replies(client, caps).await >= 1, "K-DEL-6 precondition: a reply");
+    let reply = client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6");
+    assert_eq!(reply.run_id, two.run_id, "K-DEL-6: names the run");
+    client.delete_reply(caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6: repeat");
+    assert_eq!(assistant_replies(client, caps).await, 0, "K-DEL-6: no reply left");
+    let rows = client.session_messages(caps, RF_SESSION, None).await.expect("K-DEL-6 read");
+    assert!(
+        rows.iter().any(|row| row.content().is_some_and(|text| text.contains("del marker two"))),
+        "K-DEL-6: the input stays"
+    );
+    report("K-DEL-6");
+
+    // K-DEL-7: an unknown run is 404 run_unknown.
+    assert_api(
+        "K-DEL-7",
+        client.delete_reply(caps, RF_SESSION, "0f3c2a1e-0000-4000-8000-0000000000ff").await,
+        404,
+        ApiCode::RunUnknown,
+    );
+    report("K-DEL-7");
+
+    // K-DEL-8: a batch with one live and one unknown id answers in request order.
+    let items = client
+        .delete_messages(
+            caps,
+            RF_SESSION,
+            &["rf-del-2".to_owned(), "rf-del-none-2".to_owned()],
+            None,
+        )
+        .await
+        .expect("K-DEL-8");
+    match items.as_slice() {
+        [BatchItem::Deleted(first), BatchItem::Refused { message_id, code }] => {
+            assert_eq!(first.message_id, "rf-del-2", "K-DEL-8: first id");
+            assert_eq!(message_id, "rf-del-none-2", "K-DEL-8: second id");
+            assert_eq!(*code, ApiCode::MessageUnknown, "K-DEL-8: code");
+        }
+        other => panic!("K-DEL-8: unexpected batch answer {other:?}"),
+    }
+    report("K-DEL-8");
+
+    // K-DEL-9: an empty batch is refused 400 field_invalid.
+    assert_api(
+        "K-DEL-9",
+        client.delete_messages(caps, RF_SESSION, &[], None).await,
+        400,
+        ApiCode::FieldInvalid,
+    );
+    report("K-DEL-9");
+
+    // K-DEL-10: a context message deletes with no runs.
+    client
+        .post_context(caps, RF_SESSION, &rf_message("rf-del-ctx-1", Target::Main, "del ctx"))
+        .await
+        .expect("test: context recorded");
+    let ctx =
+        client.delete_message(caps, RF_SESSION, "rf-del-ctx-1", None).await.expect("K-DEL-10");
+    assert_eq!(ctx.agents, vec![AgentRuns { agent: Target::Main, runs: Vec::new() }]);
+    report("K-DEL-10");
+}
+
 /// K-DEL: message deletes at 4f1a8bc05 (`message_delete_v1`): a message, its replay, a repeat,
 /// the reply of one run, a batch, a context, and the job result of a deleted run.
-#[allow(clippy::too_many_lines)]
 #[tokio::test]
 #[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
 async fn k_del_message_reply_and_batch_deletes() {
@@ -2807,78 +2892,7 @@ async fn k_del_message_reply_and_batch_deletes() {
         );
         report("K-DEL-5");
 
-        // K-DEL-6: the reply of one run goes; its input stays; a repeat answers the same.
-        let two = client
-            .post_turn(&caps, RF_SESSION, &rf_message("rf-del-2", Target::Main, "del marker two"))
-            .await
-            .expect("test: turn two admitted");
-        let two_job = wait_job_terminal(&client, &caps, &two.job_id).await;
-        assert_eq!(
-            two_job.status,
-            JobState::Succeeded,
-            "K-DEL-6 precondition: {:?}",
-            two_job.error
-        );
-        assert!(assistant_replies(&client, &caps).await >= 1, "K-DEL-6 precondition: a reply");
-        let reply = client.delete_reply(&caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6");
-        assert_eq!(reply.run_id, two.run_id, "K-DEL-6: names the run");
-        client.delete_reply(&caps, RF_SESSION, &two.run_id).await.expect("K-DEL-6: repeat");
-        assert_eq!(assistant_replies(&client, &caps).await, 0, "K-DEL-6: no reply left");
-        let rows = client.session_messages(&caps, RF_SESSION, None).await.expect("K-DEL-6 read");
-        assert!(
-            rows.iter()
-                .any(|row| row.content().is_some_and(|text| text.contains("del marker two"))),
-            "K-DEL-6: the input stays"
-        );
-        report("K-DEL-6");
-
-        // K-DEL-7: an unknown run is 404 run_unknown.
-        assert_api(
-            "K-DEL-7",
-            client.delete_reply(&caps, RF_SESSION, "0f3c2a1e-0000-4000-8000-0000000000ff").await,
-            404,
-            ApiCode::RunUnknown,
-        );
-        report("K-DEL-7");
-
-        // K-DEL-8: a batch with one live and one unknown id answers in request order.
-        let items = client
-            .delete_messages(
-                &caps,
-                RF_SESSION,
-                &["rf-del-2".to_owned(), "rf-del-none-2".to_owned()],
-                None,
-            )
-            .await
-            .expect("K-DEL-8");
-        match items.as_slice() {
-            [BatchItem::Deleted(first), BatchItem::Refused { message_id, code }] => {
-                assert_eq!(first.message_id, "rf-del-2", "K-DEL-8: first id");
-                assert_eq!(message_id, "rf-del-none-2", "K-DEL-8: second id");
-                assert_eq!(*code, ApiCode::MessageUnknown, "K-DEL-8: code");
-            }
-            other => panic!("K-DEL-8: unexpected batch answer {other:?}"),
-        }
-        report("K-DEL-8");
-
-        // K-DEL-9: an empty batch is refused 400 field_invalid.
-        assert_api(
-            "K-DEL-9",
-            client.delete_messages(&caps, RF_SESSION, &[], None).await,
-            400,
-            ApiCode::FieldInvalid,
-        );
-        report("K-DEL-9");
-
-        // K-DEL-10: a context message deletes with no runs.
-        client
-            .post_context(&caps, RF_SESSION, &rf_message("rf-del-ctx-1", Target::Main, "del ctx"))
-            .await
-            .expect("test: context recorded");
-        let ctx =
-            client.delete_message(&caps, RF_SESSION, "rf-del-ctx-1", None).await.expect("K-DEL-10");
-        assert_eq!(ctx.agents, vec![AgentRuns { agent: Target::Main, runs: Vec::new() }]);
-        report("K-DEL-10");
+        del_reply_and_batches(&client, &caps).await;
 
         // K-DEL-11: the job of a deleted run reads result {"deleted":true}.
         let job = client.job_status(&caps, &one.job_id).await.expect("K-DEL-11: job reads");
