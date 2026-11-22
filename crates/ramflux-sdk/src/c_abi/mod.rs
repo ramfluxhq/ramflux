@@ -907,6 +907,7 @@ fn confirm_abi_code(reason: crate::CustodyConfirmReason) -> RamfluxErrorCode {
         | crate::CustodyConfirmReason::PassphraseTooLong
         | crate::CustodyConfirmReason::PassphraseNotUtf8
         | crate::CustodyConfirmReason::PassphraseNotSixDigits
+        | crate::CustodyConfirmReason::PassphraseTrivialCode
         | crate::CustodyConfirmReason::DisplayName
         | crate::CustodyConfirmReason::OperationId => RamfluxErrorCode::InvalidArgument,
     }

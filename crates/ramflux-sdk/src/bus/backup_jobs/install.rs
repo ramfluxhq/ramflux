@@ -29,6 +29,12 @@ pub(super) fn existing_key(
     if !vault.vault_secret_path(id).exists() {
         return Err(SdkError::AccountDbNotUnlocked);
     }
+    // Unit tests model plain clients on a device with a vault (native data is device-bound).
+    #[cfg(test)]
+    let secret_key = Zeroizing::new(
+        crate::client::device_unlock::test_device::PlainSource::new(root).vault_secret(id)?,
+    );
+    #[cfg(not(test))]
     let secret_key = Zeroizing::new(vault.vault_secret(id)?);
     unwrap_local_key(index, id, &secret_key, secret)
 }

@@ -62,8 +62,10 @@ impl DeviceBoundVaultSecret {
     ) -> Result<Self, SdkError> {
         let device_secret = match secret {
             DeviceSecret::Create => create_device_secret(vault, account_id)?,
-            DeviceSecret::Load => load_device_secret(vault, account_id)?,
+            DeviceSecret::Load => load_or_recall(root, vault, account_id)?,
         };
+        #[cfg(test)]
+        let device_secret = test_device::reconcile(root, account_id, secret, &device_secret)?;
         Ok(Self {
             file: FileVaultSecretSource::new(root),
             account_id: account_id.to_owned(),
@@ -79,13 +81,22 @@ impl VaultSecretSource for DeviceBoundVaultSecret {
                 "device secret is bound to another account".to_owned(),
             ));
         }
-        let file = Zeroizing::new(self.file.vault_secret(local_account_id)?);
-        let mut hasher = Zeroizing::new(blake3::Hasher::new());
-        hasher.update(b"ramflux.account_db_device_bound.v1");
-        hasher.update(&*file);
-        hasher.update(&*self.device_secret);
-        Ok(*hasher.finalize().as_bytes())
+        device_bound_secret(&self.file, local_account_id, &self.device_secret)
     }
+}
+
+/// `V = BLAKE3("ramflux.account_db_device_bound.v1" || file secret || device secret)`.
+fn device_bound_secret(
+    file: &FileVaultSecretSource,
+    local_account_id: &str,
+    device_secret: &[u8; 32],
+) -> Result<[u8; 32], StorageError> {
+    let file = Zeroizing::new(file.vault_secret(local_account_id)?);
+    let mut hasher = Zeroizing::new(blake3::Hasher::new());
+    hasher.update(b"ramflux.account_db_device_bound.v1");
+    hasher.update(&*file);
+    hasher.update(device_secret);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn create_device_secret(
@@ -113,12 +124,50 @@ fn load_device_secret(
     let bytes = vault
         .load_device_unlock_secret(&device_unlock_reference(account_id))
         .map_err(|_| device_unlock_unavailable())?;
+    load_exact(&bytes)
+}
+
+fn load_exact(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, SdkError> {
     let mut secret = Zeroizing::new([0_u8; 32]);
     if bytes.len() != secret.len() {
         return Err(device_unlock_unavailable());
     }
-    secret.copy_from_slice(&bytes);
+    secret.copy_from_slice(bytes);
     Ok(secret)
+}
+
+#[cfg(not(test))]
+fn load_or_recall(
+    _root: &Path,
+    vault: &dyn PrimaryVault,
+    account_id: &str,
+) -> Result<Zeroizing<[u8; 32]>, SdkError> {
+    load_device_secret(vault, account_id)
+}
+
+#[cfg(test)]
+fn load_or_recall(
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    account_id: &str,
+) -> Result<Zeroizing<[u8; 32]>, SdkError> {
+    match load_device_secret(vault, account_id) {
+        Ok(secret) => Ok(secret),
+        Err(error) => test_device::recall(root, account_id).ok_or(error),
+    }
+}
+
+/// Fixture builds only: the device-bound vault secret of an account created by an
+/// `--itest-memory-vault` daemon, read from that daemon's fixture vault file in `root`.
+///
+/// # Errors
+/// Returns vault, file-secret or binding failures.
+#[cfg(feature = "itest-memory-vault")]
+pub fn itest_account_vault_secret(root: &Path, account_id: &str) -> Result<[u8; 32], SdkError> {
+    let vault =
+        crate::custody::MemoryPrimaryVault::persist_at(root.join("itest-memory-vault.json"))?;
+    let source = DeviceBoundVaultSecret::bind(root, &vault, account_id, DeviceSecret::Load)?;
+    Ok(source.vault_secret(account_id)?)
 }
 
 /// Removes an account's device secret (account data discarded). Missing items succeed.
@@ -243,3 +292,10 @@ pub(crate) fn account_code_required() -> SdkError {
 fn refusal(code: &str, message: &str, body: serde_json::Value) -> SdkError {
     SdkError::LocalBusRefused { code: code.into(), message: message.into(), body: Box::new(body) }
 }
+
+/// Unit-test device model: a client opened without a vault runs on a device whose vault holds
+/// one device secret per (data root, native account), shared with any vault-bound client in
+/// the same process. Production clients always bind a real vault; this module does not exist there.
+#[cfg(test)]
+#[path = "device_unlock_test_device.rs"]
+pub(crate) mod test_device;

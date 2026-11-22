@@ -25,14 +25,19 @@ pub(crate) fn verify_stored_data_secret_with(
     device_unlock::code_attempt_succeeded(&index, id)
 }
 
-/// Verifies a code for account data sealed by a plain (file-secret only) client.
+/// Verifies a code for account data sealed by a plain unit-test client (test device model).
 #[cfg(test)]
 pub(crate) fn verify_stored_data_secret(
     root: &Path,
     id: &str,
     secret: &[u8],
 ) -> Result<(), SdkError> {
-    verify_stored_data_secret_with(root, id, &FileVaultSecretSource::new(root), secret)
+    verify_stored_data_secret_with(
+        root,
+        id,
+        &device_unlock::test_device::PlainSource::new(root),
+        secret,
+    )
 }
 
 /// Verifies a code for account data sealed through a vault-held device secret.
@@ -54,7 +59,15 @@ impl RamfluxClient {
             _ => AccountIndex::open(root)?,
         };
         if !self.vault_secret_source_is_custom {
-            self.vault_secret_source = Some(Box::new(FileVaultSecretSource::new(index.root())));
+            #[cfg(not(test))]
+            {
+                self.vault_secret_source = Some(Box::new(FileVaultSecretSource::new(index.root())));
+            }
+            #[cfg(test)]
+            {
+                self.vault_secret_source =
+                    Some(Box::new(device_unlock::test_device::PlainSource::new(index.root())));
+            }
         }
         self.account_index = Some(index);
         Ok(())

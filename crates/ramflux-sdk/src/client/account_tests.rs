@@ -26,7 +26,8 @@ fn wrapped_db_key(
     secret: &[u8],
 ) -> Result<AccountDbKey, SdkError> {
     let index = AccountIndex::open(root)?;
-    let vault_secret = FileVaultSecretSource::new(index.root()).vault_secret(local_account_id)?;
+    let vault_secret = crate::client::device_unlock::test_device::PlainSource::new(index.root())
+        .vault_secret(local_account_id)?;
     let wrapped = index
         .load_wrapped_db_key(local_account_id)?
         .ok_or_else(|| SdkError::LocalBus(format!("missing wrapped key for {local_account_id}")))?;
@@ -163,8 +164,8 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
             if error.to_string() == "wrong passphrase or damaged local key"
     ));
 
-    restored.rekey_active_account("acct_a", b"new-data-secret")?;
-    let rewrapped_key_a = wrapped_db_key(&root, "acct_a", b"new-data-secret")?;
+    restored.rekey_active_account("acct_a", b"604917")?;
+    let rewrapped_key_a = wrapped_db_key(&root, "acct_a", b"604917")?;
     assert_eq!(rewrapped_key_a, key_a);
     let mut old_secret_after_rekey = RamfluxClient::new();
     old_secret_after_rekey.open_account_index(&root)?;
@@ -174,14 +175,14 @@ fn account_unlock_uses_random_wrapped_key_and_rewraps_on_secret_change() -> Resu
     ));
     let mut new_secret_after_rekey = RamfluxClient::new();
     new_secret_after_rekey.open_account_index(&root)?;
-    new_secret_after_rekey.unlock_account("acct_a", b"new-data-secret")?;
+    new_secret_after_rekey.unlock_account("acct_a", b"604917")?;
     assert_eq!(new_secret_after_rekey.event_body("evt_a_1")?, Some(b"persisted".to_vec()));
 
     std::fs::remove_file(FileVaultSecretSource::new(&root).vault_secret_path("acct_a"))?;
     let mut missing_vault_secret = RamfluxClient::new();
     missing_vault_secret.open_account_index(&root)?;
     assert!(matches!(
-        missing_vault_secret.unlock_account("acct_a", b"new-data-secret"),
+        missing_vault_secret.unlock_account("acct_a", b"604917"),
         Err(SdkError::Storage(StorageError::Integrity(_)))
     ));
 

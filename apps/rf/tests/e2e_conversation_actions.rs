@@ -643,8 +643,8 @@ fn capture_stores(world: &World<'_>) -> e2e::Result<Persistence> {
 }
 
 fn client_tables(data_root: &Path, account: &str) -> e2e::Result<(TableRows, Vec<PathBuf>)> {
-    let vault = ramflux_storage::read_existing_vault_secret(data_root, account)?;
-    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes());
+    let vault = ramflux_sdk::itest_account_vault_secret(data_root, account)?;
+    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, e2e::PASSPHRASE.as_bytes())?;
     let (path, key) = ramflux_storage::load_account_db_key(data_root, account, &kek)?;
     require_regular(&path)?;
     let tables = ramflux_storage::logical_table_rows(&path, &key)?;

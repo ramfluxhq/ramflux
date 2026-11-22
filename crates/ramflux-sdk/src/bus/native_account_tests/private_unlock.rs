@@ -52,6 +52,11 @@ mod tests {
         )?;
         let anchor = born.record().body.account_anchor.clone();
         drop((born, phrase));
+        // An account opens silently until it is explicitly locked; start from that locked state.
+        let index = ramflux_storage::AccountIndex::open(root.path())?;
+        index.set_account_unlocked("private-native", false)?;
+        index.clear_device_wrapped_db_key("private-native")?;
+        drop(index);
         let socket = root.path().join("private.sock");
         for _ in 0..2 {
             let (stop, receiver) = watch::channel(false);

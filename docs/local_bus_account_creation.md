@@ -35,7 +35,10 @@ creation has no enable/disable option. Vault availability is checked by begin.
    saved recovery material; do not derive the answers from a retained UI phrase.
 4. Send `account.create.confirm` with exactly `words` (three strings in the
    requested order) and `passphrase`, the six-digit account code (exactly six
-   ASCII digits; anything else is refused with `not_six_digits`). The code wraps
+   ASCII digits; anything else is refused with `not_six_digits`). A closed list
+   of trivial codes is refused with `trivial_code`: all six digits equal
+   (000000 ... 999999) and the straight runs 012345, 123456, 234567, 345678,
+   456789, 987654, 876543, 765432, 654321, 543210. Nothing else is refused. The code wraps
    the independent random account data key together with a device-unlock secret
    that the platform vault creates for the account; the account then opens without
    input on this device until it is explicitly locked. It is not a BIP39

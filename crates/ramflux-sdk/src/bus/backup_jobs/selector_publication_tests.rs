@@ -12,7 +12,7 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const LOCAL_SECRET: &str = "independent local data passphrase";
+const LOCAL_SECRET: &str = "418306";
 const ARCHIVE_SECRET: &str = "independent archive passphrase";
 const ALIAS: &str = "private-publication-alias";
 

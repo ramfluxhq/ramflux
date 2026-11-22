@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const PHRASE: &[u8] = b"correct-passphrase";
+const PHRASE: &[u8] = b"852147";
 const STAGE: &str = "acct-p08-stage";
 const RESTART: &str = "acct-p08-restart";
 const SHARED: &str = "acct-p08-shared";
@@ -254,6 +254,22 @@ impl PrimaryVault for DiskVault {
 
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
         require_vault_reference(reference, "agent-provisioning:")?;
+        Ok(Zeroizing::new(
+            fs::read(self.slot(reference)).map_err(|_| SdkError::CustodyVaultUnavailable)?,
+        ))
+    }
+
+    fn store_device_unlock_secret(
+        &self,
+        reference: &str,
+        secret: &Zeroizing<[u8; 32]>,
+    ) -> Result<(), SdkError> {
+        require_vault_reference(reference, crate::custody::DEVICE_UNLOCK_PREFIX)?;
+        self.put(reference, secret.as_slice())
+    }
+
+    fn load_device_unlock_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        require_vault_reference(reference, crate::custody::DEVICE_UNLOCK_PREFIX)?;
         Ok(Zeroizing::new(
             fs::read(self.slot(reference)).map_err(|_| SdkError::CustodyVaultUnavailable)?,
         ))

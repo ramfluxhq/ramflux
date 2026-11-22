@@ -143,6 +143,8 @@ pub use client::account::account_db_key_encryption_key;
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 pub use client::device_unlock::DeviceSecret;
+#[cfg(feature = "itest-memory-vault")]
+pub use client::device_unlock::itest_account_vault_secret;
 #[cfg(feature = "itest-fingerprint")]
 pub use client::dm_session::RecvCommitFingerprint;
 pub use client::recovery::{

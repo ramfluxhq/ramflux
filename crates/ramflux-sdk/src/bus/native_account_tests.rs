@@ -316,7 +316,7 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
 }
 
 #[tokio::test]
-async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Result {
+async fn ordinary_native_restart_reopens_silently_and_explicit_lock_needs_the_code() -> Result {
     let root = Root::new()?;
     let vault = TestVault::default();
     let now = crate::custody::network_now()?;
@@ -330,15 +330,29 @@ async fn ordinary_native_unlock_lock_restart_needs_only_data_passphrase() -> Res
     drop(vault);
     drop(phrase);
     let socket = root.0.join("ordinary.sock");
-    // Restart with creation disabled and no test provider, node, legacy manifest or seeds.
-    for passphrase in ["135792", "975311"] {
+    // Restart with creation disabled and no node, legacy manifest or seeds. The first start
+    // reopens the account through its device wrap; after the explicit lock the code is needed.
+    for (passphrase, at_start) in [("135792", "unlocked"), ("975311", "locked")] {
         let (stop, receiver) = watch::channel(false);
         let flow = async {
             let _stop = Stop(stop);
             let mut bus = connect(&socket).await?;
+            if at_start == "unlocked" {
+                // Reads wait for the startup reopen to finish.
+                let _ = bus
+                    .request(
+                        Some("ordinary".into()),
+                        "conversation",
+                        "conversation.list",
+                        json!({}),
+                    )
+                    .await;
+            }
             let listed = bus.request(None, "account", "account.list", json!({})).await?;
-            assert_eq!(listed["account_details"][0]["state"], "locked");
-            assert_eq!(listed["account_details"][0]["networking"], "networking_pending");
+            assert_eq!(
+                listed["account_details"][0]["state"], at_start,
+                "test: silent reopen or explicit lock state changed"
+            );
             let wrong = bus
                 .request_frame_response(LocalBusFrame::request(
                     "wrong",
@@ -527,7 +541,7 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
         let failed = ceremony.hidden_challenge().await?;
         let wrong = std::array::from_fn(|_| Zeroizing::new("invalid".into()));
         let error = ceremony
-            .confirm(&wrong, &Zeroizing::new("discarded data secret".into()))
+            .confirm(&wrong, &Zeroizing::new("297513".into()))
             .await
             .expect_err("wrong words must be rejected");
         assert!(
@@ -683,8 +697,7 @@ async fn per_account_home_node_does_not_change_daemon_default() -> Result {
         let challenge = ceremony.hidden_challenge().await?;
         let answers = words(&phrase, challenge)?;
         drop(phrase);
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("selected node data secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("385029".into())).await?;
         assert_eq!(account.networking, CreationState::NetworkingPending);
         local_first::wait_for_reason(&socket, &account.account_id, "node_unreachable").await?;
         let status = ordinary
@@ -747,8 +760,7 @@ async fn status_from_gateway_cause(cause: GatewayCause) -> Result<serde_json::Va
         let challenge = ceremony.hidden_challenge().await?;
         let answers = words(&phrase, challenge)?;
         drop(phrase);
-        let account =
-            ceremony.confirm(&answers, &Zeroizing::new("gateway cause secret".into())).await?;
+        let account = ceremony.confirm(&answers, &Zeroizing::new("385030".into())).await?;
         local_first::wait_for_reason(&socket, &account.account_id, expected_kind).await?;
         let status = ordinary
             .request(Some(account.account_id), "account", "account.status", json!({}))

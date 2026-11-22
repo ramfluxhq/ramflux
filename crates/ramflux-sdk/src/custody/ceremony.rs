@@ -250,8 +250,14 @@ impl CreationCeremony {
         }
         let text = std::str::from_utf8(passphrase)
             .map_err(|_| rejected(crate::CustodyConfirmReason::PassphraseNotUtf8))?;
-        if crate::check_new_passphrase(text).is_err() {
-            return Err(rejected(crate::CustodyConfirmReason::PassphraseNotSixDigits));
+        if let Err(error) = crate::check_new_passphrase(text) {
+            let reason = match error {
+                crate::PassphrasePolicyError::TrivialCode => {
+                    crate::CustodyConfirmReason::PassphraseTrivialCode
+                }
+                _ => crate::CustodyConfirmReason::PassphraseNotSixDigits,
+            };
+            return Err(rejected(reason));
         }
         self.complete(words, vault, now, Some(passphrase))
     }

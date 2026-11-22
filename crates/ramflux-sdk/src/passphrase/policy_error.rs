@@ -12,6 +12,9 @@ pub enum PassphrasePolicyError {
     /// The account code is not exactly [`ACCOUNT_CODE_DIGITS`] ASCII digits.
     #[error("not_six_digits")]
     NotSixDigits,
+    /// The account code is on the closed trivial list (all digits equal, or a straight run).
+    #[error("trivial_code")]
+    TrivialCode,
     /// Archive passphrase: fewer than [`MIN_PASSPHRASE_SCALARS`] Unicode scalar values after NFC.
     #[error("too_short")]
     TooShort {
@@ -29,6 +32,7 @@ impl PassphrasePolicyError {
     pub const fn code(self) -> &'static str {
         match self {
             Self::NotSixDigits => "not_six_digits",
+            Self::TrivialCode => "trivial_code",
             Self::TooShort { .. } => "too_short",
             Self::TooCommon => "too_common",
         }
@@ -40,6 +44,10 @@ impl PassphrasePolicyError {
         match self {
             Self::NotSixDigits => {
                 format!("The account code must be exactly {ACCOUNT_CODE_DIGITS} digits (0-9).")
+            }
+            Self::TrivialCode => {
+                "This code is too easy to guess (repeated digits or a straight run). Choose another."
+                    .to_owned()
             }
             Self::TooShort { scalars } => {
                 let missing = MIN_PASSPHRASE_SCALARS.saturating_sub(scalars);

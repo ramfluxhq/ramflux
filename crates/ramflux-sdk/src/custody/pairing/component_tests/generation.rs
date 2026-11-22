@@ -643,7 +643,7 @@ pub(super) fn phrase_provider(
 ) -> std::sync::Arc<dyn super::super::LocalCredentialProvider> {
     std::sync::Arc::new(FullPhraseFixture {
         phrase: phrase.map(|value| zeroize::Zeroizing::new(value.into())),
-        setup: super::super::recipient::tests::Phrase::setup(b"component-recipient-passphrase"),
+        setup: super::super::recipient::tests::Phrase::setup(b"752913"),
     })
 }
 impl super::super::LocalCredentialProvider for FullPhraseFixture {

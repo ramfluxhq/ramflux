@@ -212,9 +212,14 @@ fn files(root: &Path) -> anyhow::Result<BTreeMap<std::path::PathBuf, [u8; 32]>> 
     Ok(result)
 }
 
-fn assert_client_reopen(root: &Path, id: &str, baseline: &str) -> TestResult {
+fn assert_client_reopen(
+    root: &Path,
+    id: &str,
+    vault: &dyn ramflux_sdk::custody::PrimaryVault,
+    baseline: &str,
+) -> TestResult {
     assert_eq!(
-        NativeCallAccount::reopen_snapshot(root, id)?,
+        NativeCallAccount::reopen_snapshot(root, id, vault)?,
         baseline,
         "ordinary client reopen retained ephemeral journal/outbox/actor state"
     );
@@ -842,6 +847,7 @@ async fn run_activation(measure_persistence: bool) -> TestResult {
     let client_root = native_root.to_path_buf();
     let sender_root = client_root.join("sender");
     let receiver_root = client_root.join("receiver");
+    let (sender_vault, receiver_vault) = (sender.device_vault(), receiver.device_vault());
     let mut accounts = Box::pin(attach_account_pair(
         &context,
         &runtime,
@@ -929,8 +935,18 @@ async fn run_activation(measure_persistence: bool) -> TestResult {
     )
     .await?;
     if measure_persistence {
-        assert_client_reopen(&sender_root, "agent", &before.before_journal.0)?;
-        assert_client_reopen(&receiver_root, "alice", &before.before_journal.1)?;
+        assert_client_reopen(
+            &sender_root,
+            "agent",
+            sender_vault.as_ref(),
+            &before.before_journal.0,
+        )?;
+        assert_client_reopen(
+            &receiver_root,
+            "alice",
+            receiver_vault.as_ref(),
+            &before.before_journal.1,
+        )?;
     }
     Ok(())
 }
