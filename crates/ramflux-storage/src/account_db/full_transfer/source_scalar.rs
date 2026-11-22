@@ -237,8 +237,17 @@ fn build(
         let header = probe.header(bytes, rule)?;
         let mut sink =
             blob::Sink::create(spool, snapshot, rule.id, &header.0.key, bytes, source_guard)?;
-        if super::owner_sql::write(source, rule, row, &mut sink, Some(&source_guard.principal))?
-            != bytes
+        if let Some(encoded) = probe.into_complete() {
+            // The first pass already validated every exact byte. Keep the same
+            // guarded encrypted sink without encoding a small row a second time.
+            sink.write_all(&encoded)?;
+        } else if super::owner_sql::write(
+            source,
+            rule,
+            row,
+            &mut sink,
+            Some(&source_guard.principal),
+        )? != bytes
         {
             return Err(invalid());
         }

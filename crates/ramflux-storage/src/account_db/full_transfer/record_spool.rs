@@ -29,10 +29,12 @@ pub(super) struct Probe {
 }
 impl Probe {
     pub(super) fn new() -> Self {
-        Self {
-            prefix: Zeroizing::new(Vec::with_capacity(RecordHeader::LIMIT.saturating_add(4))),
-            bytes: 0,
-        }
+        Self { prefix: Zeroizing::new(Vec::new()), bytes: 0 }
+    }
+    /// Reuse the exact validated encoding when it fits the bounded prefix.
+    /// An overflow retains no claim that the prefix is a complete record.
+    pub(super) fn into_complete(self) -> Option<Zeroizing<Vec<u8>>> {
+        (self.bytes == self.prefix.len() as u64).then_some(self.prefix)
     }
     pub(super) fn header(
         &self,
@@ -56,6 +58,18 @@ impl Write for Probe {
             .checked_add(4)
             .ok_or_else(|| std::io::Error::other("source header bound overflow"))?;
         let amount = limit.saturating_sub(self.prefix.len()).min(bytes.len());
+        // Allocate only retained bytes, still capped by the protocol header bound.
+        // Replace through Zeroizing so growing never frees an unwiped prefix.
+        let length = self
+            .prefix
+            .len()
+            .checked_add(amount)
+            .ok_or_else(|| std::io::Error::other("source header prefix overflow"))?;
+        if length > self.prefix.capacity() {
+            let mut prefix = Zeroizing::new(Vec::with_capacity(length));
+            prefix.extend_from_slice(&self.prefix);
+            self.prefix = prefix;
+        }
         self.prefix.extend_from_slice(
             bytes.get(..amount).ok_or_else(|| std::io::Error::other("source header prefix"))?,
         );

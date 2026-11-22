@@ -161,6 +161,19 @@ restriction-first erasure, raw/actor ownership closure and actual materializatio
 are complete. None of this prerequisite alone increases declaration coverage or
 proves a full native transfer/install.
 
+## Bounded source-record construction
+
+The source probe retains at most RecordHeader::LIMIT + 4 bytes while counting
+all encoded bytes. A complete retained record reuses those already validated
+bytes through the same guarded encrypted sink; a larger record is encoded into
+that sink after measurement. A prefix alone never claims completeness. Both
+cases retain the exact format, family transaction and per-fragment source guard.
+The cache grows only within that fixed bound, wiping the previous allocation
+before releasing it. Header accounting uses the ordinary canonical wire header
+plus its four-byte frame prefix, without another maximum-sized scratch copy.
+The 16384-row stream witness retains its original count, output/chunk bounds and
+source-generation checks; this optimization confers no semantic transfer proof.
+
 ## Revised execution order
 
 The reproducible native seed lives in `apps/rf/tests/e2e/primary_transfer.rs` and

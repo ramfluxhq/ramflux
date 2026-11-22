@@ -6,6 +6,8 @@ use super::super::{native_payload::test_support, record_spool};
 use super::*;
 use prost::Message as _;
 #[cfg(feature = "sqlcipher")]
+use ramflux_protocol::custody::pairing::full_transfer::write_record_header;
+#[cfg(feature = "sqlcipher")]
 use std::io::{Read as _, Write as _};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

@@ -4,10 +4,7 @@
 //! Per-owner record budgets. Metadata never acquires the native payload allowance.
 use super::{CodecRule, FamilyRule, NativePayload};
 use crate::StorageError;
-use ramflux_protocol::custody::pairing::{
-    PairingWire as _,
-    full_transfer::{RecordHeader, write_record_header},
-};
+use ramflux_protocol::custody::pairing::{PairingWire as _, full_transfer::RecordHeader};
 use zeroize::Zeroizing;
 
 pub(super) const METADATA_LIMIT: usize = super::fixed_union::MAX_METADATA_BYTES;
@@ -33,9 +30,10 @@ pub(super) fn require_length(rule: &FamilyRule, length: u64) -> Result<(), Stora
     Ok(())
 }
 pub(super) fn require_header(rule: &FamilyRule, header: &RecordHeader) -> Result<(), StorageError> {
-    let mut prefix = Zeroizing::new(Vec::with_capacity(RecordHeader::LIMIT + 4));
-    write_record_header(&mut *prefix, header).map_err(|_| invalid())?;
-    let mut total = prefix.len() as u64;
+    // Count the same canonical header as the wire encoder without a second
+    // maximum-sized allocation whose spare capacity would also need wiping.
+    let prefix = Zeroizing::new(header.to_wire_bytes().map_err(|_| invalid())?);
+    let mut total = (prefix.len() as u64).checked_add(4).ok_or_else(invalid)?;
     let mut metadata = total;
     for (cell, length) in rule.cells.iter().zip(&header.cell_lengths) {
         total = total.checked_add(length.0).ok_or_else(invalid)?;
