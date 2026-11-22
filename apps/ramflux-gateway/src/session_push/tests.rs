@@ -7,7 +7,6 @@
 mod ephemeral_negotiation;
 #[path = "negotiation_tests.rs"]
 pub(crate) mod negotiation;
-#[cfg(feature = "itest-local-mint")]
 #[path = "submit_tests.rs"]
 mod submit;
 #[path = "test_support.rs"]

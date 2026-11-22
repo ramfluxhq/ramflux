@@ -69,7 +69,6 @@ pub(crate) use crate::client::contact::{
 };
 pub(crate) use crate::dm::*;
 pub(crate) use crate::gateway::{
-    GatewayRelayTokenIssueBody, GatewayRelayTokenIssueRequest, GatewayRelayTokenIssueResponse,
     GatewayRelayTokenV3IssueRequest, GatewayRelayTokenV3IssueResponse, SdkRelayTokenV3IssueBody,
     gateway_auth_frame, gateway_fresh_open_frame, gateway_heartbeat_now, gateway_session_state,
     gateway_session_timeout, gateway_stream_nonce, sdk_device_signed_fields, sdk_signed_fields,
@@ -79,14 +78,14 @@ pub(crate) use crate::object::{
     OBJECT_OPERATION_COMMITTED, OBJECT_OPERATION_FAILED, OBJECT_OPERATION_LOCAL_COMMITTED,
     OBJECT_OPERATION_PENDING, OBJECT_OPERATION_UNKNOWN, OBJECT_PUT_PROTOCOL_VERSION,
     OBJECT_PUT_REQUEST_HASH_DOMAIN, OBJECT_TRANSFER_DOWNLOAD, OBJECT_TRANSFER_UPLOAD,
-    RelayTransferOptions, SdkObjectPermissionEnvelope, SdkObjectRelayAckResponse,
-    SdkObjectRelayCapability, SdkObjectRelayGetResponse, SdkObjectRelayPutResponse,
-    SdkObjectTransferStatus, SdkRelayChunkStatus, SdkRelayToken, build_signed_object_access_grant,
-    build_signed_owner_authorization_proof, build_signed_requester_pop,
-    build_v3_ack_token_issue_body, build_v3_get_token_issue_body, build_v3_grant_token_issue_body,
-    build_v3_owner_session_token_issue_body, object_relay_chunk_cipher_hash, object_relay_chunk_id,
-    object_transfer_id, object_transfer_status, parse_relay_transfer_options,
-    recipient_device_hash, relay_quic_config, verify_recipient_object_access_grant,
+    RelayTransferOptions, SdkObjectRelayAckResponse, SdkObjectRelayCapability,
+    SdkObjectRelayGetResponse, SdkObjectRelayPutResponse, SdkObjectTransferStatus,
+    SdkRelayChunkStatus, build_signed_object_access_grant, build_signed_owner_authorization_proof,
+    build_signed_requester_pop, build_v3_ack_token_issue_body, build_v3_get_token_issue_body,
+    build_v3_grant_token_issue_body, build_v3_owner_session_token_issue_body,
+    object_relay_chunk_cipher_hash, object_relay_chunk_id, object_transfer_id,
+    object_transfer_status, parse_relay_transfer_options, recipient_device_hash, relay_quic_config,
+    verify_recipient_object_access_grant,
 };
 
 pub(crate) use crate::own_device_sync::{

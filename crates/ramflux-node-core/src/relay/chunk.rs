@@ -3,10 +3,7 @@
 
 //! Stored chunk metadata, response models, and retention/expiry limits.
 
-use super::{
-    BTreeSet, Deserialize, ObjectPermissionEnvelope, RELAY_CHUNK_META_CHARGE_OVERHEAD, RelayToken,
-    Serialize, env,
-};
+use super::{BTreeSet, Deserialize, RELAY_CHUNK_META_CHARGE_OVERHEAD, Serialize, env};
 
 pub const OBJECT_RELAY_CHUNK_DEFAULT_TTL_SECONDS: u64 = 15 * 60;
 pub const OBJECT_RELAY_CHUNK_MAX_TTL_SECONDS: u64 = 24 * 60 * 60;
@@ -63,6 +60,7 @@ impl From<RelayChunkEntry> for ObjectRelayPutResponse {
     }
 }
 
+/// Retained v3 tombstone identity, recorded only after owner-session authorization.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObjectRelayTombstone {
     pub object_id: String,
@@ -71,8 +69,8 @@ pub struct ObjectRelayTombstone {
     pub source_event_id: String,
     pub signed_at: u64,
     pub expires_at: u64,
-    pub relay_token: RelayToken,
-    pub object_permission_envelope: ObjectPermissionEnvelope,
+    pub owner_signing_key_id: String,
+    pub owner_public_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,13 +158,12 @@ impl RelayChunkMeta {
         !self.owner_signing_key_id.is_empty() && !self.owner_public_key.is_empty()
     }
 
-    /// Returns `true` when the chunk's persisted original owner matches the token's owner. A chunk
-    /// missing its owner binding (legacy record) never matches.
+    /// Returns `true` when the chunk and retained tombstone have the same immutable owner.
     #[must_use]
-    pub(super) fn owner_matches_token(&self, token: &RelayToken) -> bool {
+    pub(super) fn owner_matches_tombstone(&self, tombstone: &ObjectRelayTombstone) -> bool {
         self.has_owner_binding()
-            && self.owner_signing_key_id == token.owner_signing_key_id
-            && self.owner_public_key == token.owner_public_key
+            && self.owner_signing_key_id == tombstone.owner_signing_key_id
+            && self.owner_public_key == tombstone.owner_public_key
     }
 
     /// Rebuilds a full [`RelayChunkEntry`] carrying this metadata and the supplied payload. Used by
