@@ -30,6 +30,9 @@ pub const OWNER_ID_STABLE_V1: &str = "owner_id_stable_v1";
 pub const MESSAGE_IDEMPOTENCY_V1: &str = "message_idempotency_v1";
 /// Per-agent partitioned reads: the message history carries `agent` and filters by it.
 pub const TARGETED_AGENTS_V1: &str = "targeted_agents_v1";
+/// `POST .../messages/{id}/delete`, `.../messages/delete` and `.../runs/{run_id}/reply/delete`: tombstone
+/// deletes of a message, a batch, or one run's reply. A deleted key replays `409 message_deleted`.
+pub const MESSAGE_DELETE_V1: &str = "message_delete_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +132,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "296a83367e7aecde824974d16c08db3f508b447a";
+    const SHA: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(

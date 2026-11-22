@@ -539,7 +539,8 @@ pub(super) fn refresh_source_role(
         .as_ref()
         .is_some_and(|cached| cached.record() != current.record())
     {
-        account.gateway_config = account.gateway_config.clone().with_born_v3_account(&current);
+        // Refresh public authority without resetting the installed transport credentials.
+        account.gateway_config.principal_id.clone_from(&current.record().body.principal_id);
         account.client.born_v3_account = Some(Box::new(current));
     }
     Ok(())
