@@ -41,7 +41,6 @@ pub(crate) fn request_kind(frame: &ramflux_node_core::GatewayClientFrame) -> &'s
         Frame::PrekeyPublish { .. } => "prekey_publish",
         Frame::PrekeyFetch { .. } => "prekey_fetch",
         Frame::PrincipalManifestFetch { .. } => "principal_manifest_fetch",
-        Frame::RelayTokenIssue { .. } => "relay_token_issue",
         Frame::RelayTokenV3Issue { .. } => "relay_token_v3_issue",
         Frame::Ack { .. } => "ack",
         Frame::Cursor { .. } => "cursor",

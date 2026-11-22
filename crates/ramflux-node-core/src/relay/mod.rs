@@ -8,7 +8,6 @@ use crate::{
     NodeCoreError, RELAY_CACHE_KEY, RELAY_CACHE_TABLE, RELAY_CHUNK_ENTRY_TABLE,
     RELAY_TOMBSTONE_TABLE,
 };
-use hmac::{Hmac, Mac};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,8 +20,6 @@ pub mod attachment;
 pub use attachment::*;
 mod token_types;
 pub use token_types::*;
-mod gateway_issuance;
-pub use gateway_issuance::*;
 mod chunk;
 pub use chunk::*;
 mod commit;

@@ -468,6 +468,10 @@ impl ConnectionHandle {
             stop,
             finished,
         };
+        // On the account's session thread when one is installed: account work then cannot delay
+        // the host's timers, keepalive or receipts. Without one (direct use) spawn in place.
+        let session = crate::bus::account_runtime::session_thread::installed();
+        let _session = session.as_ref().map(tokio::runtime::Handle::enter);
         let auxiliary = background_children::start(
             &handle,
             &timeouts,

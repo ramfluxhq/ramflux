@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Provenance gate: every Rust source must carry an SPDX header, and every member
-# crate must inherit the workspace license instead of hardcoding one. Pure
-# bash + git, no toolchain required. Runs in CI and as a local pre-commit check.
+# Provenance gate: every Rust source must carry an SPDX header, every member
+# crate must inherit the workspace license instead of hardcoding one, and no
+# Rust source may exceed its file-size limit (2,000 lines in crates/ramflux-sdk,
+# 5,000 lines elsewhere). Pure bash + git, no toolchain required. Runs in CI and
+# as a local pre-commit check.
 set -euo pipefail
 
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -29,6 +31,23 @@ hardcoded_license=$(git ls-files crates apps | grep '/Cargo.toml$' | while read 
 done)
 if [ -n "$hardcoded_license" ]; then
   printf "::error::crate must use 'license.workspace = true', found hardcoded license in:\n%s\n" "$hardcoded_license"
+  fail=1
+fi
+
+# 3. File size: one clear responsibility per file. The SDK limit is 2,000 lines
+#    (owner rule 2026-11-22); every other crate and app keeps 5,000 lines.
+oversize=$(git ls-files crates apps | grep '\.rs$' | while read -r f; do
+  case "$f" in
+    crates/ramflux-sdk/*) limit=2000 ;;
+    *) limit=5000 ;;
+  esac
+  lines=$(( $(wc -l < "$f") ))
+  if [ "$lines" -gt "$limit" ]; then
+    printf '%s: %s lines (limit %s)\n' "$f" "$lines" "$limit"
+  fi
+done)
+if [ -n "$oversize" ]; then
+  printf '::error::Rust source over its file-size limit; split it by responsibility:\n%s\n' "$oversize"
   fail=1
 fi
 

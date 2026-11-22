@@ -5,43 +5,9 @@
 
 use super::{
     Deserialize, NodeCoreError, OBJECT_RELAY_CLOCK_SKEW_LEEWAY_SECONDS,
-    OBJECT_RELAY_TOKEN_AUDIENCE_RELAY, OBJECT_RELAY_TOKEN_ISSUER_GATEWAY,
-    OBJECT_RELAY_TOKEN_VERSION, OBJECT_RELAY_V3_PROOF_VERSION, RelayToken, RelayTokenIssueBody,
-    Serialize, relay_token_mac, require_non_empty, validate_relay_token_issue_body,
+    OBJECT_RELAY_V3_PROOF_VERSION, Serialize, require_non_empty,
 };
 
-/// # Errors
-/// Returns an error when the issuance body is invalid or token signing fails.
-pub fn issue_gateway_relay_token(
-    service_key: &[u8],
-    body: &RelayTokenIssueBody,
-    now: u64,
-) -> Result<RelayToken, NodeCoreError> {
-    validate_relay_token_issue_body(body, now)?;
-    let mut token = RelayToken {
-        token_version: OBJECT_RELAY_TOKEN_VERSION,
-        token_id: format!("token:{}:{}:{:?}", body.chunk_id, body.expires_at, body.capability),
-        object_id: body.object_id.clone(),
-        manifest_hash: body.manifest_hash.clone(),
-        chunk_id: body.chunk_id.clone(),
-        recipient_device_hash: body.recipient_device_hash.clone(),
-        owner_signing_key_id: body.owner_signing_key_id.clone(),
-        owner_public_key: body.owner_public_key.clone(),
-        issuer_service: OBJECT_RELAY_TOKEN_ISSUER_GATEWAY.to_owned(),
-        audience_service: OBJECT_RELAY_TOKEN_AUDIENCE_RELAY.to_owned(),
-        capabilities: vec![body.capability],
-        delete_after_ack: body.delete_after_ack,
-        issued_at: body.issued_at,
-        expires_at: body.expires_at,
-        nonce: ramflux_protocol::encode_base64url(
-            ramflux_crypto::random_32()
-                .map_err(|source| NodeCoreError::ItestHttp(source.to_string()))?,
-        ),
-        mac: String::new(),
-    };
-    token.mac = relay_token_mac(service_key, &token)?;
-    Ok(token)
-}
 pub const GATEWAY_ISSUER_CERTIFICATE_SCHEMA: &str = "ramflux.gateway_issuer_certificate.v3";
 pub const GATEWAY_CERTIFICATE_REQUEST_SCHEMA: &str = "ramflux.gateway_certificate_request.v3";
 /// Hard upper bound on an issued certificate's validity window (`not_after - now`). Short-lived

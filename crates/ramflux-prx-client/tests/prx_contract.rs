@@ -3,7 +3,7 @@
 
 //! Contract tests against a real `prx daemon` built at the pinned commit.
 //!
-//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 5d92a43a43a6373b063cd67b26dddbe0662fc2de>` and
+//! Ignored by default. Run with `RAMFLUX_PRX_BIN=<path to prx built at 296a83367e7aecde824974d16c08db3f508b447a>` and
 //! `cargo test -p ramflux-prx-client --test prx_contract -- --ignored --test-threads=1`.
 //! Every daemon gets a fresh config dir on a free loopback port and is stopped and removed
 //! at the end. The bearer token and the pairing code are never printed.
@@ -21,19 +21,21 @@
 use ramflux_prx_client::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_MAIN_READBACK_V1, AgentConfig, AgentName, AgentStatus,
     ApiCode, ApplyOutcome, Autonomy, BuildCommit, CAPABILITIES_V1, Capabilities, Chat, ChatKind,
-    ClientConfig, ConfigRevision, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
-    MESSAGE_TARGET_V1, OWNER_ID_STABLE_V1, PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind,
-    ReloadStatus, RfMessage, SESSION_KEY_V1, Sender, Target, Tools,
+    ClientConfig, ConfigRevision, HistoryRow, JobState, JobStatus, MESSAGE_CONTEXT_DELIVERY_V1,
+    MESSAGE_IDEMPOTENCY_V1, MESSAGE_TARGET_V1, NotReadyReason, OWNER_ID_STABLE_V1,
+    PROMPT_MAX_BYTES, PrxClient, PrxError, PutKind, ReloadStatus, RfMessage, RunCode, RunState,
+    SESSION_KEY_V1, Sender, TARGETED_AGENTS_V1, Target, Tools, TurnDisposition,
 };
 use serde_json::Value;
 use std::fs::File;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// The commit the binary must report (`GET /api/capabilities` `commit`).
-const PIN: &str = "5d92a43a43a6373b063cd67b26dddbe0662fc2de";
+const PIN: &str = "296a83367e7aecde824974d16c08db3f508b447a";
 /// Overall deadline of one contract test.
 const TEST_DEADLINE: Duration = Duration::from_secs(600);
 /// Deadline of one wait (readiness, pairing code, hot reload).
@@ -70,6 +72,77 @@ struct Daemon {
     port: u16,
     child: Option<Child>,
     http: reqwest::Client,
+    /// False only for the row that documents what a group-writable state directory does.
+    check_ancestors: bool,
+}
+
+/// The base directory of every daemon state dir: `RAMFLUX_PRX_STATE_ROOT`, else `$HOME/prx-live`.
+/// Never `/tmp` or `/opt/ops`: PRX refuses its recovery key under a group- or other-writable
+/// ancestor, and then every turn's terminal write fails (PRX, 2026-11-22).
+fn state_base() -> PathBuf {
+    match std::env::var_os("RAMFLUX_PRX_STATE_ROOT") {
+        Some(root) => PathBuf::from(root),
+        None => PathBuf::from(
+            std::env::var_os("HOME").expect("test: HOME or RAMFLUX_PRX_STATE_ROOT must be set"),
+        )
+        .join("prx-live"),
+    }
+}
+
+/// G6 budget admission refuses an unpriced model, so the stub's model gets a price row; the
+/// prices are dummies and the stub charges nothing.
+fn priced(provider: &str, extra: &str) -> String {
+    format!(
+        "{extra}\n[cost.prices.\"{provider}/stub-model\"]\ninput = 1.0\noutput = 1.0\ncache_read = 0.0\ncache_write = 0.0\n"
+    )
+}
+
+/// The temporary directory for the daemon and the harness: `RAMFLUX_PRX_TMPDIR`, else
+/// `<state base>/tmp`. Created 0700; the daemon gets it as `TMPDIR`, so nothing it creates with
+/// mktemp lands under `/tmp` or `/opt/ops`.
+fn tmp_base() -> PathBuf {
+    match std::env::var_os("RAMFLUX_PRX_TMPDIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => state_base().join("tmp"),
+    }
+}
+
+/// Creates `dir` (and parents) as 0700 whatever the umask.
+fn ensure_private_dir(dir: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .unwrap_or_else(|error| panic!("test: create {}: {error}", dir.display()));
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+/// Fails fast, naming the directory, when `dir` or any ancestor is group- or other-writable.
+fn check_private_ancestors(dir: &Path) {
+    check_one_chain(dir);
+    check_one_chain(&tmp_base());
+}
+
+fn check_one_chain(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        let mode = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("test: stat {}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert!(
+            mode & 0o022 == 0,
+            "test: state directory ancestor {} has mode {:o} (group- or other-writable). PRX refuses \
+             its recovery key under such an ancestor, and every turn's terminal write then fails. \
+             Set RAMFLUX_PRX_STATE_ROOT to a private path (for example $HOME/prx-live).",
+            path.display(),
+            mode
+        );
+        current = path.parent();
+    }
 }
 
 impl Daemon {
@@ -87,7 +160,7 @@ impl Daemon {
     /// Like `prepare`, but the default provider is `provider` (no credential is stored for it).
     /// Used with a `ModelStub`, so that no request leaves the host.
     fn prepare_with_provider(provider: &str, extra: &str) -> Self {
-        Self::prepare_config(provider, "stub-model", extra, false)
+        Self::prepare_config(provider, "stub-model", &priced(provider, extra), false)
     }
 
     fn prepare_state(extra: &str, default_credential: bool) -> Self {
@@ -95,10 +168,44 @@ impl Daemon {
     }
 
     fn prepare_config(provider: &str, model: &str, extra: &str, default_credential: bool) -> Self {
+        Self::prepare_in(&state_base(), provider, model, extra, default_credential, true)
+    }
+
+    /// A daemon whose state dir is under `base`, with the ancestor check off. Used only by the row
+    /// that documents the group-writable case.
+    fn prepare_unchecked_in(base: &Path, provider: &str, extra: &str) -> Self {
+        Self::prepare_in(base, provider, "stub-model", &priced(provider, extra), false, false)
+    }
+
+    fn prepare_in(
+        base: &Path,
+        provider: &str,
+        model: &str,
+        extra: &str,
+        default_credential: bool,
+        check_ancestors: bool,
+    ) -> Self {
         let bin = prx_binary();
-        let dir = TempDir::new().expect("test: temp dir");
-        std::fs::create_dir_all(dir.path().join("cfg")).expect("test: config dir");
-        std::fs::create_dir_all(dir.path().join("workspace")).expect("test: workspace dir");
+        ensure_private_dir(&tmp_base());
+        // Private by construction: the base and the state dir are 0700 whatever the umask.
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(base)
+                .expect("test: state base dir");
+            let _ = std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = TempDir::new_in(base).expect("test: temp dir under the state base");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("test: chmod state dir");
+        }
+        // cfg and workspace are 0700 too: PRX checks every ancestor of its recovery path.
+        ensure_private_dir(&dir.path().join("cfg"));
+        ensure_private_dir(&dir.path().join("workspace"));
         let port = {
             let listener =
                 std::net::TcpListener::bind("127.0.0.1:0").expect("test: free loopback port");
@@ -113,7 +220,10 @@ impl Daemon {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("test: http client");
-        let daemon = Self { bin, dir, port, child: None, http };
+        let daemon = Self { bin, dir, port, child: None, http, check_ancestors };
+        if check_ancestors {
+            check_private_ancestors(daemon.dir.path());
+        }
         if default_credential {
             daemon.credential_set("openrouter", DEFAULT_PROVIDER_KEY);
         }
@@ -133,6 +243,7 @@ impl Daemon {
         command
             .env("OPENPRX_CONFIG_DIR", self.dir.path().join("cfg"))
             .env("OPENPRX_WORKSPACE", self.dir.path().join("workspace"))
+            .env("TMPDIR", tmp_base())
             .env("RUST_LOG", "warn");
         command
     }
@@ -157,13 +268,18 @@ impl Daemon {
     }
 
     fn start(&mut self) {
+        if self.check_ancestors {
+            check_private_ancestors(self.dir.path());
+        }
         let out =
             File::create(self.dir.path().join("daemon.out")).expect("test: daemon stdout file");
         let err =
             File::create(self.dir.path().join("daemon.err")).expect("test: daemon stderr file");
         let port = self.port.to_string();
+        // Its own process group, so a crash can take the daemon and the turn workers it spawned.
         let child = self
             .command()
+            .process_group(0)
             .args(["daemon", "--host", "127.0.0.1", "-p", port.as_str()])
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
@@ -172,11 +288,38 @@ impl Daemon {
         self.child = Some(child);
     }
 
+    /// SIGKILL to the daemon's whole process group: the crash of the host and its workers.
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-KILL", "--", group.as_str()]).status();
             let _ = child.kill();
             let _ = child.wait();
+            // Wait (bounded) until no member of the group is left, so the ingress lock is free.
+            let started = Instant::now();
+            while started.elapsed() < WAIT_DEADLINE {
+                let alive = Command::new("kill")
+                    .args(["-0", "--", group.as_str()])
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success());
+                if !alive {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
+    }
+
+    /// The error lines of the daemon's log (for a failure message only).
+    fn error_lines(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.dir.path().join("daemon.out")).unwrap_or_default();
+        log.lines()
+            .filter(|line| line.contains("ERROR") || line.contains("recovery"))
+            .rev()
+            .take(12)
+            .map(|line| line.chars().take(400).collect())
+            .collect()
     }
 
     async fn wait_ready(&self) {
@@ -424,6 +567,7 @@ async fn k_ac2_capabilities_and_catalog() {
             MESSAGE_TARGET_V1,
             MESSAGE_CONTEXT_DELIVERY_V1,
             OWNER_ID_STABLE_V1,
+            MESSAGE_IDEMPOTENCY_V1,
         ];
         assert!(
             caps.capabilities.iter().all(|t| known.contains(&t.as_str())),
@@ -1169,6 +1313,15 @@ struct ModelStub {
 
 impl ModelStub {
     async fn start(hold: Duration) -> Self {
+        Self::start_mode(hold, false).await
+    }
+
+    /// Like `start`, but answers a valid chat completion (200) instead of a 500.
+    async fn start_completing(hold: Duration) -> Self {
+        Self::start_mode(hold, true).await
+    }
+
+    async fn start_mode(hold: Duration, complete: bool) -> Self {
         let listener =
             tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("test: bind model stub");
         let port = listener.local_addr().expect("test: stub addr").port();
@@ -1187,9 +1340,19 @@ impl ModelStub {
                         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                     tokio::time::sleep(hold).await;
-                    let body = r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#;
+                    let (status, body) = if complete {
+                        (
+                            "200 OK",
+                            r#"{"id":"stub-1","object":"chat.completion","created":0,"model":"stub-model","choices":[{"index":0,"message":{"role":"assistant","content":"stub reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                        )
+                    } else {
+                        (
+                            "500 Internal Server Error",
+                            r#"{"error":{"message":"contract stub: no model","type":"stub"}}"#,
+                        )
+                    };
                     let response = format!(
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
@@ -1231,6 +1394,7 @@ async fn k_b1_sessions_and_message_validation() {
             "agent_main_readback_v1",
             "capabilities_v1",
             "message_context_delivery_v1",
+            "message_idempotency_v1",
             "message_target_v1",
             "owner_id_stable_v1",
             "session_key_v1",
@@ -1239,7 +1403,7 @@ async fn k_b1_sessions_and_message_validation() {
         .map(|t| (*t).to_owned())
         .collect();
         assert_eq!(caps.capabilities, expected, "K-B1-16: advertised tokens at the pin");
-        for token in ["message_idempotency_v1", "message_delete_v1", "targeted_agents_v1"] {
+        for token in ["message_delete_v1", "targeted_agents_v1"] {
             assert!(!caps.has(token), "K-B1-16: {token} must not be advertised yet");
         }
         assert_eq!(caps.commit, BuildCommit::Sha(PIN.to_owned()), "K-B1-16: commit is the pin");
@@ -1616,6 +1780,838 @@ async fn k_b1_busy_and_agent_states_with_targeting_on() {
         }
         report("K-B1-13");
         daemon.stop();
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// B2a (message_idempotency_v1) and B3 (targeted_agents_v1) rows, at the pin.
+// ---------------------------------------------------------------------------------------------
+
+/// A run or job id that PRX never issued.
+const NEVER_ISSUED_ID: &str = "00000000-0000-4000-8000-0000000000ff";
+
+/// Waits until the model stub has seen `count` requests (a turn is in flight at the model).
+async fn wait_model_requests(daemon: &Daemon, stub: &ModelStub, count: usize) {
+    let started = Instant::now();
+    while stub.count() < count {
+        if started.elapsed() >= WAIT_DEADLINE {
+            for name in ["daemon.err", "daemon.out"] {
+                let log = std::fs::read_to_string(daemon.dir.path().join(name)).unwrap_or_default();
+                let tail: Vec<&str> = log.lines().rev().take(30).collect();
+                eprintln!("DIAG {name} tail (newest first): {tail:?}");
+            }
+            panic!("test: model stub did not see {count} request(s)");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// True for the typed `provider_not_ready` refusal of a turn or context post.
+fn is_not_ready<T>(result: &Result<T, PrxError>) -> bool {
+    matches!(
+        result,
+        Err(PrxError::ProviderNotReady {
+            status: 503,
+            reason: NotReadyReason::MissingProviderCredential
+        })
+    )
+}
+
+/// Asserts a typed API error with the given status and code.
+#[allow(clippy::needless_pass_by_value)]
+fn assert_api<T: std::fmt::Debug>(
+    row: &str,
+    result: Result<T, PrxError>,
+    status: u16,
+    code: ApiCode,
+) {
+    match result {
+        Err(PrxError::Api { status: got, code: got_code, .. })
+            if got == status && got_code == code => {}
+        other => panic!("{row}: must be {status} {code:?}, got {other:?}"),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b2a_turn_replay_conflict_main_key_and_cancel_of_ended_run() {
+    bounded(async {
+        // Named agents run on the stub (a Main turn without a credential fails before any model
+        // request, so it cannot show a real failed run); Main is used only for the key-scope row.
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "fast1", &stub.provider(), true).await;
+        let fast1 = Target::Named(AgentName::parse("fast1").expect("test: name"));
+        let id = "rf-b2-turn-0001";
+
+        // K-B2-1: the first admission is 202 without replay fields; the stub completes the turn.
+        let first = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, fast1.clone(), "replay me"))
+            .await
+            .expect("K-B2-1: first turn admitted");
+        assert_eq!(first.disposition, TurnDisposition::Admitted, "K-B2-1: first admission");
+        let job = wait_job_terminal(&client, &caps, &first.job_id).await;
+        assert_eq!(
+            job.status,
+            JobState::Succeeded,
+            "K-B2-1: the stub completes the turn; job error: {:?}; daemon: {:?}",
+            job.error,
+            daemon.error_lines()
+        );
+        report("K-B2-1");
+
+        // K-B2-2: the same key and body answers the durable state and runs nothing.
+        let (count_before, jobs_before) = (stub.count(), daemon_job_total(&daemon).await);
+        // The live job reads failed before the durable terminal row is always visible: poll the
+        // replay, bounded, and record how long the running answer lasted (finding, see report).
+        let started = Instant::now();
+        let replay = loop {
+            let answer = client
+                .post_turn(&caps, RF_SESSION, &rf_message(id, fast1.clone(), "replay me"))
+                .await
+                .expect("K-B2-2: replay answers");
+            assert_eq!(answer.run_id, first.run_id, "K-B2-2: the original run id");
+            if answer.disposition
+                != (TurnDisposition::Replayed { status: RunState::Running, code: None })
+            {
+                break answer;
+            }
+            assert!(
+                started.elapsed() < WAIT_DEADLINE,
+                "K-B2-2: replay stayed running; daemon: {:?}",
+                daemon.error_lines()
+            );
+            tokio::time::sleep(SLOW_POLL_INTERVAL).await;
+        };
+        eprintln!("ROW K-B2-2 replay turned terminal after {:?}", started.elapsed());
+        assert_eq!(
+            replay.disposition,
+            TurnDisposition::Replayed { status: RunState::Succeeded, code: None },
+            "K-B2-2: succeeded, replayed; daemon: {:?}",
+            daemon.error_lines()
+        );
+        assert_eq!(stub.count(), count_before, "K-B2-2: no model request for a replay");
+        assert_eq!(daemon_job_total(&daemon).await, jobs_before, "K-B2-2: no second job");
+        report("K-B2-2");
+
+        // K-B2-3: the same key with another body is 409 idempotency_conflict and writes nothing.
+        assert_api(
+            "K-B2-3",
+            client.post_turn(&caps, RF_SESSION, &rf_message(id, fast1.clone(), "other body")).await,
+            409,
+            ApiCode::IdempotencyConflict,
+        );
+        assert_eq!(daemon_job_total(&daemon).await, jobs_before, "K-B2-3: nothing admitted");
+        report("K-B2-3");
+
+        // K-B2-4: agent omitted and "main" are one key (raw body: the typed client omits agent).
+        let main_id = "rf-b2-main-0002";
+        let plain = rf_body("turn", Some(main_id));
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(plain.clone()),
+            )
+            .await;
+        assert_eq!(status, 202, "K-B2-4: first raw turn: {text}");
+        let spelled = {
+            let mut body = plain.clone();
+            body["agent"] = Value::String("main".to_owned());
+            body
+        };
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(spelled),
+            )
+            .await;
+        let answer: Value = serde_json::from_str(&text).expect("test: replay body is JSON");
+        eprintln!("ROW K-B2-4 raw replay with agent \"main\": {status} {text}");
+        assert_eq!(
+            (status, answer.get("replayed").and_then(Value::as_bool)),
+            (200, Some(true)),
+            "K-B2-4: agent \"main\" replays the omitted-agent key"
+        );
+        report("K-B2-4");
+
+        // K-B2-5: cancel by run id of an ended run answers its terminal state.
+        let ended = client
+            .cancel_run(&caps, RF_SESSION, &first.run_id)
+            .await
+            .expect("K-B2-5: cancel of an ended run");
+        assert_eq!(
+            (ended.status, ended.code),
+            (RunState::Succeeded, None),
+            "K-B2-5: terminal state"
+        );
+        report("K-B2-5");
+
+        // K-B2-6: an unknown run id is 404 run_unknown, never read as "not run".
+        assert_api(
+            "K-B2-6",
+            client.cancel_run(&caps, RF_SESSION, NEVER_ISSUED_ID).await,
+            404,
+            ApiCode::RunUnknown,
+        );
+        report("K-B2-6");
+
+        // K-B2-7: a job id PRX never issued: the uncoded 404 is a typed JobUnknown.
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/jobs/{NEVER_ISSUED_ID}/cancel"),
+                None,
+                None,
+            )
+            .await;
+        eprintln!("ROW K-B2-7 raw job cancel of a never-issued id: {status} {text}");
+        assert_api(
+            "K-B2-7",
+            client.cancel_job(&caps, NEVER_ISSUED_ID).await,
+            404,
+            ApiCode::JobUnknown,
+        );
+        report("K-B2-7");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b2a_running_replay_and_cancel_by_run_id() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::from_secs(600)).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "hold1", &stub.provider(), true).await;
+        let hold1 = Target::Named(AgentName::parse("hold1").expect("test: name"));
+        let id = "rf-b2-live-0001";
+        let live = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "long turn"))
+            .await
+            .expect("test: live turn admitted");
+        tokio::time::sleep(SLOW_POLL_INTERVAL).await;
+        eprintln!("DIAG job {:?}", client.job_status(&caps, &live.job_id).await);
+        wait_model_requests(&daemon, &stub, 1).await;
+
+        // K-B2-8: a replay while the turn runs answers running, not session_busy; no new request.
+        let replay = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "long turn"))
+            .await
+            .expect("K-B2-8: replay of a running turn answers");
+        assert_eq!(replay.run_id, live.run_id, "K-B2-8: same run");
+        assert_eq!(
+            replay.disposition,
+            TurnDisposition::Replayed { status: RunState::Running, code: None },
+            "K-B2-8: running"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+        assert_eq!(stub.count(), 1, "K-B2-8: no second model request");
+        report("K-B2-8");
+
+        // K-B2-9: cancel by run id of a running turn: cancelling or cancelled; the job then ends.
+        let cancel = client
+            .cancel_run(&caps, RF_SESSION, &live.run_id)
+            .await
+            .expect("K-B2-9: cancel of a running turn");
+        eprintln!("ROW K-B2-9 cancel answer: {cancel:?}");
+        assert!(
+            matches!(cancel.status, RunState::Cancelling | RunState::Cancelled),
+            "K-B2-9: cancelling or cancelled, got {:?}",
+            cancel.status
+        );
+        let ended = wait_job_terminal(&client, &caps, &live.job_id).await;
+        eprintln!("ROW K-B2-9 job after cancel: {:?}", ended.status);
+        report("K-B2-9");
+
+        // K-B2-10: a replay of the cancelled turn answers cancelled and runs nothing.
+        let after = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "long turn"))
+            .await
+            .expect("K-B2-10: replay of a cancelled turn answers");
+        assert_eq!(
+            after.disposition,
+            TurnDisposition::Replayed { status: RunState::Cancelled, code: None },
+            "K-B2-10: the cancelled state"
+        );
+        let settled = client
+            .cancel_run(&caps, RF_SESSION, &live.run_id)
+            .await
+            .expect("K-B2-10: cancel of the ended run");
+        assert_eq!(settled.status, RunState::Cancelled, "K-B2-10: the terminal state again");
+        tokio::time::sleep(POLL_INTERVAL).await;
+        assert_eq!(stub.count(), 1, "K-B2-10: a cancelled key never runs again");
+        report("K-B2-10");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b2a_crash_retry_and_interrupted_readback() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::from_secs(600)).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "hold1", &stub.provider(), true).await;
+        let hold1 = Target::Named(AgentName::parse("hold1").expect("test: name"));
+        let id = "rf-b2-crash-0001";
+        let before = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "crash me"))
+            .await
+            .expect("test: turn admitted");
+        wait_model_requests(&daemon, &stub, 1).await;
+
+        // SIGKILL the daemon mid-turn (Child::kill), then start it on the same state directory.
+        daemon.stop();
+        daemon.start();
+        daemon.wait_ready().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+
+        // K-B2-11: the resend after the crash is a new attempt with attempt >= 2 and previous_run_id.
+        let retry = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "crash me"))
+            .await
+            .expect("K-B2-11: resend after the crash");
+        assert_eq!(
+            retry.disposition,
+            TurnDisposition::Restarted { attempt: 2, previous_run_id: before.run_id.clone() },
+            "K-B2-11: attempt 2 names the interrupted run"
+        );
+        assert_ne!(retry.run_id, before.run_id, "K-B2-11: a new run id");
+        report("K-B2-11");
+
+        // K-B2-12: the interrupted run reads back as failed with code interrupted.
+        let interrupted = client
+            .cancel_run(&caps, RF_SESSION, &before.run_id)
+            .await
+            .expect("K-B2-12: the interrupted run answers");
+        assert_eq!(
+            (interrupted.status, interrupted.code),
+            (RunState::Failed, Some(RunCode::Interrupted)),
+            "K-B2-12: interrupted"
+        );
+        report("K-B2-12");
+
+        // K-B2-13: the job of the interrupted run is gone after the restart: an uncoded 404 is
+        // a contract error for job_status, never "no run happened".
+        assert!(
+            client.job_status(&caps, &before.job_id).await.is_err(),
+            "K-B2-13: a job from before the restart is not readable"
+        );
+        report("K-B2-13");
+
+        // K-B2-14: the replay now answers the new attempt, running.
+        let replay = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, hold1.clone(), "crash me"))
+            .await
+            .expect("K-B2-14: replay of the new attempt");
+        assert_eq!(replay.run_id, retry.run_id, "K-B2-14: the new attempt's run");
+        assert_eq!(
+            replay.disposition,
+            TurnDisposition::Replayed { status: RunState::Running, code: None },
+            "K-B2-14: running"
+        );
+        report("K-B2-14");
+        client.cancel_run(&caps, RF_SESSION, &retry.run_id).await.expect("test: cleanup cancel");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b2a_context_replay_and_conflict() {
+    bounded(async {
+        let (mut daemon, _stub) = paired_rf_daemon("").await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let id = "rf-b2-ctx-0001";
+        let marker = "ctx marker b2 one";
+        let first = client
+            .post_context(&caps, RF_SESSION, &rf_message(id, Target::Main, marker))
+            .await
+            .expect("K-B2-15: context recorded");
+        assert!(!first.replayed, "K-B2-15: first answer carries no replay");
+
+        // K-B2-15 (cont.): replay returns the original message id and adds no row and no job.
+        let jobs = daemon_job_total(&daemon).await;
+        let replay = client
+            .post_context(&caps, RF_SESSION, &rf_message(id, Target::Main, marker))
+            .await
+            .expect("K-B2-15: replay of a context answers");
+        assert!(replay.replayed && replay.message_id == first.message_id, "K-B2-15: {replay:?}");
+        assert_eq!(daemon_job_total(&daemon).await, jobs, "K-B2-15: no job for a context");
+        let raw = daemon
+            .raw_authorized(
+                reqwest::Method::GET,
+                &format!("/api/sessions/{RF_SESSION}/messages"),
+                None,
+                None,
+            )
+            .await;
+        let rows: Vec<Value> = serde_json::from_str(&raw.1).expect("test: history is JSON");
+        let copies = rows
+            .iter()
+            .filter(|row| {
+                row.get("content").and_then(Value::as_str).is_some_and(|c| c.contains(marker))
+            })
+            .count();
+        assert_eq!(copies, 1, "K-B2-15: one row for the key, not two");
+        report("K-B2-15");
+
+        // K-B2-16: the same key with another body is 409 idempotency_conflict.
+        assert_api(
+            "K-B2-16",
+            client
+                .post_context(&caps, RF_SESSION, &rf_message(id, Target::Main, "other context"))
+                .await,
+            409,
+            ApiCode::IdempotencyConflict,
+        );
+        report("K-B2-16");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b3_partitioned_reads_and_capabilities() {
+    bounded(async {
+        let fast = ModelStub::start(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&fast.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+
+        // K-B3-0: the advertised set at the pin with targeting on: the landed B1, B2a and B3
+        // tokens; none of the tokens that have not landed.
+        for token in [TARGETED_AGENTS_V1, MESSAGE_IDEMPOTENCY_V1] {
+            assert!(caps.has(token), "K-B3-0: {token} is advertised");
+        }
+        for token in [
+            "message_delete_v1",
+            "sync_snapshot_v1",
+            "sync_ws_v1",
+            "stream_frames_v1",
+            "run_approvals_v1",
+            "history_erase_v1",
+            "agent_memory_purge_v1",
+            "agent_limits_v1",
+        ] {
+            assert!(!caps.has(token), "K-B3-0: {token} must not be advertised yet");
+        }
+        report("K-B3-0");
+
+        let session = "rf-contract-session-0003";
+        client.create_session(&caps, session).await.expect("test: session");
+        put_agent(&client, &caps, "worker", &fast.provider(), true).await;
+        put_agent(&client, &caps, "other", &fast.provider(), true).await;
+        put_agent(&client, &caps, "idle1", &fast.provider(), true).await;
+        let worker = Target::Named(AgentName::parse("worker").expect("test: name"));
+        let other = Target::Named(AgentName::parse("other").expect("test: name"));
+        let n1 = "b3 partition marker N1";
+        let n2 = "b3 partition marker N2";
+        let main_turn = client
+            .post_turn(&caps, session, &rf_message("rf-b3-main-1", Target::Main, "main turn"))
+            .await
+            .expect("test: main turn admitted");
+        wait_job_terminal(&client, &caps, &main_turn.job_id).await;
+        client
+            .post_context(&caps, session, &rf_message("rf-b3-n1-1", worker.clone(), n1))
+            .await
+            .expect("test: context for N1");
+        client
+            .post_context(&caps, session, &rf_message("rf-b3-n2-1", other.clone(), n2))
+            .await
+            .expect("test: context for N2");
+
+        let has =
+            |rows: &[HistoryRow], marker: &str| rows.iter().any(|row| row.content.contains(marker));
+        let all = client.session_messages(&caps, session, None).await.expect("K-B3-1: read all");
+        assert!(all.iter().all(|row| matches!(row.agent, Target::Main | Target::Named(_))));
+        assert!(has(&all, n1) && has(&all, n2), "K-B3-1: every partition is readable unfiltered");
+        assert!(all.iter().any(|row| row.agent == Target::Main), "K-B3-1: Main rows exist");
+        report("K-B3-1");
+
+        // K-B3-2: ?agent=<N1> keeps N1 rows only.
+        let only_n1 = client.session_messages(&caps, session, Some(&worker)).await.expect("K-B3-2");
+        assert!(!only_n1.is_empty() && only_n1.iter().all(|row| row.agent == worker), "K-B3-2");
+        assert!(has(&only_n1, n1) && !has(&only_n1, n2), "K-B3-2: N2 context is not in N1");
+        report("K-B3-2");
+
+        // K-B3-3: ?agent=main keeps Main rows; neither N1 nor N2 context appears.
+        let main_rows =
+            client.session_messages(&caps, session, Some(&Target::Main)).await.expect("K-B3-3");
+        assert!(
+            !main_rows.is_empty()
+                && main_rows.iter().all(|row| row.agent == Target::Main)
+                && !has(&main_rows, n1)
+                && !has(&main_rows, n2),
+            "K-B3-3: a context of N1 or N2 is not returned for Main"
+        );
+        report("K-B3-3");
+
+        // K-B3-4: N2's partition does not hold N1's context.
+        let only_n2 = client.session_messages(&caps, session, Some(&other)).await.expect("K-B3-4");
+        assert!(has(&only_n2, n2) && !has(&only_n2, n1), "K-B3-4");
+        report("K-B3-4");
+
+        // K-B3-5: a configured agent with no row yet gives an empty list.
+        let idle = Target::Named(AgentName::parse("idle1").expect("test: name"));
+        assert!(
+            client.session_messages(&caps, session, Some(&idle)).await.expect("K-B3-5").is_empty(),
+            "K-B3-5: no row, empty list"
+        );
+        report("K-B3-5");
+
+        // K-B3-6: an unknown name is 404 agent_unknown.
+        let ghost = Target::Named(AgentName::parse("ghost").expect("test: name"));
+        assert_api(
+            "K-B3-6",
+            client.session_messages(&caps, session, Some(&ghost)).await,
+            404,
+            ApiCode::AgentUnknown,
+        );
+        report("K-B3-6");
+
+        // K-B3-7: a session that does not exist is 404 session_unknown.
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::GET,
+                "/api/sessions/rf-no-such-session-0001/messages",
+                None,
+                None,
+            )
+            .await;
+        eprintln!("ROW K-B3-7 raw unknown session: {status} {text}");
+        assert_eq!(status, 404, "K-B3-7: unknown session is 404");
+        assert!(
+            matches!(
+                client.session_messages(&caps, "rf-no-such-session-0001", None).await,
+                Err(PrxError::Protocol { .. })
+            ),
+            "K-B3-7: the uncoded 404 is a Protocol refusal, not session_unknown"
+        );
+        report("K-B3-7");
+
+        // K-B3-8: the session list of the paired owner names this session (the cross-owner
+        // half needs a second install: not testable with one daemon).
+        let listed = sessions_list(&daemon).await;
+        assert!(
+            listed.iter().any(|row| row.get("session_id").and_then(Value::as_str) == Some(session)),
+            "K-B3-8: the owner's session is listed"
+        );
+        report("K-B3-8");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_op3_context_and_turn_with_no_credential_and_k_op2_storage_refusal() {
+    bounded(async {
+        // Open point 3: a daemon with no provider credential. Does provider admission run before
+        // the context branch? (Source reading: yes.)
+        let mut daemon = Daemon::prepare_without_credential("");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let context = client
+            .post_context(&caps, RF_SESSION, &rf_message("rf-op3-ctx-1", Target::Main, "op3"))
+            .await;
+        eprintln!("ROW K-OP3-1 context with no credential: {context:?}");
+        assert!(is_not_ready(&context), "K-OP3-1: a context post is refused 503 before the branch");
+        report("K-OP3-1");
+
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-op3-turn-1", Target::Main, "op3"))
+            .await;
+        assert!(is_not_ready(&turn), "K-OP3-2: a turn is refused 503");
+        report("K-OP3-2");
+        assert_eq!(daemon_job_total(&daemon).await, 0, "K-OP3-2: no job was created");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_op2_storage_refusal_when_user_messages_are_not_recorded() {
+    bounded(async {
+        let (mut daemon, stub) =
+            paired_rf_daemon("[memory.events]\nrecord_user_messages = false\n").await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        let jobs = daemon_job_total(&daemon).await;
+        let model_before = stub.count();
+
+        // Open point 2: the daemon answers 500 storage_unavailable, nothing is written, and the
+        // client reports the outcome as unknown (it cannot tell this from a lost answer).
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-op2-turn-1", Target::Main, "op2"))
+            .await;
+        eprintln!("ROW K-OP2-1 turn with user messages not recorded: {turn:?}");
+        assert!(
+            matches!(turn, Err(PrxError::OutcomeUnknown { http_status: Some(500) })),
+            "K-OP2-1: 500 storage_unavailable is typed as an unknown outcome, got {turn:?}"
+        );
+        let (raw_status, raw_text) = daemon
+            .raw_authorized(
+                reqwest::Method::POST,
+                &format!("/api/sessions/{RF_SESSION}/message"),
+                None,
+                Some(rf_body("turn", Some("rf-op2-turn-2"))),
+            )
+            .await;
+        eprintln!("ROW K-OP2-1 raw answer: {raw_status} {raw_text}");
+        assert_eq!(error_code(&raw_text).as_deref(), Some("storage_unavailable"), "K-OP2-1 raw");
+        let context = client
+            .post_context(&caps, RF_SESSION, &rf_message("rf-op2-ctx-1", Target::Main, "op2"))
+            .await;
+        eprintln!("ROW K-OP2-2 context with user messages not recorded: {context:?}");
+        // Finding: the documented 500 does not come for a context at this pin; PRX answers
+        // 200 recorded. Recorded as observed; whether the row is durable is checked below.
+        let context = context.expect("K-OP2-2: context answers 200 at this pin");
+        assert!(!context.replayed, "K-OP2-2: first answer");
+        let (_, history) = daemon
+            .raw_authorized(
+                reqwest::Method::GET,
+                &format!("/api/sessions/{RF_SESSION}/messages"),
+                None,
+                None,
+            )
+            .await;
+        let rows: Vec<Value> = serde_json::from_str(&history).expect("test: history is JSON");
+        let stored = rows
+            .iter()
+            .filter(|row| {
+                row.get("content").and_then(Value::as_str).is_some_and(|c| c.contains("op2"))
+            })
+            .count();
+        eprintln!("ROW K-OP2-2 rows holding the context text with recording off: {stored}");
+        assert_eq!(daemon_job_total(&daemon).await, jobs, "K-OP2: no job admitted");
+        assert_eq!(stub.count(), model_before, "K-OP2: no model request");
+        report("K-OP2-1");
+        report("K-OP2-2");
+        daemon.stop();
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_op1_agent_put_with_custom_endpoint_answers_428() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::ZERO).await;
+        let mut daemon = Daemon::prepare_with_provider("openrouter", "");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        let name = AgentName::parse("custom1").expect("test: name");
+        let cfg = config(&stub.provider(), "stub-model", None, Tools::All, true);
+        let rev = list_revision(&client, &caps).await;
+
+        // Open point 1: a PUT that points an agent at a custom endpoint, without confirmation.
+        let refused = client.put(&caps, &name, &cfg, &rev, false).await;
+        eprintln!("ROW K-OP1-1 PUT custom endpoint without confirmation: {refused:?}");
+        let revision = match &refused {
+            Err(PrxError::Api {
+                status: 428,
+                code: ApiCode::ConfirmationRequired,
+                revision,
+                ..
+            }) => revision.clone().expect("K-OP1-1: 428 carries the revision"),
+            other => panic!("K-OP1-1: must be 428 confirmation_required, got {other:?}"),
+        };
+        // The raw answer, for the report (the reason text PRX gives).
+        let raw_body = serde_json::json!({
+            "provider": cfg.provider, "model": "stub-model", "autonomy": "full",
+            "tools": ["*"], "enabled": true
+        });
+        let (status, text) = daemon
+            .raw_authorized(
+                reqwest::Method::PUT,
+                &format!("/api/agents/{}", name.as_str()),
+                Some(rev.as_str()),
+                Some(raw_body),
+            )
+            .await;
+        eprintln!("ROW K-OP1-1 raw answer: {status} {text}");
+        assert_eq!(status, 428, "K-OP1-1 raw");
+        report("K-OP1-1");
+
+        // K-OP1-2: the apply helper turns the same 428 into NeedsConfirmation with the revision.
+        match client.apply_agent(&caps, &name, &cfg, None).await {
+            Ok(ApplyOutcome::NeedsConfirmation { revision: got }) => {
+                assert_eq!(got, revision, "K-OP1-2: the revision PRX reported");
+            }
+            other => panic!("K-OP1-2: apply must report NeedsConfirmation, got {other:?}"),
+        }
+        report("K-OP1-2");
+
+        // K-OP1-3: confirming with that revision applies the change.
+        let applied = client.put(&caps, &name, &cfg, &revision, true).await;
+        assert!(applied.is_ok(), "K-OP1-3: confirmed PUT applies: {applied:?}");
+        report("K-OP1-3");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// K-B2-17: a turn that ends `failed` (provider answers 500) replays as `failed`, and a resend
+/// runs nothing. (Was an observed deviation at the first run; it passes with the state directory
+/// and TMPDIR under a private path.)
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn k_b2a_failed_turn_replay_is_failed() {
+    bounded(async {
+        let stub = ModelStub::start(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_with_provider(&stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "fail1", &stub.provider(), true).await;
+        let fail1 = Target::Named(AgentName::parse("fail1").expect("test: name"));
+        let id = "rf-b2-fail-0001";
+        let first = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, fail1.clone(), "fail me"))
+            .await
+            .expect("test: turn admitted");
+        let job = wait_job_terminal(&client, &caps, &first.job_id).await;
+        assert_eq!(job.status, JobState::Failed, "F-1: the stub answers 500, the job fails");
+        wait_model_requests(&daemon, &stub, 1).await;
+        let jobs_before = daemon_job_total(&daemon).await;
+        let started = Instant::now();
+        let mut replay = client
+            .post_turn(&caps, RF_SESSION, &rf_message(id, fail1.clone(), "fail me"))
+            .await
+            .expect("F-2: replay answers");
+        while started.elapsed() < WAIT_DEADLINE
+            && replay.disposition
+                == (TurnDisposition::Replayed { status: RunState::Running, code: None })
+        {
+            tokio::time::sleep(SLOW_POLL_INTERVAL).await;
+            replay = client
+                .post_turn(&caps, RF_SESSION, &rf_message(id, fail1.clone(), "fail me"))
+                .await
+                .expect("F-2: replay answers");
+        }
+        assert_eq!(
+            replay.disposition,
+            TurnDisposition::Replayed { status: RunState::Failed, code: None },
+            "K-B2-17: failed, replayed; waited {:?}; daemon: {:?}",
+            started.elapsed(),
+            daemon.error_lines()
+        );
+        assert_eq!(
+            daemon_job_total(&daemon).await,
+            jobs_before,
+            "K-B2-17: the failed key admits no job"
+        );
+        report("K-B2-17");
+        daemon.stop();
+    })
+    .await;
+}
+
+/// PIN-296A-STATE (documents a requirement; at this pin it asserts what the daemon does). A state
+/// dir under a group-writable ancestor: PRX refuses its recovery key ("unsafe recovery ancestor"),
+/// admission lets the turn in, and the terminal write then fails, so the job ends `failed` with
+/// "terminal cleanup persistence failed". The next PRX repin is expected to flip this to a coded
+/// refusal up front (`storage_unavailable`, reason `recovery_unavailable`): when it does, this row
+/// must change to assert the refusal.
+#[tokio::test]
+#[ignore = "needs RAMFLUX_PRX_BIN: a prx binary built at the pinned commit"]
+async fn pin_296a_state_group_writable_ancestor_turn_admitted_terminal_fails() {
+    bounded(async {
+        use std::os::unix::fs::PermissionsExt;
+        let base = state_base().join("gw-probe");
+        std::fs::create_dir_all(&base).expect("test: group-writable probe base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o775))
+            .expect("test: chmod probe base");
+        let stub = ModelStub::start_completing(Duration::ZERO).await;
+        let mut daemon =
+            Daemon::prepare_unchecked_in(&base, &stub.provider(), "targeted_agents = true\n");
+        daemon.start();
+        daemon.wait_ready().await;
+        daemon.pair().await;
+        let client = daemon.client();
+        let caps = capabilities(&client).await;
+        client.create_session(&caps, RF_SESSION).await.expect("test: session");
+        put_agent(&client, &caps, "gw1", &stub.provider(), true).await;
+        let gw1 = Target::Named(AgentName::parse("gw1").expect("test: name"));
+        let turn = client
+            .post_turn(&caps, RF_SESSION, &rf_message("rf-gw-turn-0001", gw1, "probe"))
+            .await
+            .expect("PIN-296A-STATE: admission lets the turn in");
+        assert_eq!(turn.disposition, TurnDisposition::Admitted, "PIN-296A-STATE: admitted");
+        let job = wait_job_terminal(&client, &caps, &turn.job_id).await;
+        let error = job.error.clone().unwrap_or_default();
+        // Observed at this pin (2026-11-22, QA): the job SUCCEEDS with a group-writable ancestor,
+        // and the daemon logs the recovery refusal. PRX's description said the terminal write
+        // fails. The row asserts the observation and prints the daemon's recovery lines.
+        eprintln!(
+            "ROW PIN-296A-STATE observed job {:?} error {:?}; daemon: {:?}",
+            job.status,
+            job.error,
+            daemon.error_lines()
+        );
+        assert_eq!(
+            job.status,
+            JobState::Succeeded,
+            "PIN-296A-STATE: observed Succeeded (PRX described failed); error {error:?}; daemon: {:?}",
+            daemon.error_lines()
+        );
+        report("PIN-296A-STATE (group-writable ancestor: admitted; observed terminal Succeeded)");
+        daemon.stop();
+        drop(daemon);
+        let _ = std::fs::remove_dir_all(&base);
     })
     .await;
 }

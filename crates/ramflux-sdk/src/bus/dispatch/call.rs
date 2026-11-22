@@ -92,6 +92,11 @@ async fn invite(
         return Err(invalid("account busy"));
     }
     let _: LocalBusCallInviteRequest = serde_json::from_value(request.body.clone())?;
+    if live_session_lacks_call_resolution(account) {
+        return Err(SdkError::CapabilityDenied(
+            "voice calls are unavailable: the home node did not negotiate call resolution".into(),
+        ));
+    }
     let conversation = required(&request.body, "conversation_id")?;
     let thread = account
         .client
@@ -161,6 +166,19 @@ async fn invite(
         tracing::warn!("call signaling queued for retry");
     }
     Ok(local_bus_ok(serde_json::to_value(row)?))
+}
+
+/// A live session whose gateway granted no call-resolution generation cannot submit any call
+/// control. Without a live current session the background signaling pass decides instead.
+fn live_session_lacks_call_resolution(account: &LocalBusAccountState) -> bool {
+    account.connection.as_ref().is_some_and(|handle| {
+        let snapshot = handle.snapshot();
+        handle.metadata().is_some_and(|metadata| {
+            snapshot.state == crate::bus::connection_manager::NetworkingState::Live
+                && metadata.generation == snapshot.generation
+                && metadata.session.call_session_generation.is_none()
+        })
+    })
 }
 
 pub(crate) fn recover(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
