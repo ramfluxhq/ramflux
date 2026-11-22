@@ -4,9 +4,9 @@
 //! Receipt outbox reads, network-only steps, and unchanged-row actor checkpoints.
 
 use super::{
-    ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, GatewaySessionConfig, LIFETIME,
-    LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with,
-    mpsc, now_unix_timestamp, postpone, receipt_message,
+    ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, LIFETIME, LocalBusAccountState,
+    PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with, mpsc,
+    now_unix_timestamp, postpone, receipt_message,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
@@ -19,7 +19,7 @@ pub(crate) struct Plan {
     work: Work,
     message: GatewayDirectMessage,
     body: Vec<u8>,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
     request: Option<SendMaterialRequest>,
 }
 
@@ -469,7 +469,7 @@ mod retention_tests {
 #[cfg(test)]
 pub(crate) async fn test_fetch_material(
     context: &SessionContext,
-    config: GatewaySessionConfig,
+    config: crate::GatewaySessionConfig,
 ) -> Result<SendMaterial, SdkError> {
     let work = Work {
         status_id: String::new(),
@@ -505,7 +505,7 @@ pub(crate) async fn test_fetch_material(
         work,
         message,
         body: Vec::new(),
-        config,
+        config: crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
         request: Some(SendMaterialRequest { root: None, prekey: Some("receipt-peer".into()) }),
     };
     fetch_material(context, &mut plan).await

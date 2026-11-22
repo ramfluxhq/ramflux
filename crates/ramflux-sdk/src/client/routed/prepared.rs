@@ -7,6 +7,7 @@ use super::{
     GatewayDirectMessage, GatewaySessionConfig, RamfluxClient, Route, SdkDeviceManifestResponse,
     SdkDmX3dhHeader, SdkError, SealPair, invalid,
 };
+use crate::SealingConfig;
 use crate::client::identity_authority::HeadUse;
 
 pub(crate) struct SendMaterialRequest {
@@ -86,7 +87,7 @@ impl RamfluxClient {
 
     pub(crate) fn seal_routed_prepared(
         &self,
-        config: &GatewaySessionConfig,
+        config: &SealingConfig,
         message: &GatewayDirectMessage,
         body: &[u8],
         route: Route,
@@ -98,7 +99,7 @@ impl RamfluxClient {
             material,
             crate::client::target_selection::kind_id_for_route(&route.kind),
         )?;
-        let local = self.local_device_identity(&config.device_id)?;
+        let local = self.local_device_identity(&config.config().device_id)?;
         let recipient = Self::qualified_recipient(message)?;
         self.bind_outgoing_delivery(&local, message, &route.kind)?;
         self.seal_routed_with_route(
@@ -106,7 +107,7 @@ impl RamfluxClient {
             body,
             route,
             SealPair {
-                local: &config.device_id,
+                local: &config.config().device_id,
                 remote: &recipient,
                 session: &mut session,
                 header,
@@ -121,7 +122,7 @@ impl RamfluxClient {
     /// It has one schema, raw I, and native authority; no alternate carrier is selected on failure.
     pub(crate) fn seal_generated_routed_prepared(
         &self,
-        config: &GatewaySessionConfig,
+        config: &SealingConfig,
         message: &GatewayDirectMessage,
         body: &[u8],
         route: Route,
@@ -170,7 +171,7 @@ impl RamfluxClient {
                 body,
                 route,
                 SealPair {
-                    local: &config.device_id,
+                    local: &config.config().device_id,
                     remote: &recipient,
                     session: &mut session,
                     header,

@@ -284,7 +284,9 @@ pub(crate) mod tests {
             );
             let envelope = source.client.account_db()?.write_transaction(|| {
                 let sealed = source.client.seal_generated_routed_prepared(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &source.config,
+                    )?,
                     &first,
                     &exact.wire,
                     Route::direct(),
@@ -293,7 +295,9 @@ pub(crate) mod tests {
                         .map_err(|e| crate::SdkError::LocalBus(e.to_string()))?,
                 )?;
                 crate::dm::gateway_generated_envelope_from_sealed(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &source.config,
+                    )?,
                     &mut first,
                     sealed,
                 )
@@ -442,7 +446,7 @@ pub(crate) mod tests {
             );
             let envelope = source.client.account_db()?.write_transaction(|| {
                 let sealed = source.client.seal_generated_routed_prepared(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
                     &first,
                     &prepared.wire,
                     Route::group_message("activation-media-group"),
@@ -451,7 +455,7 @@ pub(crate) mod tests {
                         .map_err(|error| SdkError::LocalBus(error.to_string()))?,
                 )?;
                 crate::dm::gateway_generated_envelope_from_sealed(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
                     &mut first,
                     sealed,
                 )
@@ -583,14 +587,17 @@ pub(crate) mod tests {
         assert_eq!(retained.exact, exact.exact, "retry must retain the private revision nonce");
         assert_eq!(retry.message_id, first.message_id, "retry must retain the canonical identity");
         let sealed = source.client.seal_generated_routed_prepared(
-            &source.config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
             &retry,
             &retained.wire,
             Route::direct(),
             source.material_for(target)?,
         )?;
-        let retransmitted =
-            crate::dm::gateway_generated_envelope_from_sealed(&source.config, &mut retry, sealed)?;
+        let retransmitted = crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            &mut retry,
+            sealed,
+        )?;
         assert_eq!(
             ramflux_protocol::canonical_json_bytes(envelope)?,
             ramflux_protocol::canonical_json_bytes(&retransmitted)?,
@@ -700,7 +707,9 @@ pub(crate) mod tests {
                 Some("history-one")
             );
             let envelopes = source.client.seal_own_copy_generated(
-                &source.config,
+                &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                    &source.config,
+                )?,
                 draft,
                 vec![source.material_for(&sibling)?],
             )?;
@@ -767,10 +776,10 @@ pub(crate) mod tests {
             }, &native.bytes()?)?.ok_or("test: authored Task projection missing")?;
             assert!(outcome.accepted, "native Task executor must accept the authored start");
             let envelope = source.client.account_db()?.write_transaction(|| {
-                let sealed = source.client.seal_generated_routed_prepared(&source.config, &outgoing,
+                let sealed = source.client.seal_generated_routed_prepared(&crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?, &outgoing,
                     &prepared.wire, Route::direct(), source.material_for(&target)
                         .map_err(|error| SdkError::LocalBus(error.to_string()))?)?;
-                crate::dm::gateway_generated_envelope_from_sealed(&source.config, &mut outgoing, sealed)
+                crate::dm::gateway_generated_envelope_from_sealed(&crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?, &mut outgoing, sealed)
             })?;
             target.receive(envelope.clone(), 1).await?;
             target.receive(envelope, 1).await?;
@@ -858,7 +867,9 @@ pub(crate) mod tests {
             );
             let envelope = source.client.account_db()?.write_transaction(|| {
                 let sealed = source.client.seal_generated_routed_prepared(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &source.config,
+                    )?,
                     &outgoing,
                     &prepared.wire,
                     Route::direct(),
@@ -867,7 +878,9 @@ pub(crate) mod tests {
                         .map_err(|error| SdkError::LocalBus(error.to_string()))?,
                 )?;
                 crate::dm::gateway_generated_envelope_from_sealed(
-                    &source.config,
+                    &crate::bus::connection_manager::SessionMetadata::sealing_config_for(
+                        &source.config,
+                    )?,
                     &mut outgoing,
                     sealed,
                 )

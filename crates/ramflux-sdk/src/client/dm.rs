@@ -218,7 +218,8 @@ impl RamfluxClient {
             .ok_or_else(|| SdkError::InboundRejected("generated identity required".into()))?;
         message.message_id = ramflux_protocol::encode_base64url(&identity.id);
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
-        let envelope = gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
+        let envelope =
+            gateway_envelope_from_sealed(&engine.sealing_config()?, &mut message, sealed, None)?;
         if matches!(inner.kind, 1 | 4 | 9 | 10) {
             self.project_authored_message(&message, plaintext, &message.encrypted_body)?;
         }
@@ -264,7 +265,7 @@ impl RamfluxClient {
             )
             .await?;
         let envelope = crate::dm::gateway_generated_envelope_from_sealed(
-            engine.config(),
+            &engine.sealing_config()?,
             &mut message,
             sealed,
         )?;

@@ -146,7 +146,7 @@ async fn send(
             .seal_routed_as(engine, &message, &body, crate::client::routed::Route::receipt())
             .await?;
         work.packet = Some(crate::dm::gateway_generated_envelope_from_sealed(
-            engine.config(),
+            &engine.sealing_config()?,
             &mut message,
             sealed,
         )?);

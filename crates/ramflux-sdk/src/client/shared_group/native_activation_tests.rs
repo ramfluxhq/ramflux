@@ -303,7 +303,11 @@ pub(super) async fn implicit_sibling_history() -> TestResult {
         source.client.prepare_authored_history(&source.config)?.ok_or("test: group history")?;
     let (plan, envelope) = source
         .client
-        .seal_authored_history(&source.config, plan, source.material_for(&sibling)?)?
+        .seal_authored_history(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&source.config)?,
+            plan,
+            source.material_for(&sibling)?,
+        )?
         .ok_or("test: sealed group history")?;
     sibling.receive(envelope, 1).await?;
     source.client.complete_authored_history(&plan)?;

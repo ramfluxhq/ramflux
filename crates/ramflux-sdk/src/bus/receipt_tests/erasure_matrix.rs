@@ -29,8 +29,10 @@ fn own_copy(
         manifest: Some((reference.root_commitment().into(), merged.clone())),
         bundle: Some(sibling.client.load_x3dh_private_state(&reference)?.bundle),
     };
-    let (_, envelope) =
-        source.client.seal_authored_history(&config, plan, material)?.ok_or("sealed own copy")?;
+    let (_, envelope) = source
+        .client
+        .seal_authored_history(&source.sealing_config()?, plan, material)?
+        .ok_or("sealed own copy")?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

@@ -69,7 +69,7 @@ pub(crate) async fn request_entry(
         ttl: 3600,
     };
     let packet = sender.client.seal_generated_routed_prepared(
-        &sender.config,
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config)?,
         &message,
         &body,
         crate::client::routed::Route::control(),
@@ -78,8 +78,11 @@ pub(crate) async fn request_entry(
             bundle: Some(device.prekey_bundle.clone()),
         },
     )?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(&sender.config, &mut message, packet)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config)?,
+        &mut message,
+        packet,
+    )?;
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: 1,

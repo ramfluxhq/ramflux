@@ -123,7 +123,12 @@ async fn seal_beacon(
             crate::client::routed::Route::group_control("group"),
         )
         .await?;
-    Ok(crate::dm::gateway_envelope_from_sealed(&sender.config, &mut message, sealed, None)?)
+    Ok(crate::dm::gateway_envelope_from_sealed(
+        &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&sender.config)?,
+        &mut message,
+        sealed,
+        None,
+    )?)
 }
 
 /// Stage the creator's device-set hint at its current certified epoch and return the sealed

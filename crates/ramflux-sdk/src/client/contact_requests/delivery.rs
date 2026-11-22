@@ -544,7 +544,7 @@ async fn send_one(
     // Control carrier; no Direct report payload.
     engine
         .submit_envelope(crate::dm::gateway_generated_envelope_from_sealed(
-            engine.config(),
+            &engine.sealing_config()?,
             &mut message,
             sealed,
         )?)
