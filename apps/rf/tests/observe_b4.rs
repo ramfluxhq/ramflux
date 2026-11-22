@@ -258,7 +258,7 @@ fn seed(data: &Path) -> Result<(String, String, String), TestError> {
     let index = AccountIndex::open(data)?;
     let wrapped = index.load_wrapped_db_key(ACCOUNT)?.ok_or("wrapped db key row missing")?;
     let vault = FileVaultSecretSource::new(data).vault_secret(ACCOUNT)?;
-    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, PASSPHRASE.as_bytes());
+    let kek = ramflux_sdk::account_db_key_encryption_key(&vault, PASSPHRASE.as_bytes())?;
     let key = unwrap_with_vault_secret(&kek, &wrapped)?;
     let db = AccountDb::open(&index, ACCOUNT, &key)?;
     let author = g::QualifiedDevice {

@@ -277,15 +277,14 @@ impl Case {
     }
 }
 fn connection(b: &Fixture) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
-    use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write;
-    let vault = FileVaultSecretSource::new(&b.root).vault_secret("bob")?;
+    let vault = b.client.vault_secret_source()?.vault_secret("bob")?;
     let wrapped = b.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped key")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &crate::client::account::account_db_key_encryption_key(
             &vault,
             b"native fixture data passphrase",
-        ),
+        )?,
         &wrapped,
     )?;
     let sql = rusqlite::Connection::open(&b.client.account_db()?.path)?;

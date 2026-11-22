@@ -23,6 +23,8 @@ pub(crate) struct PreparedInbound {
 #[derive(Clone, Copy)]
 enum Observation {
     Preview,
+    /// Test callers record immediately. Live apply records inside the W1 fence.
+    #[cfg(test)]
     Commit,
 }
 
@@ -34,7 +36,7 @@ impl RamfluxClient {
         prepared: Option<InboundManifest>,
     ) -> Result<(), SdkError> {
         if let Some(result) = prepared {
-            return self.apply_inbound_device_manifest(entry, result?.as_ref());
+            return self.prepare_inbound_device_manifest(entry, result?.as_ref());
         }
         let request = self.inbound_device_manifest_request(entry)?;
         let manifest = if let Some(root) = request {
@@ -49,7 +51,7 @@ impl RamfluxClient {
         } else {
             None
         };
-        self.apply_inbound_device_manifest(entry, manifest.as_ref())
+        self.prepare_inbound_device_manifest(entry, manifest.as_ref())
     }
 
     #[cfg(test)]
@@ -102,6 +104,30 @@ impl RamfluxClient {
         Ok(Some(commitment))
     }
 
+    /// Records the inbound device in the open writer, or in one new transaction at autocommit.
+    ///
+    /// Live apply calls this from the W1 fence after [`Self::prepare_inbound_device_manifest`].
+    ///
+    /// # Errors
+    /// Returns the same root-address and storage errors as a commit observation.
+    pub(crate) fn record_inbound_device_observation(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        let remote = &entry.envelope.source_device_id;
+        let reference = self.inbound_device_reference(entry)?;
+        let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
+            .ok_or_else(|| invalid("sender root address required"))?;
+        self.account_db()?.upsert_device_directory_entry(
+            remote,
+            &commitment,
+            "inbound_signature",
+            now_unix_timestamp(),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_inbound_device_manifest(
         &self,
         entry: &GatewayInboxEntry,
@@ -151,6 +177,7 @@ impl RamfluxClient {
         let (commitment, _) = ramflux_protocol::parse_qualified_device_id(&reference)?
             .ok_or_else(|| invalid("sender root address required"))?;
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
+        #[cfg(test)]
         if matches!(observation, Observation::Commit) {
             self.account_db()?.upsert_device_directory_entry(
                 remote,
@@ -159,6 +186,8 @@ impl RamfluxClient {
                 now_unix_timestamp(),
             )?;
         }
+        #[cfg(not(test))]
+        let _ = observation;
         self.finish_lazy_own_group_pins(&entry.envelope.source_principal_id, &commitment, remote)?;
         Ok(())
     }

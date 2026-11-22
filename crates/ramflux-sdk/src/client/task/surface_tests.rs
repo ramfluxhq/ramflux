@@ -120,7 +120,7 @@ async fn exercise_with_restart(input: bool, read_only: bool, restart: bool) -> T
 
     let binding = if restart {
         drop(f.human.active_account_db.take());
-        f.human.unlock_account("human", b"surface-test-secret")?;
+        f.human.unlock_account("human", b"662207")?;
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
             f.human.initialize_born_v3_branch("human-device", vault.clone()),

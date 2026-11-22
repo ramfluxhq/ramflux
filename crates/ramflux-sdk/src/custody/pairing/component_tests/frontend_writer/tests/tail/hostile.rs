@@ -116,13 +116,7 @@ async fn run() -> TestResult {
         reopen(&mut rig.primary, &rig.participant_a, &mut rig.source.client, b"fresh-source-data")
             .await?;
     eprintln!("test: hostile tail source reopened; cold reopening target");
-    target = reopen(
-        &mut rig.secondary,
-        &rig.participant_b,
-        &mut client,
-        b"component-recipient-passphrase",
-    )
-    .await?;
+    target = reopen(&mut rig.secondary, &rig.participant_b, &mut client, b"752913").await?;
     // Cold owners have discarded the old bearer tokens. The native relay keeps
     // that epoch until its specified ten-second idle expiry.
     tokio::time::advance(std::time::Duration::from_secs(10)).await;

@@ -324,7 +324,7 @@ async fn cold_cleanup(replay: bool) -> TestResult {
     rig.source.client = crate::RamfluxClient::new();
     drop(client);
     let source_client = reopen(&rig.participant_a, b"fresh-source-data")?;
-    let target_client = reopen(&rig.participant_b, b"component-recipient-passphrase")?;
+    let target_client = reopen(&rig.participant_b, b"752913")?;
     Box::pin(cold_status(
         rig.participant_a.clone(),
         &source_client,

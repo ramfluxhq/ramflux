@@ -82,7 +82,7 @@ async fn future_event_survives_restart_and_waits_for_create() -> TestResult {
     assert!(f.human.surface_get("s", 0, None)?["snapshot"].is_null());
     f.human = RamfluxClient::new();
     f.human.open_account_index(&f.root)?;
-    f.human.unlock_account("human", b"surface-test-secret")?;
+    f.human.unlock_account("human", b"662207")?;
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         f.human.initialize_born_v3_branch("human-device", f.vault.clone()),
