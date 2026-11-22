@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Root-specific command demand with the original network admission deadline.
+//! Root-specific command demand. The fetch uses the network admission deadline.
+//! A fetch that has already succeeded waits only until the claimed-command bound.
 
 use super::AccountRuntime;
 use crate::SdkError;
@@ -154,13 +155,39 @@ pub(crate) fn stale_roots_since(
     Ok(stale)
 }
 
+/// Fetch budget stays at network admission. A finished fetch may wait for the
+/// writer Apply until the claimed-command bound, and no later.
+fn authority_wait_deadline(
+    refresh: &crate::bus::couriers::head_refresh::RefreshState,
+    roots: &BTreeSet<String>,
+    since: std::time::Instant,
+    network_deadline: Instant,
+    claimed_deadline: Instant,
+) -> Instant {
+    let fetched = !roots.is_empty() && roots.iter().all(|root| refresh.fetched_since(root, since));
+    if fetched { network_deadline.max(claimed_deadline) } else { network_deadline }
+}
+
+fn claimed_command_deadline(
+    command: &AccountCommand,
+    admitted_at: Instant,
+    command_bound: std::time::Duration,
+) -> Instant {
+    command
+        .admission
+        .as_ref()
+        .map_or(admitted_at + command_bound, |admission| admission.command_deadline)
+}
+
 impl AccountRuntime {
     pub(super) async fn prepare_command_heads(
         &mut self,
         command: &AccountCommand,
         admitted_at: Instant,
     ) -> Result<(), SdkError> {
-        let deadline = admitted_at + self.timeouts.network_wait;
+        let network_deadline = admitted_at + self.timeouts.network_wait;
+        let claimed_deadline =
+            claimed_command_deadline(command, admitted_at, self.timeouts.command);
         // Every NEW send authorization needs an authority fetched after this command began.
         let since = std::time::Instant::now();
         let mut enqueued = BTreeSet::new();
@@ -175,7 +202,7 @@ impl AccountRuntime {
             // The actor bind owns receive after start_connection. Standalone run
             // would return AccountWriterBusy. Unbound tests still Resume here.
             if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
-                tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
+                tokio::time::timeout_at(network_deadline, crate::bus::sync_driver::run(account))
                     .await
                     .map_err(|_| pending(account))??;
             }
@@ -195,6 +222,13 @@ impl AccountRuntime {
             }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
+            let deadline = authority_wait_deadline(
+                &account.head_refresh,
+                &roots,
+                since,
+                network_deadline,
+                claimed_deadline,
+            );
             if Instant::now() >= deadline {
                 return Err(pending(account));
             }
@@ -206,7 +240,7 @@ impl AccountRuntime {
             tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(deadline) => {
-                    return Err(pending(self.state.accounts.get(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?));
+                    // The next iteration reads a fetch that finished during this wait.
                 }
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };

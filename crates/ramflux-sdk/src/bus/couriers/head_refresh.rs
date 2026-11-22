@@ -23,6 +23,40 @@ const REFRESH_DUE: Duration = Duration::from_secs(120);
 const RETRY_DEMAND_SHARE: usize = PASS_ROOTS;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(150);
 
+/// Successful fetches visible before the writer Apply is queued.
+///
+/// The account command reads this to tell a finished fetch from one that is
+/// still on the network. Apply clears the root, so a rejected result does not
+/// keep the command waiting.
+#[derive(Default)]
+struct FetchedHeads {
+    slots: std::sync::Mutex<BTreeMap<String, Instant>>,
+}
+impl FetchedHeads {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Instant>> {
+        self.slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn record(&self, root: &str, fetched_after: Instant) {
+        let mut slots = self.lock();
+        if slots.len() >= MAX_PENDING && !slots.contains_key(root) {
+            let oldest = slots.iter().min_by_key(|(_, at)| *at).map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                slots.remove(&oldest);
+            }
+        }
+        slots.insert(root.to_owned(), fetched_after);
+    }
+
+    fn clear(&self, root: &str) {
+        self.lock().remove(root);
+    }
+
+    fn covers(&self, root: &str, since: Instant) -> bool {
+        self.lock().get(root).is_some_and(|at| *at >= since)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct RefreshState {
     pending: BTreeSet<String>,
@@ -33,6 +67,7 @@ pub(crate) struct RefreshState {
     wake: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
     active: Weak<()>,
+    fetched: Arc<FetchedHeads>,
 }
 impl RefreshState {
     fn retry_ready(&self, root: &str) -> bool {
@@ -53,6 +88,12 @@ impl RefreshState {
         self.pending.insert(root);
         self.wake.notify_one();
         true
+    }
+
+    /// True when this root's network fetch started at or after `since` and the
+    /// body is already in hand. The writer may not have applied it yet.
+    pub(crate) fn fetched_since(&self, root: &str, since: Instant) -> bool {
+        self.fetched.covers(root, since)
     }
 }
 
@@ -79,6 +120,7 @@ pub(crate) struct Plan {
     remaining_passes: usize,
     retried_demands: usize,
     config: GatewaySessionConfig,
+    fetched: Arc<FetchedHeads>,
 }
 pub(crate) enum Work {
     Subscribe {
@@ -212,6 +254,7 @@ fn prepare_due_limit(
         remaining_passes,
         retried_demands,
         config: account.gateway_config.clone(),
+        fetched: Arc::clone(&account.head_refresh.fetched),
     }))
 }
 
@@ -222,6 +265,9 @@ fn apply(
     fetched_after: Instant,
     outcome: Result<SdkDeviceManifestResponse, SdkError>,
 ) -> Result<bool, SdkError> {
+    // The body has reached the writer. A rejection must not keep the command's
+    // local-apply wait open.
+    plan.fetched.clear(root);
     let result = apply_verified(account, plan, root, fetched_after, outcome);
     if plan.fence.current(account)
         && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
@@ -364,6 +410,9 @@ async fn fetch_pass(
         for root in &plan.roots {
             let fetched_after = Instant::now();
             let outcome = super::directory::fetch(&plan.config, root).await;
+            if outcome.is_ok() {
+                plan.fetched.record(root, fetched_after);
+            }
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
