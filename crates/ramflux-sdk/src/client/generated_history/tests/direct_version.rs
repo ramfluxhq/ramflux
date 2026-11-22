@@ -246,3 +246,6 @@ mod record;
 
 #[path = "direct_version/source.rs"]
 mod source;
+
+#[path = "direct_version/merge.rs"]
+mod merge;

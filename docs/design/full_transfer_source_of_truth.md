@@ -93,6 +93,19 @@ receipt. Source-cut export, original-contribution union, restriction-first erasu
 raw ownership closure and independent actual-materialization/product-read gates
 must still use it before the native families are counted complete.
 
+## Whole native version resolution
+
+FullDirectHistory::merge keeps original identity/order immutable and selects one
+complete verified version using the existing Edit (revision, raw event id) rule.
+An equal version retains the explicitly preferred contributor's proof. Same event
+id with different content/current identity, different original identity/HLC, or
+conflicting signed original-header metadata refuses TransferConflict, even when
+both inputs have valid signatures. OriginalHeader.matches supplies the existing
+signed issuance/lifetime/layer commitment comparison; no retired body is rebuilt.
+Native body records stay narrow. Original capture history metadata needed by SDK
+publication must be retained by its separate typed history owner, not invented
+from the body record or replayed as A's execution state.
+
 ## Actual native snapshot assembly
 
 `AccountDb::read_full_direct_history` groups its reads with the existing account

@@ -196,6 +196,57 @@ impl FullDirectHistory {
             .map_err(|_| invalid())
     }
 
+    /// Resolve complete native versions, keeping this contributor when versions agree.
+    /// Revision ties use the existing native Edit register's raw event-id tie break;
+    /// message display/order always remains the independently checked original identity.
+    /// # Errors
+    /// Refuses different original metadata/scopes or equivocation under one current event id.
+    pub fn merge<'a>(&'a self, other: &'a Self, own: &str) -> Result<&'a Self, StorageError> {
+        let left = self.verify(own)?;
+        let right = other.verify(own)?;
+        if self.peer != other.peer
+            || left.original() != right.original()
+            || (left.current().id == right.current().id
+                && (left.current() != right.current() || self.exact_inner() != other.exact_inner()))
+        {
+            return Err(StorageError::PairingField("TransferConflict"));
+        }
+        if let (Some(a), Some(b)) = (self.original_header()?, other.original_header()?)
+            && !a.matches(&b).map_err(|_| invalid())?
+        {
+            return Err(StorageError::PairingField("TransferConflict"));
+        }
+        let a = (left.revision(), left.current().id.as_slice());
+        let b = (right.revision(), right.current().id.as_slice());
+        Ok(if b > a { other } else { self })
+    }
+
+    fn original_header(&self) -> Result<Option<OriginalHeader>, StorageError> {
+        if !matches!(self.class, Class::Received) {
+            return Ok(None);
+        }
+        if let Some(proof) = &self.item.original_metadata_evidence {
+            return Ok(Some(OriginalHeader {
+                exact_identity: self.item.exact_original_identity.clone(),
+                evidence: proof.clone(),
+            }));
+        }
+        let proof = self.item.source_evidence.as_ref().ok_or_else(invalid)?;
+        let scanned = g::validation::scan_inner(&self.item.exact_inner).map_err(|_| invalid())?;
+        // Extract the already verified public original header; never reconstruct a retired body.
+        Ok(Some(OriginalHeader {
+            exact_identity: g::original_header::exact_identity(&self.item.exact_inner)
+                .map_err(|_| invalid())?
+                .to_vec(),
+            evidence: g::HistoryOriginalMetadataEvidence {
+                canonical_sender_envelope: proof.canonical_sender_envelope.clone(),
+                source_authority: proof.source_authority.clone(),
+                layer: scanned.layer,
+                ..Default::default()
+            },
+        }))
+    }
+
     /// Encode a private versioned record; callers own encrypted spooling and rollback.
     /// # Errors
     /// Refuses native bounds, invalid proof data or output failures.
