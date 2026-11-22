@@ -19,6 +19,13 @@ pub(super) fn write(
     account: Option<&str>,
 ) -> Result<u64, StorageError> {
     rule.require_typed_codec()?;
+    if rule.id == "sql/device_directory" {
+        super::device_directory::validate(
+            row.get_ref(0)?.as_str().map_err(|_| invalid())?,
+            row.get_ref(1)?.as_str().map_err(|_| invalid())?,
+            row.get_ref(4)?.as_str().map_err(|_| invalid())?,
+        )?;
+    }
     if !rule.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlNativePayload { .. })) {
         return write_full_scalar_sql_row(rule, row, output);
     }

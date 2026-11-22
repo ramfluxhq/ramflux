@@ -11,41 +11,34 @@ pub(super) const RULE_30: FamilyRule = table_rule!(
     "sql/device_directory",
     "device_directory",
     Transfer,
-    Immutable,
+    PreferLocal,
     false,
     ["device_id"],
     [
-        (
-            "device_id",
-            Utf8,
-            true,
-            Transfer,
-            Immutable,
-            CodecRule::RequiresOwner { owner: "device_directory", cell_type: CellType::Utf8 }
-        ),
+        ("device_id", Utf8, true, Transfer, Immutable, CodecRule::SqlQualifiedDeviceKey),
         (
             "principal_commitment",
             Utf8,
             false,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
         (
             "source",
             Utf8,
             false,
             Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            PreferLocal,
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(256), nullable: false }
         ),
         (
             "verified_at",
             I64,
             false,
             Transfer,
-            Immutable,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            PreferLocal,
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
         (
             "raw_device_id",
@@ -53,7 +46,7 @@ pub(super) const RULE_30: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::Scalar { cell_type: CellType::Utf8 }
+            CodecRule::SqlText { min_bytes: U64(1), max_bytes: U64(1024), nullable: false }
         ),
     ]
 );

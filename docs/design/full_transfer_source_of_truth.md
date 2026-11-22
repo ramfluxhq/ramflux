@@ -351,3 +351,18 @@ Owner2026-11-22 replaces the local test/clippy loop with cargo check only while
 coding, followed by direct populated-account transfer through rf daemons and
 real services with a scratch driver and captured output. Earlier passing tests
 remain historical scoped evidence; new suites are not the implementation plan.
+
+
+## Public device directory owner
+
+The bounded device-directory record retains a qualified public address, its exact
+root/raw-device pair and historical observation source/time. Both source SQL
+encoding and receiver/contribution decoding require the qualified address to be
+derived from that pair; rootless or mismatched rows refuse UnsupportedRecord.
+The original B source/time wins for the same address; conflicting immutable
+bindings refuse TransferConflict. No device branch, key, safety verification,
+capability, custody role or current authorization is installed from this record.
+The same original-contributor resolver handles absence and independent B refresh.
+This closes one business owner in the native dependency graph; direct populated
+transfer remains blocked by the other unimplemented families. The changed codec
+and census intentionally refuse mixed-build transfer with SchemaMismatch.

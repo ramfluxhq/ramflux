@@ -1,5 +1,5 @@
 {
-  "census_hash": "MSHuBTt3qIL2Axm9CxJ6RQr3JTMXD7qRWGPYqyIaqII",
+  "census_hash": "J34mQJhmKcP_1JbC3SN9c3uZupXpAVG3UmnlRPtRbD4",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -131,7 +131,7 @@
       "id": "sql/cursor_checkpoint"
     },
     {
-      "hash": "luG8fdE0XNIqgthgApCIrIqkJ1b3FhOQnB8EEzMh-rE",
+      "hash": "vO-JP1x9xzKjvjzVYiILzpO2VDevnTsZv_751o-UIEs",
       "id": "sql/device_directory"
     },
     {

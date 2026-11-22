@@ -69,6 +69,19 @@ pub(super) struct Owner {
 }
 static OWNERS: &[Owner] = &[
     Owner {
+        family: "sql/device_directory",
+        names: &["device_id", "principal_commitment", "source", "verified_at", "raw_device_id"],
+        restrictive: false,
+        keys: &[0],
+        merge: Merge::Columns(&[
+            Column::Exact,
+            Column::Exact,
+            Column::Keep,
+            Column::Keep,
+            Column::Exact,
+        ]),
+    },
+    Owner {
         family: "sql/account_erasure_generation",
         names: &["singleton", "generation"],
         restrictive: true,
@@ -289,7 +302,15 @@ impl Owner {
         }
         Ok(())
     }
+    fn validate(&self, value: &Cells) -> Result<(), StorageError> {
+        if self.family == "sql/device_directory" {
+            super::device_directory::validate(value.text(0)?, value.text(1)?, value.text(4)?)?;
+        }
+        Ok(())
+    }
     fn resolve(&self, left: &Cells, right: &Cells) -> Result<Cells, StorageError> {
+        self.validate(left)?;
+        self.validate(right)?;
         let mut result = left.clone();
         for index in self.keys {
             if left.bytes(*index)? != right.bytes(*index)? {
@@ -374,6 +395,7 @@ impl Owner {
         if !input.is_empty() {
             return Err(invalid());
         }
+        self.validate(&value)?;
         Ok(value)
     }
     fn encode(
@@ -462,6 +484,7 @@ impl Owner {
         incoming: &Cells,
     ) -> Result<(), StorageError> {
         self.check(rule)?;
+        self.validate(incoming)?;
         if self.family == super::input_denial::FAMILY {
             super::input_denial::require_bundle(db, incoming.text(1)?)?;
         }
