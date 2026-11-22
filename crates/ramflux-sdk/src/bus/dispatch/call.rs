@@ -45,6 +45,14 @@ pub(crate) async fn dispatch(
     let mut next =
         account.client.voice_calls.get(id).cloned().ok_or_else(|| invalid("call not live"))?;
     match request.method.as_str() {
+        "call.answer"
+            if next.media_held
+                && next.local == next.callee
+                && next.row.state == "incoming_ringing"
+                && !next.expired(now) =>
+        {
+            next.request_answer();
+        }
         "call.answer" => next.answer(now)?,
         "call.reject" => next.end(true, now)?,
         "call.hangup" => next.end(false, now)?,
