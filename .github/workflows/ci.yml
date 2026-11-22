@@ -18,7 +18,8 @@ on:
 # so superseded main runs stop queueing for runner slots. Only the newest main commit is verified.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'dispatch-' || '' }}${{ github.ref }}
-  cancel-in-progress: true
+  # A running main push finishes so its rust-cache saves (pooled runners compile cold otherwise); a pending one is still replaced.
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
