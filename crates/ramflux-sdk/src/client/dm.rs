@@ -539,13 +539,12 @@ impl RamfluxClient {
         let route = self.committed_routing(HeadUse::NewAuthorization, entry)?;
         let message_id =
             route.as_ref().map_or(&entry.envelope.envelope_id, |route| &route.message_id);
-        let Some(message) = self
-            .direct_messages(conversation_id)?
-            .into_iter()
-            .find(|message| message.message_id == *message_id)
-        else {
+        let Some(message) = self.direct_message_by_id(message_id)? else {
             return Ok(None);
         };
+        if message.conversation_id != conversation_id {
+            return Ok(None);
+        }
         Ok(Some(GatewayPlaintextDelivery {
             entry: entry.clone(),
             conversation_id: conversation_id.to_owned(),
@@ -614,11 +613,10 @@ impl RamfluxClient {
                 return Ok(());
             }
             self.account_db()?.store_message_content(conversation_id, message_id, plaintext)?;
-            if self
-                .direct_messages(conversation_id)?
-                .iter()
-                .any(|message| message.message_id == message_id)
-            {
+            let already_projected = self.direct_message_by_id(message_id)?.is_some_and(|message| {
+                message.conversation_id == conversation_id
+            });
+            if already_projected {
                 self.stage_delivery_receipt(conversation_id, message_id, entry)?;
                 return Ok(());
             }
