@@ -428,10 +428,7 @@ pub(crate) async fn validate_native_frame(
     )
     .await?;
     let key = key.ok_or_else(|| anyhow::anyhow!("native branch unavailable"))?;
-    anyhow::ensure!(
-        native_live_authority_matches(&key, grant, &runtime.branch_public_key, now),
-        "native authority changed"
-    );
+    crate::session_grant::require_live_native(&key, grant, &runtime.branch_public_key, now)?;
     let capability = match frame {
         Frame::OwnDeviceFanout { .. } => "sync",
         Frame::VoiceLease { .. } => "call",

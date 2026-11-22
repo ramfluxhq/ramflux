@@ -31,13 +31,21 @@ impl CustodyService {
             .map_err(persistence)?
             .ok_or(CustodyRefusal::AuthorityUnavailable)?;
         validate_bundle(&authority, &session.device_ref, &bundle, "message", now)?;
+        match super::agent_renewal::admit_agent_renewal(&session.device_ref) {
+            super::agent_renewal::AgentRenewalFence::NotLinked => {}
+        }
         let record_hash = object_hash(&publication.record).map_err(invalid)?;
-        let expires_at = now.saturating_add(crate::NATIVE_SESSION_GRANT_SECONDS);
+        let certificate_deadline = authority
+            .authorization_deadline(&session.device_ref, "message", now)
+            .map_err(invalid)?;
+        let expires_at =
+            now.saturating_add(crate::NATIVE_SESSION_GRANT_SECONDS).min(certificate_deadline);
         let session = self.leases().renew_native(&crate::custody_sessions::NativeRenewal {
             id: session_id,
             holder: &holder,
             record_hash: &record_hash,
             expires_at,
+            certificate_deadline,
             now,
             tick,
         })?;

@@ -84,6 +84,8 @@ pub(crate) struct NativeRenewal<'a> {
     pub(crate) holder: &'a str,
     pub(crate) record_hash: &'a str,
     pub(crate) expires_at: u64,
+    /// Device and custodian certificate window. The stored deadline never passes it.
+    pub(crate) certificate_deadline: u64,
     pub(crate) now: u64,
     pub(crate) tick: Instant,
 }
@@ -401,16 +403,19 @@ impl CustodyLeases {
             }
             lease.deadline
         };
-        let seconds = expires_at.saturating_sub(now).min(NATIVE_SESSION_GRANT_SECONDS);
+        let ceiling = expires_at.min(renewal.certificate_deadline);
+        let seconds = ceiling.saturating_sub(now).min(NATIVE_SESSION_GRANT_SECONDS);
         if seconds == 0 {
             return Err(CustodyRefusal::SessionExpired);
         }
-        let deadline = tick + Duration::from_secs(seconds);
+        // `seconds` is taken from `ceiling`, so this stays inside the certificate window.
+        let granted = now.saturating_add(seconds).min(renewal.certificate_deadline);
+        let deadline = tick + Duration::from_secs(granted.saturating_sub(now));
         self.session_deadlines.remove(&(old_deadline, id.to_owned()));
         {
             let lease = self.sessions.get_mut(id).ok_or(CustodyRefusal::SessionRequired)?;
             record_hash.clone_into(&mut lease.session.record_hash);
-            lease.session.expires_at = now.saturating_add(seconds);
+            lease.session.expires_at = granted;
             lease.deadline = deadline;
         }
         self.session_deadlines.insert((deadline, id.to_owned()));

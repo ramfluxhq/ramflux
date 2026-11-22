@@ -270,7 +270,13 @@ fn reconnect_after_retirement(
     retry.record(&error, Instant::now());
     let delay = backoff(handle, retry, &error);
     let named = retirement_status(why);
-    update(handle, |snapshot| snapshot.last_reason = Some(named.to_owned()));
+    update(handle, |snapshot| {
+        snapshot.last_reason = Some(named.to_owned());
+        // NodeTimeout is the reconnect delay. It is not why a revoked grant closed.
+        if named == "renewal_refused" {
+            snapshot.cause = None;
+        }
+    });
     tracing::warn!(
         ?reason,
         why = why.unwrap_or(""),

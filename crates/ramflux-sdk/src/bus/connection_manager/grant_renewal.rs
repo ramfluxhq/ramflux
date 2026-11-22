@@ -23,13 +23,16 @@ fn native_expiry(context: &SessionContext) -> Option<u64> {
     context.connection.metadata().and_then(|meta| meta.config.native_grant_expires_at)
 }
 
-fn renew_delay(expires_at: u64) -> Duration {
+fn renew_delay(expires_at: u64) -> Option<Duration> {
     let now = crate::gateway::helpers::gateway_heartbeat_now();
-    let seconds = expires_at
-        .saturating_sub(now)
-        .saturating_sub(RENEW_LEAD_SECONDS)
-        .min(NATIVE_SESSION_GRANT_SECONDS);
-    Duration::from_secs(seconds)
+    let remaining = expires_at.saturating_sub(now);
+    // A grant already inside the lead cannot be extended past the certificate ceiling.
+    if remaining <= RENEW_LEAD_SECONDS {
+        return None;
+    }
+    Some(Duration::from_secs(
+        remaining.saturating_sub(RENEW_LEAD_SECONDS).min(NATIVE_SESSION_GRANT_SECONDS),
+    ))
 }
 
 async fn wait_until(cancel: &mut tokio::sync::watch::Receiver<bool>, due: Instant) -> bool {
@@ -62,7 +65,8 @@ pub(super) async fn run(context: SessionContext) {
         return;
     }
     loop {
-        if !wait_until(&mut cancel, Instant::now() + renew_delay(expires_at)).await {
+        let Some(delay) = renew_delay(expires_at) else { return };
+        if !wait_until(&mut cancel, Instant::now() + delay).await {
             return;
         }
         match context.renew_native_grant().await {

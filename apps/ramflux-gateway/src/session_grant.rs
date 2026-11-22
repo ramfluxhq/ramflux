@@ -10,6 +10,43 @@ use ramflux_protocol::custody::{
 use crate::custody::GatewayGrant;
 use crate::state::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
 
+/// The device-auth record says this native session's device is revoked.
+#[derive(Debug)]
+pub(crate) struct NativeDeviceRevoked;
+
+impl std::fmt::Display for NativeDeviceRevoked {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native device revoked")
+    }
+}
+
+impl std::error::Error for NativeDeviceRevoked {}
+
+/// Revocation is its own error. Every other mismatch stays "native authority changed".
+/// # Errors
+/// Returns [`NativeDeviceRevoked`] when the device-auth record is revoked, and an
+/// error when the live grant no longer matches that record.
+pub(crate) fn require_live_native(
+    registered: &ramflux_node_core::DeviceAuthKeyResponse,
+    grant: &GatewayGrant,
+    established_branch_key: &str,
+    now: u64,
+) -> anyhow::Result<()> {
+    if registered.revoked {
+        return Err(NativeDeviceRevoked.into());
+    }
+    anyhow::ensure!(
+        crate::session::native_live_authority_matches(
+            registered,
+            grant,
+            established_branch_key,
+            now,
+        ),
+        "native authority changed"
+    );
+    Ok(())
+}
+
 pub(crate) async fn wait_native_grant(grant: Option<&GatewayGrant>) {
     if let Some(grant) = grant {
         tokio::time::sleep_until(tokio::time::Instant::from_std(grant.deadline())).await;
@@ -49,6 +86,10 @@ pub(crate) async fn refuse_stale_native(
     let Some(grant) = grant else { return Ok(false) };
     if let Err(error) = crate::session::validate_native_frame(context, runtime, grant, frame).await
     {
+        if error.downcast_ref::<NativeDeviceRevoked>().is_some() {
+            close_native_grant(send, "renewal_refused").await?;
+            return Ok(true);
+        }
         tracing::debug!(%error, "native session authority no longer permits request");
         crate::session::write_gateway_handle(send, &stale_native_response(frame)).await?;
         return Ok(true);

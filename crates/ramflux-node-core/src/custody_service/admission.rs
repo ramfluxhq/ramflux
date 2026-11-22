@@ -13,6 +13,7 @@ use super::{
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
 
+mod agent_renewal;
 mod native_renew;
 pub(super) struct ProofAttempt {
     pub action: CustodyProofAction,
