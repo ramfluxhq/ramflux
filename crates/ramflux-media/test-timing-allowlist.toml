@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Existing test timing sites; review renewals individually.
+site = [
+  { path = "crates/ramflux-media/tests/loopback.rs", call = "std::thread::sleep", duration = "self . next - now", count = 1, owner = "crates/ramflux-media", reason = "Moved engine tests pace a real 20 ms capture thread against real UDP sockets; tokio virtual time does not drive std::thread::sleep inside the engine", expires = "2027-01-02" },
+  { path = "crates/ramflux-media/tests/loopback.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 50 )", count = 1, owner = "crates/ramflux-media", reason = "Poll interval while two real engine threads exchange frames through a localhost UDP stand-in; the assertion is packet contents, not elapsed time", expires = "2027-01-02" },
+  { path = "crates/ramflux-media/tests/loopback.rs", call = "std::thread::sleep", duration = "timeout", count = 1, owner = "crates/ramflux-media", reason = "Synthetic capture blocks for the caller's timeout once its scripted frames are done, matching a live source that waits; no elapsed-time assertion", expires = "2027-01-02" },
+  { path = "crates/ramflux-media/tests/rebinding.rs", call = "std::thread::sleep", duration = "self . next - now", count = 1, owner = "crates/ramflux-media", reason = "Moved engine tests pace a real 20 ms capture thread against real UDP sockets; tokio virtual time does not drive std::thread::sleep inside the engine", expires = "2027-01-02" },
+  { path = "crates/ramflux-media/tests/rebinding.rs", call = "std::thread::sleep", duration = "std::time::Duration::from_millis ( 20 )", count = 1, owner = "crates/ramflux-media", reason = "Poll interval while a real engine answers a relay rebind on a localhost UDP stand-in; the assertion is the pin move and decoded audio, not elapsed time", expires = "2027-01-02" },
+]
