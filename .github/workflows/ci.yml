@@ -275,7 +275,7 @@ jobs:
           prefix-key: v0-rust-${{ runner.environment }}
           shared-key: sdk-c-abi-${{ matrix.features }}
       - name: Compile the SDK library test binary (untimed; the timed steps below only run tests)
-        run: bash scripts/ci/qa-test.sh cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib --no-run
+        run: cargo test --locked -p ramflux-sdk --features ${{ matrix.features }} --lib --no-run
       - name: Execute real supervisor, event and trust regressions
         env:
           RUST_TEST_THREADS: '1'
@@ -1180,6 +1180,7 @@ jobs:
       - name: Session push real-router gate (explicit, ignored by default)
         if: ${{ !cancelled() }}
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label session-push-real-router -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
 
       - name: Ephemeral activation and persistence (real router, WAL on)
@@ -1188,6 +1189,7 @@ jobs:
           RAMFLUX_ROUTER_WAL: "1"
           RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(activation::)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal1 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(activation::)'
 
       - name: Ephemeral persistence (real router, WAL off)
@@ -1196,6 +1198,7 @@ jobs:
           RAMFLUX_ROUTER_WAL: "0"
           RAMFLUX_ROUTER_ASYNC_POOL_SIZE: "1"
         run: |
+          cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(ephemeral_persistence_absence)'
           python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label ephemeral-wal0 -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --run-ignored only -E 'test(ephemeral_persistence_absence)'
       - name: Preauth transport matrices (Quinn, TCP TLS, Linux compio)
         if: ${{ !cancelled() }}
@@ -1354,10 +1357,13 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/ci/junit.xml --label migration-refusals -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-router --features itest-http -E 'test(forwarded_endpoint_is_not_reachable_from_client_listener)'
 
+      - name: Compile configured graceful shutdown regressions
+        run: |
+          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
+
       - name: Configured graceful shutdown regressions
         timeout-minutes: 13
         run: |
-          RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
           RAMFLUX_ITEST_BUILD=1 python3 -B scripts/ci/run-nextest.py --junit target/nextest/shutdown/junit.xml --label graceful-shutdown -- ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile shutdown --no-tests=fail -p ramflux-router -p ramflux-retention -p ramflux-federation -p ramflux-gateway -p ramflux-notify -p ramflux-relay --features itest-http,ramflux-notify/compio-notify --test graceful_shutdown
 
       - name: Gateway management route regressions
