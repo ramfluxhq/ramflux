@@ -146,9 +146,19 @@ The descriptor, executable native method set and CAS product pin remain unchange
 Development verification builds real binaries and drives scratch-script runs through
 rf daemons, real services and product reads: same-node set/resolve/contact add, rename
 hold/exact match, and two-node lookup through one centre. Restart and lost-reply cases
-also require captured direct-run evidence. An unpublished candidate has completed the
-shortest set/resolve flow; contact acceptance, rename and foreign-home acceptance
-remain outstanding. This is not complete release evidence.
+also require captured direct-run evidence. The unpublished candidate has completed
+set/resolve, original-request contact acceptance and both default conversations,
+rename/exact-match/hold, and two-home lookup with the foreign contact barrier.
+Additional runs cover visibility/release/delete, uncertain committed operations,
+protected-store restart and exact signed-state recovery after ordinary-home loss.
+Final activation and PR CI remain required for release.
+
+An account owns at most one reusable native directory transport. Every reuse rechecks
+local pairing admission, current native authority, branch credentials and capacity;
+each request retains native session authorization and fresh centre/home verification.
+Cancellation and transport failure close the stream. Replies are never cached as
+serving authority. A failed command can have committed: inspect fresh operation status
+before authorizing another mutation.
 
 ## Live transport configuration under development
 

@@ -216,6 +216,9 @@ impl HomeService {
             return refuse("profile is not on this home");
         }
         let master = ramflux_crypto::verifying_key_from_base64url(master_public)?;
+        // The pinned resolve and current native history establish this home's root.
+        // Even a lost home store must retain the live floor before refusing missing bytes.
+        self.directory.enrol(root)?;
         let live = self.client.revalidate(&self.directory, root, None)?;
         Ok(self.directory.prepare_publication(directory::HomePublicationTarget { root, channel }, live, &master, crate::now_unix_seconds()?, |view| {
             if view.binding.as_ref() != Some(&request.binding) || view.receipt.body.profile != request.resolve.body.profile {

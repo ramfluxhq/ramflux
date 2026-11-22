@@ -3,6 +3,7 @@
 
 //! Exact username operations, typed transient master authorization and durable account restrictions.
 mod config;
+mod connection;
 mod draft;
 mod errors;
 mod intent;
@@ -10,6 +11,7 @@ mod network;
 mod signing;
 mod verify;
 pub use config::*;
+pub(crate) use connection::UsernameConnection;
 pub use draft::*;
 pub(crate) use intent::*;
 pub(crate) use network::*;

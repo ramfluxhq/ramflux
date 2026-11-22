@@ -63,6 +63,11 @@ impl DirectoryAuthority {
             ensure(row.root == reporter.root, Code::OwnershipMismatch)?;
             return Ok(row);
         }
+        // Retry lookup persists a newer safe clock. Append must use a fresh sample,
+        // with the same writer and reporting authority rechecked after that write.
+        let time = self.witness.sample_time()?;
+        self.fence.check_ready(writer, &self.head(), time)?;
+        ensure(time.wall < reporter.expires_at, Code::AuthenticationRequired)?;
         let expected = self.head();
         ensure(
             request.expected_head.lsn == expected.lsn

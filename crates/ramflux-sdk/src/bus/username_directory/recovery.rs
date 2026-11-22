@@ -35,9 +35,13 @@ impl Prepared {
     pub(super) async fn exchange_with_recovery(
         &self,
     ) -> Result<directory::UsernameNetworkReply, SdkError> {
-        let original =
-            directory::exchange_username(&self.gateway, self.pin.clone(), self.action.clone())
-                .await;
+        let original = directory::exchange_username(
+            &self.gateway,
+            &self.transport,
+            self.pin.clone(),
+            self.action.clone(),
+        )
+        .await;
         if !matches!(
             &original,
             Err(SdkError::UsernameDirectoryRefused(w::DirectoryCode::DirectoryUnavailable))
@@ -49,10 +53,18 @@ impl Prepared {
                 operation: Box::new(candidate.operation.clone()),
                 profile: Box::new(candidate.profile.clone()),
             };
-            match directory::exchange_username(&self.gateway, self.pin.clone(), action).await {
+            match directory::exchange_username(
+                &self.gateway,
+                &self.transport,
+                self.pin.clone(),
+                action,
+            )
+            .await
+            {
                 Ok(_) => {
                     return directory::exchange_username(
                         &self.gateway,
+                        &self.transport,
                         self.pin.clone(),
                         self.action.clone(),
                     )

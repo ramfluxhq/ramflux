@@ -23,6 +23,7 @@ pub(super) struct Completion {
     caller: Option<(AccountCommand, Reply)>,
 }
 pub(super) struct Calls {
+    transport: crate::username_directory::UsernameConnection,
     task: Option<JoinHandle<Completion>>,
     background: bool,
     next: Instant,
@@ -31,6 +32,7 @@ pub(super) struct Calls {
 impl Default for Calls {
     fn default() -> Self {
         Self {
+            transport: crate::username_directory::UsernameConnection::default(),
             task: None,
             background: false,
             next: Instant::now() + Duration::from_secs(1),
@@ -40,6 +42,7 @@ impl Default for Calls {
 }
 impl Drop for Calls {
     fn drop(&mut self) {
+        self.transport.clear();
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -62,14 +65,16 @@ impl Calls {
             task.abort();
             let _ = task.await;
         }
+        self.transport.clear();
     }
     fn spawn(
         &mut self,
-        prepared: adapter::Prepared,
+        mut prepared: adapter::Prepared,
         caller: Option<(AccountCommand, Reply)>,
         deadline: Instant,
     ) {
         self.background = caller.is_none();
+        prepared.transport = self.transport.clone();
         self.task = Some(tokio::spawn(async move {
             // Leave the writer a bounded reply margin before the caller's absolute fence.
             let exchange_deadline =
@@ -88,7 +93,7 @@ impl Calls {
 }
 impl AccountRuntime {
     pub(super) async fn start_username(&mut self, command: AccountCommand, reply: Reply) {
-        if self.username.background {
+        if self.username.background && self.username.task.is_some() {
             self.username.stop().await;
         }
         if self.username.task.is_some() {

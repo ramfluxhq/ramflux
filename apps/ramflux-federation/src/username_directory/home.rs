@@ -130,7 +130,10 @@ pub(crate) fn local(
             {
                 return Ok(w::NativeUsernameReply::Refused { failure: directory::failure(*code) });
             }
-            Err(error)
+            tracing::warn!(%error, "username home operation unavailable");
+            Ok(w::NativeUsernameReply::Refused {
+                failure: directory::failure(w::DirectoryCode::DirectoryUnavailable),
+            })
         }
     }
 }

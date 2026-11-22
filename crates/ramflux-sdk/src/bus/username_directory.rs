@@ -31,6 +31,7 @@ pub(super) struct Prepared {
     pub(super) root: String,
     pub(super) action: w::NativeUsernameAction,
     repairs: Vec<directory::SignedUsernameChange>,
+    pub(in crate::bus) transport: directory::UsernameConnection,
     purpose: Purpose,
 }
 enum Purpose {
@@ -90,7 +91,15 @@ pub(super) fn prepare(
     } else {
         Vec::new()
     };
-    Ok(Prepared { gateway, pin, root, action, repairs, purpose })
+    Ok(Prepared {
+        gateway,
+        pin,
+        root,
+        action,
+        repairs,
+        transport: directory::UsernameConnection::default(),
+        purpose,
+    })
 }
 
 impl Prepared {
