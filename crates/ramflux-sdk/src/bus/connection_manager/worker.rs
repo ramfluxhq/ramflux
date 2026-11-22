@@ -243,6 +243,7 @@ async fn run_account(
             super::session_host::HostExit::Retired(reason) => reason,
         };
         retire_resident(handle, &resident, reason, generation);
+        let why = resident.terminal_why.clone();
         drop(resident);
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
@@ -254,7 +255,14 @@ async fn run_account(
         }
         let error = SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS };
         retry.record(&error, Instant::now());
-        failed(handle, retry, &error);
+        let delay = backoff(handle, retry, &error);
+        tracing::warn!(
+            ?reason,
+            why = why.as_deref().unwrap_or(""),
+            generation,
+            retry_after_ms = ?delay,
+            "resident account session retired; reconnecting"
+        );
     }
 }
 
@@ -356,11 +364,16 @@ pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessio
         });
 }
 fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
+    let delay = backoff(handle, retry, error);
+    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
+}
+
+/// Publishes the retry boundary after a failed attempt or a retired session.
+fn backoff(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) -> Option<u64> {
     let delay = retry.not_before().map(|until| {
         u64::try_from(until.saturating_duration_since(Instant::now()).as_millis())
             .unwrap_or(u64::MAX)
     });
-    tracing::warn!(%error, retry_after_ms = ?delay, "account connection attempt deferred");
     update(handle, |snapshot| {
         snapshot.phase = ConnectionPhase::Backoff;
         snapshot.gateway_writer_busy = error.gateway_writer_busy();
@@ -391,6 +404,7 @@ fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
         retry_after_ms: delay,
         generation: handle.generation(),
     });
+    delay
 }
 fn wall_ms() -> u64 {
     u64::try_from(
