@@ -11,6 +11,9 @@ mod e2e;
 #[cfg(unix)]
 #[path = "e2e/agent_lifecycle.rs"]
 mod agent_lifecycle;
+#[cfg(unix)]
+#[path = "e2e/history_enrollment.rs"]
+mod history_enrollment;
 
 use e2e::{
     assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_ack,

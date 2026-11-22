@@ -375,6 +375,24 @@ impl LocalBusAccountState {
         self.connection.as_ref().map(ConnectionHandle::session_mode)
     }
 
+    /// The config an envelope is sealed and signed with by a courier that does not hold a session.
+    /// A native account's stored config names neither its device branch (which signs the envelope)
+    /// nor a source identity (the envelope's source root, which the receiver's report check
+    /// reads); a session fills the branch in the same way (`connection_config`). Fields already
+    /// present are kept.
+    /// # Errors
+    /// The account has no owned device identity yet.
+    pub(crate) fn sealing_config(&self) -> Result<GatewaySessionConfig, SdkError> {
+        let mut config = self.gateway_config.clone();
+        if config.device_branch.is_none() {
+            config.device_branch = self.client.device_branch.clone().map(std::sync::Arc::new);
+        }
+        if config.source_identity.is_none() {
+            config.source_identity = Some(self.client.owned_device_identity()?);
+        }
+        Ok(config)
+    }
+
     pub(crate) fn connection_config(&self) -> Result<GatewaySessionConfig, SdkError> {
         let mut config = self.gateway_config.clone();
         let target = self.target_delivery_id.clone();
