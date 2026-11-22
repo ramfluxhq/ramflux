@@ -125,8 +125,20 @@ fn b1_same_node_bidirectional_dm_uses_deliver_without_resume() -> e2e::Result<()
                 > e2e::receive_counter(&before, "deliver_frames")?,
             "B1 must receive Deliver frames: before={before} after={after}"
         );
-        for counter in ["resume_requests", "page_fetches", "catch_up_passes"] {
-            assert_eq!(after[counter], before[counter], "B1 {counter}: {before} -> {after}");
+        // A session the product retires and re-establishes owes one Connected catch-up;
+        // on an unchanged live session, delivery must not have used Resume at all.
+        let new_sessions = e2e::receive_counter(&after, "live_sessions")?
+            - e2e::receive_counter(&before, "live_sessions")?;
+        assert_eq!(
+            e2e::receive_counter(&after, "catch_up_passes")?
+                - e2e::receive_counter(&before, "catch_up_passes")?,
+            new_sessions,
+            "B1 catch-up passes: {before} -> {after}"
+        );
+        if new_sessions == 0 {
+            for counter in ["resume_requests", "page_fetches"] {
+                assert_eq!(after[counter], before[counter], "B1 {counter}: {before} -> {after}");
+            }
         }
         wait_dm_texts(recipient_d, recipient, &conversation, &[body, body])?;
         for owner in [(sender_d, sender), (recipient_d, recipient)] {

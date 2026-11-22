@@ -20,6 +20,10 @@ use ramflux_protocol::{
     VoiceCallFailureReason, VoiceLeaseConsent, VoiceLeaseRequest, VoiceLeaseResponse,
 };
 
+/// Typed refusal from `GatewaySessionEngine` when the established session carries no call
+/// resolution generation (the node has no call authority configured).
+const CALL_RESOLUTION_NOT_NEGOTIATED: &str = "call_resolution_not_negotiated";
+
 #[derive(Clone)]
 struct Plan {
     original: LiveCall,
@@ -53,6 +57,8 @@ struct SignedControl {
 }
 struct ControlOutcome {
     success: bool,
+    /// The session's gateway granted no call-resolution generation: no control can be submitted.
+    not_negotiated: bool,
     sent: bool,
     acknowledged: Option<String>,
     resolutions: Vec<crate::gateway::call_resolution::CallSubmitOutcome>,
@@ -350,6 +356,11 @@ async fn send_controls(
         #[cfg(feature = "test-support")]
         error: result.as_ref().err().map(ToString::to_string),
         success: result.is_ok(),
+        not_negotiated: matches!(
+            &result,
+            Err(SdkError::GatewaySessionRejected(reason))
+                if reason == CALL_RESOLUTION_NOT_NEGOTIATED
+        ),
         sent: result.as_ref().is_ok_and(|(sent, _, _)| *sent),
         acknowledged: result.as_ref().ok().and_then(|(_, call_ref, _)| call_ref.clone()),
         resolutions: result
@@ -437,6 +448,10 @@ fn note_control_result(
                 }
             }
         }
+    } else if outcome.not_negotiated && next.row.state != "ended" {
+        // Retrying cannot help within a ring window; report the real cause, not a timeout.
+        tracing::warn!("call failed: the home node did not negotiate call resolution");
+        next.fail(VoiceCallFailureReason::SignalingUnavailable, now)?;
     } else {
         next.retry_attempts = next.retry_attempts.saturating_add(1);
         next.retry_at = now.saturating_add(1_i64 << next.retry_attempts.saturating_sub(1).min(4));
