@@ -375,10 +375,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -437,10 +434,7 @@ where
     stream.flush()?;
     let (status_line, body) = read_sdk_http_response(&mut stream)?;
     if !status_line.contains(" 200 ") {
-        return Err(SdkError::LocalBus(format!(
-            "SDK HTTP request failed: {status_line}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(SdkError::LocalBus(format!("SDK HTTP request failed: {status_line}")));
     }
     Ok(serde_json::from_slice(&body)?)
 }
@@ -474,6 +468,9 @@ fn read_sdk_http_response(stream: &mut impl Read) -> Result<(String, Vec<u8>), S
     }
     let content_length = content_length
         .ok_or_else(|| SdkError::LocalBus("SDK HTTP response missing Content-Length".to_owned()))?;
+    if content_length > http_async::DIRECTORY_BODY_LIMIT {
+        return Err(SdkError::LocalBus("SDK HTTP response exceeds size limit".to_owned()));
+    }
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok((status_line, body))

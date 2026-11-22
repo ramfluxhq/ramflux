@@ -59,7 +59,7 @@ fn http_error(error: reqwest::Error) -> SdkError {
 
 /// Directory and prekey bodies. Declared length and each chunk are refused
 /// before the buffer grows past this cap, including a non-200 body.
-const DIRECTORY_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const DIRECTORY_BODY_LIMIT: usize = 1024 * 1024;
 
 async fn read_bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, SdkError> {
     let status = response.status();
