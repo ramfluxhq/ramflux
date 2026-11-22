@@ -67,7 +67,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
         return Ok(None);
     }
     client.validate_surface_resync_reply(&reply)?;
-    let config = account.gateway_config.clone();
+    let config = account.sealing_config()?;
     let request = client.surface_resync_send_material_request(&config, &reply)?;
     Ok(Some(Plan { key, fingerprint, reply, config, request }))
 }
