@@ -200,6 +200,20 @@ preview maps semantic nodes with text/native controls, stages mutations and
 forwards host slots; it does not implement SDK approval/link/image authority or
 native Modal sheets. Mobile and desktop hosts are separate modules.
 
+## Host fixtures
+
+`host-fixtures/` publishes one card input and one expected document for every
+catalog kind and every `variant` enum. `index.json` lists kind, variant,
+fixture and expected path. Trees are `ramflux.card.tree.v1` from
+`CardSession::open` against the signed library in
+`crates/ramflux-sdk/include/card/`. A catalog variant the runtime refuses has
+a `*.refusal.json` instead of a tree. The directory does not specify sizes,
+spacing, colors or accessibility chrome.
+
+Locale rows stay `en`. `LOCALE_FIXTURE_HOOK` in `src/bin/card_fixtures/cases.rs`
+is where further locales are added after the resolver accepts them. Regenerate
+with `cargo run -p ramflux-card --bin card-fixtures -- --write`.
+
 ## Validation
 
 Existing parser, keyed-diff, session, signed-library, C bridge and packer tests
