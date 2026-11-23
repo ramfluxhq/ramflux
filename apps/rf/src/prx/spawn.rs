@@ -32,8 +32,11 @@ pub(crate) fn run(spec: &CommandSpec<'_>) -> Result<(), RfError> {
         .stdin(if spec.key.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Ok(user) = std::env::var("USER") {
-        command.env("USER", user);
+    // The user's service manager (systemctl --user, launchctl) needs the session bus and runtime dir.
+    for name in ["USER", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+        if let Ok(value) = std::env::var(name) {
+            command.env(name, value);
+        }
     }
     let mut child = command.spawn()?;
     if let Some(key) = spec.key {
