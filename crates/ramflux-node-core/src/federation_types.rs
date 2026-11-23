@@ -115,6 +115,7 @@ pub struct FederationDiscoveryResult {
 pub enum FederationPinSource {
     Invitation,
     Tofu,
+    InboundSigned,
     Operator,
     DirectoryCacheConfirmed,
 }

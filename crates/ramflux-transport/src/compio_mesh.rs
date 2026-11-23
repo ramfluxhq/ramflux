@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod admitted;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use compio_buf::bytes::Bytes;
@@ -88,6 +89,23 @@ struct CompioMeshQuicPostcardResponse {
 }
 
 impl CompioMeshQuicServer {
+    /// Optional verified client authentication, exclusively for federation route admission.
+    /// # Errors
+    /// Socket binding or TLS configuration failure.
+    pub async fn bind_federation(
+        addr: &str,
+        tls: &MeshTlsConfig,
+        roots: MeshRootPemProvider,
+    ) -> Result<Self, TransportError> {
+        let config =
+            crate::tls_config::mesh_server_config_with_optional_client_auth(tls, roots, true)?;
+        let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(config)
+            .map_err(|e| TransportError::Tls(e.to_string()))?;
+        let mut config = compio_quic::ServerConfig::with_crypto(std::sync::Arc::new(crypto));
+        config.max_incoming(32);
+        Ok(Self { endpoint: compio_quic::Endpoint::server(addr, config).await? })
+    }
+
     /// # Errors
     /// Returns an error when the UDP socket cannot bind or TLS material cannot be loaded.
     pub async fn bind_with_pem_roots_provider(
@@ -352,6 +370,11 @@ fn reject_i_json(
 }
 
 impl CompioMeshQuicConnection {
+    /// Close without reading another stream.
+    pub fn close(&self, code: u32, reason: &[u8]) {
+        self.connection.close(compio_quic::VarInt::from_u32(code), reason);
+    }
+
     #[must_use]
     pub fn remote_address(&self) -> SocketAddr {
         self.connection.remote_address()

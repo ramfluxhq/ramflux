@@ -105,6 +105,44 @@ impl FederationTrustState {
         Ok(())
     }
 
+    /// Inbound first-use pins have a durable 16/hour sub-quota within the shared 32/hour
+    /// and 1024-pin caps, leaving room for outbound pinning.
+    /// # Errors
+    /// Capacity or an operator block refuses admission.
+    pub fn admit_inbound_peer_pin(&self, node: &str, now: u64) -> Result<(), NodeCoreError> {
+        if self.peer_pin_blocked(node, now) {
+            return Err(NodeCoreError::Unauthorized("federation node blocked".into()));
+        }
+        self.admit_new_peer_pin(node, now)?;
+        if self.discovery_pins_by_node.contains_key(node) {
+            return Ok(());
+        }
+        let recent = self
+            .discovery_pins_by_node
+            .values()
+            .filter(|pin| {
+                pin.pin_source == crate::FederationPinSource::InboundSigned
+                    && now.saturating_sub(pin.first_seen_at) < 3600
+            })
+            .count();
+        if recent >= 16 {
+            return Err(NodeCoreError::Capacity { resource: "inbound federation pins" });
+        }
+        Ok(())
+    }
+
+    /// Mark a newly installed, signed-request-authenticated pin for its durable sub-quota.
+    /// # Errors
+    /// The staged discovery must have installed a pin first.
+    pub fn mark_inbound_peer_pin(&mut self, node: &str) -> Result<(), NodeCoreError> {
+        let pin = self
+            .discovery_pins_by_node
+            .get_mut(node)
+            .ok_or_else(|| NodeCoreError::Unauthorized("missing staged pin".into()))?;
+        pin.pin_source = crate::FederationPinSource::InboundSigned;
+        Ok(())
+    }
+
     #[must_use]
     pub fn route(&self, node_id: &str) -> Option<&FederationPeerRoute> {
         self.routes_by_node.get(node_id)

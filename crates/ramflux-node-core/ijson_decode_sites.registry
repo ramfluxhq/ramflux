@@ -3,7 +3,6 @@
 crates/ramflux-node-core/src/custody_authority/directory.rs | custody_prekey_response | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/custody_authority/forwarded.rs | authenticated_native_forwarded_source_from_peer | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-node-core/src/custody_authority/forwarded.rs | foreign_custody_state | 1 | D | admitted-before-persist; stored row is not an ingress decoder
-crates/ramflux-node-core/src/custody_authority/forwarded/budget.rs | insert_bounded | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/custody_authority/forwarded/budget.rs | protected | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-node-core/src/device_namespace.rs | resolve_device_selector | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/device_source.rs | forwarded_envelope_source | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -145,3 +144,4 @@ crates/ramflux-node-core/src/username_directory/checkpoint.rs | read_safe_wall |
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/mod.rs | read_head | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/custody_authority/forwarded/budget.rs | pin_rows | 1 | E | excluded=stored local quota-owner metadata outside Envelope/Ack/Nack containment closure

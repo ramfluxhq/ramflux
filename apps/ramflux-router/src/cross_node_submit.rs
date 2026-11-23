@@ -19,7 +19,7 @@ pub(crate) fn respond(
             "cross-node submit requires gateway peer",
         ));
     }
-    let Ok(request) = serde_json::from_slice::<HomeSubmitForward>(body) else {
+    let Ok(request) = ramflux_protocol::parse_i_json::<HomeSubmitForward>(body) else {
         return refused_response("", "rejected_malformed");
     };
     let response = decide(router, &request);

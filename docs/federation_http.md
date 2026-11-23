@@ -47,15 +47,51 @@ consumer exists for that route.
 
 ## Authenticated mesh route inventory
 
-TCP mTLS and QUIC expose the following shared routes, on the independently configured
+TCP TLS and QUIC expose the following shared routes, on the independently configured
 mesh listener (Compose port 7443). Neither HTTP listener forwards these paths.
 
 | Method and path | Reader / caller |
 | --- | --- |
 | GET `/healthz` | Authenticated mesh health probes |
 | GET `/mvp9/federation/trust-snapshot` | Relay trust consumers over authenticated mesh |
-| POST `/s8/federation/envelope` | Admitted federation peers delivering signed envelopes |
+| POST `/s8/federation/envelope` | Node-signed envelopes; the client certificate supplies no authority |
 | POST `/internal/retention/gc_sweep` | Retention service only; peer service identity enforced |
+
+The federation listener permits absent client certificates. Every route except
+`POST /s8/federation/envelope` requires a verified mesh identity, checked before body
+reads on TCP, Quinn and compio; unknown routes deny access. Health and trust snapshot
+require a known non-retention service. Retention can call only `gc_sweep` among protected
+routes. Migration and attachment renewal require the federation role. Envelope handling
+uses only the signed request, regardless of whether a verified certificate is present.
+
+Envelope senders use server-authenticated TLS with pinned server roots, without a client
+certificate, in pools separate from service mTLS. First contact stages canonical HTTPS
+signed discovery and verifies the node request before atomically publishing trust. Existing
+pins never trigger inbound discovery or capability refresh. Requests must target this node,
+fit the 2 MiB body cap, have TTL at most 604800 seconds, be unexpired and be no more than
+60 seconds in the future. Malformed signature encodings reject before discovery; a
+well-formed signature for an unknown source requires its discovered key to verify.
+
+Inbound discovery has 64 attempts/hour, four per remote IP/hour, four concurrent workers,
+a 128-node coalescing cache and a 60-second negative cache. Failures never create node
+blocks. Its 16 new pins/hour sub-quota is recorded by `InboundSigned` pin provenance and
+survives restart, within the shared 32/hour and 1024 total pin limits. Outbound discovery
+retains its separate 32-attempt/hour allowance. These limits isolate other IPs and outbound
+traffic; callers sharing an IP share its allowance. Anonymous connections are capped at
+16 process-wide and two per IP; anonymous in-flight requests at eight and two per IP;
+each anonymous connection serves at most four requests. Header/body reads and discovery
+share a 10-second absolute request deadline. QUIC synchronous work runs in bounded
+workers whose permits survive cancellation. TCP pending handshakes have a separate cap.
+
+QUIC frames place `method` and `path` before `body`, as the mesh request serializer does.
+A bounded routing header is admitted before any body value is read; body-first or
+unroutable frames refuse. Strict I-JSON validation still covers the complete admitted frame.
+
+Both transports use the same durable federation inbound receipt table in redb. Committed
+receipts are checked only after node and device authentication, survive service restart,
+and are retained until envelope expiry. A captured valid request returns the duplicate
+outcome without another delivery; expired requests refuse. A crash before receipt commit
+retains the existing at-least-once behavior and router deduplication boundary.
 
 TCP mTLS also serves `POST /internal/cross-node/forward` only to the exact
 `spiffe://<local-node>/ramflux-router` identity. The router takes the federation

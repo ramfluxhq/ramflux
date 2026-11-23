@@ -91,7 +91,7 @@ pub use mesh_quic::{
     mesh_quic_get_json_with_peer_ca_pems_async, mesh_quic_post_json_with_peer_ca_pems,
     mesh_quic_post_json_with_peer_ca_pems_and_instance,
     mesh_quic_post_json_with_peer_ca_pems_async, mesh_quic_post_postcard_with_peer_ca_pems_async,
-    mesh_quic_post_raw_with_peer_ca_pems_async,
+    mesh_quic_post_raw_with_peer_ca_pems_async, mesh_quic_post_signed_envelope,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use mesh_quic_limited::mesh_quic_exchange_raw_response_frame;
@@ -103,12 +103,14 @@ pub use mesh_request_deadline::{
     MeshRequestDeadline, mesh_request_deadline, mesh_socket_request_deadline,
 };
 pub use mesh_tls::{
-    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_tcp_stream,
-    authenticate_tcp_stream_with_pem_roots, extract_spiffe_uri_from_certificate,
+    MeshTlsAcceptedStream, MeshTlsServer, MeshTlsServerStream, authenticate_federation_tcp_stream,
+    authenticate_tcp_stream, authenticate_tcp_stream_with_pem_roots,
+    extract_spiffe_uri_from_certificate,
 };
 pub use perf_metrics::{MeshHttpPerfSnapshot, mesh_perf_reset, mesh_perf_snapshot};
 pub use public_well_known::{
-    checked_mesh_address, checked_mesh_address_until, fetch_server_well_known, public_mesh_endpoint,
+    checked_mesh_address, checked_mesh_address_until, fetch_server_well_known,
+    fetch_server_well_known_until, public_mesh_endpoint,
 };
 pub use test_node_endpoints::{TestNodeEndpoints, test_node_discovery_origin, test_node_endpoints};
 

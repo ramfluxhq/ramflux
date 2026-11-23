@@ -25,9 +25,23 @@ pub fn fetch_server_well_known(
     node_id: &str,
     test_socket: Option<SocketAddr>,
 ) -> Result<Vec<u8>, TransportError> {
+    fetch_server_well_known_until(node_id, test_socket, Instant::now() + FETCH_TIMEOUT)
+}
+
+/// Fetch within the caller's absolute deadline, including DNS and the body.
+/// # Errors
+/// Egress, TLS, size or deadline refusal.
+pub fn fetch_server_well_known_until(
+    node_id: &str,
+    test_socket: Option<SocketAddr>,
+    deadline: Instant,
+) -> Result<Vec<u8>, TransportError> {
+    if Instant::now() >= deadline {
+        return Err(discovery_failed());
+    }
     match test_socket {
-        Some(socket) => http_get_loopback(socket),
-        None => https_get_public(node_id),
+        Some(socket) => http_get_loopback(socket, deadline),
+        None => https_get_public(node_id, deadline),
     }
 }
 
@@ -71,11 +85,11 @@ pub fn checked_mesh_address_until(
     addresses.first().copied().ok_or_else(egress_refused)
 }
 
-fn https_get_public(node_id: &str) -> Result<Vec<u8>, TransportError> {
+fn https_get_public(node_id: &str, deadline: Instant) -> Result<Vec<u8>, TransportError> {
     if !dns_name(node_id) {
         return Err(egress_refused());
     }
-    let deadline = Instant::now() + FETCH_TIMEOUT;
+    let deadline = deadline.min(Instant::now() + FETCH_TIMEOUT);
     let addresses = crate::bounded_http_dns::resolve(&format!("{node_id}:443"), deadline)?;
     let Some(chosen) = addresses.first().copied() else {
         return Err(egress_refused());
@@ -119,15 +133,15 @@ fn read_bounded_record(mut response: impl Read) -> Result<Vec<u8>, TransportErro
     }
 }
 
-fn http_get_loopback(socket: SocketAddr) -> Result<Vec<u8>, TransportError> {
+fn http_get_loopback(socket: SocketAddr, deadline: Instant) -> Result<Vec<u8>, TransportError> {
     if !socket.ip().is_loopback() || socket.port() == 0 {
         return Err(TransportError::Http(
             "federation egress test socket must be loopback".to_owned(),
         ));
     }
-    let mut stream = TcpStream::connect_timeout(&socket, FETCH_TIMEOUT)?;
-    stream.set_read_timeout(Some(FETCH_TIMEOUT))?;
-    stream.set_write_timeout(Some(FETCH_TIMEOUT))?;
+    let left = deadline.checked_duration_since(Instant::now()).ok_or_else(discovery_failed)?;
+    let stream = TcpStream::connect_timeout(&socket, left)?;
+    let mut stream = crate::mesh_http::DeadlineSocket::until(stream, deadline);
     write!(
         stream,
         "GET /.well-known/ramflux/server HTTP/1.1\r\nHost: {socket}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
@@ -136,7 +150,7 @@ fn http_get_loopback(socket: SocketAddr) -> Result<Vec<u8>, TransportError> {
     read_fixed_body(&mut stream)
 }
 
-fn read_fixed_body(stream: &mut TcpStream) -> Result<Vec<u8>, TransportError> {
+fn read_fixed_body(stream: &mut impl Read) -> Result<Vec<u8>, TransportError> {
     let mut reader = std::io::BufReader::new(stream);
     let mut budget = HEADER_LIMIT;
     let status = header_line(&mut reader, &mut budget)?;

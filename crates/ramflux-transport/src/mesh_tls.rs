@@ -154,6 +154,23 @@ pub fn authenticate_tcp_stream_with_pem_roots(
     authenticate_tcp_stream(stream, Arc::new(mesh_server_config_with_pem_roots(tls, root_pems)?))
 }
 
+/// Authenticate an optional-client-certificate federation connection. Presented certificates
+/// still require their chain and handshake signature; route admission is the caller's duty.
+/// # Errors
+/// TLS configuration, certificate, deadline or socket failures.
+pub fn authenticate_federation_tcp_stream(
+    stream: TcpStream,
+    tls: &MeshTlsConfig,
+    roots: Vec<String>,
+) -> Result<MeshTlsAcceptedStream, TransportError> {
+    let config = crate::tls_config::mesh_server_config_with_optional_client_auth(
+        tls,
+        Arc::new(move || Ok(roots.clone())),
+        true,
+    )?;
+    authenticate_tcp_stream(stream, Arc::new(config))
+}
+
 /// # Errors
 /// Returns an error when the peer certificate DER or SAN extension cannot be parsed.
 pub fn extract_spiffe_uri_from_certificate(

@@ -54,9 +54,17 @@ pub(crate) fn ensure_forward_pin(
     install(state, store, local, &record, now)
 }
 
-fn fetch_record(
+pub(crate) fn fetch_record(
     target: &str,
     now: u64,
+) -> Result<FederationServerRecord, ramflux_node_core::NodeCoreError> {
+    fetch_record_until(target, now, std::time::Instant::now() + std::time::Duration::from_secs(10))
+}
+
+pub(crate) fn fetch_record_until(
+    target: &str,
+    now: u64,
+    deadline: std::time::Instant,
 ) -> Result<FederationServerRecord, ramflux_node_core::NodeCoreError> {
     let fixture = ramflux_transport::test_node_endpoints(target)
         .map_err(|error| invalid(&error.to_string()))?;
@@ -64,7 +72,7 @@ fn fetch_record(
         Some(fixture) => Some(fixture.discovery),
         None => test_socket()?,
     };
-    let bytes = ramflux_transport::fetch_server_well_known(target, socket)
+    let bytes = ramflux_transport::fetch_server_well_known_until(target, socket, deadline)
         .map_err(|error| invalid(&error.to_string()))?;
     if bytes.len() > RECORD_LIMIT {
         return Err(invalid("federation discovery record exceeds size limit"));
@@ -82,52 +90,59 @@ fn install(
     record: &FederationServerRecord,
     now: u64,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    state.update_and_save(store, |trust| {
-        trust.admit_new_peer_pin(&record.node_id, now)?;
-        let discovered = trust.resolve_discovery_result(
-            &ramflux_node_core::FederationDiscoveryRequest {
-                node_id: record.node_id.clone(),
-                now,
-                invite_endpoint: None,
-                well_known_url: None,
-                dns_srv_records: Vec::new(),
-                address_records: Vec::new(),
-                directory_endpoint: None,
-            },
-            Some(record),
-            None,
-        )?;
-        let node_public_key_hash = ramflux_crypto::blake3_256_base64url(
+    state.update_and_save(store, |trust| install_candidate(trust, local, record, now))
+}
+
+pub(crate) fn install_candidate(
+    trust: &mut ramflux_node_core::FederationTrustState,
+    local: &LocalNode,
+    record: &FederationServerRecord,
+    now: u64,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    if trust.peer_pin_blocked(&record.node_id, now) {
+        return Err(invalid("federation node blocked"));
+    }
+    trust.admit_new_peer_pin(&record.node_id, now)?;
+    let discovered = trust.resolve_discovery_result(
+        &ramflux_node_core::FederationDiscoveryRequest {
+            node_id: record.node_id.clone(),
+            now,
+            invite_endpoint: None,
+            well_known_url: None,
+            dns_srv_records: Vec::new(),
+            address_records: Vec::new(),
+            directory_endpoint: None,
+        },
+        Some(record),
+        None,
+    )?;
+    let node_public_key_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::FEDERATION_HANDSHAKE,
+        discovered.node_public_key.as_bytes(),
+    );
+    let proof = format!("{}:{}:{now}", local.node_id, discovered.node_id);
+    let route = ramflux_node_core::FederationPeerRoute {
+        node_id: discovered.node_id.clone(),
+        endpoint: discovered.node_endpoint.clone(),
+        node_public_key_hash,
+        node_capabilities: discovered.node_capabilities.clone(),
+        trust_status: ramflux_node_core::FederationTrustStatus::Invited,
+        updated_at: now,
+        expires_at: discovered.expires_at,
+        route_update_proof_hash: ramflux_crypto::blake3_256_base64url(
             ramflux_protocol::domain::FEDERATION_HANDSHAKE,
-            discovered.node_public_key.as_bytes(),
-        );
-        let proof = format!("{}:{}:{now}", local.node_id, discovered.node_id);
-        let route = ramflux_node_core::FederationPeerRoute {
-            node_id: discovered.node_id.clone(),
-            endpoint: discovered.node_endpoint.clone(),
-            node_public_key_hash,
-            node_capabilities: discovered.node_capabilities.clone(),
-            trust_status: ramflux_node_core::FederationTrustStatus::Invited,
-            updated_at: now,
-            expires_at: discovered.expires_at,
-            route_update_proof_hash: ramflux_crypto::blake3_256_base64url(
-                ramflux_protocol::domain::FEDERATION_HANDSHAKE,
-                proof.as_bytes(),
-            ),
-        };
-        let mut peer_capabilities: Vec<String> = discovered
-            .node_capabilities
-            .iter()
-            .filter(|capability| local.capabilities.iter().any(|allowed| allowed == *capability))
-            .cloned()
-            .collect();
-        peer_capabilities.sort();
-        if peer_capabilities.is_empty() {
-            peer_capabilities.push("opaque_delivery".to_owned());
-        }
-        trust.admit_verified_discovered_peer(route, &peer_capabilities, &local.capabilities)?;
-        Ok(())
-    })
+            proof.as_bytes(),
+        ),
+    };
+    let mut peer_capabilities: Vec<String> = discovered
+        .node_capabilities
+        .iter()
+        .filter(|capability| local.capabilities.iter().any(|allowed| allowed == *capability))
+        .cloned()
+        .collect();
+    peer_capabilities.sort();
+    trust.admit_verified_discovered_peer(route, &peer_capabilities, &local.capabilities)?;
+    Ok(())
 }
 
 fn test_socket() -> Result<Option<SocketAddr>, ramflux_node_core::NodeCoreError> {
@@ -164,9 +179,10 @@ fn parse_test_socket(value: &str) -> Result<SocketAddr, ramflux_node_core::NodeC
     Ok(socket)
 }
 
-fn node_id_ok(value: &str) -> bool {
+pub(crate) fn node_id_ok(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=63).contains(&bytes.len())
+        && value.parse::<std::net::IpAddr>().is_err()
         && !value.starts_with(['.', '-'])
         && !value.ends_with(['.', '-'])
         && bytes.iter().all(|byte| {

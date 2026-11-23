@@ -232,11 +232,9 @@ fn send_signed_forward_to_peer(
     let response: ramflux_node_core::FederatedEnvelopeForwardResponse = if force_tcp {
         send_signed_forward_to_peer_over_tcp(router, peer, peer_ca_pems, signed_request)?
     } else {
-        match ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
+        match ramflux_transport::mesh_quic_post_signed_envelope(
             &peer.endpoint,
-            "/s8/federation/envelope",
             &router.tls,
-            "ramflux-federation",
             peer_ca_pems,
             &signed_request,
         ) {
@@ -544,14 +542,7 @@ fn send_signed_forward_to_peer_over_tcp(
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
     router
         .client
-        .post_json_with_peer_ca_pems(
-            &peer.endpoint,
-            "/s8/federation/envelope",
-            &router.tls,
-            "ramflux-federation",
-            peer_ca_pems,
-            signed_request,
-        )
+        .post_signed_federation_envelope(&peer.endpoint, &router.tls, peer_ca_pems, signed_request)
         .map_err(|source| {
             tracing::error!(
                 source_node_id = %signed_request.source_node_id,
