@@ -194,6 +194,9 @@ impl AccountRuntime {
                 let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(receive_prepared));
                 return Ok(());
             }
+            if let Some(error) = account.head_refresh.take_demanded_foreign(&roots, since) {
+                return Err(error);
+            }
             // A refresh only makes held entries ready; dispatch must replay them.
             receive_prepared = false;
             // Leave the actor once the fetch budget ends. Staying here to wait for
@@ -202,8 +205,8 @@ impl AccountRuntime {
             if Instant::now() >= network_deadline {
                 return self.refuse_or_apply_queued(command, since).await;
             }
-            for root in roots {
-                if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root) {
+            for root in &roots {
+                if enqueued.insert(root.clone()) && !account.head_refresh.enqueue(root.clone()) {
                     return Err(pending(account));
                 }
             }
@@ -213,6 +216,9 @@ impl AccountRuntime {
                 work = self.connection_work.recv() => {
                     let Some(work) = work else { return Err(SdkError::NetworkingPending); };
                     self.apply_connection_work(work).await?;
+                    if let Some(error) = self.demanded_foreign(&roots, since) {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -229,11 +235,23 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(());
         };
-        if stale_roots_since(account, &command.request, Some(since))?.is_empty() {
+        let roots = stale_roots_since(account, &command.request, Some(since))?;
+        if let Some(error) = account.head_refresh.take_demanded_foreign(&roots, since) {
+            return Err(error);
+        }
+        if roots.is_empty() {
             let _ = RECEIVE_PREPARED.try_with(|prepared| prepared.set(false));
             return Ok(());
         }
         Err(pending(account))
+    }
+
+    fn demanded_foreign(
+        &mut self,
+        roots: &BTreeSet<String>,
+        since: std::time::Instant,
+    ) -> Option<SdkError> {
+        self.state.accounts.get_mut(&self.id)?.head_refresh.take_demanded_foreign(roots, since)
     }
 
     async fn drain_queued_connection_work(&mut self) -> Result<(), SdkError> {

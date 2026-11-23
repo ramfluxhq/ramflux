@@ -29,6 +29,9 @@ pub(crate) struct RefreshState {
     cursor: Option<(bool, String)>,
     sweep_cursor: Option<(bool, String)>,
     failures: BTreeMap<String, (tokio::time::Instant, u8)>,
+    /// A foreign fetch or pin failure, stamped when the writer recorded it.
+    /// A command takes only a stamp at or after its own preparation.
+    foreign_errors: BTreeMap<String, (Instant, Arc<SdkError>)>,
     inbound: inbound::Inbound,
     wake: Arc<tokio::sync::Notify>,
     // A dropped/cancelled pass releases ownership without needing an actor message.
@@ -53,6 +56,32 @@ impl RefreshState {
         self.pending.insert(root);
         self.wake.notify_one();
         true
+    }
+
+    fn note_foreign(&mut self, root: &str, error: SdkError) -> Arc<SdkError> {
+        let shared = Arc::new(error);
+        self.foreign_errors.insert(root.to_owned(), (Instant::now(), Arc::clone(&shared)));
+        shared
+    }
+
+    /// The typed refusal for a demanded root whose foreign fetch failed after `since`.
+    pub(crate) fn take_demanded_foreign(
+        &mut self,
+        roots: &BTreeSet<String>,
+        since: Instant,
+    ) -> Option<SdkError> {
+        let root = roots
+            .iter()
+            .find(|root| {
+                self.foreign_errors.get(root.as_str()).is_some_and(|(at, _)| *at >= since)
+            })?
+            .clone();
+        let (_, error) = self.foreign_errors.remove(&root)?;
+        let source = match Arc::try_unwrap(error) {
+            Ok(error) => error,
+            Err(error) => SdkError::LifecycleShared(error),
+        };
+        Some(SdkError::DirectoryAuthorityUnavailable { root, source: Box::new(source) })
     }
 }
 
@@ -79,6 +108,7 @@ pub(crate) struct Plan {
     remaining_passes: usize,
     retried_demands: usize,
     config: GatewaySessionConfig,
+    origins: BTreeMap<String, crate::client::foreign_manifest::SenderManifestOrigin>,
 }
 pub(crate) enum Work {
     Subscribe {
@@ -154,6 +184,7 @@ fn prepare_due_limit(
     let eligible = eligible_roots(account)?;
     account.head_refresh.pending.retain(|root| eligible.contains(root));
     account.head_refresh.failures.retain(|root, _| eligible.contains(root));
+    account.head_refresh.foreign_errors.retain(|root, _| eligible.contains(root));
     let now = Instant::now();
     let freshness = account.client.native_head_freshness.borrow();
     let candidates: BTreeSet<_> = eligible
@@ -202,7 +233,12 @@ fn prepare_due_limit(
         })
         .count();
     let remaining_passes = candidates.len().saturating_sub(selected.len()).div_ceil(PASS_ROOTS);
-    let roots = selected.into_iter().map(|(_, root)| root).collect();
+    let roots: Vec<String> = selected.into_iter().map(|(_, root)| root).collect();
+    let origins = planned_origins(account, &roots);
+    let roots: Vec<String> = roots.into_iter().filter(|root| origins.contains_key(root)).collect();
+    if roots.is_empty() {
+        return Ok(None);
+    }
     let lease = Arc::new(());
     account.head_refresh.active = Arc::downgrade(&lease);
     Ok(Some(Plan {
@@ -212,7 +248,42 @@ fn prepare_due_limit(
         remaining_passes,
         retried_demands,
         config: account.gateway_config.clone(),
+        origins,
     }))
+}
+
+fn planned_origins(
+    account: &mut LocalBusAccountState,
+    roots: &[String],
+) -> BTreeMap<String, crate::client::foreign_manifest::SenderManifestOrigin> {
+    let mut origins = BTreeMap::new();
+    for root in roots {
+        match account.client.pinned_manifest_origin(root) {
+            Ok(origin) => {
+                origins.insert(root.clone(), origin);
+            }
+            Err(error) => {
+                let _ = account.head_refresh.note_foreign(root, error);
+            }
+        }
+    }
+    origins
+}
+
+fn pass_current(account: &LocalBusAccountState, plan: &Plan, root: &str) -> bool {
+    plan.fence.current(account)
+        && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
+        && plan.roots.iter().any(|candidate| candidate == root)
+}
+
+fn record_failure(account: &mut LocalBusAccountState, root: &str) {
+    let previous = account.head_refresh.failures.get(root).map_or(0, |(_, count)| *count);
+    let count = previous.saturating_add(1).min(6);
+    let delay = Duration::from_secs((5_u64 << (count - 1)).min(150));
+    account
+        .head_refresh
+        .failures
+        .insert(root.to_owned(), (tokio::time::Instant::now() + delay, count));
 }
 
 fn apply(
@@ -223,23 +294,31 @@ fn apply(
     outcome: Result<SdkDeviceManifestResponse, SdkError>,
 ) -> Result<bool, SdkError> {
     let result = apply_verified(account, plan, root, fetched_after, outcome);
-    if plan.fence.current(account)
-        && account.head_refresh.active.ptr_eq(&Arc::downgrade(&plan.lease))
-        && plan.roots.iter().any(|candidate| candidate == root)
-    {
-        if matches!(result, Ok(true)) {
+    if !pass_current(account, plan, root) {
+        return result;
+    }
+    match result {
+        Ok(true) => {
             account.head_refresh.failures.remove(root);
-        } else {
-            let previous = account.head_refresh.failures.get(root).map_or(0, |(_, count)| *count);
-            let count = previous.saturating_add(1).min(6);
-            let delay = Duration::from_secs((5_u64 << (count - 1)).min(150));
-            account
-                .head_refresh
-                .failures
-                .insert(root.to_owned(), (tokio::time::Instant::now() + delay, count));
+            account.head_refresh.foreign_errors.remove(root);
+            Ok(true)
+        }
+        Ok(false) => {
+            record_failure(account, root);
+            Ok(false)
+        }
+        Err(error) => {
+            record_failure(account, root);
+            if matches!(
+                plan.origins.get(root),
+                Some(crate::client::foreign_manifest::SenderManifestOrigin::Remote { .. })
+            ) {
+                Err(SdkError::LifecycleShared(account.head_refresh.note_foreign(root, error)))
+            } else {
+                Err(error)
+            }
         }
     }
-    result
 }
 
 fn apply_verified(
@@ -363,7 +442,7 @@ async fn fetch_pass(
         *retry_budget = retry_budget.saturating_sub(plan.retried_demands);
         for root in &plan.roots {
             let fetched_after = Instant::now();
-            let outcome = super::directory::fetch(&plan.config, root).await;
+            let outcome = fetch_planned(&plan, root).await;
             attempted.insert(root.clone());
             let (reply, response) = oneshot::channel();
             send(
@@ -377,7 +456,8 @@ async fn fetch_pass(
                 },
             )
             .await?;
-            let _ = response.await.map_err(|_| stopped())?;
+            let applied = response.await.map_err(|_| stopped())?;
+            foreign_fetch_status(&plan, root, applied)?;
         }
         // Release the pass lease and re-read demands before the next network fetch.
         drop(plan);
@@ -386,6 +466,47 @@ async fn fetch_pass(
         }
     }
     Ok(remaining)
+}
+
+const FETCH_ATTEMPT: Duration = Duration::from_secs(5);
+
+async fn fetch_planned(plan: &Plan, root: &str) -> Result<SdkDeviceManifestResponse, SdkError> {
+    use crate::client::foreign_manifest::SenderManifestOrigin;
+    let Some(origin) = plan.origins.get(root) else {
+        return Err(SdkError::LocalBus("manifest origin was not prepared".into()));
+    };
+    match origin {
+        SenderManifestOrigin::Local => super::directory::fetch(&plan.config, root).await,
+        SenderManifestOrigin::Remote { .. } => tokio::time::timeout(
+            FETCH_ATTEMPT,
+            crate::client::foreign_manifest::fetch_sender_manifest(
+                &plan.config,
+                origin.clone(),
+                root,
+            ),
+        )
+        .await
+        .map_err(|_| SdkError::NodeTimeout { retry_after_ms: 5_000 })?,
+    }
+}
+
+fn foreign_fetch_status(
+    plan: &Plan,
+    root: &str,
+    applied: Result<bool, SdkError>,
+) -> Result<(), SdkError> {
+    if let Err(error) = applied
+        && matches!(
+            plan.origins.get(root),
+            Some(crate::client::foreign_manifest::SenderManifestOrigin::Remote { .. })
+        )
+    {
+        return Err(SdkError::DirectoryAuthorityUnavailable {
+            root: root.to_owned(),
+            source: Box::new(error),
+        });
+    }
+    Ok(())
 }
 
 async fn send(writer: &mpsc::Sender<AccountWork>, work: Work) -> Result<(), SdkError> {
