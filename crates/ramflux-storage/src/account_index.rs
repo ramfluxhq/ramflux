@@ -275,6 +275,20 @@ impl AccountIndex {
         Ok(())
     }
 
+    /// Clears the active pointer when it names `local_account_id`. A different pointer is kept.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn clear_active_account(&self, local_account_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE active_account_state
+                SET active_local_account_id = NULL, updated_at = ?2
+              WHERE singleton_id = 1 AND active_local_account_id = ?1",
+            params![local_account_id, unix_now()],
+        )?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn active_account(&self) -> Result<Option<String>, StorageError> {

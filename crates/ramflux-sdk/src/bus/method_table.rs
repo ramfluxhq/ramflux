@@ -126,12 +126,14 @@ methods! {
     LocalMutation(Always) => Lifecycle: [
         "account.lock",
         "account.passphrase.rotate",
+        "account.sign_out",
         "account.unlock",
     ];
     LocalMutation(Always) => Supervisor: [
         "account.backup.export",
         "account.backup.import",
         "account.export_agent_credentials",
+        "account.remove_local",
         "account.switch",
         "daemon.stop",
         "node.confirm",

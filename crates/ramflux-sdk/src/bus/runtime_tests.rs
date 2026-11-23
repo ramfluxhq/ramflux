@@ -1322,7 +1322,9 @@ async fn account_read_model_retains_locked_manifest_profiles_after_restart() -> 
                     serde_json::json!({}),
                 ))
                 .await?;
-            assert_eq!(list["accounts"], serde_json::json!([]));
+            assert_eq!(list["accounts"][0]["id"], "alice");
+            assert_eq!(list["accounts"][0]["locked"], true);
+            assert_eq!(list["accounts"][0]["display_name"], "Work");
             assert_eq!(list["account_details"][0]["state"], "locked");
             assert_eq!(list["account_details"][0]["kind"], "headless_ai");
             drop(socket);

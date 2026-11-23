@@ -266,6 +266,15 @@
       "bridge_allowed": true,
       "capability": "account",
       "key_export": false,
+      "name": "account.remove_local",
+      "secret_input": true,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
       "name": "account.restore.install",
       "secret_input": true,
       "secret_output": false,
@@ -278,6 +287,15 @@
       "name": "account.restore.verify",
       "secret_input": true,
       "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "account",
+      "key_export": false,
+      "name": "account.sign_out",
+      "secret_input": true,
+      "secret_output": true,
       "show_once": false
     },
     {
