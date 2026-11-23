@@ -27,6 +27,19 @@ impl Publisher {
         for (id, row) in rows {
             self.approval(&stored_copy(&id, &row)).await;
         }
+        let sessions: Vec<(String, String, String, u64, String)> = mirror
+            .sessions
+            .iter()
+            .filter_map(|(key, row)| {
+                let job_id = row.job_id.clone()?;
+                let version = row.job_version?;
+                let channel = row.channel.clone()?;
+                Some((key.clone(), row.agent.clone(), job_id, version, channel))
+            })
+            .collect();
+        for (session, agent, job_id, version, channel) in sessions {
+            self.job_session(&session, &agent, &job_id, version, &channel).await;
+        }
     }
 
     pub(super) async fn page(&mut self, page: &SnapshotPage) {
@@ -34,6 +47,35 @@ impl Publisher {
             if let MirrorOp::Approval(copy) = &row.op {
                 self.approval(copy).await;
             }
+            self.mirror_session(&row.op).await;
+        }
+    }
+
+    pub(super) async fn mirror_session(&mut self, op: &MirrorOp) {
+        let MirrorOp::Session { session_key, agent, channel, job_id, job_version, deleted, .. } =
+            op
+        else {
+            return;
+        };
+        if *deleted {
+            return;
+        }
+        let (Some(job_id), Some(version), Some(channel)) = (job_id, job_version, channel) else {
+            return;
+        };
+        self.job_session(session_key, agent, job_id, *version, channel).await;
+    }
+
+    async fn job_session(
+        &mut self,
+        session: &str,
+        agent: &str,
+        job_id: &str,
+        version: u64,
+        channel: &str,
+    ) {
+        if let Some(body) = job_body(session, agent, job_id, version, channel) {
+            self.send("agent.job.session", body).await;
         }
     }
 
@@ -91,6 +133,32 @@ fn stored_copy(id: &str, row: &ApprovalRow) -> ApprovalCopy {
         decision: row.decision.clone(),
         cause: row.cause.clone(),
     }
+}
+
+fn job_body(
+    session: &str,
+    agent: &str,
+    job_id: &str,
+    version: u64,
+    channel: &str,
+) -> Option<Value> {
+    let prefix = match channel {
+        "cron" => "cron:",
+        "xin" => "xin:",
+        _ => return None,
+    };
+    if !path_id(agent) || !path_id(job_id) || session != format!("{prefix}{job_id}") {
+        return None;
+    }
+    Some(json!({
+        "source": "prx",
+        "agent": agent,
+        "session": session,
+        "job_id": job_id,
+        "job_version": version,
+        "channel": channel,
+        "conversation_id": agent,
+    }))
 }
 
 fn approval_body(copy: &ApprovalCopy) -> Option<Value> {

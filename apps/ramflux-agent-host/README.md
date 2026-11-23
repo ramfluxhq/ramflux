@@ -67,34 +67,26 @@ bundle to the Linux service host. Integration tests compile the explicit
 ## PRX engine
 
 PRX can provide the model and tool-execution layer while rfd remains responsible for identity,
-membership, signed delivery, and human approval evidence. Initialize PRX, then edit its active
-configuration for the chosen authorization mode. The default supervised mode requires
-the causal decision plane:
+membership, signed delivery, and human approval evidence. The desktop finds or starts PRX.
+`rf prx bootstrap` reads `<state>/runtime.json`. When that file is stale or missing it runs
+`prx init --provider <id> --from-stdin`, `prx token issue --out <state>/owner.token`, and
+`prx service install --user --yes`, then starts the user service.
+
+The provider key is the passphrase of keychain account `prx-provider:<id>` (service `ramflux`).
+When that entry is absent, bootstrap reads one key from standard input, stores it, and writes
+it to `prx init` on a private pipe. The key is not an argument, an environment variable, or a
+log line.
 
 ```sh
-prx init --interactive
+rf prx bootstrap --provider <id> --model <model>
+rf prx status
 ```
 
-```toml
-[autonomy]
-level = "supervised"
-
-[causal_tree]
-enabled = true
-```
-
-Start the local PRX daemon. It prints a one-time pairing code when no client is paired. Exchange
-that code locally and write only the returned bearer to a private file:
-
-```sh
-install -d -m 700 "$HOME/.local/state/ramflux-agent"
-umask 077
-curl --fail --silent --show-error -X POST \
-  -H "X-Pairing-Code: $PAIR_CODE" \
-  http://localhost:16830/pair \
-  | jq -er .token > "$HOME/.local/state/ramflux-agent/prx.token"
-chmod 600 "$HOME/.local/state/ramflux-agent/prx.token"
-```
+`rf prx status` prints the runtime path, `api_base`, pid, and `started_at`. It does not print
+the token. Point the agent host at the printed `api_base` and at `<state>/owner.token`.
+`rf daemon start --prx-state-dir <state>` does the same when the runtime is already fresh.
+It does not install or start PRX. The explicit `--prx-base-url` and `--prx-token-file` pair
+remains for a fake daemon and is not combined with `--prx-state-dir`.
 
 Do not put the bearer in the agent configuration. Select PRX instead of `rules` with an
 `engine.prx` object:

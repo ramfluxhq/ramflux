@@ -133,6 +133,12 @@ pub enum ApiCode {
     ApprovalUnknown,
     /// `410 approval_expired`: the approval wait ended. The call never started.
     ApprovalExpired,
+    /// Cron control answered 404. PRX's body is uncoded; the client maps it here.
+    CronJobUnknown,
+    /// `404 xin_task_unknown`.
+    XinTaskUnknown,
+    /// `404 xin_goal_unknown`.
+    XinGoalUnknown,
     Unknown(String),
 }
 
@@ -174,6 +180,9 @@ impl ApiCode {
             "approval_run_mismatch" => Self::ApprovalRunMismatch,
             "approval_unknown" => Self::ApprovalUnknown,
             "approval_expired" => Self::ApprovalExpired,
+            "cron_job_unknown" => Self::CronJobUnknown,
+            "xin_task_unknown" => Self::XinTaskUnknown,
+            "xin_goal_unknown" => Self::XinGoalUnknown,
             other => Self::Unknown(other.to_owned()),
         }
     }

@@ -52,6 +52,7 @@ impl AgentBus for RfdBus {
             "account.status"
                 | "agent.progress"
                 | "agent.approval.publish"
+                | "agent.job.session"
                 | "device.list"
                 | "device.refresh"
                 | "identity.directory"

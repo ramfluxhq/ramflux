@@ -18,9 +18,28 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
                     "--prx-base-url and --prx-token-file are set together".into(),
                 ));
             }
+            if start.prx_state_dir.is_some()
+                && (start.prx_base_url.is_some() || start.prx_token_file.is_some())
+            {
+                return Err(RfError::Message(
+                    "--prx-state-dir is not combined with --prx-base-url".into(),
+                ));
+            }
             let mut config = LocalBusConfig::new(socket, start.data_root);
             if let (Some(url), Some(path)) = (&start.prx_base_url, &start.prx_token_file) {
                 config = config.with_prx(url, path)?;
+            }
+            if let Some(dir) = &start.prx_state_dir {
+                #[cfg(unix)]
+                {
+                    let (url, path) = crate::prx::adopt(dir).await?;
+                    config = config.with_prx(&url, &path)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = dir;
+                    return Err(RfError::UnsupportedPlatform { command: "prx" });
+                }
             }
             #[cfg(feature = "itest-memory-vault")]
             if let Some(path) = itest_vault_path {

@@ -13,6 +13,7 @@
 mod agent;
 mod apply;
 mod approvals;
+mod automation;
 mod autonomy;
 mod capabilities;
 mod catalog;
@@ -42,6 +43,7 @@ pub use agent::{
 };
 pub use apply::ApplyOutcome;
 pub use approvals::ApprovalReceipt;
+pub use automation::{AutomationItem, AutomationKind};
 pub use autonomy::Autonomy;
 pub use capabilities::{
     AGENT_CATALOG_V1, AGENT_CRUD_V1, AGENT_LIMITS_V1, AGENT_MAIN_READBACK_V1,

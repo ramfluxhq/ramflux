@@ -347,6 +347,60 @@
       "bridge_allowed": true,
       "capability": "agent",
       "key_export": false,
+      "name": "agent.job.list",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.job.pause",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.job.remove",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.job.resume",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.job.session",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
+      "name": "agent.job.sessions",
+      "secret_input": false,
+      "secret_output": false,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": true,
+      "capability": "agent",
+      "key_export": false,
       "name": "agent.progress",
       "secret_input": false,
       "secret_output": false,

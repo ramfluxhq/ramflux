@@ -16,6 +16,7 @@ const MARKER_VERSION: u64 = 1;
 const DOMAIN: &str = "ramflux.sdk.agent_activity.v1";
 const MAX_MARKER: usize = 16 * 1024;
 const MAX_APPROVALS: usize = 256;
+const MAX_JOB_SESSIONS: usize = 256;
 const MAX_PROGRESS: usize = 128;
 const MAX_SIBLINGS: usize = 16;
 
@@ -72,8 +73,13 @@ pub(crate) fn commit(
     let source = source_key(state_kind, &record);
     record["source_key"] = json!(source);
     db.persist_actor_state(state_kind, &record)?;
-    let topic =
-        if state_kind.starts_with("agent-approval/") { "agent.approval" } else { "agent.progress" };
+    let topic = if state_kind.starts_with("agent-approval/") {
+        "agent.approval"
+    } else if state_kind.starts_with("agent-job-session/") {
+        "agent.job"
+    } else {
+        "agent.progress"
+    };
     let subject = text(&record, "approval_id").or_else(|| text(&record, "run_id"));
     db.append_journal(
         &source,
@@ -162,6 +168,8 @@ fn accept_approval(
 fn trim(db: &ramflux_storage::AccountDb, keep: &str) -> Result<(), SdkError> {
     let (prefix, cap) = if keep.starts_with("agent-approval/") {
         ("agent-approval/", MAX_APPROVALS)
+    } else if keep.starts_with("agent-job-session/") {
+        ("agent-job-session/", MAX_JOB_SESSIONS)
     } else {
         ("agent-progress/", MAX_PROGRESS)
     };
@@ -187,6 +195,12 @@ fn pending_key(db: &ramflux_storage::AccountDb, key: &str) -> bool {
 }
 
 fn source_key(state_kind: &str, record: &Value) -> String {
+    if state_kind.starts_with("agent-job-session/") {
+        let agent = text(record, "agent").unwrap_or_default();
+        let session = text(record, "session").unwrap_or_default();
+        let version = record.get("job_version").and_then(Value::as_u64).unwrap_or(0);
+        return format!("agent-job:{agent}:{session}:{version}");
+    }
     if state_kind.starts_with("agent-approval/") {
         let id = text(record, "approval_id").unwrap_or_default();
         let status = text(record, "status").unwrap_or_default();
@@ -262,7 +276,9 @@ fn qualified(
 }
 
 fn state_kind_ok(kind: &str) -> bool {
-    (kind.starts_with("agent-approval/") || kind.starts_with("agent-progress/"))
+    (kind.starts_with("agent-approval/")
+        || kind.starts_with("agent-progress/")
+        || kind.starts_with("agent-job-session/"))
         && kind.len() <= 256
         && !kind.contains("..")
         && !kind.contains("//")

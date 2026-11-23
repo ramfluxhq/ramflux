@@ -54,12 +54,16 @@ methods! {
     LocalRead(Always) => Actor: ["account.config.get", "diag.residue"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
-    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "device.pair.status", "device.transfer.status"];
+    LocalRead(Always) => Actor: ["a2i.list_pending", "agent.approval.list", "agent.job.list", "agent.job.sessions", "device.pair.status", "device.transfer.status"];
     LocalMutation(Always) => Actor: [
         "account.config.set",
         "a2i.acknowledge",
         "agent.approval.decide",
         "agent.approval.publish",
+        "agent.job.pause",
+        "agent.job.remove",
+        "agent.job.resume",
+        "agent.job.session",
         "agent.progress",
         "attachment.enable",
         "attachment.import.begin",

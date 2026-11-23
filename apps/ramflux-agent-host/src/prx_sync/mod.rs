@@ -419,6 +419,7 @@ async fn on_text(
 async fn publish_applied(publisher: &mut Publisher, op: &MirrorOp) {
     match op {
         MirrorOp::Approval(copy) => publisher.approval(copy).await,
+        MirrorOp::Session { .. } => publisher.mirror_session(op).await,
         MirrorOp::Turn(copy) => {
             if let TurnBody::Text { content, final_reply: true } = &copy.body {
                 publisher.final_text(copy, content).await;

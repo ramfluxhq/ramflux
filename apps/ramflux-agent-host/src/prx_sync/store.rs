@@ -45,6 +45,10 @@ pub(super) struct SessionRow {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub child: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_version: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

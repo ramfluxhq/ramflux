@@ -37,4 +37,7 @@ pub(crate) struct DaemonStart {
     /// Bearer token file for `--prx-base-url`. Mode must be `0600`.
     #[arg(long)]
     pub(crate) prx_token_file: Option<PathBuf>,
+    /// Read a fresh `runtime.json` and `owner.token` from this directory. Does not start PRX.
+    #[arg(long)]
+    pub(crate) prx_state_dir: Option<PathBuf>,
 }

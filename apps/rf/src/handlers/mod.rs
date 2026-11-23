@@ -30,6 +30,7 @@ pub(crate) mod pairing;
 #[cfg(not(unix))]
 #[path = "pairing_unsupported.rs"]
 pub(crate) mod pairing;
+pub(crate) mod prx;
 #[cfg(windows)]
 mod windows_console;
 #[cfg(not(unix))]

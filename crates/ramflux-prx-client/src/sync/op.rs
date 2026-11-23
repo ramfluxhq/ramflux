@@ -19,6 +19,10 @@ pub enum MirrorOp {
         created_at: Option<String>,
         child: bool,
         deleted: bool,
+        /// Set on a `cron:` or `xin:` session. The id inside `metadata`.
+        job_id: Option<String>,
+        /// Store version from `metadata.job_version`.
+        job_version: Option<u64>,
     },
     /// Agent configuration metadata. No prompt text.
     Agent {
@@ -256,15 +260,50 @@ fn session_op(key: &str, payload: &Value, child: bool) -> Result<MirrorOp, PrxEr
         Some(value) => Some(value),
         None => opt_id(payload, "started_at")?,
     };
+    let channel = opt_id(payload, "channel")?;
+    let (job_id, job_version) = job_meta(payload, channel.as_deref(), &session_key)?;
     Ok(MirrorOp::Session {
         session_key,
         agent: opt_label(payload, "agent")?,
         incarnation: opt_label(payload, "incarnation")?,
-        channel: opt_id(payload, "channel")?,
+        channel,
         created_at,
         child,
         deleted: flag(payload, "deleted")?.unwrap_or(false),
+        job_id,
+        job_version,
     })
+}
+
+fn job_meta(
+    payload: &Value,
+    channel: Option<&str>,
+    session_key: &str,
+) -> Result<(Option<String>, Option<u64>), PrxError> {
+    let Some(prefix) = channel.filter(|value| *value == "cron" || *value == "xin") else {
+        return Ok((None, None));
+    };
+    let Some(meta) = payload.get("metadata").and_then(Value::as_object) else {
+        return Err(protocol("sync payload field is missing"));
+    };
+    let job_id = match meta.get("job_id") {
+        Some(Value::String(text)) if job_id_ok(text) => text.clone(),
+        _ => return Err(protocol("sync payload field is invalid")),
+    };
+    if session_key != format!("{prefix}:{job_id}") {
+        return Err(protocol("sync payload field is invalid"));
+    }
+    let job_version = match meta.get("job_version") {
+        Some(value) => value.as_u64().ok_or(protocol("sync payload field has the wrong type"))?,
+        None => return Err(protocol("sync payload field is missing")),
+    };
+    Ok((Some(job_id), Some(job_version)))
+}
+
+fn job_id_ok(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
 }
 
 fn agent_op(key: &str, payload: &Value) -> Result<MirrorOp, PrxError> {

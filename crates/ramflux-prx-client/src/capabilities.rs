@@ -50,7 +50,8 @@ pub const SYNC_WS_V1: &str = "sync_ws_v1";
 pub const STREAM_FRAMES_V1: &str = "stream_frames_v1";
 /// `POST /api/sessions/{id}/approvals/{approval_id}`.
 pub const RUN_APPROVALS_V1: &str = "run_approvals_v1";
-/// Non-interactive host install. Advertised at the pin. This client does not call those routes.
+/// Non-interactive host install. The CLI runs `prx init`, `prx token issue`, and
+/// `prx service install`. There is no HTTP bootstrap route. Job routes are gated on this token.
 pub const HOST_BOOTSTRAP_V1: &str = "host_bootstrap_v1";
 
 /// The build identity PRX reports.

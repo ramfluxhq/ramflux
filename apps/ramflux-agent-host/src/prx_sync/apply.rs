@@ -20,6 +20,8 @@ impl Mirror {
                 created_at,
                 child,
                 deleted,
+                job_id,
+                job_version,
             } => {
                 let row = SessionRow {
                     agent: agent.clone(),
@@ -27,6 +29,8 @@ impl Mirror {
                     channel: channel.clone(),
                     created_at: created_at.clone(),
                     child: *child,
+                    job_id: job_id.clone(),
+                    job_version: *job_version,
                 };
                 self.apply_session(session_key, row, *deleted)?;
                 Ok(None)

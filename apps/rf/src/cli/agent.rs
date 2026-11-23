@@ -131,4 +131,53 @@ pub(crate) enum AgentAction {
         #[arg(long, allow_hyphen_values = true)]
         operation_id: String,
     },
+    /// List, pause, resume, or remove one agent's jobs, or list job-run sessions.
+    Job(AgentJobCommand),
+}
+
+#[derive(Args)]
+pub(crate) struct AgentJobCommand {
+    #[command(subcommand)]
+    pub(crate) action: AgentJobAction,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AgentJobAction {
+    /// List cron jobs, xin tasks, and xin goals for one agent.
+    List {
+        #[arg(long)]
+        agent: String,
+    },
+    /// Pause one job. `kind` is `cron`, `xin_task`, or `xin_goal`.
+    Pause {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// Resume one job.
+    Resume {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// Remove one job.
+    Remove {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        id: String,
+    },
+    /// List job-run sessions published for one agent.
+    Sessions {
+        #[arg(long)]
+        agent: String,
+    },
 }

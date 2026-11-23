@@ -4,6 +4,7 @@
 pub mod a2i;
 pub mod account;
 pub(crate) mod agent_activity;
+pub(crate) mod agent_jobs;
 pub(in crate::bus) mod attachment_prepare;
 pub(crate) mod call;
 pub mod call_bot;

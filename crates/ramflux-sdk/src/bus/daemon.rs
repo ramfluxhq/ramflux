@@ -242,6 +242,23 @@ pub(crate) struct LocalBusDispatchResult {
     pub(crate) event: Option<LocalBusFrame>,
 }
 
+async fn dispatch_agent_methods(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    match request.method.as_str() {
+        "agent.progress"
+        | "agent.approval.publish"
+        | "agent.approval.decide"
+        | "agent.approval.list" => crate::bus::dispatch::agent_activity::dispatch(request, state),
+        "agent.job.list" | "agent.job.pause" | "agent.job.resume" | "agent.job.remove"
+        | "agent.job.session" | "agent.job.sessions" => {
+            crate::bus::dispatch::agent_jobs::dispatch(request, state).await
+        }
+        other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
 pub(crate) async fn dispatch_local_bus_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -336,10 +353,7 @@ pub(crate) async fn dispatch_local_bus_request(
         method if method.starts_with("diag.") => {
             crate::bus::dispatch::residue::dispatch_residue(request, state)
         }
-        "agent.progress"
-        | "agent.approval.publish"
-        | "agent.approval.decide"
-        | "agent.approval.list" => crate::bus::dispatch::agent_activity::dispatch(request, state),
+        method if method.starts_with("agent.") => dispatch_agent_methods(request, state).await,
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
