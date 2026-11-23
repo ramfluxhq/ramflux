@@ -8,6 +8,18 @@ use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
 
 impl AccountDb {
+    fn actor_state_unchanged(&self, kind: &str, bytes: &[u8]) -> Result<bool, StorageError> {
+        match self.connection.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind=?1",
+            params![kind],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(stored) => Ok(stored == bytes),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Tests actor-state presence without decoding a private snapshot.
     /// # Errors
     /// Returns SQLite errors.
@@ -29,10 +41,16 @@ impl AccountDb {
         let value = serde_json::to_value(state)?;
         if !super::super::message_footprint::admits(kind, &value) {
             let bytes = serde_json::to_vec(state)?;
+            if self.actor_state_unchanged(kind, &bytes)? {
+                return Ok(());
+            }
             self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;
             return Ok(());
         }
         let bytes = serde_json::to_vec(&value)?;
+        if self.actor_state_unchanged(kind, &bytes)? {
+            return Ok(());
+        }
         let write = || {
             self.register_actor_message_footprint(kind, &value)?;
             self.connection.execute("INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2) ON CONFLICT(state_kind) DO UPDATE SET state_json=excluded.state_json WHERE state_json<>excluded.state_json", params![kind,&bytes])?;

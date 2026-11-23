@@ -5,6 +5,7 @@
 
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::{GatewaySessionConfig, SdkDeviceManifestResponse, SdkError};
+use std::cell::RefCell;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -52,6 +53,25 @@ pub(crate) enum DirectoryWork {
     },
 }
 const ATTEMPT: Duration = Duration::from_secs(5);
+
+thread_local! {
+    static PAUSED: RefCell<Option<DirectoryWork>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn stash_paused(work: DirectoryWork) {
+    let _ = PAUSED.try_with(|slot| {
+        if let Ok(mut guard) = slot.try_borrow_mut() {
+            *guard = Some(work);
+        }
+    });
+}
+
+pub(crate) fn take_paused() -> Option<DirectoryWork> {
+    PAUSED
+        .try_with(|slot| slot.try_borrow_mut().ok().and_then(|mut guard| guard.take()))
+        .ok()
+        .flatten()
+}
 
 pub(crate) async fn backfill(context: SessionContext, writer: mpsc::Sender<AccountWork>) {
     let mut cancel = context.cancel.clone();

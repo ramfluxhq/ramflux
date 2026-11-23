@@ -179,6 +179,11 @@ pub enum SdkError {
     SurfaceProtocol(#[from] ramflux_protocol::a2ui::Reject),
     #[error("priority session calls cannot await account writer checkpoints")]
     PriorityWriterAccess,
+    #[error("account command queue wait expired")]
+    AccountCommandBackpressure,
+    /// Internal yield while a background writer attempt lets one queued command run.
+    #[error("account writer paused for a queued command")]
+    WriterPause,
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
     #[error(transparent)]
@@ -454,6 +459,7 @@ impl From<StorageError> for SdkError {
         match error {
             StorageError::ObjectErased => Self::ObjectErased,
             StorageError::PairingField(name) => Self::PairingField(name),
+            StorageError::WriterPause => Self::WriterPause,
             other => Self::Storage(other),
         }
     }

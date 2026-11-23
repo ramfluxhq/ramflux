@@ -53,8 +53,6 @@ impl CommandAdmission {
     pub(super) async fn response(
         &self,
         mut response: oneshot::Receiver<Result<ActorResponse, SdkError>>,
-        needs_network: bool,
-        pending: impl Fn() -> SdkError,
     ) -> Result<ActorResponse, SdkError> {
         match timeout_at(self.residence_deadline, &mut response).await {
             Ok(result) => return result.map_err(|_| unavailable("account command cancelled"))?,
@@ -68,11 +66,9 @@ impl CommandAdmission {
                 if let Some(retained) = &self.expired_replies {
                     retained.retain(response);
                 }
-                return Err(if needs_network {
-                    pending()
-                } else {
-                    unavailable("account command queue wait expired")
-                });
+                // Still queued when the residence budget ends. This is queue
+                // backpressure, including when the connection itself is live.
+                return Err(SdkError::AccountCommandBackpressure);
             }
             Err(_) => {}
         }
