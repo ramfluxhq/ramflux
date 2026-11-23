@@ -20,14 +20,15 @@ self.addEventListener("message", async (event: MessageEvent) => {
         let response: string;
         switch (op) {
           case "open": case "update": case "event": case "present":
-            if (typeof json !== "string" || json.length > 16384) throw Error("transport bound");
+            if (typeof json !== "string" || new TextEncoder().encode(json).length > 32768) throw Error("transport bound");
             response = runtime[op](json); break;
+          case "tree": response = runtime.tree(); break;
           case "suspend": response = runtime.suspend(); break;
           case "resume": response = runtime.resume(); break;
           case "dispose": runtime.dispose(); port.postMessage({seq, disposed:true}); port.close(); return;
           default: throw Error("unknown card operation");
         }
-        if (response.length > 131072) {terminal=true;runtime.dispose();throw Error("output bound");}
+        if (new TextEncoder().encode(response).length > 263168) {terminal=true;runtime.dispose();throw Error("output bound");}
         port.postMessage({seq, json:response});
       } catch(error) { port.postMessage({seq, error:"content_unavailable",terminal:terminal || error instanceof WebAssembly.RuntimeError || (wasActive&&!runtime.is_active())}); }
     };
