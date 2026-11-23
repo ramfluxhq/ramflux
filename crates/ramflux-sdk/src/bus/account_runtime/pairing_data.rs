@@ -84,7 +84,7 @@ impl AccountRuntime {
             account.activation_pending = true;
         }
         self.initialize_readers()?;
-        self.start_connection()?;
+        self.start_connection_or_defer();
         self.start_courier();
         Ok(())
     }

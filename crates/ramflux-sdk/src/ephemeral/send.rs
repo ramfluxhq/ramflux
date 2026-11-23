@@ -69,6 +69,7 @@ pub fn encode_ephemeral_submit(
             call_context: None,
             signed_request: signed_request.clone(),
             envelope: envelope.clone(),
+            target_node: None,
             call_intent: None,
             wake_id: None,
             call_ref: None,

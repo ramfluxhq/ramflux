@@ -98,6 +98,15 @@ pub(crate) fn handle_s8_forward_envelope(
             request.target_node_id, discovery.node_id
         )));
     }
+    crate::peer_pin::ensure_forward_pin(
+        &request.target_node_id,
+        state,
+        store,
+        &crate::peer_pin::LocalNode {
+            node_id: discovery.node_id.clone(),
+            capabilities: discovery.node_capabilities.clone(),
+        },
+    )?;
     let peer = resolve_forward_peer(request, state)?;
     tracing::info!(
         target_node_id = %request.target_node_id,
@@ -126,7 +135,10 @@ pub(crate) fn handle_s8_forward_envelope(
     );
     match send_signed_forward_to_peer(router, &peer, &signed_request) {
         Ok(response) => Ok(response),
-        Err(error) => spool_failed_forward(store, &signed_request, &error),
+        Err(error) => match crate::ingress_policy::permanent_outcome(&error) {
+            Some(outcome) => Ok(permanent_forward_response(&signed_request, outcome)),
+            None => spool_failed_forward(store, &signed_request, &error),
+        },
     }
 }
 
@@ -193,7 +205,9 @@ fn resolve_forward_peer(
         peer_ca_len = peer_ca_cert_pem.len(),
         "federation forward pinned peer CA found"
     );
-    Ok(ForwardPeer { endpoint: route.endpoint.clone(), peer_ca_cert_pem })
+    let endpoint =
+        crate::peer_pin::checked_forward_endpoint(&request.target_node_id, &route.endpoint)?;
+    Ok(ForwardPeer { endpoint, peer_ca_cert_pem })
 }
 
 fn send_signed_forward_to_peer(
@@ -218,11 +232,9 @@ fn send_signed_forward_to_peer(
     let response: ramflux_node_core::FederatedEnvelopeForwardResponse = if force_tcp {
         send_signed_forward_to_peer_over_tcp(router, peer, peer_ca_pems, signed_request)?
     } else {
-        match ramflux_transport::mesh_quic_post_json_with_peer_ca_pems(
+        match ramflux_transport::mesh_quic_post_signed_envelope(
             &peer.endpoint,
-            "/s8/federation/envelope",
             &router.tls,
-            "ramflux-federation",
             peer_ca_pems,
             &signed_request,
         ) {
@@ -261,12 +273,20 @@ pub(crate) fn start_outbound_spool_retry_loop(
     store: Arc<ramflux_node_core::FederationRedbStore>,
     state: Arc<crate::SharedFederationTrustState>,
     router: Arc<RouterMeshClient>,
+    node_signing_seed: [u8; 32],
+    discovery: &FederationDiscoverySurface,
 ) {
+    let local = crate::peer_pin::LocalNode {
+        node_id: discovery.node_id.clone(),
+        capabilities: discovery.node_capabilities.clone(),
+    };
     let interval = Duration::from_secs(outbound_spool_retry_interval_seconds().max(1));
     if let Err(error) =
         ramflux_node_core::spawn_service_worker("federation-spool-retry", move |_| {
             while ramflux_node_core::service_shutdown_sleep(interval) {
-                if let Err(error) = retry_outbound_spool_once(&store, &state, &router) {
+                if let Err(error) =
+                    retry_outbound_spool_once(&store, &state, &router, node_signing_seed, &local)
+                {
                     tracing::warn!(%error, "federation outbound spool retry pass failed");
                 }
             }
@@ -280,12 +300,15 @@ pub(crate) fn retry_outbound_spool_once(
     store: &ramflux_node_core::FederationRedbStore,
     state: &crate::SharedFederationTrustState,
     router: &RouterMeshClient,
+    node_signing_seed: [u8; 32],
+    local: &crate::peer_pin::LocalNode,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
     let now = now_unix_seconds()?;
     let shutdown = ramflux_node_core::service_shutdown_token();
     retry_outbound_spool_with(store, now, outbound_spool_retry_batch(), &shutdown, |entry| {
+        crate::peer_pin::ensure_forward_pin(&entry.forward.target_node_id, state, store, local)?;
         let peer = resolve_forward_peer(&entry.forward, state)?;
-        let forward = refresh_spooled_forward(&entry.forward, state, |envelope| {
+        let forward = refresh_spooled_forward(&entry.forward, node_signing_seed, |envelope| {
             attach_forward_source_authority(envelope, router)
         })?;
         send_signed_forward_to_peer(router, &peer, &forward)
@@ -315,6 +338,9 @@ fn retry_outbound_spool_with(
             continue;
         }
         match send(&entry) {
+            Ok(outcome) if crate::ingress_policy::is_permanent_outcome(&outcome) => {
+                dead_letter_permanent(store, &entry.peer_node_id, entry.seq, &outcome, now)?;
+            }
             Ok(outcome) => {
                 store.mark_outbound_delivered(&entry.peer_node_id, entry.seq)?;
                 tracing::info!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %outcome, "delivered federation outbound spool entry");
@@ -325,28 +351,31 @@ fn retry_outbound_spool_with(
                 tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, ?reason_code, dead_letters, "dead-lettered federation outbound spool entry");
             }
             Err(error) => {
-                store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
-                tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %error, "federation outbound spool retry deferred");
-                blocked_peers.insert(entry.peer_node_id);
+                if let Some(outcome) = crate::ingress_policy::permanent_outcome(&error) {
+                    dead_letter_permanent(store, &entry.peer_node_id, entry.seq, outcome, now)?;
+                } else {
+                    store.record_outbound_attempt(&entry.peer_node_id, entry.seq)?;
+                    tracing::warn!(peer_node_id = %entry.peer_node_id, seq = entry.seq, %error, "federation outbound spool retry deferred");
+                    blocked_peers.insert(entry.peer_node_id);
+                }
             }
         }
     }
     Ok(())
 }
 
+/// Resign with the mounted node key a direct forward uses. Trust state does not store that seed:
+/// startup keeps it on the discovery surface, and `save_state` removes any legacy copy.
 fn refresh_spooled_forward(
     retained: &ramflux_node_core::FederatedEnvelopeForwardRequest,
-    state: &crate::SharedFederationTrustState,
+    node_signing_seed: [u8; 32],
     refresh: impl FnOnce(
         &mut ramflux_protocol::Envelope,
     ) -> Result<(), ramflux_node_core::NodeCoreError>,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, ramflux_node_core::NodeCoreError> {
-    let seed = state.snapshot()?.node_signing_seed().ok_or_else(|| {
-        ramflux_node_core::NodeCoreError::Unauthorized("federation signing key unavailable".into())
-    })?;
     let mut current = retained.clone();
     refresh(&mut current.envelope)?;
-    ramflux_node_core::sign_federated_envelope_forward(&mut current, seed)?;
+    ramflux_node_core::sign_federated_envelope_forward(&mut current, node_signing_seed)?;
     Ok(current)
 }
 
@@ -391,6 +420,96 @@ fn spooled_forward_response(
     }
 }
 
+fn permanent_forward_response(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    outcome: &str,
+) -> ramflux_node_core::FederatedEnvelopeForwardResponse {
+    ramflux_node_core::FederatedEnvelopeForwardResponse {
+        accepted: false,
+        source_node_id: request.source_node_id.clone(),
+        target_node_id: request.target_node_id.clone(),
+        delivery: refused_submit(&request.envelope.target_delivery_id, outcome),
+    }
+}
+
+fn refused_submit(
+    target_delivery_id: &str,
+    outcome: &str,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    ramflux_node_core::EnvelopeSubmitResponse {
+        migration_refusal: None,
+        outcome: outcome.to_owned(),
+        target_delivery_id: target_delivery_id.to_owned(),
+        inbox_seq: None,
+        cursor: None,
+        nack: None,
+    }
+}
+
+fn dead_letter_reason(outcome: &str) -> ramflux_node_core::EnvelopeAuthorityReason {
+    match outcome {
+        "rejected_limit" => ramflux_node_core::EnvelopeAuthorityReason::Limit,
+        "rejected_blocked" => ramflux_node_core::EnvelopeAuthorityReason::Blocked,
+        "rejected_malformed" => ramflux_node_core::EnvelopeAuthorityReason::Malformed,
+        _ => ramflux_node_core::EnvelopeAuthorityReason::AuthorityMismatch,
+    }
+}
+
+fn dead_letter_permanent(
+    store: &ramflux_node_core::FederationRedbStore,
+    peer_node_id: &str,
+    seq: u64,
+    outcome: &str,
+    now: u64,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    store.dead_letter_outbound(peer_node_id, seq, dead_letter_reason(outcome), now)?;
+    let dead_letters = store.outbound_dead_letter_count()?;
+    tracing::warn!(
+        peer_node_id,
+        seq,
+        outcome,
+        dead_letters,
+        "dead-lettered federation outbound spool entry after a permanent refusal"
+    );
+    Ok(())
+}
+
+fn inbound_json_len(envelope: &ramflux_protocol::Envelope) -> Result<u64, &'static str> {
+    let bytes = serde_json::to_vec(envelope).map_err(|_| "rejected_malformed")?;
+    u64::try_from(bytes.len()).map_err(|_| "rejected_malformed")
+}
+
+/// Policy and proof failures on an inbound forward are permanent. A poisoned lock is not.
+fn receive_verify_refusal(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    error: ramflux_node_core::NodeCoreError,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    let text = error.to_string();
+    if text.contains("lock poisoned") {
+        return Err(error);
+    }
+    if text.contains("federation delivery paused") {
+        return Ok(permanent_forward_response(request, "rejected_blocked"));
+    }
+    match crate::ingress_policy::permanent_outcome(&error) {
+        Some(outcome) => Ok(permanent_forward_response(request, outcome)),
+        None => Ok(permanent_forward_response(request, "rejected_authority")),
+    }
+}
+
+fn classify_router_delivery(
+    target_delivery_id: &str,
+    delivery: Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError>,
+) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError> {
+    match delivery {
+        Ok(delivery) => Ok(delivery),
+        Err(error) => match crate::ingress_policy::permanent_outcome(&error) {
+            Some(outcome) => Ok(refused_submit(target_delivery_id, outcome)),
+            None => Err(error),
+        },
+    }
+}
+
 fn outbound_spool_ttl_seconds() -> u64 {
     env_u64("RAMFLUX_FEDERATION_SPOOL_TTL_SECONDS", DEFAULT_OUTBOUND_SPOOL_TTL_SECONDS)
 }
@@ -423,14 +542,7 @@ fn send_signed_forward_to_peer_over_tcp(
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
     router
         .client
-        .post_json_with_peer_ca_pems(
-            &peer.endpoint,
-            "/s8/federation/envelope",
-            &router.tls,
-            "ramflux-federation",
-            peer_ca_pems,
-            signed_request,
-        )
+        .post_signed_federation_envelope(&peer.endpoint, &router.tls, peer_ca_pems, signed_request)
         .map_err(|source| {
             tracing::error!(
                 source_node_id = %signed_request.source_node_id,
@@ -462,7 +574,53 @@ pub(crate) fn handle_s8_receive_envelope(
         observability.record_receive_target_check(step_started.elapsed());
     }
     let now = now_unix_seconds()?;
-    verify_inbound_federated_forward(request, state, now, observability)?;
+    if let Err(error) = verify_inbound_federated_forward(request, state, now, observability) {
+        return receive_verify_refusal(request, error);
+    }
+    let home = crate::source_home::from_pin(state, &request.source_node_id)?;
+    admit_authenticated_receive(
+        request,
+        store,
+        router,
+        observability,
+        AuthenticatedReceive { now, total_started, home },
+    )
+}
+
+struct AuthenticatedReceive {
+    now: u64,
+    total_started: std::time::Instant,
+    home: Option<crate::source_home::VerifiedSourceHome>,
+}
+
+fn admit_authenticated_receive(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    store: &ramflux_node_core::FederationRedbStore,
+    router: &RouterMeshClient,
+    observability: Option<&FederationMeshObservability>,
+    delivery: AuthenticatedReceive,
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    let bytes = match inbound_json_len(&request.envelope) {
+        Ok(bytes) => bytes,
+        Err(outcome) => return Ok(permanent_forward_response(request, outcome)),
+    };
+    let source = match ramflux_node_core::DeviceAuthKeyResponse::forwarded_envelope_source(
+        &request.envelope,
+    ) {
+        Ok((_, source)) => source,
+        Err(error) => return receive_verify_refusal(request, error),
+    };
+    // A committed receipt returns before either counter. Device authentication has to
+    // precede this peek, because the replay key is the authenticated device. The
+    // attempt and delivery charges run in `deliver_reserved`, after the seen-table
+    // lease, so an in-flight duplicate is not charged either.
+    let AuthenticatedReceive { now, total_started, home } = delivery;
+    if request.migration_evidence.is_none()
+        && store.inbound_forward_committed(&source, request, now)?
+    {
+        return Ok(duplicate_forward_response(request));
+    }
+    let tuple = ramflux_node_core::FederationRedbStore::inbound_replay_tuple(&source, request);
     let attempt_lease_seconds =
         ramflux_transport::router_post_worst_case_timeout().as_secs().saturating_mul(2).max(1);
     handle_verified_s8_receive_envelope(
@@ -470,13 +628,43 @@ pub(crate) fn handle_s8_receive_envelope(
         store,
         observability,
         InboundForwardTiming { now, total_started, attempt_lease_seconds },
-        || {
-            post_inbound_to_router(
-                request,
-                ramflux_node_core::home_migration_enabled()?,
-                |path, body| router_post_json(router, path, body),
-            )
-        },
+        || deliver_reserved(request, router, &tuple, bytes, now, home.as_ref()),
+    )
+}
+
+fn deliver_reserved(
+    request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
+    router: &RouterMeshClient,
+    tuple: &str,
+    bytes: u64,
+    now: u64,
+    home: Option<&crate::source_home::VerifiedSourceHome>,
+) -> Result<ramflux_node_core::EnvelopeSubmitResponse, ramflux_node_core::NodeCoreError> {
+    // A tuple reserved this hour is a retry of a charge that already succeeded.
+    // Do not spend another attempt, and do not turn that retry into `rejected_limit`.
+    if !crate::ingress_policy::delivery_reserved(tuple, now)
+        && let Err(outcome) = crate::ingress_policy::note_attempt(&request.source_node_id, now)
+    {
+        return Ok(refused_submit(&request.envelope.target_delivery_id, outcome));
+    }
+    if let Err(outcome) = crate::ingress_policy::reserve_delivery(
+        tuple,
+        &request.source_node_id,
+        &request.envelope.target_delivery_id,
+        bytes,
+        now,
+    ) {
+        return Ok(refused_submit(&request.envelope.target_delivery_id, outcome));
+    }
+    let mut posted = request.clone();
+    crate::source_home::apply(&mut posted.envelope, home);
+    classify_router_delivery(
+        &request.envelope.target_delivery_id,
+        post_inbound_to_router(
+            &posted,
+            ramflux_node_core::home_migration_enabled()?,
+            |path, body| router_post_json(router, path, body),
+        ),
     )
 }
 
@@ -496,10 +684,14 @@ where
         return Ok(crate::durable_mode::rejected_security(&request.envelope));
     }
     if request.migration_evidence.is_none() {
+        // Node-internal context. The envelope bytes are unchanged; the verified source
+        // node travels beside them so pin quota is not a shared bucket.
         let response = post(
             "/mvp0/envelope",
-            &serde_json::to_value(&request.envelope)
-                .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?,
+            &serde_json::json!({
+                "verified_source_node_id": request.source_node_id,
+                "envelope": request.envelope,
+            }),
         )?;
         return serde_json::from_value(response)
             .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()));
@@ -934,11 +1126,8 @@ mod tests {
     #[test]
     fn spool_retry_refreshes_authority_before_resigning_and_refuses_revoked_sources()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = ramflux_node_core::FederationTrustState::new();
-        state.set_node_signing_seed([9; 32]);
-        let state = crate::SharedFederationTrustState::new(state);
         let request = retained_forward()?;
-        let refreshed = refresh_spooled_forward(&request, &state, |envelope| {
+        let refreshed = refresh_spooled_forward(&request, [9; 32], |envelope| {
             envelope
                 .ext
                 .ext
@@ -952,7 +1141,7 @@ mod tests {
             &ramflux_crypto::public_key_base64url_from_seed(&[9; 32]),
         )?;
         assert!(
-            refresh_spooled_forward(&request, &state, |_| Err(
+            refresh_spooled_forward(&request, [9; 32], |_| Err(
                 ramflux_node_core::NodeCoreError::Unauthorized("revoked".into())
             ))
             .is_err()
@@ -1249,9 +1438,25 @@ mod tests {
             inbound_timing(now),
             || {
                 post_inbound_to_router(&request, true, |path, body| {
-                    let envelope: ramflux_protocol::Envelope = serde_json::from_value(body.clone())
-                        .map_err(|e| ramflux_node_core::NodeCoreError::ItestJson(e.to_string()))?;
                     assert_eq!(path, "/mvp0/envelope");
+                    let verified = body
+                        .get("verified_source_node_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            ramflux_node_core::NodeCoreError::ItestHttp(
+                                "plain ingress omitted the verified source node".into(),
+                            )
+                        })?;
+                    assert_eq!(verified, request.source_node_id);
+                    let envelope_value = body.get("envelope").cloned().ok_or_else(|| {
+                        ramflux_node_core::NodeCoreError::ItestHttp(
+                            "plain ingress omitted the envelope".into(),
+                        )
+                    })?;
+                    let envelope: ramflux_protocol::Envelope =
+                        serde_json::from_value(envelope_value).map_err(|e| {
+                            ramflux_node_core::NodeCoreError::ItestJson(e.to_string())
+                        })?;
                     assert!(
                         destination
                             .authenticated_envelope_source_from(

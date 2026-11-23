@@ -118,17 +118,18 @@ async fn seal_and_send(
         let route = crate::client::routed::Route::group_control(packet.group());
         let bytes = account.client.generated_group_control_inner(&packet)?;
         message.message_id = crate::RamfluxClient::shared_group_packet_message_id(&bytes, "")?;
-        let sealed = if let Some(federation) = &federation {
-            account.client.seal_routed_federated_as(
-                &engine,
-                &message,
-                &bytes,
-                federation.recipient_prekey_url.as_deref(),
+        let sealed = crate::client::recipient_home::seal_member(
+            &account.client,
+            &mut engine,
+            crate::client::recipient_home::MemberSeal {
+                message: &message,
+                body: &bytes,
+                commitment: &root,
+                federation: federation.as_ref(),
                 route,
-            )?
-        } else {
-            account.client.seal_routed_as(&mut engine, &message, &bytes, route).await?
-        };
+            },
+        )
+        .await?;
         // GroupControl has no Direct report payload; into_parts still carries committed_a0 (None).
         let attempt = Attempt {
             id: id.into(),
@@ -365,8 +366,13 @@ async fn send(
 ) -> Result<usize, SdkError> {
     tokio::time::timeout(Duration::from_secs(3), async {
         if let Some(federation) = &attempt.federation {
-            if !RamfluxClient::forward_federated_envelope(federation, attempt.envelope.clone())?
-                .accepted
+            if !RamfluxClient::forward_federated_envelope(
+                engine,
+                federation,
+                attempt.envelope.clone(),
+            )
+            .await?
+            .accepted
             {
                 return Err(SdkError::InboundPending("group courier federation refused".into()));
             }

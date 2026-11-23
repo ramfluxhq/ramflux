@@ -526,15 +526,27 @@ fn approval_request(account: &LocalBusAccountState) -> Case<Box<approval::Reques
 
 async fn stall(
     account: &LocalBusAccountState,
-) -> Case<(tokio::task::JoinHandle<()>, mpsc::Receiver<()>)> {
+) -> Case<(
+    tokio::task::JoinHandle<()>,
+    mpsc::Receiver<()>,
+    crate::client::recipient_home::TestPublicBase,
+)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let db = account.client.account_db()?;
+    let mut identity = db.client_record("identity", "stalled-peer")?.ok_or("stalled identity")?;
+    identity["home_node_id"] = json!("stall-node");
+    identity["node"] = json!({
+        "url": "https://stall-node",
+        "key_fingerprint": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    });
+    db.persist_client_record("identity", "stalled-peer", &identity)?;
     let scope: String =
         db.load_actor_state("fixture/stalled-conversation")?.ok_or("stalled scope")?;
     let mut row = db.client_record("conversation", &scope)?.ok_or("stalled conversation")?;
-    row["direct_route"] = json!({"federation":{"recipient_prekey_url":url}});
+    row["direct_route"] = json!({"federation":{"recipient_prekey_url":"invalid://must-not-fetch"}});
     db.persist_client_record("conversation", &scope, &row)?;
+    let base = crate::client::recipient_home::install_test_public_base("stall-node", &url);
     let (entered, received) = mpsc::channel(16);
     let task = tokio::spawn(async move {
         let mut sockets = Vec::new();
@@ -543,7 +555,7 @@ async fn stall(
             let _ = entered.send(()).await;
         }
     });
-    Ok((task, received))
+    Ok((task, received, base))
 }
 
 #[tokio::test]
@@ -560,7 +572,7 @@ async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_att
         ack(&fixture.source, "task/ack/000-stalled", &slow)?;
         ack(&fixture.source, "task/ack/100-healthy", &healthy)?;
         forward(&fixture.source, "task/forward/healthy", &healthy)?;
-        let (stalled, mut entered) = stall(&fixture.source).await?;
+        let (stalled, mut entered, _base) = stall(&fixture.source).await?;
         let root = fixture.root.clone();
         let gateway = fixture.gateway.clone();
         let (mut actor, _sender, stop, mut events) = runtime(fixture.source, &root.join("source"));
@@ -745,7 +757,7 @@ async fn r6_twenty_busy_actor_passes_keep_one_gateway_session_deliver_inbound_an
             }
             let call_id = fixture.inbound().await?;
             let conversation = fixture::direct_conversation(&fixture.source.client)?;
-            let (stalled, mut entered) = stall(&fixture.source).await?;
+            let (stalled, mut entered, _base) = stall(&fixture.source).await?;
             let root = fixture.root.clone();
             let gateway = fixture.gateway.clone();
             let (mut actor, sender, stop, mut events) =

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Ordinary gateway submission and bounded executor-confirmation retries.
+use crate::gateway::access::ClassifiedSubmit;
 use crate::prelude::*;
 pub(super) const SUBMIT_ALLOWANCE: Duration = Duration::from_secs(15);
 pub(super) struct Destination {
@@ -62,13 +63,24 @@ async fn submit(
                     target_node_id = %destination.route.target_node_id,
                     "forwarding task control to federation"
                 );
-                RamfluxClient::forward_task_envelope_until(
-                    destination.route.clone(),
-                    envelope,
+                let target = (!destination.route.target_node_id.is_empty())
+                    .then(|| destination.route.target_node_id.clone());
+                match tokio::time::timeout_at(
                     deadline,
+                    engine.submit_classified_to(envelope, target),
                 )
                 .await
-                .map(|_| ())
+                {
+                    Ok(Ok(Ok(_))) => Ok(()),
+                    Ok(Ok(Err(refusal))) => {
+                        Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => {
+                        account.retire_session(&engine)?;
+                        Err(SdkError::TaskDeliveryTimeout)
+                    }
+                }
             }
             Err(error) => Err(error),
         }
@@ -176,7 +188,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
         let (arrived, mut observed) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || -> std::io::Result<()> {
@@ -219,12 +230,9 @@ mod tests {
         )?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: url,
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote-device".into(),
@@ -301,12 +309,9 @@ mod tests {
         }))?;
         let destination = Destination {
             route: LocalBusFederationRoute {
-                federation_url: "http://127.0.0.1:1".into(),
                 source_node_id: "a".into(),
                 target_node_id: "b".into(),
                 required_capability: "task".into(),
-                admin_token: None,
-                recipient_prekey_url: None,
             },
 
             device_id: "remote".into(),
