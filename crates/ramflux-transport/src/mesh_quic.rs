@@ -406,6 +406,17 @@ impl MeshQuicPoolRegistry {
         self.pools.store(Arc::new(next));
         pool
     }
+
+    async fn drop_remote(&self, remote: SocketAddr) -> bool {
+        let snapshot = self.pools.load();
+        let mut dropped = false;
+        for pool in snapshot.values() {
+            if pool.drop_remote(remote).await {
+                dropped = true;
+            }
+        }
+        dropped
+    }
 }
 
 /// Owns one `connecting` slot of a pool. Dropping it (success, error, timeout or cancellation)
@@ -492,7 +503,7 @@ impl MeshQuicConnectionPool {
         MeshQuicSelectedConnection { cached }
     }
 
-    async fn drop_remote(&self, remote: SocketAddr) {
+    async fn drop_remote(&self, remote: SocketAddr) -> bool {
         let _guard = self.write_lock.lock().await;
         let snapshot = self.connections.load();
         let next: Vec<_> = snapshot
@@ -500,10 +511,12 @@ impl MeshQuicConnectionPool {
             .filter(|cached| cached.connection.remote_address() != remote)
             .cloned()
             .collect();
-        if next.len() != snapshot.len() {
+        let dropped = next.len() != snapshot.len();
+        if dropped {
             self.connections.store(Arc::new(next));
         }
         self.notify.notify_waiters();
+        dropped
     }
 
     async fn remove_connection(&self, target: &MeshQuicSelectedConnection) {

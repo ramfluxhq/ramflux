@@ -42,7 +42,7 @@ pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
         return Err(deadline_error());
     }
     let (response, receiver) = std::sync::mpsc::sync_channel(1);
-    let (completion, _finished) = tokio::sync::oneshot::channel();
+    let (completion, finished) = tokio::sync::oneshot::channel();
     mesh_quic_client_runtime()
         .jobs
         .send(MeshQuicClientJob {
@@ -72,7 +72,12 @@ pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
             }),
         })
         .map_err(|_| TransportError::Quic("mesh QUIC runtime stopped".into()))?;
-    match receiver.recv_timeout(remaining).map_err(|_| deadline_error())?? {
+    let inbound = receiver.recv_timeout(remaining);
+    // The worker forgets a silent peer before acknowledging. Wait for that, including
+    // when this deadline wins the race, so the caller's next post cannot reuse it.
+    drop(receiver);
+    let _terminated = finished.blocking_recv();
+    match inbound.map_err(|_| deadline_error())?? {
         MeshQuicClientResponsePayload::RawJson(bytes) => Ok(bytes),
         _ => Err(crate::quic_errors::wire("unexpected raw mesh response kind")),
     }
@@ -81,6 +86,8 @@ pub(crate) fn mesh_quic_post_raw_with_deadline_sync<T: serde::Serialize>(
 /// Return the original mesh response frame, without decoding its JSON body.
 /// A cached connection that fails before the request is finished is replaced once.
 /// A request that was finished is not written again.
+/// A request that ends without a response drops every cached connection to that peer
+/// before the caller returns, so the next post dials instead of reusing a silent peer.
 /// Cancellation drops the actual request future.
 /// Admission stays with that work even if this caller is aborted. A timed-out caller
 /// waits for transport termination before returning.
@@ -144,6 +151,8 @@ pub(super) async fn run(
     control: RawRequestControl,
     pool_size: usize,
 ) {
+    let endpoint = request.endpoint.clone();
+    let pools_after = Arc::clone(&pools);
     let result = {
         let work = mesh_quic_cached_request(pools, breakers, request, pool_size, true);
         tokio::pin!(work);
@@ -155,7 +164,28 @@ pub(super) async fn run(
             }
         }
     }; // Drop all stream/connect/retry futures before releasing admission or completing the call.
+    if result.is_err() {
+        forget_unanswered_peer(&pools_after, &endpoint).await;
+    }
     drop(control.admission);
     response.send(result);
     let _completed = control.completion.send(());
+}
+
+async fn forget_unanswered_peer(pools: &MeshQuicPoolRegistry, endpoint: &str) {
+    let Ok(hosts) = tokio::net::lookup_host(endpoint).await else {
+        return;
+    };
+    let mut dropped = false;
+    for remote in hosts {
+        if pools.drop_remote(remote).await {
+            dropped = true;
+        }
+    }
+    if dropped {
+        tracing::warn!(
+            %endpoint,
+            "mesh QUIC raw request ended before a response; dropping cached peer"
+        );
+    }
 }
