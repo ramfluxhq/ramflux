@@ -23,6 +23,9 @@ pub(super) fn start(
     let _ = handle.spawn_session_child("keepalive", |context| {
         Box::pin(crate::bus::push_receiver::keepalive::run(context))
     });
+    let _ = handle.spawn_session_child("grant-renewal", |context| {
+        Box::pin(super::grant_renewal::run(context))
+    });
     if let Some(work) = handle.shared.account_work.clone() {
         let task_writer = work.clone();
         let task_requests = Arc::new(tokio::sync::Mutex::new(task_requests));
