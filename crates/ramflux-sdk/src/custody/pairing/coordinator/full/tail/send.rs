@@ -126,9 +126,15 @@ impl TailJob {
         if *manifest_hash != hash(self.manifest.as_ref().ok_or_else(wrong)?)? {
             return Err(wrong());
         }
-        self.io
-            .endpoint(move |mut endpoint, now| Ok(endpoint.record_source_receipt(&data, now)?))
-            .await?;
+        let (relay, origin, probe) = self.activity_inputs();
+        super::activity::retain_relay_activity(
+            relay,
+            origin,
+            probe,
+            self.io
+                .endpoint(move |mut endpoint, now| Ok(endpoint.record_source_receipt(&data, now)?)),
+        )
+        .await?;
         self.finish();
         self.cleanup_pending = true;
         if self.io.reclaim().await.is_ok() {

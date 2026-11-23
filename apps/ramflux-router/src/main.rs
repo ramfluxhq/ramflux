@@ -28,6 +28,7 @@ mod router_runtime;
 mod send_authority;
 mod serve;
 mod startup;
+mod username_directory;
 
 use std::sync::Arc;
 

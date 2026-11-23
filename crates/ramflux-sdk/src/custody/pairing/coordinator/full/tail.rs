@@ -9,6 +9,7 @@ use ramflux_protocol::custody::pairing::full_transfer::{
 };
 use std::sync::Arc;
 mod abandon;
+mod activity;
 #[cfg(test)]
 mod hostile_fixture;
 mod io;
@@ -90,7 +91,14 @@ impl TailJob {
         }
         match self.phase {
             Phase::Prepare => {
-                let manifest = self.io.source_manifest().await?;
+                let (relay, origin, probe) = self.activity_inputs();
+                let manifest = activity::retain_relay_activity(
+                    relay,
+                    origin,
+                    probe,
+                    self.io.source_manifest(),
+                )
+                .await?;
                 #[cfg(test)]
                 let manifest = match self.manifest_override.take() {
                     Some(replace) => replace(manifest)?,
@@ -107,17 +115,23 @@ impl TailJob {
             Phase::Chunk => self.receive_chunk().await?,
             Phase::Validate => {
                 let hash = hash(self.manifest.as_ref().ok_or_else(wrong)?)?;
-                self.io.validate(hash).await?;
+                let (relay, origin, probe) = self.activity_inputs();
+                activity::retain_relay_activity(relay, origin, probe, self.io.validate(hash))
+                    .await?;
                 self.phase = Phase::Apply;
             }
             Phase::Apply => {
                 let hash = hash(self.manifest.as_ref().ok_or_else(wrong)?)?;
-                if self
-                    .io
-                    .endpoint(move |endpoint, now| {
+                let (relay, origin, probe) = self.activity_inputs();
+                if activity::retain_relay_activity(
+                    relay,
+                    origin,
+                    probe,
+                    self.io.endpoint(move |endpoint, now| {
                         Ok(endpoint.apply_recipient_batch(&hash, 32, now)?)
-                    })
-                    .await?
+                    }),
+                )
+                .await?
                 {
                     self.phase = Phase::Commit;
                 }

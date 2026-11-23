@@ -8,6 +8,50 @@ use super::{
 };
 use ramflux_protocol::{custody::object_hash, home_migration::HomeDeclarationV1};
 
+impl crate::RouterCore {
+    /// Enrol the current ordinary home without manufacturing a migration destination.
+    /// The caller must have authenticated the current native account/branch before dispatch.
+    /// Existing home evidence is returned verbatim; this never replaces a genesis or lineage.
+    /// # Errors
+    /// Refuses missing registration, stale native/declaration authority, a different home,
+    /// unsafe clock, changed node signer and unavailable durable storage.
+    pub fn ensure_home_genesis(
+        &self,
+        store: &crate::RouterRedbStore,
+        node: &MigrationNode,
+        declaration: &Signed<HomeDeclarationV1>,
+        now: u64,
+    ) -> Result<RecordEvidence, NodeCoreError> {
+        let anchor = declaration.body.account_anchor.as_str();
+        let _root = store.migration_root_barrier(anchor)?;
+        self.with_migration_authority(anchor, now, |authority, publication| {
+            crypto::verify_home_declaration(declaration, authority, node.node_id(), now)
+                .map_err(|_| refusal(Refusal::HomeDeclarationRequired))?;
+            let map = super::map_for(authority)?;
+            let mut registered = false;
+            for entry in &map {
+                registered |= store.custody_prekey(&entry.target_delivery_id)?.is_some();
+            }
+            if !registered {
+                return Err(refusal(Refusal::HomeGenesisRequired));
+            }
+            let tx = store.begin_write().map_err(storage)?;
+            let now = super::clock(&tx, now)?;
+            super::signer_pin::retain(&tx, node)?;
+            super::authority_evidence::remember(&tx, publication, now)?;
+            let head = match super::read::<RecordEvidence>(&tx, super::HEADS, anchor)? {
+                Some(existing) => existing,
+                None => create(&tx, node, publication, authority, Some(declaration), now)?,
+            };
+            if head.record.home() != (node.node_id(), node.public_key()) {
+                return Err(refusal(Refusal::BaseMismatch));
+            }
+            super::commit_transition(store, tx)?;
+            Ok(head)
+        })
+    }
+}
+
 pub(super) fn create(
     tx: &redb::WriteTransaction,
     node: &MigrationNode,
