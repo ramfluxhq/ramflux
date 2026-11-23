@@ -61,6 +61,7 @@ pub(super) async fn execute(
             body: serde_json::Value::Null,
             events: Vec::new(),
             nodes: None,
+            owner_copy: None,
         }));
     }
     if !is_request(&command.request.method, &command.request.body) {
@@ -89,6 +90,7 @@ pub(super) async fn execute(
         body: crate::bindings::encode_message_update(&update)?,
         events: Vec::new(),
         nodes: None,
+        owner_copy: None,
     }))
 }
 

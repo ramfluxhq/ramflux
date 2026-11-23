@@ -111,11 +111,11 @@ impl Publisher {
         let Some(bus) = self.bus.as_mut() else { return };
         match bus.request(method, body, None).await {
             Ok(_) => {}
-            Err(Error::Bus | Error::Resync | Error::IdentityLost) => {
-                eprintln!("prx sync bus publish failed");
+            Err(error @ (Error::Bus | Error::Resync | Error::IdentityLost)) => {
+                eprintln!("prx sync bus publish failed: {error}");
                 self.bus = None;
             }
-            Err(_) => eprintln!("prx sync bus publish refused"),
+            Err(error) => eprintln!("prx sync bus publish refused: {error}"),
         }
     }
 }
@@ -209,7 +209,7 @@ fn progress_body(notice: &LiveNotice) -> Option<Value> {
         "conversation_id": notice.session,
         "session": notice.session,
         "run_id": run,
-        "idx": notice.idx,
+        "idx": safe_idx(notice.idx),
     });
     put_id(&mut body, "agent", &notice.agent);
     match &notice.body {
@@ -307,5 +307,9 @@ fn stable_idx(text: &str) -> u64 {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    hash
+    safe_idx(hash)
+}
+
+fn safe_idx(value: u64) -> u64 {
+    value & ramflux_protocol::MAX_SAFE_JSON_INTEGER
 }

@@ -581,7 +581,7 @@ impl Supervisor {
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let response = if matches!(
+        let requested = if matches!(
             request.request.method.as_str(),
             "device.transfer.begin"
                 | "device.transfer.status"
@@ -593,6 +593,15 @@ impl Supervisor {
             super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await
         } else {
             actor.request(request).await
+        };
+        let response = match requested {
+            Ok(mut response) => {
+                if let Some(activity) = response.owner_copy.take() {
+                    self.deliver_owner_copy(*activity).await?;
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error),
         };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
@@ -1154,8 +1163,39 @@ fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> Acco
 fn not_open(id: &str) -> SdkError {
     SdkError::AccountNotOpen(id.to_owned())
 }
+
+impl Supervisor {
+    /// Commits an agent-activity row on the human owner's actor.
+    ///
+    /// # Errors
+    /// `AccountNotOpen` when that actor is not unlocked. The agent's own row stays stored.
+    pub(super) async fn deliver_owner_copy(
+        &self,
+        activity: super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        let owner_id = activity.owner_id.clone();
+        let actor = self.accounts.borrow().get(&owner_id).filter(|actor| actor.is_open()).cloned();
+        let Some(actor) = actor else {
+            tracing::warn!(
+                owner_id = %owner_id,
+                reason_code = "owner_not_open",
+                "agent activity owner copy was not stored"
+            );
+            return Err(not_open(&owner_id));
+        };
+        actor.project_activity(activity).await.map_err(|error| {
+            tracing::warn!(
+                %error,
+                owner_id = %owner_id,
+                reason_code = "owner_copy_failed",
+                "agent activity owner copy was not stored"
+            );
+            error
+        })
+    }
+}
 fn reply(body: serde_json::Value) -> ActorResponse {
-    ActorResponse { body, events: Vec::new(), nodes: None }
+    ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None }
 }
 
 fn opens_account(method: &str) -> bool {

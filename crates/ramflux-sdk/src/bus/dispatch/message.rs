@@ -798,7 +798,7 @@ pub(crate) async fn dispatch_message_receive_request(
         "durable_reader": "message.read",
         "snapshot_sequence": account.client.account_db()?.journal_bounds()?.head_seq,
     });
-    Ok(LocalBusDispatchResult { response_body, event })
+    Ok(LocalBusDispatchResult { response_body, event, owner_copy: None })
 }
 
 #[cfg(test)]
