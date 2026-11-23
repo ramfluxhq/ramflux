@@ -3,24 +3,41 @@
 
 //! Hosted-agent admission for group-operation signing.
 //!
-//! The node fence remains the session and delivery refusal. This check uses the
-//! custodian record and the publishing creation plan already stored on this desktop.
-//! A missing host directory is a refusal and is not created.
+//! The node fence remains the session and delivery refusal. This check applies the
+//! same active-device test as `agent_fence::require_operable` to the custodian
+//! record the caller fetched from the current directory. The desktop's stored human
+//! file is not that record. A missing host directory is a refusal and is not created.
 
 use super::BornAccount;
 use crate::SdkError;
-use crate::custody::agent_creation::{AgentCreationStore, is_retired_agent_account};
+use crate::custody::agent_creation::{
+    AgentCreationStore, host_branch_marked, is_retired_agent_account,
+};
 use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::DeviceSetStatus;
 use ramflux_protocol::custody::{DeviceRef, decode_register_plan};
 use std::path::Path;
 
-pub(super) fn admit(account: &BornAccount) -> Result<(), SdkError> {
+pub(super) fn admit(account: &BornAccount, host: Option<&VerifiedRecord>) -> Result<(), SdkError> {
     if !account.hosts_agent_locally()? {
         return Ok(());
     }
     refuse_retired(account)?;
-    host_still_active(account)
+    if host_desktop_marked(account)? {
+        return Err(retired());
+    }
+    host_still_active(account, host.ok_or_else(retired)?)
+}
+
+/// Account anchor of the custodian, when this device hosts the agent. `None` for a human.
+pub(super) fn hosted_human_anchor(account: &BornAccount) -> Result<Option<String>, SdkError> {
+    if !account.hosts_agent_locally()? {
+        return Ok(None);
+    }
+    let root = data_root(account)?;
+    let human_id = account.custodian_account_id().ok_or_else(retired)?;
+    let plan = publishing_plan(root, human_id, account.local_account_id())?;
+    Ok(Some(plan.human_primary.account_anchor))
 }
 
 fn refuse_retired(account: &BornAccount) -> Result<(), SdkError> {
@@ -39,23 +56,28 @@ fn refuse_retired(account: &BornAccount) -> Result<(), SdkError> {
     Ok(())
 }
 
-fn host_still_active(account: &BornAccount) -> Result<(), SdkError> {
+fn host_desktop_marked(account: &BornAccount) -> Result<bool, SdkError> {
+    let Some(human_id) = account.custodian_account_id() else {
+        return Ok(false);
+    };
+    Ok(host_branch_marked(data_root(account)?, human_id))
+}
+
+/// Same comparison as `agent_fence::require_operable`: the stored primary must still
+/// be the human record's primary, and both that primary and the host desktop must be
+/// active devices of the record the caller supplied.
+fn host_still_active(account: &BornAccount, human: &VerifiedRecord) -> Result<(), SdkError> {
     let root = data_root(account)?;
     let human_id = account.custodian_account_id().ok_or_else(retired)?;
     let plan = publishing_plan(root, human_id, account.local_account_id())?;
-    let now = crate::custody::network_now()?;
-    let human = match super::load_account(root, human_id, now) {
-        Ok(human) => human,
-        Err(SdkError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(retired());
-        }
-        Err(error) => return Err(error),
-    };
-    let verified = human.verified();
-    let current = &verified.envelope().body.master_certificate.body.primary_device_ref;
+    let body = &human.envelope().body;
+    if body.account_anchor != plan.human_primary.account_anchor {
+        return Err(retired());
+    }
+    let current = &body.master_certificate.body.primary_device_ref;
     if &plan.human_primary != current
-        || !device_active(verified, current)
-        || !device_active(verified, &plan.desktop)
+        || !device_active(human, current)
+        || !device_active(human, &plan.desktop)
     {
         return Err(retired());
     }

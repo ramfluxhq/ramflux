@@ -429,6 +429,9 @@ impl BornAccount {
     /// self-signing key on the device that hosts it. A retired agent, or one whose
     /// approving primary or host desktop is no longer active, is refused.
     ///
+    /// `host` is the custodian's current directory record. A hosted agent with `None`
+    /// is refused before a lease exists. A human passes `None`.
+    ///
     /// # Errors
     /// `PairingCode("PrimaryRequired")` when a human is not on its primary device.
     /// `AgentCreationRefused("agent_retired")` when the hosted agent or its host is no
@@ -436,9 +439,14 @@ impl BornAccount {
     pub(crate) fn group_operation_signer(
         &self,
         vault: &dyn PrimaryVault,
+        host: Option<&VerifiedRecord>,
     ) -> Result<super::PrimarySigningLease, SdkError> {
-        group_participant::admit(self)?;
+        group_participant::admit(self, host)?;
         self.primary_lease(vault, self.hosts_agent_locally()?)
+    }
+    /// Account anchor of the custodian when this device hosts the agent.
+    pub(crate) fn hosted_human_anchor(&self) -> Result<Option<String>, SdkError> {
+        group_participant::hosted_human_anchor(self)
     }
     /// The signer of this account's contact card and contact consent. A human signs on its
     /// primary device. An agent's record names its custodian's primary phone as primary, and that
