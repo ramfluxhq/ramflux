@@ -347,6 +347,28 @@ impl LocalAttachmentBackend {
             upload: r.upload,
         })
     }
+    /// Reconciles persisted slices, returning zero for a segment with no durable checkpoint.
+    /// # Errors
+    /// Refuses corrupt metadata, retired identities and concurrent physical writers.
+    pub fn checkpoint(&self, spec: &BackendSegment) -> Result<BackendEntry, BackendError> {
+        spec.validate()?;
+        let exists = {
+            let tx = self.db.begin_read().map_err(store)?;
+            let rows = tx.open_table(SEGMENTS).map_err(store)?;
+            rows.get(self.key(spec).as_slice()).map_err(store)?.is_some()
+        };
+        if !exists {
+            return Ok(BackendEntry {
+                spec: spec.clone(),
+                received: 0,
+                committed: false,
+                upload: None,
+            });
+        }
+        self.reconcile(spec)?;
+        self.status(spec)
+    }
+
     /// Aborts one abandoned remote upload under the object's exclusive lease.
     /// Unknown uploads can exist after a crash between remote creation and journal commit.
     /// # Errors
