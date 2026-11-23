@@ -52,6 +52,15 @@ body; it is not a second business schema. Message ProtoJSON retains its own
 schema's presence and decimal string rules. The bridge never generates an
 operation key, retries a mutation or turns a lost response into success.
 
+## Attended account code
+
+`ramflux_v2_set_credential_provider` installs the callback that answers
+`device.credential.request` on the in-process connection. Setup requires the
+code twice and the copies must match. Unlock and phrase take one copy and an
+empty confirmation. A null callback unregisters and drains. The host must not
+reenter the client from the callback. Close and replacement wait until the
+callback returns. `account.passphrase.rotate` stays in the wiped request body.
+
 ## Generated method policy
 
 `crates/ramflux-sdk/include/ramflux_sdk_methods.json` is the machine-readable

@@ -75,6 +75,12 @@ fn details(value: &Value, code: &Code) -> Details {
         }
         _ => {}
     }
+    if let Some(pairing) = value.get("pairing").and_then(token) {
+        return Details::Generated(ErrorDetails::Pairing { pairing });
+    }
+    if let Some(reason) = value.get("reason").and_then(token) {
+        return Details::Generated(ErrorDetails::Reason { reason });
+    }
     if let Some(retryable) = value.get("retryable").and_then(Value::as_bool) {
         return Details::Retryable { retryable };
     }

@@ -158,6 +158,10 @@ fn bus_reason_code(error: &SdkError) -> Option<String> {
         SdkError::CustodyExpired => "deadline".into(),
         SdkError::ContactConfirmationRequired(_) => "root_replacement_confirmation_required".into(),
         SdkError::ContactHomeNodeUnsupported => "invalid_card".into(),
+        SdkError::PairingCode(code) => {
+            let token = pairing_https_token(code)?;
+            token.to_owned()
+        }
         _ if local_bus_error_code(error) == "transfer_requires_sync" => {
             "head_or_removal_floor_mismatch".into()
         }
@@ -182,8 +186,20 @@ fn bus_error_details(error: &SdkError) -> Option<Box<serde_json::Value>> {
         SdkError::EditConflict { target, expected, received } => Some(Box::new(
             serde_json::json!({"target": target, "expected": expected, "received": received}),
         )),
+        SdkError::PairingCode(code) => {
+            pairing_https_token(code).map(|token| Box::new(serde_json::json!({"pairing": token})))
+        }
         _ => None,
     }
+}
+
+/// Static pairing HTTPS tokens. Other pairing codes keep their existing empty details.
+fn pairing_https_token(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "UntrustedPeer" => "UntrustedPeer",
+        "ResumeRequired" => "ResumeRequired",
+        _ => return None,
+    })
 }
 
 fn generated_error_body(error: &crate::bindings::AdapterError) -> LocalBusErrorBody {
