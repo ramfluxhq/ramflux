@@ -290,8 +290,8 @@ pub fn unwrap_with_vault_secret(
     Ok(AccountDbKey { bytes: *bytes })
 }
 
-pub(crate) fn apply_key(connection: &Connection, key: &AccountDbKey) -> Result<(), StorageError> {
-    connection.execute_batch(&zeroize::Zeroizing::new(format!(
+pub(crate) fn key_pragma_sql(key: &AccountDbKey) -> zeroize::Zeroizing<String> {
+    zeroize::Zeroizing::new(format!(
         "PRAGMA key = \"x'{}'\";
          PRAGMA cipher_page_size = 4096;
          PRAGMA kdf_iter = 256000;
@@ -299,7 +299,11 @@ pub(crate) fn apply_key(connection: &Connection, key: &AccountDbKey) -> Result<(
          PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;
          PRAGMA foreign_keys = ON;",
         zeroize::Zeroizing::new(key.sqlcipher_hex()).as_str()
-    )))?;
+    ))
+}
+
+pub(crate) fn apply_key(connection: &Connection, key: &AccountDbKey) -> Result<(), StorageError> {
+    connection.execute_batch(&key_pragma_sql(key))?;
     Ok(())
 }
 

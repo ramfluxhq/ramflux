@@ -119,6 +119,7 @@ policies! {
     "contact.rejected" => ("contact", false, true, false, false),
     "contact.remove" => ("contact", true, true, false, false),
     "contact.request" => ("contact", true, true, false, false),
+    "contact.requests.decline" => ("contact", true, true, false, false),
     "contact.requests.list" => ("contact", false, true, false, false),
     "contact.requests.policy.get" => ("contact", false, true, false, false),
     "contact.requests.policy.set" => ("contact", true, true, false, false),
@@ -166,6 +167,7 @@ policies! {
     "group.invitation.accept" => ("group", true, true, false, false),
     "group.invitation.decline" => ("group", true, true, false, false),
     "group.invitations.list" => ("group", false, true, false, false),
+    "group.leave" => ("group", true, true, false, false),
     "group.list" => ("group", false, true, false, false),
     "group.member.add" => ("group", true, true, false, false),
     "group.member.kick" => ("group", true, true, false, false),
@@ -263,13 +265,9 @@ policies! {
     "profile.update" => ("profile", true, true, false, false),
 }
 
-// Search stays unavailable to native hosts until its separate ABI integration is admitted.
+// Search and daemon shutdown stay unavailable. Username methods and the
+// profile alias are executable. The master phrase is not a bus field.
 pub(super) const DENIED_METHODS: &[&str] = &[
-    "username.mutate",
-    "username.status",
-    "username.resolve",
-    "username.contact.add",
-    "profile.update",
     "daemon.stop",
     "search.cancel",
     "search.cursor.close",

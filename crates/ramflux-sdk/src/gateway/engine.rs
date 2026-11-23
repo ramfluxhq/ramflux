@@ -56,6 +56,18 @@ pub(crate) enum GatewaySessionClientTransport {
     },
 }
 
+impl GatewaySessionClientTransport {
+    /// Release the carrier. A QUIC client waits until the endpoint drops its UDP socket.
+    pub(crate) async fn shutdown(self) {
+        match self {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Injected => {}
+            Self::Quic { _client: client } => client.shutdown().await,
+            Self::TcpTls { .. } => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GatewayDirectMessage {
     pub conversation_id: String,
@@ -1116,6 +1128,18 @@ impl GatewaySessionEngine {
             GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
             _ => Err(SdkError::GatewaySessionRejected("expected attachment reply".into())),
         }
+    }
+
+    /// Finish the application stream, then close a QUIC UDP socket before returning.
+    ///
+    /// Declaration order drops the endpoint while the stream still holds the connection, so the
+    /// driver goes back to sleep and the socket stays open. Process suspend is not polled again
+    /// after the caller returns.
+    pub async fn shutdown_transport(self) {
+        let GatewaySessionEngine { _transport: transport, mut stream, .. } = self;
+        let _ = stream.finish();
+        drop(stream);
+        transport.shutdown().await;
     }
 
     /// # Errors

@@ -44,7 +44,8 @@ impl crate::AccountIndex {
 pub(crate) struct AccountWriter {
     // Drop explicitly unlocks before close; process exit also releases ownership.
     // Never unlink this inode or use file age to break ownership.
-    file: Option<File>,
+    // Suspend closes the descriptor and keeps this owner so the in-memory generation stays put.
+    file: Mutex<Option<File>>,
     path: PathBuf,
     // An exclusive owner is never shared with, and refuses, any other in-process holder.
     exclusive: bool,
@@ -140,12 +141,14 @@ impl AccountWriter {
             if let Some(owner) = owner.upgrade() {
                 #[cfg(test)]
                 upgrade_hook(&path);
-                if exclusive || owner.exclusive {
+                if exclusive || owner.exclusive || !owner.holds_lock() {
                     // The upgraded Arc may be the last one. Its Drop locks the registry, so
-                    // the guard must be released first.
+                    // the guard must be released first. A suspended owner keeps the registry
+                    // entry and the generation, but its descriptor is closed.
                     drop(registered);
+                    let busy = owner.account_label();
                     drop(owner);
-                    return Err(StorageError::AccountWriterBusy(account.to_owned()));
+                    return Err(StorageError::AccountWriterBusy(busy));
                 }
                 return Ok(owner);
             }
@@ -156,34 +159,81 @@ impl AccountWriter {
                 .wait(registered)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&path).map_err(|source| lock_io(&path, source))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
+        let file = match open_exclusive(&path) {
+            Ok(file) => file,
+            Err(StorageError::AccountWriterBusy(_)) => {
                 return Err(StorageError::AccountWriterBusy(account.to_owned()));
             }
-            Err(error) => {
-                return Err(lock_io(&path, error));
-            }
-        }
+            Err(error) => return Err(error),
+        };
         let owner = Arc::new(Self {
-            file: Some(file),
+            file: Mutex::new(Some(file)),
             path: path.clone(),
             exclusive,
             generation: RwLock::new(0),
         });
         registered.insert(path, Arc::downgrade(&owner));
         Ok(owner)
+    }
+}
+
+fn open_exclusive(path: &Path) -> Result<File, StorageError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(|source| lock_io(path, source))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(file),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            Err(StorageError::AccountWriterBusy(path.display().to_string()))
+        }
+        Err(error) => Err(lock_io(path, error)),
+    }
+}
+
+impl AccountWriter {
+    pub(crate) fn holds_lock(&self) -> bool {
+        self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+    }
+
+    pub(crate) fn release_lock(&self) {
+        let mut slot = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(file) = slot.take() {
+            let _ = FileExt::unlock(&file);
+        }
+    }
+
+    pub(crate) fn reacquire_lock(&self) -> Result<(), StorageError> {
+        let mut slot = self
+            .file
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("account writer lock poisoned")))?;
+        if slot.is_some() {
+            return Ok(());
+        }
+        *slot = Some(open_exclusive(&self.path).map_err(|error| match error {
+            StorageError::AccountWriterBusy(_) => {
+                StorageError::AccountWriterBusy(self.account_label())
+            }
+            other => other,
+        })?);
+        Ok(())
+    }
+
+    fn account_label(&self) -> String {
+        self.path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("account")
+            .to_owned()
     }
 }
 
@@ -206,10 +256,12 @@ impl Drop for AccountWriter {
         // Unlock and close the descriptor before releasing the registry mutex. An acquire
         // can therefore observe either the live shared owner or a released
         // kernel lock, never the stale interval between those two states.
-        if let Some(file) = self.file.take() {
+        let mut slot = self.file.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(file) = slot.take() {
             let _ = FileExt::unlock(&file);
             drop(file);
         }
+        drop(slot);
         registered.remove(&self.path);
         registry.teardown_complete.notify_all();
     }

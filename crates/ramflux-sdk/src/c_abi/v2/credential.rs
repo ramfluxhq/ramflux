@@ -13,11 +13,19 @@ use std::sync::{Arc, Mutex};
 use zeroize::{Zeroize, Zeroizing};
 
 const PROMPT_METHOD: &str = "device.credential.request";
+/// Not a pairing-wire action. A credential reply must never carry this purpose.
+const USERNAME_MASTER: &str = "username_master";
 
 #[derive(Default)]
 pub(super) struct Bridge {
     provider: Mutex<Option<Arc<super::super::pairing::CallbackProvider>>>,
     parents: Mutex<BTreeMap<u64, Parent>>,
+    usernames: Mutex<BTreeMap<u64, UsernameParent>>,
+}
+
+pub(super) struct UsernameParent {
+    pub method: String,
+    pub account_id: String,
 }
 
 struct Parent {
@@ -46,22 +54,81 @@ impl Bridge {
         method: &str,
         account_id: Option<&str>,
     ) -> Result<(), SdkError> {
-        let mut parents = self.parents.lock().map_err(|_| lock_err())?;
-        parents.insert(
-            id,
-            Parent {
-                method: method.to_owned(),
-                account_id: account_id.map(str::to_owned),
-                prompted: false,
-            },
-        );
+        {
+            let mut parents = self.parents.lock().map_err(|_| lock_err())?;
+            parents.insert(
+                id,
+                Parent {
+                    method: method.to_owned(),
+                    account_id: account_id.map(str::to_owned),
+                    prompted: false,
+                },
+            );
+        }
+        if let Err(error) = self.remember_username(id, method, account_id) {
+            self.forget(id);
+            return Err(error);
+        }
         Ok(())
     }
 
+    /// Prompt parents end at completion. Username parents stay until release or close.
     pub(super) fn forget(&self, id: u64) {
         if let Ok(mut parents) = self.parents.lock() {
             parents.remove(&id);
         }
+    }
+
+    pub(super) fn forget_username(&self, id: u64) {
+        if let Ok(mut names) = self.usernames.lock() {
+            names.remove(&id);
+        }
+    }
+
+    pub(super) fn clear_username(&self) {
+        if let Ok(mut names) = self.usernames.lock() {
+            names.clear();
+        }
+    }
+
+    pub(super) fn username_parent(&self, id: u64) -> Result<Option<UsernameParent>, SdkError> {
+        let names = self.usernames.lock().map_err(|_| lock_err())?;
+        Ok(names.get(&id).map(|parent| UsernameParent {
+            method: parent.method.clone(),
+            account_id: parent.account_id.clone(),
+        }))
+    }
+
+    pub(super) fn hold_username_master(
+        &self,
+    ) -> Result<super::super::pairing::UsernameMasterHold, SdkError> {
+        let Some(provider) = self.provider()? else {
+            return Err(SdkError::PairingField("credential_provider"));
+        };
+        provider.hold_username_master()
+    }
+
+    fn remember_username(
+        &self,
+        id: u64,
+        method: &str,
+        account_id: Option<&str>,
+    ) -> Result<(), SdkError> {
+        if !matches!(method, "username.mutate" | "profile.update") {
+            return Ok(());
+        }
+        let Some(account_id) = account_id.filter(|value| !value.is_empty()) else {
+            return Err(SdkError::PairingField("username_account"));
+        };
+        let mut names = self.usernames.lock().map_err(|_| lock_err())?;
+        if !names.contains_key(&id) && names.len() >= super::state::MAX_OPERATIONS {
+            return Err(SdkError::PairingField("username_capacity"));
+        }
+        names.insert(
+            id,
+            UsernameParent { method: method.to_owned(), account_id: account_id.to_owned() },
+        );
+        Ok(())
     }
 
     pub(super) fn replace(
@@ -84,6 +151,7 @@ impl Bridge {
         if let Some(previous) = previous {
             previous.stop_and_drain();
         }
+        self.clear_username();
     }
 
     fn provider(&self) -> Result<Option<Arc<super::super::pairing::CallbackProvider>>, SdkError> {
@@ -199,6 +267,10 @@ fn parent_id(request_id: &str) -> Result<u64, SdkError> {
 }
 
 fn allowed(method: &str, action: &str) -> bool {
+    // The username master phrase is a separate borrowed input, never a credential reply.
+    if matches!(method, "username.mutate" | "profile.update") || action == USERNAME_MASTER {
+        return false;
+    }
     match method {
         "device.pair.join" | "device.transfer.join" => matches!(action, "setup" | "unlock"),
         "device.transfer.prepare" => action == "phrase",

@@ -213,20 +213,35 @@ async fn sdk_policy_gateway_request(
     config: &GatewaySessionConfig,
     request: &ramflux_transport::GatewayQuicRequest,
 ) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
-    tokio::time::timeout(config.timeout.saturating_mul(3), async {
-        let (_owner, mut stream, _kind) =
-            crate::gateway::engine::open_gateway_session_transport(config).await?;
-        ramflux_transport::write_gateway_session_json(&mut *stream, request).await?;
-        if native_directory_request(config, request) {
-            let bytes =
-                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut *stream)
-                    .await?;
-            return Ok(ramflux_protocol::parse_i_json(&bytes)?);
-        }
-        Ok(ramflux_transport::read_gateway_session_json(&mut *stream).await?)
-    })
+    let (owner, mut stream, _kind) = tokio::time::timeout(
+        config.timeout.saturating_mul(3),
+        crate::gateway::engine::open_gateway_session_transport(config),
+    )
     .await
-    .map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))?
+    .map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))??;
+    let result = tokio::time::timeout(
+        config.timeout.saturating_mul(3),
+        policy_gateway_exchange(&mut *stream, config, request),
+    )
+    .await;
+    let _ = stream.finish();
+    drop(stream);
+    owner.shutdown().await;
+    result.map_err(|_| SdkError::GatewaySessionRejected("gateway request timed out".into()))?
+}
+
+async fn policy_gateway_exchange(
+    stream: &mut (dyn ramflux_transport::GatewaySessionTransport + Send),
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
+    ramflux_transport::write_gateway_session_json(stream, request).await?;
+    if native_directory_request(config, request) {
+        let bytes =
+            ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(stream).await?;
+        return Ok(ramflux_protocol::parse_i_json(&bytes)?);
+    }
+    Ok(ramflux_transport::read_gateway_session_json(stream).await?)
 }
 
 async fn sdk_quic_gateway_request(
@@ -243,21 +258,31 @@ async fn sdk_quic_gateway_request(
     )
     .await?;
     client.set_session_timeout(config.timeout);
-    if native_directory_request(config, request) {
-        let mut stream = client.open_bidi_stream().await?;
-        return tokio::time::timeout(timeout, async {
-            ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
-            let bytes =
-                ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream)
-                    .await?;
-            Ok(ramflux_protocol::parse_i_json(&bytes)?)
-        })
-        .await
-        .map_err(|_| {
-            SdkError::GatewaySessionRejected("native directory request timed out".into())
-        })?;
+    let result = quic_gateway_exchange(&mut client, config, request, timeout).await;
+    client.shutdown().await;
+    result
+}
+
+async fn quic_gateway_exchange(
+    client: &mut ramflux_transport::QuicGatewayClient,
+    config: &GatewaySessionConfig,
+    request: &ramflux_transport::GatewayQuicRequest,
+    timeout: Duration,
+) -> Result<ramflux_transport::GatewayQuicResponse, SdkError> {
+    if !native_directory_request(config, request) {
+        return Ok(client.request(request).await?);
     }
-    Ok(client.request(request).await?)
+    let mut stream = client.open_bidi_stream().await?;
+    let result = tokio::time::timeout(timeout, async {
+        ramflux_transport::write_gateway_session_json(&mut stream, request).await?;
+        let bytes =
+            ramflux_transport::GatewaySessionFrameSource::recv_custody_frame(&mut stream).await?;
+        Ok(ramflux_protocol::parse_i_json(&bytes)?)
+    })
+    .await
+    .map_err(|_| SdkError::GatewaySessionRejected("native directory request timed out".into()))?;
+    let _ = stream.finish();
+    result
 }
 
 async fn sdk_tcp_tls_gateway_request(

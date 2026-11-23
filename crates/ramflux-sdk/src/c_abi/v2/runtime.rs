@@ -35,6 +35,7 @@ impl Command {
 pub(super) struct Client {
     pub commands: mpsc::Sender<Command>,
     pub shared: Arc<Shared>,
+    lifecycle: mpsc::Sender<crate::bus::inprocess::LifecycleRequest>,
     shutdown: watch::Sender<bool>,
     done: Mutex<CloseCompletion>,
     close_wait: Duration,
@@ -95,6 +96,7 @@ pub(super) use crate::bus::inprocess::ShutdownGate;
 struct Worker {
     config: LocalBusConfig,
     commands: mpsc::Receiver<Command>,
+    lifecycle: mpsc::Receiver<crate::bus::inprocess::LifecycleRequest>,
     shutdown: watch::Receiver<bool>,
     stop: watch::Sender<bool>,
     ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
@@ -128,6 +130,7 @@ impl Client {
     ) -> Result<Arc<Self>, SdkError> {
         let data_root = config.data_root.clone();
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
+        let (lifecycle, lifecycle_rx) = mpsc::channel(4);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (ready, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (done_tx, done) = std::sync::mpsc::sync_channel(1);
@@ -141,6 +144,7 @@ impl Client {
                     run(Worker {
                         config,
                         commands: receiver,
+                        lifecycle: lifecycle_rx,
                         shutdown: shutdown_rx,
                         stop: worker_shutdown,
                         ready,
@@ -171,6 +175,7 @@ impl Client {
             data_root,
             commands,
             shared,
+            lifecycle,
             shutdown,
             done: Mutex::new(CloseCompletion { receiver: done, terminal: None }),
             close_wait,
@@ -203,6 +208,22 @@ impl Client {
         action()
     }
 
+    pub(super) fn drive_lifecycle(&self, resume: bool, wait: Duration) -> Result<(), DriveError> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        let request = crate::bus::inprocess::LifecycleRequest { resume, reply };
+        if self.lifecycle.blocking_send(request).is_err() {
+            return Err(DriveError::Failed(SdkError::LocalBus("lifecycle channel closed".into())));
+        }
+        match response.recv_timeout(wait) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(DriveError::Failed(error)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DriveError::TimedOut),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(DriveError::Failed(SdkError::LocalBus("lifecycle reply lost".into())))
+            }
+        }
+    }
+
     pub fn shutdown_confirmed(&self) -> Result<bool, SdkError> {
         match self.done.try_lock() {
             Ok(mut state) => {
@@ -227,6 +248,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     let Worker {
         config,
         commands,
+        lifecycle,
         shutdown,
         stop,
         ready,
@@ -242,6 +264,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
         config,
         server_stream,
         server_shutdown,
+        lifecycle,
         server_ready,
         #[cfg(test)]
         gate,
@@ -268,6 +291,17 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     stopped.and(read_result)
 }
 
+enum WriteAction {
+    Skip,
+    Cancel,
+    Send,
+}
+
+pub(super) enum DriveError {
+    TimedOut,
+    Failed(SdkError),
+}
+
 async fn write_commands(
     mut commands: mpsc::Receiver<Command>,
     mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
@@ -286,34 +320,40 @@ async fn write_commands(
             _ = shutdown.changed() => break,
             command = commands.recv() => match command { Some(command) => command, None => break },
         };
-        let cancelled = {
+        let action = {
             let mut state = command
                 .operation
                 .state
                 .lock()
                 .map_err(|_| SdkError::LocalBus("operation lock poisoned".into()))?;
-            if state.cancelled {
-                true
+            if state.result.is_some() || state.slot == super::state::ResultSlot::Frozen {
+                WriteAction::Skip
+            } else if shared.suspended.load(Ordering::Acquire) {
+                let effects = if state.admitted { "unknown" } else { "none" };
+                state.slot = super::state::ResultSlot::Frozen;
+                state.result = Some(super::state::suspended_bytes(effects));
+                WriteAction::Skip
+            } else if state.cancelled {
+                WriteAction::Cancel
             } else if command
                 .deadline_ms
                 .is_some_and(|deadline| u128::from(deadline) <= super::super::current_millis())
             {
                 drop(state);
-                shared.complete(
-                    command.id,
-                    serde_json::json!({
-                        "code":10,"effects":"none"
-                    }),
-                );
-                continue;
+                shared.complete(command.id, serde_json::json!({"code":10,"effects":"none"}));
+                WriteAction::Skip
             } else {
                 state.admitted = true;
-                false
+                WriteAction::Send
             }
         };
-        if cancelled {
-            shared.complete(command.id, failure(RamfluxV2Status::Cancelled, "none"));
-            continue;
+        match action {
+            WriteAction::Skip => continue,
+            WriteAction::Cancel => {
+                shared.complete(command.id, failure(RamfluxV2Status::Cancelled, "none"));
+                continue;
+            }
+            WriteAction::Send => {}
         }
         note_parent(&command, shared)?;
         let sent = tokio::time::timeout(
@@ -372,6 +412,35 @@ async fn read_responses(
     }
 }
 
+fn refusal_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Code 16 is the unmapped class. Keep the bus refusal string as `name` so a client can
+/// tell Replay from an unrelated internal failure without a new numeric status.
+fn name_unmapped_refusal(frame: &mut serde_json::Value, code: i32) {
+    if code != super::super::RamfluxErrorCode::Internal as i32 {
+        return;
+    }
+    for key in ["error", "result"] {
+        let Some(object) = frame.get_mut(key).and_then(serde_json::Value::as_object_mut) else {
+            continue;
+        };
+        if object.get("name").and_then(serde_json::Value::as_str).is_some_and(refusal_token) {
+            continue;
+        }
+        let Some(bus) = object.get("code").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !refusal_token(bus) {
+            continue;
+        }
+        object.insert("name".to_owned(), serde_json::Value::String(bus.to_owned()));
+    }
+}
+
 fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
     // The authenticated in-process server emits both ordinary bus and compatibility
     // custody envelopes. Preserve either representation, including unknown business data.
@@ -408,6 +477,7 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
             let code = error
                 .and_then(serde_json::Value::as_str)
                 .map_or(if failed { 16 } else { 0 }, super::error_code);
+            name_unmapped_refusal(&mut frame, code);
             stop_requested = code == 0
                 && frame.get("method").and_then(serde_json::Value::as_str) == Some("daemon.stop");
             if code == 0
@@ -442,7 +512,9 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
             };
             shared.complete(id, completed);
         }
-    } else {
+    } else if !is_credential_request(&frame) {
+        // A prompt that escaped the credential bridge has no subscription generation.
+        // Treating it as an event closes the worker.
         let generation = generation
             .ok_or_else(|| SdkError::LocalBus("event missing subscription generation".into()))?;
         super::native_error::frame(&mut frame);
@@ -450,6 +522,10 @@ fn handle_public(shared: &Shared, bytes: &[u8]) -> Result<bool, SdkError> {
     }
     crate::bus::inprocess::erase_value(&mut frame);
     Ok(stop_requested)
+}
+
+fn is_credential_request(frame: &serde_json::Value) -> bool {
+    frame.get("method").and_then(serde_json::Value::as_str) == Some("device.credential.request")
 }
 
 #[cfg(test)]
