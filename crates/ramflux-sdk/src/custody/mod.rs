@@ -41,7 +41,9 @@ pub use vault::{
 };
 #[cfg(windows)]
 pub use vault::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};
-pub(crate) use vault::{agent_key_unavailable, require_vault_reference};
+#[cfg(feature = "c-abi")]
+pub(crate) use vault::agent_key_unavailable;
+pub(crate) use vault::require_vault_reference;
 
 #[cfg(any(target_os = "linux", test))]
 pub use vault::linux::{
