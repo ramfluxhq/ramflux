@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-authorized task authoring; ingress is a typed local request, never a peer event map.
-use crate::client::task::{invalid, require_local_human};
+use crate::client::task::invalid;
 use crate::prelude::*;
 use ramflux_protocol::{
     TaskAccept, TaskCancel, TaskDecline, TaskEvent, TaskEventBody, TaskProposal, TaskResolve,
@@ -30,7 +30,6 @@ async fn dispatch_task_inner(
     if request.method == "task.decision.prove" {
         return prove_decision(request, state);
     }
-    authorize_local_task_sender(request, state, id)?;
     let account = local_bus_account_mut(state, id)?;
     let device = account.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
     let principal = device.principal_id.clone();
@@ -167,63 +166,6 @@ fn prove_decision(
     };
     let proof = account.client.witness_task_decision(conversation, resolution, evidence)?;
     Ok(local_bus_ok(json!({"decision_proof_base64":proof.encoded()?})))
-}
-
-fn authorize_local_task_sender(
-    request: &LocalBusFrame,
-    state: &LocalBusDaemonState,
-    id: &str,
-) -> Result<(), SdkError> {
-    let human = matches!(
-        request.method.as_str(),
-        "task.start" | "task.accept" | "task.decline" | "task.resolve" | "task.cancel"
-    );
-    if human || request.method == "task.propose" {
-        if let Some(native) = &local_bus_account(state, id)?.client.born_v3_account {
-            let required = if request.method == "task.propose" {
-                ramflux_protocol::PrincipalKind::HeadlessAi
-            } else {
-                ramflux_protocol::PrincipalKind::Human
-            };
-            if request.method == "task.propose" {
-                return if native.record().body.principal_kind == required {
-                    Ok(())
-                } else {
-                    Err(invalid("task proposal requires a headless AI account"))
-                };
-            }
-            return require_local_human(
-                &LocalBusClientMode::AttendedCli,
-                Some(if native.record().body.principal_kind == required {
-                    "human"
-                } else {
-                    "headless_ai"
-                }),
-            );
-        }
-        let manifest = read_local_bus_account_manifest(&local_bus_account_manifest_path(
-            &state.config.data_root,
-            id,
-        ))?;
-        let default_kind = if manifest.client_mode == LocalBusClientMode::HeadlessAi {
-            "headless_ai"
-        } else {
-            "human"
-        };
-        if request.method == "task.propose" {
-            if manifest.client_mode != LocalBusClientMode::HeadlessAi
-                || manifest.kind.as_deref().unwrap_or(default_kind) != "headless_ai"
-            {
-                return Err(invalid("task proposal requires a headless AI account"));
-            }
-        } else {
-            require_local_human(
-                &manifest.client_mode,
-                manifest.kind.as_deref().or(Some(default_kind)),
-            )?;
-        }
-    }
-    Ok(())
 }
 
 fn build_event(

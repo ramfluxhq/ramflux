@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Atomic pure task lifecycle and human decision authority.
+//! Atomic pure task lifecycle. Authority is the signer's principal, not account kind.
 use super::{
     MAX_TASK_VERSION, NeedsMe, TaskDecision, TaskEvent, TaskEventBody, TaskReject, TaskResolve,
     TaskSigner, TaskStatus, TaskStep,
 };
-use crate::ActorType;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Read-only snapshot; a proposal is provisional until `accepted` is true.
@@ -45,8 +44,8 @@ impl TaskState {
     }
     /// Verifies a signed event and applies it atomically to this task.
     ///
-    /// The signer comes from the caller's authenticated identity, role and conversation ACL.
-    /// A Resolve is a receipt of an already-verified external human decision, not a tool grant.
+    /// The signer comes from the caller's authenticated identity and conversation ACL.
+    /// A Resolve is a receipt of an already-verified decision, not a tool grant.
     /// # Errors
     /// Rejects invalid signatures, authority, context, revision, limits or transitions.
     pub fn apply(
@@ -90,7 +89,6 @@ impl TaskState {
         }
         match event.event() {
             TaskEventBody::Accept(_) | TaskEventBody::Decline(_) => {
-                human(signer)?;
                 if task.state != TaskStatus::Proposed {
                     return Err(TaskReject::IllegalTransition);
                 }
@@ -146,7 +144,6 @@ impl TaskState {
     fn initialize(&mut self, event: &TaskEvent, signer: &TaskSigner<'_>) -> Result<(), TaskReject> {
         let task = match event.event() {
             TaskEventBody::Start(v) => {
-                human(signer)?;
                 if signer.principal_id != v.requester {
                     return Err(TaskReject::WrongSigner);
                 }
@@ -176,9 +173,6 @@ impl TaskState {
                 }
             }
             TaskEventBody::Proposal(v) => {
-                if !matches!(signer.actor_type, ActorType::Bot | ActorType::Workflow) {
-                    return Err(TaskReject::AgentRequired);
-                }
                 if signer.principal_id != v.proposer {
                     return Err(TaskReject::WrongSigner);
                 }
@@ -208,11 +202,7 @@ impl TaskState {
         Ok(())
     }
 }
-fn human(signer: &TaskSigner<'_>) -> Result<(), TaskReject> {
-    if signer.actor_type == ActorType::Human { Ok(()) } else { Err(TaskReject::HumanRequired) }
-}
 fn requester(task: &Task, signer: &TaskSigner<'_>) -> Result<(), TaskReject> {
-    human(signer)?;
     if task.requester.as_deref() != Some(signer.principal_id) {
         return Err(TaskReject::WrongSigner);
     }
@@ -329,7 +319,7 @@ fn resolve(task: &mut Task, decision: &TaskResolve) -> Result<(), TaskReject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SignatureAlg, SignedFields, encode_base64url, signed_bytes};
+    use crate::{ActorType, SignatureAlg, SignedFields, encode_base64url, signed_bytes};
     use ed25519_dalek::{Signer, SigningKey};
     #[test]
     fn maximum_safe_revision_cannot_advance_or_mutate_state()

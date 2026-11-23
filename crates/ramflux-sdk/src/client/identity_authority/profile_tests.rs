@@ -93,18 +93,6 @@ async fn lookup_exposes_verified_kind_and_normalized_public_name_without_manual_
     assert_eq!(contact["kind_verified"], true);
     assert_eq!(contact["verified"], false);
     assert!(crate::client::task::actor_kind_verified(&peer.client, "agent", &device));
-    assert!(!crate::client::task::actor_role_kind_verified(
-        &peer.client,
-        "agent",
-        &device,
-        ramflux_protocol::ActorType::Human
-    ));
-    assert!(crate::client::task::actor_role_kind_verified(
-        &peer.client,
-        "agent",
-        &device,
-        ramflux_protocol::ActorType::Bot
-    ));
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "agent", "bob"));
     assert!(!crate::client::task::actor_kind_verified(&peer.client, "unknown", &device));
     Ok(())

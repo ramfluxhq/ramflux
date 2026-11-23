@@ -10,7 +10,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 use super::{AttachmentLedgerError, ScopedGrantRegistry, VerifiedScopedGrant, store};
-pub use owner::{OwnerAdmission, OwnerAdmissionError};
+pub use owner::{AttachmentCheckpoint, OwnerAdmission, OwnerAdmissionError};
 pub(super) use storage::install;
 use storage::{consume, gc};
 /// Metadata of a `PoP` already verified against the exact native operation by P9.

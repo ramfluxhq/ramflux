@@ -1,58 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Authoring guards execute before parsing or signing a human operation.
+//! Task request shapes and typed refusal codes.
 use super::*;
-use crate::bus::runtime_tests::{account, root};
-use std::sync::{Arc, atomic::AtomicBool};
-#[tokio::test(flavor = "current_thread")]
-async fn every_human_task_method_rejects_headless_mode_and_nonhuman_kind_before_signing()
--> Result<(), SdkError> {
-    let root = root("task-authority");
-    let local = account(&root, "agent", None, Arc::new(AtomicBool::new(false)))?;
-    let mut state = LocalBusDaemonState {
-        config: LocalBusConfig::new(root.join("bus.sock"), &root),
-        account_index: None,
-        nodes: crate::node::NodeStore::default(),
-        accounts: BTreeMap::from([("agent".into(), local)]),
-        active_account_id: Some("agent".into()),
-        attended_accounts: BTreeSet::new(),
-        subscribers: BTreeMap::new(),
-    };
-    for (mode, kind) in [
-        (LocalBusClientMode::HeadlessAi, "human"),
-        (LocalBusClientMode::AttendedCli, "headless_ai"),
-    ] {
-        let path = local_bus_account_manifest_path(&root, "agent");
-        let mut manifest = read_local_bus_account_manifest(&path)?;
-        manifest.client_mode = mode;
-        manifest.kind = Some(kind.into());
-        write_local_bus_account_manifest(&root, &manifest)?;
-        for method in ["task.start", "task.accept", "task.decline", "task.resolve", "task.cancel"] {
-            let request = LocalBusFrame::request(
-                method,
-                Some("agent".into()),
-                "task",
-                method,
-                serde_json::json!({}),
-            );
-            let result = dispatch_task(&request, &mut state).await;
-            assert!(
-                matches!(
-                    result,
-                    Err(SdkError::TaskRefused {
-                        reason: crate::TaskRefusalCode::HumanRequired,
-                        ..
-                    })
-                ),
-                "{method} must fail at authoring guard"
-            );
-        }
-    }
-    drop(state);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
 
 #[test]
 fn every_documented_task_method_parses_its_exact_request_body() -> Result<(), SdkError> {
@@ -141,48 +91,5 @@ fn terminal_result_summaries_are_bounded_and_reject_unsafe_text() -> Result<(), 
             .is_err()
         );
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn native_task_authoring_uses_signed_kind_without_a_legacy_manifest()
--> crate::client::native_test_support::TestResult {
-    let native = crate::client::native_test_support::Fixture::new("native-task-human").await?;
-    let root = native.root.0.clone();
-    let state = LocalBusDaemonState {
-        config: LocalBusConfig::new(root.join("bus.sock"), &root),
-        account_index: None,
-        nodes: crate::node::NodeStore::default(),
-        accounts: BTreeMap::from([(
-            "native-task-human".into(),
-            LocalBusAccountState::disconnected(
-                native.client,
-                native.config,
-                native.manifest.principal_commitment,
-            ),
-        )]),
-        active_account_id: Some("native-task-human".into()),
-        attended_accounts: BTreeSet::new(),
-        subscribers: BTreeMap::new(),
-    };
-    assert!(!local_bus_account_manifest_path(&root, "native-task-human").exists());
-    for method in ["task.start", "task.accept", "task.decline", "task.resolve", "task.cancel"] {
-        let request = LocalBusFrame::request(
-            method,
-            Some("native-task-human".into()),
-            "task",
-            method,
-            json!({}),
-        );
-        authorize_local_task_sender(&request, &state, "native-task-human")?;
-    }
-    let request = LocalBusFrame::request(
-        "proposal",
-        Some("native-task-human".into()),
-        "task",
-        "task.propose",
-        json!({}),
-    );
-    assert!(authorize_local_task_sender(&request, &state, "native-task-human").is_err());
     Ok(())
 }

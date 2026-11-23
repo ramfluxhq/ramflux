@@ -149,20 +149,12 @@ fn actor_metadata_inner(
             .and_then(|id| history.events.iter().rev().find(|e| e.carrier.principal_id == id))
             .map_or("", |e| e.carrier.device_id.as_str());
         let facts = principal.and_then(|p| client.read_profile_facts(p));
-        let kind_verified =
-            facts.as_ref().is_some_and(|f| f.matches_role(device, relation_role(role)));
+        let kind_verified = facts.as_ref().is_some_and(|f| f.matches_device(device));
         actors[role] = json!({"principal_id":principal,"device_id":device,"actor_kind_verified":kind_verified,"actor_kind":facts.map(|f|f.profile.kind)});
     }
     Ok(actors)
 }
 
-fn relation_role(role: &str) -> ramflux_protocol::ActorType {
-    if role == "assignee" {
-        ramflux_protocol::ActorType::Bot
-    } else {
-        ramflux_protocol::ActorType::Human
-    }
-}
 fn refresh_actors(client: &RamfluxClient, row: &mut Value) {
     if row.is_null() {
         return;
@@ -173,9 +165,11 @@ fn refresh_actors(client: &RamfluxClient, row: &mut Value) {
             continue;
         }
         let facts = actor["principal_id"].as_str().and_then(|p| client.read_profile_facts(p));
-        actor["actor_kind_verified"] = json!(facts.as_ref().is_some_and(|f| {
-            f.matches_role(actor["device_id"].as_str().unwrap_or(""), relation_role(role))
-        }));
+        actor["actor_kind_verified"] = json!(
+            facts
+                .as_ref()
+                .is_some_and(|f| { f.matches_device(actor["device_id"].as_str().unwrap_or("")) })
+        );
         actor["actor_kind"] = json!(facts.map(|f| f.profile.kind));
     }
 }
