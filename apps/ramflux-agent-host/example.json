@@ -3,8 +3,6 @@
   "state_file": "/run/user/1000/ramflux-agent/cursor.json",
   "account_id": "agent",
   "poll_interval_ms": 250,
-  "per_conversation_interval_ms": 1000,
-  "max_conversations": 128,
   "rules": [
     {
       "pattern": "@agent ping",
@@ -32,5 +30,6 @@
         "close_on_action": true
       }
     }
-  ]
+  ],
+  "max_pending_turns": 128
 }

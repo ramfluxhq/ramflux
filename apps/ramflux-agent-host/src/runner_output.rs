@@ -70,13 +70,8 @@ impl<E: EngineProvider> AgentHost<E> {
                 return Ok(());
             }
             participant::identity(bus, &mut self.state, &self.config.account_id).await?;
-            let context = participant::conversation(
-                bus,
-                &self.state,
-                &pending.conversation_id,
-                self.config.max_conversations,
-            )
-            .await?;
+            let context =
+                participant::conversation(bus, &self.state, &pending.conversation_id).await?;
             let Some(current) = context else {
                 self.stop_surface_output(&pending, ramflux_sdk::SurfaceRefusalCode::NotPermitted)?;
                 return Ok(());

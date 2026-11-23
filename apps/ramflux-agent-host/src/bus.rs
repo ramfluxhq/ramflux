@@ -59,36 +59,6 @@ impl AgentBus for RfdBus {
         body: Value,
         operation: Option<&str>,
     ) -> Result<Value> {
-        // The host publishes live PRX progress and forwards an owner's approval decision.
-        // It does not approve a tool call by itself.
-        if !matches!(
-            method,
-            "account.status"
-                | "agent.progress"
-                | "agent.approval.publish"
-                | "agent.job.session"
-                | "device.list"
-                | "device.refresh"
-                | "identity.directory"
-                | "conversation.directory"
-                | "group.members"
-                | "group.list"
-                | "message.read"
-                | "message.receive"
-                | "bus.subscribe"
-                | "message.submit"
-                | "group.send"
-                | "surface.send"
-                | "surface.get"
-                | "surface.resync"
-                | "task.get"
-                | "task.propose"
-                | "task.update"
-                | "mcp.server.add"
-                | "mcp.tool.started"
-        ) {
-            return Err(Error::Unauthorized);
-        }
         self.next = self.next.checked_add(1).ok_or(Error::Limit)?;
         let mut frame = LocalBusFrame::request(
             format!("agent-{}", self.next),

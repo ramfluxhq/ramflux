@@ -12,13 +12,6 @@ pub const MAX_CONFIG_BYTES: u64 = 65_536;
 pub enum PrxSessionScope {
     PerConversation,
 }
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PrxAuthorization {
-    #[default]
-    Supervised,
-    Full,
-}
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrxConfig {
@@ -27,27 +20,13 @@ pub struct PrxConfig {
     pub session_scope: PrxSessionScope,
     pub request_timeout_s: u64,
     pub max_in_flight_per_conversation: usize,
-    #[serde(default)]
-    pub authorization: PrxAuthorization,
     #[serde(default = "turn_timeout")]
     pub turn_timeout_s: u64,
     #[serde(default = "approval_timeout")]
     pub approval_timeout_s: u64,
-    /// PRX agent name that receives `limits`. Required when a bound is set.
+    /// PRX agent name that receives targeted turns.
     #[serde(default)]
     pub agent_name: Option<String>,
-    /// Provider stored when this host creates the PRX agent. Required when a bound is set.
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// Model stored when this host creates the PRX agent. Required when a bound is set.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// `agent_limits_v1` concurrency bound. `1..=1024` when set.
-    #[serde(default)]
-    pub max_concurrent_turns: Option<u32>,
-    /// `agent_limits_v1` daily cost bound, in cents. `1..=1_000_000_000` when set.
-    #[serde(default)]
-    pub max_cost_per_day_cents: Option<u64>,
     /// When set, a deleted conversation erases every agent's turns in the mapped PRX session.
     #[serde(default)]
     pub erase_session_on_delete: bool,
@@ -122,33 +101,17 @@ pub struct Config {
     pub engine: Option<EngineConfig>,
     #[serde(default = "poll")]
     pub poll_interval_ms: u64,
-    #[serde(default = "interval")]
-    pub per_conversation_interval_ms: u64,
     #[serde(default = "conversations")]
-    pub max_conversations: usize,
+    /// Resource bound for active turns and cached session mappings. Idle mappings are evicted.
+    pub max_pending_turns: usize,
 }
 const fn poll() -> u64 {
     250
-}
-const fn interval() -> u64 {
-    1000
 }
 const fn conversations() -> usize {
     128
 }
 
-fn limit_config_invalid(config: &PrxConfig) -> bool {
-    let turns = config.max_concurrent_turns;
-    let cost = config.max_cost_per_day_cents;
-    let bounded = turns.is_some() || cost.is_some();
-    let turns_bad = turns.is_some_and(|value| !(1..=1024).contains(&value));
-    let cost_bad = cost.is_some_and(|value| !(1..=1_000_000_000).contains(&value));
-    let name_bad = config.agent_name.as_ref().is_none_or(|name| name.is_empty() || name.len() > 64);
-    let provider_bad =
-        config.provider.as_ref().is_none_or(|value| value.is_empty() || value.len() > 128);
-    let model_bad = config.model.as_ref().is_none_or(|value| value.is_empty() || value.len() > 128);
-    turns_bad || cost_bad || (bounded && (name_bad || provider_bad || model_bad))
-}
 impl Config {
     /// # Errors
     /// Rejects unreadable, oversized or invalid configuration files.
@@ -173,8 +136,7 @@ impl Config {
             || prx.is_some() != self.rules.is_empty()
             || self.rules.len() > 64
             || !(50..=60_000).contains(&self.poll_interval_ms)
-            || !(100..=3_600_000).contains(&self.per_conversation_interval_ms)
-            || !(1..=1024).contains(&self.max_conversations)
+            || !(1..=1024).contains(&self.max_pending_turns)
             || self.rules.iter().any(|r| {
                 r.pattern.is_empty()
                     || r.pattern.len() > 1024
@@ -194,7 +156,6 @@ impl Config {
                     || config.max_in_flight_per_conversation != 1
                     || !(1..=3600).contains(&config.turn_timeout_s)
                     || !(1..=3600).contains(&config.approval_timeout_s)
-                    || limit_config_invalid(config)
             })
         {
             return Err(Error::Config);

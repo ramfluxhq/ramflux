@@ -103,7 +103,6 @@ Do not put the bearer in the agent configuration. Select PRX instead of `rules` 
       "request_timeout_s": 30,
       "turn_timeout_s": 120,
       "approval_timeout_s": 600,
-      "authorization": "supervised",
       "max_in_flight_per_conversation": 1
     }
   }
@@ -117,11 +116,11 @@ The bundle and the PRX bearer are separate credentials and neither belongs in th
 
 Each Ramflux conversation owns one persisted PRX session and at most one detached job. A second
 message while a job or human decision is pending receives `engine_busy`; it is not forwarded or
-queued. Busy hints bypass the ordinary reply interval; they do not admit another provider turn.
+queued. Busy hints do not admit another provider turn.
 Replies are
 final text, not streamed. PRX tool access is scoped in PRX configuration, including
 `[autonomy.scopes]`, `[tool_tiering]`, and `exposed_tools`; the agent host does not broaden it.
-In `authorization: "supervised"` (the default), the host fetches the authoritative PRX approval
+When PRX requests approval, the host fetches the authoritative PRX approval
 view and creates a conversation task with a fresh high-risk grant request binding its tool,
 redacted arguments summary, effect, call digest and decision ID. Model-written reply text never
 supplies the consent label. Only the human's signed task decision is sent back to PRX. Standing
@@ -141,11 +140,9 @@ the single-use approval POST. The shared core retry policy bounds this to three 
 or exhausted retries retire the approval with `approval_unavailable`. Restoring state caps job
 and approval deadlines to their configured remaining maxima without extending expired work.
 
-For full authorization, set `authorization: "full"` here and `[autonomy] level = "full"` in PRX.
-PRX must execute within its own configured scopes without asking the bridge for human approval.
-An unexpected `awaiting_approval` is declined with `authorization_mismatch` and a fixed diagnostic
-logged once per host process. This configuration setting is the interim authorization control;
-a per-account bus switch and standing grant are not available.
+PRX owns autonomy, tool allowlists, concurrency and cost limits. The host has no
+supervised/full setting and forwards every authenticated PRX approval request to its owner.
+Ordinary SDK authorization and decision correlation still apply.
 
 Every detached job, including a resumed job, has a persisted wall-clock deadline set by
 `turn_timeout_s` (default 120 seconds). At expiry the host cancels the job, returns
@@ -163,8 +160,7 @@ Other terminal failures produce one short typed reply. The owner-only token file
 startup, is never checkpointed, and is never included in diagnostics. The bearer is an owner-wide
 PRX credential, including access to other `/api/*` controls; keep it on the agent's own operating
 system account and private volume. In groups, member-authored text reaches PRX under this single
-owner credential. Supervised human decisions or the deliberately selected full mode, together with
-PRX tool scopes, define the execution authority; a prompt header is only context and conveys no
+owner credential. PRX autonomy and tool scopes define execution authority; a prompt header is only context and conveys no
 permission. Headers include only the bounded sender display label, chat kind and mention flag,
 never group member lists.
 
@@ -175,7 +171,7 @@ Do not run a second host with a different checkpoint against the same account.
 An exclusive lock prevents two hosts sharing one checkpoint.
 
 The checkpoint is atomically replaced, fsynced and written mode 0600. It contains an
-account/device binding, applied journal sequence, bounded rate counters, PRX session/job/task
+account/device binding, applied journal sequence, bounded PRX session/job/task
 metadata when enabled, and at most one prepared output batch. It never contains the PRX bearer.
 A batch includes plaintext output: protect the directory.
 The host stores the entire batch before sending with stable operation/message IDs,
@@ -190,11 +186,11 @@ historical commands are not synthesized from message history. Fresh startup simi
 starts at the current head. A pending prepared output still recovers after a gap if
 current authorization allows it. Reconnection resumes from the last applied cursor.
 
-Replies in one conversation within the configured interval are skipped. Rate counters
-survive restart; each new conversation consumes one bounded counter slot. When the
-counter/directory limit is exhausted the host stops, requiring operator review. It
-never evicts counters to bypass rate limits. Directory scans cap total response bytes
-at 1 MiB and rows at the configured conversation bound (identity scans: 1024 rows).
+The host applies no local reply interval or lifetime conversation quota.
+`max_pending_turns` (default 128) bounds active provider work and the idle session cache.
+An idle mapping can be evicted and reopened using the same deterministic caller key;
+PRX retains the conversation history. If every slot has active work, the host returns
+`engine_busy` and queues no additional turn.
 Config is capped at 64 KiB, rules at 64, input/reply text at 16 KiB, and checkpoint at
 512 KiB. The SDK bounds individual wire frames and its event queue.
 
@@ -248,24 +244,12 @@ metadata remain readable; stale legacy streams stop instead of guessing a target
 
 Handled action IDs are scoped and persisted as a FIFO of the most recent 2048 IDs.
 This cache is an optimization: rfd's actionable/action_already_used checks remain
-the authoritative replay guard. Expired last-reply entries are pruned before each
-event; max_conversations bounds recent rate history, not directory size. Directory
-lookups scan pages of at most 100 rows and 1 MiB per page without retaining the whole
-directory (a 10,000-cursor ceiling and cycle detection bound a corrupt pager).
-Recent conversation keys also have a 64 KiB budget; prepared output bodies are
-bounded to 256 KiB so an individual output cannot exhaust checkpoint space.
+the authoritative replay guard. Directory lookups scan pages of at most 100 rows
+and 1 MiB per page without retaining the whole directory (a 10,000-cursor ceiling and cycle detection bound a corrupt pager).
+Prepared output bodies are bounded to 256 KiB so an individual output cannot exhaust checkpoint space.
 
-Message triggers inside the configured interval are dropped with rate_limited.
-User actions and resync notifications are deferred durably and rechecked by the next
-poll after the interval ends. The queue holds at most 64 scoped references / 32 KiB,
-with at most four references / 2 KiB per conversation. Eight busy conversations
-can use at most half the queue, leaving headroom for a new conversation. Only the newest work in a
-conversation above its share is refused. Older checkpoints are compacted by the same
-rule on startup, keeping the oldest references. Each poll processes all due rows in
-sequence order within these bounds, with no copied action values. Current
-author/executor/actionability is read again
-before use. It survives restart and keeps the account cursor moving. Its timestamp
-records the actual recheck time. The event loop never sleeps for a conversation interval. A peer losing
+Surface actions and resync notifications revalidate current author, executor and
+actionability immediately. A peer losing
 its devices, a stale executor notification, an unusable surface or an invalid provider
 output records a typed last_refusal and advances the cursor. Lost transport replies
 retain the exact durable pending request and reconnect. Only loss of the host's own
