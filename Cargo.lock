@@ -3500,6 +3500,7 @@ version = "0.2.5"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "ramflux-protocol",
  "rquickjs",
  "rquickjs-core",
  "rquickjs-sys",

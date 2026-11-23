@@ -249,6 +249,20 @@ pub enum AccountNetworkingReason {
     },
     CustodyExpired,
 }
+
+impl AccountNetworkingReason {
+    /// The node refused registration because this agent is retired.
+    #[must_use]
+    pub(crate) fn agent_retired(&self) -> bool {
+        matches!(
+            self,
+            Self::RegistrationRefused {
+                code: ramflux_protocol::custody::CustodyRefusal::AgentRetired,
+            }
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalBusCreatedAccountState {

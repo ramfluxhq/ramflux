@@ -115,6 +115,8 @@ pub enum StorageError {
     /// A transfer export or received export file was refused; the value names the step.
     #[error("transfer export refused at step: {0}")]
     TransferExportRefused(&'static str),
+    #[error("mute_until is outside the safe JSON integer range")]
+    MuteUntilOutOfRange,
 }
 
 impl StorageError {

@@ -3,10 +3,6 @@ import {CardView} from './adapter';
 import {HostSettings,PresentationRegistry} from './settings';
 const registry=new PresentationRegistry();
 const query=new URLSearchParams(location.search);
-if(query.get('locale')==='pseudo'){
- const source=registry.resolve('en','light',false).strings;
- registry.addLocale('pseudo',query.has('rtl')?'rtl':'ltr',Object.fromEntries(Object.entries(source).map(([k,v])=>[k,'［'+v.repeat(3)+'］'])));
-}
 const settings=new HostSettings(registry,localStorage,matchMedia('(prefers-color-scheme: dark)'));
 if(query.has('locale')||query.has('theme'))settings.select(query.get('locale')??'en',query.get('theme')??'system');
 const root=document.querySelector<HTMLElement>('#card')!,status=document.querySelector<HTMLElement>('#status')!,host=document.querySelector<HTMLElement>('#host')!,controls=document.querySelector<HTMLElement>('#settings')!;
@@ -30,8 +26,7 @@ settings.subscribe(p=>{
  if(opened)void card.present(p).then(()=>{status.textContent=p.strings.preview_ready}).catch(()=>{status.textContent=p.strings.content_unavailable});
 });
 language.onchange=theme.onchange=()=>settings.select(language.value,theme.value);
-const fixtures=await Promise.all(['complete_form','task','chart','approval'].map(async name=>await(await fetch('../fixtures/'+name+'.json')).json()));
-const selected={catalog:'rf-card/v1',model:fixtures[0].model,components:fixtures.flatMap(f=>f.components)};
+const selected=await(await fetch('../fixtures/complete_form.json')).json();
 Object.assign(window,{card,CardView,intents,failures,selected,settings});Object.defineProperty(window,"slots",{get:()=>slots});
 await card.open(JSON.stringify(selected));opened=true;status.textContent=settings.current().strings.preview_ready;
 window.addEventListener('pagehide',()=>{settings.dispose();card.dispose()},{once:true});

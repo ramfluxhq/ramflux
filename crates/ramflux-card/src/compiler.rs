@@ -50,7 +50,7 @@ pub fn compile_and_sign(
     let descriptor = PackageDescriptor {
         app_id: release.app_id.clone(),
         bytecode_sha256: sha256(&bytecode),
-        catalog: "rf-card/v1".into(),
+        catalog: ramflux_protocol::a2ui::CATALOG_ID.into(),
         catalog_sha256: catalog_digest(),
         engine: ENGINE_ID.into(),
         host_abi: HOST_ABI,
