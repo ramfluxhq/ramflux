@@ -931,9 +931,15 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CustodyModeDowngrade
         | SdkError::AgentCustodyUnsupported
         | SdkError::UsernameDirectoryRefused(_) => RamfluxErrorCode::UnsupportedVersion,
-        SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable) => {
-            RamfluxErrorCode::PermissionDenied
-        }
+        SdkError::CustodyVaultUnavailable
+        | SdkError::CustodyVault(_)
+        | SdkError::AttachmentDeleted
+        | SdkError::Sync(_)
+        | SdkError::CapabilityDenied(_)
+        | SdkError::GrantInvalidated
+        | SdkError::RemoteAppApprovalRequired
+        | SdkError::Crypto(ramflux_crypto::CryptoError::GroupLeaseUnavailable)
+        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
         SdkError::CustodyRandomUnavailable
         | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
@@ -962,17 +968,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskDeliveryTimeout => RamfluxErrorCode::TransportUnavailable,
         #[rustfmt::skip]
         SdkError::Protocol(_) | SdkError::Json(_) | SdkError::InvalidGatewayCursor(_) => RamfluxErrorCode::InvalidCanonicalJson,
-        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => {
-            RamfluxErrorCode::Internal
-        }
-        SdkError::CustodyVaultUnavailable
-        | SdkError::CustodyVault(_)
-        | SdkError::AttachmentDeleted
-        | SdkError::Sync(_)
-        | SdkError::CapabilityDenied(_)
-        | SdkError::GrantInvalidated
-        | SdkError::RemoteAppApprovalRequired
-        | SdkError::LocalBusPermissionDenied => RamfluxErrorCode::PermissionDenied,
+        #[rustfmt::skip]
+        SdkError::PriorityWriterAccess | SdkError::WriterPause | SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::AccountCommandBackpressure
         | SdkError::ContactInput(crate::ContactReason::LookupRateLimited)
         | SdkError::ContactRequestCapacity(_)
