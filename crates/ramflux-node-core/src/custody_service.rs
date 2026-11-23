@@ -399,6 +399,9 @@ impl CustodyService {
                     SessionRequest { session_id, request, action, connection_id },
                     admission,
                 ),
+            CustodyMeshRequest::RenewNativeSession { session_id, connection_id } => {
+                self.renew_native_session(scope, &session_id, &connection_id)
+            }
         }
     }
 }

@@ -126,8 +126,22 @@ impl SendAuthorityStore {
             seconds
         };
         let tx = self.db.begin_write().map_err(storage)?;
-        self.persist_clock(&tx).map_err(storage)?;
-        tx.commit().map_err(storage)?;
+        let prior = tx
+            .open_table(CLOCK)
+            .map_err(storage)?
+            .get("utc_nanoseconds")
+            .map_err(storage)?
+            .map_or(0, |value| value.value());
+        let floor = {
+            let gate = self.gate.lock().map_err(storage)?;
+            u64::try_from(gate.utc_floor).map_err(storage)?
+        };
+        if floor > prior {
+            self.persist_clock(&tx).map_err(storage)?;
+            tx.commit().map_err(storage)?;
+        } else {
+            tx.abort().map_err(storage)?;
+        }
         Ok(seconds)
     }
 

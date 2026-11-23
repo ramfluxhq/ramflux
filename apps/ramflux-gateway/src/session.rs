@@ -251,6 +251,7 @@ async fn handle_gateway_session_transport_inner(
     first_frame: ramflux_node_core::GatewayClientFrame,
     grant: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
+    let _native_lease = super::custody::hold_native_lease(&context, grant.as_ref());
     let Some(auth_request) = ramflux_node_core::begin_service_request() else {
         return Ok(());
     };
@@ -427,10 +428,7 @@ pub(crate) async fn validate_native_frame(
     )
     .await?;
     let key = key.ok_or_else(|| anyhow::anyhow!("native branch unavailable"))?;
-    anyhow::ensure!(
-        native_live_authority_matches(&key, grant, &runtime.branch_public_key, now),
-        "native authority changed"
-    );
+    crate::session_grant::require_live_native(&key, grant, &runtime.branch_public_key, now)?;
     let capability = match frame {
         Frame::OwnDeviceFanout { .. } => "sync",
         Frame::VoiceLease { .. } => "call",
@@ -863,7 +861,7 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
     context: GatewayQuicContext,
     runtime: GatewaySessionRuntime,
     mut closed: Option<tokio::sync::watch::Receiver<bool>>,
-    native: Option<super::custody::GatewayGrant>,
+    mut native: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
     // One serial push route worker per session; dropping it with the loop cancels it.
     let mut route_control: Option<crate::push_registration::RouteControlQueue> = None;
@@ -872,11 +870,9 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
         // its router commit and before its reply. Finish the request before checking again.
         let incoming = tokio::select! {
             biased;
-            () = async {
-                if let Some(grant) = native.as_ref() {
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(grant.deadline())).await;
-                } else { std::future::pending::<()>().await; }
-            } => return Ok(()),
+            () = crate::session_grant::wait_native_grant(native.as_ref()) => {
+                return crate::session_grant::close_native_grant(&send, "grant_expired").await;
+            }
             () = async {
                 if let Some(closed) = closed.as_mut() {
                     if !*closed.borrow() { let _ = closed.changed().await; }
@@ -933,23 +929,15 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
         let Some(_request) = ramflux_node_core::begin_service_request() else {
             return Ok(());
         };
-        if let Some(grant) = native.as_ref()
-            && let Err(error) = validate_native_frame(&context, &runtime, grant, &frame).await
+        if crate::session_grant::refuse_stale_native(
+            &send,
+            &context,
+            &runtime,
+            native.as_ref(),
+            &frame,
+        )
+        .await?
         {
-            tracing::debug!(%error, "native session authority no longer permits request");
-            let response =
-                if matches!(frame, ramflux_node_core::GatewayClientFrame::VoiceLease { .. }) {
-                    ramflux_node_core::GatewayServerFrame::VoiceLease {
-                        response: Box::new(ramflux_protocol::VoiceLeaseResponse::Refused {
-                            reason: ramflux_protocol::VoiceCallFailureReason::AuthorityRefused,
-                        }),
-                    }
-                } else {
-                    ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: "native_session_authority_refused".into(),
-                    }
-                };
-            write_gateway_handle(&send, &response).await?;
             return Ok(());
         }
         // I-NP: classify before the first persistent mutation. A non-durable submit leaves the
@@ -1080,6 +1068,13 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                 ramflux_node_core::GatewayClientFrame::Close { reason } => {
                     handle_gateway_close(&send, &context, &runtime, reason).await?;
                     return Ok::<bool, anyhow::Error>(true);
+                }
+                ramflux_node_core::GatewayClientFrame::GrantRenew => {
+                    if crate::session_grant::apply_native_renewal(&send, &context, native.as_mut())
+                        .await?
+                    {
+                        return Ok(true);
+                    }
                 }
                 ramflux_node_core::GatewayClientFrame::Open { .. }
                 | ramflux_node_core::GatewayClientFrame::Auth { .. } => {
