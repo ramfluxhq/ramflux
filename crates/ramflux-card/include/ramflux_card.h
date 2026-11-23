@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #ifndef RAMFLUX_CARD_H
 #define RAMFLUX_CARD_H
-#define RAMFLUX_CARD_ABI_VERSION 4
+#define RAMFLUX_CARD_ABI_VERSION 5
 #include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
@@ -18,6 +18,12 @@ extern "C" {
  * The host supplies a release-pinned trusted_key, never data received from a peer.
  * Descriptor and separate host-pinned policy are bounded canonical/closed JSON.
  * Serialization/output-cap failure disposes the handle; open returns out=0.
+ * ABI 5 spec is an SDK-authorized Surface v3 envelope, never a raw peer snapshot.
+ * Mutations carry signed_version/hash, edit_seq and a complete host_slots array.
+ * Event tokens carry session/signedVersion/editSeq/treeVersion/key. The stable
+ * C handle differs from the fresh token session identity after resume.
+ * HostSlotReply and ImageResult belong to the later SDK/native authority bridge;
+ * encoded image bytes must never be serialized into these JSON callbacks.
  * Only project-signed bytecode for the pinned engine is accepted. */
 typedef struct RamfluxCardBytes { const uint8_t *data; size_t len; } RamfluxCardBytes;
 typedef struct RamfluxCardOpen {
@@ -32,6 +38,7 @@ typedef struct RamfluxCardOpen {
 typedef void (*RamfluxCardCallback)(void *user, const uint8_t *json, size_t len);
 uint32_t ramflux_card_abi_version(void);
 int32_t ramflux_card_open(const RamfluxCardOpen *input, RamfluxCardCallback callback, void *user, uint64_t *out);
+int32_t ramflux_card_tree(uint64_t session, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_update(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_present(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);
 int32_t ramflux_card_event(uint64_t session, RamfluxCardBytes input, RamfluxCardCallback callback, void *user);

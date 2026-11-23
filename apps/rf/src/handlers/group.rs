@@ -258,6 +258,7 @@ async fn handle_group_disappearing(
 }
 
 async fn handle_group_mute(bus: &mut LocalBusClient, mute: GroupMute) -> Result<(), RfError> {
+    require_json_safe_mute_until(mute.mute_until)?;
     let request = LocalBusConversationMuteRequest {
         conversation_id: mute.group,
         mute_until: mute.mute_until,

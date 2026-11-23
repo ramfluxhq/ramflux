@@ -16,21 +16,20 @@ mod presentation;
 mod projection;
 mod runtime;
 mod session;
+mod slots;
 mod spec;
 mod tree;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 mod web;
 
-pub use components::{
-    Approval, Chart, ChartKind, Choice, Component, Field, FieldKind, Form, HostSecuritySlot, Point,
-    Scalar, Series, Task, TaskStatus, TaskStep,
-};
+pub use components::NodeKind;
 pub use error::CardError;
 pub use package::{
     AcceptancePolicy, ENGINE_ID, HOST_ABI, PackageDescriptor, SignedPackage, catalog_digest,
 };
 pub use presentation::{Direction, Presentation};
 pub use runtime::CardRuntime;
-pub use session::{CardSession, Event, EventKind, EventResult, EventToken};
-pub use spec::{CardSpec, Theme};
-pub use tree::{Attrs, Mutation, MutationBatch, Node, NodeKind, Plot, Style, Tree};
+pub use session::{CardSession, EventResult, EventToken, HostEvent, HostEventKind};
+pub use slots::{HostSlot, HostSlotReply, ImageResult, SlotOutcome, SlotRequest};
+pub use spec::CardSpec;
+pub use tree::{Mutation, MutationBatch, Node, Tree};

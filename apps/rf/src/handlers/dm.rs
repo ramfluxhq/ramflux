@@ -214,6 +214,7 @@ async fn handle_dm_disappearing(
 }
 
 async fn handle_dm_mute(bus: &mut LocalBusClient, mute: DmMute) -> Result<(), RfError> {
+    require_json_safe_mute_until(mute.mute_until)?;
     let request = LocalBusConversationMuteRequest {
         conversation_id: mute.conversation,
         mute_until: mute.mute_until,

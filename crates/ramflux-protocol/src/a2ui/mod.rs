@@ -5,8 +5,16 @@
 mod action;
 mod expression;
 mod format_string;
+mod graph;
+mod icon_path;
 mod link;
+pub use link::validate_url;
+mod locale;
+pub use locale::DisplayLocale;
 mod pointer;
+mod resolve;
+mod resource;
+pub use resolve::*;
 mod rpc;
 pub use rpc::*;
 mod schema;

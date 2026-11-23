@@ -737,16 +737,18 @@ fn dispatch_conversation_mute(
     if body.unmute {
         account.client.unmute_conversation(&body.conversation_id)?;
     } else {
-        account
-            .client
-            .mute_conversation(&body.conversation_id, body.mute_until.unwrap_or(i64::MAX))?;
+        let mute_until = body.mute_until.unwrap_or(ramflux_storage::MUTE_UNTIL_TURNED_OFF);
+        account.client.mute_conversation(&body.conversation_id, mute_until)?;
     }
     let state = account.client.conversation_list_state(&body.conversation_id)?;
+    let (muted, mute_until) =
+        account.client.account_db()?.conversation_mute_fields(state.mute_until);
     Ok(local_bus_ok(serde_json::json!({
         "conversation_id": state.conversation_id,
         "archived": state.archived,
         "pin_order": state.pin_order,
-        "mute_until": state.mute_until,
+        "muted": muted,
+        "mute_until": mute_until,
         "hidden_at": state.hidden_at,
         "cleared_at": state.cleared_at,
     })))

@@ -303,7 +303,17 @@ pub(super) async fn export(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account = local_bus_account(state, id)?;
     let profile = account_home(state, id)?;
+    let agent_retired = account.connection.as_ref().is_some_and(|connection| {
+        connection
+            .snapshot()
+            .cause
+            .as_ref()
+            .is_some_and(crate::AccountNetworkingReason::agent_retired)
+    });
     if let Some(native) = &account.client.born_v3_account {
+        if agent_retired {
+            return Err(SdkError::AgentCreationRefused("agent_retired"));
+        }
         let now = crate::custody::network_now()?;
         let current =
             crate::custody::load_account_after_install(&state.config.data_root, id, now).await?;

@@ -53,6 +53,7 @@ impl Presentation {
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<(), CardError> {
+        ramflux_protocol::a2ui::DisplayLocale::parse(&self.locale)?;
         let reference = Self::bundled("en", false)?;
         if self.locale.is_empty()
             || self.locale.len() > 35
@@ -90,7 +91,9 @@ impl Presentation {
     pub fn text(&self, key: &str) -> &str {
         self.strings.get(key).map_or("", String::as_str)
     }
-    pub(crate) fn format(&self, key: &str, values: &[(&str, &str)]) -> String {
+    /// Substitute only host catalog placeholders; replacement text remains opaque.
+    #[must_use]
+    pub fn format(&self, key: &str, values: &[(&str, &str)]) -> String {
         let mut result = String::new();
         let mut rest = self.text(key);
         while let Some((prefix, tail)) = rest.split_once('{') {
@@ -107,9 +110,6 @@ impl Presentation {
         }
         result.push_str(rest);
         result
-    }
-    pub(crate) fn owns_color(&self, value: &str) -> bool {
-        self.tokens.values().any(|token| token.as_str() == Some(value))
     }
 }
 fn color(value: &str) -> bool {
@@ -157,31 +157,15 @@ mod tests {
                 "peer JSON cannot select host presentation"
             );
         }
-        let mut json: serde_json::Value = serde_json::from_str(input).expect("test: fixture");
-        let form = json
-            .get_mut("components")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|v| v.first_mut())
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("test: form object");
-        form.insert("fields".into(), serde_json::json!([]));
-        assert!(
-            crate::CardSpec::parse(&serde_json::to_vec(&json).expect("test: empty form")).is_err(),
-            "explicit fields must be nonempty"
-        );
-        let form = json
-            .get_mut("components")
-            .and_then(serde_json::Value::as_array_mut)
-            .and_then(|v| v.first_mut())
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("test: form object");
-        form.remove("fields");
-        form.insert("label".into(), "Name".into());
-        form.insert("binding".into(), "/name".into());
-        assert!(
-            crate::CardSpec::parse(&serde_json::to_vec(&json).expect("test: legacy specimen"))
-                .is_err(),
-            "single-field legacy spelling is rejected"
-        );
+        let mut spec = crate::runtime::tests::fixture();
+        spec.snapshot
+            .components
+            .first_mut()
+            .expect("test: component")
+            .as_object_mut()
+            .expect("test: object")
+            .insert("fields".into(), serde_json::json!([]));
+        spec.signed_hash = spec.snapshot.hash().expect("test: updated hash");
+        assert!(spec.validate().is_err(), "legacy fields are not admitted by the v3 catalog");
     }
 }
