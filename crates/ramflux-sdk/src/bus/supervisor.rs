@@ -47,6 +47,12 @@ pub(super) struct Supervisor {
     lifecycle_registry: super::lifecycle_registry::Registry,
 }
 
+pub(super) enum OpenJournal {
+    Unavailable,
+    Resync,
+    Ready(Box<super::subscription::JournalFollow>),
+}
+
 impl Supervisor {
     pub(super) fn new(mut config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
         if config.pairing.is_none() {
@@ -1099,6 +1105,39 @@ impl Supervisor {
             self.streams.borrow_mut().insert(connection.connection_id, task);
         }
         Ok(())
+    }
+
+    /// Tails the journal only when this account's reader pool is already open.
+    /// A missing pool stays ephemeral so restore and attended opens still acknowledge.
+    pub(super) async fn prepare_open_journal(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<OpenJournal, SdkError> {
+        let Some(id) = request.account_id.as_deref() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Ok(readers) = actor.reader_pool() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        match super::subscription::prepare_follow(readers, request, &connection.outbound).await? {
+            None => Ok(OpenJournal::Resync),
+            Some(follow) => Ok(OpenJournal::Ready(Box::new(follow))),
+        }
+    }
+
+    pub(super) fn install_stream(&self, id: u64, task: tokio::task::JoinHandle<()>) {
+        self.clear_stream(id);
+        self.streams.borrow_mut().insert(id, task);
+    }
+
+    pub(super) fn clear_stream(&self, id: u64) {
+        if let Some(previous) = self.streams.borrow_mut().remove(&id) {
+            previous.abort();
+        }
     }
 
     pub(super) fn subscribe(&self, connection: &LocalBusConnectionState, account_id: String) {
