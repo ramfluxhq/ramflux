@@ -20,18 +20,22 @@ pub(super) async fn dispatch_identity_authority(
         .await?;
     if let Some(native) = &manifest.custody {
         let record = &native.publication.record.body;
-        return Ok(local_bus_ok(json!({
+        let mut body = json!({
             "principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,
             "principal_kind":record.principal_kind,"kind_asserted":record.profile.kind,
             "kind_verified":account.client.verified_identity_profile(&record.principal_id)?.is_some(),
             "safety_kind_verified":account.client.verified_principal_kind(&record.principal_id)?.is_some(),
             "identity_scheme":"custody_v3","devices":record.devices,
-        })));
+        });
+        body[crate::VerifiedClassification::FIELD] =
+            json!(account.client.verified_classification(&record.principal_id)?);
+        return Ok(local_bus_ok(body));
     }
     let record = manifest
         .signed_device_set
         .ok_or_else(|| SdkError::InboundRejected("signed device set absent".into()))?;
-    Ok(local_bus_ok(
-        json!({"principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,"principal_kind":record.principal_kind,"kind_asserted":record.profile.as_ref().map(|p|p.kind),"kind_verified":account.client.verified_identity_profile(&record.principal_id)?.is_some(),"safety_kind_verified":account.client.verified_principal_kind(&record.principal_id)?.is_some(),"devices":record.devices}),
-    ))
+    let mut body = json!({"principal_id":record.principal_id,"device_set_epoch":record.device_set_epoch,"principal_kind":record.principal_kind,"kind_asserted":record.profile.as_ref().map(|p|p.kind),"kind_verified":account.client.verified_identity_profile(&record.principal_id)?.is_some(),"safety_kind_verified":account.client.verified_principal_kind(&record.principal_id)?.is_some(),"devices":record.devices});
+    body[crate::VerifiedClassification::FIELD] =
+        json!(account.client.verified_classification(&record.principal_id)?);
+    Ok(local_bus_ok(body))
 }

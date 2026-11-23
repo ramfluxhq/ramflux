@@ -16,6 +16,7 @@
     "allowSyntheticDefaultImports": true
   },
   "files": [
+    "gallery-data.d.ts",
     "adapter.ts",
     "worker.ts",
     "env.ts",

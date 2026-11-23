@@ -13,6 +13,29 @@ use super::store::{AgentCreationRecord, AgentCreationStore};
 use crate::SdkError;
 use std::future::Future;
 
+/// Whether this rebind publication is still the one the inventory names.
+///
+/// Any other publication state still advances. A pending or unknown rebind whose inventory names
+/// a different request, or none, stays where it is.
+fn publication_is_current(
+    store: &AgentCreationStore,
+    record: &AgentCreationRecord,
+) -> Result<bool, SdkError> {
+    if !matches!(
+        record.state,
+        AgentCreationState::PublicationPending | AgentCreationState::PublicationUnknown
+    ) {
+        return Ok(true);
+    }
+    let Some(account_id) = record.account_id.as_deref() else {
+        return Ok(true);
+    };
+    let Some(entry) = store.load_rebind(account_id)? else {
+        return Ok(true);
+    };
+    Ok(entry.request_id.as_deref() == Some(record.request_id.as_str()))
+}
+
 /// Whether the agent of this record has a paused binding (rebind pending or committed) in the
 /// inventory. Such an agent is neither activated nor connected by an advance.
 fn binding_is_paused(
@@ -92,6 +115,11 @@ pub async fn advance_one<S: AgentSteps>(
 ) -> Result<AgentCreationState, SdkError> {
     let mut record = store.load(request_id)?.ok_or(SdkError::CustodySetupInvalid)?;
     if is_rebind(&record) {
+        // Reassociation clears the inventory request id, so an earlier approval is not published
+        // again. The request the inventory still names follows the ordinary publication path.
+        if !publication_is_current(store, &record)? {
+            return Ok(record.state);
+        }
         return advance_rebind(steps, record, now).await;
     }
     // Stage D3: an agent whose binding is paused (rebind pending or committed) is never activated
@@ -160,6 +188,9 @@ pub async fn advance_all<S: AgentSteps>(
     store: &AgentCreationStore,
     now: u64,
 ) -> Result<Vec<(String, Result<AgentCreationState, SdkError>)>, SdkError> {
+    if super::reassociate::store_is_fenced(store)? {
+        return Ok(Vec::new());
+    }
     let mut outcomes = Vec::new();
     for record in store.pending()? {
         let outcome = advance_one(steps, store, &record.request_id, now).await;

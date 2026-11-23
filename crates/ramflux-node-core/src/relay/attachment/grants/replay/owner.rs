@@ -24,6 +24,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod status;
+pub use status::AttachmentCheckpoint;
+
 #[cfg(test)]
 mod tests;
 
@@ -227,12 +230,9 @@ impl super::super::ScopedGrantRegistry {
     ) -> Result<AttachmentReservation, OwnerAdmissionError> {
         let spec = segment_spec(record, checked.op.segment_index)?;
         let mut body = std::io::Cursor::new(request.body);
-        if let Err(error) = backend.write_chunk(&spec, checked.op.offset, &mut body) {
-            return Err(match backend.delete(&spec) {
-                Ok(()) => publication(error),
-                Err(delete_error) => publication(delete_error),
-            });
-        }
+        // A rejected retry must not retire the object or destroy previously accepted slices.
+        // Incomplete writes have no checkpoint; reconciliation verifies the durable bits.
+        backend.write_chunk(&spec, checked.op.offset, &mut body).map_err(publication)?;
         let current = self.ledger.reservation(&checked.owner, &checked.op.operation_id)?;
         let retired = matches!(
             current.state,

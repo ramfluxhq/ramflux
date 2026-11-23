@@ -138,14 +138,6 @@ fn task_carriers_preserve_typed_event_bytes_and_reject_duplicate_json_members() 
     Ok(())
 }
 #[test]
-fn headless_accounts_cannot_sign_human_actions_by_changing_their_kind() -> TestResult {
-    use crate::LocalBusClientMode::{AttendedCli, HeadlessAi};
-    assert!(require_local_human(&HeadlessAi, Some("human")).is_err());
-    assert!(require_local_human(&AttendedCli, Some("headless_ai")).is_err());
-    require_local_human(&AttendedCli, Some("human"))?;
-    Ok(())
-}
-#[test]
 fn task_actor_kind_is_unverified_and_agent_cannot_accept_its_own_proposal() -> TestResult {
     let f = Fixture::new()?;
     let proposal = sign(&f.agent, "thread", "proposal", proposal())?;

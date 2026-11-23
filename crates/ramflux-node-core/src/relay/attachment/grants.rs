@@ -12,7 +12,8 @@ pub use renewal::{
     ChallengeMint, HomeVerdict, RenewalAdmission, RenewalChallenge, RenewalPolicy, RenewalRefusal,
 };
 pub use replay::{
-    AttachmentReplayError, AttachmentReplayProof, OwnerAdmission, OwnerAdmissionError,
+    AttachmentCheckpoint, AttachmentReplayError, AttachmentReplayProof, OwnerAdmission,
+    OwnerAdmissionError,
 };
 pub use wire::{ChallengeEnvelope, ForwardedRenewal, RequesterWire};
 #[cfg(any(test, feature = "test-support"))]

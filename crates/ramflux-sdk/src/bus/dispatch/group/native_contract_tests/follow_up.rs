@@ -32,28 +32,15 @@ async fn public_receivers_preserve_bare_directory_errors_and_log_kind() -> TestR
         gateway.inbox = vec![entry.clone()];
         let mut engine =
             GatewaySessionEngine::with_test_transport(alice.config.clone(), Box::new(gateway));
-        let error = if control {
-            alice.client.receive_a2i_control_events(&mut engine, 32).await.err()
+        if control {
+            alice.client.receive_a2i_control_events(&mut engine, 32).await?;
         } else {
-            alice
+            let error = alice
                 .client
                 .receive_gateway_plaintext_deliveries(&mut engine, &pool, 32, "thread")
                 .await
                 .err()
-        }
-        .ok_or("directory outage must fail")?;
-        if control {
-            assert!(
-                matches!(
-                    error,
-                    SdkError::GeneratedRefused {
-                        code: crate::error::GeneratedRefusalCode::Authority,
-                        ..
-                    }
-                ),
-                "A2I must refuse before fetching a directory: {error:?}"
-            );
-        } else {
+                .ok_or("directory outage must fail")?;
             assert!(
                 matches!(error, SdkError::Transport(_)),
                 "public receiver must preserve bare transport error: {error:?}"

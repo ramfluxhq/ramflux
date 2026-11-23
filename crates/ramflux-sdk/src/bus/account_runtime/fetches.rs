@@ -173,7 +173,12 @@ impl AccountRuntime {
             }
             Ok(Dispatch::Complete(body)) => {
                 if let Some(reply) = reply {
-                    let _ = reply.send(Ok(ActorResponse { body, events: Vec::new(), nodes: None }));
+                    let _ = reply.send(Ok(ActorResponse {
+                        body,
+                        events: Vec::new(),
+                        nodes: None,
+                        owner_copy: None,
+                    }));
                 }
             }
             Ok(Dispatch::Queued(job)) => {
@@ -421,7 +426,7 @@ impl AccountRuntime {
             Ok::<_, SdkError>(body)
         })?;
         self.transfers.fetches.get_mut(&id).ok_or_else(stopped)?.outcome =
-            Some(Ok(ActorResponse { body, events: Vec::new(), nodes: None }));
+            Some(Ok(ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None }));
         Ok(())
     }
 }

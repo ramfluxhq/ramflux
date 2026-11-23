@@ -29,6 +29,8 @@ impl BusStream for MemoryStream {
     }
 
     fn accepts_credential_prompt(&self) -> bool {
+        // Connect samples this once, before the host can register a callback.
+        // Unlock reads that registration directly.
         false
     }
 
@@ -170,6 +172,7 @@ pub(crate) fn method_names() -> Vec<&'static str> {
         "agent.operation.get",
         "agent.list",
         "agent.get",
+        "agent.host.manage",
         "agent.persona.edit",
         "agent.access.set",
         "agent.watch",

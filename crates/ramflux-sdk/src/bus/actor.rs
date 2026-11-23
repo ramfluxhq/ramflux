@@ -23,11 +23,19 @@ pub(super) enum AgentPrivate {
     HomeNode {
         reply: oneshot::Sender<Result<Option<String>, SdkError>>,
     },
+    /// The account's gateway config, for a public directory read outside this actor.
+    Gateway {
+        reply: oneshot::Sender<Result<Option<crate::gateway::GatewaySessionConfig>, SdkError>>,
+    },
     /// The live pairing-admission reader of this unlocked account, if it is still open.
     Admission {
         reply: oneshot::Sender<
             Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError>,
         >,
+    },
+    /// Finish or drop an authority-refresh marker that still fences this primary.
+    SettleAdmission {
+        reply: oneshot::Sender<Result<(), SdkError>>,
     },
     Call {
         call: super::agent_methods::AgentCall,
@@ -60,6 +68,11 @@ pub(super) enum PrivateCommand {
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
     /// An agent creation command; boxed so the agent payloads do not grow this enum.
     Agent(Box<AgentPrivate>),
+    /// Commits one owner copy of an agent-activity row. The supervisor routes it.
+    ProjectActivity {
+        activity: Box<OwnerActivity>,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -87,11 +100,20 @@ pub(super) struct AccountCommand {
     pub reply: Option<oneshot::Sender<Result<ActorResponse, SdkError>>>,
 }
 
+/// One stored agent-activity row to commit on the human owner's actor.
+#[derive(Clone)]
+pub(crate) struct OwnerActivity {
+    pub owner_id: String,
+    pub state_kind: String,
+    pub record: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub(super) struct ActorResponse {
     pub body: serde_json::Value,
     pub events: Vec<LocalBusFrame>,
     pub nodes: Option<crate::node::NodeStore>,
+    pub owner_copy: Option<Box<OwnerActivity>>,
 }
 
 #[derive(Clone)]
@@ -273,6 +295,16 @@ impl AccountActor {
         }
     }
 
+    /// Stores one activity row on this owner actor. The caller is the supervisor.
+    ///
+    /// # Errors
+    /// Returns the actor's typed refusal. A stopped actor is `LocalBus`.
+    pub(super) async fn project_activity(&self, activity: OwnerActivity) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::ProjectActivity { activity: Box::new(activity), reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+
     pub(super) async fn unlock_native(
         &self,
         secret: super::native_account::NativeUnlockSecret,
@@ -335,6 +367,14 @@ impl AccountActor {
         self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Call { call, reply })))?;
         response.await.map_err(|_| stopped())?
     }
+    /// The gateway this account already uses, so a directory read does not build a second one.
+    pub(super) async fn agent_gateway(
+        &self,
+    ) -> Result<Option<crate::gateway::GatewaySessionConfig>, SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Gateway { reply })))?;
+        response.await.map_err(|_| stopped())?
+    }
     /// The stored home node of this human account (`account/node-id`), read by its runtime.
     pub(super) async fn agent_home_node(&self) -> Result<Option<String>, SdkError> {
         let (reply, response) = oneshot::channel();
@@ -347,6 +387,14 @@ impl AccountActor {
     ) -> Result<Option<std::sync::Arc<ramflux_storage::PairingAdmissionReader>>, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::Admission { reply })))?;
+        response.await.map_err(|_| stopped())?
+    }
+    /// Settle a leftover authority-refresh marker on this account's runtime, before a proof.
+    pub(super) async fn settle_primary_admission(&self) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::Agent(Box::new(AgentPrivate::SettleAdmission {
+            reply,
+        })))?;
         response.await.map_err(|_| stopped())?
     }
     pub(super) async fn capture_backup(
@@ -463,6 +511,7 @@ impl AccountActor {
                 body: readers.request(command.request).await?,
                 events: Vec::new(),
                 nodes: None,
+                owner_copy: None,
             });
         }
         let (sender, receiver) = oneshot::channel();

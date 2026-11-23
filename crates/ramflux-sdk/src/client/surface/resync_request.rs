@@ -322,8 +322,8 @@ impl RamfluxClient {
         {
             return Err(invalid("resync reply requires the original author device"));
         }
-        if rpc && !self.surface_author_is_own_agent(&reply.carrier.author_principal_id)? {
-            return Err(invalid("RPC replies require an own agent"));
+        if rpc && !self.rpc_resync_reply_author_bound(&reply.carrier)? {
+            return Err(invalid("RPC resync reply is not bound to this conversation"));
         }
         let target = &reply.destination;
         let device = self.trusted_device(
@@ -347,6 +347,32 @@ impl RamfluxClient {
             )?;
         }
         Ok(())
+    }
+    /// This device may answer an RPC when it is the author, owns the author, or shares
+    /// the card's conversation with that author. Snapshot replies stay author-device only.
+    fn rpc_resync_reply_author_bound(&self, carrier: &Carrier) -> Result<bool, SdkError> {
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if carrier.author_principal_id == local.principal_id
+            || self.surface_author_is_own_agent(&carrier.author_principal_id)?
+        {
+            return Ok(true);
+        }
+        let Some(thread) =
+            self.account_db()?.client_record("conversation", &carrier.conversation_id)?
+        else {
+            return Ok(false);
+        };
+        if let Some(group) =
+            thread.get("group_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+        {
+            return self.surface_group_device_allowed(group, &self.owned_device_identity()?);
+        }
+        let author = carrier.author_principal_id.as_str();
+        let local_id = local.principal_id.as_str();
+        Ok(thread.get("participants").and_then(Value::as_array).is_some_and(|ids| {
+            ids.iter().any(|peer| peer.as_str() == Some(local_id))
+                && ids.iter().any(|peer| peer.as_str() == Some(author))
+        }))
     }
 
     /// Content builder shared with the live surface courier `prepare` path.

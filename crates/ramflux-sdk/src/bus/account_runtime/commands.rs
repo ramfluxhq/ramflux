@@ -3,6 +3,7 @@
 
 //! Claimed commands, lifecycle preemption, and bounded ordinary dispatch.
 
+use super::super::publication_wait::dispatch;
 use super::{AccountRuntime, stopped};
 use crate::bus::actor::AccountCommand;
 use crate::prelude::*;
@@ -155,6 +156,11 @@ impl AccountRuntime {
                 let result = self.authorize_backup(generation);
                 let _ = reply.send(result);
             }
+            super::super::actor::PrivateCommand::ProjectActivity { activity, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.store_owner_activity(*activity));
+                }
+            }
             super::super::actor::PrivateCommand::Agent(command) => self.apply_agent(*command),
             super::super::actor::PrivateCommand::Capture(reply) => {
                 if !reply.is_closed() {
@@ -254,6 +260,7 @@ impl AccountRuntime {
         }
         #[cfg(test)]
         let receive_gate_hook = self.receive_gate_hook.take();
+        let command_timeout = self.timeouts.command;
         let mut stopping = false;
         let mut cancelled = false;
         let mut preempted = false;
@@ -268,9 +275,7 @@ impl AccountRuntime {
                 result = async {
                     #[cfg(test)]
                     wait_receive_gate(receive_gate_hook).await;
-                    let deadline=command.admission.as_ref().map_or_else(||tokio::time::Instant::now()+self.timeouts.command,|admission|admission.command_deadline);
-                    super::super::command_admission::COMMAND_CONTEXT.scope(deadline, tokio::time::timeout_at(deadline,super::super::mutations::execute(&mut self.state,&self.id,&command))).await
-                        .map_err(|_|super::super::command_admission::unavailable("account command deadline expired"))?
+                    dispatch(&mut self.state, &self.id, &command, command_timeout).await
                 } => result,
             }
         };
@@ -330,6 +335,17 @@ impl AccountRuntime {
         }
         let result = match self.publish(&command.request).await {
             Ok(()) => result,
+            // The progress row is already committed. A later outbox wake can fail
+            // with the writer pause, which the bus reports as ValidationFailed.
+            // The host does not retry that code, so the owner copy must still go out.
+            Err(error) if result.is_ok() && command.request.method == "agent.progress" => {
+                tracing::warn!(
+                    account_id = %self.id,
+                    %error,
+                    "agent progress publication deferred; owner copy remains"
+                );
+                result
+            }
             Err(error) => Err(error),
         };
         let _ = reply.send(result);
@@ -339,6 +355,30 @@ impl AccountRuntime {
 }
 
 impl AccountRuntime {
+    fn store_owner_activity(
+        &self,
+        activity: super::super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        if activity.owner_id != self.id {
+            tracing::warn!(
+                owner_id = %activity.owner_id,
+                account_id = %self.id,
+                reason_code = "owner_actor_mismatch",
+                "agent activity owner copy was not stored"
+            );
+            return Err(SdkError::AccountNotOpen(activity.owner_id));
+        }
+        // This thread's pause scope belongs to whichever account last armed it.
+        // The copy is one short command; a foreign scope must not refuse it.
+        let _guard = ramflux_storage::writer_budget::ServiceGuard::enter();
+        let client = &local_bus_account(&self.state, &self.id)?.client;
+        crate::client::agent_activity::store_owner_copy(
+            client,
+            &activity.state_kind,
+            activity.record,
+        )
+    }
+
     pub(super) async fn start_owned_command(
         &mut self,
         command: AccountCommand,

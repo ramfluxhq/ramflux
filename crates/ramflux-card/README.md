@@ -24,8 +24,8 @@ one catalog and one renderer path.
 
 The example documents the shape; an empty component list is not an admitted
 surface. `surface_ref` is the snapshot's `surfaceId`. The SDK must authenticate
-the conversation and author and set `render_allowed` from its own-agent read
-gate. A supplied boolean is not proof of authority. This crate validates the
+the conversation and author and set `render_allowed` from the stored open
+snapshot. A supplied boolean is not proof of authority. This crate validates the
 signed snapshot commitment and protocol state; it has no account registry,
 network, signing credentials, approval authority or attachment access. Closure
 or loss of `render_allowed` retires an existing session and removes its tree and

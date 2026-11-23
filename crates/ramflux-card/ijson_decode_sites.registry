@@ -14,3 +14,5 @@ crates/ramflux-card/examples/card-render.rs | main | 1 | E | excluded=bounded op
 crates/ramflux-card/src/spec.rs | parse | 1 | E | excluded=bounded strict I-JSON SDK-authorized surface rendering envelope outside Envelope/Ack/Nack admission
 crates/ramflux-card/src/projection.rs | project | 1 | E | excluded=closed native kind decoded only from already schema-validated public resolver output
 crates/ramflux-card/src/projection.rs | slot | 1 | E | excluded=typed task binding from already schema-validated public resolver output; request only, no approval authority
+crates/ramflux-card/src/web.rs | open_preview | 1 | E | excluded=bounded strict I-JSON local showcase envelope; normal CardSpec admission follows recomputed development commitment
+crates/ramflux-card/src/web.rs | open_preview | 2 | E | excluded=bounded strict I-JSON local showcase model; normal resolver admission follows before rendering

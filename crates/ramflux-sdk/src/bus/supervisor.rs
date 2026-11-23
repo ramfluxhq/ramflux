@@ -31,6 +31,7 @@ pub(super) struct Supervisor {
     pub(super) daemon_attended: RefCell<BTreeSet<u64>>,
     pub(super) installing: RefCell<BTreeSet<String>>,
     backup_expiry: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    agent_repairs: RefCell<Option<tokio::task::JoinHandle<()>>>,
     pub(super) accounts: RefCell<BTreeMap<String, AccountActor>>,
     restore_states: RefCell<BTreeMap<String, RestoreState>>,
     subscribers: Rc<RefCell<BTreeMap<u64, LocalBusSubscriber>>>,
@@ -77,6 +78,7 @@ impl Supervisor {
             daemon_attended: RefCell::new(BTreeSet::default()),
             installing: RefCell::new(BTreeSet::default()),
             backup_expiry: RefCell::new(None),
+            agent_repairs: RefCell::new(None),
             config,
             index,
             stop_requested,
@@ -402,12 +404,17 @@ impl Supervisor {
             self.set_active(&id).await?;
             return Ok(reply(serde_json::to_value(result)?));
         }
-        // The in-process carrier cannot answer `device.credential.request`. Sending it makes the
-        // C ABI reader tear the worker down, and every later call completes as Closed.
-        if !prompts {
+        // Without a registered callback the in-process carrier cannot answer
+        // `device.credential.request`. Sending it makes the C ABI reader tear the worker down.
+        // A device wrap already returned above, so cold open and resume stay prompt-free.
+        if !prompts && !self.credential_callback_registered() {
             return Err(code_required());
         }
         self.prompted_unlock(call, &id).await
+    }
+
+    fn credential_callback_registered(&self) -> bool {
+        self.config.credential_callback.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -642,7 +649,7 @@ impl Supervisor {
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
         request.nodes = Some(self.nodes.borrow().clone());
-        let response = if matches!(
+        let requested = if matches!(
             request.request.method.as_str(),
             "device.transfer.begin"
                 | "device.transfer.status"
@@ -654,6 +661,15 @@ impl Supervisor {
             super::command_admission::RETAIN_COMPLETION.scope((), actor.request(request)).await
         } else {
             actor.request(request).await
+        };
+        let response = match requested {
+            Ok(mut response) => {
+                if let Some(activity) = response.owner_copy.take() {
+                    self.deliver_owner_copy(*activity).await?;
+                }
+                Ok(response)
+            }
+            Err(error) => Err(error),
         };
         if creating && response.is_ok() {
             self.restore_states.borrow_mut().remove(&id);
@@ -1226,6 +1242,10 @@ impl Supervisor {
     }
 
     pub(super) fn start_event_router(&self) {
+        if self.agent_repairs.borrow().is_none() {
+            let owner = self.owner.borrow().clone();
+            *self.agent_repairs.borrow_mut() = Some(spawn_agent_repairs(owner));
+        }
         if self.backup_expiry.borrow().is_none() {
             let jobs = self.backup_jobs.clone();
             *self.backup_expiry.borrow_mut() = Some(tokio::task::spawn_local(async move {
@@ -1249,6 +1269,9 @@ impl Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        if let Some(task) = self.agent_repairs.get_mut().take() {
+            task.abort();
+        }
         if let Some(task) = self.backup_expiry.get_mut().take() {
             task.abort();
         }
@@ -1259,6 +1282,22 @@ impl Drop for Supervisor {
             task.abort();
         }
     }
+}
+
+/// The worker future stays in this frame. Inlining it into `activate_native` makes that
+/// caller's future larger than the clippy limit.
+#[inline(never)]
+fn spawn_agent_repairs(owner: std::rc::Weak<Supervisor>) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(supervisor) = owner.upgrade() else { break };
+            if *supervisor.stop_requested.borrow() {
+                break;
+            }
+            Box::pin(supervisor.maintain_agent_repairs()).await;
+        }
+    })
 }
 
 fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> AccountCommand {
@@ -1279,8 +1318,39 @@ fn command(request: LocalBusFrame, connection: &LocalBusConnectionState) -> Acco
 fn not_open(id: &str) -> SdkError {
     SdkError::AccountNotOpen(id.to_owned())
 }
+
+impl Supervisor {
+    /// Commits an agent-activity row on the human owner's actor.
+    ///
+    /// # Errors
+    /// `AccountNotOpen` when that actor is not unlocked. The agent's own row stays stored.
+    pub(super) async fn deliver_owner_copy(
+        &self,
+        activity: super::actor::OwnerActivity,
+    ) -> Result<(), SdkError> {
+        let owner_id = activity.owner_id.clone();
+        let actor = self.accounts.borrow().get(&owner_id).filter(|actor| actor.is_open()).cloned();
+        let Some(actor) = actor else {
+            tracing::warn!(
+                owner_id = %owner_id,
+                reason_code = "owner_not_open",
+                "agent activity owner copy was not stored"
+            );
+            return Err(not_open(&owner_id));
+        };
+        actor.project_activity(activity).await.map_err(|error| {
+            tracing::warn!(
+                %error,
+                owner_id = %owner_id,
+                reason_code = "owner_copy_failed",
+                "agent activity owner copy was not stored"
+            );
+            error
+        })
+    }
+}
 fn reply(body: serde_json::Value) -> ActorResponse {
-    ActorResponse { body, events: Vec::new(), nodes: None }
+    ActorResponse { body, events: Vec::new(), nodes: None, owner_copy: None }
 }
 
 fn opens_account(method: &str) -> bool {

@@ -36,8 +36,9 @@ pub(super) struct EventFields {
     pub conversation_id: String,
     pub event: TaskEventBody,
 }
-/// Trusted caller-owned mapping from the authenticated current device key to principal and
-/// account role. Neither principal nor role may be inferred from untrusted event content.
+/// Trusted caller-owned mapping from the authenticated current device key to principal.
+/// `actor_type` is caller context. Lifecycle authority does not read it.
+/// Neither principal nor this label may be inferred from untrusted event content.
 /// The caller also verifies conversation membership and external decision binding/single use.
 #[derive(Clone, Debug)]
 pub struct TaskSigner<'a> {
