@@ -156,9 +156,14 @@ makes the VM inactive; hosts must cancel requests. Resume drops a failed VM,
 clears old callbacks/sheets, retains consumed submits and drafts, and rebuilds
 with a fresh token identity using the same cumulative execution budget.
 
-The offline `card-pack` tool signs the linted `library/form.js` using an
-operator-provided seed and release metadata. ABI 5 requires fresh artifacts;
-old artifacts fail admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
+The offline `card-pack` tool signs the linted `library/form.js` from a 32-byte
+Ed25519 operator seed and release metadata. The SDK bundles the ABI 5 development
+package at release 1:3; its seed was generated outside the repository and removed
+after packaging. Only the public verification key is committed. This development
+key must not ship as a production release key; production signing-key custody and
+rotation remain an owner release-process decision. The ABI 4 development package
+at release 1:2 is retired. ABI 5 requires fresh artifacts; old artifacts fail
+admission. `card-render PACKAGE_PREFIX ENVELOPE [UPDATED]`
 loads `.qjb`, `.descriptor.json`, `.sig`, `.pub` and the independently pinned
 `.policy.json` and prints the actual tree/mount/update batches. It accepts only
 local operator files and performs no authentication on their behalf. Production
