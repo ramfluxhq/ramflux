@@ -280,6 +280,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         ledger: None,
         transient: crate::bus::account_runtime::TransientHost::default(),
         pairing: crate::bus::account_runtime::pairing_calls::Calls::default(),
+        username: crate::bus::account_runtime::username_calls::Calls::default(),
         transfers: super::super::uploads::Transfers::start(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {

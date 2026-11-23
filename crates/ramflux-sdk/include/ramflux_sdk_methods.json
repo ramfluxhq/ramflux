@@ -1940,6 +1940,51 @@
       "secret_input": true,
       "secret_output": true,
       "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "username",
+      "key_export": false,
+      "name": "username.mutate",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "username",
+      "key_export": false,
+      "name": "username.status",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "username",
+      "key_export": false,
+      "name": "username.resolve",
+      "secret_input": false,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "username",
+      "key_export": false,
+      "name": "username.contact.add",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
+    },
+    {
+      "bridge_allowed": false,
+      "capability": "profile",
+      "key_export": false,
+      "name": "profile.update",
+      "secret_input": true,
+      "secret_output": true,
+      "show_once": false
     }
   ],
   "policy_version": 2

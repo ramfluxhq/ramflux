@@ -62,6 +62,7 @@ mod readers;
 mod requests;
 pub(crate) mod secrets;
 mod shared_group_sync;
+mod username_directory;
 pub(crate) use shared_group_sync::enqueue as enqueue_shared_group;
 pub(crate) mod push_receiver;
 mod socket;
