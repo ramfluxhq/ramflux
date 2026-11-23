@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! CLDR number, date and plural formatting for the launch locales.
+//! Digits use each locale's CLDR 48 default numbering system (ICU4X 2.1.1).
 use super::Reject;
 use super::locale::DisplayLocale;
 use icu_calendar::cal::Gregorian;
@@ -41,7 +42,7 @@ fn render_number(
     default_decimals: usize,
 ) -> Result<String, Reject> {
     let (value, decimals, grouping) = number_args(args, default_decimals)?;
-    render_decimal(locale.format_tag(), value, decimals, grouping)
+    render_decimal(locale, value, decimals, grouping)
 }
 fn render_currency(args: &Map<String, Value>, locale: DisplayLocale) -> Result<String, Reject> {
     let currency = args.get("currency").and_then(Value::as_str).ok_or(Reject::Expression)?;
@@ -50,7 +51,7 @@ fn render_currency(args: &Map<String, Value>, locale: DisplayLocale) -> Result<S
     }
     let digits = usize::from(u8::from(!matches!(currency, "JPY" | "KRW"))) * 2;
     let (value, decimals, grouping) = number_args(args, digits)?;
-    let magnitude = render_decimal(locale.format_tag(), value.abs(), decimals, grouping)?;
+    let magnitude = render_decimal(locale, value.abs(), decimals, grouping)?;
     let symbol = currency_symbol(currency, locale.format_tag());
     let sign = if value.is_sign_negative() { "-" } else { "" };
     let gap = if symbol == currency { "\u{a0}" } else { "" };
@@ -87,7 +88,7 @@ fn render_date(args: &Map<String, Value>, locale: DisplayLocale) -> Result<Strin
                 count = count.saturating_add(1);
             }
             let (shape, kind) = token_shape(ch, count)?;
-            let rendered = format_token(locale.format_tag(), shape, kind, when)?;
+            let rendered = format_token(locale, shape, kind, when)?;
             push_limited(&mut out, &rendered)?;
         } else {
             push_limited(&mut out, &ch.to_string())?;
@@ -121,19 +122,31 @@ fn number_args(
     Ok((value, decimals, grouping))
 }
 fn render_decimal(
-    tag: &str,
+    locale: DisplayLocale,
     value: f64,
     decimals: usize,
     grouping: bool,
 ) -> Result<String, Reject> {
     let literal = format!("{value:.decimals$}");
     let decimal = Decimal::from_str(&literal).map_err(|_| Reject::Expression)?;
+    let numbering = number_locale(locale);
+    let formatter = match decimal_formatter(&numbering, grouping) {
+        Ok(formatter) => formatter,
+        Err(reject) => {
+            let fallback = icu_locale(locale.format_tag());
+            if fallback == numbering {
+                return Err(reject);
+            }
+            decimal_formatter(&fallback, grouping)?
+        }
+    };
+    bounded(&formatter.format_to_string(&decimal))
+}
+fn decimal_formatter(locale: &Locale, grouping: bool) -> Result<DecimalFormatter, Reject> {
     let mut options = DecimalFormatterOptions::default();
     options.grouping_strategy =
         Some(if grouping { GroupingStrategy::Always } else { GroupingStrategy::Never });
-    let formatter = DecimalFormatter::try_new(icu_locale(tag).into(), options)
-        .map_err(|_| Reject::Expression)?;
-    bounded(&formatter.format_to_string(&decimal))
+    DecimalFormatter::try_new(locale.clone().into(), options).map_err(|_| Reject::Expression)
 }
 fn plural_literal(value: f64) -> Result<String, Reject> {
     if !value.is_finite() || value.abs() > MAX_NUMBER {
@@ -250,12 +263,35 @@ enum NameKind {
     Period,
 }
 fn format_token(
-    tag: &str,
+    locale: DisplayLocale,
     shape: &str,
     kind: NameKind,
     when: OffsetDateTime,
 ) -> Result<String, Reject> {
-    let mut names = FixedCalendarDateTimeNames::<Gregorian>::try_new(icu_locale(tag).into())
+    let numbering = match kind {
+        NameKind::Numeric => number_locale(locale),
+        _ => icu_locale(locale.format_tag()),
+    };
+    match write_token(&numbering, shape, kind, when) {
+        Ok(text) => Ok(text),
+        Err(reject) if matches!(kind, NameKind::Numeric) => {
+            let fallback = icu_locale(locale.format_tag());
+            if fallback == numbering {
+                Err(reject)
+            } else {
+                write_token(&fallback, shape, kind, when)
+            }
+        }
+        Err(reject) => Err(reject),
+    }
+}
+fn write_token(
+    locale: &Locale,
+    shape: &str,
+    kind: NameKind,
+    when: OffsetDateTime,
+) -> Result<String, Reject> {
+    let mut names = FixedCalendarDateTimeNames::<Gregorian>::try_new(locale.clone().into())
         .map_err(|_| Reject::Expression)?;
     load_names(&mut names, kind)?;
     let pattern = DateTimePattern::try_from_pattern_str(shape).map_err(|_| Reject::Expression)?;
@@ -272,7 +308,10 @@ fn load_names(
     kind: NameKind,
 ) -> Result<(), Reject> {
     match kind {
-        NameKind::Numeric => Ok(()),
+        NameKind::Numeric => {
+            names.include_decimal_formatter().map_err(|_| Reject::Expression)?;
+            Ok(())
+        }
         NameKind::MonthAbbr => names
             .include_month_names(MonthNameLength::Abbreviated)
             .map(|_| ())
@@ -304,6 +343,19 @@ fn gregorian_datetime(when: OffsetDateTime) -> Result<DateTime<Gregorian>, Rejec
 }
 fn icu_locale(tag: &str) -> Locale {
     Locale::from_str(tag).unwrap_or(locale!("en"))
+}
+/// Numbering locale for ICU4X 2.1.1, which bakes CLDR 48.0.0 `defaultNumberingSystem`.
+/// A requested region is used only when the launch tag has none and the language matches:
+/// plain `ar` stays Latin, `ar-EG` is Arabic-Indic, and `zh-HK` stays on `zh-TW`.
+fn number_locale(locale: DisplayLocale) -> Locale {
+    let format = icu_locale(locale.format_tag());
+    let Ok(requested) = Locale::from_str(locale.requested_tag()) else {
+        return format;
+    };
+    let widen = requested.id.language == format.id.language
+        && format.id.region.is_none()
+        && requested.id.region.is_some();
+    if widen { requested } else { format }
 }
 fn bounded(text: &str) -> Result<String, Reject> {
     if text.len() > MAX_OUT { Err(Reject::Limit) } else { Ok(text.to_owned()) }
