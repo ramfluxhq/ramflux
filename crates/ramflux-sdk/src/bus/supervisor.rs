@@ -315,7 +315,7 @@ impl Supervisor {
         if request.method == "account.unlock"
             && let Some(call) = &credential_call
         {
-            return self.private_unlock(&request, call).await;
+            return self.private_unlock(&request, call, connection.credential_prompts).await;
         }
         if !super::lifecycle::handles(&request.method) {
             return Box::pin(self.route(request, connection)).await;
@@ -376,6 +376,7 @@ impl Supervisor {
         &self,
         request: &LocalBusFrame,
         call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+        prompts: bool,
     ) -> Result<ActorResponse, SdkError> {
         self.ensure_request_allowed(request)?;
         if request.body.as_object().is_none_or(|body| !body.is_empty()) {
@@ -386,30 +387,81 @@ impl Supervisor {
         // is refused before the provider is asked for the passphrase.
         self.refuse_unusable_agent(&id)?;
         self.require_restore_ready(&id, true)?;
+        if let Some(result) = self.open_device_unlock(&id).await? {
+            return Ok(reply(serde_json::to_value(result)?));
+        }
+        if self.silently_unlockable(&id)? {
+            let result = self.unlock_native_silently(&id).await?;
+            self.restore_states.borrow_mut().remove(&id);
+            self.set_active(&id).await?;
+            return Ok(reply(serde_json::to_value(result)?));
+        }
+        // The in-process carrier cannot answer `device.credential.request`. Sending it makes the
+        // C ABI reader tear the worker down, and every later call completes as Closed.
+        if !prompts {
+            return Err(code_required());
+        }
+        self.prompted_unlock(call, &id).await
+    }
+}
+
+fn code_required() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "AuthFailed".into(),
+        message: "account code is required".into(),
+        body: Box::new(serde_json::Value::Null),
+    }
+}
+
+impl Supervisor {
+    async fn open_device_unlock(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::LocalBusCreatedAccount>, SdkError> {
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(None);
+        };
+        if !actor.is_open() {
+            return Ok(None);
+        }
+        let result =
+            actor.unlock_native(super::native_account::NativeUnlockSecret::Device, None).await?;
+        self.restore_states.borrow_mut().remove(id);
+        self.set_active(id).await?;
+        self.set_unlocked(id, true).await?;
+        self.advance_after_unlock(id).await;
+        Ok(Some(result))
+    }
+
+    async fn prompted_unlock(
+        &self,
+        call: &crate::custody::pairing::private_credential::PrivateCredentialCall,
+        id: &str,
+    ) -> Result<ActorResponse, SdkError> {
         let secret =
-            super::credentials::unlock_secret(self.config.data_root.clone(), id.clone()).await?;
+            super::credentials::unlock_secret(self.config.data_root.clone(), id.to_owned()).await?;
         call.require_live()?;
-        let existing = self.accounts.borrow().get(&id).cloned();
+        let existing = self.accounts.borrow().get(id).cloned();
         let actor = if let Some(actor) = existing {
             actor
         } else {
             let actor = AccountActor::start(
-                id.clone(),
+                id.to_owned(),
                 self.config.clone(),
                 self.nodes.borrow().clone(),
                 self.index.clone(),
                 self.events.clone(),
             )?;
-            self.accounts.borrow_mut().insert(id.clone(), actor.clone());
+            self.accounts.borrow_mut().insert(id.to_owned(), actor.clone());
             actor
         };
         let result = actor
             .unlock_native(super::native_account::NativeUnlockSecret::Code(secret), None)
             .await?;
-        self.restore_states.borrow_mut().remove(&id);
-        self.set_active(&id).await?;
-        self.set_unlocked(&id, true).await?;
-        self.advance_after_unlock(&id).await;
+        self.restore_states.borrow_mut().remove(id);
+        self.set_active(id).await?;
+        self.set_unlocked(id, true).await?;
+        self.advance_after_unlock(id).await;
         Ok(reply(serde_json::to_value(result)?))
     }
 

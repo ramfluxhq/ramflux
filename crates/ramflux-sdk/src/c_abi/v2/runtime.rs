@@ -434,7 +434,7 @@ async fn read_responses(
                 };
                 shared.complete(id, completed);
             }
-        } else {
+        } else if !is_credential_request(&frame) {
             let generation = generation.ok_or_else(|| {
                 SdkError::LocalBus("event missing subscription generation".into())
             })?;
@@ -446,6 +446,11 @@ async fn read_responses(
             break Ok(());
         }
     }
+}
+
+fn is_credential_request(frame: &serde_json::Value) -> bool {
+    // This prompt carries no subscription generation. Treating it as an event closes the worker.
+    frame.get("method").and_then(serde_json::Value::as_str) == Some("device.credential.request")
 }
 
 #[cfg(test)]

@@ -41,10 +41,15 @@ impl AccountRuntime {
         if files_released() && self.wait_while_released().await? {
             return Ok(None);
         }
+        // A pipelined `message.read` would otherwise skip connection work. Apply one resumed
+        // receive item before the next read so the peer reply becomes visible inside the window.
+        self.kick_resumed_receive();
+        self.apply_resumed_receive().await?;
         Ok(Some(self.prepare_receive_turn().await?))
     }
 
     pub(super) async fn release_for_suspend(&mut self) -> Result<(), SdkError> {
+        self.resume_receive_until = None;
         self.stop_connection().await;
         self.stop_courier().await;
         self.transfers.stop().await;
@@ -68,7 +73,55 @@ impl AccountRuntime {
             self.start_username_delivery();
             self.start_connection()?;
         }
+        // The connected catch-up runs before a peer can reply. Keep asking until that reply
+        // has had time to arrive; the push safety sweep is otherwise 900s.
+        self.resume_receive_until =
+            Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
         set_files_released(false);
+        self.kick_resumed_receive();
+        Ok(())
+    }
+
+    fn resume_window_open(&mut self) -> bool {
+        let Some(until) = self.resume_receive_until else {
+            return false;
+        };
+        if tokio::time::Instant::now() >= until {
+            self.resume_receive_until = None;
+            return false;
+        }
+        true
+    }
+
+    fn kick_resumed_receive(&mut self) {
+        if !self.resume_window_open() {
+            return;
+        }
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return;
+        };
+        if let Some(connection) = &account.connection {
+            connection.redrive_receive();
+        }
+    }
+
+    fn take_pending_work(&mut self) -> Option<crate::bus::connection_manager::AccountWork> {
+        if let Ok(work) = self.head_rx.try_recv() {
+            return Some(work);
+        }
+        if let Some(work) = self.deferred.pop_front() {
+            return Some(work);
+        }
+        self.connection_work.try_recv().ok()
+    }
+
+    async fn apply_resumed_receive(&mut self) -> Result<(), SdkError> {
+        if !self.resume_window_open() {
+            return Ok(());
+        }
+        if let Some(work) = self.take_pending_work() {
+            self.apply_connection_work(work).await?;
+        }
         Ok(())
     }
 

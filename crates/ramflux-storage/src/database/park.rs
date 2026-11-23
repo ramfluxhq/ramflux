@@ -144,14 +144,31 @@ fn run_job(db: Option<&mut rusqlite::Connection>, job: Job, checkpoints: &Backgr
 
 fn park_db(db: &mut Option<rusqlite::Connection>, reply: &SyncSender<Result<(), Error>>) {
     let result = match db.take() {
-        Some(connection) => {
-            let checkpoint = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-            drop(connection);
-            checkpoint
-        }
+        Some(connection) => close_parked(connection),
         None => Ok(()),
     };
     let _ = reply.send(result);
+}
+
+/// Checkpoint, then `sqlite3_close`. Dropping the connection discards a busy close and
+/// leaves the descriptor open; the caller must see that failure. A checkpoint error still
+/// attempts the close, so the descriptor is not abandoned on the way out.
+fn close_parked(connection: rusqlite::Connection) -> Result<(), Error> {
+    if !connection.is_autocommit() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let checkpoint = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    let closed = match connection.close() {
+        Ok(()) => Ok(()),
+        Err((connection, _)) => match connection.close() {
+            Ok(()) => Ok(()),
+            Err((connection, error)) => {
+                drop(connection);
+                Err(error)
+            }
+        },
+    };
+    checkpoint.and(closed)
 }
 
 fn unpark_db(

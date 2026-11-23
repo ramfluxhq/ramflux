@@ -91,6 +91,9 @@ struct AccountRuntime {
     /// Generic connection work skipped so a demanded head can be applied first.
     deferred: std::collections::VecDeque<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    /// After resume, redrive receive until this instant so a peer reply is not stuck behind
+    /// the push safety sweep.
+    resume_receive_until: Option<tokio::time::Instant>,
     transient: TransientHost,
     pairing: pairing_calls::Calls,
     username: username_calls::Calls,
@@ -179,6 +182,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         head_rx,
         deferred: std::collections::VecDeque::new(),
         ledger: None,
+        resume_receive_until: None,
         transient: TransientHost::default(),
         pairing: pairing_calls::Calls::default(),
         username: username_calls::Calls::default(),

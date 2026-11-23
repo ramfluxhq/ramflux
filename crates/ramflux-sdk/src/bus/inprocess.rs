@@ -28,6 +28,10 @@ impl BusStream for MemoryStream {
         true
     }
 
+    fn accepts_credential_prompt(&self) -> bool {
+        false
+    }
+
     fn matches_peer(&self, _expected: PeerCred) -> Result<(), SdkError> {
         // This stream can only be minted inside the host process; it has no listener.
         Ok(())

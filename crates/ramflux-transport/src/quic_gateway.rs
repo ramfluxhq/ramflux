@@ -129,8 +129,10 @@ pub trait GatewaySessionTransport: GatewaySessionFrameSink + GatewaySessionFrame
 impl<T> GatewaySessionTransport for T where T: GatewaySessionFrameSink + GatewaySessionFrameSource {}
 
 pub struct QuicGatewayClient {
-    _endpoint: quinn::Endpoint,
+    // Connection before the endpoint: Drop must release the connection while the endpoint
+    // still exists, then drop the endpoint so the driver can close the UDP socket.
     connection: quinn::Connection,
+    _endpoint: quinn::Endpoint,
     timeout: Duration,
 }
 
@@ -238,7 +240,7 @@ impl QuicGatewayClient {
                 )));
             }
         };
-        Ok(Self { _endpoint: endpoint, connection, timeout })
+        Ok(Self { connection, _endpoint: endpoint, timeout })
     }
 
     /// Connects with an explicit, pre-built quinn client config and separate handshake/request
@@ -273,7 +275,7 @@ impl QuicGatewayClient {
                 other => Err(QuicConnectPhase::HandshakeFailed(other.to_string())),
             },
             Ok(Ok(connection)) => {
-                Ok(Self { _endpoint: endpoint, connection, timeout: request_timeout })
+                Ok(Self { connection, _endpoint: endpoint, timeout: request_timeout })
             }
         }
     }
@@ -341,6 +343,23 @@ impl QuicGatewayClient {
     /// connection after a transport failure so the old connection cannot be reused.
     pub fn close(&self) {
         self.connection.close(quinn::VarInt::from_u32(0), b"relay pool evict");
+    }
+
+    /// Close the connection and wait until the endpoint driver drops the UDP socket.
+    ///
+    /// The socket stays open until the driver is polled with no remaining connections and no
+    /// endpoint handles. Callers that must return with the descriptor closed (process suspend)
+    /// await this instead of dropping the client.
+    pub async fn shutdown(self) {
+        let Self { connection, _endpoint: endpoint, timeout: _ } = self;
+        connection.close(quinn::VarInt::from_u32(0), b"session closed");
+        // The endpoint keeps the connection until this handle is gone and the driver drains it.
+        drop(connection);
+        let idle = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle());
+        let _ = idle.await;
+        drop(endpoint);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
     }
 
     /// # Errors
