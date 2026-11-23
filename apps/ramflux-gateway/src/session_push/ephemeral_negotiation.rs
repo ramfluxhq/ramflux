@@ -659,6 +659,7 @@ async fn identity_403_logging_hooks_cover_session_upsert_principal_and_get() -> 
     fixture.context.hub.readiness.seed_echo_for_test(false, false);
     let identity_403 = json!({"reason": "gateway_instance_mismatch"});
 
+    fixture.answer_session_fence.store(false, std::sync::atomic::Ordering::Release);
     let before_get = crate::registration::identity_rejection_call_count();
     let router = fixture.context.router.clone();
     let get_session =

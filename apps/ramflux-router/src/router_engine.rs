@@ -227,6 +227,56 @@ fn entry_bound_refusal(
     }
 }
 
+fn early_submit_refusal(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    envelope: &ramflux_protocol::Envelope,
+) -> anyhow::Result<Option<PreparedSubmit>> {
+    if let Some(outcome) = state.fenced_submit_outcome(store, envelope, submission_now())? {
+        return Ok(Some(complete_response(submit_response_from_outcome(state, outcome))));
+    }
+    if let Some(refusal) = entry_bound_refusal(
+        &ramflux_node_core::check_entry_bound(envelope),
+        &envelope.target_delivery_id,
+    ) {
+        return Ok(Some(complete_response(refusal)));
+    }
+    Ok(None)
+}
+
+struct ReplayWindow {
+    replay_key: String,
+    sender_root_commitment: String,
+    replay_expires_at: i64,
+}
+
+fn replay_window_or_duplicate(
+    store: &ramflux_node_core::RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &ramflux_protocol::Envelope,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+    now_unix_seconds: i64,
+) -> anyhow::Result<Result<ReplayWindow, PreparedSubmit>> {
+    let replay_key = ramflux_node_core::envelope_replay_tuple_key(source, envelope);
+    let sender_root_commitment = source.root_commitment().to_owned();
+    let replay_expires_at = envelope
+        .created_at
+        .checked_add(i64::from(envelope.ttl))
+        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
+    ramflux_node_core::record_router_submit_lock_wait_us(0);
+    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
+        store,
+        origin,
+        sender_root_commitment: source.root_commitment(),
+        envelope,
+        replay_key: &replay_key,
+        now_unix_seconds,
+    })? {
+        return Ok(Err(complete_response(response)));
+    }
+    Ok(Ok(ReplayWindow { replay_key, sender_root_commitment, replay_expires_at }))
+}
+
 fn prepare_submission(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -235,11 +285,8 @@ fn prepare_submission(
     total_started: Instant,
     ingress: SubmitIngress<'_>,
 ) -> anyhow::Result<PreparedSubmit> {
-    if let Some(refusal) = entry_bound_refusal(
-        &ramflux_node_core::check_entry_bound(&envelope),
-        &envelope.target_delivery_id,
-    ) {
-        return Ok(complete_response(refusal));
+    if let Some(done) = early_submit_refusal(state, store, &envelope)? {
+        return Ok(done);
     }
     record_decoded(&envelope);
     let (source, mut source_lease) =
@@ -277,25 +324,18 @@ fn prepare_submission(
         return submission_refusal(state, store, &envelope, error).map(complete_response);
     }
     state.refresh_registered_envelope_authority(&mut envelope)?;
-    let replay_key = ramflux_node_core::envelope_replay_tuple_key(&source, &envelope);
-    let sender_root_commitment = source.root_commitment().to_owned();
-    let replay_expires_at = envelope
-        .created_at
-        .checked_add(i64::from(envelope.ttl))
-        .ok_or_else(|| anyhow::anyhow!("envelope ttl overflows replay expiry"))?;
-    ramflux_node_core::record_router_submit_lock_wait_us(0);
-    let dispatch_started = Instant::now();
     let now_unix_seconds = i64::try_from(submission_now()).unwrap_or(i64::MAX);
-    if let Some(response) = persistent_local_replay_response(PersistentReplayQuery {
+    let replay = match replay_window_or_duplicate(
         store,
-        origin: ingress.origin,
-        sender_root_commitment: source.root_commitment(),
-        envelope: &envelope,
-        replay_key: &replay_key,
+        &source,
+        &envelope,
+        ingress.origin,
         now_unix_seconds,
-    })? {
-        return Ok(complete_response(response));
-    }
+    )? {
+        Ok(replay) => replay,
+        Err(done) => return Ok(done),
+    };
+    let dispatch_started = Instant::now();
     let outcome = if forward.client.is_some() {
         let preparation = state.prepare_envelope_with_home_node_forward_at(
             &source,
@@ -316,16 +356,16 @@ fn prepare_submission(
     });
     persist_submission_outcome(
         store,
-        &replay_key,
-        replay_expires_at,
-        &sender_root_commitment,
+        &replay.replay_key,
+        replay.replay_expires_at,
+        &replay.sender_root_commitment,
         submission,
         (&outcome, persistent_entry.as_ref()),
     )?;
     finish_retry_owner(
         retry_owner,
         store,
-        &sender_root_commitment,
+        &replay.sender_root_commitment,
         persistent_entry.as_ref(),
         &outcome,
         now_unix_seconds,

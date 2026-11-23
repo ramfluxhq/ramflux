@@ -43,8 +43,6 @@ apps/ramflux-gateway/src/registration.rs | session_response | 2 | E | excluded=t
 apps/ramflux-gateway/src/send_authority.rs | read | 1 | E | excluded=typed authenticated notification authority metadata; original bytes validated by mesh ingress
 apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 1 | C | admission=crates/ramflux-transport/src/mesh_quic.rs#accept_request_on_connection_once#1
 apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 2 | C | admission=crates/ramflux-transport/src/mesh_quic.rs#accept_request_on_connection_once#1
-apps/ramflux-gateway/src/session.rs | handle_gateway_own_device_fanout | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/session.rs | handle_gateway_submit | 1 | E | excluded=router response decoding; not a received signed-envelope ingress
 apps/ramflux-gateway/src/session.rs | load_gateway_v3_issuer_material | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/session.rs | read_gateway_auth_frame | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-gateway/src/session.rs | run_gateway_session_loop_until_closed | 1 | A | strict=parse_i_json; admission=A ingress boundary
@@ -58,3 +56,5 @@ apps/ramflux-gateway/src/session_push/ephemeral_negotiation.rs | open_frame | 1 
 apps/ramflux-gateway/src/session_push/test_support.rs | send_frame | 1 | E | excluded=test support frame fixture; not a received production ingress
 apps/ramflux-gateway/src/session_push/test_support.rs | serve | 1 | E | excluded=test support server fixture; not a received production ingress
 apps/ramflux-gateway/src/submit_fixtures.rs | signed_submit | 1 | E | excluded=signed submit test fixture decoding; not a received production ingress
+apps/ramflux-gateway/src/session/submission.rs | handle_gateway_own_device_fanout | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-gateway/src/session/submission.rs | handle_gateway_submit | 1 | E | excluded=router response decoding; not a received signed-envelope ingress
