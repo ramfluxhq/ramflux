@@ -28,7 +28,7 @@ pub(crate) async fn dispatch_account_bus_request(
     match request.method.as_str() {
         // Creation is owned by the exclusive secret ceremony on the connection.
         "account.create" => Err(SdkError::CustodySetupInvalid),
-        "account.list" => Ok(local_bus_ok(super::super::account_local::daemon_list(state)?)),
+        "account.list" => Ok(local_bus_ok(account_list(state)?)),
         "account.switch" => {
             let account_id = request_account_id(request)?.to_owned();
             if !state.accounts.contains_key(&account_id) {
@@ -105,6 +105,81 @@ pub(crate) async fn dispatch_account_bus_request(
             })))
         }
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
+    }
+}
+
+fn account_list(state: &LocalBusDaemonState) -> Result<serde_json::Value, SdkError> {
+    // On-disk and locked rows stay. An open session still publishes its live name and kind.
+    let mut body = super::super::account_local::daemon_list(state)?;
+    if let Some(details) = body.get_mut("account_details").and_then(|value| value.as_array_mut()) {
+        for detail in details {
+            let Some(id) = detail.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let id = id.to_owned();
+            let Some(account) = state.accounts.get(&id) else {
+                continue;
+            };
+            let open = open_account_detail(&id, account);
+            let Some(map) = detail.as_object_mut() else {
+                continue;
+            };
+            if let Some(name) = open.get("display_name").and_then(serde_json::Value::as_str)
+                && !name.is_empty()
+            {
+                map.insert("display_name".to_owned(), serde_json::Value::String(name.to_owned()));
+            }
+            if let Some(kind) = open.get("kind") {
+                map.insert("kind".to_owned(), kind.clone());
+            }
+        }
+    }
+    if let Some(details) = body.get("account_details").and_then(serde_json::Value::as_array) {
+        let accounts = super::super::account_local::picker(details);
+        if let Some(map) = body.as_object_mut() {
+            map.insert("accounts".to_owned(), serde_json::Value::Array(accounts));
+        }
+    }
+    Ok(body)
+}
+
+fn open_account_detail(id: &str, account: &LocalBusAccountState) -> serde_json::Value {
+    if let Some(native) = account.client.born_v3_account.as_ref() {
+        let body = &native.record().body;
+        return serde_json::json!({
+            "id": id,
+            "display_name": body.profile.display_name,
+            "kind": principal_kind_name(body.principal_kind),
+        });
+    }
+    let principal = account
+        .client
+        .account_db()
+        .ok()
+        .and_then(|db| db.client_record("self", "account").ok().flatten())
+        .and_then(|row| {
+            row.get("principal_id").and_then(serde_json::Value::as_str).map(str::to_owned)
+        });
+    let display_name = principal.as_deref().and_then(|principal| {
+        account
+            .client
+            .read_profile_facts(principal)
+            .map(|facts| facts.profile.display_name.clone())
+            .filter(|name| !name.is_empty())
+    });
+    serde_json::json!({
+        "id": id,
+        "display_name": display_name,
+        "kind": serde_json::Value::Null,
+    })
+}
+
+fn principal_kind_name(kind: ramflux_protocol::PrincipalKind) -> &'static str {
+    match kind {
+        ramflux_protocol::PrincipalKind::Human => "human",
+        ramflux_protocol::PrincipalKind::HeadlessAi => "headless_ai",
+        ramflux_protocol::PrincipalKind::Bot => "bot",
+        ramflux_protocol::PrincipalKind::Workflow => "workflow",
     }
 }
 

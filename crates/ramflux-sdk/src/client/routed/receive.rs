@@ -645,16 +645,35 @@ impl RamfluxClient {
         }
         // A malformed request cannot leave a cached root or device, pair state, consent,
         // or message projection behind. Candidate authentication preceded this transaction.
-        let first_seen =
-            self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
+        let root = manifest.principal_commitment.as_str();
+        let (cache_existed, floor_existed, first_seen) = {
+            let db = self.account_db()?;
+            (
+                db.actor_state_exists(&format!("contact-request/cache/{root}"))?,
+                db.contact_request_authority_floor(root, crate::time::now_unix_timestamp())?
+                    .is_some(),
+                db.client_record("identity", &manifest.principal_id)?.is_none(),
+            )
+        };
         self.remember_contact_request_cache(manifest)?;
         self.persist_root_verified_directory(manifest)?;
+        let opened = self.open_routed(entry, local)?;
+        if self.commit_stranger_group_invitation(&opened, entry, &receipt)? {
+            // The directory is real. The requester cache and its floor are not.
+            self.release_borrowed_contact_cache(root, cache_existed, floor_existed)?;
+            #[cfg(test)]
+            commit_fault::take(commit_fault::Kind::Bootstrap)?;
+            return Ok(Delivery {
+                routing: Some(opened.routing),
+                plaintext: None,
+                call_control: false,
+                pair_reply: None,
+            });
+        }
         if first_seen {
             // A requester's root comes from the network, never from an imported card.
             self.mark_lookup_root(&manifest.principal_id)?;
         }
-
-        let opened = self.open_routed(entry, local)?;
         let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;
         if control.body.kind != crate::client::contact_requests::Decision::Request {
             return Err(invalid("stranger envelope can only carry a contact request"));
@@ -684,6 +703,59 @@ impl RamfluxClient {
             pair_reply: None,
         })
     }
+
+    fn commit_stranger_group_invitation(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        receipt: &str,
+    ) -> Result<bool, SdkError> {
+        let Some(invitation) = self.stranger_invitation_packet(&opened.routing, &opened.body)?
+        else {
+            return Ok(false);
+        };
+        let own = self.owned_device_identity()?;
+        let trusted = self.trusted_device(HeadUse::NewAuthorization, &own)?;
+        let target = trusted
+            .get("target_delivery_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid("group receive target is absent"))?
+            .to_owned();
+        self.confirm_routed_context(&opened.routing, entry)?;
+        self.persist_routed_projection(Commit {
+            opened,
+            entry,
+            body: &opened.body,
+            metadata: None,
+            membership: None,
+            shared_group: Some(&invitation),
+            local_target: Some(&target),
+            slots: &[],
+            references: Vec::new(),
+            receipt,
+            consume_erased: false,
+            contact_held: false,
+        })?;
+        Ok(true)
+    }
+
+    fn release_borrowed_contact_cache(
+        &self,
+        root: &str,
+        cache_existed: bool,
+        floor_existed: bool,
+    ) -> Result<(), SdkError> {
+        if cache_existed {
+            return Ok(());
+        }
+        let db = self.account_db()?;
+        db.remove_actor_state(&format!("contact-request/cache/{root}"))?;
+        if !floor_existed {
+            db.release_contact_request_authority_floor(root)?;
+        }
+        Ok(())
+    }
+
     /// A content refusal still consumes its authenticated pair ciphertext. This joins the
     /// terminal receive transaction so a refused first packet cannot strand its successor.
     pub(crate) fn commit_generated_refusal_pair(

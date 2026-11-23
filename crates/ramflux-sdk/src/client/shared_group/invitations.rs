@@ -149,8 +149,8 @@ impl RamfluxClient {
         })
     }
     pub(crate) fn group_invitations(&self) -> Result<serde_json::Value, SdkError> {
-        // The list runs on the query-only reader pool. Expired rows stay until the
-        // writer path in `hold_group_invitation` retains them.
+        // The list runs on the query-only reader pool. Expired rows stay until
+        // `hold_group_invitation` retains them on the writer.
         let now = now_unix_timestamp();
         let db = self.account_db()?;
         let mut rows = Vec::new();
