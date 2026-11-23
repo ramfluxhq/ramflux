@@ -275,14 +275,69 @@ impl AccountIndex {
         Ok(())
     }
 
+    /// Clears the active pointer when it names `local_account_id`. A different pointer is kept.
+    ///
+    /// The stored value is SQL NULL. [`Self::active_account`] reads that NULL as no active account.
+    ///
     /// # Errors
-    /// Returns an error when validation, serialization, storage, or state checks fail.
+    /// Returns storage errors.
+    pub fn clear_active_account(&self, local_account_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE active_account_state
+                SET active_local_account_id = NULL, updated_at = ?2
+              WHERE singleton_id = 1 AND active_local_account_id = ?1",
+            params![local_account_id, unix_now()],
+        )?;
+        Ok(())
+    }
+
+    /// Moves the active pointer off `local_account_id`.
+    ///
+    /// Another on-disk account becomes active: an unlocked row wins, then the lowest id.
+    /// When none remains, the pointer is cleared. A pointer that names a different account
+    /// is left unchanged.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn release_active_account(&self, local_account_id: &str) -> Result<(), StorageError> {
+        if self.active_account()?.as_deref() != Some(local_account_id) {
+            return Ok(());
+        }
+        match self.successor_account(local_account_id)? {
+            Some(next) => self.set_active_account(&next),
+            None => self.clear_active_account(local_account_id),
+        }
+    }
+
+    /// The active account, or `None` when the singleton row is missing or its id is SQL NULL.
+    ///
+    /// # Errors
+    /// Returns an error when the index cannot be read. A NULL id is not an error.
     pub fn active_account(&self) -> Result<Option<String>, StorageError> {
-        Ok(self
+        let stored = self
             .connection
             .query_row(
                 "SELECT active_local_account_id FROM active_account_state WHERE singleton_id = 1",
                 [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(stored.flatten())
+    }
+
+    /// Another account that can own the active pointer. Removed rows are not candidates.
+    fn successor_account(&self, except: &str) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT local_account_id
+                   FROM local_account
+                  WHERE local_account_id <> ?1
+                    AND account_state <> 'removed'
+                  ORDER BY CASE account_state WHEN 'active' THEN 0 ELSE 1 END,
+                           local_account_id
+                  LIMIT 1",
+                params![except],
                 |row| row.get(0),
             )
             .optional()?)

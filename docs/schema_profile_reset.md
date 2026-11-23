@@ -3,7 +3,8 @@
 The active application profile is generation **1** (message schema v1). Development
 account, index, backup and gateway stores require the coordinated reset. Generation-0
 stores are refused with `schema_reset_required`; there is no compatibility reader or
-down-migration. The protocol design is `docs/design/message_schema_v1.md`.
+down-migration. See the [message schema specification](protocol/message-schema.md) and its linked
+protobuf grammar.
 
 SQLite `PRAGMA user_version` is the durable application-profile marker, separate
 from SQL migration checksums and versions. Existing unmarked databases read as
