@@ -980,42 +980,25 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::CallControlReceiptCapacity { .. }
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
-        SdkError::OperationReconciliationRequired(_)
-        | SdkError::AgentCreationRefused(_)
-        | SdkError::AgentNotRetired
-        | SdkError::PrxCall(_)
-        | SdkError::EditConflict { .. }
-        | SdkError::PinLimitReached
-        | SdkError::RestoreSetupRequired
-        | SdkError::CustodySetupInvalid
-        | SdkError::CustodyExpired
-        | SdkError::CustodyAccountConflict
-        | SdkError::CustodyPublicationFailed
-        | SdkError::SurfaceRefused { .. }
-        | SdkError::SurfaceProtocol(_)
-        | SdkError::GroupRefused { .. }
-        | SdkError::TaskRefused { .. }
-        | SdkError::TaskDeliveryTooLarge { .. }
-        | SdkError::SurfaceDeliveryTooLarge { .. }
-        | SdkError::ContactConfirmationRequired(_)
-        | SdkError::ContactHomeNodeUnsupported
-        | SdkError::ContactInput(_)
-        | SdkError::AccountNotOpen(_)
-        | SdkError::AccountRestorePending(_)
-        | SdkError::AccountRestoreFailed { .. }
-        | SdkError::AccountManifestUnreadable
-        | SdkError::LocalBus(_)
-        | SdkError::LocalBusRefused { .. }
-        | SdkError::InboundRejected(_)
-        | SdkError::PayloadTooLarge
-        | SdkError::ReplayMismatch
-        | SdkError::InvalidOfflineRetention(_)
-        | SdkError::PassphrasePolicy(_)
-        | SdkError::InboundPending(_)
-        | SdkError::SenderManifestRequired { .. }
-        | SdkError::FreshHeadRequired { .. }
-        | SdkError::PairRecoveryRequired
-        | SdkError::PairingField(_)
+        #[rustfmt::skip]
+        SdkError::OperationReconciliationRequired(_) | SdkError::AgentCreationRefused(_)
+        | SdkError::AgentNotRetired | SdkError::PrxCall(_)
+        | SdkError::EditConflict { .. } | SdkError::PinLimitReached
+        | SdkError::RestoreSetupRequired | SdkError::CustodySetupInvalid
+        | SdkError::CustodyExpired | SdkError::CustodyAccountConflict
+        | SdkError::CustodyPublicationFailed | SdkError::SurfaceRefused { .. }
+        | SdkError::SurfaceProtocol(_) | SdkError::GroupRefused { .. }
+        | SdkError::TaskRefused { .. } | SdkError::TaskDeliveryTooLarge { .. }
+        | SdkError::SurfaceDeliveryTooLarge { .. } | SdkError::ContactConfirmationRequired(_)
+        | SdkError::ContactHomeNodeUnsupported | SdkError::ContactInput(_)
+        | SdkError::AccountNotOpen(_) | SdkError::AccountRestorePending(_)
+        | SdkError::AccountRestoreFailed { .. } | SdkError::AccountManifestUnreadable
+        | SdkError::LocalBus(_) | SdkError::LocalBusRefused { .. }
+        | SdkError::InboundRejected(_) | SdkError::PayloadTooLarge
+        | SdkError::ReplayMismatch | SdkError::InvalidOfflineRetention(_)
+        | SdkError::PassphrasePolicy(_) | SdkError::InboundPending(_)
+        | SdkError::SenderManifestRequired { .. } | SdkError::FreshHeadRequired { .. }
+        | SdkError::PairRecoveryRequired | SdkError::PairingField(_)
         | SdkError::PairingCode(_) => RamfluxErrorCode::InvalidArgument,
     }
 }

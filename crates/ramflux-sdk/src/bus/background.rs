@@ -19,13 +19,17 @@ pub(crate) fn client_suspended() -> SdkError {
 impl Supervisor {
     pub(super) async fn suspend_for_background(&self) -> Result<(), SdkError> {
         if self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_none() {
+            ramflux_transport::drain_abandoned_quic().await;
             return Ok(());
         }
         self.config.background.store(true, Ordering::Release);
         let node = self.node_actor.clone();
         let accounts = self.accounts.borrow().values().cloned().collect::<Vec<_>>();
-        self.park_actors(&node, &accounts).await?;
-        self.index.release_files().map_err(SdkError::from)?;
+        let parked = self.park_actors(&node, &accounts).await;
+        let released = parked.and_then(|()| self.index.release_files().map_err(SdkError::from));
+        // Stop has dropped every QUIC client. Return only after those UDP sockets close.
+        ramflux_transport::drain_abandoned_quic().await;
+        released?;
         self.root_lease.borrow_mut().take();
         Ok(())
     }
