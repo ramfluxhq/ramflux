@@ -323,6 +323,7 @@ pub extern "C" fn ramflux_v2_client_close(handle: u64) -> i32 {
     let code = call(|| {
         let client = REGISTRY.lock().map_err(|_| internal())?.clients.get(&handle).cloned();
         if let Some(client) = client {
+            client.shared.credentials.shutdown();
             match client.close().map_err(|error| super::super::map_sdk_error(&error))? {
                 CloseResult::Done => {
                     REGISTRY.lock().map_err(|_| internal())?.clients.remove(&handle);
@@ -365,6 +366,32 @@ pub(super) fn register_test_client(client: Arc<Client>) -> u64 {
     id
 }
 
+fn reject_request_shape(request: &Request) -> Result<(), CAbiError> {
+    if request.method.contains("itest")
+        || request.method.is_empty()
+        || request.method.len() > 128
+        || request.sdk_api.len() > 128
+        || request.account_id.as_ref().is_some_and(|id| id.len() > 128)
+        || request.operation_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 256)
+    {
+        return Err(invalid("invalid method"));
+    }
+    Ok(())
+}
+
+fn send_command(client: &Client, command: Command) -> Result<(), CAbiError> {
+    client.commands.try_send(command).map_err(|error| {
+        if matches!(error, tokio::sync::mpsc::error::TrySendError::Closed(_))
+            || client.closing.load(std::sync::atomic::Ordering::Acquire)
+            || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            CAbiError::new(RamfluxErrorCode::TransportUnavailable, "closed")
+        } else {
+            busy()
+        }
+    })
+}
+
 /// Submit one request, copying input before return. Returns an explicit operation/cancel handle.
 /// `deadline_ms` is required; `operation_id` is supplied by the caller for lifecycle reconciliation.
 #[unsafe(no_mangle)]
@@ -378,15 +405,7 @@ pub extern "C" fn ramflux_v2_execute(
     let status = call(|| {
         write_handle(out_operation, 0)?;
         let mut request: Request = input(request, len)?;
-        if request.method.contains("itest")
-            || request.method.is_empty()
-            || request.method.len() > 128
-            || request.sdk_api.len() > 128
-            || request.account_id.as_ref().is_some_and(|id| id.len() > 128)
-            || request.operation_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 256)
-        {
-            return Err(invalid("invalid method"));
-        }
+        reject_request_shape(&request)?;
         if !super::method_policy::allowed(&request.method) {
             return Err(CAbiError::new(RamfluxErrorCode::PermissionDenied, "method"));
         }
@@ -415,6 +434,8 @@ pub extern "C" fn ramflux_v2_execute(
         let id = next_id(&mut *REGISTRY.lock().map_err(|_| internal())?)?;
         let frame_method_close = request.method == "subscription.close";
         let deadline_ms = Some(request.deadline_ms);
+        let attended_method = request.method.clone();
+        let attended_account = request.account_id.clone();
         let mut frame = LocalBusFrame::request(
             id.to_string(),
             request.account_id.take(),
@@ -444,19 +465,19 @@ pub extern "C" fn ramflux_v2_execute(
             return Err(busy());
         }
         operations.insert(id, Arc::clone(&operation));
-        if let Err(error) = client.commands.try_send(Command { id, bytes, operation, deadline_ms })
-        {
+        if let Err(error) = send_command(
+            &client,
+            Command {
+                id,
+                bytes,
+                operation,
+                deadline_ms,
+                method: attended_method,
+                account_id: attended_account,
+            },
+        ) {
             operations.remove(&id);
-            return Err(
-                if matches!(error, tokio::sync::mpsc::error::TrySendError::Closed(_))
-                    || client.closing.load(std::sync::atomic::Ordering::Acquire)
-                    || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    CAbiError::new(RamfluxErrorCode::TransportUnavailable, "closed")
-                } else {
-                    busy()
-                },
-            );
+            return Err(error);
         }
         if subscription {
             *subscribed = Some(id);
@@ -518,12 +539,12 @@ pub extern "C" fn ramflux_v2_operation_cancel(handle: u64, id: u64) -> i32 {
                     .map_err(|error| super::super::map_sdk_error(&error))?;
                 client
                     .commands
-                    .try_send(Command {
-                        id: 0,
-                        deadline_ms: None,
-                        bytes: zeroize::Zeroizing::new(bytes),
-                        operation: Arc::new(Operation::default()),
-                    })
+                    .try_send(Command::carrier(
+                        0,
+                        zeroize::Zeroizing::new(bytes),
+                        Arc::new(Operation::default()),
+                        None,
+                    ))
                     .map_err(|_| busy())?;
             }
             *subscribed = None;
@@ -619,7 +640,28 @@ pub(super) fn error_code(name: &str) -> i32 {
         | "payload_too_large"
         | "target_not_found"
         | "target_deleted"
-        | "edit_conflict" => E::InvalidArgument as i32,
+        | "edit_conflict"
+        | "authority_unavailable"
+        | "layout_invalid"
+        | "recipient_empty"
+        | "not_grantee"
+        | "not_owner"
+        | "not_ready"
+        | "stream_closed"
+        | "stream_offset"
+        | "digest_mismatch"
+        | "seal_failed"
+        | "upload_rejected"
+        | "stale_generation"
+        | "duplicate_operation"
+        | "path_refused"
+        | "file_too_large"
+        | "manifest_too_large"
+        | "recipient_limit"
+        | "expired"
+        | "cancelled"
+        | "retirement_pending"
+        | "large_attachments" => E::InvalidArgument as i32,
         "InvalidCanonicalJson" => E::InvalidCanonicalJson as i32,
         "UnsupportedVersion" | "AccountSchemaTooNew" | "peer_upgrade_required" => {
             E::UnsupportedVersion as i32
@@ -635,7 +677,9 @@ pub(super) fn error_code(name: &str) -> i32 {
         "ObjectTransferFailed" => E::ObjectTransferFailed as i32,
         "DeviceRevoked" => E::DeviceRevoked as i32,
         "CryptoFailed" | "crypto_failure" => E::CryptoFailed as i32,
-        "StorageFailed" | "storage_unavailable" | "storage_capacity" => E::StorageFailed as i32,
+        "StorageFailed" | "storage_unavailable" | "storage_capacity" | "disk_full" => {
+            E::StorageFailed as i32
+        }
         "TransportUnavailable"
         | "NetworkingPending"
         | "Unavailable"
@@ -646,9 +690,9 @@ pub(super) fn error_code(name: &str) -> i32 {
         "PermissionDenied" | "authorization_rejected" | "not_authorized" => {
             E::PermissionDenied as i32
         }
-        "RateLimited" | "rate_limited" => E::RateLimited as i32,
+        "RateLimited" | "rate_limited" | "quota_exceeded" => E::RateLimited as i32,
         "AccountBusy" | "DataRootInUse" | "account_busy" => E::AccountBusy as i32,
-        "ObjectErased" => E::ObjectErased as i32,
+        "ObjectErased" | "attachment_deleted" => E::ObjectErased as i32,
         "ObjectIdentityConflict" => E::ObjectIdentityConflict as i32,
         "ObjectOwnershipUnverified" => E::ObjectOwnershipUnverified as i32,
         "CustodyForkFenced" => E::CustodyForkFenced as i32,
@@ -747,6 +791,36 @@ pub extern "C" fn ramflux_v2_card_trust_package(out: *mut *mut RamfluxBuffer) ->
         let value =
             super::card::trust_package().map_err(|error| super::super::map_sdk_error(&error))?;
         super::buffer::write_json_buffer(out, &value)
+    })
+}
+
+/// Install or clear the in-process account-code callback.
+/// Host output capacities are 1024 bytes; SDK storage is zeroized on every path.
+/// Setup requires the code twice and the copies must match. Unlock and phrase take one copy.
+/// A null callback unregisters and drains. The host must not reenter this client from the
+/// callback. Close and replacement wait until the callback returns.
+#[unsafe(no_mangle)]
+#[must_use]
+pub extern "C" fn ramflux_v2_set_credential_provider(
+    handle: u64,
+    callback: super::super::pairing::CredentialProviderCallback,
+    user_data: *mut std::ffi::c_void,
+) -> i32 {
+    call(|| {
+        let client = client(handle)?;
+        if client.closing.load(std::sync::atomic::Ordering::Acquire)
+            || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
+        }
+        let next = callback.map(|callback| {
+            Arc::new(super::super::pairing::CallbackProvider::new(
+                client.data_root.clone(),
+                callback,
+                user_data,
+            ))
+        });
+        client.shared.credentials.replace(next).map_err(|error| super::super::map_sdk_error(&error))
     })
 }
 

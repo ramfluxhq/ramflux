@@ -387,7 +387,10 @@ async fn ordinary_native_restart_reopens_silently_and_explicit_lock_needs_the_co
             assert_eq!(directory["identities"][0]["display_name"], "Example Human");
             let listed = bus.request(None, "account", "account.list", json!({})).await?;
             assert_eq!(listed["account_details"][0]["state"], "unlocked");
-            assert_eq!(listed["accounts"], json!(["ordinary"]));
+            assert_eq!(
+                listed["accounts"],
+                json!([{"id":"ordinary","display_name":"Example Human","locked":false}])
+            );
             bus.request(
                 Some("ordinary".into()),
                 "account",
@@ -398,7 +401,10 @@ async fn ordinary_native_restart_reopens_silently_and_explicit_lock_needs_the_co
             bus.request(Some("ordinary".into()), "account", "account.lock", json!({})).await?;
             let listed = bus.request(None, "account", "account.list", json!({})).await?;
             assert_eq!(listed["account_details"][0]["state"], "locked");
-            assert_eq!(listed["accounts"], json!([]));
+            assert_eq!(
+                listed["accounts"],
+                json!([{"id":"ordinary","display_name":"Example Human","locked":true}])
+            );
             Ok::<_, Box<dyn std::error::Error>>(())
         };
         let (server, flow) = tokio::join!(
