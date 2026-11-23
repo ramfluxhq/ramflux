@@ -181,9 +181,7 @@ impl AccountRuntime {
                 }
             }
             AccountWork::Contacts(work) => {
-                if work.generation() == handle.generation() {
-                    crate::client::contact_requests::apply_background(account, *work);
-                }
+                Self::apply_contact_drive(account, handle.generation(), *work).await;
             }
             AccountWork::OwnCopy(work) => {
                 if work.generation() == handle.generation() {
@@ -237,6 +235,33 @@ impl AccountRuntime {
             }
         }
         Ok(publish_networking)
+    }
+
+    /// The contact courier's production pass. Durable queue updates and the submit
+    /// stay on this writer; `flush` is the same function the inline test callers use.
+    async fn apply_contact_drive(
+        account: &mut LocalBusAccountState,
+        generation: u64,
+        work: crate::client::contact_requests::ContactWork,
+    ) {
+        match work {
+            crate::client::contact_requests::ContactWork::Drive { generation: stamped, reply } => {
+                if reply.is_closed() {
+                    return;
+                }
+                let active = if stamped == generation {
+                    crate::client::contact_requests::flush(account).await.map(|count| count > 0)
+                } else {
+                    Ok(false)
+                };
+                let _ = reply.send(active);
+            }
+            other => {
+                if other.generation() == generation {
+                    crate::client::contact_requests::apply_background(account, other);
+                }
+            }
+        }
     }
 
     fn apply_ack_work(

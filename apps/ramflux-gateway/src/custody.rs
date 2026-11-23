@@ -158,12 +158,27 @@ pub(crate) fn is_open(bytes: &[u8]) -> bool {
 /// No public fields or deserialization can manufacture a handoff from client JSON.
 pub(crate) struct GatewayGrant {
     session: CustodySession,
+    connection_id: String,
     deadline: std::time::Instant,
 }
 impl GatewayGrant {
+    fn deadline_for(expires_at: u64) -> std::time::Instant {
+        let remaining = expires_at
+            .saturating_sub(ramflux_node_core::now_unix_seconds())
+            .min(ramflux_node_core::NATIVE_SESSION_GRANT_SECONDS);
+        std::time::Instant::now() + Duration::from_secs(remaining)
+    }
+    fn granted(session: CustodySession, connection_id: String) -> Self {
+        let deadline = Self::deadline_for(session.expires_at);
+        Self { session, connection_id, deadline }
+    }
     #[cfg(test)]
     pub(crate) fn from_test_session(session: CustodySession) -> Self {
-        Self { session, deadline: std::time::Instant::now() + Duration::from_secs(60) }
+        Self {
+            session,
+            connection_id: String::new(),
+            deadline: std::time::Instant::now() + Duration::from_secs(60),
+        }
     }
     pub(crate) fn deadline(&self) -> std::time::Instant {
         self.deadline
@@ -171,8 +186,15 @@ impl GatewayGrant {
     pub(crate) fn session(&self) -> &CustodySession {
         &self.session
     }
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
     pub(crate) fn live(&self, now: u64) -> bool {
         self.session.expires_at > now && std::time::Instant::now() < self.deadline
+    }
+    pub(crate) fn replace_renewed(&mut self, session: CustodySession) {
+        self.deadline = Self::deadline_for(session.expires_at);
+        self.session = session;
     }
 }
 
@@ -186,6 +208,8 @@ struct Proxy {
     router: Option<crate::RouterMeshClient>,
     auth_deadline: tokio::time::Instant,
     authenticated: bool,
+    /// Set only once the session is about to take the lease, so a failed handoff still disconnects.
+    handed_off: bool,
 }
 async fn rpc(
     context: &GatewayQuicContext,
@@ -285,6 +309,7 @@ impl Proxy {
                 router: Some(context.router.clone()),
                 auth_deadline,
                 authenticated: false,
+                handed_off: false,
             },
             response,
         ))
@@ -331,12 +356,8 @@ impl Proxy {
             // A connection retains only its latest session; an old id cannot become a bearer.
             self.session_ids.clear();
             self.session_ids.insert(session.session_id.clone());
-            let remaining =
-                session.expires_at.saturating_sub(ramflux_node_core::now_unix_seconds()).min(300);
-            self.handoff_session = Some(GatewayGrant {
-                session: session.clone(),
-                deadline: std::time::Instant::now() + Duration::from_secs(remaining),
-            });
+            self.handoff_session =
+                Some(GatewayGrant::granted(session.clone(), self.connection.clone()));
         } else if matches!(result, CustodyServerFrame::Closed) {
             self.session_ids.clear();
             self.handoff_session = None;
@@ -494,6 +515,10 @@ impl Proxy {
         self.session_ids.clear();
         Ok(grant)
     }
+    /// The session guard now owns the lease. Drop must not disconnect it.
+    fn retain_after_handoff(&mut self) {
+        self.handed_off = true;
+    }
     fn deadline(&self) -> tokio::time::Instant {
         if self.authenticated {
             tokio::time::Instant::now() + IO_TIMEOUT
@@ -502,25 +527,54 @@ impl Proxy {
         }
     }
 }
+fn spawn_disconnect(router: crate::RouterMeshClient, connection_id: String) {
+    if connection_id.is_empty() {
+        return;
+    }
+    let request = CustodyMeshRequest::Disconnect { connection_id };
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let result = crate::router_post_json_async::<_, CustodyServerFrame>(
+                &router,
+                CUSTODY_RPC_PATH,
+                &request,
+            );
+            let _ = tokio::time::timeout(Duration::from_secs(2), result).await;
+        });
+    }
+}
 impl Drop for Proxy {
     fn drop(&mut self) {
-        let Some(router) = self.router.clone() else { return };
-        let request = CustodyMeshRequest::Disconnect { connection_id: self.connection.clone() };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let result = crate::router_post_json_async::<_, CustodyServerFrame>(
-                    &router,
-                    CUSTODY_RPC_PATH,
-                    &request,
-                );
-                let _ = tokio::time::timeout(Duration::from_secs(2), result).await;
-            });
+        if self.handed_off {
+            return;
         }
+        let Some(router) = self.router.clone() else { return };
+        spawn_disconnect(router, std::mem::take(&mut self.connection));
     }
+}
+/// Removes the router lease when the gateway session that kept it ends.
+pub(crate) struct NativeLeaseGuard {
+    router: crate::RouterMeshClient,
+    connection_id: String,
+}
+impl Drop for NativeLeaseGuard {
+    fn drop(&mut self) {
+        spawn_disconnect(self.router.clone(), std::mem::take(&mut self.connection_id));
+    }
+}
+pub(crate) fn hold_native_lease(
+    context: &crate::GatewayQuicContext,
+    grant: Option<&GatewayGrant>,
+) -> Option<NativeLeaseGuard> {
+    let connection_id = grant?.connection_id().to_owned();
+    if connection_id.is_empty() {
+        return None;
+    }
+    Some(NativeLeaseGuard { router: context.router.clone(), connection_id })
 }
 enum DriveEnd {
     Finished,
-    Handoff { grant: GatewayGrant, first: Box<ramflux_node_core::GatewayClientFrame> },
+    Handoff { grant: Box<GatewayGrant>, first: Box<ramflux_node_core::GatewayClientFrame> },
 }
 
 fn custody_deadline_error(code: CustodyRefusal) -> anyhow::Error {
@@ -568,7 +622,8 @@ async fn tcp_drive(
                 .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
             let first =
                 ramflux_protocol::parse_i_json(&first).map_err(|_| CustodyRefusal::InvalidInput)?;
-            return Ok(DriveEnd::Handoff { grant, first: Box::new(first) });
+            proxy.retain_after_handoff();
+            return Ok(DriveEnd::Handoff { grant: Box::new(grant), first: Box::new(first) });
         }
         let observed = nonce(&frame)?
             .map(|nonce| {
@@ -630,7 +685,8 @@ async fn quic_drive(
                 .map_err(|_| custody_deadline_error(CustodyRefusal::AbortedRetrySafe))?;
             let first =
                 ramflux_protocol::parse_i_json(&first).map_err(|_| CustodyRefusal::InvalidInput)?;
-            return Ok(DriveEnd::Handoff { grant, first: Box::new(first) });
+            proxy.retain_after_handoff();
+            return Ok(DriveEnd::Handoff { grant: Box::new(grant), first: Box::new(first) });
         }
         let observed = nonce(&frame)?
             .map(|nonce| {
@@ -701,7 +757,7 @@ pub(crate) async fn tcp(
                 Box::new(recv),
                 context,
                 *first,
-                grant,
+                *grant,
             ))
             .await
         }
@@ -735,7 +791,7 @@ pub(crate) async fn quic(
                 Box::new(recv),
                 context,
                 *first,
-                grant,
+                *grant,
             ))
             .await
         }

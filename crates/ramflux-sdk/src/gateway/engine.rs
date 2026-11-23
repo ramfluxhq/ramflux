@@ -458,6 +458,23 @@ impl GatewaySessionEngine {
         }
     }
 
+    /// Re-admit the live native grant. The stored expiry is the server's new deadline.
+    /// # Errors
+    /// Returns an error when the gateway refuses the renewal or the reply is not `GrantRenewed`.
+    pub(crate) async fn renew_native_grant(&mut self) -> Result<u64, SdkError> {
+        self.write_frame(&GatewayClientFrame::GrantRenew).await?;
+        match self.read_reply(super::frame_dispatch::ExpectedReply::GrantRenew).await? {
+            GatewayServerFrame::GrantRenewed { expires_at } => {
+                self.config.native_grant_expires_at = Some(expires_at);
+                Ok(expires_at)
+            }
+            GatewayServerFrame::Nack { reason } => Err(SdkError::gateway_nack(reason)),
+            other => Err(SdkError::GatewaySessionRejected(format!(
+                "expected grant renewal, got {other:?}"
+            ))),
+        }
+    }
+
     /// # Errors
     /// Returns an error when the gateway rejects or cannot deliver the envelope.
     pub async fn submit_envelope(
