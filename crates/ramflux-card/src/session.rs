@@ -452,10 +452,10 @@ fn advance(value: u64, name: &'static str) -> Result<u64, CardError> {
 fn retain_drafts(old: &CardSpec, new: &CardSpec) -> Result<SurfaceDrafts, CardError> {
     let before = old
         .snapshot
-        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::en())?;
     let after = new
         .snapshot
-        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::En)?;
+        .resolve_for_locale(&SurfaceDrafts::new(), ramflux_protocol::a2ui::DisplayLocale::en())?;
     let mut retained = SurfaceDrafts::new();
     for (pointer, value) in &old.drafts {
         let input = before
@@ -476,7 +476,7 @@ fn retain_drafts(old: &CardSpec, new: &CardSpec) -> Result<SurfaceDrafts, CardEr
             candidate.insert(pointer.clone(), value.clone());
             if new
                 .snapshot
-                .resolve_for_locale(&candidate, ramflux_protocol::a2ui::DisplayLocale::En)
+                .resolve_for_locale(&candidate, ramflux_protocol::a2ui::DisplayLocale::en())
                 .is_ok_and(|resolved| {
                     resolved
                         .inputs
