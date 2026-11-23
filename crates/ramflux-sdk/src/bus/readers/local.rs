@@ -188,6 +188,8 @@ pub(super) fn read(
 
 fn status(client: &RamfluxClient, view: &AccountView) -> Result<Value, SdkError> {
     let mut status = view.status.clone();
+    status[crate::VerifiedClassification::FIELD] =
+        json!(client.verified_classification(&view.principal)?);
     if view.native.is_some() {
         let now = crate::custody::network_now()?;
         let native = crate::custody::load_data_account(
