@@ -71,11 +71,10 @@ pub(super) async fn dispatch(
     };
     if decision == "accepted" && record.state == "pending" {
         let engine = account.session_client().await?;
-        let manifest = crate::client::contact::fetch_verified_device_manifest(
-            &engine.config,
-            &record.contact_identity_commitment,
-        )
-        .await;
+        let manifest = account
+            .client
+            .peer_device_manifest(&engine.config, &record.contact_identity_commitment)
+            .await;
         account.apply_session_metadata(engine);
         account.client.persist_fetched_identity_directory(&manifest?)?;
     }

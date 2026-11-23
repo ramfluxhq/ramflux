@@ -460,14 +460,7 @@ pub(in crate::client) async fn deliver(
     )
     .await?;
     let home = crate::client::recipient_home::foreign_target(client, &intent.peer_root)?;
-    let fingerprint = match home.as_deref() {
-        Some(_) => {
-            Some(crate::client::recipient_home::pinned_node_fingerprint(client, &intent.peer_root)?)
-        }
-        None => None,
-    };
-    let peer =
-        peer_manifest(engine, &intent.peer_root, home.as_deref(), fingerprint.as_deref()).await?;
+    let peer = client.peer_device_manifest(engine.config(), &intent.peer_root).await?;
     client.persist_fetched_identity_directory(&own_manifest)?;
     client.persist_fetched_identity_directory(&peer)?;
     if own_manifest.custody.is_none() {
@@ -565,35 +558,6 @@ async fn send_one(
     }
     engine.submit_envelope(envelope).await?;
     Ok(())
-}
-
-async fn peer_manifest(
-    engine: &impl GatewaySessionAccess,
-    peer_root: &str,
-    home: Option<&str>,
-    pinned_fingerprint: Option<&str>,
-) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
-    let Some(home) = home else {
-        return crate::client::contact::fetch_verified_device_manifest(engine.config(), peer_root)
-            .await;
-    };
-    let fingerprint = pinned_fingerprint
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| SdkError::LocalBus("pinned node fingerprint is required".into()))?;
-    let base = crate::client::recipient_home::public_prekey_base(home, fingerprint).await?;
-    let started = std::time::Instant::now();
-    let manifest =
-        crate::prekey::http_async::get::<Option<crate::prekey::SdkDeviceManifestResponse>>(
-            &base,
-            &format!("/mvp1/device-manifest/{peer_root}"),
-            std::time::Duration::from_secs(10),
-        )
-        .await?
-        .ok_or_else(|| SdkError::LocalBus(format!("missing device manifest for {peer_root}")))?;
-    let manifest = manifest.fetched_from(started);
-    crate::client::contact::verify_device_manifest(&manifest, peer_root)
-        .map_err(|_| SdkError::ContactInput(crate::ContactReason::ManifestInvalid))?;
-    Ok(crate::client::identity_authority::ready_manifest(manifest, now_unix_timestamp()))
 }
 
 pub(crate) fn status(client: &RamfluxClient, root: &str) -> Result<&'static str, SdkError> {

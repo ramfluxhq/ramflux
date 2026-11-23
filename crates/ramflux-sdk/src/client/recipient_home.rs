@@ -17,9 +17,14 @@ pub(crate) fn pin_choice(
     caller_target: Option<&str>,
 ) -> Result<Option<String>, SdkError> {
     let principal = principal_for_commitment(client, commitment)?;
-    let home = match principal.as_deref() {
+    let recorded = match principal.as_deref() {
         Some(principal) => pinned_home(client, principal)?,
         None => None,
+    };
+    let home = match recorded {
+        Some(home) => Some(home),
+        None => crate::client::foreign_manifest::stored_source(client, commitment)?
+            .map(|(home, _)| home),
     };
     let caller = node_id(caller_target);
     if let (Some(home), Some(caller)) = (&home, caller.as_deref())
@@ -57,7 +62,24 @@ pub(crate) fn pinned_home(
     let Some(identity) = client.account_db()?.client_record("identity", principal)? else {
         return Ok(None);
     };
-    Ok(node_id(identity.get("home_node_id").and_then(serde_json::Value::as_str)))
+    if let Some(home) = node_id(identity.get("home_node_id").and_then(serde_json::Value::as_str)) {
+        if let Some(root) =
+            identity.get("contact_identity_commitment").and_then(serde_json::Value::as_str)
+            && let Some((stored, _)) = crate::client::foreign_manifest::stored_source(client, root)?
+            && stored != home
+        {
+            return Err(SdkError::LocalBus(
+                "pinned home disagrees with the verified source".into(),
+            ));
+        }
+        return Ok(Some(home));
+    }
+    let Some(root) =
+        identity.get("contact_identity_commitment").and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok(crate::client::foreign_manifest::stored_source(client, root)?.map(|(home, _)| home))
 }
 
 pub(crate) fn principal_for_commitment(
@@ -82,19 +104,28 @@ pub(crate) fn pinned_node_fingerprint(
     client: &RamfluxClient,
     commitment: &str,
 ) -> Result<String, SdkError> {
-    let principal =
-        principal_for_commitment(client, commitment)?.ok_or_else(fingerprint_required)?;
-    let identity = client
-        .account_db()?
-        .client_record("identity", &principal)?
-        .ok_or_else(fingerprint_required)?;
-    identity
-        .get("node")
-        .and_then(|node| node.get("key_fingerprint"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(fingerprint_required)
+    let card = match principal_for_commitment(client, commitment)? {
+        Some(principal) => client
+            .account_db()?
+            .client_record("identity", &principal)?
+            .as_ref()
+            .and_then(|identity| identity.get("node"))
+            .and_then(|node| node.get("key_fingerprint"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        None => None,
+    };
+    let stored = crate::client::foreign_manifest::stored_source(client, commitment)?
+        .map(|(_, fingerprint)| fingerprint);
+    match (card, stored) {
+        (Some(card), Some(stored)) if card != stored => {
+            Err(SdkError::LocalBus("pinned home disagrees with the verified source".into()))
+        }
+        (Some(card), _) => Ok(card),
+        (None, Some(stored)) => Ok(stored),
+        (None, None) => Err(fingerprint_required()),
+    }
 }
 
 fn fingerprint_required() -> SdkError {
@@ -182,12 +213,16 @@ pub(crate) fn foreign_target(
     client: &RamfluxClient,
     commitment: &str,
 ) -> Result<Option<String>, SdkError> {
-    let Some(principal) = principal_for_commitment(client, commitment)? else {
-        return Ok(None);
+    let from_identity = match principal_for_commitment(client, commitment)? {
+        Some(principal) => pinned_home(client, &principal)?,
+        None => None,
     };
-    let Some(home) = pinned_home(client, &principal)? else {
-        return Ok(None);
+    let home = match from_identity {
+        Some(home) => Some(home),
+        None => crate::client::foreign_manifest::stored_source(client, commitment)?
+            .map(|(home, _)| home),
     };
+    let Some(home) = home else { return Ok(None) };
     let own = client.account_db()?.load_actor_state::<String>("account/node-id")?;
     if own.as_deref() == Some(home.as_str()) { Ok(None) } else { Ok(Some(home)) }
 }
@@ -280,12 +315,10 @@ pub(crate) async fn seal_member(
     engine: &mut impl GatewaySessionAccess,
     seal: MemberSeal<'_>,
 ) -> Result<crate::client::routed::SealedRouted, SdkError> {
-    let Some(federation) = seal.federation else {
-        return client.seal_routed_as(engine, seal.message, seal.body, seal.route).await;
-    };
-    if let Some(base) =
-        directory_base(client, seal.commitment, Some(federation.target_node_id.as_str()), true)
-            .await?
+    let caller = seal.federation.map(|federation| federation.target_node_id.as_str());
+    let foreign = foreign_target(client, seal.commitment)?;
+    if (foreign.is_some() || caller.is_some())
+        && let Some(base) = directory_base(client, seal.commitment, caller, true).await?
     {
         client.seal_routed_federated_as(engine, seal.message, seal.body, Some(&base), seal.route)
     } else {

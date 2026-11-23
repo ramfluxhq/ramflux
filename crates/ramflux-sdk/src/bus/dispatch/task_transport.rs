@@ -595,31 +595,24 @@ async fn direct_targets_with_policy(
         prepared.clone()
     } else if account.task_prepared_only {
         return Err(SdkError::TaskManifestWorkerCapacity);
-    } else if let Some(route) = &federation
-        && let Some(base) = crate::client::recipient_home::directory_base(
-            client,
-            commitment,
-            Some(route.target_node_id.as_str()),
-            true,
-        )
-        .await?
-    {
-        let manifest = if bounded_manifest_worker {
-            fetch_federated_manifest(&base, commitment).await?
-        } else {
-            crate::client::contact::fetch_verified_device_manifest_from_url_async(
-                crate::client::contact::RemoteManifest {
-                    url: &base,
-                    timeout: account.timeouts.http,
-                },
-                commitment,
-            )
-            .await?
-        };
-        client.persist_fetched_identity_directory(&manifest)?;
-        manifest
     } else {
-        client.cache_verified_device_manifest(gateway, commitment, "task_peer").await?
+        let caller = federation.as_ref().map(|route| route.target_node_id.as_str());
+        let foreign = crate::client::recipient_home::foreign_target(client, commitment)?;
+        if (foreign.is_some() || caller.is_some())
+            && let Some(base) =
+                crate::client::recipient_home::directory_base(client, commitment, caller, true)
+                    .await?
+        {
+            let manifest = if bounded_manifest_worker {
+                fetch_federated_manifest(&base, commitment).await?
+            } else {
+                client.peer_device_manifest(gateway, commitment).await?
+            };
+            client.persist_fetched_identity_directory(&manifest)?;
+            manifest
+        } else {
+            client.cache_verified_device_manifest(gateway, commitment, "task_peer").await?
+        }
     };
     direct_targets_from_manifest(account, thread, manifest)
 }

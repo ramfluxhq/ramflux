@@ -586,25 +586,15 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
                 "already_submitted": true,
             })));
         }
-        let qualified=account.client.root_qualified_device_lookup(recipient.storage_key())?;
-        let prekey = if let Some(federation) = route.federation.as_ref()
-            && let Some(base) = crate::client::recipient_home::directory_base(
-                &account.client,
-                &member_principal_commitment,
-                Some(federation.target_node_id.as_str()),
-                true,
-            )
-            .await?
-        {
-            crate::prekey::http_async::get::<crate::prekey::SdkPrekeyResponse>(
-                &base,
-                &format!("/mvp1/prekey/{qualified}"),
-                account.timeouts.http,
-            )
-            .await?
-        } else {
-            engine.fetch_prekey_bundle(&qualified).await?
-        };
+        let qualified = account.client.root_qualified_device_lookup(recipient.storage_key())?;
+        let prekey = group_sender_key_prekey(
+            account,
+            &mut engine,
+            &route,
+            &member_principal_commitment,
+            &qualified,
+        )
+        .await?;
         let target_delivery_id =
             route.target_delivery_id.clone().or(prekey.target_delivery_id).ok_or_else(|| {
                 SdkError::LocalBus(format!(
@@ -646,6 +636,30 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
     .await;
     account.apply_session_metadata(engine);
     result
+}
+
+async fn group_sender_key_prekey(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewaySessionAccess,
+    route: &LocalBusGroupMemberRoute,
+    commitment: &str,
+    qualified: &str,
+) -> Result<crate::prekey::SdkPrekeyResponse, SdkError> {
+    let caller = route.federation.as_ref().map(|federation| federation.target_node_id.as_str());
+    let foreign = crate::client::recipient_home::foreign_target(&account.client, commitment)?;
+    if (foreign.is_some() || caller.is_some())
+        && let Some(base) =
+            crate::client::recipient_home::directory_base(&account.client, commitment, caller, true)
+                .await?
+    {
+        return crate::prekey::http_async::get(
+            &base,
+            &format!("/mvp1/prekey/{qualified}"),
+            account.timeouts.http,
+        )
+        .await;
+    }
+    engine.fetch_prekey_bundle(qualified).await
 }
 
 fn stable_distribution_header(
