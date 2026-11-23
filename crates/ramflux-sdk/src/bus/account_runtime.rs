@@ -212,6 +212,11 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
     result.and(flushed).and(pairing)
 }
 
+#[cfg(not(test))]
+type WriterBudget = ramflux_storage::writer_budget::Armed;
+#[cfg(test)]
+type WriterBudget = ();
+
 impl AccountRuntime {
     fn networking_expiry_request(&self) -> LocalBusFrame {
         LocalBusFrame::request(
@@ -419,11 +424,21 @@ impl AccountRuntime {
 
     /// Unlock writes in `initialize_actor` finish before a queued command can pause the writer.
     #[cfg(not(test))]
-    fn arm_writer_budget(&self) -> ramflux_storage::writer_budget::Armed {
+    fn arm_writer_budget(waiting: &Arc<std::sync::atomic::AtomicUsize>) -> WriterBudget {
         ramflux_storage::writer_budget::Armed::arm(
-            Arc::clone(&self.command_waiting),
+            Arc::clone(waiting),
             super::runtime_limits::WRITER_SLICE,
         )
+    }
+
+    /// Unit-test runtimes keep the unbudgeted writer.
+    #[cfg(test)]
+    fn arm_writer_budget(_waiting: &Arc<std::sync::atomic::AtomicUsize>) -> WriterBudget {}
+
+    /// Arms the writer budget (non-test builds) and starts the receive schedule after unlock.
+    fn serve_setup(&self) -> (WriterBudget, super::sync_driver::Schedule, tokio::time::Instant) {
+        let (schedule, next) = self.receive_schedule();
+        (Self::arm_writer_budget(&self.command_waiting), schedule, next)
     }
 
     fn receive_schedule(&self) -> (super::sync_driver::Schedule, tokio::time::Instant) {
@@ -447,14 +462,11 @@ impl AccountRuntime {
         Ok((transient, username))
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
         if !self.initialize_actor(ready).await? {
             return Ok(());
         }
-        #[cfg(not(test))]
-        let _writer_budget = self.arm_writer_budget();
-        let (mut schedule, mut next) = self.receive_schedule();
+        let (_writer_budget, mut schedule, mut next) = self.serve_setup();
         let mut checkpoints = 0_u8;
         loop {
             let (transient_deadline, username_deadline) =
