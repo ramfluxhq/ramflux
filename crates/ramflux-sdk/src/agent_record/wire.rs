@@ -14,7 +14,7 @@ pub(crate) fn to_wire(record: &StoredAgentRecord) -> g::AgentRecord {
         custodian_anchor: record.custodian_anchor.clone(),
         persona: Some(record.persona.clone()),
         host: None,
-        config: None,
+        config: config_of(record),
         revision: None,
         lifecycle: record.lifecycle.clone(),
         observation: String::new(),
@@ -22,4 +22,23 @@ pub(crate) fn to_wire(record: &StoredAgentRecord) -> g::AgentRecord {
         access: Some(record.access.clone()),
         role: record.role.clone(),
     }
+}
+
+fn config_of(record: &StoredAgentRecord) -> Option<g::AgentConfigData> {
+    let bounded = record.max_concurrent_turns.is_some() || record.max_cost_per_day_cents.is_some();
+    if !bounded && record.provider.is_none() && record.model.is_none() {
+        return None;
+    }
+    Some(g::AgentConfigData {
+        provider: record.provider.clone().unwrap_or_default(),
+        model: record.model.clone().unwrap_or_default(),
+        prompt: None,
+        autonomy: String::new(),
+        tools: Vec::new(),
+        enabled: None,
+        limits: bounded.then_some(g::AgentLimits {
+            max_concurrent_turns: record.max_concurrent_turns,
+            max_cost_per_day_cents: record.max_cost_per_day_cents,
+        }),
+    })
 }

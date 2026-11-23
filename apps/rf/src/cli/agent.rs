@@ -35,6 +35,12 @@ pub(crate) struct AgentModelArgs {
     /// The model of that provider.
     #[arg(long)]
     pub(crate) model: String,
+    /// Admission limit: concurrent turns for this agent (`1..=1024`).
+    #[arg(long)]
+    pub(crate) max_concurrent_turns: Option<u32>,
+    /// Admission limit: daily cost in cents (`1..=1000000000`).
+    #[arg(long)]
+    pub(crate) max_cost_per_day_cents: Option<u64>,
 }
 
 /// The access policy of an agent (contract 1 `AgentAccessPolicy`).

@@ -31,4 +31,10 @@ pub(crate) struct DaemonStart {
     pub(crate) builtin_nodes: Option<PathBuf>,
     #[arg(long, default_value = DEFAULT_DATA_ROOT)]
     pub(crate) data_root: PathBuf,
+    /// Loopback PRX base URL. Set together with `--prx-token-file`, or set neither.
+    #[arg(long)]
+    pub(crate) prx_base_url: Option<String>,
+    /// Bearer token file for `--prx-base-url`. Mode must be `0600`.
+    #[arg(long)]
+    pub(crate) prx_token_file: Option<PathBuf>,
 }
