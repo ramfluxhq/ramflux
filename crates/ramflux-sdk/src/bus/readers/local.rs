@@ -246,6 +246,9 @@ fn native_status(
             &client.account_db()?.local_account_id,
             now,
         )?;
+        if let Some(custodian) = native.custodian_account_id() {
+            status["custodian_account_id"] = serde_json::Value::from(custodian);
+        }
         status["networking"] = serde_json::to_value(native.state())?;
         let last_error = client
             .account_db()?

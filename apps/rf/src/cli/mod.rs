@@ -25,6 +25,7 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+mod prx;
 mod vault;
 pub(crate) use vault::*;
 mod mcp;
@@ -47,6 +48,7 @@ pub(crate) use conversation_ops::*;
 pub(crate) use daemon::*;
 pub(crate) use device::*;
 pub(crate) use diag::*;
+pub(crate) use prx::*;
 mod pairing;
 mod transfer;
 pub(crate) use dm::*;
@@ -88,6 +90,8 @@ pub(crate) enum Command {
     Pairing(PairingCommand),
     /// Agent accounts: create, decide, list, show, edit, access, delete, status (desktop bus).
     Agent(AgentCommand),
+    /// Find or start the local PRX daemon.
+    Prx(PrxCommand),
     /// Full-account primary transfer preview (default-off).
     Transfer(TransferCommand),
     Dm(DmCommand),

@@ -68,6 +68,11 @@ pub(super) enum PrivateCommand {
     Capture(oneshot::Sender<Result<super::backup_jobs::CapturedAccount, SdkError>>),
     /// An agent creation command; boxed so the agent payloads do not grow this enum.
     Agent(Box<AgentPrivate>),
+    /// Commits one owner copy of an agent-activity row. The supervisor routes it.
+    ProjectActivity {
+        activity: Box<OwnerActivity>,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
     AuthorizeBackup {
         generation: i64,
         reply: oneshot::Sender<Result<(), SdkError>>,
@@ -95,11 +100,20 @@ pub(super) struct AccountCommand {
     pub reply: Option<oneshot::Sender<Result<ActorResponse, SdkError>>>,
 }
 
+/// One stored agent-activity row to commit on the human owner's actor.
+#[derive(Clone)]
+pub(crate) struct OwnerActivity {
+    pub owner_id: String,
+    pub state_kind: String,
+    pub record: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub(super) struct ActorResponse {
     pub body: serde_json::Value,
     pub events: Vec<LocalBusFrame>,
     pub nodes: Option<crate::node::NodeStore>,
+    pub owner_copy: Option<Box<OwnerActivity>>,
 }
 
 #[derive(Clone)]
@@ -279,6 +293,16 @@ impl AccountActor {
                 }
             }
         }
+    }
+
+    /// Stores one activity row on this owner actor. The caller is the supervisor.
+    ///
+    /// # Errors
+    /// Returns the actor's typed refusal. A stopped actor is `LocalBus`.
+    pub(super) async fn project_activity(&self, activity: OwnerActivity) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::ProjectActivity { activity: Box::new(activity), reply })?;
+        response.await.map_err(|_| stopped())?
     }
 
     pub(super) async fn unlock_native(
@@ -487,6 +511,7 @@ impl AccountActor {
                 body: readers.request(command.request).await?,
                 events: Vec::new(),
                 nodes: None,
+                owner_copy: None,
             });
         }
         let (sender, receiver) = oneshot::channel();

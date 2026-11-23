@@ -146,6 +146,9 @@ fn name_from_anchor(anchor: &str) -> Result<AgentName, SdkError> {
 fn map_prx(error: &PrxError) -> SdkError {
     match error {
         PrxError::Api { code: ApiCode::AgentNotRetired, .. } => SdkError::AgentNotRetired,
+        PrxError::Api { code: ApiCode::ModelCapabilitiesUnknown, .. } => {
+            SdkError::PrxCall("model_capabilities_unknown")
+        }
         PrxError::Unsupported { .. } => SdkError::PrxCall("prx_unsupported"),
         PrxError::Unavailable | PrxError::Timeout => SdkError::PrxCall("prx_unavailable"),
         _ => SdkError::PrxCall("prx_rejected"),

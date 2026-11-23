@@ -193,12 +193,19 @@ An empty `RAMFLUX_NOTIFY_PROVIDER_CREDENTIALS_FILE` means "not configured". WebP
 be provisioned by the operator before accepting subscriptions. Provider secret
 references are stored in redb; provider secrets remain in the referenced files or operator-controlled environment.
 
-Providers receive the device token and a closed payload. The iOS alert title is
-`Ramflux` and the body is `You have a new Ramflux update.` The payload carries no
-wake id, envelope id, sender, delivery class, or encrypted hint, and it sets no
-sound, badge, `mutable-content`, or `content-available`. Background delivery is
-unsupported: there is no background push builder. FCM is data-only. Web Push
-encrypts a short body and is not used for calls.
+Providers receive the device token and a closed payload. An APNs alert sets
+`mutable-content` to 1 and `sound` to `default`. Its alert dictionary is a
+localisation key (`RF_PUSH_MESSAGE` for a message, `RF_PUSH_CALL` when a call
+uses the alert route) and an empty `loc-args` array. There is no literal title,
+body, sender, or message text. A custom `rf` object carries version 1, class
+`m` or `call`, an empty route-tag placeholder, and the wake id. That wake id is
+the content-free hint. The source envelope id is not copied. Sibling fields
+still carry `wake_id`, `class`, and, for a message, `collapse_key`. The payload
+sets no badge and no `content-available`. Background delivery is unsupported:
+there is no background push builder. FCM is a data message with the same facts.
+`rf` is a JSON string, because FCM data values are strings, and there is no
+notification text. Android priority is `HIGH`. Web Push encrypts a short body,
+keeps urgency `normal`, and is not used for calls.
 
 A message collapse value is HMAC-SHA-256 of the target delivery id under the
 notify route secret, domain `ramflux.notification.device_collapse.v1`. Calls omit
@@ -206,7 +213,10 @@ collapse on every provider. One device has one message collapse slot, so message
 subclasses, token rotations, and provider routes share it. An operator who holds
 the route secret can recompute that value. Knowing only a delivery id does not.
 
-Only `call_wake` is high priority, and only after a current signed call intent.
+Messages and calls both use APNs priority 10 and FCM `HIGH`. APNs
+`apns-expiration` is the signed absolute deadline. FCM `ttl` is the whole
+seconds remaining until that deadline. A call is still minted only after a
+current signed call intent.
 An iOS device may register both an alert route (`apns`) and a `PushKit` route
 (`apns_voip`). A call uses the `PushKit` route when
 `RAMFLUX_NOTIFY_APNS_VOIP_ENABLED` is exactly `1` and that route's credential is
