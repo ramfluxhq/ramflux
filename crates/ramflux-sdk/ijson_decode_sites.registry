@@ -386,3 +386,4 @@ crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 1 | E | excluded=cl
 crates/ramflux-sdk/src/bus/username_directory.rs | prepare | 2 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/username_directory/retry.rs | delivery_retry | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/username_directory/submission.rs | prepare | 1 | E | excluded=closed username public intent, profile, floor or checkpoint metadata outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/account_local.rs | confirm | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
