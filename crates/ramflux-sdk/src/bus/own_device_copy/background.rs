@@ -351,12 +351,10 @@ fn draft(
         result => result?,
     };
     let Some(mut draft) = prepared else {
-        // A cached manifest can predate a sibling's registration. The root's authority still names
-        // an authorized sibling, so the copy is not unneeded: retry against a fetched manifest.
-        if plan.cached_manifest && account.client.own_sent_has_siblings()? {
-            return Err(SdkError::InboundPending(
-                "own-device cached manifest lists no sibling; refetch".into(),
-            ));
+        // A native manifest omits a sync sibling until that sibling publishes a prekey.
+        // Finishing not_needed is terminal. prepare's attempt cap stops a sibling that never publishes.
+        if account.client.own_sent_has_siblings()? {
+            return Ok(None);
         }
         finish(account, &plan.key, &plan.work, "not_needed")?;
         return Ok(None);

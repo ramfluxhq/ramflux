@@ -14,6 +14,7 @@ mod card;
 #[cfg(test)]
 #[path = "cas_tests.rs"]
 mod cas_tests;
+mod credential;
 mod custody;
 #[cfg(test)]
 mod custody_tests;
@@ -38,5 +39,6 @@ pub use exports::{
     ramflux_v2_conversation_project, ramflux_v2_event_poll, ramflux_v2_event_reset,
     ramflux_v2_execute, ramflux_v2_negotiate, ramflux_v2_operation_cancel,
     ramflux_v2_operation_poll, ramflux_v2_operation_release, ramflux_v2_receipt_present,
+    ramflux_v2_set_credential_provider,
 };
 use exports::{error_code, failure};

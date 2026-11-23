@@ -47,6 +47,12 @@ pub(super) struct Supervisor {
     lifecycle_registry: super::lifecycle_registry::Registry,
 }
 
+pub(super) enum OpenJournal {
+    Unavailable,
+    Resync,
+    Ready(Box<super::subscription::JournalFollow>),
+}
+
 impl Supervisor {
     pub(super) fn new(mut config: LocalBusConfig) -> Result<Rc<Self>, SdkError> {
         if config.pairing.is_none() {
@@ -306,7 +312,7 @@ impl Supervisor {
         }
         let credential_call =
             super::credentials::call(&self.config.data_root, &request, connection)?;
-        if request.method == "account.lock" {
+        if matches!(request.method.as_str(), "account.lock" | "account.sign_out") {
             crate::custody::pairing::private_credential::cancel_call(
                 &self.config.data_root,
                 request_account_id(&request)?,
@@ -520,6 +526,9 @@ impl Supervisor {
             "account.export_agent_credentials" => {
                 return self.export_agent_credentials(&request, connection).await;
             }
+            "account.remove_local" => {
+                return self.remove_local(request).await;
+            }
             _ => {}
         }
         if request.method.starts_with("node.")
@@ -576,7 +585,7 @@ impl Supervisor {
         } else {
             return Err(self.account_unavailable(&id));
         };
-        let locking = request.method == "account.lock";
+        let locking = matches!(request.method.as_str(), "account.lock" | "account.sign_out");
         let unlocking = request.method == "account.unlock";
         let mut request = command(request, connection);
         request.attended = self.attended.borrow().values().any(|account| account == &id);
@@ -724,65 +733,96 @@ impl Supervisor {
         Ok(result)
     }
 
+    async fn remove_local(&self, mut request: LocalBusFrame) -> Result<ActorResponse, SdkError> {
+        let confirmed = super::account_local::confirm(&request);
+        super::account_local::wipe_confirmation(&mut request.body);
+        confirmed?;
+        let id = request_account_id(&request)?.to_owned();
+        let index = self.index.clone();
+        let root = self.config.data_root.clone();
+        let present = {
+            let index = index.clone();
+            let root = root.clone();
+            let id = id.clone();
+            super::lifecycle::spawn_blocking(move || {
+                super::account_local::present(&index, &root, &id)
+            })
+            .await
+            .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??
+        };
+        if !present && !self.accounts.borrow().contains_key(&id) {
+            return Err(super::account_local::missing());
+        }
+        if self.accounts.borrow().contains_key(&id) {
+            self.lock_account_session(&id).await?;
+            self.clear_device_wrap(&id).await?;
+        }
+        let vault = super::custody_setup::primary_provider(&self.config);
+        let removed = id.clone();
+        super::lifecycle::spawn_blocking(move || {
+            super::account_local::erase(&index, &root, vault.as_ref(), &removed)
+        })
+        .await
+        .map_err(|error| SdkError::LocalBus(format!("account erase failed: {error}")))??;
+        Ok(reply(serde_json::json!({"local_account_id": id, "removed": true})))
+    }
+
     async fn account_list(&self) -> Result<ActorResponse, SdkError> {
         let index = self.index.clone();
         let root = self.config.data_root.clone();
-        let (active,known) = super::lifecycle::spawn_blocking(move || -> Result<_,SdkError> {
-            let mut known=Vec::new();
-            for id in index.known_account_ids()? {
-                if crate::custody::account_exists(&root,&id)? { continue; }
-                let path=local_bus_account_manifest_path(&root,&id);
-                let (manifest,unreadable)=if super::daemon::account_manifest_available(&path) {
-                    if let Ok(manifest)=read_local_bus_account_manifest(&path) {
-                        (Some(manifest),false)
-                    }else{
-                        tracing::warn!(account_id=%id,reason_code="manifest_unreadable","account list omitted unreadable manifest metadata");
-                        (None,true)
-                    }
-                }else{(None,false)};
-                known.push((serde_json::json!({"id":id,"label":manifest.as_ref().and_then(|m|m.label.as_ref()),"kind":manifest.as_ref().and_then(|m|m.kind.as_ref()),"principal_id":manifest.as_ref().map(|m|&m.principal_id)}),unreadable));
-            }
-            for mut account in crate::custody::list_accounts(&root,super::custody_setup::now()?)? {
-                account["id"]=account["local_account_id"].clone();
-                known.push((account, false));
-            }
-            Ok((index.active_account()?,known))
+        let (active, mut known) = super::lifecycle::spawn_blocking(move || {
+            super::account_local::known_rows(&index, &root)
         })
-            .await
-            .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
-        let accounts = self
+        .await
+        .map_err(|error| SdkError::LocalBus(format!("index reader failed: {error}")))??;
+        let open = self
             .accounts
             .borrow()
             .iter()
             .filter(|(_, actor)| actor.is_open())
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        let active = active.filter(|id| accounts.contains(id));
+        super::account_local::include_open(&mut known, &open);
+        let active = active.filter(|id| open.contains(id));
         let restore_states = self.restore_states.borrow().clone();
-        let mut known = known;
         for (row, manifest_unreadable) in &mut known {
-            if row["custody_v3_observed"].as_bool() == Some(true) {
-                row["networking"] = row["state"].clone();
+            if row.get("custody_v3_observed").and_then(serde_json::Value::as_bool) == Some(true) {
+                let networking = row.get("state").cloned().unwrap_or(serde_json::Value::Null);
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("networking".to_owned(), networking);
+                }
             }
-            let id =
-                row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
-            row["state"] = serde_json::json!(match restore_states.get(&id) {
+            let id = super::account_local::row_id(row).to_owned();
+            let state = match restore_states.get(&id) {
                 Some(RestoreState::Pending(_)) => "restore_pending",
                 Some(RestoreState::Failed(_)) => "restore_failed",
                 None if *manifest_unreadable => "restore_failed",
-                None if accounts.iter().any(|account| account == &id) => "unlocked",
+                None if open.iter().any(|account| account == &id) => "unlocked",
                 None => "locked",
-            });
-            if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
-                row["restore_error_code"] = serde_json::json!(reason);
-            } else if *manifest_unreadable {
-                row["restore_error_code"] = serde_json::json!("manifest_unreadable");
+            };
+            if let Some(map) = row.as_object_mut() {
+                map.insert("state".to_owned(), serde_json::Value::from(state));
+                if let Some(RestoreState::Failed(reason)) = restore_states.get(&id) {
+                    map.insert(
+                        "restore_error_code".to_owned(),
+                        serde_json::Value::from(reason.clone()),
+                    );
+                } else if *manifest_unreadable {
+                    map.insert(
+                        "restore_error_code".to_owned(),
+                        serde_json::Value::from("manifest_unreadable"),
+                    );
+                }
             }
+            super::account_local::attach_from_state(row);
         }
-        let known = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
-        Ok(reply(
-            serde_json::json!({"accounts":accounts, "account_details":known, "active_account_id":active}),
-        ))
+        let details = known.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        let accounts = super::account_local::picker(&details);
+        Ok(reply(serde_json::json!({
+            "accounts": accounts,
+            "account_details": details,
+            "active_account_id": active,
+        })))
     }
 
     async fn prepare_import(
@@ -1065,6 +1105,39 @@ impl Supervisor {
             self.streams.borrow_mut().insert(connection.connection_id, task);
         }
         Ok(())
+    }
+
+    /// Tails the journal only when this account's reader pool is already open.
+    /// A missing pool stays ephemeral so restore and attended opens still acknowledge.
+    pub(super) async fn prepare_open_journal(
+        &self,
+        request: &LocalBusFrame,
+        connection: &LocalBusConnectionState,
+    ) -> Result<OpenJournal, SdkError> {
+        let Some(id) = request.account_id.as_deref() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Some(actor) = self.accounts.borrow().get(id).cloned() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        let Ok(readers) = actor.reader_pool() else {
+            return Ok(OpenJournal::Unavailable);
+        };
+        match super::subscription::prepare_follow(readers, request, &connection.outbound).await? {
+            None => Ok(OpenJournal::Resync),
+            Some(follow) => Ok(OpenJournal::Ready(Box::new(follow))),
+        }
+    }
+
+    pub(super) fn install_stream(&self, id: u64, task: tokio::task::JoinHandle<()>) {
+        self.clear_stream(id);
+        self.streams.borrow_mut().insert(id, task);
+    }
+
+    pub(super) fn clear_stream(&self, id: u64) {
+        if let Some(previous) = self.streams.borrow_mut().remove(&id) {
+            previous.abort();
+        }
     }
 
     pub(super) fn subscribe(&self, connection: &LocalBusConnectionState, account_id: String) {

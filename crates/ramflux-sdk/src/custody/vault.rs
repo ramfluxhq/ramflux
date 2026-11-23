@@ -237,8 +237,8 @@ pub const VAULT_CLASS_PROTECTED: &str = "software_os_credential_non_synchronizin
 pub const VAULT_CLASS_LOGIN_KEYCHAIN: &str = "software_os_credential_login_keychain";
 /// Software OS credential vault. This is not a nonexportable hardware Ed25519 key.
 /// macOS uses its protected, explicitly non-synchronizing keychain, or the login keychain
-/// when the process has no data-protection entitlement (ad hoc signing). Other platforms
-/// fail closed until their primary provider is implemented and reviewed.
+/// when the process has no data-protection entitlement (ad hoc signing). Production Linux
+/// selects `LinuxDesktopVault` instead of this type. This type still fails closed off macOS.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativePrimaryVault;
 #[cfg(target_os = "macos")]
