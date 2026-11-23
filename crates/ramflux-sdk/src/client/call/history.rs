@@ -186,6 +186,63 @@ fn stored_summary(bytes: &[u8]) -> Result<Option<g::CallSummary>, SdkError> {
     })
 }
 
+fn summary_evidence(missing: bool) -> SdkError {
+    use ramflux_protocol::message::original_header::EvidenceError;
+    if missing {
+        EvidenceError::OriginEvidenceMissing.into()
+    } else {
+        EvidenceError::OriginCommitmentMismatch.into()
+    }
+}
+
+/// The call summary carried by these exact inner bytes.
+/// `Ok(None)` is any other kind, including a call control, so history does not ring.
+/// # Errors
+/// Refuses a kind-11 body that is not a verified summary.
+pub(crate) fn open_summary_history(
+    bytes: &[u8],
+) -> Result<Option<(g::EventIdentity, g::CallSummary)>, SdkError> {
+    let kind = match g::validation::scan_inner(bytes) {
+        Ok(scanned) => scanned.kind,
+        Err(_) => return Ok(None),
+    };
+    if kind != 11 {
+        return Ok(None);
+    }
+    let (identity, content) =
+        RamfluxClient::decode_generated_inner(bytes).map_err(|_| summary_evidence(false))?;
+    let Some(g::content::Value::Call(call)) = content.value else {
+        return Err(summary_evidence(false));
+    };
+    let summary = match &call.payload {
+        Some(g::call::Payload::Summary(summary)) => summary.clone(),
+        Some(g::call::Payload::Control(_)) => return Ok(None),
+        None => return Err(summary_evidence(false)),
+    };
+    RamfluxClient::validate_generated_call(&call).map_err(|_| summary_evidence(false))?;
+    g::identity::verify(&identity).map_err(|_| summary_evidence(false))?;
+    if summary.call_id.len() != 16 {
+        return Err(summary_evidence(false));
+    }
+    Ok(Some((identity, summary)))
+}
+
+/// Remember the summary id the history import just stored. `call.list` reads this key.
+/// # Errors
+/// Refuses a call id that is not 16 bytes, or a storage failure.
+pub(crate) fn persist_summary_identity(
+    client: &RamfluxClient,
+    call_id: &[u8],
+    identity: &g::EventIdentity,
+) -> Result<(), SdkError> {
+    if call_id.len() != 16 {
+        return Err(refused("call id"));
+    }
+    let encoded = ramflux_protocol::encode_base64url(call_id);
+    client.account_db()?.persist_actor_state(&summary_key(&encoded), identity)?;
+    Ok(())
+}
+
 fn encode_summary(
     identity: g::EventIdentity,
     summary: g::CallSummary,

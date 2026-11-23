@@ -17,6 +17,11 @@ impl RamfluxClient {
         ) {
             return Ok(false);
         }
+        if let Some((identity, summary)) =
+            crate::client::call::history::open_summary_history(&item.exact_inner)?
+        {
+            return self.import_call_summary(sibling, item, &identity, &summary);
+        }
         if sibling.root_commitment() != self.own_account_anchor()? {
             return Err(EvidenceError::EditAuthorMismatch.into());
         }
@@ -208,6 +213,121 @@ impl RamfluxClient {
             crate::time::now_unix_timestamp(),
         )?;
         Ok(true)
+    }
+
+    fn import_call_summary(
+        &self,
+        sibling: &ramflux_crypto::RootQualifiedDeviceRef,
+        item: &g::HistoryItem,
+        identity: &g::EventIdentity,
+        summary: &g::CallSummary,
+    ) -> Result<bool, SdkError> {
+        self.admit_call_summary_item(sibling, item, identity)?;
+        self.account_db()?
+            .write_transaction(|| self.install_call_summary_item(item, identity, summary))
+    }
+
+    fn admit_call_summary_item(
+        &self,
+        sibling: &ramflux_crypto::RootQualifiedDeviceRef,
+        item: &g::HistoryItem,
+        identity: &g::EventIdentity,
+    ) -> Result<(), SdkError> {
+        if item.tombstone.is_some()
+            || item.source_evidence.is_some()
+            || item.original_metadata_evidence.is_some()
+            || !item.exact_original_identity.is_empty()
+            || identity.group_id.is_some()
+        {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
+        if sibling.root_commitment() != self.own_account_anchor()? {
+            return Err(EvidenceError::EditAuthorMismatch.into());
+        }
+        self.require_native_operation(sibling, NativeOperation::Sync)?;
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        Ok(())
+    }
+
+    fn install_call_summary_item(
+        &self,
+        item: &g::HistoryItem,
+        identity: &g::EventIdentity,
+        summary: &g::CallSummary,
+    ) -> Result<bool, SdkError> {
+        self.authorize_history_message_scope(identity)?;
+        let db = self.account_db()?;
+        let id = ramflux_protocol::encode_base64url(&identity.id);
+        if db.message_is_deleted(&id)? || self.apply_generated_delete_fence(identity)? {
+            return Ok(false);
+        }
+        if let Some(stored) = db.message_content(&id)? {
+            if stored != item.exact_inner {
+                return Err(SdkError::ReplayMismatch);
+            }
+            crate::client::call::history::persist_summary_identity(
+                self,
+                &summary.call_id,
+                identity,
+            )?;
+            return Ok(false);
+        }
+        self.bind_imported_summary_conversation(identity, summary)?;
+        let sender = identity.author.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
+        db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
+            conversation_id: &identity.conversation_id,
+            message_id: &id,
+            sender_id: &sender.device_id,
+            encrypted_body: &[],
+            metadata: &ramflux_storage::MessageMetadata::default(),
+            created_at: summary.created_at,
+        })?;
+        db.persist_actor_state(&format!("routed/generated-identity/{id}"), identity)?;
+        db.replace_call_summary_body(&identity.conversation_id, &id, &item.exact_inner)?;
+        crate::client::call::history::persist_summary_identity(self, &summary.call_id, identity)?;
+        let row = self.direct_message_by_id(&id)?.ok_or(EvidenceError::OriginCommitmentMismatch)?;
+        let update = self.generated_message_update(&row, &identity.conversation_id, 0)?;
+        db.append_message_update(
+            &format!("history/item/{id}"),
+            "message.received",
+            &update,
+            crate::time::now_unix_timestamp(),
+        )?;
+        Ok(true)
+    }
+
+    fn bind_imported_summary_conversation(
+        &self,
+        identity: &g::EventIdentity,
+        summary: &g::CallSummary,
+    ) -> Result<(), SdkError> {
+        let db = self.account_db()?;
+        if db.client_record("conversation", &identity.conversation_id)?.is_some() {
+            return Ok(());
+        }
+        let own = self.own_account_anchor()?;
+        let author = identity.author.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
+        if author.account_anchor == own {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let caller = summary.caller.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?;
+        db.persist_client_record(
+            "conversation",
+            &identity.conversation_id,
+            &serde_json::json!({
+                "kind": "direct",
+                "group_id": null,
+                "title": null,
+                "direct_route": null,
+                "participants": [local.principal_id, caller.principal_id],
+                "participant_roots": std::collections::BTreeSet::from([
+                    own,
+                    author.account_anchor.clone(),
+                ]),
+            }),
+        )?;
+        Ok(())
     }
 }
 

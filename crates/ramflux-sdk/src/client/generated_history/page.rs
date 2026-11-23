@@ -135,6 +135,14 @@ impl RamfluxClient {
         ) {
             return Ok(());
         }
+        if let Some((identity, _)) =
+            crate::client::call::history::open_summary_history(&item.exact_inner)?
+        {
+            // The message verifier requires kind 1 and a sender envelope. A summary has neither.
+            self.authorize_history_message_scope(&identity)?;
+            self.import_generated_history_message(source, item)?;
+            return Ok(());
+        }
         let identity = if edited(item)? {
             self.verify_generated_edited_history_item(item)?
         } else {
