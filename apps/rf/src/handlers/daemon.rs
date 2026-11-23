@@ -13,7 +13,15 @@ pub(crate) async fn handle_daemon(socket: PathBuf, command: DaemonCommand) -> Re
             #[cfg(feature = "itest-memory-vault")]
             let itest_vault_path =
                 start.itest_memory_vault.then(|| start.data_root.join("itest-memory-vault.json"));
+            if start.prx_base_url.is_some() != start.prx_token_file.is_some() {
+                return Err(RfError::Message(
+                    "--prx-base-url and --prx-token-file are set together".into(),
+                ));
+            }
             let mut config = LocalBusConfig::new(socket, start.data_root);
+            if let (Some(url), Some(path)) = (&start.prx_base_url, &start.prx_token_file) {
+                config = config.with_prx(url, path)?;
+            }
             #[cfg(feature = "itest-memory-vault")]
             if let Some(path) = itest_vault_path {
                 config.custody_vault = Some(std::sync::Arc::new(
