@@ -8,7 +8,7 @@ type Mutation={op:"remove";key:string}|{op:"upsert";parent:string|null;index:num
 type Batch={schema:string;session:number;previous_version:number;version:number;signed_version:number;signed_hash:string;edit_seq:number;mutations:Mutation[];host_slots:HostSlot[]};
 type Reply={session:number;version:number;value:Batch|{result:string;batch?:Batch;action?:unknown}|null};
 type Edit={key:string;version:number};
-type Pending={edit?:Edit;presentation?:HostPresentation;resolve:(value:Reply|null)=>void;reject:(reason:Error)=>void};
+type Pending={op:string;edit?:Edit;presentation?:HostPresentation;resolve:(value:Reply|null)=>void;reject:(reason:Error)=>void};
 // Each WASM instance has its own Rust resident counter. Bound worker instances
 // at the app adapter too, so separate heaps cannot bypass the two-VM policy.
 let workers=0;
@@ -45,7 +45,8 @@ export class CardView {
   constructor(private readonly root:HTMLElement, workerURL:URL,
     private readonly intent:(action:unknown,fields?:unknown)=>void,
     private readonly hostSlots:(slots:readonly HostSlot[])=>void,
-    private readonly failure:(message:string)=>void,private presentation:HostPresentation) {
+    private readonly failure:(message:string)=>void,private presentation:HostPresentation,
+    private readonly observe?:(entry:{op:string;request?:unknown;reply?:unknown;refusal?:unknown})=>void) {
     if(this.root.childElementCount)throw Error(this.ui("root_not_empty"));
     this.worker=createWorker(workerURL,presentation.strings);this.root.inert=false;
     const channel=new MessageChannel();this.port=channel.port1;
@@ -63,6 +64,8 @@ export class CardView {
   }
   private ui(key:keyof Strings):string{return this.presentation.strings[key]}
   present(presentation:HostPresentation):Promise<Reply|null>{return this.request("present",JSON.stringify(presentation),undefined,presentation)}
+  preview(input:string,model:string):Promise<Reply|null>{return this.request("open_preview",input,undefined,undefined,model)}
+  tree():Promise<Reply|null>{return this.request("tree")}
   open(selectedJSON:string):Promise<Reply|null>{return this.request("open",selectedJSON)}
   update(selectedJSON:string):Promise<Reply|null>{return this.request("update",selectedJSON)}
   suspend():Promise<Reply|null>{return this.request("suspend")}
@@ -80,25 +83,26 @@ export class CardView {
     for(const pending of this.pending.values())pending.reject(error);this.pending.clear();
     if(notify){this.port.close();this.releaseWorker();this.root.inert=true;this.hostSlots([]);this.failure(error.message)}
   }
-  private async request(op:string,json?:string,edit?:Edit,presentation?:HostPresentation):Promise<Reply|null> {
+  private async request(op:string,json?:string,edit?:Edit,presentation?:HostPresentation,model?:string):Promise<Reply|null> {
     if(this.disposed||this.released)throw Error(this.ui("disposed"));
     if(json!==undefined && (typeof json!=="string" || new TextEncoder().encode(json).length>32768))throw Error(this.ui("input_bound"));
     if(this.pending.size>=32)throw Error(this.ui("busy"));
     // Reserve before awaiting readiness so the pre-init queue is bounded too.
     const seq=++this.sequence;
-    const response=new Promise<Reply|null>((resolve,reject)=>this.pending.set(seq,{resolve,reject,edit,presentation}));
+    const response=new Promise<Reply|null>((resolve,reject)=>this.pending.set(seq,{op,resolve,reject,edit,presentation}));
     this.refreshButtons();
-    try {await this.ready;if(this.disposed)throw Error(this.ui("disposed"));this.port.postMessage({seq,op,json})}
+    try {await this.ready;if(this.disposed)throw Error(this.ui("disposed"));this.observe?.({op,request:op==="event"&&json!==undefined?JSON.parse(json):json});this.port.postMessage({seq,op,json,model})}
     catch(error){this.pending.get(seq)?.reject(error instanceof Error?error:Error(this.ui("runtime_unavailable")));this.pending.delete(seq)}
     return response;
   }
-  private receive(message:{seq:number;json?:string;error?:string;terminal?:boolean;disposed?:boolean}):void {
+  private receive(message:{seq:number;json?:string;error?:string;terminal?:boolean;disposed?:boolean;refusal?:unknown}):void {
     const pending=this.pending.get(message.seq);if(!pending)return;this.pending.delete(message.seq);
-    if(message.error){const failure=Error(this.ui(message.error==="runtime_unavailable"?"runtime_unavailable":"content_unavailable"));pending.reject(failure);if(message.terminal)this.abort(failure);this.refreshButtons();return}
+    if(message.error){this.observe?.({op:"refused",refusal:message.refusal});const failure=Error(this.ui(message.error==="runtime_unavailable"?"runtime_unavailable":"content_unavailable"));pending.reject(failure);if(message.terminal)this.abort(failure);this.refreshButtons();return}
     try {
       if(message.disposed){pending.resolve(null);return}
       if(typeof message.json!=="string"||new TextEncoder().encode(message.json).length>263168)throw Error(this.ui("output_unavailable"));
       const reply=JSON.parse(message.json) as Reply;
+      this.observe?.({op:pending.op,reply});
       if(pending.presentation)this.presentation=pending.presentation;
       this.session=reply.session;
       const value=reply.value;
