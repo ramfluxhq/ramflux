@@ -70,8 +70,11 @@ pub(super) async fn seal_content_with_identity(
     let inner = RamfluxClient::encode_generated_inner(identity, &content)?;
     let route = crate::client::routed::Route::from_inner(&inner)?;
     let sealed = Box::pin(account.client.seal_routed_as(engine, &message, &inner, route)).await?;
-    let envelope =
-        crate::dm::gateway_generated_envelope_from_sealed(engine.config(), &mut message, sealed)?;
+    let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+        &engine.sealing_config()?,
+        &mut message,
+        sealed,
+    )?;
     if matches!(content.value, Some(ramflux_protocol::message::content::Value::Message(_))) {
         assert!(
             envelope.ext.ext.contains_key(ramflux_protocol::message::original_header::EXT_KEY),
@@ -647,6 +650,16 @@ async fn serve(
                     continue;
                 }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
+                GatewayClientFrame::GrantRenew => {
+                    let renewed = match native_session.as_deref() {
+                        Some(id) => native.renew(&connection, id)?,
+                        None => None,
+                    };
+                    match renewed {
+                        Some(expires_at) => GatewayServerFrame::GrantRenewed { expires_at },
+                        None => GatewayServerFrame::Close { reason: "renewal_refused".into() },
+                    }
+                }
                 GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
                     if let Some(hold) = hold {

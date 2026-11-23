@@ -51,8 +51,11 @@ impl RamfluxClient {
                 if !db.mark_raw_inner_reparse_attempted(&snapshot, &decoder)? {
                     return Ok(false);
                 }
-                if snapshot.copy.kind == ramflux_storage::RawInnerCopyKind::SourceEvidence
-                    && snapshot.copy.copy_id.starts_with("routed/own-sent-attestation/")
+                if matches!(
+                    snapshot.copy.kind,
+                    ramflux_storage::RawInnerCopyKind::SourceEvidence
+                        | ramflux_storage::RawInnerCopyKind::SupportedOwnAttestation
+                ) && snapshot.copy.copy_id.starts_with("routed/own-sent-attestation/")
                 {
                     return match self.reparse_own_sent_attestation(&snapshot) {
                         Ok(projected) => Ok(projected),

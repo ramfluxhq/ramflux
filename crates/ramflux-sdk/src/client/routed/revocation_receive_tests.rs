@@ -197,8 +197,11 @@ impl Case {
         request.recipient_principal_commitment = Some(root);
         request.target_delivery_id = b.config()?.target_delivery_id;
         let (mut request, sealed) = seal_native_fixture(&a, &b, request, &exact, Route::control())?;
-        let envelope =
-            crate::dm::gateway_generated_envelope_from_sealed(&a.config()?, &mut request, sealed)?;
+        let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&a.config()?)?,
+            &mut request,
+            sealed,
+        )?;
         let entry = GatewayInboxEntry {
             target_delivery_id: envelope.target_delivery_id.clone(),
             envelope,

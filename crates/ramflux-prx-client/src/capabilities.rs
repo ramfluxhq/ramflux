@@ -33,6 +33,9 @@ pub const TARGETED_AGENTS_V1: &str = "targeted_agents_v1";
 /// `POST .../messages/{id}/delete`, `.../messages/delete` and `.../runs/{run_id}/reply/delete`: tombstone
 /// deletes of a message, a batch, or one run's reply. A deleted key replays `409 message_deleted`.
 pub const MESSAGE_DELETE_V1: &str = "message_delete_v1";
+/// The three delete routes accept `"forget_writes": true` and also forget the memories and
+/// documents the deleted runs wrote. Sending the field without this token is refused.
+pub const MESSAGE_FORGET_WRITES_V1: &str = "message_forget_writes_v1";
 
 /// The build identity PRX reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +135,7 @@ impl PrxClient {
 mod tests {
     use super::*;
 
-    const SHA: &str = "c5aab92e51dfb17e3d47de09396643e466dd719b";
+    const SHA: &str = "d9b7946a4d6cdc5914f8e1fba6f94fe43e52fe15";
 
     fn body(commit: &str, extra: &str) -> String {
         format!(

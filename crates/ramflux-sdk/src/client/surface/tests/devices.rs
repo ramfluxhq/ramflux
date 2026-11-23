@@ -80,13 +80,17 @@ pub(super) fn entry(
     let bundle = target.load_x3dh_private_state(&remote)?.bundle;
     let envelope = source.account_db()?.write_transaction(|| {
         let sealed = source.seal_generated_routed_prepared(
-            &config,
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
             &message,
             &exact,
             Route::direct(),
             SendMaterial { manifest: None, bundle: Some(bundle) },
         )?;
-        crate::dm::gateway_generated_envelope_from_sealed(&config, &mut message, sealed)
+        crate::dm::gateway_generated_envelope_from_sealed(
+            &crate::bus::connection_manager::SessionMetadata::sealing_config_for(&config)?,
+            &mut message,
+            sealed,
+        )
     })?;
     Ok(crate::GatewayInboxEntry {
         forwarded: false,

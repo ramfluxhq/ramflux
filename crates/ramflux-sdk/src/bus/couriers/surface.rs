@@ -15,7 +15,7 @@ struct Plan {
     key: String,
     fingerprint: serde_json::Value,
     reply: ResyncReply,
-    config: GatewaySessionConfig,
+    config: crate::SealingConfig,
     request: SendMaterialRequest,
 }
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {

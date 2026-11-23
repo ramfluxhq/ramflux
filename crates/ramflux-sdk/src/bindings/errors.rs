@@ -191,6 +191,9 @@ impl AdapterError {
                         scope: match scope {
                             ramflux_storage::RawInnerQuotaScope::Source => "source",
                             ramflux_storage::RawInnerQuotaScope::Account => "account",
+                            ramflux_storage::RawInnerQuotaScope::SupportedAttestation => {
+                                "supported_attestation"
+                            }
                         }
                         .into(),
                         source: source_anchor.clone(),
