@@ -415,7 +415,9 @@ fn write_first(
     })?;
     db.store_message_content(&row.conversation_id, message_id, body)?;
     db.persist_actor_state(&format!("routed/generated-identity/{message_id}"), identity)?;
-    if owner.device_id() == sender {
+    if identity.author.as_ref().is_some_and(|author| {
+        author.account_anchor == owner.root_commitment() && author.device_id == owner.device_id()
+    }) {
         db.mark_generated_message_owned(message_id, &owner)?;
     }
     db.persist_actor_state(&summary_key(&row.call_id), identity)?;
