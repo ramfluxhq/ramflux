@@ -117,8 +117,7 @@ fn corrupt_profile_unverifies_only_that_actor_and_preserves_other_directory_and_
     Ok(())
 }
 #[test]
-fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_verified()
--> TestResult {
+fn signed_headless_device_verifies_task_actor_kind_without_a_role_class() -> TestResult {
     use ramflux_protocol::{TaskAccept, TaskEvent, TaskEventBody, TaskStart};
     let agent = Actor::new("agent", "agent-device", 51, 52, 1)?;
     mode(&agent, PrincipalKind::HeadlessAi, LocalBusClientMode::HeadlessAi)?;
@@ -158,7 +157,7 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
             TaskEventBody::Accept(TaskAccept { task_id: "missing".into(), version: 2 }),
         )?,
     ] {
-        assert!(!crate::client::task::carrier_kind_verified(&reader.client, &c));
+        assert!(crate::client::task::carrier_kind_verified(&reader.client, &c));
         reader
             .client
             .project_task_message(
@@ -174,7 +173,7 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
             .ok_or("outcome")?;
         assert_eq!(
             reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind_verified"],
-            false
+            true
         );
         assert_eq!(
             reader.client.task_message_metadata("thread", &c.message_id)?.ok_or("metadata")?["actor_kind"],
@@ -182,19 +181,20 @@ fn headless_profile_cannot_mark_human_role_task_outcomes_or_expired_holds_kind_v
         );
         let journal = db.latest_journal_event("task.changed")?.ok_or("journal")?;
         assert_eq!(journal.body["actor_kind"], "headless_ai");
-        assert_eq!(journal.body["actor_kind_verified"], false);
+        assert_eq!(journal.body["actor_kind_verified"], true);
     }
     reader.client.retry_pending_tasks(now + 601)?;
     let journal = db.latest_journal_event("task.changed")?.ok_or("event")?;
     assert_eq!(journal.body["resync_required"], true);
     assert_eq!(journal.body["actor_kind"], "headless_ai");
+    assert_eq!(journal.body["actor_kind_verified"], true);
     let mut missing = make(
         "unknown-device",
         TaskEventBody::Accept(TaskAccept { task_id: "missing".into(), version: 2 }),
     )?;
     missing.device_id = "not-authorized".into();
     assert_eq!(crate::client::task::carrier_actor_kind(&reader.client, &missing), None);
-    assert_eq!(journal.body["actor_kind_verified"], false);
+    assert!(!crate::client::task::carrier_kind_verified(&reader.client, &missing));
     Ok(())
 }
 

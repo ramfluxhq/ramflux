@@ -17,13 +17,13 @@ pub(crate) enum TaskAction {
     List(TaskList),
     /// `task.get`: one task by id.
     Get(TaskGet),
-    /// `task.propose`: a headless AI proposal; the body file is the typed `TaskProposal`.
+    /// `task.propose`: a proposal; the body file is the typed `TaskProposal`.
     Propose(TaskBodyFile),
     /// `task.accept`: accept a proposal or start at a given task version.
     Accept(TaskVersioned),
     /// `task.decline`: decline a proposal or start at a given task version.
     Decline(TaskVersioned),
-    /// `task.start`: a human requests a task; the body file is the typed `TaskStart`.
+    /// `task.start`: a request; the body file is the typed `TaskStart`.
     Start(TaskBodyFile),
     /// `task.update`: a typed `TaskUpdate` body (state, steps, result).
     Update(TaskBodyFile),

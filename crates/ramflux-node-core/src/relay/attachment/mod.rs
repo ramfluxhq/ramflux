@@ -11,6 +11,7 @@ mod identity;
 pub use grants::*;
 mod quota;
 mod retention;
+mod status;
 mod terminal;
 pub use retention::{AttachmentDebtPage, AttachmentPolicy};
 #[cfg(test)]
