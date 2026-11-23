@@ -35,13 +35,13 @@ pub(crate) use store::{
     reconcile_incomplete_markers, reserve_pairing_account,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
-pub(crate) use vault::{agent_key_unavailable, require_vault_reference};
 pub use vault::{
     AgentDecisionSigning, BranchCredentials, CustodyVaultReason, DEVICE_UNLOCK_PREFIX,
     NativePrimaryVault, PrimaryVault, VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
 #[cfg(windows)]
 pub use vault::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};
+pub(crate) use vault::{agent_key_unavailable, require_vault_reference};
 
 #[cfg(any(target_os = "linux", test))]
 pub use vault::linux::{
