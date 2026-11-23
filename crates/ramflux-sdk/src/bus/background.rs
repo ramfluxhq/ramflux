@@ -3,9 +3,13 @@
 
 //! Suspend keeps unlocked accounts in memory and releases every process file they hold.
 
-use super::actor::AccountActor;
-use super::supervisor::Supervisor;
 use crate::prelude::*;
+
+#[cfg(feature = "c-abi")]
+use super::actor::AccountActor;
+#[cfg(feature = "c-abi")]
+use super::supervisor::Supervisor;
+#[cfg(feature = "c-abi")]
 use std::sync::atomic::Ordering;
 
 pub(crate) fn client_suspended() -> SdkError {
@@ -16,6 +20,7 @@ pub(crate) fn client_suspended() -> SdkError {
     }
 }
 
+#[cfg(feature = "c-abi")]
 impl Supervisor {
     pub(super) async fn suspend_for_background(&self) -> Result<(), SdkError> {
         if self.config.background.load(Ordering::Acquire) && self.root_lease.borrow().is_none() {

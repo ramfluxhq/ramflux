@@ -162,9 +162,11 @@ impl AccountRuntime {
                     let _ = reply.send(result);
                 }
             }
+            #[cfg(feature = "c-abi")]
             super::super::actor::PrivateCommand::ReleaseFiles { reply } => {
                 let _ = reply.send(self.release_for_suspend().await);
             }
+            #[cfg(feature = "c-abi")]
             super::super::actor::PrivateCommand::ReopenFiles { reply } => {
                 let _ = reply.send(self.reopen_from_suspend());
             }

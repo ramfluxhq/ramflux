@@ -65,10 +65,12 @@ pub(super) enum PrivateCommand {
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
     /// Close this actor's descriptors. The unlocked account and its key stay in memory.
+    #[cfg(feature = "c-abi")]
     ReleaseFiles {
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
     /// Reopen descriptors closed by `ReleaseFiles`. Does not ask for the unlock code.
+    #[cfg(feature = "c-abi")]
     ReopenFiles {
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
@@ -125,6 +127,21 @@ struct ActorLaunch {
     initialized: std::sync::mpsc::Receiver<()>,
     finished: watch::Sender<ActorExit>,
     wait_for_initial: bool,
+}
+
+#[cfg(feature = "c-abi")]
+fn is_lifecycle_private(command: &PrivateCommand) -> bool {
+    matches!(
+        command,
+        PrivateCommand::NativeUnlock { .. }
+            | PrivateCommand::ReleaseFiles { .. }
+            | PrivateCommand::ReopenFiles { .. }
+    )
+}
+
+#[cfg(not(feature = "c-abi"))]
+fn is_lifecycle_private(command: &PrivateCommand) -> bool {
+    matches!(command, PrivateCommand::NativeUnlock { .. })
 }
 
 impl AccountActor {
@@ -266,12 +283,14 @@ impl AccountActor {
         response.await.map_err(|_| stopped())?
     }
 
+    #[cfg(feature = "c-abi")]
     pub(super) async fn release_files(&self) -> Result<(), SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::ReleaseFiles { reply })?;
         response.await.map_err(|_| stopped())?
     }
 
+    #[cfg(feature = "c-abi")]
     pub(super) async fn reopen_files(&self) -> Result<(), SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::ReopenFiles { reply })?;
@@ -379,12 +398,7 @@ impl AccountActor {
     }
     fn send_private(&self, backup: PrivateCommand) -> Result<(), SdkError> {
         let (outbound, _events) = mpsc::channel(1);
-        let lifecycle = matches!(
-            backup,
-            PrivateCommand::NativeUnlock { .. }
-                | PrivateCommand::ReleaseFiles { .. }
-                | PrivateCommand::ReopenFiles { .. }
-        );
+        let lifecycle = is_lifecycle_private(&backup);
         self.enqueue(
             AccountCommand {
                 admission: None,

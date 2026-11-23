@@ -44,6 +44,7 @@ impl RefreshState {
 
     /// The session suspend just stopped no longer owns the pass. A lease, backoff or
     /// preempt permit from those sockets must not block the session resume starts.
+    #[cfg(feature = "c-abi")]
     pub(crate) fn release_after_suspend(&mut self) {
         if let Some(work) = super::directory::take_paused()
             && !matches!(work, super::directory::DirectoryWork::HeadRefresh(_))

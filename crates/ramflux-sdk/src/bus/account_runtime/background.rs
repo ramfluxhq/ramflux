@@ -16,12 +16,24 @@ pub(super) fn files_released() -> bool {
     FILES_RELEASED.with(Cell::get)
 }
 
+#[cfg(feature = "c-abi")]
 fn set_files_released(released: bool) {
     FILES_RELEASED.with(|flag| flag.set(released));
 }
 
 pub(super) fn is_file_command(private: &PrivateCommand) -> bool {
+    file_command(private)
+}
+
+/// `ReleaseFiles` and `ReopenFiles` exist only on the C ABI suspend path.
+#[cfg(feature = "c-abi")]
+fn file_command(private: &PrivateCommand) -> bool {
     matches!(private, PrivateCommand::ReleaseFiles { .. } | PrivateCommand::ReopenFiles { .. })
+}
+
+#[cfg(not(feature = "c-abi"))]
+fn file_command(_private: &PrivateCommand) -> bool {
+    false
 }
 
 pub(super) fn reject_suspended(command: &mut AccountCommand) {
@@ -48,6 +60,7 @@ impl AccountRuntime {
         Ok(Some(self.prepare_receive_turn().await?))
     }
 
+    #[cfg(feature = "c-abi")]
     pub(super) async fn release_for_suspend(&mut self) -> Result<(), SdkError> {
         self.resume_receive_until = None;
         self.stop_connection().await;
@@ -62,6 +75,7 @@ impl AccountRuntime {
         released
     }
 
+    #[cfg(feature = "c-abi")]
     pub(super) fn reopen_from_suspend(&mut self) -> Result<(), SdkError> {
         if !files_released() {
             return Ok(());
@@ -128,6 +142,7 @@ impl AccountRuntime {
         Ok(())
     }
 
+    #[cfg(feature = "c-abi")]
     fn drop_open_files(&mut self) -> Result<(), SdkError> {
         if let Some(account) = self.state.accounts.get_mut(&self.id) {
             account.object_put_spools.clear();
@@ -143,6 +158,7 @@ impl AccountRuntime {
         db.release_files().map_err(SdkError::from)
     }
 
+    #[cfg(feature = "c-abi")]
     fn reopen_account_db(&self) -> Result<(), SdkError> {
         let Some(account) = self.state.accounts.get(&self.id) else {
             return Ok(());
@@ -176,29 +192,43 @@ impl AccountRuntime {
         }
     }
 
-    fn command_while_released(&mut self, mut command: AccountCommand) -> bool {
-        match command.private.take() {
-            Some(PrivateCommand::ReopenFiles { reply }) => {
-                let result = self.reopen_from_suspend();
-                let resumed = result.is_ok();
-                let _ = reply.send(result);
-                resumed
-            }
-            Some(PrivateCommand::ReleaseFiles { reply }) => {
-                let _ = reply.send(Ok(()));
-                false
-            }
-            Some(other) => {
-                reject_private(other);
-                reject_reply(command.reply.take());
-                false
-            }
-            None => {
-                reject_reply(command.reply.take());
-                false
-            }
+    fn command_while_released(&mut self, command: AccountCommand) -> bool {
+        apply_released_command(self, command)
+    }
+}
+
+#[cfg(feature = "c-abi")]
+fn apply_released_command(runtime: &mut AccountRuntime, mut command: AccountCommand) -> bool {
+    match command.private.take() {
+        Some(PrivateCommand::ReopenFiles { reply }) => {
+            let result = runtime.reopen_from_suspend();
+            let resumed = result.is_ok();
+            let _ = reply.send(result);
+            resumed
+        }
+        Some(PrivateCommand::ReleaseFiles { reply }) => {
+            let _ = reply.send(Ok(()));
+            false
+        }
+        Some(other) => {
+            reject_private(other);
+            reject_reply(command.reply.take());
+            false
+        }
+        None => {
+            reject_reply(command.reply.take());
+            false
         }
     }
+}
+
+#[cfg(not(feature = "c-abi"))]
+fn apply_released_command(_runtime: &mut AccountRuntime, mut command: AccountCommand) -> bool {
+    if let Some(other) = command.private.take() {
+        reject_private(other);
+    }
+    reject_reply(command.reply.take());
+    false
 }
 
 fn reject_reply(
@@ -227,10 +257,8 @@ fn reject_private(private: PrivateCommand) {
             let _ = reply.send(Err(error));
         }
         PrivateCommand::Agent(command) => reject_agent(*command, error),
-        PrivateCommand::ReleaseFiles { reply } => {
-            let _ = reply.send(Ok(()));
-        }
-        PrivateCommand::ReopenFiles { reply } => {
+        #[cfg(feature = "c-abi")]
+        PrivateCommand::ReleaseFiles { reply } | PrivateCommand::ReopenFiles { reply } => {
             let _ = reply.send(Ok(()));
         }
         #[cfg(test)]
