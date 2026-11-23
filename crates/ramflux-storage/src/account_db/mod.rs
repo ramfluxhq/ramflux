@@ -49,6 +49,7 @@ mod deleted_messages;
 pub mod device_directory;
 mod device_metadata;
 mod event_counter;
+mod files;
 pub mod friend;
 pub(crate) mod full_transfer;
 mod group_device_address;

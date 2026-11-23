@@ -24,6 +24,9 @@ pub enum RamfluxV2Status {
     Closed = 26,
     /// Event credit was exhausted. Re-read projections and reopen the subscription.
     ResyncRequired = 27,
+    /// The client released its files. 28 and 29 belong to pairing on `RamfluxErrorCode`.
+    /// A refused call had no business effects. An admitted call reports effects `unknown`.
+    Suspended = 30,
 }
 
 #[derive(Default)]
@@ -106,6 +109,14 @@ fn refuse_raw_submit(client: &Client, request: &Request) -> Result<(), CAbiError
     }
     Ok(())
 }
+fn refuse_closed(client: &Client) -> Result<(), CAbiError> {
+    if client.closing.load(std::sync::atomic::Ordering::Acquire)
+        || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
+    }
+    Ok(())
+}
 fn internal() -> CAbiError {
     CAbiError::new(RamfluxErrorCode::Internal, "bridge lock poisoned")
 }
@@ -116,7 +127,7 @@ fn next_id(registry: &mut Registry) -> Result<u64, CAbiError> {
     registry.next = registry.next.checked_add(1).ok_or_else(busy)?;
     Ok(registry.next)
 }
-fn client(handle: u64) -> Result<Arc<Client>, CAbiError> {
+pub(super) fn client(handle: u64) -> Result<Arc<Client>, CAbiError> {
     REGISTRY
         .lock()
         .map_err(|_| internal())?
@@ -146,7 +157,7 @@ pub(super) fn call(action: impl FnOnce() -> Result<(), CAbiError>) -> i32 {
         action()
     })) {
         Ok(Ok(())) => 0,
-        Ok(Err(error)) => error.code as i32,
+        Ok(Err(error)) => error.status.unwrap_or(error.code as i32),
         Err(payload) => {
             // Arbitrary panic payload destructors may panic again. Never unwind from this boundary.
             std::mem::forget(payload);
@@ -406,11 +417,7 @@ pub extern "C" fn ramflux_v2_execute(
                 ));
             }
         }
-        if client.closing.load(std::sync::atomic::Ordering::Acquire)
-            || client.shared.closed.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(CAbiError::new(RamfluxErrorCode::TransportUnavailable, "client closed"));
-        }
+        refuse_closed(&client)?;
         let subscription = matches!(request.method.as_str(), "subscription.open" | "bus.subscribe");
         let id = next_id(&mut *REGISTRY.lock().map_err(|_| internal())?)?;
         let frame_method_close = request.method == "subscription.close";
@@ -436,6 +443,9 @@ pub extern "C" fn ramflux_v2_execute(
             OperationKind::Request
         };
         let mut operations = client.shared.operations.lock().map_err(|_| internal())?;
+        if client.shared.suspended.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(CAbiError::with_status(RamfluxV2Status::Suspended as i32, "suspended"));
+        }
         if operations.len() >= MAX_OPERATIONS {
             return Err(busy());
         }
@@ -654,6 +664,7 @@ pub(super) fn error_code(name: &str) -> i32 {
         "CustodyForkFenced" => E::CustodyForkFenced as i32,
         "SchemaResetRequired" | "schema_reset_required" => E::SchemaResetRequired as i32,
         "resync_required" => RamfluxV2Status::ResyncRequired as i32,
+        "ClientSuspended" => RamfluxV2Status::Suspended as i32,
         _ => E::Internal as i32,
     }
 }

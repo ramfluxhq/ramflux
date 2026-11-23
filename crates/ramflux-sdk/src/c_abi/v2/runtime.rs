@@ -22,6 +22,7 @@ pub(super) struct Command {
 pub(super) struct Client {
     pub commands: mpsc::Sender<Command>,
     pub shared: Arc<Shared>,
+    lifecycle: mpsc::Sender<crate::bus::inprocess::LifecycleRequest>,
     shutdown: watch::Sender<bool>,
     done: Mutex<CloseCompletion>,
     close_wait: Duration,
@@ -82,6 +83,7 @@ pub(super) use crate::bus::inprocess::ShutdownGate;
 struct Worker {
     config: LocalBusConfig,
     commands: mpsc::Receiver<Command>,
+    lifecycle: mpsc::Receiver<crate::bus::inprocess::LifecycleRequest>,
     shutdown: watch::Receiver<bool>,
     stop: watch::Sender<bool>,
     ready: std::sync::mpsc::SyncSender<Result<(), SdkError>>,
@@ -115,6 +117,7 @@ impl Client {
     ) -> Result<Arc<Self>, SdkError> {
         let data_root = config.data_root.clone();
         let (commands, receiver) = mpsc::channel(MAX_OPERATIONS);
+        let (lifecycle, lifecycle_rx) = mpsc::channel(4);
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (ready, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (done_tx, done) = std::sync::mpsc::sync_channel(1);
@@ -128,6 +131,7 @@ impl Client {
                     run(Worker {
                         config,
                         commands: receiver,
+                        lifecycle: lifecycle_rx,
                         shutdown: shutdown_rx,
                         stop: worker_shutdown,
                         ready,
@@ -158,6 +162,7 @@ impl Client {
             data_root,
             commands,
             shared,
+            lifecycle,
             shutdown,
             done: Mutex::new(CloseCompletion { receiver: done, terminal: None }),
             close_wait,
@@ -190,6 +195,22 @@ impl Client {
         action()
     }
 
+    pub(super) fn drive_lifecycle(&self, resume: bool, wait: Duration) -> Result<(), DriveError> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        let request = crate::bus::inprocess::LifecycleRequest { resume, reply };
+        if self.lifecycle.blocking_send(request).is_err() {
+            return Err(DriveError::Failed(SdkError::LocalBus("lifecycle channel closed".into())));
+        }
+        match response.recv_timeout(wait) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(DriveError::Failed(error)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DriveError::TimedOut),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(DriveError::Failed(SdkError::LocalBus("lifecycle reply lost".into())))
+            }
+        }
+    }
+
     pub fn shutdown_confirmed(&self) -> Result<bool, SdkError> {
         match self.done.try_lock() {
             Ok(mut state) => {
@@ -214,6 +235,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     let Worker {
         config,
         commands,
+        lifecycle,
         shutdown,
         stop,
         ready,
@@ -229,6 +251,7 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
         config,
         server_stream,
         server_shutdown,
+        lifecycle,
         server_ready,
         #[cfg(test)]
         gate,
@@ -253,6 +276,17 @@ async fn run(worker: Worker) -> Result<(), SdkError> {
     stopped.and(read_result)
 }
 
+enum WriteAction {
+    Skip,
+    Cancel,
+    Send,
+}
+
+pub(super) enum DriveError {
+    TimedOut,
+    Failed(SdkError),
+}
+
 async fn write_commands(
     mut commands: mpsc::Receiver<Command>,
     mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
@@ -264,34 +298,40 @@ async fn write_commands(
             _ = shutdown.changed() => break,
             command = commands.recv() => match command { Some(command) => command, None => break },
         };
-        let cancelled = {
+        let action = {
             let mut state = command
                 .operation
                 .state
                 .lock()
                 .map_err(|_| SdkError::LocalBus("operation lock poisoned".into()))?;
-            if state.cancelled {
-                true
+            if state.result.is_some() || state.slot == super::state::ResultSlot::Frozen {
+                WriteAction::Skip
+            } else if shared.suspended.load(Ordering::Acquire) {
+                let effects = if state.admitted { "unknown" } else { "none" };
+                state.slot = super::state::ResultSlot::Frozen;
+                state.result = Some(super::state::suspended_bytes(effects));
+                WriteAction::Skip
+            } else if state.cancelled {
+                WriteAction::Cancel
             } else if command
                 .deadline_ms
                 .is_some_and(|deadline| u128::from(deadline) <= super::super::current_millis())
             {
                 drop(state);
-                shared.complete(
-                    command.id,
-                    serde_json::json!({
-                        "code":10,"effects":"none"
-                    }),
-                );
-                continue;
+                shared.complete(command.id, serde_json::json!({"code":10,"effects":"none"}));
+                WriteAction::Skip
             } else {
                 state.admitted = true;
-                false
+                WriteAction::Send
             }
         };
-        if cancelled {
-            shared.complete(command.id, failure(RamfluxV2Status::Cancelled, "none"));
-            continue;
+        match action {
+            WriteAction::Skip => continue,
+            WriteAction::Cancel => {
+                shared.complete(command.id, failure(RamfluxV2Status::Cancelled, "none"));
+                continue;
+            }
+            WriteAction::Send => {}
         }
         let sent = tokio::time::timeout(
             std::time::Duration::from_secs(5),

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod backup;
+mod files;
 pub use backup::{AccountGenerationSelection, BackupIndexInstall};
 mod device_unlock;
 pub use device_unlock::CodeAttempts;

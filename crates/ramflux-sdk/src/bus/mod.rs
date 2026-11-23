@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 pub(crate) mod account_runtime;
+mod background;
 #[cfg(test)]
 pub(crate) use account_runtime::apply_ack_flush;
 mod ack_cache;

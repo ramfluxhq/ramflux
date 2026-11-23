@@ -9,6 +9,7 @@ use super::readers::AccountReaders;
 use crate::prelude::*;
 use std::sync::{Arc, Mutex as RoutingMutex};
 
+mod background;
 mod commands;
 mod maintenance;
 use maintenance::Maintenance;
@@ -184,7 +185,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         "account.flush",
         serde_json::json!({}),
     );
-    let flushed = account.publish(&request).await;
+    let flushed = flush_if_open(&account, &request).await;
     account.close_readers().await;
     let pairing = crate::custody::pairing::remove_actor_and_drain(
         &account.state.config.data_root,
@@ -417,8 +418,8 @@ impl AccountRuntime {
         let (mut schedule, mut next) = self.receive_schedule();
         let mut checkpoints = 0_u8;
         loop {
-            let (transient_deadline, username_deadline) =
-                Box::pin(self.prepare_receive_turn()).await?;
+            let prepared = self.background_or_prepare().await?;
+            let Some((transient_deadline, username_deadline)) = prepared else { break };
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -549,6 +550,10 @@ impl AccountRuntime {
         self.publish(&request).await?;
         Ok(activity || fetched)
     }
+}
+
+async fn flush_if_open(account: &AccountRuntime, request: &LocalBusFrame) -> Result<(), SdkError> {
+    if background::files_released() { Ok(()) } else { account.publish(request).await }
 }
 
 fn stopped() -> SdkError {

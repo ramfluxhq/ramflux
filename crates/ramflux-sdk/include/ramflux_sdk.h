@@ -139,6 +139,11 @@ enum RamfluxV2Status
    Event credit was exhausted. Re-read projections and reopen the subscription.
    */
   RAMFLUX_V2_STATUS_RESYNC_REQUIRED = 27,
+  /*
+   The client released its files. 28 and 29 belong to pairing on `RamfluxErrorCode`.
+   A refused call had no business effects. An admitted call reports effects `unknown`.
+   */
+  RAMFLUX_V2_STATUS_SUSPENDED = 30,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -398,6 +403,23 @@ int32_t ramflux_v2_receipt_present(const uint8_t *input_json,
  The owned JSON output uses `ramflux_v2_buffer_free`; no account or renderer is opened.
  */
 int32_t ramflux_v2_card_trust_package(struct RamfluxBuffer **out);
+
+/*
+ Stop networking, flush databases, and close file descriptors.
+ Unlocked account state, including the database key, stays in memory.
+ Pending operations complete as `RAMFLUX_V2_STATUS_SUSPENDED` (30).
+ A second call while already suspended returns 0.
+ Call off the UI thread. A killed process is a cold start and must unlock again.
+ */
+int32_t ramflux_v2_client_suspend(uint64_t handle);
+
+/*
+ Reopen files and reconnect. Does not ask for the unlock code.
+ Returns 0 when the client was not suspended.
+ A data-root conflict leaves the client suspended.
+ Call off the UI thread.
+ */
+int32_t ramflux_v2_client_resume(uint64_t handle);
 
 /*
  Decode and re-encode a generated message request through the shared adapter core.

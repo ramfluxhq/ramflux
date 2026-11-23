@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Park one account actor. Production runs one actor on this thread, so the flag is that actor's.
+
+use super::AccountRuntime;
+use crate::bus::actor::{AccountCommand, AgentPrivate, PrivateCommand};
+use crate::prelude::*;
+use std::cell::Cell;
+
+thread_local! {
+    static FILES_RELEASED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn files_released() -> bool {
+    FILES_RELEASED.with(Cell::get)
+}
+
+fn set_files_released(released: bool) {
+    FILES_RELEASED.with(|flag| flag.set(released));
+}
+
+pub(super) fn is_file_command(private: &PrivateCommand) -> bool {
+    matches!(private, PrivateCommand::ReleaseFiles { .. } | PrivateCommand::ReopenFiles { .. })
+}
+
+pub(super) fn reject_suspended(command: &mut AccountCommand) {
+    if let Some(private) = command.private.take() {
+        reject_private(private);
+    }
+    if let Some(reply) = command.reply.take() {
+        let _ = reply.send(Err(super::super::background::client_suspended()));
+    }
+}
+
+impl AccountRuntime {
+    pub(super) async fn background_or_prepare(
+        &mut self,
+    ) -> Result<Option<(Option<tokio::time::Instant>, Option<tokio::time::Instant>)>, SdkError>
+    {
+        if files_released() && self.wait_while_released().await? {
+            return Ok(None);
+        }
+        Ok(Some(self.prepare_receive_turn().await?))
+    }
+
+    pub(super) async fn release_for_suspend(&mut self) -> Result<(), SdkError> {
+        self.stop_connection().await;
+        self.stop_courier().await;
+        self.transfers.stop().await;
+        self.username.stop().await;
+        self.pairing.stop().await;
+        self.close_readers().await;
+        self.ledger = None;
+        let released = self.drop_open_files();
+        set_files_released(true);
+        released
+    }
+
+    pub(super) fn reopen_from_suspend(&mut self) -> Result<(), SdkError> {
+        if !files_released() {
+            return Ok(());
+        }
+        self.reopen_account_db()?;
+        if self.state.accounts.contains_key(&self.id) {
+            self.initialize_readers()?;
+            self.start_courier();
+            self.start_username_delivery();
+            self.start_connection()?;
+        }
+        set_files_released(false);
+        Ok(())
+    }
+
+    fn drop_open_files(&mut self) -> Result<(), SdkError> {
+        if let Some(account) = self.state.accounts.get_mut(&self.id) {
+            account.object_put_spools.clear();
+            account.object_get_spools.clear();
+            account.relay_quic_pool = None;
+        }
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        let Ok(db) = account.client.account_db() else {
+            return Ok(());
+        };
+        db.release_files().map_err(SdkError::from)
+    }
+
+    fn reopen_account_db(&self) -> Result<(), SdkError> {
+        let Some(account) = self.state.accounts.get(&self.id) else {
+            return Ok(());
+        };
+        let Ok(db) = account.client.account_db() else {
+            return Ok(());
+        };
+        db.reopen_files().map_err(SdkError::from)
+    }
+
+    async fn wait_while_released(&mut self) -> Result<bool, SdkError> {
+        loop {
+            if *self.shutdown.borrow() {
+                return Ok(true);
+            }
+            let command = tokio::select! {
+                biased;
+                _ = self.shutdown.changed() => return Ok(true),
+                command = self.lifecycle.recv() => {
+                    self.preempt.borrow_and_update();
+                    command
+                }
+                command = self.receiver.recv() => command,
+            };
+            let Some(command) = command else {
+                return Ok(true);
+            };
+            if self.command_while_released(command) {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn command_while_released(&mut self, mut command: AccountCommand) -> bool {
+        match command.private.take() {
+            Some(PrivateCommand::ReopenFiles { reply }) => {
+                let result = self.reopen_from_suspend();
+                let resumed = result.is_ok();
+                let _ = reply.send(result);
+                resumed
+            }
+            Some(PrivateCommand::ReleaseFiles { reply }) => {
+                let _ = reply.send(Ok(()));
+                false
+            }
+            Some(other) => {
+                reject_private(other);
+                reject_reply(command.reply.take());
+                false
+            }
+            None => {
+                reject_reply(command.reply.take());
+                false
+            }
+        }
+    }
+}
+
+fn reject_reply(
+    reply: Option<
+        tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
+    >,
+) {
+    if let Some(reply) = reply {
+        let _ = reply.send(Err(super::super::background::client_suspended()));
+    }
+}
+
+fn reject_private(private: PrivateCommand) {
+    let error = super::super::background::client_suspended();
+    match private {
+        PrivateCommand::SearchRebuild { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        PrivateCommand::NativeUnlock { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        PrivateCommand::Capture(reply) => {
+            let _ = reply.send(Err(error));
+        }
+        PrivateCommand::AuthorizeBackup { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        PrivateCommand::Agent(command) => reject_agent(*command, error),
+        PrivateCommand::ReleaseFiles { reply } => {
+            let _ = reply.send(Ok(()));
+        }
+        PrivateCommand::ReopenFiles { reply } => {
+            let _ = reply.send(Ok(()));
+        }
+        #[cfg(test)]
+        PrivateCommand::HoldLocalMutation { entered, release } => {
+            let _ = entered.send(tokio::time::Instant::now());
+            drop(release);
+        }
+        #[cfg(test)]
+        PrivateCommand::ReleasePreSendHold { reply } => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+fn reject_agent(command: AgentPrivate, error: SdkError) {
+    match command {
+        AgentPrivate::Creation { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::HomeNode { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::Admission { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        AgentPrivate::Call { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}

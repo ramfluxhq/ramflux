@@ -216,6 +216,9 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
     if matches!(error,SdkError::LocalBusRefused{code,..} if code == "transfer_requires_sync") {
         return "transfer_requires_sync";
     }
+    if matches!(error, SdkError::LocalBusRefused { code, .. } if code == "ClientSuspended") {
+        return "ClientSuspended";
+    }
     if let SdkError::GroupRefused { operation, .. } = error {
         return operation.error_code();
     }
